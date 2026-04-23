@@ -168,7 +168,7 @@ managed_runtime_port() (
 
 # Resolve GC_DOLT_PORT if not already set by the caller.
 # Priority: env override > validated managed runtime state > default 3307.
-if [ -z "$GC_DOLT_PORT" ]; then
+if [ -z "${GC_DOLT_PORT:-}" ]; then
   GC_DOLT_PORT=$(managed_runtime_port "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt")
   : "${GC_DOLT_PORT:=3307}"
 fi

@@ -1,6 +1,8 @@
+# Converted from formula+pool to exec. All compactor operations are
+# deterministic: soft-resets on a temporary branch, branch swap, and
+# DOLT_GC. No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Flatten Dolt commit history to reduce storage"
-formula = "mol-dog-compactor"
+exec = "$PACK_DIR/assets/scripts/compactor.sh"
 trigger = "cooldown"
 interval = "24h"
-pool = "dog"

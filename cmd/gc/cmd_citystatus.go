@@ -80,8 +80,18 @@ type StoreHealth struct {
 }
 
 var (
-	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
-	openCityStoreAtForStatus      = openCityStoreAt
+	// observeSessionTargetForStatus is the single observation hook used by
+	// gc status / gc rig status. When sessionBeads is non-nil, it serves
+	// session-name resolution from that prefetched slice instead of calling
+	// store.List per target (see ga-jwtz). Tests override this var to inject
+	// errors or fake observations.
+	observeSessionTargetForStatus = func(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, sessionBeads []beads.Bead) (worker.LiveObservation, error) {
+		if sessionBeads != nil {
+			return workerObserveSessionTargetWithPrefetchedSessions(cityPath, store, sp, cfg, target, sessionBeads)
+		}
+		return workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	}
+	openCityStoreAtForStatus = openCityStoreAt
 )
 
 var controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
@@ -282,6 +292,11 @@ func writeCityStatusJSONWithCache(
 }
 
 
+// observeSessionTargetWithWarning runs a live observation for a single
+// target. When sessionBeads is non-nil, the observation uses the
+// prefetched-resolver path so the per-target call avoids a fresh
+// store.List inside session.ResolveSessionID (see ga-jwtz). Pass nil to
+// preserve the legacy per-target behavior.
 func observeSessionTargetWithWarning(
 	cmdName string,
 	cityPath string,
@@ -289,9 +304,10 @@ func observeSessionTargetWithWarning(
 	sp runtime.Provider,
 	cfg *config.City,
 	target string,
+	sessionBeads []beads.Bead,
 	stderr io.Writer,
 ) worker.LiveObservation {
-	obs, err := observeSessionTargetForStatus(cityPath, store, sp, cfg, target)
+	obs, err := observeSessionTargetForStatus(cityPath, store, sp, cfg, target, sessionBeads)
 	if err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target, err) //nolint:errcheck // best-effort stderr
 	}

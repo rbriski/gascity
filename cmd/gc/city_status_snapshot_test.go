@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,48 @@ func (s *failingStatusStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, s.err
 	}
 	return s.MemStore.Get(id)
+}
+
+type listCountingStore struct {
+	*beads.MemStore
+	sessionLabelLists int
+}
+
+func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession {
+		s.sessionLabelLists++
+	}
+	return s.MemStore.List(query)
+}
+
+// TestCityStatusFallbackListsSessionsOnce is the regression test for
+// ga-jwtz: the fallback gc status path must not call store.List once per
+// agent. Before the fix, each agent observation invoked
+// session.ResolveSessionID, which lists session beads from the store; on
+// large cities with the controller stopped that produced N×~2s lists.
+// After the fix, one prefetch serves every observation.
+func TestCityStatusFallbackListsSessionsOnce(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "city"}}
+	const agentCount = 20
+	for i := 0; i < agentCount; i++ {
+		cfg.Agents = append(cfg.Agents, config.Agent{
+			Name:              fmt.Sprintf("agent-%02d", i),
+			MaxActiveSessions: intPtr(1), // single-instance: skips pool expansion
+		})
+	}
+
+	var stderr bytes.Buffer
+	cityPath := filepath.Join(t.TempDir(), "city")
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+
+	if got := store.sessionLabelLists; got != 1 {
+		t.Fatalf("List(session label) calls = %d, want 1 (one prefetch should serve all %d observations)", got, agentCount)
+	}
+	if got := len(snapshot.Agents); got != agentCount {
+		t.Fatalf("snapshot agents = %d, want %d", got, agentCount)
+	}
 }
 
 func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {

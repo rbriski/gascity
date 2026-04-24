@@ -101,6 +101,25 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 		return snapshot
 	}
 
+	// Pre-fetch session beads once (ga-jwtz): in the fallback path each
+	// observation otherwise triggers session.ResolveSessionID, which lists
+	// session beads from the store. On a 37-agent city with ~2s-per-list,
+	// that was ~74s per gc status; one prefetch serves them all. Nil means
+	// "no prefetch happened" — observations fall back to the legacy path.
+	// An empty (but non-nil) slice means "prefetched, no sessions found"
+	// and observations skip the per-target store.List.
+	var sessionBeads []beads.Bead
+	if store != nil {
+		if list, err := store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: false}); err == nil {
+			sessionBeads = list
+			if sessionBeads == nil {
+				sessionBeads = []beads.Bead{}
+			}
+		} else if stderr != nil {
+			fmt.Fprintf(stderr, "gc status: prefetching session beads: %v (falling back to per-agent lookups)\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
 	for _, r := range cfg.Rigs {
 		if r.Suspended {
@@ -141,7 +160,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 			headerShown := false
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
 				sn := cliSessionName(cityPath, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, sessionBeads, stderr)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
 					Agent: StatusAgentJSON{
@@ -171,7 +190,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 		}
 
 		sn := cliSessionName(cityPath, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, sessionBeads, stderr)
 		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
 			Agent: StatusAgentJSON{
 				Name:          a.Name,
@@ -208,7 +227,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 	for _, ns := range cfg.NamedSessions {
 		identity := ns.QualifiedName()
 		mode := ns.ModeOrDefault()
-		status := namedSessionStatusForCity(cityPath, cfg, store, snapshot.CityName, identity, mode, suspendedRigs)
+		status := namedSessionStatusForCity(cityPath, cfg, store, snapshot.CityName, identity, mode, suspendedRigs, sessionBeads)
 		snapshot.NamedSessions = append(snapshot.NamedSessions, cityStatusNamedSession{
 			Identity: identity,
 			Status:   status,
@@ -227,6 +246,7 @@ func namedSessionStatusForCity(
 	identity string,
 	mode string,
 	suspendedRigs map[string]bool,
+	sessionBeads []beads.Bead,
 ) string {
 	status := "reserved-unmaterialized"
 	if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
@@ -238,7 +258,22 @@ func namedSessionStatusForCity(
 		return status
 	}
 
-	id, err := resolveSessionIDWithConfig(cityPath, cfg, store, identity)
+	var (
+		id  string
+		err error
+	)
+	if sessionBeads != nil {
+		if resolvedID, ok := resolveSessionIDFromPrefetched(identity, sessionBeads); ok {
+			id = resolvedID
+		} else {
+			// Prefetched index doesn't have it (named-session aliases may
+			// not yet exist as open session beads); fall back to the
+			// store-backed resolver for parity with the pre-fix path.
+			id, err = resolveSessionIDWithConfig(cityPath, cfg, store, identity)
+		}
+	} else {
+		id, err = resolveSessionIDWithConfig(cityPath, cfg, store, identity)
+	}
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return status

@@ -254,6 +254,101 @@ func workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath string, store
 	return worker.ObserveHandle(context.Background(), handle)
 }
 
+// workerObserveSessionTargetWithPrefetchedSessions is
+// workerObserveSessionTargetWithConfig with an injected slice of session
+// beads. When sessionBeads is non-nil, session-name and alias resolution
+// is served from the slice instead of calling store.List — turning N agent
+// observations into 1 list plus N linear scans. Used by CLI read-models
+// (gc status, gc rig status) that enumerate all agents. The slice should
+// already be filtered to open sessions (IncludeClosed: false) — same as
+// ResolveSessionID's internal query. See bead ga-jwtz.
+func workerObserveSessionTargetWithPrefetchedSessions(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	target string,
+	sessionBeads []beads.Bead,
+) (worker.LiveObservation, error) {
+	handle, err := workerHandleForSessionTargetWithPrefetched(cityPath, store, sp, cfg, target, nil, sessionBeads)
+	if err != nil {
+		return worker.LiveObservation{}, err
+	}
+	return worker.ObserveHandle(context.Background(), handle)
+}
+
+func workerHandleForSessionTargetWithPrefetched(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	target string,
+	processNames []string,
+	sessionBeads []beads.Bead,
+) (worker.Handle, error) {
+	if sessionBeads == nil {
+		return workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, session.ErrSessionNotFound
+	}
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if id, ok := resolveSessionIDFromPrefetched(target, sessionBeads); ok {
+		return factory.SessionByID(id)
+	}
+	if sp != nil {
+		if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
+			return factory.SessionByID(strings.TrimSpace(sessionID))
+		}
+	}
+	if sp == nil {
+		return nil, session.ErrSessionNotFound
+	}
+	providerName := target
+	if liveProvider, err := sp.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+		providerName = strings.TrimSpace(liveProvider)
+	}
+	return factory.RuntimeHandle(target, providerName, "", processNames)
+}
+
+// resolveSessionIDFromPrefetched mirrors session.ResolveSessionIDByExactID +
+// session.ResolveSessionID against a pre-fetched slice of open session beads.
+// Ambiguous matches collapse to "not found from prefetched"; the caller then
+// consults the runtime provider, which for status observations correctly
+// reports the target as stopped when no unique session can be attributed.
+func resolveSessionIDFromPrefetched(target string, sessionBeads []beads.Bead) (string, bool) {
+	var openNameMatches []string
+	var openAliasMatches []string
+	for _, b := range sessionBeads {
+		if !session.IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		if b.ID == target {
+			return b.ID, true
+		}
+		if b.Status == "closed" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) == target {
+			openNameMatches = append(openNameMatches, b.ID)
+		}
+		if strings.TrimSpace(b.Metadata["alias"]) == target {
+			openAliasMatches = append(openAliasMatches, b.ID)
+		}
+	}
+	if len(openNameMatches) == 1 {
+		return openNameMatches[0], true
+	}
+	if len(openAliasMatches) == 1 {
+		return openAliasMatches[0], true
+	}
+	return "", false
+}
+
 func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
 	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {

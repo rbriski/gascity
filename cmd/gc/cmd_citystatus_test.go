@@ -99,7 +99,7 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	}
 	dops := newFakeDrainOps()
 	oldObserve := observeSessionTargetForStatus
-	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string, []beads.Bead) (worker.LiveObservation, error) {
 		return worker.LiveObservation{}, errors.New("status observation unavailable")
 	}
 	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
@@ -333,7 +333,7 @@ func TestCityStatusJSONReportsObservationErrors(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	oldObserve := observeSessionTargetForStatus
-	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string, []beads.Bead) (worker.LiveObservation, error) {
 		return worker.LiveObservation{}, errors.New("status observation unavailable")
 	}
 	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })

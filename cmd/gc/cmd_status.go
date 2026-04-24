@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -191,6 +192,21 @@ func doRigStatus(
 		}
 	}
 
+	// Pre-fetch session beads once (ga-jwtz): otherwise each per-agent
+	// observation triggers session.ResolveSessionID's store.List, which
+	// dominates wall time on large cities with the controller stopped.
+	// Nil = no prefetch (legacy fallback); empty non-nil = prefetched,
+	// no sessions found.
+	var sessionBeads []beads.Bead
+	if store != nil {
+		if list, err := store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: false}); err == nil {
+			sessionBeads = list
+			if sessionBeads == nil {
+				sessionBeads = []beads.Bead{}
+			}
+		}
+	}
+
 	suspStr := "no"
 	if rig.Suspended {
 		suspStr = "yes"
@@ -205,13 +221,13 @@ func doRigStatus(
 		sp0 := scaleParamsFor(&a)
 		if !a.SupportsInstanceExpansion() {
 			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), sessionTemplate)
-			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, nil, sn, stderr)
+			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, nil, sn, sessionBeads, stderr)
 			status := agentStatusLine(obs.Running, dops, sn, a.Suspended || obs.Suspended)
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
 		} else {
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				sn := cliSessionName(cityPath, cityName, qualifiedInstance, sessionTemplate)
-				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, nil, sn, stderr)
+				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, nil, sn, sessionBeads, stderr)
 				status := agentStatusLine(obs.Running, dops, sn, a.Suspended || obs.Suspended)
 				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
 			}

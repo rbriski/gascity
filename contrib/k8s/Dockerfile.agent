@@ -22,6 +22,8 @@ FROM ${BASE_IMAGE}
 # back to gcagent below.
 USER root
 
+ARG BINARY=gc
+
 # bd (beads) CLI — copied from build context.
 # Build with: cp $(which bd) . && docker build ...
 COPY bd /usr/local/bin/bd

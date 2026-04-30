@@ -135,6 +135,16 @@ type cleanupOptions struct {
 	Host     string
 	HomeDir  string
 
+	// StalePrefixes overrides defaultStaleDatabasePrefixes when non-empty.
+	// Set by tests; production passes nil and falls back to the built-in.
+	StalePrefixes []string
+
+	// DoltClient is the SQL surface used by the drop and purge stages. When
+	// nil, those stages no-op (the report still renders, just without DB
+	// operations) — useful for tests that exercise the port resolver and
+	// reaper in isolation.
+	DoltClient CleanupDoltClient
+
 	DiscoverProcesses func() ([]DoltProcInfo, error)
 	KillProcess       func(pid int, sig syscall.Signal) error
 	ReapGracePeriod   time.Duration
@@ -184,6 +194,7 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 		}
 	}
 
+	runDropStage(&report, opts)
 	runReapStage(&report, opts)
 
 	emitReport(report, resolution, opts, stdout, stderr)

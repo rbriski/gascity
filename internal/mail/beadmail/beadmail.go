@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -26,12 +27,59 @@ const (
 
 // Provider implements [mail.Provider] using [beads.Store] as the backend.
 type Provider struct {
-	store beads.Store
+	store        beads.Store
+	sessionCache *sessionBeadCache
+}
+
+type sessionBeadCache struct {
+	mu      sync.Mutex
+	list    []beads.Bead
+	fetched bool
 }
 
 // New returns a beadmail provider backed by the given store.
+//
+// The default provider is stateless so long-lived shared users such as the API
+// always see fresh session topology.
 func New(store beads.Store) *Provider {
 	return &Provider{store: store}
+}
+
+// NewCached returns a beadmail provider backed by the given store with a
+// provider-local session enumeration cache for command-scoped reuse.
+func NewCached(store beads.Store) *Provider {
+	return &Provider{
+		store:        store,
+		sessionCache: &sessionBeadCache{},
+	}
+}
+
+// cachedSessionBeads returns the full set of session beads (open + closed).
+// Cached providers reuse a single enumeration; stateless providers fetch
+// fresh results on every call.
+func (p *Provider) cachedSessionBeads() ([]beads.Bead, error) {
+	if p.store == nil {
+		return nil, nil
+	}
+	if p.sessionCache == nil {
+		return p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	}
+	return p.sessionCache.get(p.store)
+}
+
+func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fetched {
+		return c.list, nil
+	}
+	list, err := store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	if err != nil {
+		return nil, err
+	}
+	c.list = list
+	c.fetched = true
+	return list, nil
 }
 
 // Send creates a message bead with subject in Title and body in Description.
@@ -543,7 +591,7 @@ func appendSessionRecipientRoutes(routes []string, b beads.Bead) []string {
 }
 
 func (p *Provider) recipientRoutesByHistoricalAlias(recipient string, routes []string) []string {
-	sessions, err := p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	sessions, err := p.cachedSessionBeads()
 	if err != nil {
 		log.Printf("beadmail: listing sessions for historical recipient route %q: %v", recipient, err)
 		return routes

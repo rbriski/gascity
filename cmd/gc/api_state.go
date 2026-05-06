@@ -468,14 +468,11 @@ func (cs *controllerState) currentConfigRevision() (string, error) {
 	if cs.cityPath == "" {
 		return "", nil
 	}
-	tomlPath := filepath.Join(cs.cityPath, "city.toml")
-	nextCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	_, revision, err := cs.loadCurrentConfigSnapshot()
 	if err != nil {
 		return "", fmt.Errorf("loading current city config: %w", err)
 	}
-	applyFeatureFlags(nextCfg)
-	applyRuntimeCityIdentity(nextCfg, cs.cityName)
-	return config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath), nil
+	return revision, nil
 }
 
 func (cs *controllerState) markConfigMutationPending(revision string) {
@@ -783,6 +780,15 @@ func (cs *controllerState) CreateAgent(a config.Agent) error {
 	})
 }
 
+// WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
+// config snapshot resolves the given qualified agent name. CreateAgent already
+// refreshes cs.cfg from disk, so the first check normally succeeds; the wait
+// preserves the HTTP contract that a successful POST /agents response can be
+// followed immediately by POST /sling against the same target.
+func (cs *controllerState) WaitForAgentVisibility(ctx context.Context, qualifiedName string) error {
+	return api.WaitForAgentVisibilityIn(ctx, cs.Config, qualifiedName)
+}
+
 // UpdateAgent partially updates an existing agent definition in city.toml.
 func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error {
 	return cs.mutateAndPoke(func() error {
@@ -1043,14 +1049,10 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 		return "", nil
 	}
 
-	tomlPath := filepath.Join(cs.cityPath, "city.toml")
-	nextCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	nextCfg, revision, err := cs.loadCurrentConfigSnapshot()
 	if err != nil {
 		return "", fmt.Errorf("loading updated city config: %w", err)
 	}
-	applyFeatureFlags(nextCfg)
-	applyRuntimeCityIdentity(nextCfg, cs.cityName)
-	revision := config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath)
 	if revision == "" {
 		return "", errors.New("computed empty config revision")
 	}
@@ -1060,6 +1062,17 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	cs.mu.RUnlock()
 	cs.update(nextCfg, sp)
 	return revision, nil
+}
+
+func (cs *controllerState) loadCurrentConfigSnapshot() (*config.City, string, error) {
+	nextCfg, prov, err := loadCityConfigWithBuiltinPacks(cs.cityPath, extraConfigFiles...)
+	if err != nil {
+		return nil, "", err
+	}
+	applyFeatureFlags(nextCfg)
+	applyRuntimeCityIdentity(nextCfg, cs.cityName)
+	revision := config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath)
+	return nextCfg, revision, nil
 }
 
 // Poke signals the controller to trigger an immediate reconciler tick.

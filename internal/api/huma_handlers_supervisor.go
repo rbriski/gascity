@@ -645,7 +645,7 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 }
 
 func supervisorEventListFilterIsEmpty(filter events.Filter) bool {
-	return filter.Type == "" && filter.Actor == "" && filter.Since.IsZero() && filter.AfterSeq == 0
+	return filter == (events.Filter{})
 }
 
 func (sm *SupervisorMux) currentSupervisorEventTotal() int {
@@ -718,11 +718,9 @@ func (sm *SupervisorMux) precheckGlobalEventStream(ctx context.Context, _ *Super
 	return nil
 }
 
-// streamGlobalEvents emits tagged events with composite per-city cursor
-// IDs. Called after headers commit; failures terminate the stream cleanly
-// (there's no way to return an HTTP error at this point). This is the
-// final wiring of Fix 3g — it replaces the raw writeSSEWithStringID loop
-// that previously lived in streamProjectedGlobalEvents.
+// streamGlobalEvents emits tagged events with composite per-city cursor IDs.
+// Once the stream is prepared and headers are committed, failures terminate
+// the stream cleanly because there is no way to return an HTTP error.
 func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *SupervisorEventStreamInput, send StringIDSender) {
 	cursor := strings.TrimSpace(input.LastEventID)
 	if cursor == "" {
@@ -749,6 +747,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		return
 	}
 	defer mw.Close() //nolint:errcheck
+	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()

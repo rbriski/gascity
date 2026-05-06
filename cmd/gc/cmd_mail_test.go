@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2537,6 +2538,143 @@ func TestMailCheckInjectFormatsMessages(t *testing.T) {
 	}
 }
 
+func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("sender-a", "recipient", "", "first")  //nolint:errcheck
+	mp.Send("sender-b", "recipient", "", "second") //nolint:errcheck
+	mp.Send("sender-c", "recipient", "", "third")  //nolint:errcheck
+	mp.Send("sender-d", "recipient", "", "fourth") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
+		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectTruncatesLongBodies(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := "prefix " + strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("sender-a", "recipient", "Long body", longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Long body") {
+		t.Errorf("stdout missing subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Errorf("stdout includes too much of the long body:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectCompactsAndBoundsLongSubjects(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longSubject := "subject\n\tline " + strings.Repeat("x", mailInjectBodyPreviewSize+100) + " tail"
+	mp.Send("sender-a", "recipient", longSubject, "short body") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "[subject line ") {
+		t.Fatalf("stdout missing compacted subject prefix:\n%s", out)
+	}
+	if strings.Contains(out, "subject\n\tline") {
+		t.Fatalf("stdout contains raw multiline subject:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Fatalf("stdout includes too much of the long subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [subject truncated]") {
+		t.Fatalf("stdout missing subject truncation marker:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectOmitsSubjectWhenFullBodyMatches(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("sender-a", "recipient", longBody, longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "["+longBody+"]") {
+		t.Errorf("stdout should not repeat a matching subject after body truncation:\n%s", out)
+	}
+	if !strings.Contains(out, "gc-1 from sender-a: ") {
+		t.Errorf("stdout missing compact message format:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+}
+
+func TestMailInjectBodyPreviewUsesBoundedScan(t *testing.T) {
+	body := strings.Repeat(" ", mailInjectPreviewScanSize+1) + "tail"
+	preview, truncated := mailInjectBodyPreview(body)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate after scan budget")
+	}
+	if preview != "" {
+		t.Fatalf("mailInjectBodyPreview = %q, want empty preview after leading-space budget", preview)
+	}
+}
+
+func TestMailInjectBodyPreviewCompactsWhitespace(t *testing.T) {
+	preview, truncated := mailInjectBodyPreview(" first\n\tsecond   third ")
+	if truncated {
+		t.Fatalf("mailInjectBodyPreview truncated short body")
+	}
+	if preview != "first second third" {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, "first second third")
+	}
+}
+
+func TestMailInjectBodyPreviewKeepsUTF8Boundary(t *testing.T) {
+	prefix := strings.Repeat("a", mailInjectBodyPreviewSize-1)
+	compact := prefix + "界tail"
+
+	preview, truncated := mailInjectBodyPreview(compact)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate long body")
+	}
+	if preview != prefix {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, prefix)
+	}
+	if !utf8.ValidString(preview) {
+		t.Fatalf("mailInjectBodyPreview returned invalid UTF-8: %q", preview)
+	}
+}
+
 func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -2592,5 +2730,129 @@ func TestMailCheckInjectFiltersCorrectly(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 unread message(s)") {
 		t.Errorf("stdout missing correct count:\n%s", out)
+	}
+}
+
+// --- ga-q6ct: identity-resolution session-list cache ---
+
+// countingMailIdentityListStore counts broad gc:session List calls (the same
+// query the cmd_mail identity-resolution path issues) so tests can assert the
+// per-command cache budget.
+type countingMailIdentityListStore struct {
+	beads.Store
+	sessionListCalls int
+}
+
+func (s *countingMailIdentityListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.sessionListCalls++
+	}
+	return s.Store.List(query)
+}
+
+func TestResolveLiveConfiguredNamedMailTargetCached_SharesCacheAcrossCalls(t *testing.T) {
+	// Pin: when a single command invocation resolves multiple identity
+	// candidates (or recipient + sender both), the broad gc:session
+	// enumeration runs at most once via the shared cache.
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	if _, err := base.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "gascity/builder",
+			"alias":                      "builder-1",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	cache := &mailIdentitySessionCache{}
+	for _, id := range []string{"unmatched-a", "unmatched-b", "unmatched-c"} {
+		if _, _, err := resolveLiveConfiguredNamedMailTargetCached(store, id, cache); err != nil {
+			t.Fatalf("resolve(%q): %v", id, err)
+		}
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (cache must dedupe across resolutions)", store.sessionListCalls)
+	}
+}
+
+func TestResolveLiveConfiguredNamedMailTargetCached_NilCacheStillFetches(t *testing.T) {
+	// Backward-compat: passing nil cache should still resolve correctly,
+	// issuing a broad scan per call (the legacy behavior).
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	for _, id := range []string{"a", "b"} {
+		if _, _, err := resolveLiveConfiguredNamedMailTargetCached(store, id, nil); err != nil {
+			t.Fatalf("resolve(%q): %v", id, err)
+		}
+	}
+
+	if store.sessionListCalls != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (no cache → per-call scan)", store.sessionListCalls)
+	}
+}
+
+func TestListLiveSessionMailboxesCached_UsesCache(t *testing.T) {
+	// Pin: listLiveSessionMailboxesCached + a sibling resolve call sharing
+	// the same cache hit the store at most once for the broad enumeration.
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	if _, err := base.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "gascity/mayor",
+			"alias":                      "mayor",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	cache := &mailIdentitySessionCache{}
+	if _, err := listLiveSessionMailboxesCached(store, cache); err != nil {
+		t.Fatalf("listLiveSessionMailboxesCached: %v", err)
+	}
+	if _, _, err := resolveLiveConfiguredNamedMailTargetCached(store, "no-match", cache); err != nil {
+		t.Fatalf("resolveLiveConfiguredNamedMailTargetCached: %v", err)
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 across listLiveSessionMailboxes + resolve sharing one cache", store.sessionListCalls)
+	}
+}
+
+func TestResolveMailIdentityWithConfigCached_SharedCacheSurvivesFallbackMiss(t *testing.T) {
+	// Pin: the shared cache must stay in effect even when identity resolution
+	// misses every shortcut and falls back to the generic resolution path.
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	if _, err := base.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "gascity/worker",
+			"alias":                      "worker",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	cache := &mailIdentitySessionCache{}
+	if _, err := listLiveSessionMailboxesCached(store, cache); err != nil {
+		t.Fatalf("listLiveSessionMailboxesCached: %v", err)
+	}
+	if _, err := resolveMailIdentityWithConfigCached("", nil, store, "no-match", cache); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveMailIdentityWithConfigCached(no-match) error = %v, want ErrSessionNotFound", err)
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 across listLiveSessionMailboxes + fallback miss resolution", store.sessionListCalls)
 	}
 }

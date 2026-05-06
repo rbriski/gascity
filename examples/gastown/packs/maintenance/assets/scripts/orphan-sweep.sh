@@ -40,17 +40,16 @@ fi
 # and rig scope. Fall back to the older config-show parser for older binaries.
 AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
 if [ -z "$AGENTS" ]; then
-    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || exit 0
 fi
 if [ -z "$AGENTS" ]; then
     exit 0
 fi
 
-# Build a lookup set of known agents.
-declare -A KNOWN_AGENTS
-while IFS= read -r agent; do
-    KNOWN_AGENTS["$agent"]=1
-done <<< "$AGENTS"
+agent_exists() {
+    local candidate="$1"
+    [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+}
 
 # Step 3: Find orphaned beads (assigned to non-existent agents).
 # Pool instances use names like "worker-3"; strip the -N suffix to match
@@ -58,10 +57,21 @@ done <<< "$AGENTS"
 is_known_agent() {
     local name="$1"
     # Direct match.
-    if [ -n "${KNOWN_AGENTS[$name]+x}" ]; then return 0; fi
+    if agent_exists "$name"; then return 0; fi
     # Pool instance: strip trailing -<digits> and check template name.
     local base="${name%-[0-9]*}"
-    if [ "$base" != "$name" ] && [ -n "${KNOWN_AGENTS[$base]+x}" ]; then return 0; fi
+    if [ "$base" != "$name" ] && agent_exists "$base"; then return 0; fi
+    # City-qualified assignee (gastown.deacon): strip everything through the
+    # last dot and re-check. This relies on flattened pack binding chains.
+    # Defense-in-depth for older binaries that fall through to `gc config show`
+    # and emit unqualified names. Also covers pool patterns like
+    # "gastown.dog-3" by re-stripping the -N suffix.
+    local short="${name##*.}"
+    if [ "$short" != "$name" ]; then
+        if agent_exists "$short"; then return 0; fi
+        local short_base="${short%-[0-9]*}"
+        if [ "$short_base" != "$short" ] && agent_exists "$short_base"; then return 0; fi
+    fi
     return 1
 }
 

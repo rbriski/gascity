@@ -285,6 +285,7 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	}
 
 	aliveChecks := 0
+	var waitStarted time.Time
 	withSupervisorTestHooks(
 		t,
 		func(_, _ io.Writer) int { return 0 },
@@ -292,6 +293,7 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 		func() int {
 			aliveChecks++
 			if aliveChecks <= 1 {
+				waitStarted = time.Now()
 				return 4242
 			}
 			return 0
@@ -302,7 +304,6 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	)
 
 	var stdout, stderr bytes.Buffer
-	started := time.Now()
 	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
 	if code != 1 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
@@ -310,7 +311,10 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	if !strings.Contains(stderr.String(), "supervisor stopped before city became ready") {
 		t.Fatalf("stderr = %q, want supervisor-stopped message", stderr.String())
 	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+	if waitStarted.IsZero() {
+		t.Fatal("supervisor wait path was not reached")
+	}
+	if elapsed := time.Since(waitStarted); elapsed > 250*time.Millisecond {
 		t.Fatalf("registerCityWithSupervisor took %v, want fast failure when supervisor stops", elapsed)
 	}
 	if !strings.Contains(stderr.String(), "keeping registration") {
@@ -1436,6 +1440,7 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	withSupervisorTestHooks(
 		t,
@@ -1515,6 +1520,7 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := reg.Register(cityPath, "new-name"); err != nil {
@@ -1560,6 +1566,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	t.Setenv("GC_HOME", gcHome)
 
 	cityPath := shortSocketTempDir(t, "gc-supervisor-city-")
+	cleanupManagedDoltTestCity(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1571,6 +1578,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := reg.Register(cityPath, "test-city"); err != nil {
@@ -1910,7 +1918,7 @@ func TestReconcileCitiesResetsAbsentCounterWhenDirectoryReappears(t *testing.T) 
 	}
 }
 
-func TestPublishManagedCityMarksRunningBeforeInitialReconcile(t *testing.T) {
+func TestPublishManagedCityWaitsForInitialReconcileBeforeRunning(t *testing.T) {
 	registry := newCityRegistry()
 	cityPath := "/tmp/bright-lights"
 	cs := &controllerState{}
@@ -1938,14 +1946,14 @@ func TestPublishManagedCityMarksRunningBeforeInitialReconcile(t *testing.T) {
 	if len(cities) != 1 {
 		t.Fatalf("ListCities() returned %d cities, want 1", len(cities))
 	}
-	if !cities[0].Running {
-		t.Fatalf("city Running = false, want true: %+v", cities[0])
+	if cities[0].Running {
+		t.Fatalf("city Running = true before startup reconcile: %+v", cities[0])
 	}
-	if cities[0].Status != "" {
-		t.Fatalf("city Status = %q, want empty once published", cities[0].Status)
+	if cities[0].Status != "starting_agents" {
+		t.Fatalf("city Status = %q, want starting_agents while startup reconcile runs", cities[0].Status)
 	}
-	if got := registry.CityState("bright-lights"); got != cs {
-		t.Fatalf("CityState() = %#v, want controller state", got)
+	if got := registry.CityState("bright-lights"); got != nil {
+		t.Fatalf("CityState() = %#v before startup reconcile, want nil", got)
 	}
 
 	registry.ReadCallback(func(

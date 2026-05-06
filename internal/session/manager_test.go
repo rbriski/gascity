@@ -25,6 +25,24 @@ type noImmediateProvider struct {
 	runtime.Provider
 }
 
+type nonRunningStopRecorder struct {
+	*runtime.Fake
+	stopCalls int
+	stopErr   error
+}
+
+func (p *nonRunningStopRecorder) IsRunning(string) bool {
+	return false
+}
+
+func (p *nonRunningStopRecorder) Stop(name string) error {
+	p.stopCalls++
+	if p.stopErr != nil {
+		return p.stopErr
+	}
+	return p.Fake.Stop(name)
+}
+
 func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.startErr != nil {
 		return p.startErr
@@ -549,6 +567,32 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 	if b.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", b.Metadata["pending_create_claim"])
+	}
+}
+
+func TestCreateAliasedBeadOnlyNamed_SetsPendingCreateMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedBeadOnlyNamed("worker", "test-city--worker", "worker", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	startedAt := b.Metadata["pending_create_started_at"]
+	if startedAt == "" {
+		t.Fatal("pending_create_started_at is empty")
+	}
+	if _, err := time.Parse(time.RFC3339, startedAt); err != nil {
+		t.Fatalf("pending_create_started_at = %q, want RFC3339: %v", startedAt, err)
 	}
 }
 
@@ -1301,6 +1345,50 @@ func TestSuspendCrashedSession(t *testing.T) {
 	}
 	if got.State != StateSuspended {
 		t.Errorf("State = %q, want %q", got.State, StateSuspended)
+	}
+}
+
+func TestSuspendCleansDeadRuntimeArtifact(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &nonRunningStopRecorder{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	if sp.stopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1 to clean dead runtime artifact", sp.stopCalls)
+	}
+}
+
+func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &nonRunningStopRecorder{Fake: runtime.NewFake(), stopErr: errors.New("cleanup unavailable")}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if sp.stopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls)
+	}
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != StateSuspended {
+		t.Fatalf("State = %q, want %q", got.State, StateSuspended)
 	}
 }
 
@@ -3006,6 +3094,47 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 	if path != "" {
 		t.Errorf("TranscriptPath = %q, want empty when workdir fallback is ambiguous", path)
+	}
+}
+
+func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	info1, err := mgr.Create(context.Background(), "helper", "one", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create one: %v", err)
+	}
+	info2, err := mgr.Create(context.Background(), "helper", "two", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create two: %v", err)
+	}
+	if err := mgr.Close(info1.ID); err != nil {
+		t.Fatalf("Close one: %v", err)
+	}
+	if err := mgr.Close(info2.ID); err != nil {
+		t.Fatalf("Close two: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	dayDir := filepath.Join(searchBase, "2026", "05", "04")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	codexPath := filepath.Join(dayDir, "rollout-current.jsonl")
+	meta := `{"type":"session_meta","payload":{"cwd":"` + workDir + `"}}`
+	if err := os.WriteFile(codexPath, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info1.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != "" {
+		t.Errorf("TranscriptPath = %q, want empty for ambiguous historical codex workdir", path)
 	}
 }
 

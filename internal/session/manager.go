@@ -644,6 +644,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
+		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
@@ -748,9 +749,19 @@ func (m *Manager) Suspend(id string) error {
 			return err
 		}
 
-		// Kill the runtime session (skip if already dead).
-		if m.sp.IsRunning(sessName) {
-			if err := m.sp.Stop(sessName); err != nil {
+		// Kill the runtime session. Stop is provider-idempotent, so call it
+		// even when liveness already reports false; tmux remain-on-exit panes
+		// can be non-running but still need their session artifact removed.
+		if strings.TrimSpace(sessName) != "" {
+			running := m.sp.IsRunning(sessName)
+			err := m.sp.Stop(sessName)
+			if err != nil && !running {
+				// Preserve historical Suspend semantics for already-dead
+				// sessions: cleanup is best-effort when the runtime did not
+				// report a live process before Stop.
+				err = nil
+			}
+			if err != nil {
 				return fmt.Errorf("stopping runtime session: %w", err)
 			}
 		}
@@ -850,6 +861,7 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	update.Metadata["session_name"] = ""
 	update.Metadata["session_name_explicit"] = ""
 	update.Metadata["pending_create_claim"] = ""
+	update.Metadata["pending_create_started_at"] = ""
 	if err := m.store.Update(id, update); err != nil {
 		return fmt.Errorf("retiring configured named session identifiers: %w", err)
 	}

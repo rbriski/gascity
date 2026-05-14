@@ -14,8 +14,12 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
 	}
+	effective := *plan
+	if !effective.NoHistory {
+		effective.NoHistory = s.storage.NoHistory
+	}
 
-	data, err := json.Marshal(plan)
+	data, err := json.Marshal(&effective)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling graph apply plan: %w", err)
 	}
@@ -40,7 +44,11 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 		return nil, fmt.Errorf("closing graph apply temp file: %w", err)
 	}
 
-	out, err := s.runner(s.dir, "bd", "create", "--graph", tmpPath, "--json")
+	args := []string{"create", "--graph", tmpPath, "--json"}
+	if effective.NoHistory {
+		args = append(args, "--no-history")
+	}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
@@ -49,7 +57,7 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
 		return nil, fmt.Errorf("bd create --graph: parsing JSON: %w", err)
 	}
-	if err := ValidateGraphApplyResult(plan, &result); err != nil {
+	if err := ValidateGraphApplyResult(&effective, &result); err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 	return &result, nil

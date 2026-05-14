@@ -147,6 +147,75 @@ func TestBdStoreCreatePassesDeps(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesNoHistory(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","no_history":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{Title: "test", NoHistory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--no-history") {
+		t.Errorf("args = %q, want --no-history", args)
+	}
+	if created.Ephemeral {
+		t.Fatalf("created.Ephemeral = true, want false")
+	}
+	if !created.NoHistory {
+		t.Fatalf("created.NoHistory = false, want true")
+	}
+}
+
+func TestBdStoreCreateInheritsNoHistoryDefault(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStoreWithPrefixAndOptions("/city", runner, "", beads.BdStoreOptions{NoHistory: true})
+	created, err := s.Create(beads.Bead{Title: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--no-history") {
+		t.Errorf("args = %q, want --no-history", args)
+	}
+	if created.Ephemeral {
+		t.Fatalf("created.Ephemeral = true, want false")
+	}
+	if !created.NoHistory {
+		t.Fatalf("created.NoHistory = false, want true")
+	}
+}
+
+func TestBdStoreCreateExplicitStorageOverridesDefault(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","ephemeral":true}`), nil
+	}
+	s := beads.NewBdStoreWithPrefixAndOptions("/city", runner, "", beads.BdStoreOptions{NoHistory: true})
+	created, err := s.Create(beads.Bead{Title: "test", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if strings.Contains(args, "--no-history") {
+		t.Fatalf("args = %q, did not want --no-history", args)
+	}
+	if !strings.Contains(args, "--ephemeral") {
+		t.Fatalf("args = %q, want --ephemeral", args)
+	}
+	if !created.Ephemeral || created.NoHistory {
+		t.Fatalf("created flags = ephemeral:%v no_history:%v, want true/false", created.Ephemeral, created.NoHistory)
+	}
+}
+
 func TestBdStoreCreatePassesPriority(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -2851,6 +2920,47 @@ func TestBdStoreApplyGraphPlan(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(filepath.Join(dir, ".gc", "tmp", "graph-apply-*.json")); len(matches) != 0 {
 		t.Fatalf("temp graph apply files were not cleaned up: %v", matches)
+	}
+}
+
+func TestBdStoreApplyGraphPlanInheritsNoHistoryDefault(t *testing.T) {
+	dir := t.TempDir()
+	var capturedPlan beads.GraphApplyPlan
+	var gotArgs []string
+	runner := func(cmdDir, name string, args ...string) ([]byte, error) {
+		if cmdDir != dir {
+			t.Fatalf("runner dir = %q, want %q", cmdDir, dir)
+		}
+		if name != "bd" {
+			t.Fatalf("runner name = %q, want bd", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			t.Fatalf("reading plan file: %v", err)
+		}
+		if err := json.Unmarshal(data, &capturedPlan); err != nil {
+			t.Fatalf("unmarshal plan file: %v", err)
+		}
+		return []byte(`{"ids":{"root":"bd-1"}}`), nil
+	}
+
+	s := beads.NewBdStoreWithPrefixAndOptions(dir, runner, "", beads.BdStoreOptions{NoHistory: true})
+	result, err := s.ApplyGraphPlan(t.Context(), &beads.GraphApplyPlan{
+		Nodes: []beads.GraphApplyNode{{Key: "root", Title: "Root"}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyGraphPlan: %v", err)
+	}
+	if got := result.IDs["root"]; got != "bd-1" {
+		t.Fatalf("result ID = %q, want bd-1", got)
+	}
+	if !capturedPlan.NoHistory {
+		t.Fatalf("capturedPlan.NoHistory = false, want true")
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--no-history") {
+		t.Fatalf("args = %q, want --no-history", args)
 	}
 }
 

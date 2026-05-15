@@ -16,6 +16,36 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
+type sessionNameLookupResolver struct {
+	cityName        string
+	sessionTemplate string
+	sessionBeads    *sessionBeadSnapshot
+}
+
+func newSessionNameLookupResolver(store beads.Store, cityName, sessionTemplate string) sessionNameLookupResolver {
+	resolver := sessionNameLookupResolver{
+		cityName:        cityName,
+		sessionTemplate: sessionTemplate,
+	}
+	if store == nil {
+		return resolver
+	}
+	sessionBeads, err := loadSessionBeadSnapshot(store)
+	if err == nil {
+		resolver.sessionBeads = sessionBeads
+	}
+	return resolver
+}
+
+func (r sessionNameLookupResolver) Resolve(qualifiedName string) string {
+	if r.sessionBeads != nil {
+		if sn := r.sessionBeads.FindSessionNameByTemplate(qualifiedName); sn != "" {
+			return sn
+		}
+	}
+	return agent.SessionNameFor(r.cityName, qualifiedName, r.sessionTemplate)
+}
+
 type poolSessionCreateIdentity struct {
 	AgentName string
 	Alias     string
@@ -495,10 +525,7 @@ func lookupSessionName(store beads.Store, qualifiedName string) (string, bool) {
 // name. Tries the bead store first; falls back to the legacy SessionNameFor
 // function if no bead is found.
 func lookupSessionNameOrLegacy(store beads.Store, cityName, qualifiedName, sessionTemplate string) string {
-	if sn, ok := lookupSessionName(store, qualifiedName); ok {
-		return sn
-	}
-	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
+	return newSessionNameLookupResolver(store, cityName, sessionTemplate).Resolve(qualifiedName)
 }
 
 // lookupPoolSessionNames returns bead-backed session names for pool instances

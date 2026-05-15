@@ -2,6 +2,7 @@ package events
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +160,61 @@ func TestNewFileRecorderReapsOrphansOnOpen(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("ReadAll after reap returned %d events, want 3", len(all))
+	}
+}
+
+// TestNewFileRecorderSeedsSeqFromArchives verifies that on open, the
+// recorder seeds its seq counter from the max archive LastSeq when
+// the active log is absent or trails behind. Without this, a process
+// that crashed during rotation could leave an archive with seqs
+// [100..200] while the active log has no events, and the next Record
+// would emit seq=1, silently duplicating seqs already on disk.
+func TestNewFileRecorderSeedsSeqFromArchives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	rotating := filepath.Join(dir, "events.jsonl.rotating-20260507T120000Z-seq-100-200")
+	var buf bytes.Buffer
+	for i := uint64(100); i <= 200; i++ {
+		fmt.Fprintf(&buf, "{\"seq\":%d,\"type\":\"x\",\"actor\":\"events\"}\n", i)
+	}
+	if err := os.WriteFile(rotating, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	// The reaper should have promoted the rotating file to a canonical
+	// archive by the time NewFileRecorder returns.
+	if _, err := os.Stat(rotating); !os.IsNotExist(err) {
+		t.Errorf("rotating file should be reaped on open: %v", err)
+	}
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "post-recovery"})
+
+	all, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 102 {
+		t.Fatalf("ReadAll after recovery returned %d events, want 102", len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i].Seq <= all[i-1].Seq {
+			t.Errorf("seq not monotonic at index %d: %d <= %d", i, all[i].Seq, all[i-1].Seq)
+		}
+	}
+	last := all[len(all)-1]
+	if last.Seq != 201 {
+		t.Errorf("post-recovery Record Seq = %d, want 201", last.Seq)
+	}
+	if last.Subject != "post-recovery" {
+		t.Errorf("last event Subject = %q, want %q", last.Subject, "post-recovery")
 	}
 }
 

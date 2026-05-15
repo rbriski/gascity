@@ -146,6 +146,19 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, err
 	}
 
+	// Crash recovery: if a prior process rotated events into archives
+	// but the active log is empty or absent, ReadLatestSeq returns 0
+	// and new records would collide with seqs already written to disk.
+	// Take the max of the active tail and every archive's LastSeq so
+	// the next Record continues monotonically across rotations.
+	if archives, archErr := archiveFilesIn(filepath.Dir(path)); archErr == nil {
+		for _, info := range archives {
+			if info.LastSeq > maxSeq {
+				maxSeq = info.LastSeq
+			}
+		}
+	}
+
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening event log: %w", err)
@@ -156,7 +169,7 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		file:                  file,
 		seq:                   maxSeq,
 		stderr:                stderr,
-		maxSize:               defaultRotationMaxSize,
+		maxSize:               0,
 		rotationCheckRecords:  defaultRotationCheckRecords,
 		rotationCheckInterval: defaultRotationCheckInterval,
 		lastSizeCheck:         time.Now(),

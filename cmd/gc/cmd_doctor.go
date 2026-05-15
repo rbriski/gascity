@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	doctorchecks "github.com/gastownhall/gascity/internal/doctor/checks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
@@ -133,6 +134,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	registerV2DeprecationChecks(d)
 	d.Register(&doctor.ImplicitImportCacheCheck{})
 	d.Register(&doctor.DeprecatedAttachmentFieldsCheck{})
+	d.Register(doctorchecks.NewProjectIdentityCheck())
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).

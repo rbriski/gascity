@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -773,9 +774,19 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
 	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
 	storeRootB64 := base64.StdEncoding.EncodeToString([]byte(storeRoot))
+	hostScope := hostScopeForPod(cfg, workDir)
+	l1Bytes, l1Present, err := readHostL1File(hostScope)
+	if err != nil {
+		return fmt.Errorf("read host L1: %w", err)
+	}
+	identityB64 := ""
+	if l1Present {
+		identityB64 = base64.StdEncoding.EncodeToString(l1Bytes)
+	}
 
 	patchCmd := fmt.Sprintf(
 		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
+			`if [ -n '%s' ]; then echo '%s' | base64 -d > .beads/identity.toml || true; fi && `+
 			`if [ -f .beads/metadata.json ]; then `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
@@ -789,7 +800,9 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
 			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
 			`yes | BEADS_DIR="$WD/.beads" bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		storeRootB64, patchB64, prefixB64,
+		storeRootB64, patchB64,
+		identityB64, identityB64,
+		prefixB64,
 		base64.StdEncoding.EncodeToString([]byte(doltHost)),
 		base64.StdEncoding.EncodeToString([]byte(doltPort)),
 	)
@@ -812,13 +825,45 @@ func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runti
 	}
 	_, err = ops.execInPod(ctx, podName, "agent", []string{
 		"sh", "-c",
-		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml`,
+		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml && test -f .beads/identity.toml`,
 		"sh", storeRoot,
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("canonical .beads files missing or unreadable at %s: %w", storeRoot, err)
+		return fmt.Errorf("canonical .beads files missing or unreadable at %s (need metadata.json, config.yaml, identity.toml): %w", storeRoot, err)
 	}
 	return nil
+}
+
+func hostScopeForPod(cfg runtime.Config, podWorkDir string) string {
+	if storeRoot := strings.TrimSpace(cfg.Env["GC_STORE_ROOT"]); storeRoot != "" {
+		return storeRoot
+	}
+	if workDir := strings.TrimSpace(cfg.WorkDir); workDir != "" {
+		return workDir
+	}
+	ctrlCity := controllerCityPath(cfg.Env)
+	if ctrlCity == "" {
+		return strings.TrimSpace(podWorkDir)
+	}
+	podWorkDir = strings.TrimSpace(podWorkDir)
+	if podWorkDir == "" || podWorkDir == "/workspace" {
+		return ctrlCity
+	}
+	if rel, ok := strings.CutPrefix(podWorkDir, "/workspace/"); ok {
+		return ctrlCity + "/" + rel
+	}
+	return podWorkDir
+}
+
+func readHostL1File(hostScope string) ([]byte, bool, error) {
+	data, err := os.ReadFile(contract.ProjectIdentityPath(hostScope))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 func buildRESTConfig(k8sContext string) (*rest.Config, error) {

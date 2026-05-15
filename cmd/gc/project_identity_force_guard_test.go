@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -40,7 +41,7 @@ func TestOnlyBdDoctorReseedCallsUpsertProjectIDForce(t *testing.T) {
 				return true
 			}
 			pos := fset.Position(call.Pos())
-			callers = append(callers, filepath.Base(path)+":"+pos.Line)
+			callers = append(callers, filepath.Base(path)+":"+strconv.Itoa(pos.Line))
 			return true
 		})
 		return nil

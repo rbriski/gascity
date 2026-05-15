@@ -223,7 +223,7 @@ func installBdDoctorTestHooks(state *bdDoctorTestState) func() {
 		return state.l1ID, state.l1OK, nil
 	}
 	bdDoctorDialDoltForScope = func(string, string) (*sql.DB, bool, error) {
-		return &sql.DB{}, state.doltOK, nil
+		return nil, state.doltOK, nil
 	}
 	bdDoctorReadDatabaseProjectID = func(context.Context, *sql.DB) (string, bool, error) {
 		return state.oldID, strings.TrimSpace(state.oldID) != "", nil

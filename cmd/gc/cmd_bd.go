@@ -97,6 +97,10 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
+	if len(bdArgs) > 0 && bdArgs[0] == "doctor" {
+		return doBdDoctor(cityName, rigName, bdArgs[1:], os.Stdin, stdout, stderr)
+	}
+
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

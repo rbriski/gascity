@@ -581,6 +581,21 @@ func seedDatabaseProjectID(ctx context.Context, db *sql.DB, projectID string) (b
 	return true, nil
 }
 
+func upsertDatabaseProjectIDForce(ctx context.Context, db *sql.DB, projectID string) (int64, error) {
+	if err := ensureDatabaseMetadataTable(ctx, db); err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, "INSERT INTO metadata (`key`, value) VALUES ('_project_id', ?) ON DUPLICATE KEY UPDATE value = VALUES(value)", projectID)
+	if err != nil {
+		return 0, fmt.Errorf("force upsert database _project_id: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return rows, nil
+}
+
 func ensureDatabaseMetadataTable(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS metadata (`key` VARCHAR(255) PRIMARY KEY, value LONGTEXT)")
 	if err != nil {

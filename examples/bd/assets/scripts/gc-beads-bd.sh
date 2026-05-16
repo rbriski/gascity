@@ -89,7 +89,7 @@ lower_dolt_database_name() {
 
 is_system_dolt_database_name() {
     case "$(lower_dolt_database_name "$1")" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
+        information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -217,9 +217,7 @@ path_under_data_dir() {
     return 1
 }
 
-# do_query_probe runs a SELECT active_branch() query against the dolt server.
-# active_branch() is lightweight and won't block behind queued queries,
-# unlike SELECT 1 which goes through the full query executor (per Tim Sehn, Dolt CEO).
+# do_query_probe runs a read-only information_schema query against the dolt server.
 do_query_probe() {
     local host gc_bin
     host=$(connect_host)
@@ -228,7 +226,7 @@ do_query_probe() {
         "$gc_bin" dolt-state query-probe --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
         return $?
     fi
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "SELECT active_branch()" >/dev/null 2>&1
+    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
 }
 
 # server_sql runs a SQL query against the running dolt server.
@@ -2240,7 +2238,7 @@ op_health() {
 
     if load_health_check_from_gc; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
-            die "dolt query probe failed (SELECT active_branch())"
+            die "dolt query probe failed (information_schema.SCHEMATA)"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -2252,7 +2250,7 @@ op_health() {
     else
         # Query probe.
         if ! do_query_probe; then
-            die "dolt query probe failed (SELECT active_branch())"
+            die "dolt query probe failed (information_schema.SCHEMATA)"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is

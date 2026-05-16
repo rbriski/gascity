@@ -347,6 +347,7 @@ func TestGcBeadsBdInitRejectsManagedProbeDatabaseName(t *testing.T) {
 		" " + managedDoltProbeDatabase + " ",
 		"information_schema",
 		"mysql",
+		"dolt",
 		"dolt_cluster",
 		"performance_schema",
 		"sys",
@@ -381,6 +382,7 @@ func TestEnsureCanonicalScopeMetadataRejectsManagedSystemDatabases(t *testing.T)
 		managedDoltProbeDatabase,
 		"information_schema",
 		"mysql",
+		"dolt",
 		"dolt_cluster",
 		"performance_schema",
 		"sys",
@@ -542,7 +544,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
@@ -619,7 +621,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*)

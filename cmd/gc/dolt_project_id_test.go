@@ -269,7 +269,7 @@ func TestRecoverManagedDoltProcessWithPasswordReusesHealthyRealServer(t *testing
 		t.Fatalf("MkdirAll(data dir): %v", err)
 	}
 
-	_, port, pid, cleanup := startPasswordedDoltServer(t, layout.DataDir)
+	_, port, pid, cleanup := startPasswordedDoltServer(t, layout.DataDir, "CREATE DATABASE IF NOT EXISTS `hq`")
 	defer cleanup()
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {

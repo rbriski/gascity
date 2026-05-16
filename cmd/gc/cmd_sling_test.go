@@ -7485,3 +7485,51 @@ func TestCliBeadRouter_BuiltinPathSetsSingletonAssigneeAndMetadata(t *testing.T)
 		t.Errorf("gc.routed_to = %q, want %q", got, "deep-investigator")
 	}
 }
+
+// TestCliBeadRouter_BackingTemplateRoutePreservesNamedSessionDemand pins the
+// asymmetric named-session case raised in PR #1736's 2026-05-15 review: when
+// the sling target is a TEMPLATE that backs a [[named_session]] whose
+// identity differs from the template (e.g. identity="primary" backed by
+// template="worker"), the router must leave the bead unassigned so the
+// demand scan in defaultNamedSessionDemand can materialize the named-session
+// identity. Stamping Assignee=<backing-template> removes the bead from the
+// unassigned-routed scan at build_desired_state.go:949 and strands the
+// named session.
+func TestCliBeadRouter_BackingTemplateRoutePreservesNamedSessionDemand(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "demo work",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "primary", Template: "worker", Mode: "on_demand"},
+		},
+	}
+	router := cliBeadRouter{deps: &slingDeps{Cfg: cfg, Store: store}}
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: bead.ID,
+		Target: "worker",
+	}); err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+
+	demand, _, _ := defaultNamedSessionDemand([]defaultScaleCheckTarget{{
+		template: "worker",
+		storeKey: "rig:test-city",
+		store:    store,
+	}}, cfg, "test-city")
+	if !demand["primary"] {
+		updated, _ := store.Get(bead.ID)
+		t.Fatalf("named-session demand for \"primary\" not materialized after sling to backing template \"worker\"; bead Assignee=%q gc.routed_to=%q demand=%v",
+			updated.Assignee, updated.Metadata["gc.routed_to"], demand)
+	}
+}

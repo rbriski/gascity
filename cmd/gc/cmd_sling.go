@@ -597,6 +597,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		} else if ok {
 			assignTarget = !agentCfg.SupportsInstanceExpansion()
+			if assignTarget && isNamedSessionBackingTemplate(r.deps.Cfg, req.Target) {
+				assignTarget = false
+			}
 		}
 	}
 	if r.deps.Store == nil {

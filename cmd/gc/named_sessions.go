@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -28,6 +30,33 @@ func findNamedSessionSpec(cfg *config.City, cityName, identity string) (namedSes
 
 func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
+}
+
+// isNamedSessionBackingTemplate reports whether any [[named_session]] in cfg
+// is backed by the agent template `template`. cliBeadRouter uses this to
+// suppress the singleton Assignee stamp on routes whose demand path
+// materializes a named-session identity — setting Assignee=<template> would
+// remove the bead from defaultNamedSessionDemand's unassigned-routed scan
+// (build_desired_state.go:949) and strand the named session.
+func isNamedSessionBackingTemplate(cfg *config.City, template string) bool {
+	if cfg == nil {
+		return false
+	}
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return false
+	}
+	cityName := cfg.EffectiveCityName()
+	for i := range cfg.NamedSessions {
+		spec, ok := findNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(namedSessionBackingTemplate(spec)) == template {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {

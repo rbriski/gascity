@@ -366,7 +366,7 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
 	inner := &recordingTB{}
 	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
 		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
-	}, func(pid int, sig syscall.Signal) error {
+	}, func(_ int, sig syscall.Signal) error {
 		if sig == syscall.SIGTERM {
 			return errors.New("synthetic kill failure")
 		}

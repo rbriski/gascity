@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -107,6 +108,9 @@ func (g *doltLeakGuardedTestingM) Run() int {
 
 	code := g.m.Run()
 
+	g.cleanupTemporaryPaths()
+	reapManagedDoltTestProcesses()
+
 	guardFailed := initialErr != nil
 	if initialErr == nil {
 		final, finalErr := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
@@ -121,8 +125,6 @@ func (g *doltLeakGuardedTestingM) Run() int {
 		}
 	}
 
-	g.cleanupTemporaryPaths()
-	reapManagedDoltTestProcesses()
 	if guardFailed && code == 0 {
 		return 1
 	}
@@ -269,13 +271,13 @@ func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, sys
 func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
 	var errs []error
 	for _, pid := range pids {
-		if err := killFn(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		if err := killFn(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 			errs = append(errs, fmt.Errorf("SIGTERM pid %d: %w", pid, err))
 		}
 	}
 	time.Sleep(250 * time.Millisecond)
 	for _, pid := range pids {
-		if err := killFn(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		if err := killFn(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			errs = append(errs, fmt.Errorf("SIGKILL pid %d: %w", pid, err))
 		}
 	}

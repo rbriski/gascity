@@ -275,6 +275,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
+				Warmup:    entry.Warmup,
 			})
 		}
 	}

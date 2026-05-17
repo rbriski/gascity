@@ -316,12 +316,6 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable during reopen: %v\n", sessionName, identity, err) //nolint:errcheck
 			return nil
 		}
-		open := "open"
-		if err := store.Update(bead.ID, beads.UpdateOpts{Status: &open}); err != nil {
-			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
-			return nil
-		}
-		bead.Status = "open"
 		pendingCreateClaim := ""
 		if state != "active" {
 			pendingCreateClaim = "true"
@@ -346,13 +340,25 @@ func reopenClosedConfiguredNamedSessionBead(
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
-		if setMetaBatch(store, bead.ID, batch, stderr) == nil {
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string, len(batch))
+		open := "open"
+		if err := store.Tx("reopen configured named session "+bead.ID, func(tx beads.Tx) error {
+			if err := tx.Update(bead.ID, beads.UpdateOpts{Status: &open}); err != nil {
+				return fmt.Errorf("updating status: %w", err)
 			}
-			for k, v := range batch {
-				bead.Metadata[k] = v
+			if err := tx.SetMetadataBatch(bead.ID, batch); err != nil {
+				return fmt.Errorf("setting metadata: %w", err)
 			}
+			return nil
+		}); err != nil {
+			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
+			return nil
+		}
+		bead.Status = "open"
+		if bead.Metadata == nil {
+			bead.Metadata = make(map[string]string, len(batch))
+		}
+		for k, v := range batch {
+			bead.Metadata[k] = v
 		}
 		reopened = bead
 		return nil
@@ -1637,10 +1643,7 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	patch["sleep_intent"] = ""
-	if setMetaBatch(store, id, patch, stderr) != nil {
-		return false
-	}
-	if err := store.Close(id); err != nil {
+	if err := closeBeadWithPatch(store, id, patch); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
@@ -1916,10 +1919,7 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	if reason == string(session.StateFailedCreate) {
 		return closeFailedCreateBead(store, id, now, stderr)
 	}
-	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
-		return false
-	}
-	if err := store.Close(id); err != nil {
+	if err := closeBeadWithPatch(store, id, session.ClosePatch(now, reason)); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
@@ -1930,6 +1930,18 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// slack (#1939).
 	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	return true
+}
+
+func closeBeadWithPatch(store beads.Store, id string, patch map[string]string) error {
+	return store.Tx("close session bead "+id, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(id, patch); err != nil {
+			return fmt.Errorf("setting close metadata: %w", err)
+		}
+		if err := tx.Close(id); err != nil {
+			return fmt.Errorf("closing status: %w", err)
+		}
+		return nil
+	})
 }
 
 // resolveAgentTemplate returns the config agent template name for a given

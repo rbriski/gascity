@@ -48,6 +48,65 @@ func (s *sessionSnapshotListSpyStore) List(query beads.ListQuery) ([]beads.Bead,
 	return s.Store.List(query)
 }
 
+type sessionLifecycleTxSpyStore struct {
+	*beads.MemStore
+
+	txCalls                     int
+	txOps                       []string
+	txStarted                   func()
+	directSetMetadataKeys       []string
+	directSetMetadataBatchCalls int
+	directUpdateCalls           int
+	directCloseCalls            int
+}
+
+func (s *sessionLifecycleTxSpyStore) SetMetadata(id, key, value string) error {
+	s.directSetMetadataKeys = append(s.directSetMetadataKeys, key)
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *sessionLifecycleTxSpyStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.directSetMetadataBatchCalls++
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *sessionLifecycleTxSpyStore) Update(id string, opts beads.UpdateOpts) error {
+	s.directUpdateCalls++
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *sessionLifecycleTxSpyStore) Close(id string) error {
+	s.directCloseCalls++
+	return s.MemStore.Close(id)
+}
+
+func (s *sessionLifecycleTxSpyStore) Tx(_ string, fn func(beads.Tx) error) error {
+	s.txCalls++
+	if s.txStarted != nil {
+		s.txStarted()
+	}
+	return fn(sessionLifecycleTxSpy{store: s})
+}
+
+type sessionLifecycleTxSpy struct {
+	store *sessionLifecycleTxSpyStore
+}
+
+func (t sessionLifecycleTxSpy) Update(id string, opts beads.UpdateOpts) error {
+	t.store.txOps = append(t.store.txOps, "Update:"+id)
+	return t.store.MemStore.Update(id, opts)
+}
+
+func (t sessionLifecycleTxSpy) SetMetadataBatch(id string, kvs map[string]string) error {
+	t.store.txOps = append(t.store.txOps, "SetMetadataBatch:"+id)
+	return t.store.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (t sessionLifecycleTxSpy) Close(id string) error {
+	t.store.txOps = append(t.store.txOps, "Close:"+id)
+	return t.store.MemStore.Close(id)
+}
+
 type failingCloseStore struct {
 	*beads.MemStore
 }
@@ -118,6 +177,27 @@ func (s *failingCloseStore) Close(_ string) error {
 	return errors.New("close failed")
 }
 
+func (s *failingCloseStore) Tx(_ string, fn func(beads.Tx) error) error {
+	return fn(closeFailingTx{mem: s.MemStore, close: s.Close})
+}
+
+type closeFailingTx struct {
+	mem   *beads.MemStore
+	close func(string) error
+}
+
+func (t closeFailingTx) Update(id string, opts beads.UpdateOpts) error {
+	return t.mem.Update(id, opts)
+}
+
+func (t closeFailingTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	return t.mem.SetMetadataBatch(id, kvs)
+}
+
+func (t closeFailingTx) Close(id string) error {
+	return t.close(id)
+}
+
 func (p *stopHookProvider) Stop(name string) error {
 	if p.beforeStop != nil {
 		p.beforeStop(name)
@@ -160,6 +240,10 @@ func (s *poolSessionNameLockProbeStore) SetMetadata(id, key, value string) error
 
 func (s *failingPoolSessionNameStore) Close(_ string) error {
 	return errors.New("close failed")
+}
+
+func (s *failingPoolSessionNameStore) Tx(_ string, fn func(beads.Tx) error) error {
+	return fn(closeFailingTx{mem: s.MemStore, close: s.Close})
 }
 
 func citySessionIdentifierLockHeld(cityPath, identifier string) (bool, error) {
@@ -1115,6 +1199,77 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsPendingCreateStartedAtWhenA
 	}
 	if stored.Metadata["pending_create_started_at"] != "" {
 		t.Fatalf("stored pending_create_started_at = %q, want empty", stored.Metadata["pending_create_started_at"])
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBeadUsesTransactionUnderIdentifierLocks(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &sessionLifecycleTxSpyStore{MemStore: beads.NewMemStore()}
+	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.MemStore.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+	store.txStarted = func() {
+		for _, identifier := range []string{"refinery", sessionName} {
+			held, err := citySessionIdentifierLockHeld(cityPath, identifier)
+			if err != nil {
+				t.Errorf("checking lock for %q: %v", identifier, err)
+				continue
+			}
+			if !held {
+				t.Errorf("identifier lock for %q was not held while reopening in tx", identifier)
+			}
+		}
+	}
+
+	var stderr bytes.Buffer
+	reopened, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "creating", now, nil, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if reopened.Status != "open" {
+		t.Fatalf("reopened status = %q, want open", reopened.Status)
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("Tx calls = %d, want 1", store.txCalls)
+	}
+	if store.directUpdateCalls != 0 || store.directSetMetadataBatchCalls != 0 {
+		t.Fatalf("direct writes outside tx: Update=%d SetMetadataBatch=%d, want 0",
+			store.directUpdateCalls, store.directSetMetadataBatchCalls)
+	}
+	wantOps := "Update:" + closed.ID + ",SetMetadataBatch:" + closed.ID
+	if got := strings.Join(store.txOps, ","); got != wantOps {
+		t.Fatalf("tx ops = %s, want %s", got, wantOps)
 	}
 }
 
@@ -5486,6 +5641,110 @@ func TestUnclaimResetsInProgressStatus(t *testing.T) {
 // closeSessionBeadIfUnassigned, which has the full multi-store, multi-identifier
 // view of assigned work. closeBead itself must stay dumb so it doesn't
 // introduce a narrower contract than the live-query helper.
+func TestCloseBeadUsesTransactionForMetadataAndClose(t *testing.T) {
+	store := &sessionLifecycleTxSpyStore{MemStore: beads.NewMemStore()}
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+		t.Fatalf("closeBead returned false: stderr=%s", stderr.String())
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("Tx calls = %d, want 1", store.txCalls)
+	}
+	if store.directSetMetadataBatchCalls != 0 || store.directCloseCalls != 0 {
+		t.Fatalf("direct writes outside tx: SetMetadataBatch=%d Close=%d, want 0",
+			store.directSetMetadataBatchCalls, store.directCloseCalls)
+	}
+	wantOps := "SetMetadataBatch:" + sessionBead.ID + ",Close:" + sessionBead.ID
+	if got := strings.Join(store.txOps, ","); got != wantOps {
+		t.Fatalf("tx ops = %s, want %s", got, wantOps)
+	}
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if got.Metadata["close_reason"] == "" {
+		t.Fatalf("close_reason was not stamped: metadata=%v", got.Metadata)
+	}
+}
+
+func TestRollbackPendingCreateClearsExplicitSessionNameBeforeCloseTransaction(t *testing.T) {
+	store := &sessionLifecycleTxSpyStore{MemStore: beads.NewMemStore()}
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"last_woke_at":          time.Date(2026, 5, 1, 11, 59, 0, 0, time.UTC).Format(time.RFC3339),
+			"state":                 "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	store.txStarted = func() {
+		got, err := store.Get(sessionBead.ID)
+		if err != nil {
+			t.Errorf("get session bead at tx start: %v", err)
+			return
+		}
+		if got.Metadata["session_name"] != "" {
+			t.Errorf("session_name at close tx start = %q, want already cleared", got.Metadata["session_name"])
+		}
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	rollbackPendingCreate(&sessionBead, store, now, &stderr)
+
+	foundSessionNameClear := false
+	for _, key := range store.directSetMetadataKeys {
+		if key == "session_name" {
+			foundSessionNameClear = true
+			break
+		}
+	}
+	if !foundSessionNameClear {
+		t.Fatalf("session_name was not cleared through the explicit pre-close metadata write: keys=%v", store.directSetMetadataKeys)
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("Tx calls = %d, want 1", store.txCalls)
+	}
+	wantOps := "SetMetadataBatch:" + sessionBead.ID + ",Close:" + sessionBead.ID
+	if got := strings.Join(store.txOps, ","); got != wantOps {
+		t.Fatalf("tx ops = %s, want %s", got, wantOps)
+	}
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if got.Metadata["session_name"] != "" {
+		t.Fatalf("session_name = %q, want empty", got.Metadata["session_name"])
+	}
+}
+
 func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {
 	store := beads.NewMemStore()
 

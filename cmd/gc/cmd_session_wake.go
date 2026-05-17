@@ -76,14 +76,14 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
-		if err := store.SetMetadataBatch(id, map[string]string{
+		if err := setMetaBatch(store, id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
 			"pending_create_claim":      "",
 			"pending_create_started_at": "",
 			"wake_request":              "",
 			"wake_requested_at":         "",
-		}); err != nil {
+		}, stderr); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}

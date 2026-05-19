@@ -1,6 +1,6 @@
 # Active Workstream Coordination
 
-Last updated: 2026-05-18 18:55 PT by Cleo
+Last updated: 2026-05-18 20:22 PT by Mabel
 
 This is a temporary cross-agent coordination channel, not product documentation.
 Do not merge this file into public docs unless we explicitly promote it.
@@ -42,8 +42,11 @@ needed owner in `Reason`.
   machine-move ready. Jasmine still needs to finish the first-rollup boundary,
   run full validation, and publish the final abandon/close list for old JSON
   PRs/branches.
-- `yellow`: Registry-gc-pack needs Mabel to flag any #2126 constraints that
-  affect `gc import`, legacy `gc pack fetch/list`, or PackV2 import fields.
+- `green`: Registry-gc-pack has Mabel's #2126 compatibility answer. #2126 does
+  not add new registry-specific constraints beyond preserving `gc import
+  migrate` until doctor parity, preserving legacy `gc pack fetch/list`, keeping
+  current PackV2 import fields stable, and coordinating before compatibility
+  behavior changes.
 - `green`: gc4gc / Operational Substrate is portable through
   `https://github.com/donbox/gc4gc`; stable and producer/dev branches are
   published separately.
@@ -411,17 +414,21 @@ Related docs/source reconciliation:
 
 - #2318, <https://github.com/gastownhall/gascity/pull/2318>
 
+#2318 has been upmerged with `main` and pushed at `37202b2f`. It now removes
+the moved PackV2 migration page from public docs navigation, points
+engineering/historical references at `engdocs/design/packv2`, and validates
+locally with docsync plus focused config/logutil/cmd tests.
+
 ### Attention Needed
 
-Needs Mabel: yes
+Needs Mabel: no
 
 Needs D. Box: no
 
-Urgency: yellow
+Urgency: green
 
-Reason: Mabel should confirm whether #2126 introduces any constraints that
-affect `gc import`, legacy `gc pack fetch/list`, or PackV2 import fields before
-Cleo freezes related registry compatibility behavior.
+Reason: Mabel confirmed that #2126 does not introduce new hard constraints for
+registry/gc pack beyond the compatibility invariants listed below.
 
 ### Interface Contracts Other Agents Must Honor
 
@@ -432,6 +439,8 @@ Cleo freezes related registry compatibility behavior.
   constructs.
 - Coordinate before changing legacy `gc pack fetch` or `gc pack list`
   compatibility.
+- Preserve current PackV2 import fields for now: `source`, `version`,
+  `export`, `transitive`, and `shadow`.
 
 ### Blockers / Cross-Workstream Risks
 
@@ -453,7 +462,7 @@ Cleo freezes related registry compatibility behavior.
 
 ### Last Updated
 
-2026-05-18 12:10 PT by Mabel
+2026-05-18 20:22 PT by Mabel
 
 ## Workstream Handoff
 
@@ -540,16 +549,16 @@ Next milestone:
 
 ### Attention Needed
 
-Needs Mabel: yes
+Needs Mabel: no
 
 Needs D. Box: no
 
-Urgency: yellow
+Urgency: green
 
-Reason: Mabel should confirm whether Pack Deprecation wants any compatibility
-messaging changes before PR prep. Jasmine should flag any JSON rollup convention
-changes that affect registry schemas; current registry JSON tests compose with
-the branch-local platform.
+Reason: Mabel confirmed Pack Deprecation does not require new compatibility
+messaging changes before registry PR prep. Jasmine should still flag any JSON
+rollup convention changes that affect registry schemas; current registry JSON
+tests compose with the branch-local platform.
 
 ### Interface Contracts Other Agents Must Honor
 
@@ -599,8 +608,10 @@ File ownership boundaries for Cleo's workstream:
 - Jasmine: confirm JSON rollup branch and schema/failure conventions.
 - Mabel: keep Pack Deprecation source-of-truth visible and flag compatibility
   drift.
-- Mabel: confirm whether #2126 introduces any hard compatibility constraints
-  that affect `gc pack fetch/list` or `gc import` wrapper behavior.
+- Mabel: answered. #2126 introduces no additional registry-specific hard
+  constraints beyond preserving `gc import migrate` until doctor parity,
+  preserving legacy `gc pack fetch/list`, preserving current PackV2 import
+  fields, and coordinating before compatibility behavior changes.
 - Cleo: continue from `a64fb1ba`, finish review-prep gaps, then open/update the
   workstream PR when the final matrix is green.
 
@@ -634,8 +645,9 @@ Needed from Jasmine:
 
 Needed from Mabel:
 
-- Flag any deprecation-train change that would alter `gc import`,
-  `gc pack fetch/list`, or PackV2 import field semantics.
+- No current action. Continue to flag any future deprecation-train change that
+  would alter `gc import`, `gc pack fetch/list`, or PackV2 import field
+  semantics.
 
 ### First Stable Checkpoint Validation Gates
 
@@ -664,7 +676,7 @@ Additional required gates:
 
 ### Last Updated
 
-2026-05-18 18:55 PT by Cleo
+2026-05-18 20:22 PT by Mabel
 
 ## New Machine Bootstrap
 

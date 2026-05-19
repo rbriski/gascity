@@ -475,8 +475,10 @@ Current implementation worktree:
 - Worktree: `/Users/dbox/repos/gc-pr2119`
 - Current branch: `codex/pack-registry-workstream`
 - Pushed branch: `donbox/gascityworkplace:codex/pack-registry-workstream`
-- Current checkpoint commit: `894654174cb44f50625c40e9c8426b121e58347d`
-- State: clean and pushed as a WIP preservation/integration checkpoint.
+- Current checkpoint commit: `a64fb1ba`
+- State: clean and pushed after registry hardening, first `gc pack`
+  dependency-command bridge, docs/reference update, and doctor guard for
+  durable `registry:` selectors.
 
 Older local branches are not current:
 
@@ -496,16 +498,25 @@ The registry/gc pack source of truth is now
 Dirty/unpushed work has been migrated and pushed. No meaningful local-only
 registry work should remain on the old machine.
 
-First milestone inside the workstream:
+Completed inside the workstream since the preservation checkpoint:
 
-- Stabilize registry operations only: `internal/gchome`,
-  `internal/packregistry`, `gc pack registry list/add/remove/refresh/search/show`,
-  result schemas, and conformance tests.
-- Keep dependency mutation parked until registry config/catalog behavior is
-  correct and validated.
-- Tree hash, registry resolution, schema-2 lock metadata, and command-shape
-  scaffolding may remain on the workstream branch but should not be treated as
-  the first stable checkpoint until registry ops are green.
+- Registry operations hardening: remote-cache trust boundary, per-registry
+  cache locking, safer config/cache add ordering, source validation on
+  hand-edited `registries.toml`, and richer registry schema conformance tests.
+- `gc pack add/remove/sync/upgrade/why` command bridge. `add` supports registry
+  selectors and writes concrete durable import sources while preserving
+  registry/ref/hash metadata in `packs.lock`.
+- Legacy `gc pack fetch/list` remain on the old `[packs]` behavior and have
+  regression coverage.
+- `gc import` output remains stable through shared handlers; it has not entered
+  warning/removal mode.
+- `gc doctor` now flags durable `registry:` sources with remediation text.
+
+Next milestone:
+
+- Review/fill any remaining command-surface gaps (`gc pack check`, future
+  dependency `list/show/outdated` shape, or explicit deferral), then run the
+  final review-pass matrix before opening a workstream PR.
 
 ### Attention Needed
 
@@ -515,9 +526,10 @@ Needs D. Box: no
 
 Urgency: yellow
 
-Reason: Mabel should answer Cleo's compatibility ask from the Pack Deprecation
-train; Jasmine should answer JSON schema/failure conventions before Cleo freezes
-registry command schemas/tests.
+Reason: Mabel should confirm whether Pack Deprecation wants any compatibility
+messaging changes before PR prep. Jasmine should flag any JSON rollup convention
+changes that affect registry schemas; current registry JSON tests compose with
+the branch-local platform.
 
 ### Interface Contracts Other Agents Must Honor
 
@@ -569,8 +581,8 @@ File ownership boundaries for Cleo's workstream:
   drift.
 - Mabel: confirm whether #2126 introduces any hard compatibility constraints
   that affect `gc pack fetch/list` or `gc import` wrapper behavior.
-- Cleo: continue from the pushed workstream branch and update this section after
-  each stable checkpoint.
+- Cleo: continue from `a64fb1ba`, finish review-prep gaps, then open/update the
+  workstream PR when the final matrix is green.
 
 ### JSON Assumptions
 
@@ -610,10 +622,16 @@ Needed from Mabel:
 Run from `/Users/dbox/repos/gc-pr2119` on `codex/pack-registry-workstream`:
 
 ```sh
-go test ./internal/gchome ./internal/packregistry
-go test ./cmd/gc -run 'TestPackRegistry|TestPackRegistryJSON|TestJSONSchema|TestJSONUnsupported|TestJSONExecutionFailure'
+go test ./internal/packsource ./internal/packregistry ./internal/packman ./internal/config
+go test ./cmd/gc -run 'TestPackRegistry|TestPackRegistryJSON|TestPackAdd|TestPackSync|TestPackCommandTree|TestDoImport|TestImport|TestImportStateDoctor|TestDoDoctor|TestJSONSchema|TestJSONUnsupported|TestJSONExecutionFailure|TestSyncLock|TestCheckInstalled'
+make check-docs
 git diff --check
 ```
+
+These targeted gates passed on the old machine at `a64fb1ba`. A broader
+`go test ./cmd/gc -count=1` attempt was stopped after running long with no
+additional output; use the targeted matrix above plus CI/full package testing as
+review prep.
 
 Additional required gates:
 
@@ -626,7 +644,7 @@ Additional required gates:
 
 ### Last Updated
 
-2026-05-18 12:45 PT by Cleo
+2026-05-18 18:35 PT by Cleo
 
 ## New Machine Bootstrap
 
@@ -664,7 +682,7 @@ git worktree add -B codex/workstream-coordination /Users/dbox/repos/gc-workstrea
 
 None required. Registry/gc pack implementation state is pushed to
 `origin/codex/pack-registry-workstream` at
-`894654174cb44f50625c40e9c8426b121e58347d`.
+`a64fb1ba`.
 
 Old stashes on the old machine are preservation artifacts only:
 
@@ -680,7 +698,8 @@ They should not be needed unless the pushed branch is lost.
 git status --short --branch --untracked-files=all
 git log --oneline -5 --decorate
 go test ./internal/packsource ./internal/packregistry ./internal/packman ./internal/config
-go test ./cmd/gc -run 'TestPackRegistry|TestPackRegistryJSON|TestDoImport|TestImport|TestJSONSchema|TestJSONUnsupported|TestJSONExecutionFailure'
+go test ./cmd/gc -run 'TestPackRegistry|TestPackRegistryJSON|TestPackAdd|TestPackSync|TestPackCommandTree|TestDoImport|TestImport|TestImportStateDoctor|TestDoDoctor|TestJSONSchema|TestJSONUnsupported|TestJSONExecutionFailure|TestSyncLock|TestCheckInstalled'
+make check-docs
 git diff --check
 ```
 
@@ -705,13 +724,13 @@ Cleo, continue the registry/gc pack workstream from:
 
 - repo: /Users/dbox/repos/gc-pr2119
 - branch: codex/pack-registry-workstream
-- checkpoint commit: 894654174cb44f50625c40e9c8426b121e58347d
+- checkpoint commit: a64fb1ba
 - coordination file: /Users/dbox/repos/gc-workstream-coordination/engdocs/coordination/active-workstreams.md
 
 First, refresh upstream/main and the coordination branch, verify the setup with
-the commands in the New Machine Bootstrap section, then continue by stabilizing
-the first registry-ops checkpoint. Keep registry/gc pack separate from PackV2
-deprecation except for explicit compatibility checkpoints.
+the commands in the New Machine Bootstrap section, then continue review-prep
+for the registry/gc pack workstream. Keep registry/gc pack separate from
+PackV2 deprecation except for explicit compatibility checkpoints.
 ```
 
 ## Workstream Handoff

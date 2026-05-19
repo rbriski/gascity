@@ -1,6 +1,6 @@
 # Active Workstream Coordination
 
-Last updated: 2026-05-18 12:45 PT by Jasmine
+Last updated: 2026-05-18 12:45 PT by Jasmine and Cleo
 
 This is a temporary cross-agent coordination channel, not product documentation.
 Do not merge this file into public docs unless we explicitly promote it.
@@ -303,19 +303,21 @@ Registry-gc-pack
 
 ### Current Branch / PR
 
-Branch: `codex/pack-registry-workstream` planned by Cleo
+Branch: `codex/pack-registry-workstream`
 
 PR: not opened yet
 
-Base: latest `origin/main`
+Base: `upstream/main` / `gastownhall/gascity@03c80562`
 
 Owner: Cleo
 
-Current local implementation worktree noted by Cleo:
+Current implementation worktree:
 
 - Worktree: `/Users/dbox/repos/gc-pr2119`
-- Current branch: `codex/pack-registry-latest-main`
-- State: dirty/unpushed; should be treated as Cleo-owned implementation state.
+- Current branch: `codex/pack-registry-workstream`
+- Pushed branch: `donbox/gascityworkplace:codex/pack-registry-workstream`
+- Current checkpoint commit: `894654174cb44f50625c40e9c8426b121e58347d`
+- State: clean and pushed as a WIP preservation/integration checkpoint.
 
 Older local branches are not current:
 
@@ -329,8 +331,22 @@ Cleo will maintain one long-lived registry/gc pack workstream branch for
 several days rather than preparing small immediate review PRs. Registry
 operations still come first inside that workstream.
 
-The registry/gc pack source of truth is Cleo's planned
-`codex/pack-registry-workstream` branch once created.
+The registry/gc pack source of truth is now
+`donbox/gascityworkplace:codex/pack-registry-workstream`.
+
+Dirty/unpushed work has been migrated and pushed. No meaningful local-only
+registry work should remain on the old machine.
+
+First milestone inside the workstream:
+
+- Stabilize registry operations only: `internal/gchome`,
+  `internal/packregistry`, `gc pack registry list/add/remove/refresh/search/show`,
+  result schemas, and conformance tests.
+- Keep dependency mutation parked until registry config/catalog behavior is
+  correct and validated.
+- Tree hash, registry resolution, schema-2 lock metadata, and command-shape
+  scaffolding may remain on the workstream branch but should not be treated as
+  the first stable checkpoint until registry ops are green.
 
 ### Interface Contracts Other Agents Must Honor
 
@@ -351,6 +367,18 @@ The registry/gc pack source of truth is Cleo's planned
   must reach parity before removal.
 - Compose with Jasmine's JSON rollup conventions once stable.
 
+File ownership boundaries for Cleo's workstream:
+
+- Cleo owns new registry/gc pack implementation files and tests:
+  `internal/gchome`, `internal/packregistry`, `internal/packsource`,
+  packman registry/hash/lock additions, `cmd/gc/cmd_pack.go`,
+  `cmd/gc/cmd_pack_registry*_test.go`, and `schemas/pack/**`.
+- Other agents should not edit `gc pack registry` command behavior or
+  `schemas/pack/**` without coordinating here first.
+- Pack deprecation agents may edit deprecation docs/doctor surfaces, but should
+  coordinate before touching `gc import`, legacy `gc pack fetch/list`, or
+  shared PackV2 import semantics.
+
 ### Blockers / Cross-Workstream Risks
 
 - `red`: Do not base registry command JSON/schema tests on an unstable or
@@ -368,12 +396,152 @@ The registry/gc pack source of truth is Cleo's planned
 - Jasmine: confirm JSON rollup branch and schema/failure conventions.
 - Mabel: keep Pack Deprecation source-of-truth visible and flag compatibility
   drift.
-- Cleo: publish the long-lived branch name once created and summarize changed
-  file ownership boundaries.
+- Mabel: confirm whether #2126 introduces any hard compatibility constraints
+  that affect `gc pack fetch/list` or `gc import` wrapper behavior.
+- Cleo: continue from the pushed workstream branch and update this section after
+  each stable checkpoint.
+
+### JSON Assumptions
+
+- Use `--json`; do not add `--format json`.
+- Registry result schemas live under
+  `schemas/pack/registry/<command>/result.schema.json`.
+- Every public and nested public schema field needs `description`.
+- Real `--json` stdout must validate against `--json-schema=result`.
+- Failure behavior must follow Jasmine's JSON rollup once stable; until then,
+  treat structured failure JSON as a coordination point, not a unilateral
+  registry decision.
+
+Needed from Jasmine:
+
+- Current JSON rollup branch.
+- Final source of truth for `--json-schema=result` and shared failure schema.
+- Whether `x-gc-jsonl` is accepted, and its exact shape if accepted.
+- Whether new commands should require structured failure JSON immediately or
+  only when they opt into schema-backed buffering.
+
+### Pack Deprecation Assumptions
+
+- #2126 remains a separate PackV1/PackV2 deprecation train.
+- Registry/gc pack preserves current PackV2 `source`, `version`, `export`,
+  `transitive`, and `shadow` behavior for now.
+- #2129 `[[exports]]` is design input/future direction, not this workstream's
+  implementation scope.
+- `gc import migrate` remains until doctor / `doctor --fix` parity exists.
+
+Needed from Mabel:
+
+- Flag any deprecation-train change that would alter `gc import`,
+  `gc pack fetch/list`, or PackV2 import field semantics.
+
+### First Stable Checkpoint Validation Gates
+
+Run from `/Users/dbox/repos/gc-pr2119` on `codex/pack-registry-workstream`:
+
+```sh
+go test ./internal/gchome ./internal/packregistry
+go test ./cmd/gc -run 'TestPackRegistry|TestPackRegistryJSON|TestJSONSchema|TestJSONUnsupported|TestJSONExecutionFailure'
+git diff --check
+```
+
+Additional required gates:
+
+- `gc pack registry` text behavior covers list/add/remove/refresh/search/show.
+- Registry JSON output validates against checked-in result schemas.
+- Unsupported JSON command paths use platform behavior.
+- Diagnostics do not pollute JSON stdout.
+- Registry add/search/show cover stale caches, partial reachability, ambiguous
+  bare names, removed snapshots, and invalid registry/catalog inputs.
 
 ### Last Updated
 
-2026-05-18 12:10 PT by Mabel
+2026-05-18 12:45 PT by Cleo
+
+## New Machine Bootstrap
+
+### Repos To Clone
+
+- Main implementation repo:
+  `https://github.com/donbox/gascityworkplace.git`
+- Upstream remote to add/fetch:
+  `https://github.com/gastownhall/gascity.git`
+
+### Branches To Fetch / Checkout
+
+```sh
+git clone https://github.com/donbox/gascityworkplace.git /Users/dbox/repos/gc-pr2119
+cd /Users/dbox/repos/gc-pr2119
+git remote add upstream https://github.com/gastownhall/gascity.git
+git fetch upstream main
+git fetch origin codex/pack-registry-workstream
+git switch codex/pack-registry-workstream
+```
+
+Coordination branch:
+
+```sh
+git fetch https://github.com/gastownhall/gascity.git codex/workstream-coordination:refs/remotes/upstream/workstream-coordination
+git worktree add -B codex/workstream-coordination /Users/dbox/repos/gc-workstream-coordination upstream/workstream-coordination
+```
+
+### Worktrees To Create
+
+- `/Users/dbox/repos/gc-pr2119` for registry/gc pack implementation.
+- `/Users/dbox/repos/gc-workstream-coordination` for coordination updates.
+
+### Local-Only State
+
+None required. Registry/gc pack implementation state is pushed to
+`origin/codex/pack-registry-workstream` at
+`894654174cb44f50625c40e9c8426b121e58347d`.
+
+Old stashes on the old machine are preservation artifacts only:
+
+- `registry workstream migration to codex/pack-registry-workstream`
+- `pack registry work before true latest main`
+- `pack registry work before main upmerge`
+
+They should not be needed unless the pushed branch is lost.
+
+### Setup Validation Commands
+
+```sh
+git status --short --branch --untracked-files=all
+git log --oneline -5 --decorate
+go test ./internal/packsource ./internal/packregistry ./internal/packman ./internal/config
+go test ./cmd/gc -run 'TestPackRegistry|TestPackRegistryJSON|TestDoImport|TestImport|TestJSONSchema|TestJSONUnsupported|TestJSONExecutionFailure'
+git diff --check
+```
+
+### Old-Machine Worktrees Safe To Ignore
+
+- `/Users/dbox/repos/gc-pr2119` branches
+  `codex/pack-registry-1a-core`,
+  `codex/pack-registry-mainline`, and
+  `codex/pack-registry-latest-main` are obsolete for active work.
+
+### Old-Machine Worktrees Not Safe To Delete Yet
+
+- `/Users/dbox/repos/gc-pr2119` should not be deleted until the new machine has
+  fetched and validated `codex/pack-registry-workstream`.
+- `/Users/dbox/repos/gc-workstream-coordination` should not be deleted until
+  this coordination update is pushed and visible from the new machine.
+
+### First Prompt For Cleo On The New Machine
+
+```text
+Cleo, continue the registry/gc pack workstream from:
+
+- repo: /Users/dbox/repos/gc-pr2119
+- branch: codex/pack-registry-workstream
+- checkpoint commit: 894654174cb44f50625c40e9c8426b121e58347d
+- coordination file: /Users/dbox/repos/gc-workstream-coordination/engdocs/coordination/active-workstreams.md
+
+First, refresh upstream/main and the coordination branch, verify the setup with
+the commands in the New Machine Bootstrap section, then continue by stabilizing
+the first registry-ops checkpoint. Keep registry/gc pack separate from PackV2
+deprecation except for explicit compatibility checkpoints.
+```
 
 ## Workstream Handoff
 

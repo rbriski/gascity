@@ -71,8 +71,8 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 }
 
 // SupportsEphemeralGraphApply reports whether this store can apply a whole
-// graph directly into ephemeral storage. The current bd graph path does not
-// preserve ephemeral storage, so Gas City uses the sequential hidden fallback.
+// graph directly into ephemeral storage. Current bd graph create preserves the
+// requested storage tier, so Gas City can use the atomic graph path.
 func (s *BdStore) SupportsEphemeralGraphApply() bool {
-	return false
+	return true
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -230,7 +231,59 @@ func newSupervisorShutdownController() *supervisorShutdownController {
 	return &supervisorShutdownController{destructiveCh: make(chan struct{})}
 }
 
-func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode), requestReconcile func()) {
+// shutdownTrigger carries the attribution for a supervisor shutdown so
+// the requestShutdown wrapper can log and emit it before the context is
+// canceled. Source values are "signal" or "socket_stop".
+type shutdownTrigger struct {
+	Source     string
+	Signal     string
+	ClientAddr string
+}
+
+// supervisorShutdownModeName returns the stable string for a shutdown
+// mode, used in log lines and structured event payloads.
+func supervisorShutdownModeName(mode supervisorShutdownMode) string {
+	switch mode {
+	case supervisorShutdownPreserveSessions:
+		return "preserve_sessions"
+	case supervisorShutdownDestructive:
+		return "destructive"
+	default:
+		return "unknown"
+	}
+}
+
+func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCtl *supervisorShutdownController, cancel context.CancelFunc, mode supervisorShutdownMode, trigger shutdownTrigger) {
+	modeName := supervisorShutdownModeName(mode)
+	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log via the
+	// launchd/systemd-redirected stream. This is the canonical place
+	// operators look after an unexpected graceful exit.
+	fmt.Fprintf(stderr, "gc supervisor: shutdown requested: source=%s signal=%q client=%q mode=%s\n", //nolint:errcheck
+		trigger.Source, trigger.Signal, trigger.ClientAddr, modeName)
+	if rec != nil {
+		payload := api.SupervisorShutdownPayload{
+			Source:     trigger.Source,
+			Signal:     trigger.Signal,
+			ClientAddr: trigger.ClientAddr,
+			Mode:       modeName,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: marshal shutdown event: %v\n", err) //nolint:errcheck
+		} else {
+			rec.Record(events.Event{
+				Type:    events.SupervisorShutdownRequested,
+				Actor:   "supervisor",
+				Subject: "supervisor",
+				Payload: raw,
+			})
+		}
+	}
+	shutdownCtl.request(mode)
+	cancel()
+}
+
+func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger), requestReconcile func()) {
 	for {
 		select {
 		case sig := <-sigCh:
@@ -241,7 +294,10 @@ func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestS
 				requestReconcile()
 				continue
 			}
-			requestShutdown(supervisorShutdownModeForSignal(sig))
+			requestShutdown(supervisorShutdownModeForSignal(sig), shutdownTrigger{
+				Source: "signal",
+				Signal: sig.String(),
+			})
 		case <-done:
 			return
 		}
@@ -313,7 +369,7 @@ func (s *shutdownState) finish(err error) {
 	close(s.done)
 }
 
-func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
+func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode, shutdownTrigger), reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
 	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -345,14 +401,21 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 // then — if the client keeps the connection open — blocks until shutdown
 // completes and sends a second line "done:ok\n" or "done:err:<detail>\n"
 // so --wait clients can distinguish clean shutdown from partial failure.
-func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) {
+func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode, shutdownTrigger), reconcileCh chan reconcileRequest, shut *shutdownState) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if scanner.Scan() {
 		switch scanner.Text() {
 		case "stop":
-			requestShutdown(supervisorShutdownDestructive)
+			peer := ""
+			if addr := conn.RemoteAddr(); addr != nil {
+				peer = addr.String()
+			}
+			requestShutdown(supervisorShutdownDestructive, shutdownTrigger{
+				Source:     "socket_stop",
+				ClientAddr: peer,
+			})
 			if _, err := conn.Write([]byte("ok\n")); err != nil {
 				return
 			}
@@ -813,9 +876,16 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	shutdownCtl := newSupervisorShutdownController()
-	requestShutdown := func(mode supervisorShutdownMode) {
-		shutdownCtl.request(mode)
-		cancel()
+	// Track managed cities via atomic-snapshot registry. API reads are
+	// lock-free (atomic pointer load); mutations go through citiesMu.
+	registry := newCityRegistry()
+	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
+		registry.SetSupervisorRecorder(supFR)
+		defer supFR.Close() //nolint:errcheck
+	}
+	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) {
+		requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
 
 	// Reconcile channel — triggers immediate reconciliation from SIGHUP
@@ -847,15 +917,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
 		return 1
-	}
-
-	// Track managed cities via atomic-snapshot registry. API reads are
-	// lock-free (atomic pointer load); mutations go through citiesMu.
-	registry := newCityRegistry()
-	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
-		registry.SetSupervisorRecorder(supFR)
-		defer supFR.Close() //nolint:errcheck
 	}
 
 	// Start API server with city-namespaced routing (Phase 2).

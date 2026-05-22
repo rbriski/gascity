@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -376,6 +377,24 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// Startup instrumentation: per-phase elapsed timing plus a watchdog
+	// that dumps goroutines if onStarted has not fired by half of
+	// [daemon].start_ready_timeout. Operators previously got a generic
+	// client-side timeout with no breadcrumbs (#gco-4pj); these log lines
+	// surface where startup is spending its budget.
+	startupBegan := time.Now()
+	startupReady := make(chan struct{})
+	var readyOnce sync.Once
+	markReady := func() { readyOnce.Do(func() { close(startupReady) }) }
+	defer markReady()
+	if total := cr.cfg.Daemon.StartReadyTimeoutDuration(); total > 0 {
+		go cr.startupReadinessWatchdog(ctx, startupReady, total/2, total)
+	}
+	logPhaseElapsed := func(name string, start time.Time) {
+		fmt.Fprintf(cr.stderr, "%s: startup phase=%s elapsed=%s\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, name, time.Since(start).Round(time.Millisecond))
+	}
+
 	retryDelay := cr.cfg.Daemon.PatrolIntervalDuration()
 	startupRetryLimit := cr.cfg.Daemon.MaxRestartsOrDefault()
 	waitForRetry := func() bool {
@@ -389,6 +408,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 	retryStartupStep := func(trigger string, complete func() bool, run func()) bool {
+		phaseStart := time.Now()
+		defer func() { logPhaseElapsed(trigger, phaseStart) }()
 		for attempt := 1; !complete(); attempt++ {
 			panicked := cr.safeTick(run, trigger)
 			if ctx.Err() != nil {
@@ -449,7 +470,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	configReloadStart := time.Now()
 	cr.applyStartupConfigReload(ctx, dirty, &lastProviderName, cityRoot)
+	logPhaseElapsed("config-reload", configReloadStart)
 	if ctx.Err() != nil {
 		return
 	}
@@ -457,9 +480,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Dispatch due orders before startup session reconciliation. A cold-start
 	// reconcile can take minutes when it has stale or config-drifted sessions;
 	// due event/condition formulas should not wait behind that maintenance work.
+	startupOrdersStart := time.Now()
 	cr.safeTick(func() {
 		cr.dispatchOrders(ctx, cityRoot)
 	}, "startup-orders")
+	logPhaseElapsed("startup-orders", startupOrdersStart)
 	if ctx.Err() != nil {
 		return
 	}
@@ -566,6 +591,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if cr.onStarted != nil {
 		cr.onStarted()
 	}
+	markReady()
+	fmt.Fprintf(cr.stderr, "%s: startup ready elapsed=%s\n", //nolint:errcheck // best-effort stderr
+		cr.logPrefix, time.Since(startupBegan).Round(time.Millisecond))
 	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
 	if ctx.Err() != nil {
 		return
@@ -698,6 +726,29 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 	}()
 	fn()
 	return false
+}
+
+// startupReadinessWatchdog emits a warning + goroutine dump to stderr
+// if startup has not signaled ready within delay. delay is normally
+// half of [daemon].start_ready_timeout, giving operators a snapshot of
+// which goroutines are blocked while the client-side probe still has
+// budget left. It exits silently when ready is signaled, when ctx is
+// canceled, or after firing once. Run as its own goroutine.
+func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-chan struct{}, delay, total time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		return
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	buf := make([]byte, 1<<20)
+	n := goruntime.Stack(buf, true)
+	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
+		"%s: startup watchdog: city %q not ready after %s (half of [daemon].start_ready_timeout=%s); goroutine dump follows:\n%s\n",
+		cr.logPrefix, cr.cityName, delay, total, buf[:n])
 }
 
 func convergenceStartupComplete(cr *CityRuntime) bool {

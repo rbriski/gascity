@@ -174,12 +174,14 @@ func TestPolicyReadPathsIncludeHistoryAndNoHistoryRows(t *testing.T) {
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch cmd {
-		case "bd list --json --label=gc:session --include-infra --include-gates --limit 0":
+		case "bd list --json --type=session --include-infra --include-gates --limit 0",
+			"bd list --json --label=gc:session --include-infra --include-gates --limit 0":
 			return []byte(`[
 				{"id":"bd-old-session","title":"old session","status":"open","issue_type":"session","created_at":"2026-05-01T00:00:00Z","labels":["gc:session"],"metadata":{"session_name":"old"}},
 				{"id":"bd-new-session","title":"new session","status":"open","issue_type":"session","created_at":"2026-05-01T00:00:01Z","labels":["gc:session"],"metadata":{"session_name":"new"},"no_history":true}
 			]`), nil
-		case "bd list --json --label=gc:wait --include-infra --include-gates --limit 1001":
+		case "bd list --json --label=gc:wait --include-infra --include-gates --limit 0",
+			"bd list --json --label=gc:wait --include-infra --include-gates --limit 1001":
 			return []byte(`[
 				{"id":"bd-old-wait","title":"old wait","status":"open","issue_type":"gate","created_at":"2026-05-01T00:00:00Z","labels":["gc:wait"],"metadata":{"session_id":"s1"}},
 				{"id":"bd-new-wait","title":"new wait","status":"open","issue_type":"gate","created_at":"2026-05-01T00:00:01Z","labels":["gc:wait"],"metadata":{"session_id":"s2"},"no_history":true}

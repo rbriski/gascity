@@ -294,6 +294,13 @@ func persistSleepPolicyMetadata(
 	}
 }
 
+func shouldPersistSleepPolicyMetadata(session beads.Bead, alive bool) bool {
+	if alive {
+		return true
+	}
+	return session.Metadata["sleep_intent"] == "idle-stop-pending"
+}
+
 func markIdleSleepPending(session *beads.Bead, store beads.Store) {
 	if session == nil || store == nil || session.Metadata["sleep_intent"] == "idle-stop-pending" {
 		return

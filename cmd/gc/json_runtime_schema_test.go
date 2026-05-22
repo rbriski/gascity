@@ -21,6 +21,7 @@ func TestDirectJSONWriterPayloadsValidateDeclaredSchemas(t *testing.T) {
 
 	cityPath := t.TempDir()
 	writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
+	writeCatalogFile(t, cityPath, "agents/dog-1/agent.toml", "start_command = \"true\"\n")
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("open city store: %v", err)

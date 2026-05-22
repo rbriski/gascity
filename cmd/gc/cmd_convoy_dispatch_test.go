@@ -2376,6 +2376,15 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
 		}
 	}
+	for _, unwanted := range []string{
+		`bd --readonly --sandbox ready --assignee="$cand"`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
+	} {
+		if strings.Contains(query, unwanted) {
+			t.Fatalf("workflowServeControlReadyQuery still has non-superset ready probe %q in %q", unwanted, query)
+		}
+	}
 	if !strings.Contains(query, `--limit=20`) {
 		t.Fatalf("workflowServeControlReadyQuery missing scan limit: %q", query)
 	}

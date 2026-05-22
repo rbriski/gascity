@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
-	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -180,39 +178,18 @@ func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {
 	}
 }
 
-type failLiveWispListStore struct {
-	beads.Store
-	mu   sync.Mutex
-	fail bool
-}
-
-func (s *failLiveWispListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	s.mu.Lock()
-	fail := s.fail
-	s.mu.Unlock()
-	if fail && query.Live && (query.TierMode == beads.TierWisps || query.TierMode == beads.TierBoth) {
-		return nil, errors.New("live wisp list should not be required")
-	}
-	return s.Store.List(query)
-}
-
-func (s *failLiveWispListStore) setFail(fail bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fail = fail
-}
-
-func TestSessionHasOpenAssignedWorkInStore_UsesCachedWispOwnership(t *testing.T) {
+func TestSessionHasOpenAssignedWorkInStore_UsesLiveWispOwnership(t *testing.T) {
 	t.Parallel()
 
-	backing := &failLiveWispListStore{Store: beads.NewMemStore()}
-	if _, err := backing.Create(beads.Bead{
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{
 		Title:     "wisp work",
 		Type:      "task",
 		Status:    "in_progress",
 		Assignee:  "sess-1",
 		Ephemeral: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create(wisp): %v", err)
 	}
 
@@ -220,15 +197,19 @@ func TestSessionHasOpenAssignedWorkInStore_UsesCachedWispOwnership(t *testing.T)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
-	backing.setFail(true)
+
+	empty := ""
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+		t.Fatalf("Update(%s, unassign): %v", work.ID, err)
+	}
 
 	session := beads.Bead{ID: "sess-1"}
 	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
 	}
-	if !hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStore() = false, want cached wisp ownership to count")
+	if hasAssignedWork {
+		t.Fatal("sessionHasOpenAssignedWorkInStore() = true, want false after external wisp reassignment")
 	}
 }
 

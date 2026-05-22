@@ -1928,6 +1928,16 @@ func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
 	}
 }
 
+func TestCachingStoreIDPrefixReturnsConfiguredPrefix(t *testing.T) {
+	t.Parallel()
+	backing := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTestWithPrefix(backing, "mc-", nil)
+
+	if got := cs.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() = %q, want normalized prefix", got)
+	}
+}
+
 func TestCachingStoreApplyEventRefreshesOwnedUnknownBeadFromBacking(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()

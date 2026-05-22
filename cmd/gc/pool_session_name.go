@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"path"
 	"strings"
@@ -69,6 +70,53 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 			continue
 		}
 		if !closeSessionBeadIfUnassigned(store, rigStores, nil, sb, "gc_swept", time.Now().UTC(), nil) {
+			continue
+		}
+		closed = append(closed, sb.ID)
+	}
+	return closed
+}
+
+// GCSweepStoppedSessionBeads closes stopped session beads using one batched
+// live assigned-work index. The caller must only pass sessions whose runtime
+// provider has already reported not-running; possibly-running sessions must use
+// GCSweepSessionBeads so the final close decision performs its own live guard.
+func GCSweepStoppedSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionBeads []beads.Bead) []string {
+	return GCSweepStoppedSessionBeadsWithReason(store, rigStores, sessionBeads, "gc_swept", time.Now().UTC(), nil)
+}
+
+func GCSweepStoppedSessionBeadsWithReason(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads []beads.Bead,
+	reason string,
+	now time.Time,
+	stderr io.Writer,
+) []string {
+	if store == nil || len(sessionBeads) == 0 {
+		return nil
+	}
+	if reason == "" {
+		reason = "gc_swept"
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	index := buildAssignedWorkLiveIndex(store, rigStores)
+	var closed []string
+	for _, sb := range sessionBeads {
+		if sb.Status == "closed" {
+			continue
+		}
+		hasAssignedWork, err := index.hasOpenAssignedWork(sb)
+		if err != nil {
+			log.Printf("GCSweepStoppedSessionBeads: checking assigned work for %s: %v", sb.ID, err)
+			continue
+		}
+		if hasAssignedWork {
+			continue
+		}
+		if !closeSessionBeadKnownUnassigned(store, sb, reason, now, stderr) {
 			continue
 		}
 		closed = append(closed, sb.ID)

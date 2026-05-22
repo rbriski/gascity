@@ -38,6 +38,34 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type metadataWriteCountingStore struct {
+	*beads.MemStore
+	setMetadataCalls      int
+	setMetadataBatchCalls int
+}
+
+func (s *metadataWriteCountingStore) SetMetadata(id, key, value string) error {
+	s.setMetadataCalls++
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *metadataWriteCountingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.setMetadataBatchCalls++
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+type taskWorkDirLiveListCountingStore struct {
+	beads.Store
+	liveInProgressAssigneeLists int
+}
+
+func (s *taskWorkDirLiveListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Live && query.Status == "in_progress" && query.Assignee != "" {
+		s.liveInProgressAssigneeLists++
+	}
+	return s.Store.List(query)
+}
+
 type failNthMetadataBatchStore struct {
 	*beads.MemStore
 	failOn int
@@ -62,18 +90,6 @@ func (s *failSetMetadataStore) SetMetadata(id, key, value string) error {
 		return fmt.Errorf("set metadata %s failed", key)
 	}
 	return s.MemStore.SetMetadata(id, key, value)
-}
-
-type taskWorkDirLiveListCountingStore struct {
-	beads.Store
-	liveInProgressAssigneeLists int
-}
-
-func (s *taskWorkDirLiveListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Live && query.Status == "in_progress" && query.Assignee != "" {
-		s.liveInProgressAssigneeLists++
-	}
-	return s.Store.List(query)
 }
 
 type panicMetadataBatchStore struct {
@@ -858,6 +874,90 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	want := "codex resume --ask-for-approval never abc-123"
 	if prepared.cfg.Command != want {
 		t.Fatalf("prepared.cfg.Command = %q, want %q", prepared.cfg.Command, want)
+	}
+}
+
+func TestPrepareStartCandidateForCity_StampsLaunchMetadataInPreWakeBatch(t *testing.T) {
+	store := &metadataWriteCountingStore{MemStore: beads.NewMemStore()}
+	clk := &clock.Fake{Time: time.Date(2026, 5, 19, 2, 0, 0, 0, time.UTC)}
+	oldWorkDir := t.TempDir()
+	newWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":         "worker",
+			"session_name":       "worker",
+			"template":           "worker",
+			"session_origin":     "manual",
+			"generation":         "2",
+			"continuation_epoch": "1",
+			"state":              "asleep",
+			"command":            "codex --model old",
+			"work_dir":           oldWorkDir,
+			"provider":           "codex-min",
+			"provider_kind":      "codex",
+			"builtin_ancestor":   "codex",
+			"resume_flag":        "--resume",
+			"resume_style":       "flag",
+			"resume_command":     "codex-old resume {{.SessionKey}}",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName:  "worker",
+			SessionName:   "worker",
+			Command:       "codex --model gpt-5.5",
+			WorkDir:       newWorkDir,
+			ManualSession: true,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:            "codex-max",
+				BuiltinAncestor: "codex",
+				ResumeFlag:      "resume",
+				ResumeStyle:     "subcommand",
+				ResumeCommand:   "codex resume {{.SessionKey}}",
+			},
+		},
+		order: 0,
+	}, "", "", &config.City{Agents: []config.Agent{{Name: "worker"}}}, nil, store, clk, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != oldWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, oldWorkDir)
+	}
+	if store.setMetadataBatchCalls != 1 {
+		t.Fatalf("SetMetadataBatch calls = %d, want 1 pre-wake batch", store.setMetadataBatchCalls)
+	}
+	if store.setMetadataCalls != 0 {
+		t.Fatalf("SetMetadata calls = %d, want launch metadata folded into pre-wake batch", store.setMetadataCalls)
+	}
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	want := map[string]string{
+		"state":            "creating",
+		"command":          "codex --model gpt-5.5",
+		"work_dir":         oldWorkDir,
+		"provider":         "codex-max",
+		"provider_kind":    "codex",
+		"builtin_ancestor": "codex",
+		"resume_flag":      "resume",
+		"resume_style":     "subcommand",
+		"resume_command":   "codex resume {{.SessionKey}}",
+	}
+	for key, expected := range want {
+		if got.Metadata[key] != expected {
+			t.Fatalf("%s = %q, want %q", key, got.Metadata[key], expected)
+		}
 	}
 }
 
@@ -2496,6 +2596,42 @@ func TestPendingCreateStartInFlight_ZeroStartupTimeoutUsesRecoveryLease(t *testi
 	}
 }
 
+func TestPendingCreateStartInFlight_TreatsFreshCreatingStartWithoutClaimAsInFlight(t *testing.T) {
+	now := time.Date(2026, 5, 19, 14, 56, 0, 0, time.UTC)
+	session := beads.Bead{
+		Metadata: map[string]string{
+			"state":        string(sessionpkg.StateCreating),
+			"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+		},
+	}
+	if !pendingCreateStartInFlight(session, &clock.Fake{Time: now}, time.Minute) {
+		t.Fatal("fresh creating start without pending_create_claim should still be in flight")
+	}
+}
+
+func TestPendingCreateStartInFlight_RejectsStaleOrNonCreatingStartsWithoutClaim(t *testing.T) {
+	now := time.Date(2026, 5, 19, 14, 56, 0, 0, time.UTC)
+	stale := beads.Bead{
+		Metadata: map[string]string{
+			"state":        string(sessionpkg.StateCreating),
+			"last_woke_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	if pendingCreateStartInFlight(stale, &clock.Fake{Time: now}, time.Minute) {
+		t.Fatal("stale creating start without pending_create_claim should no longer be in flight")
+	}
+
+	active := beads.Bead{
+		Metadata: map[string]string{
+			"state":        string(sessionpkg.StateActive),
+			"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+		},
+	}
+	if pendingCreateStartInFlight(active, &clock.Fake{Time: now}, time.Minute) {
+		t.Fatal("fresh last_woke_at without creating state or pending_create_claim should not be in flight")
+	}
+}
+
 func TestAsyncStartTrackerWaitZeroDoesNotBlock(t *testing.T) {
 	var tracker asyncStartTracker
 	done, ok := tracker.start()
@@ -2581,6 +2717,64 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(
 	}
 	if updated.Status != "closed" {
 		t.Fatalf("status = %q, want closed so stale runtime is not recovered", updated.Status)
+	}
+}
+
+func TestRollbackPendingCreateBatchesTerminalMetadata(t *testing.T) {
+	store := &metadataWriteCountingStore{MemStore: beads.NewMemStore()}
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":               "worker-1",
+			"session_name_explicit":      "true",
+			"template":                   "worker",
+			"pending_create_claim":       "true",
+			"pending_create_started_at":  now.Add(-time.Minute).Format(time.RFC3339),
+			"last_woke_at":               now.Add(-time.Minute).Format(time.RFC3339),
+			"sleep_intent":               "stop",
+			"state_assigned_to":          "worker-1",
+			"state_assigned_session_id":  "old-session",
+			"state_assigned_session_url": "old-url",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	rollbackPendingCreate(&session, store, now, ioDiscard{})
+
+	if store.setMetadataCalls != 0 {
+		t.Fatalf("SetMetadata calls = %d, want 0 separate metadata writes", store.setMetadataCalls)
+	}
+	if store.setMetadataBatchCalls != 1 {
+		t.Fatalf("SetMetadataBatch calls = %d, want 1 terminal patch batch", store.setMetadataBatchCalls)
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	for key, want := range map[string]string{
+		"state":                     string(sessionpkg.StateFailedCreate),
+		"close_reason":              sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"last_woke_at":              "",
+		"sleep_intent":              "",
+		"session_name":              "",
+	} {
+		if got.Metadata[key] != want {
+			t.Fatalf("metadata[%s] = %q, want %q", key, got.Metadata[key], want)
+		}
+	}
+	if session.Metadata["session_name"] != "" || session.Metadata["last_woke_at"] != "" {
+		t.Fatalf("rollback did not update in-memory session metadata: %#v", session.Metadata)
 	}
 }
 
@@ -6198,6 +6392,61 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 	}
 	if got.Metadata["opt_permission_mode"] != "plan" {
 		t.Fatalf("opt_permission_mode = %q, want plan", got.Metadata["opt_permission_mode"])
+	}
+}
+
+func TestCommitStartResultClearsPendingCreateStartedAtAfterConcurrentAwakeHeal(t *testing.T) {
+	store := beads.NewMemStore()
+	startedAt := time.Unix(90, 0).UTC().Format(time.RFC3339)
+	session, err := store.Create(beads.Bead{
+		Title:  "control-dispatcher-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                  "control-dispatcher",
+			"session_name":              "control-dispatcher",
+			"state":                     "awake",
+			"state_reason":              "creation_complete",
+			"pending_create_started_at": startedAt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := startCandidate{
+		session: &session,
+		tp:      TemplateParams{TemplateName: "control-dispatcher", InstanceName: "control-dispatcher"},
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: candidate,
+			coreHash:  "core-abc",
+			liveHash:  "live-xyz",
+		},
+		outcome:  "success",
+		started:  time.Unix(100, 0),
+		finished: time.Unix(101, 0),
+	}
+
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{})
+	if !ok {
+		t.Fatal("commitStartResult returned false for successful start")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "awake" {
+		t.Errorf("state = %q, want awake", got.Metadata["state"])
+	}
+	if got.Metadata["pending_create_started_at"] != "" {
+		t.Errorf("pending_create_started_at = %q, want cleared", got.Metadata["pending_create_started_at"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["creation_complete_at"] != time.Unix(102, 0).UTC().Format(time.RFC3339) {
+		t.Errorf("creation_complete_at = %q, want %q", got.Metadata["creation_complete_at"], time.Unix(102, 0).UTC().Format(time.RFC3339))
 	}
 }
 

@@ -18,6 +18,10 @@ func (c *importStateDoctorCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *builtinPackRegistryMigrationCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *jsonlArchiveDoctorCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

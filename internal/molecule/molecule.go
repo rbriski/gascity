@@ -316,12 +316,11 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
 func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
-	all, err := store.List(beads.ListQuery{
+	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.idempotency_key": key,
 			"gc.root_bead_id":    rootBeadID,
 		},
-		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -404,9 +403,8 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 	if len(wantedRefs) == 0 {
 		return idMapping, nil
 	}
-	all, err := store.List(beads.ListQuery{
+	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootBeadID},
-		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -519,7 +517,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 
 		b := stepToBead(step, vars, priorityOverride)
 		if graphWorkflow {
-			b.Ephemeral = true
+			b.NoHistory = true
 		}
 		if opts.DeferAssignees || graphWorkflow {
 			deferBeadRouting(&b)
@@ -1291,9 +1289,8 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 }
 
 func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
-	all, err := store.List(beads.ListQuery{
+	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootID},
-		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err

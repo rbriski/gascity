@@ -2502,7 +2502,8 @@ func TestOpenCityStoreAtUsesExplicitCityOverGCCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", explicitCity, err)
 	}
-	bdStore, ok := store.(*beads.BdStore)
+	baseStore, _, _ := unwrapBeadPolicyStore(store)
+	bdStore, ok := baseStore.(*beads.BdStore)
 	if !ok {
 		t.Fatalf("openCityStoreAt(%q) returned %T, want *beads.BdStore", explicitCity, store)
 	}

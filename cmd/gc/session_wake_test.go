@@ -95,6 +95,12 @@ func TestPreWakeCommit(t *testing.T) {
 	if got.Metadata["last_woke_at"] == "" {
 		t.Error("expected last_woke_at to be set")
 	}
+	if got.Metadata["state"] != string(sessionpkg.StateCreating) {
+		t.Errorf("stored state = %q, want %q", got.Metadata["state"], sessionpkg.StateCreating)
+	}
+	if got.Metadata["pending_create_started_at"] != now.UTC().Format(time.RFC3339) {
+		t.Errorf("pending_create_started_at = %q, want %q", got.Metadata["pending_create_started_at"], now.UTC().Format(time.RFC3339))
+	}
 	if got.Metadata["sleep_reason"] != "" {
 		t.Error("expected sleep_reason to be cleared")
 	}
@@ -276,6 +282,8 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		"continuation_epoch":         "3",
 		"continuation_reset_pending": "",
 		"detached_at":                "",
+		"state":                      string(sessionpkg.StateCreating),
+		"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 		"last_woke_at":               now.UTC().Format(time.RFC3339),
 		"sleep_reason":               "",
 		"sleep_intent":               "",
@@ -284,6 +292,54 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		if got.Metadata[key] != value {
 			t.Errorf("%s = %q, want preserved %q", key, got.Metadata[key], value)
 		}
+	}
+}
+
+func TestPreWakeCommit_PendingContinuationResetClearsStaleConversationMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Title: "resume-session",
+		Metadata: map[string]string{
+			"session_name":               "resume-worker",
+			"template":                   "worker",
+			"generation":                 "2",
+			"continuation_epoch":         "3",
+			"wake_mode":                  "resume",
+			"continuation_reset_pending": "true",
+			"session_key":                "stale-conversation",
+			"started_config_hash":        "stale-core-hash",
+			"started_live_hash":          "stale-live-hash",
+			"live_hash":                  "stale-live-hash",
+			"startup_dialog_verified":    "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	got, _ := store.Get(b.ID)
+	for _, key := range []string{
+		"session_key",
+		"started_config_hash",
+		"started_live_hash",
+		"live_hash",
+		"startup_dialog_verified",
+	} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s = %q, want cleared for pending continuation reset", key, got.Metadata[key])
+		}
+	}
+	if got.Metadata["continuation_epoch"] != "4" {
+		t.Fatalf("continuation_epoch = %q, want bumped to 4", got.Metadata["continuation_epoch"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want consumed", got.Metadata["continuation_reset_pending"])
 	}
 }
 

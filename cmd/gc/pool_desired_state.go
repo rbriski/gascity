@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // SessionRequest represents a single session the reconciler should start.
@@ -187,44 +188,110 @@ func computePoolDesiredStates(
 	// represent already-spent new demand, so they occupy the first new-demand
 	// slots explicitly before anonymous creates are materialized.
 	if len(scaleCheckCounts) > 0 {
-		for i := range cfg.Agents {
-			agent := &cfg.Agents[i]
-			if agent.Suspended {
-				continue
-			}
-			template := agent.QualifiedName()
-			scaleCount, ok := scaleCheckCounts[template]
-			if !ok {
-				continue
-			}
-			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
-			inFlight := inFlightNewRequests[template]
-			inFlightCount := minInt(len(inFlight), newCount)
-			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
-				trace.recordDecision(string(TraceSitePoolInFlightReuse), template, "", string(TraceReasonInFlightReuse), "accepted", traceRecordPayload{
-					"scale_check":   scaleCount,
-					"in_flight":     len(inFlight),
-					"reused":        inFlightCount,
-					"anonymous_new": newCount - inFlightCount,
-				}, nil, "")
-			}
-			for j := 0; j < inFlightCount; j++ {
-				req := inFlight[j]
-				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
-			}
-			for j := inFlightCount; j < newCount; j++ {
-				req := SessionRequest{
-					Template: template,
-					Tier:     "new",
-				}
-				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
-			}
-		}
+		allRequests = appendFairScaleCheckDemand(cfg, allRequests, &usage, limits, inFlightNewRequests, scaleCheckCounts, trace)
 	}
 
 	return applyNestedCaps(cfg, allRequests, trace)
+}
+
+type scaleCheckDemandCursor struct {
+	template          string
+	demand            int
+	inFlight          []SessionRequest
+	next              int
+	blocked           bool
+	acceptedReused    int
+	acceptedAnonymous int
+}
+
+func appendFairScaleCheckDemand(
+	cfg *config.City,
+	requests []SessionRequest,
+	usage *nestedCapUsage,
+	limits nestedCapLimits,
+	inFlightNewRequests map[string][]SessionRequest,
+	scaleCheckCounts map[string]int,
+	trace *sessionReconcilerTraceCycle,
+) []SessionRequest {
+	var cursors []scaleCheckDemandCursor
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended {
+			continue
+		}
+		if !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		template := agent.QualifiedName()
+		scaleCount := scaleCheckCounts[template]
+		if scaleCount <= 0 {
+			continue
+		}
+		cursors = append(cursors, scaleCheckDemandCursor{
+			template: template,
+			demand:   scaleCount,
+			inFlight: inFlightNewRequests[template],
+		})
+	}
+
+	for {
+		progress := false
+		for i := range cursors {
+			cursor := &cursors[i]
+			if cursor.blocked || cursor.next >= cursor.demand {
+				continue
+			}
+			req := cursor.nextRequest()
+			if usage.isDuplicateSessionRequest(req) {
+				cursor.next++
+				progress = true
+				continue
+			}
+			if _, _, _, rejected := usage.rejection(req, limits); rejected {
+				cursor.blocked = true
+				continue
+			}
+			requests = append(requests, req)
+			usage.accept(req, limits)
+			cursor.accept(req)
+			cursor.next++
+			progress = true
+		}
+		if !progress {
+			break
+		}
+	}
+
+	for _, cursor := range cursors {
+		if len(cursor.inFlight) == 0 || trace == nil {
+			continue
+		}
+		trace.recordDecision(string(TraceSitePoolInFlightReuse), cursor.template, "", string(TraceReasonInFlightReuse), "accepted", traceRecordPayload{
+			"scale_check":   cursor.demand,
+			"in_flight":     len(cursor.inFlight),
+			"reused":        cursor.acceptedReused,
+			"anonymous_new": cursor.acceptedAnonymous,
+		}, nil, "")
+	}
+	return requests
+}
+
+func (c *scaleCheckDemandCursor) nextRequest() SessionRequest {
+	if c.next < len(c.inFlight) {
+		return c.inFlight[c.next]
+	}
+	return SessionRequest{
+		Template: c.template,
+		Tier:     "new",
+	}
+}
+
+func (c *scaleCheckDemandCursor) accept(req SessionRequest) {
+	if req.SessionBeadID != "" {
+		c.acceptedReused++
+		return
+	}
+	c.acceptedAnonymous++
 }
 
 func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
@@ -275,7 +342,8 @@ func poolSessionConsumesNewDemand(session beads.Bead) bool {
 	// This pure desired-state pass has no reconciler clock. Creating sessions
 	// still represent already-spent new demand; lifecycle code owns stale
 	// creating recovery with its clock-aware predicate.
-	return strings.TrimSpace(session.Metadata["state"]) == "creating"
+	state := strings.TrimSpace(session.Metadata["state"])
+	return state == "creating" || state == string(sessionpkg.StateStartPending)
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
@@ -437,33 +505,6 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 	return usage
 }
 
-func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {
-	if demand <= 0 {
-		return 0
-	}
-	template := agent.QualifiedName()
-	remaining := demand
-	if agentMax := limits.agentMax[template]; agentMax >= 0 {
-		remaining = minInt(remaining, agentMax-usage.agentCount[template])
-	}
-	if rig := limits.agentRig[template]; rig != "" {
-		rigMax, ok := limits.rigMax[rig]
-		if !ok {
-			rigMax = -1
-		}
-		if rigMax >= 0 {
-			remaining = minInt(remaining, rigMax-usage.rigCount[rig])
-		}
-	}
-	if limits.workspaceMax >= 0 {
-		remaining = minInt(remaining, limits.workspaceMax-usage.workspaceCount)
-	}
-	if remaining < 0 {
-		return 0
-	}
-	return remaining
-}
-
 func (u nestedCapUsage) canAccept(req SessionRequest, limits nestedCapLimits) bool {
 	if u.isDuplicateSessionRequest(req) {
 		return false
@@ -519,11 +560,4 @@ func (u *nestedCapUsage) accept(req SessionRequest, limits nestedCapLimits) {
 	if req.SessionBeadID != "" {
 		u.seenSessionBead[req.SessionBeadID] = true
 	}
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

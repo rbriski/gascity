@@ -7,6 +7,31 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+type listCountingStore struct {
+	beads.Store
+	assignedWorkScanCalls   int
+	assignedWorkLookupCalls int
+	assignedWorkTierCalls   int
+}
+
+func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Live &&
+		query.Type == "" &&
+		query.Label == "" &&
+		query.ParentID == "" &&
+		(query.Status == "open" || query.Status == "in_progress") {
+		if query.Assignee == "" {
+			s.assignedWorkScanCalls++
+		} else {
+			s.assignedWorkLookupCalls++
+		}
+		if query.TierMode == beads.TierIssues || query.TierMode == beads.TierWisps {
+			s.assignedWorkTierCalls++
+		}
+	}
+	return s.Store.List(query)
+}
+
 func TestSessionBeadAssigneeIdentities(t *testing.T) {
 	tests := []struct {
 		name string
@@ -159,6 +184,46 @@ func TestGCSweepSessionBeads_ClosesOrphans(t *testing.T) {
 	got, _ = store.Get(active.ID)
 	if got.Status == "closed" {
 		t.Error("active session was closed, should stay open")
+	}
+}
+
+func TestGCSweepStoppedSessionBeads_BatchesAssignedWorkChecksAfterStop(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &listCountingStore{Store: base}
+
+	var sessionBeads []beads.Bead
+	for i := 0; i < 10; i++ {
+		session, err := store.Create(beads.Bead{
+			Title:  "session",
+			Type:   "session",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "worker-session-" + string(rune('a'+i)),
+				"state":        "active",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(session %d): %v", i, err)
+		}
+		sessionBeads = append(sessionBeads, session)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Assignee: sessionBeads[3].Metadata["session_name"],
+		Status:   "in_progress",
+	}); err != nil {
+		t.Fatalf("Create(assigned work): %v", err)
+	}
+
+	closed := GCSweepStoppedSessionBeads(store, nil, sessionBeads)
+	if len(closed) != len(sessionBeads)-1 {
+		t.Fatalf("closed %d beads, want %d", len(closed), len(sessionBeads)-1)
+	}
+	if store.assignedWorkScanCalls != 2 {
+		t.Fatalf("assigned-work List calls = %d, want 2 batched logical live assigned-work scans", store.assignedWorkScanCalls)
+	}
+	if store.assignedWorkTierCalls != 0 {
+		t.Fatalf("tier-specific assigned-work List calls = %d, want callers to use reader handles", store.assignedWorkTierCalls)
 	}
 }
 

@@ -157,7 +157,7 @@ func memGraphReady(t *testing.T, store beads.Store) []beads.Bead {
 
 	var ready []beads.Bead
 	for _, bead := range all {
-		if bead.Status != "open" || beads.IsReadyExcludedType(bead.Type) {
+		if bead.Status != "open" || beads.IsReadyExcludedBead(bead) {
 			continue
 		}
 		deps, err := store.DepList(bead.ID, "down")

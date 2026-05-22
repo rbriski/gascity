@@ -459,6 +459,10 @@ func statusDisplayText(status string) string {
 		return "Resolving formulas..."
 	case "adopting_sessions":
 		return "Adopting sessions..."
+	case "dispatching_orders":
+		return "Dispatching orders..."
+	case "reconciling_sessions":
+		return "Reconciling sessions..."
 	case "starting_agents":
 		return "Starting agents..."
 	default:

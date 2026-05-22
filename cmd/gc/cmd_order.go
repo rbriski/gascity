@@ -1303,11 +1303,10 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 			if store == nil {
 				continue
 			}
-			results, err := store.List(beads.ListQuery{
+			results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 				Label:         label,
 				IncludeClosed: true,
 				Sort:          beads.SortCreatedDesc,
-				TierMode:      beads.TierBoth,
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1457,7 +1456,7 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		}
 		return 1
 	}
-	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps)
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, onlyOrders, includeWisps)
 	if err := errors.Join(openErr, sweepErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		if result.storesSwept == 0 {
@@ -1567,11 +1566,10 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 }
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
-	beadList, err := store.List(beads.ListQuery{
+	beadList, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Label:         "order:" + orderName,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		if len(beadList) == 0 {

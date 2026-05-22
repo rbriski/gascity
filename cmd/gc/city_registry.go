@@ -436,6 +436,8 @@ var startupPhaseOrder = []string{
 	"starting_bead_store",
 	"resolving_formulas",
 	"adopting_sessions",
+	"dispatching_orders",
+	"reconciling_sessions",
 	"starting_agents",
 }
 

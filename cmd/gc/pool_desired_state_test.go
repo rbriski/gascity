@@ -338,6 +338,36 @@ func TestComputePoolDesiredStates_WorkspaceCap(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_ScaleCheckDemandDoesNotStarveLaterTemplates(t *testing.T) {
+	wsMax := 3
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("workflows.codex-max", "gascity", nil, 0),
+			poolAgent("workflows.claude-max", "gascity", nil, 0),
+			poolAgent("workflows.kimi", "gascity", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{
+		"gascity/workflows.codex-max":  100,
+		"gascity/workflows.claude-max": 1,
+		"gascity/workflows.kimi":       1,
+	}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+
+	counts := PoolDesiredCounts(result)
+	if counts["gascity/workflows.codex-max"] != 1 {
+		t.Fatalf("codex-max desired = %d, want 1; counts=%v", counts["gascity/workflows.codex-max"], counts)
+	}
+	if counts["gascity/workflows.claude-max"] != 1 {
+		t.Fatalf("claude-max desired = %d, want 1; counts=%v", counts["gascity/workflows.claude-max"], counts)
+	}
+	if counts["gascity/workflows.kimi"] != 1 {
+		t.Fatalf("kimi desired = %d, want 1; counts=%v", counts["gascity/workflows.kimi"], counts)
+	}
+}
+
 func TestComputePoolDesiredStates_RigCap(t *testing.T) {
 	rigMax := 2
 	cfg := &config.City{

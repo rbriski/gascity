@@ -932,6 +932,71 @@ func TestMarkCityStopSessionSleepReasonSkipsCreatingSessions(t *testing.T) {
 	}
 }
 
+func TestDoStopPreservesAssignedWorkForStoppedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start(worker-1): %v", err)
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"pool_managed": boolMetadata(true),
+			"session_name": "worker-1",
+			"sleep_reason": sleepReasonCityStop,
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "review",
+		Type:     "task",
+		Assignee: session.ID,
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doStop(
+		[]string{"worker-1"},
+		sp,
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		store,
+		0,
+		events.Discard,
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doStop() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(work): %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("work status = %q, want in_progress after city stop", got.Status)
+	}
+	if got.Assignee != session.ID {
+		t.Fatalf("work assignee = %q, want preserved session assignment %q", got.Assignee, session.ID)
+	}
+	if got.Metadata["gc.routed_to"] != "worker" {
+		t.Fatalf("gc.routed_to = %q, want preserved route", got.Metadata["gc.routed_to"])
+	}
+}
+
 func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 

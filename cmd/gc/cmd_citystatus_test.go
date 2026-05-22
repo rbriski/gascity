@@ -53,6 +53,18 @@ func TestCityStatusEmptyCity(t *testing.T) {
 	}
 }
 
+func TestControllerSupervisorStatusTextIncludesSessionReconcile(t *testing.T) {
+	if got := controllerSupervisorStatusText("reconciling_sessions"); got != "reconciling sessions" {
+		t.Fatalf("controllerSupervisorStatusText(reconciling_sessions) = %q, want reconciling sessions", got)
+	}
+}
+
+func TestControllerSupervisorStatusTextIncludesOrderDispatch(t *testing.T) {
+	if got := controllerSupervisorStatusText("dispatching_orders"); got != "dispatching orders" {
+		t.Fatalf("controllerSupervisorStatusText(dispatching_orders) = %q, want dispatching orders", got)
+	}
+}
+
 func TestCityStatusWithAgents(t *testing.T) {
 	sp := runtime.NewFake()
 	// Start one agent session.

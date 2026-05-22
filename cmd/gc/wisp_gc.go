@@ -85,14 +85,12 @@ func legacyWispGCPolicies(ttl time.Duration) []beadGCPolicy {
 			ttl:  ttl,
 			queries: []beads.ListQuery{
 				{
-					Status:   "closed",
-					Label:    molecule.WispLabel,
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Label:  molecule.WispLabel,
 				},
 				{
-					Status:   "closed",
-					Type:     "molecule",
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Type:   "molecule",
 				},
 			},
 			deleteFn: deleteExpiredBeadClosure,
@@ -102,14 +100,12 @@ func legacyWispGCPolicies(ttl time.Duration) []beadGCPolicy {
 			ttl:  ttl,
 			queries: []beads.ListQuery{
 				{
-					Status:   "closed",
-					Label:    labelOrderTracking,
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Label:  labelOrderTracking,
 				},
 				{
-					Status:   "closed",
-					Label:    legacyLabelOrderTracking,
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Label:  legacyLabelOrderTracking,
 				},
 			},
 			deleteFn: deleteWorkflowBead,
@@ -125,10 +121,9 @@ func configuredWispGCPolicies(defaultTTL time.Duration, overrides map[string]con
 			name: beadPolicySession,
 			queries: []beads.ListQuery{
 				{
-					Status:   "closed",
-					Type:     session.BeadType,
-					Label:    session.LabelSession,
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Type:   session.BeadType,
+					Label:  session.LabelSession,
 				},
 			},
 			deleteFn: deleteWorkflowBead,
@@ -137,9 +132,8 @@ func configuredWispGCPolicies(defaultTTL time.Duration, overrides map[string]con
 			name: beadPolicyWait,
 			queries: []beads.ListQuery{
 				{
-					Status:   "closed",
-					Label:    session.WaitBeadLabel,
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Label:  session.WaitBeadLabel,
 				},
 			},
 			deleteFn: deleteWorkflowBead,
@@ -148,9 +142,8 @@ func configuredWispGCPolicies(defaultTTL time.Duration, overrides map[string]con
 			name: beadPolicyNudge,
 			queries: []beads.ListQuery{
 				{
-					Status:   "closed",
-					Label:    nudgeBeadLabel,
-					TierMode: beads.TierBoth,
+					Status: "closed",
+					Label:  nudgeBeadLabel,
 				},
 			},
 			deleteFn: deleteWorkflowBead,
@@ -210,9 +203,10 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 func (p beadGCPolicy) list(store beads.Store, cutoff time.Time) ([]beads.Bead, error) {
 	entries := make([]beads.Bead, 0)
 	seen := make(map[string]struct{})
+	reader := beads.HandlesFor(store).Live
 	for _, query := range p.queries {
 		query.ClosedBefore = cutoff
-		items, err := store.List(query)
+		items, err := reader.List(query)
 		if err != nil {
 			return nil, err
 		}

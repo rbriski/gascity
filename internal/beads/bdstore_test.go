@@ -106,6 +106,26 @@ func TestBdStoreCreatePreservesExplicitType(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesExplicitID(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"mc-session-abc123","title":"test","status":"open","issue_type":"session","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{ID: "mc-session-abc123", Title: "test", Type: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--id mc-session-abc123") {
+		t.Fatalf("args = %q, want explicit --id", args)
+	}
+	if created.ID != "mc-session-abc123" {
+		t.Fatalf("created.ID = %q, want explicit ID", created.ID)
+	}
+}
+
 func TestBdStoreCreatePassesDeps(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -881,6 +901,49 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 	}
 }
 
+func TestBdStoreUpdateAllBatchesIDsAndRetriesTransientWrite(t *testing.T) {
+	var calls [][]string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		calls = append(calls, append([]string(nil), args...))
+		if len(calls) == 1 {
+			return nil, fmt.Errorf("Error 1213 (40001): serialization failure")
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	status := "closed"
+	updated, err := s.UpdateAll([]string{"bd-1", "bd-2"}, beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			"phase":      "abort",
+			"gc.outcome": "skipped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateAll: %v", err)
+	}
+	if updated != 2 {
+		t.Fatalf("updated = %d, want 2", updated)
+	}
+	want := []string{
+		"update", "--json", "bd-1", "bd-2",
+		"--status", "closed",
+		"--set-metadata", "gc.outcome=skipped",
+		"--set-metadata", "phase=abort",
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2 transient retry attempts", len(calls))
+	}
+	for i, got := range calls {
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("call[%d] = %v, want %v", i, got, want)
+		}
+	}
+}
+
 func TestBdStoreWaitForParentProjection(t *testing.T) {
 	var mu sync.Mutex
 	showCalls := 0
@@ -1386,6 +1449,43 @@ func TestBdStoreListEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("List() returned %d beads, want 0", len(got))
+	}
+}
+
+func TestBdStoreListSkipLabelsUsesMinimalJSON(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[]`), nil
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(gotCmd, "--json-minimal") {
+		t.Fatalf("cmd = %q, want --json-minimal", gotCmd)
+	}
+}
+
+func TestBdStoreListParentDoesNotUseMinimalJSON(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[]`), nil
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true, ParentID: "bd-parent"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(gotCmd, "--json-minimal") {
+		t.Fatalf("cmd = %q, must not contain --json-minimal for parent projection", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "--parent bd-parent") {
+		t.Fatalf("cmd = %q, want parent filter", gotCmd)
 	}
 }
 
@@ -2949,7 +3049,7 @@ func TestBdStoreListWispsUsesBdListAndFiltersToWispTier(t *testing.T) {
 	if !strings.HasPrefix(gotCmd, "bd list --json ") {
 		t.Fatalf("cmd = %q, want bd list prefix", gotCmd)
 	}
-	for _, want := range []string{"--label=order-tracking", "--include-infra", "--include-gates", "--include-templates", "--limit 0"} {
+	for _, want := range []string{"--json-minimal", "--wisp-tier", "--label=order-tracking", "--include-infra", "--include-gates", "--include-templates", "--limit 0"} {
 		if !strings.Contains(gotCmd, want) {
 			t.Fatalf("cmd = %q, want %q", gotCmd, want)
 		}
@@ -3122,7 +3222,7 @@ func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.
 		out []byte
 		err error
 	}{
-		`bd list --json --include-infra --include-gates --include-templates --limit 0`: {
+		`bd list --json --json-minimal --wisp-tier --include-infra --include-gates --include-templates --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
 				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time","ephemeral":true}

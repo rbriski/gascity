@@ -62,6 +62,17 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 	}
 }
 
+func (s *beadPolicyStore) IDPrefix() string {
+	if s == nil {
+		return ""
+	}
+	prefixStore, ok := s.Store.(explicitBeadIDStore)
+	if !ok {
+		return ""
+	}
+	return prefixStore.IDPrefix()
+}
+
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	policyName, storage := s.policyForCreate(b)
 	if storage != "" {

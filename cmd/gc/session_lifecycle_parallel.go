@@ -682,7 +682,7 @@ func prepareStartCandidateForCity(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
-	workDirResolver taskWorkDirResolver,
+	workDirResolvers ...taskWorkDirResolver,
 ) (*preparedStart, error) {
 	session := candidate.session
 	if session != nil && strings.TrimSpace(session.ID) != "" && store != nil {
@@ -692,15 +692,23 @@ func prepareStartCandidateForCity(
 				return err
 			}
 			candidate.session = &current
-			_, _, err = preWakeCommit(candidate.session, store, clk)
+			_, _, err = preWakeCommit(candidate.session, store, clk, startLaunchMetadataPatch(candidate.session.Metadata, candidate.tp))
 			return err
 		}); err != nil {
 			return nil, err
 		}
-	} else if _, _, err := preWakeCommit(session, store, clk); err != nil {
-		return nil, err
+	} else if session != nil {
+		if _, _, err := preWakeCommit(session, store, clk, startLaunchMetadataPatch(session.Metadata, candidate.tp)); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("pre-wake: missing session bead")
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	var workDirResolver taskWorkDirResolver
+	if len(workDirResolvers) > 0 {
+		workDirResolver = workDirResolvers[0]
+	}
 	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
 }
 
@@ -1512,14 +1520,14 @@ func commitStartResult(
 
 // confirmPendingStart reports whether a session in the given metadata
 // state should be transitioned to "active" after a successful runtime
-// spawn. Empty, "creating", "asleep", and "drained" all indicate the
+// spawn. Empty, "start-pending", "creating", "asleep", and "drained" all indicate the
 // session was pending a spawn; "awake" is treated by the reconciler as
 // equivalent to "active" and is intentionally NOT restamped (a no-op
 // metadata write on every spawn). Any other state ("draining",
 // "archived", "quarantined", ...) is left alone.
 func confirmPendingStart(currentState string) bool {
 	switch sessionpkg.State(strings.TrimSpace(currentState)) {
-	case "", sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
+	case "", sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
 		return true
 	}
 	return false
@@ -1600,6 +1608,8 @@ func commitStartResultTraced(
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
 	}
+	clearPendingCreate := shouldRollbackPendingCreate(session) ||
+		strings.TrimSpace(session.Metadata["pending_create_started_at"]) != ""
 	// Transition creating/asleep/drained beads to active once the runtime
 	// spawn has confirmed. Folded into this metadata batch so the state
 	// write is atomic with the hash writes, the pending_create_claim
@@ -1613,7 +1623,7 @@ func commitStartResultTraced(
 		CoreBreakdown:           coreBreakdown,
 		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
 		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
-		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
+		ClearPendingCreateClaim: clearPendingCreate,
 		Now:                     clk.Now(),
 	})
 	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
@@ -1786,45 +1796,46 @@ func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string,
 }
 
 func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
-	if session == nil || store == nil {
-		return
-	}
-	clearPendingStartInFlightLease(session, store, stderr)
-	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
-		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
-			if session.Metadata == nil {
-				session.Metadata = make(map[string]string)
-			}
-			session.Metadata["session_name"] = ""
-		}
-	}
-	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+	rollbackPendingCreateWithTerminalPatch(session, store, now, stderr)
 }
 
 func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
 	if session == nil || store == nil {
 		return
 	}
-	clearPendingStartInFlightLease(session, store, stderr)
-	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
-		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
-			if session.Metadata == nil {
-				session.Metadata = make(map[string]string)
-			}
-			session.Metadata["session_name"] = ""
-		}
+	rollbackPendingCreateWithTerminalPatch(session, store, now, stderr)
+}
+
+func rollbackPendingCreateWithTerminalPatch(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
+	if session == nil || store == nil {
+		return
 	}
-	if !closeFailedCreateBead(store, session.ID, now, stderr) {
+	if session.Status == "closed" {
+		return
+	}
+	patch := sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate))
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	patch["sleep_intent"] = ""
+	patch["last_woke_at"] = ""
+	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
+		patch["session_name"] = ""
+	}
+	if setMetaBatch(store, session.ID, patch, stderr) != nil {
+		return
+	}
+	if err := store.Close(session.ID); err != nil {
+		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", session.ID, err) //nolint:errcheck
 		return
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	for key, value := range sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)) {
+	for key, value := range patch {
 		session.Metadata[key] = value
 	}
-	session.Metadata["pending_create_claim"] = ""
-	session.Metadata["pending_create_started_at"] = ""
+	session.Status = "closed"
+	cancelStateAssignedToRetiredSessionBead(store, session.ID, now, stderr)
 }
 
 func executePlannedStarts(

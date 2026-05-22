@@ -47,7 +47,7 @@ func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string, warningWrite
 	cfg, prov, err := config.LoadWithIncludesOptions(
 		fsys.OSFS{},
 		tomlPath,
-		config.LoadOptions{SuppressDeprecatedOrderWarnings: true},
+		config.LoadOptions{},
 	)
 	if err != nil {
 		return nil, err

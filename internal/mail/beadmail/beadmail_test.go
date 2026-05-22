@@ -98,17 +98,20 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") &&
+			strings.Contains(cmd, "--assignee="+recipient) &&
+			strings.Contains(cmd, "--type=message") &&
+			strings.Contains(cmd, "--include-templates"):
+			sawWispQuery = true
+			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		case strings.Contains(cmd, "bd list --json") &&
+			strings.Contains(cmd, "--assignee="+recipient) &&
+			strings.Contains(cmd, "--type=message"):
+			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--assignee="+recipient):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			sawWispQuery = true
-			if strings.Contains(cmd, "assignee="+recipient) {
-				t.Fatalf("slash recipient leaked into bd query: %s", cmd)
-			}
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("unexpected wisp query: %s", cmd)
-			}
-			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+			t.Fatalf("Check used slow bd query path for wisp-tier messages: %s", cmd)
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}

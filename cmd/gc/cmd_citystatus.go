@@ -614,6 +614,10 @@ func controllerSupervisorStatusText(status string) string {
 		return "resolving formulas"
 	case "adopting_sessions":
 		return "adopting sessions"
+	case "dispatching_orders":
+		return "dispatching orders"
+	case "reconciling_sessions":
+		return "reconciling sessions"
 	case "starting_agents":
 		return "starting agents"
 	case "init_failed":

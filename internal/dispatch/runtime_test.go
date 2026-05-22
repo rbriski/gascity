@@ -446,6 +446,113 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	}
 }
 
+func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
+	t.Parallel()
+
+	store := &scopeSkipBatchStore{MemStore: beads.NewMemStore()}
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	futureMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+	futureControl := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	independent := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "independent cleanup marker",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
+	mustDepAdd(t, store, futureControl.ID, futureMember.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, failed, control, futureMember, futureControl, independent},
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err != nil {
+		t.Fatalf("skipOpenScopeMembers: %v", err)
+	}
+	if skipped != 3 {
+		t.Fatalf("skipped = %d, want 3", skipped)
+	}
+	if store.depListCalls != 0 {
+		t.Fatalf("DepList calls = %d, want 0 when batch dep listing is available", store.depListCalls)
+	}
+	if store.depListBatchCalls != 2 {
+		t.Fatalf("DepListBatch calls = %d, want 2 dependency waves", store.depListBatchCalls)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("Update calls = %d, want 0 when batch update is available", store.updateCalls)
+	}
+	if store.updateAllCalls != 2 {
+		t.Fatalf("UpdateAll calls = %d, want 2 dependency waves", store.updateAllCalls)
+	}
+	if got := []int{len(store.updateAllIDs[0]), len(store.updateAllIDs[1])}; !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("UpdateAll wave sizes = %v, want [2 1]", got)
+	}
+	for _, beadID := range []string{futureMember.ID, futureControl.ID, independent.ID} {
+		member := mustGetBead(t, store, beadID)
+		if member.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", beadID, member.Status)
+		}
+		if got := member.Metadata["gc.outcome"]; got != "skipped" {
+			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
+		}
+	}
+}
+
 func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *testing.T) {
 	t.Parallel()
 
@@ -793,6 +900,49 @@ func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	}
 }
 
+func TestProcessFanoutReturnsMalformedForInvalidSourceOutputJSON(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  "/tmp/gc.output_json.pretty.json",
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout invalid output JSON) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
 func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testing.T) {
 	t.Parallel()
 
@@ -1053,6 +1203,15 @@ type countingListStore struct {
 	queries   []beads.ListQuery
 }
 
+type scopeSkipBatchStore struct {
+	*beads.MemStore
+	depListCalls      int
+	depListBatchCalls int
+	updateCalls       int
+	updateAllCalls    int
+	updateAllIDs      [][]string
+}
+
 type scopeBodyVanishAfterFirstResolveStore struct {
 	*beads.MemStore
 	mu       sync.Mutex
@@ -1078,6 +1237,34 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls++
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+func (s *scopeSkipBatchStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.depListCalls++
+	return s.MemStore.DepList(id, direction)
+}
+
+func (s *scopeSkipBatchStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	s.depListBatchCalls++
+	return s.MemStore.DepListBatch(ids)
+}
+
+func (s *scopeSkipBatchStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updateCalls++
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *scopeSkipBatchStore) UpdateAll(ids []string, opts beads.UpdateOpts) (int, error) {
+	s.updateAllCalls++
+	s.updateAllIDs = append(s.updateAllIDs, slices.Clone(ids))
+	updated := 0
+	for _, id := range ids {
+		if err := s.MemStore.Update(id, opts); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
 }
 
 func (s *scopeBodyVanishAfterFirstResolveStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -7845,6 +8032,62 @@ func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
 	}
 	if !strings.Contains(traced, "status=in_progress") {
 		t.Fatalf("trace missing the actual status; got:\n%s", traced)
+	}
+}
+
+func TestProcessControlClosesControlWhenWorkflowRootMissing(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "orphaned retry control",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":           "retry",
+			"gc.max_attempts":   "3",
+			"gc.root_bead_id":   "missing-root",
+			"gc.root_store_ref": "rig:gascity",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	opts := ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&traceBuf, format, args...)
+			traceBuf.WriteByte('\n')
+		},
+	}
+
+	result, err := ProcessControl(store, control, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "orphaned-workflow" {
+		t.Fatalf("result = %+v, want processed orphaned-workflow", result)
+	}
+	after := mustGetBead(t, store, control.ID)
+	if after.Status != "closed" {
+		t.Fatalf("status = %q, want closed", after.Status)
+	}
+	if after.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", after.Metadata["gc.outcome"])
+	}
+	if after.Metadata["gc.failure_reason"] != "missing_workflow_root" {
+		t.Fatalf("gc.failure_reason = %q, want missing_workflow_root", after.Metadata["gc.failure_reason"])
+	}
+	if after.Metadata["gc.final_disposition"] != "orphaned_workflow" {
+		t.Fatalf("gc.final_disposition = %q, want orphaned_workflow", after.Metadata["gc.final_disposition"])
+	}
+	if after.Metadata["gc.missing_root_bead_id"] != "missing-root" {
+		t.Fatalf("gc.missing_root_bead_id = %q, want missing-root", after.Metadata["gc.missing_root_bead_id"])
+	}
+	traced := traceBuf.String()
+	if !strings.Contains(traced, "close reason=missing_workflow_root") {
+		t.Fatalf("trace missing missing-root close reason; got:\n%s", traced)
 	}
 }
 

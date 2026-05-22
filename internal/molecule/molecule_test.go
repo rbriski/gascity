@@ -1092,7 +1092,7 @@ func TestInstantiateGraphWorkflowDefersAssignmentsOnlyForFutureBlockers(t *testi
 	}
 }
 
-func TestInstantiateFallbackCreatesEphemeralHiddenGraphThenActivates(t *testing.T) {
+func TestInstantiateFallbackCreatesNoHistoryHiddenGraphThenActivates(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &recordingStore{Store: base}
 
@@ -1101,7 +1101,7 @@ func TestInstantiateFallbackCreatesEphemeralHiddenGraphThenActivates(t *testing.
 		Steps: []formula.RecipeStep{
 			{
 				ID:       "graph-ephemeral",
-				Title:    "Graph Ephemeral",
+				Title:    "Graph No History",
 				Type:     "task",
 				IsRoot:   true,
 				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
@@ -1126,8 +1126,8 @@ func TestInstantiateFallbackCreatesEphemeralHiddenGraphThenActivates(t *testing.
 	createdByRef := make(map[string]beads.Bead, len(store.created))
 	for _, created := range store.created {
 		createdByRef[created.Ref] = created
-		if !created.Ephemeral {
-			t.Fatalf("created bead %q Ephemeral = false, want true", created.Ref)
+		if created.Ephemeral || !created.NoHistory {
+			t.Fatalf("created bead %q storage = ephemeral:%v no_history:%v, want no-history", created.Ref, created.Ephemeral, created.NoHistory)
 		}
 	}
 	work := createdByRef["graph-ephemeral.work"]
@@ -1585,8 +1585,8 @@ func TestInstantiateRunnableWispRootPreservesTaskType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	if len(ready) != 1 || ready[0].ID != result.RootID {
-		t.Fatalf("Ready() = %+v, want only root %s", ready, result.RootID)
+	if len(ready) != 0 {
+		t.Fatalf("Ready() = %+v, want gc:wisp root excluded from ready demand", ready)
 	}
 }
 

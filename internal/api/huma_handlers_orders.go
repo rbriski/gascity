@@ -429,20 +429,14 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
 		}
 		var (
 			rows []beads.Bead
 			err  error
 		)
-		if cached, ok := info.store.(cachedListStore); ok {
-			var cacheOK bool
-			rows, cacheOK = cached.CachedList(query)
-			if !cacheOK {
-				rows, err = info.store.List(query)
-			}
-		} else {
-			rows, err = info.store.List(query)
+		rows, err = beads.HandlesFor(info.store).Cached.List(query)
+		if err != nil {
+			rows, err = beads.HandlesFor(info.store).Live.List(query)
 		}
 		if err != nil {
 			if i == 0 && len(rows) == 0 {
@@ -487,13 +481,12 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 		if info.store == nil {
 			continue
 		}
-		rows, err := info.store.List(beads.ListQuery{
+		rows, err := beads.HandlesFor(info.store).Live.List(beads.ListQuery{
 			Label:         label,
 			CreatedBefore: beforeTime,
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			if i == 0 && len(rows) == 0 {

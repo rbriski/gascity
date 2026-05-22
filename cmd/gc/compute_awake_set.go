@@ -52,7 +52,7 @@ type AwakeSessionBead struct {
 	ID                     string
 	SessionName            string
 	Template               string
-	State                  string // "creating", "active", "asleep", "drained", "closed"
+	State                  string // "start-pending", "creating", "active", "asleep", "drained", "closed"
 	SleepReason            string
 	ManualSession          bool
 	PendingCreate          bool      // controller claimed this bead for initial start
@@ -536,7 +536,7 @@ func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSess
 	for _, b := range beads {
 		// See collectActiveBeads above for why ConfiguredNamedSession beads
 		// must be excluded even when NamedIdentity is empty.
-		if b.Template == template && b.State == "creating" &&
+		if b.Template == template && (b.State == "creating" || b.State == "start-pending") &&
 			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
 			!b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)

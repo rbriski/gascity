@@ -1236,7 +1236,7 @@ func (b *blockingOrderDispatcher) drainContextErrors() []error {
 	return append([]error(nil), b.ctxErrs...)
 }
 
-func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
+func TestCityRuntimeTickDispatchesOrdersAfterDemandSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	od := &recordingOrderDispatcher{}
 	cr := &CityRuntime{
@@ -1250,8 +1250,8 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 		stderr:              io.Discard,
 	}
 	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-		if !od.called.Load() {
-			t.Fatal("order dispatch should happen before demand snapshot build")
+		if od.called.Load() {
+			t.Fatal("order dispatch should wait until after demand snapshot build")
 		}
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
@@ -1297,7 +1297,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
+func TestCityRuntimeTickDispatchCancellationHappensAfterDemand(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())
 	od := &recordingOrderDispatcher{
@@ -1305,6 +1305,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *te
 			cancel()
 		},
 	}
+	var demandBuilt atomic.Bool
 	cr := &CityRuntime{
 		cityName:            "test-city",
 		cityPath:            t.TempDir(),
@@ -1316,7 +1317,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *te
 		stderr:              io.Discard,
 	}
 	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-		t.Fatal("demand snapshot should not run after order dispatch cancels the city context")
+		demandBuilt.Store(true)
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
@@ -1328,9 +1329,12 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *te
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
 	}
+	if !demandBuilt.Load() {
+		t.Fatal("demand snapshot should be built before order dispatch can cancel the city context")
+	}
 }
 
-func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
+func TestCityRuntimeRunDispatchesOrdersAfterStartupReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -1353,8 +1357,8 @@ func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
 		Cfg:      cfg,
 		SP:       sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
-			if !od.called.Load() {
-				t.Fatal("order dispatch should happen before startup reconcile")
+			if od.called.Load() {
+				t.Fatal("order dispatch should wait until after startup reconcile")
 			}
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -1540,7 +1544,6 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 			time.Now(),
 			50*time.Millisecond,
 			nil,
-			orderTrackingSweepMetadataInitiator,
 			false,
 		)
 		return nil, err
@@ -4793,8 +4796,8 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	if started {
 		t.Fatal("OnStarted called after cancellation")
 	}
-	if got := od.calls.Load(); got != 1 {
-		t.Fatalf("order dispatch calls = %d, want startup dispatch before cancellation", got)
+	if got := od.calls.Load(); got != 0 {
+		t.Fatalf("order dispatch calls = %d, want no dispatch after startup cancellation", got)
 	}
 	if strings.Contains(stdout.String(), "City started.") {
 		t.Fatalf("stdout = %q, want no started banner after cancellation", stdout.String())

@@ -145,6 +145,9 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		Nodes:         make([]beads.GraphApplyNode, 0, len(recipe.Steps)),
 		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)),
 	}
+	if graphWorkflow {
+		plan.NoHistory = true
+	}
 
 	for i, step := range recipe.Steps {
 		if recipe.RootOnly && i > 0 {

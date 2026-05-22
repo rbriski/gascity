@@ -9,6 +9,29 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+type explicitIDPoolCreateStore struct {
+	beads.Store
+	prefix           string
+	created          beads.Bead
+	setMetadataCalls int
+}
+
+func (s *explicitIDPoolCreateStore) IDPrefix() string {
+	return s.prefix
+}
+
+func (s *explicitIDPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	s.created = bead
+	bead.Status = "open"
+	bead.CreatedAt = time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+	return bead, nil
+}
+
+func (s *explicitIDPoolCreateStore) SetMetadata(_, _, _ string) error {
+	s.setMetadataCalls++
+	return nil
+}
+
 func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
@@ -34,6 +57,54 @@ func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 	}
 	if got, want := stored.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(now); got != want {
 		t.Fatalf("stored pending_create_started_at = %q, want %q", got, want)
+	}
+}
+
+func TestCreatePoolSessionBead_UsesExplicitIDStoreWithoutSessionNameUpdate(t *testing.T) {
+	store := &explicitIDPoolCreateStore{
+		Store:  beads.NewMemStore(),
+		prefix: "mc",
+	}
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead: %v", err)
+	}
+
+	if !strings.HasPrefix(bead.ID, "mc-session-") {
+		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
+	}
+	wantSessionName := PoolSessionName("gascity/claude", bead.ID)
+	if got := store.created.Metadata["session_name"]; got != wantSessionName {
+		t.Fatalf("created session_name = %q, want final session name %q", got, wantSessionName)
+	}
+	if got := bead.Metadata["session_name"]; got != wantSessionName {
+		t.Fatalf("returned session_name = %q, want final session name %q", got, wantSessionName)
+	}
+	if store.setMetadataCalls != 0 {
+		t.Fatalf("SetMetadata calls = %d, want zero hot-path updates", store.setMetadataCalls)
+	}
+}
+
+func TestCreatePoolSessionBead_UsesExplicitIDThroughBeadPolicyStore(t *testing.T) {
+	base := &explicitIDPoolCreateStore{
+		Store:  beads.NewMemStore(),
+		prefix: "mc",
+	}
+	store := wrapStoreWithBeadPolicies(base, &config.City{})
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead: %v", err)
+	}
+
+	if !strings.HasPrefix(bead.ID, "mc-session-") {
+		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
+	}
+	if base.setMetadataCalls != 0 {
+		t.Fatalf("SetMetadata calls = %d, want zero through policy wrapper", base.setMetadataCalls)
 	}
 }
 

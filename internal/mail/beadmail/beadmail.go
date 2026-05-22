@@ -425,11 +425,10 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	default:
 		return nil, fmt.Errorf("beadmail thread: resolving %q: %w", id, err)
 	}
-	bs, err := p.store.List(beads.ListQuery{
-		Label:    "thread:" + threadID,
-		Type:     "message",
-		Sort:     beads.SortCreatedAsc,
-		TierMode: beads.TierBoth,
+	bs, err := beads.HandlesFor(p.store).Live.List(beads.ListQuery{
+		Label: "thread:" + threadID,
+		Type:  "message",
+		Sort:  beads.SortCreatedAsc,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("beadmail thread: %w", err)
@@ -723,11 +722,10 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 	// Primary: targeted query scoped to recipient.
 	if len(routes) > 0 {
 		for _, route := range routes {
-			assigned, err := p.store.List(beads.ListQuery{
+			assigned, err := beads.HandlesFor(p.store).Live.List(beads.ListQuery{
 				Assignee: route,
 				Type:     "message",
 				Status:   "open",
-				TierMode: beads.TierBoth,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("listing by assignee %q: %w", route, err)
@@ -736,7 +734,7 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 		}
 	} else {
 		// No recipient filter — use type-based query for global discovery.
-		all, err := p.store.List(beads.ListQuery{Type: "message", TierMode: beads.TierBoth})
+		all, err := beads.HandlesFor(p.store).Live.List(beads.ListQuery{Type: "message"})
 		if err != nil {
 			return nil, fmt.Errorf("listing message beads: %w", err)
 		}

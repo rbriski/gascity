@@ -257,6 +257,14 @@ func normalizeIDPrefix(prefix string) string {
 	return strings.Trim(strings.ToLower(strings.TrimSpace(prefix)), "-")
 }
 
+// IDPrefix returns the normalized bead ID prefix owned by this cache.
+func (c *CachingStore) IDPrefix() string {
+	if c == nil {
+		return ""
+	}
+	return c.idPrefix
+}
+
 func (c *CachingStore) ownsBeadID(id string) bool {
 	if c.idPrefix == "" {
 		return true

@@ -515,3 +515,175 @@ The CachingStore does not cover the ephemeral/wisps tier today. Extending it wou
 fix R1 (the dominant CPU hot path) without a store replacement. This is an open
 decision for round-2 scoping: extend the cache now as a bridge, or treat it as part
 of the replacement.
+
+---
+
+## Round-2 Recommendation
+
+> **Date:** 2026-05-23. Author: gascity/architect (R2.4 synthesis).
+> Sources: R2.1 (harness + SQLite reference adapter), R2.1b (adapter sweep — 6 backends),
+> R2.2 (author-own design), R2.3 (migration path).
+
+### Decision: Author-own (HQStore)
+
+**Build HQStore — the thin in-process custom store designed in R2.2.**
+
+Do not adopt SQLite, PostgreSQL, CouchDB, or any other external database. Do not extend the Dolt/BdStore path.
+
+### Evidence summary
+
+#### Benchmarked performance vs targets (R2.1b RealWorldWorkload, 30 s, 20 goroutines)
+
+| Backend | 9/9 targets? | Point-read p99 | Notes |
+|---|---|---|---|
+| **authorcore PoC** | **9/9** | **282 µs** | The R2.2 HQStore hot path. 3.5× headroom on the critical target. |
+| bbolt | 9/9 | 537 µs | Application index/query layer required — not a general query engine. |
+| SQLite (mattn CGo) | 8/9 | 1.22–1.63 ms | Fails point-read p99. Structural WAL shared-lock floor under concurrency. |
+| PostgreSQL | 4/9 | 3.15 ms | Networked hop disqualifies it for local HQ hot path. |
+| CouchDB | 1/9 | 17.6 ms | Document model mismatch; write-through bottleneck. |
+| Dolt SQL baseline | 1/9 | 16.2 ms | Even with fork tax removed, fails every latency target. |
+
+All six candidates passed correctness on all 18 FRs. Performance, not correctness, is the differentiator.
+
+The **authorcore PoC satisfies all nine measured performance targets** including the critical point-read p99 at 282 µs (3.5× headroom vs the 1 ms target). SQLite's 1 ms miss is structural: under 20 goroutines, WAL shared-lock acquisition adds 0.6–1.0 ms to every point read (confirmed by R2.1). This floor does not improve with tuning and worsens as city concurrency grows.
+
+bbolt passes 9/9 but is not meaningfully distinct from author-own: it provides persistence but requires building and owning the entire index/query layer atop its KV API. The Bead struct must still be serialized for bbolt storage. The ownership surface is the same as HQStore with less architectural upside.
+
+Pure-Go SQLite (modernc.org) is not a viable path — R2.2 documents it as ~3× slower than the C version, which at SQLite's existing 1.22–1.63 ms point-read would produce ~3.6–4.9 ms point reads, failing by a large margin.
+
+#### Build and maintenance cost
+
+| Path | Build cost | Ongoing maintenance | Principal risk |
+|---|---|---|---|
+| HQStore (author-own) | ~9 days, ~1,580 LOC | ~15–20 days/year | Own WAL crash recovery |
+| SQLite (CGo) | ~3 days, ~200 LOC | ~1–2 days/year | CGo dep; SQL↔Bead marshal layer; WAL concurrency floor |
+
+HQStore's ~9 day build cost is the honest price of the performance advantage. The principal ongoing risk is owning WAL crash recovery. This risk is bounded: the WAL design in R2.2 is conservative (partial-line skip on SIGKILL; checkpoint + replay on recovery; atomic checkpoint writes), the existing MemStore/FileStore cover ~60–70% of the surface, and the R2.1 harness gates crash-recovery correctness before any production rollout.
+
+SQLite's maintenance advantage (near-zero storage layer cost) is real but comes with two compounding architectural costs: the CGo dependency (the `gc` binary currently has zero C dependencies; adding CGo affects cross-compilation, sandboxing, and build reproducibility) and a SQL↔Bead marshaling layer on every read and write path.
+
+#### Risk comparison
+
+| Risk | HQStore | SQLite (CGo) |
+|---|---|---|
+| WAL corruption on SIGKILL | Low (partial-line skip; CRC-32; conservative lock protocol) | **Zero — SQLite owns it** |
+| Index consistency bug | Medium (6 index types × 4 write paths; mitigated by harness + test suite) | **Zero — B-tree by SQLite** |
+| Ready-set stale | Medium (incremental openUnblocked maintenance; cross-check in tests) | Low (query replays from index each time) |
+| CGo build/runtime | **Zero** | High (mattn/go-sqlite3 requires C toolchain) |
+| SQL↔Bead marshal layer | **Zero** | Medium (new per-path error surface; schema migration coupling) |
+| Performance under growing concurrency | **Low — in-memory, no shared lock** | High — WAL shared-lock scales worse as goroutine count grows |
+
+The crash-recovery ownership risk is acknowledged and not minimized. The mitigation: SIGKILL-injection tests at every write path, partial-line recovery fuzz testing, and the 48-hour rollback window during cutover (Dolt backup kept hot).
+
+### Deferred bridge fixes — folded into migration, not pre-migration patches
+
+The operator deferred three bridge fixes to the migration. They resolve for free during import:
+
+1. **`wisp_events` FK cascade (bloat bug #1)** — HQStore enforces label/event cascade natively on delete. During import, orphan `wisp_events` rows (45% of 47,334 rows ≈ 21,300 rows eliminated) are simply not imported — they reference wisp IDs that don't exist.
+
+2. **`wisp_labels` FK cascade (bloat bug #2)** — Same. Orphan `wisp_labels` rows (46% of 23,106 rows ≈ 10,600 rows eliminated) are dropped during import.
+
+3. **Mail auto-archive** — the TTLSweeper enforces the retention model from the entity retention table. On import, mail wisps with `created_at > 30 days AND status=open` are archived; read mail older than 7 days is dropped. The +200/day net growth in open mail stops permanently on day one of the new store.
+
+These are not items to schedule separately. The migration IS the fix. No bridge patch on Dolt is needed.
+
+### Phased implementation plan
+
+All work lives on the `experiment/coordination-store` branch. No PRs until the backend is shipped and the rationale is documented.
+
+#### Phase 1 — Build HQStore (Weeks 1–3, ~9 days)
+
+**Goal:** A complete `HQStore` satisfying all 18 FRs, passing the R2.1 harness at 9/9 targets.
+
+| Step | Deliverable | Days |
+|---|---|---|
+| 1 | `internal/beads/hqstore_core.go` — IndexedMemCore: primary map, 6 secondary index types (label, assignee, status, type, parent, metadata-KV), two-tier routing, all 22 Store methods | 3 |
+| 2 | `internal/beads/hqstore_wal.go` — JSONL WAL format, writer, fsync, seq counter, partial-line detection, replay | 2 |
+| 3 | `internal/beads/hqstore_checkpoint.go` — checkpoint write/load, atomic rename, recovery orchestration | 1 |
+| 4 | `internal/beads/hqstore_ttl.go` — TTLSweeper goroutine, 60 s cadence, expiry enforcement | 0.5 |
+| 5 | `internal/beads/hqstore.go` — Open/Close lifecycle, goroutine management, config | 0.5 |
+| 6 | `internal/beads/hqstore_*_test.go` — SIGKILL injection, partial-line recovery, checkpoint round-trip, TTL boundary, concurrent write correctness | 2 |
+
+**Gate:** `COORDSTORE_BENCH=1 go test -run TestBenchmarkSuiteRealWorld` scores 9/9 with HQStore adapter registered.
+
+**Pivot trigger (end of Week 3 only):** If WAL fsync latency adds >1 ms to point reads under harness load, evaluate batch-fsync (accumulate writes, fsync every N ms). If WAL complexity proves materially larger than ~420 LOC (>2×), escalate to operator with measurements. If 9/9 cannot be reached, pivot to SQLite-CGo (see Fallback below).
+
+#### Phase 2 — bd shim + provider (Week 4, ~2 days)
+
+**Goal:** Agents call `bd` transparently; it routes to HQStore.
+
+| Step | Deliverable | Days |
+|---|---|---|
+| 1 | Complete `gc bd-store-bridge` operation coverage — add `show`, `stats`, `count`, `mol` operations | 1 |
+| 2 | `gc-beads-hqstore` exec provider script — materializes `bd` shim at `.gc/system/bin/bd`, analogous to `gc-beads-bd` | 1 |
+
+**Gate:** `bd create`, `bd ready`, `bd show`, `bd update`, `bd close`, `bd stats` all route to HQStore in a test city.
+
+#### Phase 3 — Migration tooling + shadow validation (Week 5, ~2 days)
+
+**Goal:** `gc store` subcommands ready; shadow-write running.
+
+| Step | Deliverable | Days |
+|---|---|---|
+| 1 | `gc store export` — JSONL dump from BdStore (issues + wisps + labels + deps) | 0.5 |
+| 2 | `gc store import` — load JSONL into HQStore; drop orphan wisp_events/wisp_labels; apply mail retention; set ID counter to `max(imported IDs) + 1000` | 1 |
+| 3 | `gc store validate` — spot-check canonical queries against both stores; diff output | 0.5 |
+
+Shadow-write starts as soon as Phase 2 gate passes. Run 24–48 h; accept if zero discrepancies.
+
+**Gate:** zero discrepancies on shadow-write diff; all R2.3 spot-check queries match.
+
+#### Phase 4 — Cutover (Week 6, ≤60 s downtime)
+
+Sequence per R2.3:
+
+1. `gc stop` (drain agents, 5–15 s)
+2. `gc store export` (full JSONL dump, ~2 s)
+3. `gc store import` (into HQStore; applies bridge fixes; ~5 s)
+4. Rename Dolt data dir to `.gc/store/dolt.backup/` (rollback anchor)
+5. `gc start` with `gc-beads-hqstore` provider (store warm-up, ~5 s)
+6. Post-cutover spot checks (R2.3 validation protocol)
+7. Monitor `gc bd trace` latency telemetry for 48 h
+
+**Rollback (available 48 h):** `gc stop` → restore Dolt backup → swap provider back to `gc-beads-bd` → `gc start` → delta replay from WAL export (bounded by monitoring window writes).
+
+#### Phase 5 — Cleanup (Weeks 7–8, ~3 days)
+
+1. After 48 h monitoring passes: `rm -rf .gc/store/dolt.backup/`
+2. Remove `gc-beads-bd` from city config (or no-op provider for legacy cities)
+3. Deprecate `BdStore` in `internal/beads/`; keep MemStore/FileStore for tests and tutorial-01
+4. File bead: agent prompt migration from `bd` → `gc bd ...` (multi-sprint; do not block cleanup)
+5. File bead: rig-DB right-sizing (separate problem; same HQStore solution shape, different data profile per D-6's HQ-only scope)
+
+#### Timeline summary
+
+| Phase | What | Duration | Week |
+|---|---|---|---|
+| 1 | Build HQStore | 9 days | 1–3 |
+| 2 | bd shim + provider | 2 days | 4 |
+| 3 | Migration tooling + shadow | 2 days | 5 |
+| 4 | Cutover | 1 day | 6 |
+| 5 | Cleanup | 3 days | 7–8 |
+| **Total** | | **~17 days** | **~8 weeks** |
+
+### Fallback: SQLite (ADOPT) — when to pivot
+
+If Phase 1 demonstrates WAL complexity exceeds the ~420 LOC estimate by 2× or harness 9/9 cannot be reached by end of Week 3, pivot to SQLite (mattn CGo) before Phase 2:
+
+- Implement `BdStoreSQLite` adapter using the existing harness scaffolding (~3 days)
+- Accept CGo dependency; document rationale (WAL complexity exceeded estimate; SQLite's 8/9 performance is operationally acceptable)
+- Accept the point-read p99 target at 8/9 (1.22–1.63 ms vs 1 ms); the miss is close to machine-variance territory per R2.1b notes
+- Phases 2–5 are unchanged — same migration strategy, same tooling
+
+The pivot must happen by end of Week 3. Do not begin Phase 2 without a passing harness gate for the chosen backend.
+
+Pure-Go SQLite (modernc.org) is **not a fallback** — it fails point-read p99 by 3–5× margin and must not be re-evaluated.
+
+### Open decisions resolved by this recommendation
+
+| D# | Question | Resolution |
+|---|---|---|
+| D-7 (open) | Mail-tier caching as short-term fix | **Closed: skip.** The HQStore's IndexedMemCore serves the ephemeral tier from in-memory indexes, eliminating the mail-poll full-scan hot path (R1) on day one. A CachingStore bridge patch on Dolt is not worth the effort given the 8-week migration timeline. |
+| OQ-1 | Round-2 technology decision | **Closed: HQStore.** |
+| OQ-2 | Wisp FK gap — bridge fix or skip | **Closed: skip.** Deferred bridge fixes are folded into migration import. |
+| OQ-6 | HQ vs rig-DB separation | **Confirmed: treat separately.** File a follow-up bead for rig-DB right-sizing after HQ cutover. |

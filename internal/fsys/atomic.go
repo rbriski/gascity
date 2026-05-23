@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // WriteFileAtomic writes data to path atomically using a temp file + rename.
@@ -31,7 +35,61 @@ func WriteFileAtomic(fs FS, path string, data []byte, perm os.FileMode) error {
 		_ = fs.Remove(tmp)
 		return fmt.Errorf("renaming temp file: %w", err)
 	}
+	sweepDeadAtomicOrphans(fs, path)
 	return nil
+}
+
+// sweepDeadAtomicOrphans removes sibling temp files left behind by previous
+// WriteFileAtomic callers that died (e.g., SIGTERM) between WriteFile and
+// Rename. It is best-effort: any error during enumeration or removal is
+// ignored so a stale-temp cleanup never fails an otherwise successful write.
+//
+// Only siblings of `target` matching the WriteFileAtomic suffix scheme
+// (`<basename>.tmp.<pid>.<unixnano-base36>`) are considered. PIDs that are
+// still alive — including in-progress writers from concurrent calls — are
+// preserved.
+func sweepDeadAtomicOrphans(fs FS, target string) {
+	dir := filepath.Dir(target)
+	prefix := filepath.Base(target) + ".tmp."
+	entries, err := fs.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		pid, ok := parseAtomicTempPID(name[len(prefix):])
+		if !ok {
+			continue
+		}
+		if pidutil.Alive(pid) {
+			continue
+		}
+		_ = fs.Remove(filepath.Join(dir, name))
+	}
+}
+
+// parseAtomicTempPID parses the `<pid>.<unixnano-base36>` suffix produced by
+// WriteFileAtomic and returns the PID. Returns ok=false when the input does
+// not match the scheme (e.g., no dot, non-numeric PID).
+func parseAtomicTempPID(suffix string) (int, bool) {
+	dot := strings.IndexByte(suffix, '.')
+	if dot <= 0 || dot == len(suffix)-1 {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(suffix[:dot])
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	if _, err := strconv.ParseInt(suffix[dot+1:], 36, 64); err != nil {
+		return 0, false
+	}
+	return pid, true
 }
 
 // WriteFileIfChangedAtomic writes data to path atomically only when the
@@ -107,7 +165,13 @@ func comparableMode(mode os.FileMode) os.FileMode {
 }
 
 func fileIdentityFromInfo(info os.FileInfo) (fileIdentity, bool) {
-	stat := reflect.Indirect(reflect.ValueOf(info.Sys()))
+	return fileIdentityFromSys(info.Sys())
+}
+
+func fileIdentityFromSys(sys any) (fileIdentity, bool) {
+	// Signed stat fields follow Go's direct int-to-uint conversion so the
+	// Fstat and Lstat paths agree on device identity across Unix variants.
+	stat := reflect.Indirect(reflect.ValueOf(sys))
 	if !stat.IsValid() {
 		return fileIdentity{}, false
 	}
@@ -130,11 +194,7 @@ func fileIdentityFromInfo(info os.FileInfo) (fileIdentity, bool) {
 func numericFieldToUint64(v reflect.Value) (uint64, bool) {
 	switch v.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		value := v.Int()
-		if value < 0 {
-			return 0, false
-		}
-		return uint64(value), true
+		return uint64(v.Int()), true
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return v.Uint(), true
 	default:

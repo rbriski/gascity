@@ -60,7 +60,7 @@ touch "$STATE_FILE"
 current_pids=$(ls "$POLLERS_DIR" 2>/dev/null \
   | grep -E '^polecat-[a-z0-9-]+\.pid$' \
   | sed -E 's/^polecat-(.+)\.pid$/\1/' \
-  | sort -u)
+  | sort -u || true)
 
 # Last-seen set from previous run.
 prev_pids=$(cat "$STATE_FILE" 2>/dev/null | sort -u)
@@ -85,7 +85,7 @@ for dead in $disappeared; do
     | jq -r --arg s "$dead" '
         .[] | select(
           (.metadata.work_dir // "" | contains($s)) or
-          (.metadata.polecat_session // "" == $s)
+          ((.metadata.polecat_session // "") == $s)
         ) | .id' 2>/dev/null || true)
 
   if [ -n "$orphans" ]; then

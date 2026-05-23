@@ -215,6 +215,15 @@ Rig added.
 Gas City derived the rig name from the directory basename (`my-project`) and set
 up work tracking in it. The shared rig declaration lives in `city.toml`:
 
+<Note>
+Published `gc` 1.0.0 can leave a clean rig without the beads `issue_prefix`,
+which makes later `bd` or `gc sling` calls fail. If you installed 1.0.0 and
+see that error after this clean `gc init` / `gc rig add` path, run
+`gc doctor --fix` from the city directory, then retry. This is a temporary
+workaround for [GitHub issue #1670](https://github.com/gastownhall/gascity/issues/1670);
+newer builds include the code fix.
+</Note>
+
 ```shell
 
 ~/my-city

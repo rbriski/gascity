@@ -39,6 +39,15 @@ gc rig add ~/hello-world
 A rig is an external project directory registered with the city. It gets its
 own beads database, hook installation, and routing context.
 
+<Note>
+Published `gc` 1.0.0 can leave a clean rig without the beads `issue_prefix`,
+which makes later `bd` or `gc sling` calls fail. If you installed 1.0.0 and
+see that error after this clean `gc init` / `gc rig add` path, run
+`gc doctor --fix` from the city directory, then retry. This is a temporary
+workaround for [GitHub issue #1670](https://github.com/gastownhall/gascity/issues/1670);
+newer builds include the code fix.
+</Note>
+
 ## 3. Sling Work
 
 ```bash

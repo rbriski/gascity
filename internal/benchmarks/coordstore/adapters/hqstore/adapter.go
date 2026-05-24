@@ -185,7 +185,7 @@ func (a *Adapter) PurgeExpired(context.Context) (int, error) {
 
 // PrimeScan loads open records through the HQStore list path.
 func (a *Adapter) PrimeScan(context.Context) (int, error) {
-	items, err := a.store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	items, err := a.store.List(beads.ListQuery{AllowScan: true})
 	if err != nil {
 		return 0, err
 	}

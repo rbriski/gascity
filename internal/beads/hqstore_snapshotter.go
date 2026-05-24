@@ -198,6 +198,56 @@ func (s *HQStore) loadSnapshot() error {
 	return nil
 }
 
+func (s *HQStore) refreshSnapshotForRead() error {
+	if !s.snapshotOnWrite {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadSnapshot()
+}
+
+func (s *HQStore) beginLiveWrite() (func(bool) error, error) {
+	if !s.snapshotOnWrite {
+		return func(bool) error { return nil }, nil
+	}
+	s.writeMu.Lock()
+	if err := s.locker.Lock(); err != nil {
+		s.writeMu.Unlock()
+		return nil, err
+	}
+	release := func() {
+		_ = s.locker.Unlock()
+		s.writeMu.Unlock()
+	}
+
+	s.mu.Lock()
+	err := s.loadSnapshot()
+	s.mu.Unlock()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	before := s.ExportAll()
+
+	return func(changed bool) error {
+		defer release()
+		if !changed {
+			return nil
+		}
+		if err := s.writeSnapshot(); err != nil {
+			s.mu.Lock()
+			s.loadExportLocked(before)
+			s.mu.Unlock()
+			return fmt.Errorf("snapshotting hqstore after write: %w", err)
+		}
+		return nil
+	}, nil
+}
+
 // readSnapshotStream decodes a gzip-compressed JSONL snapshot from r.
 func readSnapshotStream(r io.Reader) (HQExport, error) {
 	gz, err := gzip.NewReader(r)

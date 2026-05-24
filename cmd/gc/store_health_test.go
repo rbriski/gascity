@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,25 @@ func TestLiveRowCountCountsBeads(t *testing.T) {
 	}
 }
 
+func TestLiveRowCountIncludesClosedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	open, err := store.Create(beads.Bead{Title: "open"})
+	if err != nil {
+		t.Fatalf("Create open: %v", err)
+	}
+	closed, err := store.Create(beads.Bead{Title: "closed"})
+	if err != nil {
+		t.Fatalf("Create closed: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := liveRowCount(store); got != 2 {
+		t.Fatalf("liveRowCount = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+}
+
 func TestCollectStoreHealthReadsEvents(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{Title: "x"}); err != nil {
@@ -151,5 +171,40 @@ func TestCollectStoreHealthReadsEvents(t *testing.T) {
 	}
 	if h.Path != storehealth.StorePath("/c") {
 		t.Errorf("Path = %q, want %q", h.Path, storehealth.StorePath("/c"))
+	}
+}
+
+func TestCollectStoreHealthUsesHQStorePath(t *testing.T) {
+	cityDir := t.TempDir()
+	hqPath := filepath.Join(cityDir, ".gc", "hqstore")
+	store, err := beads.OpenHQStore(
+		hqPath,
+		beads.WithHQStoreIDPrefix("zz"),
+		beads.WithHQStoreSnapshotInterval(0),
+	)
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+	if _, err := store.Create(beads.Bead{Title: "x"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Snapshot(); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	h := collectStoreHealth(cityDir, store, events.NewFake())
+	if h == nil {
+		t.Fatal("collectStoreHealth returned nil")
+	}
+	if h.Path != hqPath {
+		t.Fatalf("Path = %q, want %q", h.Path, hqPath)
+	}
+	if h.SizeBytes == 0 {
+		t.Fatalf("SizeBytes = 0, want snapshot bytes under %s", hqPath)
 	}
 }

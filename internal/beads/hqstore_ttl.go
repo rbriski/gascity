@@ -4,28 +4,45 @@ import (
 	"time"
 )
 
-// PurgeExpired removes ephemeral beads whose expires_at metadata is in the
-// past. It returns the number of beads removed.
+// PurgeExpired removes expired ephemeral beads and closed main-tier beads whose
+// retention window has elapsed. It returns the number of beads removed.
 func (s *HQStore) PurgeExpired() (int, error) {
 	now := time.Now()
 
+	finish, err := s.beginLiveWrite()
+	if err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
+		s.mu.Unlock()
+		_ = finish(false)
 		return 0, err
 	}
 
 	var ids []string
 	for id, bead := range s.wisps {
 		expiresAt, ok := hqBeadExpiresAt(bead)
-		if ok && expiresAt.Before(now) {
+		if ok && !expiresAt.After(now) {
 			ids = append(ids, id)
+		}
+	}
+	if s.closedTaskRetention > 0 {
+		for id, bead := range s.main {
+			if hqClosedTaskExpired(bead, now, s.closedTaskRetention) && !s.hasOpenChildrenLocked(id) {
+				ids = append(ids, id)
+			}
 		}
 	}
 	for _, id := range ids {
 		s.deleteLocked(id)
 	}
-	return len(ids), nil
+	purged := len(ids)
+	s.mu.Unlock()
+	if err := finish(purged > 0); err != nil {
+		return 0, err
+	}
+	return purged, nil
 }
 
 func hqBeadExpiresAt(b Bead) (time.Time, bool) {
@@ -44,6 +61,36 @@ func hqBeadExpiresAt(b Bead) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return expiresAt, true
+}
+
+func hqClosedTaskExpired(b Bead, now time.Time, retention time.Duration) bool {
+	if b.Status != "closed" {
+		return false
+	}
+	ref := b.CreatedAt
+	if len(b.Metadata) > 0 && b.Metadata[hqClosedAtMetadataKey] != "" {
+		if closedAt, err := time.Parse(time.RFC3339Nano, b.Metadata[hqClosedAtMetadataKey]); err == nil {
+			ref = closedAt
+		}
+	}
+	if ref.IsZero() {
+		return false
+	}
+	return !ref.Add(retention).After(now)
+}
+
+func (s *HQStore) hasOpenChildrenLocked(parentID string) bool {
+	for _, child := range s.main {
+		if child.ParentID == parentID && child.Status != "closed" && child.Status != "archived" {
+			return true
+		}
+	}
+	for _, child := range s.wisps {
+		if child.ParentID == parentID && child.Status != "closed" && child.Status != "archived" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *HQStore) startTTLSweeper() {

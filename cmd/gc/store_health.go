@@ -15,7 +15,11 @@ import (
 // when the maintenance log is empty, LastGCAt and LastGCStatus are
 // omitted (json:"omitempty").
 func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
-	h := storehealth.Compute(cityPath, sizeBytes, liveRows, lastGCAt, lastGCStatus)
+	return storeHealthFromPath(storehealth.StorePath(cityPath), sizeBytes, liveRows, lastGCAt, lastGCStatus)
+}
+
+func storeHealthFromPath(path string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
+	h := storehealth.ComputeForPath(path, sizeBytes, liveRows, lastGCAt, lastGCStatus)
 	out := &StoreHealth{
 		Path:        h.Path,
 		SizeBytes:   h.SizeBytes,
@@ -31,15 +35,29 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 	return out
 }
 
+type storeHealthPathProvider interface {
+	StoreHealthPath() string
+}
+
+func storeHealthPath(cityPath string, store beads.Store) string {
+	if provider, ok := store.(storeHealthPathProvider); ok {
+		if path := provider.StoreHealthPath(); path != "" {
+			return path
+		}
+	}
+	return storehealth.StorePath(cityPath)
+}
+
 // collectStoreHealth measures the Dolt store at cityPath and the latest
 // maintenance event via ep, returning a populated *StoreHealth.
 // store.List(AllowScan) provides the live row count; callers without a
 // store pass nil and LiveRows is reported as zero.
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
-	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
+	path := storeHealthPath(cityPath, store)
+	size := storehealth.WalkSize(path)
 	rows := liveRowCount(store)
 	lastAt, lastStatus := storehealth.LastMaintenance(ep)
-	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
+	return storeHealthFromPath(path, size, rows, lastAt, lastStatus)
 }
 
 // liveRowCount returns the number of beads known to store, or 0 when
@@ -50,7 +68,7 @@ func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true})
+	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		return 0
 	}

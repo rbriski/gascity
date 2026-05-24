@@ -45,8 +45,13 @@ func StorePath(cityPath string) string {
 // Compute builds a Health from measured inputs. Pure function — all
 // I/O is performed by the caller via WalkSize and LastMaintenance.
 func Compute(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) Health {
+	return ComputeForPath(StorePath(cityPath), sizeBytes, liveRows, lastGCAt, lastGCStatus)
+}
+
+// ComputeForPath builds a Health for an explicitly selected store path.
+func ComputeForPath(path string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) Health {
 	h := Health{
-		Path:         StorePath(cityPath),
+		Path:         path,
 		SizeBytes:    sizeBytes,
 		LiveRows:     liveRows,
 		ThresholdMB:  DefaultThresholdMB,

@@ -84,6 +84,47 @@ func TestRawBeadsProviderPreservesCustomExecOverride(t *testing.T) {
 	}
 }
 
+func TestOpenCityStoreAtSupportsHQStoreProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+prefix = "zz"
+
+[beads]
+provider = "hqstore"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	hq, ok := store.(*beads.HQStore)
+	if !ok {
+		t.Fatalf("openCityStoreAt returned %T, want *beads.HQStore", store)
+	}
+	t.Cleanup(func() {
+		if err := hq.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+
+	created, err := store.Create(beads.Bead{Title: "live hqstore bead"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !strings.HasPrefix(created.ID, "zz-") {
+		t.Fatalf("created ID = %q, want city prefix zz-", created.ID)
+	}
+	if got := rawBeadsProvider(cityDir); got != "hqstore" {
+		t.Fatalf("rawBeadsProvider() = %q, want hqstore", got)
+	}
+	if got := beadsProvider(cityDir); got != "hqstore" {
+		t.Fatalf("beadsProvider() = %q, want hqstore", got)
+	}
+}
+
 func TestRawBeadsProviderForScopePreservesExplicitEnvOverride(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

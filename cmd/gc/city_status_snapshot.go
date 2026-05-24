@@ -102,6 +102,7 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 func cityStatusStorePresent(cityPath string) bool {
 	for _, candidate := range []string{
 		filepath.Join(cityPath, ".beads"),
+		filepath.Join(cityPath, ".gc", "hqstore"),
 		filepath.Join(cityPath, ".gc", "beads.json"),
 	} {
 		if _, err := os.Stat(candidate); err == nil {

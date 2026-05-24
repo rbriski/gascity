@@ -86,15 +86,14 @@ type WorkloadConfig struct {
 }
 
 // MailAssignees is the set of assignees used in mail-poll simulation.
-// Matches the ~20-agent population observed in the discovery rig.
+// Matches the ~20-agent population size observed in the discovery rig without
+// baking any user-defined role names into SDK code.
 var MailAssignees = []string{
-	"gascity/builder", "gascity/architect", "gascity/investigator",
-	"gascity/reviewer", "gascity/designer", "gascity/deployer",
-	"gascity/tester", "gascity/analyst", "gascity/planner",
-	"gascity/monitor", "gascity/cleaner", "gascity/reporter",
-	"gascity/merger", "gascity/validator", "gascity/scheduler",
-	"gascity/auditor", "gascity/tracer", "gascity/logger",
-	"gascity/syncer", "mayor",
+	"rig/agent-01", "rig/agent-02", "rig/agent-03", "rig/agent-04",
+	"rig/agent-05", "rig/agent-06", "rig/agent-07", "rig/agent-08",
+	"rig/agent-09", "rig/agent-10", "rig/agent-11", "rig/agent-12",
+	"rig/agent-13", "rig/agent-14", "rig/agent-15", "rig/agent-16",
+	"rig/agent-17", "rig/agent-18", "rig/agent-19", "rig/agent-20",
 }
 
 // RealWorldWorkload mirrors the traffic mix measured on the live gascity HQ

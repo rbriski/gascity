@@ -121,6 +121,14 @@ var cityFlag string
 // Empty means "discover from cwd or omit."
 var rigFlag string
 
+var hqStoreCache sync.Map // map[string]*hqStoreCacheEntry
+
+type hqStoreCacheEntry struct {
+	ready chan struct{}
+	store *beads.HQStore
+	err   error
+}
+
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
@@ -264,6 +272,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newSlingCmd(stdout, stderr),
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
+		newMoleculeCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),
 		newPromptCmd(stdout, stderr),
 		newHandoffCmd(stdout, stderr),
@@ -730,7 +739,7 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 }
 
 func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
-	cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(cityPath, io.Discard)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		if _, ok := missingRootCityTOML(err, cityPath); ok {
 			return nil, nil
@@ -899,7 +908,7 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
-		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, io.Discard)
+		cfg, err := loadCityConfig(c.Path, io.Discard)
 		if err != nil {
 			// Tolerate stale registry entries whose city.toml has been
 			// deleted out from under the registry, but keep missing includes
@@ -908,12 +917,12 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 				stale = append(stale, staleRegisteredCity{Label: registeredCityLabel(c), Path: cityTOML})
 				continue
 			}
-			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
+			loadErrors = append(loadErrors, registeredCityLoadError(c, err))
 			continue
 		}
 		siteBinding, err := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
 		if err != nil {
-			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
+			loadErrors = append(loadErrors, registeredCityLoadError(c, err))
 			continue
 		}
 		for _, binding := range siteBoundRigBindings(c, cfg, siteBinding) {
@@ -929,6 +938,17 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 		return matched, stale, nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
 	}
 	return matched, stale, nil, nil
+}
+
+func registeredCityLoadError(city supervisor.CityEntry, err error) string {
+	label := registeredCityLabel(city)
+	base := fmt.Sprintf("%s: %v", label, err)
+	if strings.Contains(err.Error(), "unsupported PackV1 order path") {
+		return base + fmt.Sprintf(
+			" (registered city %q still has a legacy order layout; run `gc --city %s doctor` for migration diagnostics, then rename legacy orders to flat orders/<name>.toml)",
+			label, label)
+	}
+	return base
 }
 
 func missingRootCityTOML(err error, cityPath string) (string, bool) {
@@ -1139,6 +1159,73 @@ func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, erro
 	return openScopeLocalFileStore(cityPath)
 }
 
+func openHQStoreAt(scopeRoot, cityPath string) (*beads.HQStore, error) {
+	storeDir, err := canonicalHQStoreDir(scopeRoot)
+	if err != nil {
+		return nil, err
+	}
+	cityPath, err = canonicalHQCityPath(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	scopeRoot = hqStoreScopeRoot(storeDir)
+
+	entry := &hqStoreCacheEntry{ready: make(chan struct{})}
+	actual, loaded := hqStoreCache.LoadOrStore(storeDir, entry)
+	if loaded {
+		cached := actual.(*hqStoreCacheEntry)
+		<-cached.ready
+		return cached.store, cached.err
+	}
+
+	entry.store, entry.err = openHQStoreUncached(scopeRoot, cityPath, storeDir)
+	close(entry.ready)
+	if entry.err != nil {
+		hqStoreCache.Delete(storeDir)
+		return nil, entry.err
+	}
+	return entry.store, nil
+}
+
+func canonicalHQStoreDir(scopeRoot string) (string, error) {
+	storeDir := filepath.Join(scopeRoot, ".gc", "hqstore")
+	abs, err := filepath.Abs(filepath.Clean(storeDir))
+	if err != nil {
+		return "", fmt.Errorf("resolving hqstore dir %q: %w", storeDir, err)
+	}
+	return abs, nil
+}
+
+func canonicalHQCityPath(cityPath string) (string, error) {
+	if strings.TrimSpace(cityPath) == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(filepath.Clean(cityPath))
+	if err != nil {
+		return "", fmt.Errorf("resolving hqstore city path %q: %w", cityPath, err)
+	}
+	return abs, nil
+}
+
+func hqStoreScopeRoot(storeDir string) string {
+	return filepath.Dir(filepath.Dir(storeDir))
+}
+
+func openHQStoreUncached(scopeRoot, cityPath, storeDir string) (*beads.HQStore, error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		cfg = nil
+	}
+	return beads.OpenHQStore(
+		storeDir,
+		beads.WithHQStoreIDPrefix(issuePrefixForScope(scopeRoot, cityPath, cfg)),
+		beads.WithHQStoreTTLInterval(time.Minute),
+		beads.WithHQStoreSnapshotInterval(0),
+		beads.WithHQStoreSnapshotOnWrite(true),
+		beads.WithHQStoreLocker(beads.NewFileFlock(filepath.Join(storeDir, "snapshot.lock"))),
+	)
+}
+
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
@@ -1178,6 +1265,8 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	switch provider {
 	case "file":
 		return openCompatibleFileStore(scopeRoot, runtimeCityPath)
+	case "hqstore":
+		return openHQStoreAt(scopeRoot, runtimeCityPath)
 	default: // "bd" or unrecognized → use bd
 		if _, err := exec.LookPath("bd"); err != nil {
 			return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")

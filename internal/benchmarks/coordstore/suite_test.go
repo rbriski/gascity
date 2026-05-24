@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,6 +117,17 @@ func TestBenchmarkSoakCalibrate(t *testing.T) {
 	}
 	cfg := soakConfigFromEnv(t, 30*time.Minute, 1.0)
 	runSoakSuite(t, cfg)
+}
+
+// TestBenchmarkSoakPhaseB runs the Phase B chaos soak harness.
+func TestBenchmarkSoakPhaseB(t *testing.T) {
+	if os.Getenv("COORDSTORE_SOAK") == "" || os.Getenv("COORDSTORE_SOAK_PHASE_B") == "" {
+		t.Skip("set COORDSTORE_SOAK=1 and COORDSTORE_SOAK_PHASE_B=1 to run Phase B chaos")
+	}
+	cfg := soakConfigFromEnv(t, 4*time.Hour, 1.0)
+	cfg.SoakPhase = coordstore.SoakPhaseB
+	cfg.KillCadence = killCadenceFromEnv(t, 30*time.Second)
+	runChaosSuite(t, cfg)
 }
 
 func runSuite(t *testing.T, wl coordstore.WorkloadConfig, enforceTargets bool) {
@@ -241,6 +253,37 @@ func runSoakSuite(t *testing.T, cfg coordstore.SoakConfig) {
 	}
 }
 
+func runChaosSuite(t *testing.T, cfg coordstore.SoakConfig) {
+	t.Helper()
+	ctx := context.Background()
+	workload := coordstore.RealWorldWorkload
+
+	for _, af := range registeredAdapters {
+		af := af
+		t.Run(af.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dataDir := filepath.Join(dir, "store")
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatalf("mkdir store: %v", err)
+			}
+			adapter := af.newFn()
+			if err := adapter.Open(ctx, coordstore.Config{DataDir: dataDir}); err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer adapter.Close() //nolint:errcheck
+
+			soakCfg := cfg
+			soakCfg.DataDir = dataDir
+			controller := &suiteChaosController{StoreAdapter: adapter}
+			result, err := coordstore.NewChaosRunner(af.name, controller, workload, soakCfg).Run(ctx, testWriter{t})
+			if err != nil {
+				t.Fatalf("ChaosRunner: %v", err)
+			}
+			t.Logf("chaos artifacts: %s", result.ResultsDir)
+		})
+	}
+}
+
 func soakConfigFromEnv(t *testing.T, defaultDuration time.Duration, defaultScale float64) coordstore.SoakConfig {
 	t.Helper()
 	resultsDir := os.Getenv("COORDSTORE_RESULTS_DIR")
@@ -278,6 +321,67 @@ func soakConfigFromEnv(t *testing.T, defaultDuration time.Duration, defaultScale
 		ResultsDir:     resultsDir,
 		ScaleFactor:    scale,
 	}
+}
+
+func killCadenceFromEnv(t *testing.T, defaultCadence time.Duration) time.Duration {
+	t.Helper()
+	if raw := os.Getenv("COORDSTORE_KILL_CADENCE"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("invalid COORDSTORE_KILL_CADENCE %q: %v", raw, err)
+		}
+		return parsed
+	}
+	return defaultCadence
+}
+
+type suiteChaosController struct {
+	coordstore.StoreAdapter
+	mu       sync.Mutex
+	lastAck  time.Time
+	ackedIDs []string
+}
+
+func (c *suiteChaosController) Create(ctx context.Context, r coordstore.Record) (coordstore.Record, error) {
+	created, err := c.StoreAdapter.Create(ctx, r)
+	if err != nil {
+		return coordstore.Record{}, err
+	}
+	c.mu.Lock()
+	c.lastAck = time.Now()
+	c.ackedIDs = append(c.ackedIDs, created.ID)
+	c.mu.Unlock()
+	return created, nil
+}
+
+func (c *suiteChaosController) Update(ctx context.Context, id string, u coordstore.Update) error {
+	if err := c.StoreAdapter.Update(ctx, id, u); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.lastAck = time.Now()
+	c.ackedIDs = append(c.ackedIDs, id)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *suiteChaosController) Kill(context.Context) error { return nil }
+
+func (c *suiteChaosController) Restart(context.Context) (time.Duration, error) {
+	start := time.Now()
+	return time.Since(start), nil
+}
+
+func (c *suiteChaosController) LastAckTime() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastAck
+}
+
+func (c *suiteChaosController) AckedIDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.ackedIDs...)
 }
 
 // printComparison prints a side-by-side pass/fail matrix for all backends.

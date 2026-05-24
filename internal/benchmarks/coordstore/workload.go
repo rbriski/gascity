@@ -92,6 +92,8 @@ type SoakPhase string
 const (
 	// SoakPhaseA is the in-process Phase A soak harness.
 	SoakPhaseA SoakPhase = "phase-a"
+	// SoakPhaseB is the subprocess chaos Phase B soak harness.
+	SoakPhaseB SoakPhase = "phase-b"
 )
 
 // SoakConfig configures an in-process coordination-store soak run.

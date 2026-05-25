@@ -548,6 +548,38 @@ func hqWriteCoverageMatrix(out *bytes.Buffer, c *beads.EntryCounters) []string {
 	return zeros
 }
 
+func TestHQStoreReadyFiltersSyntheticConvoys(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	synthetic := mustHQCreate(t, store, beads.Bead{
+		Title: "synthetic drain unit",
+		Type:  "convoy",
+		Metadata: map[string]string{
+			"gc.synthetic": "true",
+		},
+	})
+	work := mustHQCreate(t, store, beads.Bead{Title: "ready work"})
+
+	ready, err := store.Ready(beads.ReadyQuery{Limit: 1})
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 {
+		t.Fatalf("Ready(limit) returned %d beads, want 1", len(ready))
+	}
+	if ready[0].ID != work.ID {
+		t.Fatalf("Ready(limit)[0].ID = %q, want %s (synthetic %s hidden)", ready[0].ID, work.ID, synthetic.ID)
+	}
+}
+
 func mustHQCreate(t *testing.T, store *beads.HQStore, b beads.Bead) beads.Bead {
 	t.Helper()
 	created, err := store.Create(b)

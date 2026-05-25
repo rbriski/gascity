@@ -1008,7 +1008,6 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	// rollbackAvailable=false means the caller deferred the formal rollback
 	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
 	// can drive attemptRollbackPendingCreate properly.
-	stalePendingCreateRollback := false
 	if rollbackAvailable && !alive && strings.TrimSpace(meta["state"]) == "creating" {
 		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)

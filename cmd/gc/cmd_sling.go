@@ -1386,7 +1386,7 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 			return graphRouteBinding{}, false, nil
 		}
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 		}
 		return graphRouteBinding{}, false, nil
 	}
@@ -1402,7 +1402,7 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 		// collide with a config target name.
 		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
 			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-				return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+				return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 			}
 		}
 		if _, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
@@ -1410,7 +1410,7 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
 			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-				return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+				return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 			}
 		}
 		return graphRouteBinding{}, false, nil
@@ -1419,7 +1419,7 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 	if err != nil {
 		return graphRouteBinding{}, false, err
 	}
-	return graphRouteBinding{DirectSessionID: id}, true, nil
+	return graphRouteBinding{DirectSessionID: id, RigContext: graphRouteRigContext(spec.Identity)}, true, nil
 }
 
 func graphRouteRigContext(route string) string {
@@ -1432,6 +1432,25 @@ func graphRouteRigContext(route string) string {
 		return ""
 	}
 	return route[:idx]
+}
+
+func graphDirectSessionRigContext(target, rigContext string, bead beads.Bead) string {
+	if rigContext = strings.TrimSpace(rigContext); rigContext != "" {
+		return rigContext
+	}
+	if rigContext = graphRouteRigContext(target); rigContext != "" {
+		return rigContext
+	}
+	for _, candidate := range []string{
+		bead.Metadata[namedSessionIdentityMetadata],
+		bead.Metadata["alias"],
+		bead.Metadata["template"],
+	} {
+		if rigContext = graphRouteRigContext(candidate); rigContext != "" {
+			return rigContext
+		}
+	}
+	return ""
 }
 
 // targetType returns "pool" or "agent" for telemetry attributes.

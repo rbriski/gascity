@@ -26,10 +26,6 @@ type poolSessionCreateIdentity struct {
 	Slot      int
 }
 
-type explicitBeadIDStore interface {
-	IDPrefix() string
-}
-
 func isPoolManagedSessionBead(bead beads.Bead) bool {
 	if isEphemeralSessionBead(bead) {
 		return true
@@ -240,22 +236,6 @@ func createPoolSessionBeadWithAlias(
 	return bead, nil
 }
 
-func poolSessionExplicitBeadID(store beads.Store, instanceToken string) string {
-	prefixStore, ok := store.(explicitBeadIDStore)
-	if !ok {
-		return ""
-	}
-	prefix := strings.TrimSpace(prefixStore.IDPrefix())
-	if prefix == "" {
-		return ""
-	}
-	instanceToken = strings.TrimSpace(instanceToken)
-	if instanceToken == "" {
-		return ""
-	}
-	return prefix + "-session-" + instanceToken
-}
-
 // derivePoolSessionName picks the session_name for a fresh pool bead. When
 // resolvedTmuxAlias is non-empty and unreserved in the live store, config, and
 // current open snapshot, it wins; otherwise the bead ID is appended as a
@@ -326,6 +306,7 @@ func poolSessionExplicitBeadID(store beads.Store, instanceToken string) string {
 		return ""
 	}
 	prefix := strings.Trim(strings.TrimSpace(prefixStore.IDPrefix()), "-")
+	instanceToken = strings.TrimSpace(instanceToken)
 	if prefix == "" || instanceToken == "" {
 		return ""
 	}

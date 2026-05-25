@@ -1602,11 +1602,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
-	if q.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(q.Limit))
-	} else {
-		args = append(args, "--limit", "0")
-	}
+	args = append(args, "--limit", "0")
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
@@ -1615,7 +1611,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	result := make([]Bead, 0, len(issues))
 	for i := range issues {
 		bead := issues[i].toBead()
-		if IsReadyExcludedType(bead.Type) {
+		if IsReadyExcludedBead(bead) {
 			continue
 		}
 		if bead.Ephemeral {
@@ -1625,6 +1621,9 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			continue
 		}
 		result = append(result, bead)
+		if q.Limit > 0 && len(result) >= q.Limit {
+			break
+		}
 	}
 	if parseErr != nil {
 		if len(result) == 0 {

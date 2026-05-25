@@ -1585,7 +1585,7 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --assignee worker-1 --limit 3`: {
+		`bd ready --json --assignee worker-1 --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-worker","title":"ready one","status":"open","issue_type":"task","assignee":"worker-1","created_at":"2025-01-15T10:30:00Z"},
 				{"id":"bd-other","title":"wrong assignee","status":"open","issue_type":"task","assignee":"worker-2","created_at":"2025-01-15T10:31:00Z"}
@@ -1602,6 +1602,32 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 	}
 	if got[0].ID != "bd-worker" {
 		t.Fatalf("Ready(assignee)[0].ID = %q, want bd-worker", got[0].ID)
+	}
+}
+
+func TestBdStoreReadyLimitAppliesAfterSyntheticFiltering(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-synthetic","title":"synthetic unit","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:29:00Z","metadata":{"gc.synthetic":"true"}},
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-extra","title":"ready two","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready(beads.ReadyQuery{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready(limit) returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-task" {
+		t.Fatalf("Ready(limit)[0].ID = %q, want bd-task", got[0].ID)
 	}
 }
 

@@ -142,10 +142,17 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(formula)
 
-	// Resolve description_file references relative to the formula file's directory.
+	// Resolve description_file references relative to the formula file's
+	// directory. Graph.v2 formulas fail fast on missing files; legacy formulas
+	// keep the historical best-effort behavior.
 	formulaDir := filepath.Dir(absPath)
-	resolveDescriptionFiles(formula.Steps, formulaDir)
-	resolveDescriptionFiles(formula.Template, formulaDir)
+	strictDescriptionFiles := declaresGraphV2Contract(formula)
+	if err := resolveDescriptionFiles(formula.Steps, formulaDir, p.source, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	}
+	if err := resolveDescriptionFiles(formula.Template, formulaDir, p.source, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	}
 
 	p.cache[absPath] = formula
 
@@ -301,6 +308,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	if err := merged.Validate(); err != nil {
 		return nil, err
 	}
+	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
+		return nil, err
+	}
 
 	return merged, nil
 }
@@ -428,13 +438,29 @@ func ExtractVariables(formula *Formula) []string {
 	extractFromStep = func(step *Step) {
 		extract(step.Title)
 		extract(step.Description)
+		extract(step.Notes)
 		extract(step.Assignee)
 		extract(step.Condition)
 		for _, l := range step.Labels {
 			extract(l)
 		}
+		for k, v := range step.Metadata {
+			extract(k)
+			extract(v)
+		}
+		if step.Drain != nil {
+			extract(step.Drain.Formula)
+			extract(step.Drain.ContinuationGroup)
+			extract(step.Drain.MemberAccess)
+			extract(step.Drain.OnItemFailure)
+		}
 		for _, child := range step.Children {
 			extractFromStep(child)
+		}
+		if step.Loop != nil {
+			for _, child := range step.Loop.Body {
+				extractFromStep(child)
+			}
 		}
 	}
 
@@ -637,26 +663,70 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 // resolveDescriptionFiles walks all steps and replaces DescriptionFile
 // with the file's contents. Paths are resolved relative to baseDir
 // (the formula file's directory).
-func resolveDescriptionFiles(steps []*Step, baseDir string) {
+func resolveDescriptionFiles(steps []*Step, baseDir string, source Source, strict bool) error {
+	if source == nil {
+		source = FSSource{}
+	}
 	for _, step := range steps {
-		if step == nil || step.DescriptionFile == "" {
+		if step == nil {
 			continue
 		}
-		path := step.DescriptionFile
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(baseDir, path)
+		if step.DescriptionFile != "" {
+			path := step.DescriptionFile
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(baseDir, path)
+			}
+			data, err := source.ReadFile(path)
+			if err != nil {
+				if strict {
+					return fmt.Errorf("%s: %w", step.DescriptionFile, err)
+				}
+			} else {
+				step.Description = string(data)
+				step.DescriptionFile = "" // consumed; don't serialize
+			}
 		}
-		// #nosec G304 -- path comes from formula author, same trust as description
-		data, err := os.ReadFile(path)
-		if err == nil {
-			step.Description = string(data)
+		if err := resolveDescriptionFiles(step.Children, baseDir, source, strict); err != nil {
+			return err
 		}
-		step.DescriptionFile = "" // consumed; don't serialize
-		if len(step.Children) > 0 {
-			resolveDescriptionFiles(step.Children, baseDir)
+		if step.Loop != nil {
+			if err := resolveDescriptionFiles(step.Loop.Body, baseDir, source, strict); err != nil {
+				return err
+			}
 		}
 	}
-	// Also handle template steps (expansion formulas).
+	return nil
+}
+
+func validateResolvedGraphV2DescriptionFiles(f *Formula) error {
+	if !declaresGraphV2Contract(f) {
+		return nil
+	}
+	if err := rejectUnresolvedDescriptionFiles(f.Steps, "steps"); err != nil {
+		return err
+	}
+	return rejectUnresolvedDescriptionFiles(f.Template, "template")
+}
+
+func rejectUnresolvedDescriptionFiles(steps []*Step, prefix string) error {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		if path := strings.TrimSpace(step.DescriptionFile); path != "" {
+			return fmt.Errorf("%s.description_file %q was not resolved", stepPrefix, path)
+		}
+		if err := rejectUnresolvedDescriptionFiles(step.Children, stepPrefix+".children"); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := rejectUnresolvedDescriptionFiles(step.Loop.Body, stepPrefix+".loop.body"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // SetSourceInfo populates the SourceFormula and SourcePath fields on each

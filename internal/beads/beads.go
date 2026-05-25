@@ -5,6 +5,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -123,6 +124,18 @@ var readyExcludeTypes = map[string]bool{
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
+}
+
+// IsReadyExcludedBead reports whether a bead is infrastructure that should not
+// appear in Ready results.
+func IsReadyExcludedBead(b Bead) bool {
+	if IsReadyExcludedType(b.Type) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(b.Metadata["gc.synthetic"]), "true") {
+		return true
+	}
+	return false
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

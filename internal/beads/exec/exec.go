@@ -347,7 +347,7 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	}
 	result := all[:0]
 	for _, b := range all {
-		if !b.Ephemeral && !beads.IsReadyExcludedType(b.Type) {
+		if !b.Ephemeral && !beads.IsReadyExcludedBead(b) {
 			result = append(result, b)
 		}
 	}

@@ -209,7 +209,12 @@ func (a *Adapter) RecentScan(_ context.Context, limit int) ([]coordstore.Record,
 
 // Stats returns optional diagnostics.
 func (a *Adapter) Stats(context.Context) map[string]int64 {
-	return nil
+	if a.store == nil {
+		return nil
+	}
+	return map[string]int64{
+		"live_objects": a.store.LiveObjectCount(),
+	}
 }
 
 func recordToBead(r coordstore.Record) beads.Bead {

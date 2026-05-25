@@ -37,6 +37,14 @@ func (s *HQStore) resetCoreLocked() {
 	s.seq = 0
 }
 
+// LiveObjectCount returns the number of currently live beads across both
+// HQStore tiers.
+func (s *HQStore) LiveObjectCount() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.main) + len(s.wisps))
+}
+
 // Create persists a new bead.
 func (s *HQStore) Create(b Bead) (Bead, error) {
 	s.counters.Create.Add(1)

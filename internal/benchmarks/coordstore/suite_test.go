@@ -1,6 +1,7 @@
 package coordstore_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -112,7 +113,8 @@ func TestBenchmarkSoakPhaseA(t *testing.T) {
 	if os.Getenv("COORDSTORE_SOAK") == "" {
 		t.Skip("set COORDSTORE_SOAK=1 to run the Phase A soak harness")
 	}
-	cfg := soakConfigFromEnv(t, 4*time.Hour, 1.0)
+	cfg := soakConfigFromEnv(t, 4*time.Hour)
+	checkSoakPreflight(t, cfg, len(registeredAdapters))
 	runSoakSuite(t, cfg)
 }
 
@@ -121,7 +123,8 @@ func TestBenchmarkSoakCalibrate(t *testing.T) {
 	if os.Getenv("COORDSTORE_SOAK") == "" || os.Getenv("COORDSTORE_SOAK_CALIBRATE") == "" {
 		t.Skip("set COORDSTORE_SOAK=1 and COORDSTORE_SOAK_CALIBRATE=1 to run calibration")
 	}
-	cfg := soakConfigFromEnv(t, 30*time.Minute, 1.0)
+	cfg := soakConfigFromEnv(t, 30*time.Minute)
+	checkSoakPreflight(t, cfg, len(registeredAdapters))
 	runSoakSuite(t, cfg)
 }
 
@@ -130,10 +133,49 @@ func TestBenchmarkSoakPhaseB(t *testing.T) {
 	if os.Getenv("COORDSTORE_SOAK") == "" || os.Getenv("COORDSTORE_SOAK_PHASE_B") == "" {
 		t.Skip("set COORDSTORE_SOAK=1 and COORDSTORE_SOAK_PHASE_B=1 to run Phase B chaos")
 	}
-	cfg := soakConfigFromEnv(t, 4*time.Hour, 1.0)
+	cfg := soakConfigFromEnv(t, 4*time.Hour)
 	cfg.SoakPhase = coordstore.SoakPhaseB
 	cfg.KillCadence = killCadenceFromEnv(t, 30*time.Second)
+	checkSoakPreflight(t, cfg, len(registeredAdapters))
 	runChaosSuite(t, cfg)
+}
+
+// TestBenchmarkSoakTriage synthesizes existing Phase A/B artifacts into a
+// Markdown and JSON report.
+func TestBenchmarkSoakTriage(t *testing.T) {
+	if os.Getenv("COORDSTORE_SOAK") == "" {
+		t.Skip("set COORDSTORE_SOAK=1 to run soak triage")
+	}
+	resultsDir := os.Getenv("COORDSTORE_RESULTS_DIR")
+	if resultsDir == "" {
+		t.Fatal("COORDSTORE_RESULTS_DIR is required for soak triage")
+	}
+	writeSoakTriage(t, resultsDir)
+}
+
+// TestBenchmarkSoakFullMatrix runs Phase A, Phase B, then Phase C triage for
+// the four release-candidate backends.
+func TestBenchmarkSoakFullMatrix(t *testing.T) {
+	if os.Getenv("COORDSTORE_SOAK") == "" || os.Getenv("COORDSTORE_FULL_MATRIX") == "" {
+		t.Skip("set COORDSTORE_SOAK=1 and COORDSTORE_FULL_MATRIX=1 to run full matrix")
+	}
+	adapters := fullMatrixAdapters(registeredAdapters)
+	if len(adapters) != 4 {
+		t.Skipf("full matrix requires hqstore, bbolt, sqlite-cgo, and badger; found %d target adapters", len(adapters))
+	}
+	cfg := soakConfigFromEnv(t, 4*time.Hour)
+	phaseBCfg := cfg
+	phaseBCfg.SoakPhase = coordstore.SoakPhaseB
+	phaseBCfg.KillCadence = killCadenceFromEnv(t, 30*time.Second)
+	checkSoakPreflight(t, phaseBCfg, len(adapters))
+	for _, af := range adapters {
+		af := af
+		t.Run(af.name, func(t *testing.T) {
+			runSoakBackend(t, cfg, af)
+			runChaosBackend(t, phaseBCfg, af)
+		})
+	}
+	writeSoakTriage(t, cfg.ResultsDir)
 }
 
 func runSuite(t *testing.T, wl coordstore.WorkloadConfig, enforceTargets bool) {
@@ -224,73 +266,141 @@ func runSuite(t *testing.T, wl coordstore.WorkloadConfig, enforceTargets bool) {
 
 func runSoakSuite(t *testing.T, cfg coordstore.SoakConfig) {
 	t.Helper()
-	ctx := context.Background()
-	workload := coordstore.RealWorldWorkload
+	runSoakSuiteForAdapters(t, cfg, registeredAdapters)
+}
 
-	for _, af := range registeredAdapters {
+func runSoakSuiteForAdapters(t *testing.T, cfg coordstore.SoakConfig, adapters []adapterFactory) {
+	t.Helper()
+	for _, af := range adapters {
 		af := af
 		t.Run(af.name, func(t *testing.T) {
-			dir := t.TempDir()
-			dataDir := filepath.Join(dir, "store")
-			if err := os.MkdirAll(dataDir, 0o755); err != nil {
-				t.Fatalf("mkdir store: %v", err)
-			}
-			adapter := af.newFn()
-			if err := adapter.Open(ctx, coordstore.Config{DataDir: dataDir}); err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			defer adapter.Close() //nolint:errcheck
-
-			failures := coordstore.CorrectnessChecker(ctx, adapter)
-			for _, f := range failures {
-				t.Errorf("  FAIL correctness: %s", f)
-			}
-			if len(failures) > 0 {
-				t.Fatalf("  %d correctness failures — skipping soak", len(failures))
-			}
-			soakCfg := cfg
-			soakCfg.DataDir = dataDir
-			result, err := coordstore.NewSoakRunner(af.name, adapter, workload, soakCfg).Run(ctx, testWriter{t})
-			if err != nil {
-				t.Fatalf("SoakRunner: %v", err)
-			}
-			t.Logf("soak artifacts: %s", result.ResultsDir)
+			runSoakBackend(t, cfg, af)
 		})
 	}
 }
 
 func runChaosSuite(t *testing.T, cfg coordstore.SoakConfig) {
 	t.Helper()
-	ctx := context.Background()
-	workload := coordstore.RealWorldWorkload
+	runChaosSuiteForAdapters(t, cfg, registeredAdapters)
+}
 
-	for _, af := range registeredAdapters {
+func runChaosSuiteForAdapters(t *testing.T, cfg coordstore.SoakConfig, adapters []adapterFactory) {
+	t.Helper()
+	for _, af := range adapters {
 		af := af
 		t.Run(af.name, func(t *testing.T) {
-			dir := t.TempDir()
-			dataDir := filepath.Join(dir, "store")
-			if err := os.MkdirAll(dataDir, 0o755); err != nil {
-				t.Fatalf("mkdir store: %v", err)
-			}
-			adapter := af.newFn()
-			if err := adapter.Open(ctx, coordstore.Config{DataDir: dataDir}); err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			defer adapter.Close() //nolint:errcheck
-
-			soakCfg := cfg
-			soakCfg.DataDir = dataDir
-			controller := &suiteChaosController{StoreAdapter: adapter}
-			result, err := coordstore.NewChaosRunner(af.name, controller, workload, soakCfg).Run(ctx, testWriter{t})
-			if err != nil {
-				t.Fatalf("ChaosRunner: %v", err)
-			}
-			t.Logf("chaos artifacts: %s", result.ResultsDir)
+			runChaosBackend(t, cfg, af)
 		})
 	}
 }
 
-func soakConfigFromEnv(t *testing.T, defaultDuration time.Duration, defaultScale float64) coordstore.SoakConfig {
+func runSoakBackend(t *testing.T, cfg coordstore.SoakConfig, af adapterFactory) {
+	t.Helper()
+	ctx := context.Background()
+	workload := coordstore.RealWorldWorkload
+
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "store")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir store: %v", err)
+	}
+	adapter := af.newFn()
+	if err := adapter.Open(ctx, coordstore.Config{DataDir: dataDir}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer adapter.Close() //nolint:errcheck
+
+	failures := coordstore.CorrectnessChecker(ctx, adapter)
+	for _, f := range failures {
+		t.Errorf("  FAIL correctness: %s", f)
+	}
+	if len(failures) > 0 {
+		t.Fatalf("  %d correctness failures — skipping soak", len(failures))
+	}
+	soakCfg := cfg
+	soakCfg.DataDir = dataDir
+	result, err := coordstore.NewSoakRunner(af.name, adapter, workload, soakCfg).Run(ctx, testWriter{t})
+	if err != nil {
+		t.Fatalf("SoakRunner: %v", err)
+	}
+	t.Logf("soak artifacts: %s", result.ResultsDir)
+}
+
+func runChaosBackend(t *testing.T, cfg coordstore.SoakConfig, af adapterFactory) {
+	t.Helper()
+	ctx := context.Background()
+	workload := coordstore.RealWorldWorkload
+
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "store")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir store: %v", err)
+	}
+	adapter := af.newFn()
+	if err := adapter.Open(ctx, coordstore.Config{DataDir: dataDir}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer adapter.Close() //nolint:errcheck
+
+	soakCfg := cfg
+	soakCfg.DataDir = dataDir
+	controller := &suiteChaosController{StoreAdapter: adapter}
+	result, err := coordstore.NewChaosRunner(af.name, controller, workload, soakCfg).Run(ctx, testWriter{t})
+	if err != nil {
+		t.Fatalf("ChaosRunner: %v", err)
+	}
+	t.Logf("chaos artifacts: %s", result.ResultsDir)
+}
+
+func checkSoakPreflight(t *testing.T, cfg coordstore.SoakConfig, backendCount int) {
+	t.Helper()
+	result, err := coordstore.CheckSoakPreflight(context.Background(), coordstore.SoakPreflightConfig{
+		ResultsDir:   cfg.ResultsDir,
+		SoakConfig:   cfg,
+		BackendCount: backendCount,
+	})
+	t.Log(result.Message)
+	if err != nil {
+		t.Fatalf("soak preflight: %v", err)
+	}
+}
+
+func writeSoakTriage(t *testing.T, resultsDir string) {
+	t.Helper()
+	var report coordstore.TriageReport
+	if err := report.Synthesize(context.Background(), resultsDir); err != nil {
+		t.Fatalf("triage synthesize: %v", err)
+	}
+	var markdown bytes.Buffer
+	if err := report.PrintMarkdown(&markdown); err != nil {
+		t.Fatalf("triage markdown: %v", err)
+	}
+	markdownPath := filepath.Join(resultsDir, "triage.md")
+	if err := os.WriteFile(markdownPath, markdown.Bytes(), 0o644); err != nil {
+		t.Fatalf("write triage markdown: %v", err)
+	}
+	if err := report.WriteJSON(filepath.Join(resultsDir, "triage.json")); err != nil {
+		t.Fatalf("write triage json: %v", err)
+	}
+	t.Log(markdown.String())
+}
+
+func fullMatrixAdapters(adapters []adapterFactory) []adapterFactory {
+	targets := []string{"hqstore", "bbolt", "sqlite-cgo", "badger"}
+	byName := make(map[string]adapterFactory, len(adapters))
+	for _, adapter := range adapters {
+		byName[adapter.name] = adapter
+	}
+	out := make([]adapterFactory, 0, len(targets))
+	for _, name := range targets {
+		if adapter, ok := byName[name]; ok {
+			out = append(out, adapter)
+		}
+	}
+	return out
+}
+
+func soakConfigFromEnv(t *testing.T, defaultDuration time.Duration) coordstore.SoakConfig {
 	t.Helper()
 	resultsDir := os.Getenv("COORDSTORE_RESULTS_DIR")
 	if resultsDir == "" {
@@ -312,7 +422,7 @@ func soakConfigFromEnv(t *testing.T, defaultDuration time.Duration, defaultScale
 		}
 		sampleInterval = parsed
 	}
-	scale := defaultScale
+	scale := 1.0
 	if raw := os.Getenv("COORDSTORE_SOAK_SCALE"); raw != "" {
 		parsed, err := strconv.ParseFloat(raw, 64)
 		if err != nil || parsed <= 0 {

@@ -38,6 +38,12 @@ type Adapter struct {
 	gcRuns      atomic.Int64
 	gcNoRewrite atomic.Int64
 	gcErrors    atomic.Int64
+
+	gcEvents              atomic.Int64
+	gcLastStartedUnixNano atomic.Int64
+	gcLastDurationNanos   atomic.Int64
+	gcLastFreedBytes      atomic.Int64
+	gcTotalFreedBytes     atomic.Int64
 }
 
 // New returns an uninitialized BadgerDB adapter.
@@ -198,6 +204,11 @@ func (a *Adapter) Stats(ctx context.Context) map[string]int64 {
 	stats["badger_gc_runs"] = a.gcRuns.Load()
 	stats["badger_gc_no_rewrite"] = a.gcNoRewrite.Load()
 	stats["badger_gc_errors"] = a.gcErrors.Load()
+	stats["badger_gc_events"] = a.gcEvents.Load()
+	stats["badger_gc_last_started_unix_nano"] = a.gcLastStartedUnixNano.Load()
+	stats["badger_gc_last_duration_nanos"] = a.gcLastDurationNanos.Load()
+	stats["badger_gc_last_freed_bytes"] = a.gcLastFreedBytes.Load()
+	stats["badger_gc_total_freed_bytes"] = a.gcTotalFreedBytes.Load()
 	return stats
 }
 
@@ -308,7 +319,11 @@ func (a *Adapter) runValueLogGC(discardRatio float64) error {
 	if db == nil {
 		return nil
 	}
+	started := time.Now()
+	beforeLSM, beforeVlog := db.Size()
 	err := db.RunValueLogGC(discardRatio)
+	afterLSM, afterVlog := db.Size()
+	a.recordGCEvent(started, beforeLSM+beforeVlog, afterLSM+afterVlog)
 	if err == nil {
 		a.gcRuns.Add(1)
 		return nil
@@ -319,6 +334,18 @@ func (a *Adapter) runValueLogGC(discardRatio float64) error {
 	}
 	a.gcErrors.Add(1)
 	return fmt.Errorf("badger: value log gc: %w", err)
+}
+
+func (a *Adapter) recordGCEvent(started time.Time, beforeBytes, afterBytes int64) {
+	freed := beforeBytes - afterBytes
+	if freed < 0 {
+		freed = 0
+	}
+	a.gcEvents.Add(1)
+	a.gcLastStartedUnixNano.Store(started.UnixNano())
+	a.gcLastDurationNanos.Store(time.Since(started).Nanoseconds())
+	a.gcLastFreedBytes.Store(freed)
+	a.gcTotalFreedBytes.Add(freed)
 }
 
 func deleteIfPresent(txn *badger.Txn, key []byte) error {

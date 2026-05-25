@@ -14,12 +14,13 @@ import (
 
 // OpSnapshot captures one operation histogram at a telemetry sample point.
 type OpSnapshot struct {
-	Samples  int   `json:"samples"`
-	Errors   int   `json:"errors"`
-	P50Nanos int64 `json:"p50_nanos"`
-	P95Nanos int64 `json:"p95_nanos"`
-	P99Nanos int64 `json:"p99_nanos"`
-	MaxNanos int64 `json:"max_nanos"`
+	Samples   int   `json:"samples"`
+	Errors    int   `json:"errors"`
+	P50Nanos  int64 `json:"p50_nanos"`
+	P95Nanos  int64 `json:"p95_nanos"`
+	P99Nanos  int64 `json:"p99_nanos"`
+	P999Nanos int64 `json:"p999_nanos"`
+	MaxNanos  int64 `json:"max_nanos"`
 }
 
 // TelemetrySample is one JSONL row emitted by TimeSeriesRecorder.
@@ -28,6 +29,7 @@ type TelemetrySample struct {
 	HeapAllocBytes uint64                `json:"heap_alloc_bytes"`
 	HeapInuseBytes uint64                `json:"heap_inuse_bytes"`
 	RSSBytes       uint64                `json:"rss_bytes,omitempty"`
+	Goroutines     int                   `json:"goroutines"`
 	StoreSizeBytes int64                 `json:"store_size_bytes"`
 	AdapterStats   map[string]int64      `json:"adapter_stats,omitempty"`
 	Operations     map[string]OpSnapshot `json:"operations,omitempty"`
@@ -186,6 +188,7 @@ func (r *TimeSeriesRecorder) sample(ctx context.Context) (TelemetrySample, error
 		Timestamp:      time.Now().UTC(),
 		HeapAllocBytes: ms.HeapAlloc,
 		HeapInuseBytes: ms.HeapInuse,
+		Goroutines:     runtime.NumGoroutine(),
 		StoreSizeBytes: size,
 	}
 	if rss, ok := readRSSBytes(); ok {
@@ -270,6 +273,7 @@ func snapshotOperations(results map[string]*OperationResult) map[string]OpSnapsh
 			op.P50Nanos = res.H.P50().Nanoseconds()
 			op.P95Nanos = res.H.P95().Nanoseconds()
 			op.P99Nanos = res.H.P99().Nanoseconds()
+			op.P999Nanos = res.H.P999().Nanoseconds()
 			op.MaxNanos = res.H.Max().Nanoseconds()
 		}
 		out[name] = op

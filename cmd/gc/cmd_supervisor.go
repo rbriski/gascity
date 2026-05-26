@@ -764,13 +764,22 @@ func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
 
 func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
 	sockPath, pid := runningSupervisorSocket()
+	checkedPaths := supervisorSocketPathCandidates()
+	systemdActive := false
+	systemdService := ""
+	if pid == 0 && supervisorRuntimeGOOS == "linux" {
+		systemdService = supervisorSystemdServiceName()
+		systemdActive = supervisorSystemctlActive(systemdService)
+	}
 	if asJSON {
 		payload := map[string]any{
-			"schema_version": "1",
-			"running":        pid > 0,
-			"pid":            pid,
-			"socket_path":    sockPath,
-			"checked_paths":  supervisorSocketPathCandidates(),
+			"schema_version":  "1",
+			"running":         pid > 0,
+			"pid":             pid,
+			"socket_path":     sockPath,
+			"checked_paths":   checkedPaths,
+			"systemd_active":  systemdActive,
+			"systemd_service": systemdService,
 		}
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
@@ -781,8 +790,19 @@ func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
 		return 0
 	}
+	if systemdActive {
+		fmt.Fprintf(stdout, "Supervisor running (systemd) but socket unreachable at %s\n", supervisorStatusSocketPath(checkedPaths)) //nolint:errcheck
+		return 1
+	}
 	fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
 	return 1
+}
+
+func supervisorStatusSocketPath(checkedPaths []string) string {
+	if len(checkedPaths) == 0 {
+		return "(unknown)"
+	}
+	return checkedPaths[0]
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {

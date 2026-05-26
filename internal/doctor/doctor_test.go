@@ -78,6 +78,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&RigGitCheck{},
 		&RigPathCheck{},
 		&SkillCollisionCheck{},
+		&SupervisorHTTPCheck{},
 		&WorktreeCheck{},
 		&WorktreeDiskSizeCheck{},
 		&ZombieSessionsCheck{},

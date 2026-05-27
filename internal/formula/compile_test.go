@@ -1164,6 +1164,60 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	}
 }
 
+func TestCompileDoWorkCarriesSummaryPathContract(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
+
+	recipe, err := Compile(context.Background(), "mol-do-work", []string{searchDir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, name := range []string{"issue", "context_path", "summary_path"} {
+		def, ok := recipe.Vars[name]
+		if !ok {
+			t.Fatalf("formula missing %q variable", name)
+		}
+		if def == nil {
+			t.Fatalf("formula variable %q is nil", name)
+		}
+	}
+
+	if !recipe.Vars["issue"].Required {
+		t.Fatal("issue should remain required")
+	}
+	for _, name := range []string{"context_path", "summary_path"} {
+		def := recipe.Vars[name]
+		if def.Required {
+			t.Fatalf("%s should be optional", name)
+		}
+		if def.Default == nil {
+			t.Fatalf("%s default missing", name)
+		}
+		if got := *def.Default; got != "" {
+			t.Fatalf("%s default = %q, want empty string", name, got)
+		}
+	}
+
+	if !strings.Contains(recipe.Description, "| summary_path | caller | Optional path for the per-item summary; empty uses the default item summary path |") {
+		t.Fatalf("formula description missing summary_path variable contract: %q", recipe.Description)
+	}
+
+	step := recipe.StepByID("mol-do-work.do-work")
+	if step == nil {
+		t.Fatal("do-work step missing")
+	}
+	for _, required := range []string{"{{context_path}}", "{{summary_path}}"} {
+		if !strings.Contains(step.Description, required) {
+			t.Fatalf("do-work step description missing %s placeholder", required)
+		}
+	}
+}
+
 func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 	enableV2ForTest(t)
 

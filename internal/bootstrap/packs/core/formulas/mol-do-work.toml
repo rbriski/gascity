@@ -16,6 +16,8 @@ review).
 | Variable | Source | Description |
 |----------|--------|-------------|
 | issue | caller | The work bead ID assigned to this agent |
+| context_path | caller | Optional path to a context bundle to read before starting |
+| summary_path | caller | Optional path for the per-item summary; empty uses the default item summary path |
 """
 formula = "mol-do-work"
 version = 1
@@ -24,6 +26,14 @@ version = 1
 [vars.issue]
 description = "The work bead ID assigned to this agent"
 required = true
+
+[vars.context_path]
+description = "Optional path to a context bundle to read before starting"
+default = ""
+
+[vars.summary_path]
+description = "Optional path for the per-item summary; empty uses the default item summary path"
+default = ""
 
 [[steps]]
 id = "do-work"
@@ -38,6 +48,10 @@ bd show {{issue}}
 ```
 
 Read the bead's title and description carefully. This is your task.
+
+If `{{context_path}}` is set, read it before starting the work. If
+`{{summary_path}}` is set, write the per-item summary there before closing the
+bead; otherwise use the workflow's default item summary path.
 
 **2. Implement the solution and verify it:**
 

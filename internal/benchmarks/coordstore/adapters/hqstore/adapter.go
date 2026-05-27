@@ -189,6 +189,8 @@ func (a *Adapter) PurgeTerminal(_ context.Context, olderThan time.Duration) (int
 		return 0, nil
 	}
 	cutoff := time.Now().Add(-olderThan)
+	// beads.ListQuery has no UpdatedBefore filter today, so this adapter can
+	// only approximate terminal retention by creation time.
 	items, err := a.store.List(beads.ListQuery{
 		AllowScan:     true,
 		IncludeClosed: true,

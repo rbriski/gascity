@@ -27,6 +27,7 @@ var dialect = sqlstore.Dialect{
 		    type TEXT NOT NULL DEFAULT 'task',
 		    priority BIGINT NOT NULL DEFAULT 0,
 		    created_at BIGINT NOT NULL,
+		    updated_at BIGINT NOT NULL DEFAULT 0,
 		    assignee TEXT NOT NULL DEFAULT '',
 		    parent_id TEXT NOT NULL DEFAULT '',
 		    description TEXT NOT NULL DEFAULT ''
@@ -36,6 +37,7 @@ var dialect = sqlstore.Dialect{
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_type ON records(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_parent_id ON records(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_created ON records(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_coord_records_terminal_retention ON records(status, updated_at) WHERE status IN ('closed','cancelled','canceled','expired')`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_status_assignee ON records(status, assignee)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_open ON records(assignee, status) WHERE status <> 'closed'`,
 		`CREATE TABLE IF NOT EXISTS ephemeral (
@@ -44,6 +46,7 @@ var dialect = sqlstore.Dialect{
 		    status TEXT NOT NULL DEFAULT 'open',
 		    type TEXT NOT NULL DEFAULT 'message',
 		    created_at BIGINT NOT NULL,
+		    updated_at BIGINT NOT NULL DEFAULT 0,
 		    assignee TEXT NOT NULL DEFAULT '',
 		    parent_id TEXT NOT NULL DEFAULT '',
 		    expires_at BIGINT NOT NULL DEFAULT 0
@@ -52,7 +55,7 @@ var dialect = sqlstore.Dialect{
 		`CREATE INDEX IF NOT EXISTS idx_coord_eph_assignee ON ephemeral(assignee)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_eph_type ON ephemeral(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_eph_expires_at ON ephemeral(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_coord_eph_mailpoll ON ephemeral(type, status, assignee, id, title, created_at, parent_id, expires_at) WHERE status = 'open'`,
+		`CREATE INDEX IF NOT EXISTS idx_coord_eph_mailpoll ON ephemeral(type, status, assignee, id, title, created_at, updated_at, parent_id, expires_at) WHERE status = 'open'`,
 		`CREATE TABLE IF NOT EXISTS labels (
 		    record_id TEXT NOT NULL,
 		    label TEXT NOT NULL,

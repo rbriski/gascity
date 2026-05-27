@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,13 +87,73 @@ func TestChaosRunnerWritesKillArtifacts(t *testing.T) {
 	}
 }
 
+func TestChaosRunnerChunksDurabilityBatchGet(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	adapter := authorcore.New()
+	if err := adapter.Open(ctx, coordstore.Config{DataDir: filepath.Join(dir, "store")}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer adapter.Close() //nolint:errcheck
+	controller := &fakeChaosController{StoreAdapter: adapter, maxBatchGetSize: 1000}
+	cfg := coordstore.SoakConfig{
+		SoakPhase:      coordstore.SoakPhaseB,
+		SoakDuration:   50 * time.Millisecond,
+		KillCadence:    5 * time.Millisecond,
+		SampleInterval: 10 * time.Millisecond,
+		ResultsDir:     filepath.Join(dir, "results"),
+		ScaleFactor:    1,
+	}
+	workload := coordstore.WorkloadConfig{
+		Name:          "chaos-batchget-chunk-test",
+		MainOpenCount: 1105,
+		PointReadRate: 1,
+		Duration:      time.Second,
+		Concurrency:   1,
+	}
+
+	var progress bytes.Buffer
+	result, err := coordstore.NewChaosRunner("fake", controller, workload, cfg).Run(ctx, &progress)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.KillEvents) == 0 {
+		t.Fatal("expected at least one kill event")
+	}
+	if result.KillEvents[0].AckedIDs < workload.MainOpenCount {
+		t.Fatalf("AckedIDs = %d, want at least %d", result.KillEvents[0].AckedIDs, workload.MainOpenCount)
+	}
+	sizes := controller.batchGetSizes()
+	if len(sizes) < 2 {
+		t.Fatalf("BatchGet sizes = %v, want chunked calls", sizes)
+	}
+	sawFullChunk := false
+	sawTailChunk := false
+	for _, size := range sizes {
+		if size > controller.maxBatchGetSize {
+			t.Fatalf("BatchGet size %d exceeds max %d; all sizes=%v", size, controller.maxBatchGetSize, sizes)
+		}
+		if size == controller.maxBatchGetSize {
+			sawFullChunk = true
+		}
+		if size == workload.MainOpenCount-controller.maxBatchGetSize {
+			sawTailChunk = true
+		}
+	}
+	if !sawFullChunk || !sawTailChunk {
+		t.Fatalf("BatchGet sizes = %v, want 1000 and 105 chunks", sizes)
+	}
+}
+
 type fakeChaosController struct {
 	coordstore.StoreAdapter
-	mu           sync.Mutex
-	ackedIDs     []string
-	lastAck      time.Time
-	killCount    int
-	restartCount int
+	mu              sync.Mutex
+	ackedIDs        []string
+	lastAck         time.Time
+	killCount       int
+	restartCount    int
+	maxBatchGetSize int
+	batchGetCalls   []int
 }
 
 func (f *fakeChaosController) Create(ctx context.Context, r coordstore.Record) (coordstore.Record, error) {
@@ -116,6 +177,17 @@ func (f *fakeChaosController) Update(ctx context.Context, id string, u coordstor
 	f.lastAck = time.Now()
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeChaosController) BatchGet(ctx context.Context, ids []string) ([]coordstore.Record, error) {
+	f.mu.Lock()
+	f.batchGetCalls = append(f.batchGetCalls, len(ids))
+	maxSize := f.maxBatchGetSize
+	f.mu.Unlock()
+	if maxSize > 0 && len(ids) > maxSize {
+		return nil, fmt.Errorf("BatchGet got %d IDs, max %d", len(ids), maxSize)
+	}
+	return f.StoreAdapter.BatchGet(ctx, ids)
 }
 
 func (f *fakeChaosController) Kill(context.Context) error {
@@ -144,4 +216,10 @@ func (f *fakeChaosController) AckedIDs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.ackedIDs...)
+}
+
+func (f *fakeChaosController) batchGetSizes() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.batchGetCalls...)
 }

@@ -87,6 +87,42 @@ func TestTriageReportSynthesizesTimeseriesAndKillEvents(t *testing.T) {
 	}
 }
 
+func TestTriageReportSynthesizesLongKillEventLine(t *testing.T) {
+	resultsDir := t.TempDir()
+	runID := "20260526T210325Z"
+	phaseBDir := filepath.Join(resultsDir, runID, "dolt", string(SoakPhaseB))
+	missingIDs := make([]string, 7000)
+	for i := range missingIDs {
+		missingIDs[i] = "acked-id-" + strings.Repeat("x", 8) + "-" + string(rune('a'+i%26))
+	}
+	killEventsPath := filepath.Join(phaseBDir, "kill-events.jsonl")
+	writeJSONL(t, killEventsPath,
+		KillEvent{RecoveryNanos: int64(123 * time.Millisecond), MissingIDs: missingIDs},
+	)
+	data, err := os.ReadFile(killEventsPath)
+	if err != nil {
+		t.Fatalf("read kill events: %v", err)
+	}
+	if len(data) <= 64*1024 {
+		t.Fatalf("test fixture line is %d bytes, want larger than bufio.Scanner default token limit", len(data))
+	}
+
+	var report TriageReport
+	if err := report.Synthesize(context.Background(), resultsDir); err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	if len(report.Backends) != 1 {
+		t.Fatalf("backends = %d, want 1: %#v", len(report.Backends), report.Backends)
+	}
+	got := report.Backends[0]
+	if got.Name != "dolt" {
+		t.Fatalf("backend name = %q, want dolt", got.Name)
+	}
+	if got.KillEvents != 1 || got.LostRecords != len(missingIDs) || got.RecoveryP99Ms != 123 {
+		t.Fatalf("chaos metrics = kills %d lost %d recovery %.1f", got.KillEvents, got.LostRecords, got.RecoveryP99Ms)
+	}
+}
+
 func TestTriageReportWritesJSONAndMarkdownInterpretation(t *testing.T) {
 	report := TriageReport{
 		RunID:       "run-1",

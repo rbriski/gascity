@@ -1,7 +1,6 @@
 package coordstore
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -388,17 +387,19 @@ func readJSONL(path string, decode func([]byte) error) error {
 		return err
 	}
 	defer file.Close() //nolint:errcheck
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+	dec := json.NewDecoder(file)
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
 		}
-		if err := decode(line); err != nil {
+		if err := decode(raw); err != nil {
 			return err
 		}
 	}
-	return scanner.Err()
 }
 
 func artifactIdentity(root, path string) (string, string, bool) {

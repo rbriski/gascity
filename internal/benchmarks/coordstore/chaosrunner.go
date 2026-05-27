@@ -23,6 +23,8 @@ type chaosAckLedgerResetter interface {
 	ResetAckLedger(path string) error
 }
 
+const chaosDurabilityBatchGetLimit = 1000
+
 // KillEvent records one kill/restart/durability probe.
 type KillEvent struct {
 	KilledAt        time.Time     `json:"killed_at"`
@@ -172,7 +174,7 @@ func (r *ChaosRunner) killAndRecover(ctx context.Context) (KillEvent, error) {
 		recovery = restartDur
 	}
 	ackedIDs := r.controller.AckedIDs()
-	records, err := r.controller.BatchGet(ctx, ackedIDs)
+	records, err := r.batchGetAckedIDs(ctx, ackedIDs)
 	if err != nil {
 		return KillEvent{}, err
 	}
@@ -200,6 +202,25 @@ func (r *ChaosRunner) killAndRecover(ctx context.Context) (KillEvent, error) {
 		AckedIDs:        len(ackedIDs),
 		MissingIDs:      missing,
 	}, nil
+}
+
+func (r *ChaosRunner) batchGetAckedIDs(ctx context.Context, ids []string) ([]Record, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	records := make([]Record, 0, len(ids))
+	for start := 0; start < len(ids); start += chaosDurabilityBatchGetLimit {
+		end := start + chaosDurabilityBatchGetLimit
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch, err := r.controller.BatchGet(ctx, ids[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("chaos durability BatchGet ids[%d:%d]: %w", start, end, err)
+		}
+		records = append(records, batch...)
+	}
+	return records, nil
 }
 
 func appendKillEvent(path string, event KillEvent) error {

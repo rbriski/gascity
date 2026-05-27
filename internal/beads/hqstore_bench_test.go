@@ -61,6 +61,58 @@ func BenchmarkHQStoreRAM10K(b *testing.B) {
 	}
 }
 
+// BenchmarkHQStoreRecentScan measures the cost of a SortCreatedDesc+Limit scan
+// over a 28k-bead corpus — the "before" number (no fast path) establishes the
+// baseline; after Phase 1 lands the builder's fast path, this should drop by
+// roughly an order of magnitude in both ns/op and allocs/op.
+//
+// Run with:
+//
+//	go test -bench=BenchmarkHQStoreRecentScan -benchmem ./internal/beads/
+func BenchmarkHQStoreRecentScan(b *testing.B) {
+	const corpusSize = 28_000
+
+	store, err := beads.OpenHQStore(b.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		b.Fatalf("OpenHQStore: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			b.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	for i := range corpusSize {
+		status := ""
+		if i%3 == 0 {
+			status = "closed"
+		}
+		if _, err := store.Create(beads.Bead{Title: "bench-" + strconv.Itoa(i), Status: status}); err != nil {
+			b.Fatalf("Create: %v", err)
+		}
+	}
+
+	q := beads.ListQuery{
+		AllowScan:     true,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Sort:          beads.SortCreatedDesc,
+		Limit:         5,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		results, err := store.List(q)
+		if err != nil {
+			b.Fatalf("List: %v", err)
+		}
+		if len(results) == 0 {
+			b.Fatal("expected non-empty results")
+		}
+	}
+}
+
 func hqBenchRSSBytes() uint64 {
 	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {

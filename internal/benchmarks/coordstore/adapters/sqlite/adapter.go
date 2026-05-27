@@ -8,9 +8,8 @@
 //   - Labels in a separate table with cascade on delete (FR-17).
 //   - Deps in a separate table (FR-10).
 //   - WAL journal mode for concurrent reads (FR-16, throughput target).
-//   - PRAGMA synchronous=NORMAL: single-process only; full fsync on each
-//     commit is not needed for this benchmark (same trade-off as discovery.md
-//     author-own design, which allows sync=normal for single-process use).
+//   - PRAGMA synchronous=FULL: commits are flushed through SQLite's WAL path
+//     so acknowledged writes survive process crashes in the production config.
 package sqlite
 
 import (
@@ -33,17 +32,20 @@ import (
 // WAL concurrency model:
 //   - writeDB: single connection, serializes all writes. WAL mode allows
 //     readers to continue during writes without blocking.
-//   - readDB: pool of up to 20 connections. Multiple goroutines can read
+//   - readDB: pool of up to 8 connections. Multiple goroutines can read
 //     concurrently in WAL mode while a write is in progress.
 //
 // This matches the canonical SQLite WAL production pattern for in-process use.
 type Adapter struct {
-	path        string
-	writeDB     *sql.DB // single writer connection
-	readDB      *sql.DB // reader connection pool
-	stmtGetMain *sql.Stmt
-	stmtGetEph  *sql.Stmt
-	seq         atomic.Int64
+	path            string
+	writeDB         *sql.DB // single writer connection
+	readDB          *sql.DB // reader connection pool
+	stmtGetMain     *sql.Stmt
+	stmtGetEph      *sql.Stmt
+	retentionCancel context.CancelFunc
+	retentionDone   chan struct{}
+	seq             atomic.Int64
+	retentionErrors atomic.Int64
 }
 
 // New returns an Adapter. Call Open before using it.
@@ -52,6 +54,18 @@ func New() *Adapter { return &Adapter{} }
 // Open initializes the SQLite database at cfg.DataDir/store.db.
 func (a *Adapter) Open(ctx context.Context, cfg coordstore.Config) error {
 	path := cfg.DataDir + "/store.db"
+	readPoolSize, err := sqliteReadPoolSize(cfg.Extra)
+	if err != nil {
+		return err
+	}
+	walAutocheckpoint, err := sqliteWALAutocheckpoint(cfg.Extra)
+	if err != nil {
+		return err
+	}
+	retentionPeriod, retentionSweepInterval, err := sqliteRetentionConfig(cfg.Extra)
+	if err != nil {
+		return err
+	}
 
 	// Write connection: single connection, serializes all mutations.
 	writeDB, err := sql.Open("sqlite", path+"?_busy_timeout=5000")
@@ -60,7 +74,7 @@ func (a *Adapter) Open(ctx context.Context, cfg coordstore.Config) error {
 	}
 	writeDB.SetMaxOpenConns(1)
 
-	if _, err := writeDB.ExecContext(ctx, pragmas); err != nil {
+	if _, err := writeDB.ExecContext(ctx, pragmas(walAutocheckpoint)); err != nil {
 		writeDB.Close() //nolint:errcheck
 		return fmt.Errorf("sqlite: set pragmas: %w", err)
 	}
@@ -83,8 +97,8 @@ func (a *Adapter) Open(ctx context.Context, cfg coordstore.Config) error {
 	}
 	// Keep all connections warm — connection churn is the dominant read latency
 	// when MaxIdleConns < MaxOpenConns causes constant open/close on every op.
-	readDB.SetMaxOpenConns(20)
-	readDB.SetMaxIdleConns(20)
+	readDB.SetMaxOpenConns(readPoolSize)
+	readDB.SetMaxIdleConns(readPoolSize)
 	readDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	writeDB.SetMaxIdleConns(1)
@@ -111,11 +125,13 @@ func (a *Adapter) Open(ctx context.Context, cfg coordstore.Config) error {
 	a.stmtGetMain = stmtGetMain
 	a.stmtGetEph = stmtGetEph
 	a.path = path
+	a.startRetentionSweep(retentionPeriod, retentionSweepInterval)
 	return nil
 }
 
 // Close releases all database connections and prepared statements.
 func (a *Adapter) Close() error {
+	a.stopRetentionSweep()
 	var errs []string
 	if a.stmtGetMain != nil {
 		if err := a.stmtGetMain.Close(); err != nil {
@@ -632,7 +648,7 @@ func (a *Adapter) PurgeExpired(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
-// PurgeTerminal removes old terminal main-tier records.
+// PurgeTerminal removes old terminal records from the main tier.
 func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (int, error) {
 	if olderThan <= 0 {
 		return 0, nil
@@ -648,7 +664,8 @@ func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (i
 		`SELECT id FROM records
 		 WHERE status IN ('closed','cancelled','canceled','expired')
 		   AND COALESCE(NULLIF(updated_at, 0), created_at) < ?
-		 LIMIT ?`, cutoff, coordstore.TerminalPurgeBatchSize)
+		 LIMIT ?`,
+		cutoff, coordstore.TerminalPurgeBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite PurgeTerminal: query: %w", err)
 	}
@@ -687,6 +704,11 @@ func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (i
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("sqlite PurgeTerminal: commit: %w", err)
 	}
+	if len(ids) > 0 {
+		if _, err := a.writeDB.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+			return len(ids), fmt.Errorf("sqlite PurgeTerminal: checkpoint: %w", err)
+		}
+	}
 	return len(ids), nil
 }
 
@@ -695,7 +717,7 @@ func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (i
 // PrimeScan loads all open records and returns the count.
 func (a *Adapter) PrimeScan(ctx context.Context) (int, error) {
 	rows, err := a.readDB.QueryContext(ctx,
-		"SELECT id FROM records WHERE status != 'closed'")
+		"SELECT id FROM records WHERE status NOT IN ('closed','cancelled','canceled','expired')")
 	if err != nil {
 		return 0, fmt.Errorf("sqlite PrimeScan: %w", err)
 	}
@@ -735,12 +757,50 @@ func (a *Adapter) Stats(_ context.Context) map[string]int64 {
 		"open_connections": int64(stats.OpenConnections),
 		"in_use":           int64(stats.InUse),
 		"idle":             int64(stats.Idle),
+		"retention_errors": a.retentionErrors.Load(),
 	}
 	if a.path != "" {
 		out["db_bytes"] = fileSize(a.path)
 		out["wal_bytes"] = fileSize(a.path + "-wal")
 	}
 	return out
+}
+
+func (a *Adapter) startRetentionSweep(retentionPeriod, sweepInterval time.Duration) {
+	if retentionPeriod <= 0 || sweepInterval <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	a.retentionCancel = cancel
+	a.retentionDone = done
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(sweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := a.PurgeTerminal(ctx, retentionPeriod); err != nil && !errors.Is(err, context.Canceled) {
+					a.retentionErrors.Add(1)
+				}
+			}
+		}
+	}()
+}
+
+func (a *Adapter) stopRetentionSweep() {
+	if a.retentionCancel == nil {
+		return
+	}
+	a.retentionCancel()
+	if a.retentionDone != nil {
+		<-a.retentionDone
+	}
+	a.retentionCancel = nil
+	a.retentionDone = nil
 }
 
 // --- helpers ---
@@ -949,15 +1009,74 @@ func isNotFound(err error) bool {
 	return ok
 }
 
+const (
+	defaultSQLiteReadPoolSize        = 8
+	defaultSQLiteWALAutocheckpoint   = 1000
+	defaultSQLiteRetentionPeriod     = 4 * time.Hour
+	defaultSQLiteRetentionSweepEvery = 30 * time.Second
+)
+
+func sqliteReadPoolSize(extra map[string]string) (int, error) {
+	return intConfig(extra, "pool_size", defaultSQLiteReadPoolSize)
+}
+
+func sqliteWALAutocheckpoint(extra map[string]string) (int, error) {
+	return intConfig(extra, "wal_autocheckpoint", defaultSQLiteWALAutocheckpoint)
+}
+
+func sqliteRetentionConfig(extra map[string]string) (time.Duration, time.Duration, error) {
+	period, err := durationConfig(extra, "retention_period", defaultSQLiteRetentionPeriod)
+	if err != nil {
+		return 0, 0, err
+	}
+	interval, err := durationConfig(extra, "retention_sweep_interval", defaultSQLiteRetentionSweepEvery)
+	if err != nil {
+		return 0, 0, err
+	}
+	return period, interval, nil
+}
+
+func intConfig(extra map[string]string, key string, fallback int) (int, error) {
+	raw := extra[key]
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: parse %s=%q: %w", key, raw, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("sqlite: %s must be > 0, got %d", key, value)
+	}
+	return value, nil
+}
+
+func durationConfig(extra map[string]string, key string, fallback time.Duration) (time.Duration, error) {
+	raw := extra[key]
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: parse %s=%q: %w", key, raw, err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("sqlite: %s must be >= 0, got %s", key, value)
+	}
+	return value, nil
+}
+
 // pragmas are applied once after opening the database.
-const pragmas = `
+func pragmas(walAutocheckpoint int) string {
+	return fmt.Sprintf(`
 PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
+PRAGMA synchronous=FULL;
 PRAGMA cache_size=-65536;
 PRAGMA temp_store=MEMORY;
 PRAGMA mmap_size=268435456;
-PRAGMA wal_autocheckpoint=1000;
-`
+PRAGMA wal_autocheckpoint=%d;
+`, walAutocheckpoint)
+}
 
 // schema defines all tables and indexes. Applied once at Open.
 const schema = `

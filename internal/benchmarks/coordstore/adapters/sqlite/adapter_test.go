@@ -16,7 +16,7 @@ import (
 
 func TestOpenUsesProductionSQLiteSettings(t *testing.T) {
 	ctx := context.Background()
-	a := openTestAdapter(t, ctx, coordstore.Config{DataDir: t.TempDir()})
+	a := openTestAdapter(ctx, t, coordstore.Config{DataDir: t.TempDir()})
 
 	if got := a.readDB.Stats().MaxOpenConnections; got != 8 {
 		t.Fatalf("read pool max open connections = %d, want 8", got)
@@ -25,20 +25,20 @@ func TestOpenUsesProductionSQLiteSettings(t *testing.T) {
 		t.Fatalf("write pool max open connections = %d, want 1", got)
 	}
 
-	if got := queryStringPragma(t, ctx, a.writeDB, "journal_mode"); got != "wal" {
+	if got := queryStringPragma(ctx, t, a.writeDB, "journal_mode"); got != "wal" {
 		t.Fatalf("journal_mode = %q, want wal", got)
 	}
-	if got := queryIntPragma(t, ctx, a.writeDB, "synchronous"); got != 2 {
+	if got := queryIntPragma(ctx, t, a.writeDB, "synchronous"); got != 2 {
 		t.Fatalf("synchronous = %d, want 2 (FULL)", got)
 	}
-	if got := queryIntPragma(t, ctx, a.writeDB, "wal_autocheckpoint"); got != 1000 {
+	if got := queryIntPragma(ctx, t, a.writeDB, "wal_autocheckpoint"); got != 1000 {
 		t.Fatalf("wal_autocheckpoint = %d, want 1000", got)
 	}
 }
 
 func TestPoolEightConcurrentAccessHasNoErrors(t *testing.T) {
 	ctx := context.Background()
-	a := openTestAdapter(t, ctx, coordstore.Config{DataDir: t.TempDir()})
+	a := openTestAdapter(ctx, t, coordstore.Config{DataDir: t.TempDir()})
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
@@ -80,12 +80,12 @@ func TestPoolEightConcurrentAccessHasNoErrors(t *testing.T) {
 
 func TestPurgeTerminalRemovesOnlyOldTerminalMainRecords(t *testing.T) {
 	ctx := context.Background()
-	a := openTestAdapter(t, ctx, coordstore.Config{DataDir: t.TempDir()})
+	a := openTestAdapter(ctx, t, coordstore.Config{DataDir: t.TempDir()})
 	old := time.Now().Add(-5 * time.Hour)
 	recent := time.Now()
 	olderThan := 4 * time.Hour
 
-	oldClosed := mustCreateRecord(t, ctx, a, coordstore.Record{
+	oldClosed := mustCreateRecord(ctx, t, a, coordstore.Record{
 		ID:        "old-closed",
 		Title:     "old closed",
 		Status:    "closed",
@@ -94,21 +94,29 @@ func TestPurgeTerminalRemovesOnlyOldTerminalMainRecords(t *testing.T) {
 		Labels:    []string{"purge-me"},
 		Metadata:  map[string]string{"scope": "terminal"},
 	})
-	oldCancelled := mustCreateRecord(t, ctx, a, coordstore.Record{
-		ID:        "old-cancelled",
-		Title:     "old cancelled",
-		Status:    "cancelled",
+	oldCancelled := mustCreateRecord(ctx, t, a, coordstore.Record{
+		ID:        "old-canceled",
+		Title:     "old canceled",
+		Status:    "canceled",
 		Type:      "task",
 		CreatedAt: old,
 	})
-	recentClosed := mustCreateRecord(t, ctx, a, coordstore.Record{
+	recentClosed := mustCreateRecord(ctx, t, a, coordstore.Record{
 		ID:        "recent-closed",
 		Title:     "recent closed",
 		Status:    "closed",
 		Type:      "task",
 		CreatedAt: recent,
 	})
-	oldOpen := mustCreateRecord(t, ctx, a, coordstore.Record{
+	oldButUpdatedRecently := mustCreateRecord(ctx, t, a, coordstore.Record{
+		ID:        "old-updated-recently",
+		Title:     "old updated recently",
+		Status:    "closed",
+		Type:      "task",
+		CreatedAt: old,
+		UpdatedAt: recent,
+	})
+	oldOpen := mustCreateRecord(ctx, t, a, coordstore.Record{
 		ID:        "old-open",
 		Title:     "old open",
 		Status:    "open",
@@ -132,7 +140,7 @@ func TestPurgeTerminalRemovesOnlyOldTerminalMainRecords(t *testing.T) {
 			t.Fatalf("Get(%q) error = %v, want ErrNotFound", id, err)
 		}
 	}
-	for _, id := range []string{recentClosed.ID, oldOpen.ID} {
+	for _, id := range []string{recentClosed.ID, oldButUpdatedRecently.ID, oldOpen.ID} {
 		if _, err := a.Get(ctx, id); err != nil {
 			t.Fatalf("Get(%q): %v", id, err)
 		}
@@ -148,7 +156,7 @@ func TestPurgeTerminalRemovesOnlyOldTerminalMainRecords(t *testing.T) {
 
 func TestRetentionSweepStartsFromConfig(t *testing.T) {
 	ctx := context.Background()
-	a := openTestAdapter(t, ctx, coordstore.Config{
+	a := openTestAdapter(ctx, t, coordstore.Config{
 		DataDir: t.TempDir(),
 		Extra: map[string]string{
 			"retention_period":         "1ms",
@@ -156,7 +164,7 @@ func TestRetentionSweepStartsFromConfig(t *testing.T) {
 		},
 	})
 
-	r := mustCreateRecord(t, ctx, a, coordstore.Record{
+	r := mustCreateRecord(ctx, t, a, coordstore.Record{
 		ID:        "sweep-me",
 		Title:     "sweep me",
 		Status:    "closed",
@@ -181,10 +189,10 @@ func TestRetentionSweepStartsFromConfig(t *testing.T) {
 func TestSQLiteWALAutoCheckpointBoundsLog(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	a := openTestAdapter(t, ctx, coordstore.Config{DataDir: dir})
+	a := openTestAdapter(ctx, t, coordstore.Config{DataDir: dir})
 
 	for i := 0; i < 1200; i++ {
-		mustCreateRecord(t, ctx, a, coordstore.Record{
+		mustCreateRecord(ctx, t, a, coordstore.Record{
 			Title:  fmt.Sprintf("wal-%d", i),
 			Status: "open",
 			Type:   "task",
@@ -375,7 +383,7 @@ func mustCreateTerminalTestRecord(ctx context.Context, t *testing.T, adapter *Ad
 	return created
 }
 
-func openTestAdapter(t *testing.T, ctx context.Context, cfg coordstore.Config) *Adapter {
+func openTestAdapter(ctx context.Context, t *testing.T, cfg coordstore.Config) *Adapter {
 	t.Helper()
 	a := New()
 	if err := a.Open(ctx, cfg); err != nil {
@@ -389,7 +397,7 @@ func openTestAdapter(t *testing.T, ctx context.Context, cfg coordstore.Config) *
 	return a
 }
 
-func mustCreateRecord(t *testing.T, ctx context.Context, a *Adapter, r coordstore.Record) coordstore.Record {
+func mustCreateRecord(ctx context.Context, t *testing.T, a *Adapter, r coordstore.Record) coordstore.Record {
 	t.Helper()
 	created, err := a.Create(ctx, r)
 	if err != nil {
@@ -407,7 +415,7 @@ func countTerminalTestRows(t *testing.T, adapter *Adapter, table, recordID strin
 	return count
 }
 
-func queryIntPragma(t *testing.T, ctx context.Context, db *sql.DB, name string) int {
+func queryIntPragma(ctx context.Context, t *testing.T, db *sql.DB, name string) int {
 	t.Helper()
 	var got int
 	if err := db.QueryRowContext(ctx, "PRAGMA "+name).Scan(&got); err != nil {
@@ -416,7 +424,7 @@ func queryIntPragma(t *testing.T, ctx context.Context, db *sql.DB, name string) 
 	return got
 }
 
-func queryStringPragma(t *testing.T, ctx context.Context, db *sql.DB, name string) string {
+func queryStringPragma(ctx context.Context, t *testing.T, db *sql.DB, name string) string {
 	t.Helper()
 	var got string
 	if err := db.QueryRowContext(ctx, "PRAGMA "+name).Scan(&got); err != nil {

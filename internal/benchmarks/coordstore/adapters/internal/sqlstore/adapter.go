@@ -433,7 +433,7 @@ func (a *Adapter) PurgeExpired(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
-// PurgeTerminal removes old terminal main-tier records.
+// PurgeTerminal removes old terminal records from the main tier.
 func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (int, error) {
 	if olderThan <= 0 {
 		return 0, nil
@@ -483,7 +483,7 @@ func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (i
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%s PurgeTerminal commit: %w", a.dialect.Name, err)
 	}
 	return len(ids), nil
 }
@@ -491,7 +491,7 @@ func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (i
 // PrimeScan scans open main-tier records.
 func (a *Adapter) PrimeScan(ctx context.Context) (int, error) {
 	rows, err := a.db.QueryContext(ctx,
-		"SELECT id FROM records WHERE status <> 'closed'")
+		"SELECT id FROM records WHERE status NOT IN ('closed','cancelled','expired')")
 	if err != nil {
 		return 0, fmt.Errorf("%s PrimeScan: %w", a.dialect.Name, err)
 	}

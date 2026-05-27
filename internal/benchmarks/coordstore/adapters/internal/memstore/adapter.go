@@ -383,14 +383,7 @@ func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (i
 
 	var ids []string
 	for id, r := range a.main {
-		if !coordstore.IsTerminalStatus(r.Status) {
-			continue
-		}
-		ref := r.UpdatedAt
-		if ref.IsZero() {
-			ref = r.CreatedAt
-		}
-		if !ref.IsZero() && ref.Before(cutoff) {
+		if terminalBefore(r, cutoff) {
 			ids = append(ids, id)
 			if len(ids) >= coordstore.TerminalPurgeBatchSize {
 				break
@@ -427,7 +420,7 @@ func (a *Adapter) PrimeScan(_ context.Context) (int, error) {
 	defer a.mu.RUnlock()
 	n := 0
 	for _, r := range a.main {
-		if r.Status != "closed" {
+		if !coordstore.IsTerminalStatus(r.Status) {
 			n++
 		}
 	}
@@ -557,11 +550,14 @@ func normalizeRecord(r coordstore.Record, nextID func() string) coordstore.Recor
 }
 
 func applyUpdate(r *coordstore.Record, u coordstore.Update) {
+	changed := false
 	if u.Status != "" {
 		r.Status = u.Status
+		changed = true
 	}
 	if u.Assignee != "" {
 		r.Assignee = u.Assignee
+		changed = true
 	}
 	if len(u.Metadata) > 0 {
 		if r.Metadata == nil {
@@ -570,8 +566,22 @@ func applyUpdate(r *coordstore.Record, u coordstore.Update) {
 		for k, v := range u.Metadata {
 			r.Metadata[k] = v
 		}
+		changed = true
 	}
-	r.UpdatedAt = time.Now()
+	if changed {
+		r.UpdatedAt = time.Now()
+	}
+}
+
+func terminalBefore(r coordstore.Record, cutoff time.Time) bool {
+	if !coordstore.IsTerminalStatus(r.Status) {
+		return false
+	}
+	t := r.UpdatedAt
+	if t.IsZero() {
+		t = r.CreatedAt
+	}
+	return t.Before(cutoff)
 }
 
 func matches(r coordstore.Record, q coordstore.Query) bool {
@@ -579,7 +589,7 @@ func matches(r coordstore.Record, q coordstore.Query) bool {
 		if r.Status != q.Status {
 			return false
 		}
-	} else if r.Status == "closed" {
+	} else if coordstore.IsTerminalStatus(r.Status) {
 		return false
 	}
 	if q.Type != "" && r.Type != q.Type {

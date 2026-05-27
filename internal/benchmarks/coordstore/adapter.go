@@ -32,7 +32,7 @@ import (
 type Record struct {
 	ID        string
 	Title     string
-	Status    string // "open" | "in_progress" | "closed"
+	Status    string // "open" | "in_progress" | terminal states such as "closed"
 	Type      string // "task" | "message" | "session" | "step" | ...
 	Priority  int
 	CreatedAt time.Time
@@ -210,7 +210,8 @@ type StoreAdapter interface {
 	PurgeExpired(ctx context.Context) (int, error)
 
 	// PurgeTerminal removes main-tier records in terminal statuses whose last
-	// update is older than olderThan. Returns the number of records removed.
+	// update is older than olderThan. Implementations must cascade dependency,
+	// label, and metadata rows for purged records. Returns the number removed.
 	PurgeTerminal(ctx context.Context, olderThan time.Duration) (int, error)
 
 	// --- FR-15: Background prime scan (target ≤ 5s at 10k open records) ---
@@ -251,11 +252,11 @@ func IsNotFound(err error) bool {
 	return ok
 }
 
-// IsTerminalStatus reports whether status represents completed work that is
-// eligible for retention cleanup.
+// IsTerminalStatus reports whether status represents a completed lifecycle
+// state that can be removed by retention once it is older than the cutoff.
 func IsTerminalStatus(status string) bool {
 	switch status {
-	case "closed", "canceled", "cancel" + "led", "expired":
+	case "closed", "cancel" + "led", "canceled", "expired":
 		return true
 	default:
 		return false

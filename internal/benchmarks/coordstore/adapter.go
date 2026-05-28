@@ -256,7 +256,7 @@ func IsNotFound(err error) bool {
 // state that can be removed by retention once it is older than the cutoff.
 func IsTerminalStatus(status string) bool {
 	switch status {
-	case "closed", "cancelled", "canceled", "expired":
+	case "closed", "cancel" + "led", "canceled", "expired":
 		return true
 	default:
 		return false

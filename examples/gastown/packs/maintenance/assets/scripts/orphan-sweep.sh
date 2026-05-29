@@ -12,7 +12,12 @@
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
-__SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+__SOURCE="${BASH_SOURCE[0]}"
+case "$__SOURCE" in
+    */*) __SCRIPT_DIR="${__SOURCE%/*}" ;;
+    *) __SCRIPT_DIR="." ;;
+esac
+__SCRIPT_DIR="$(cd "$__SCRIPT_DIR" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
 

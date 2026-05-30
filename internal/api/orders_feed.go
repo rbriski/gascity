@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/orderroute"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -337,7 +340,13 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			updatedAt := orderTrackingUpdatedAt(info.store, bead, scopedName)
 			orderDef, ok := orderByScopedName[scopedName]
 			title := orderTrackingTitle(scopedName, orderDef, ok)
-			target := orderTrackingTarget(orderDef, ok, bead)
+			target, err := orderTrackingTarget(state.Config(), orderDef, ok, bead)
+			if err != nil {
+				msg := fmt.Sprintf("order %s target resolution failed", scopedName)
+				orderFeedLogf("api: order feed target resolution failed for %s: %v", scopedName, err)
+				partialErrors = append(partialErrors, msg)
+				continue
+			}
 			itemType := orderTrackingType(orderDef, ok, bead)
 			item := monitorFeedItemResponse{
 				ID:                 "order:" + info.ref + ":" + bead.ID,
@@ -487,29 +496,26 @@ func orderTrackingTitle(scopedName string, orderDef orders.Order, found bool) st
 	return scopedName
 }
 
-func orderTrackingTarget(orderDef orders.Order, found bool, bead beads.Bead) string {
+func orderTrackingTarget(cfg *config.City, orderDef orders.Order, found bool, bead beads.Bead) (string, error) {
 	if found {
 		if orderDef.IsExec() {
-			return "exec"
+			return "exec", nil
 		}
 		if orderDef.Pool != "" {
-			return qualifyOrderFeedTarget(orderDef.Pool, orderDef.Rig)
+			target, err := orderroute.QualifyOrderPool(orderDef, cfg)
+			if err != nil {
+				return "", err
+			}
+			return target, nil
 		}
 		if orderDef.Formula != "" {
-			return orderDef.Formula
+			return orderDef.Formula, nil
 		}
 	}
 	if orderLabelsContainExec(bead.Labels) {
-		return "exec"
+		return "exec", nil
 	}
-	return "formula"
-}
-
-func qualifyOrderFeedTarget(pool, rig string) string {
-	if rig == "" || strings.Contains(pool, "/") {
-		return pool
-	}
-	return rig + "/" + pool
+	return "formula", nil
 }
 
 func orderTrackingType(orderDef orders.Order, found bool, bead beads.Bead) string {

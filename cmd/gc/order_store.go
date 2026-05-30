@@ -83,19 +83,6 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 	if cfg == nil {
 		return execStoreTarget{}, fmt.Errorf("rig-scoped order %q requires city config", a.ScopedName())
 	}
-	if strings.TrimSpace(a.Pool) != "" {
-		pool, err := qualifyOrderPool(a, cfg)
-		if err != nil {
-			return execStoreTarget{}, err
-		}
-		if !strings.Contains(pool, "/") {
-			return execStoreTarget{
-				ScopeRoot: cityPath,
-				ScopeKind: "city",
-				Prefix:    config.EffectiveHQPrefix(cfg),
-			}, nil
-		}
-	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	rig, ok := rigByName(cfg, a.Rig)
 	if !ok {
@@ -104,12 +91,62 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 	if strings.TrimSpace(rig.Path) == "" {
 		return execStoreTarget{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before dispatching rig-scoped orders", rig.Name, rig.Name)
 	}
+	if strings.TrimSpace(a.Pool) != "" {
+		pool, err := qualifyOrderPool(a, cfg)
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		if !strings.Contains(pool, "/") {
+			// Rig orders newly resolving to city-scoped pools intentionally
+			// move tracking to the city store; old rig-store cooldown history
+			// is not migrated and may allow one immediate upgrade dispatch.
+			return execStoreTarget{
+				ScopeRoot: cityPath,
+				ScopeKind: "city",
+				Prefix:    config.EffectiveHQPrefix(cfg),
+			}, nil
+		}
+	}
 	return execStoreTarget{
 		ScopeRoot: rig.Path,
 		ScopeKind: "rig",
 		Prefix:    rig.EffectivePrefix(),
 		RigName:   rig.Name,
 	}, nil
+}
+
+func resolveOrderDispatchStoreTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error, error) {
+	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+	if err == nil {
+		return target, nil, nil
+	}
+
+	accountingTarget, ok := orderRouteFailureAccountingTarget(cityPath, cfg, a)
+	if ok {
+		return accountingTarget, err, nil
+	}
+	return execStoreTarget{}, nil, err
+}
+
+func orderRouteFailureAccountingTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, bool) {
+	if cfg == nil || strings.TrimSpace(a.Rig) == "" || strings.TrimSpace(a.Pool) == "" {
+		return execStoreTarget{}, false
+	}
+	if _, err := qualifyOrderPool(a, cfg); err == nil {
+		return execStoreTarget{}, false
+	}
+
+	resolveRigPaths(cityPath, cfg.Rigs)
+	rig, ok := rigByName(cfg, a.Rig)
+	if !ok || strings.TrimSpace(rig.Path) == "" {
+		return execStoreTarget{}, false
+	}
+	return execStoreTarget{
+		ScopeRoot: rig.Path,
+		ScopeKind: "rig",
+		Prefix:    rig.EffectivePrefix(),
+		RigName:   rig.Name,
+	}, true
 }
 
 func resolveOrderExecTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error) {

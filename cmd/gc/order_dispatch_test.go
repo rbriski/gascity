@@ -591,6 +591,105 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchRejectsAmbiguousRigEventCityPoolOncePerEvent(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	cityStore := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "gastown"},
+			{Name: "dog", BindingName: "maintenance"},
+		},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: "frontend",
+		}},
+	}
+
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+
+	const scoped = "release-watch:rig:frontend"
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "release-watch",
+			Rig:          "frontend",
+			Trigger:      "event",
+			On:           events.BeadClosed,
+			Formula:      "test-formula",
+			Pool:         "dog",
+			FormulaLayer: sharedTestFormulaDir,
+		}},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			switch target.ScopeKind {
+			case "rig":
+				return rigStore, nil
+			case "city":
+				return cityStore, nil
+			default:
+				t.Fatalf("store target ScopeKind = %q, want rig or city", target.ScopeKind)
+				return nil, nil
+			}
+		},
+		ep:      eventLog,
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     cfg,
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now())
+	m.drain(context.Background())
+
+	all := trackingBeads(t, rigStore, "order-run:"+scoped)
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label after first dispatch = %d, want 1", len(all))
+	}
+	if !slicesContain(all[0].Labels, "order:"+scoped) {
+		t.Fatalf("tracking bead labels = %v, want order cursor label", all[0].Labels)
+	}
+	if !slicesContain(all[0].Labels, fmt.Sprintf("seq:%d", headSeq)) {
+		t.Fatalf("tracking bead labels = %v, want seq:%d", all[0].Labels, headSeq)
+	}
+	if !strings.Contains(stderr.String(), `ambiguous pool "dog"`) {
+		t.Fatalf("stderr = %q, want ambiguity error", stderr.String())
+	}
+
+	failedEvents := 0
+	for _, event := range rec.events {
+		if event.Type == events.OrderFailed && event.Subject == scoped {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("order.failed count after first dispatch = %d, want 1", failedEvents)
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now().Add(10*time.Second))
+	m.drain(context.Background())
+
+	all = trackingBeads(t, rigStore, "order-run:"+scoped)
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label after second dispatch = %d, want 1", len(all))
+	}
+	failedEvents = 0
+	for _, event := range rec.events {
+		if event.Type == events.OrderFailed && event.Subject == scoped {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("order.failed count after second dispatch = %d, want 1", failedEvents)
+	}
+}
+
 func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
@@ -6131,6 +6230,92 @@ func TestResolveOrderExecTarget_BoundRigDispatchesNormally(t *testing.T) {
 	}
 	if target.ScopeRoot != "/home/user/frontend" {
 		t.Errorf("ScopeRoot = %q, want %q", target.ScopeRoot, "/home/user/frontend")
+	}
+}
+
+func TestResolveOrderStoreTargetRigOrderCityPoolUsesCityScope(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{{
+			Name:        "runner",
+			BindingName: "shared",
+		}},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: "/home/user/frontend",
+		}},
+	}
+	target, err := resolveOrderStoreTarget("/city", cfg, orders.Order{Name: "run", Rig: "frontend", Pool: "runner"})
+	if err != nil {
+		t.Fatalf("resolveOrderStoreTarget: unexpected error: %v", err)
+	}
+	if target.ScopeKind != "city" {
+		t.Fatalf("ScopeKind = %q, want city", target.ScopeKind)
+	}
+	if target.ScopeRoot != "/city" {
+		t.Fatalf("ScopeRoot = %q, want /city", target.ScopeRoot)
+	}
+	if target.RigName != "" {
+		t.Fatalf("RigName = %q, want empty city target", target.RigName)
+	}
+}
+
+func TestResolveOrderStoreTargetRigOrderCityPoolMissingRigErrors(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{{
+			Name:        "runner",
+			BindingName: "shared",
+		}},
+	}
+	_, err := resolveOrderStoreTarget("/city", cfg, orders.Order{Name: "run", Rig: "frontend", Pool: "runner"})
+	if err == nil {
+		t.Fatal("resolveOrderStoreTarget: expected missing rig error, got nil")
+	}
+	if !strings.Contains(err.Error(), `rig "frontend" not found`) {
+		t.Fatalf("error = %q, want missing rig error", err)
+	}
+}
+
+func TestResolveOrderStoreTargetRigOrderCityPoolUnboundRigErrors(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{{
+			Name:        "runner",
+			BindingName: "shared",
+		}},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: "",
+		}},
+	}
+	_, err := resolveOrderStoreTarget("/city", cfg, orders.Order{Name: "run", Rig: "frontend", Pool: "runner"})
+	if err == nil {
+		t.Fatal("resolveOrderStoreTarget: expected unbound rig error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no path binding") {
+		t.Fatalf("error = %q, want unbound rig error", err)
+	}
+}
+
+func TestResolveOrderStoreTargetRigOrderAmbiguousCityPoolErrors(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{
+			{Name: "runner", BindingName: "shared"},
+			{Name: "runner", BindingName: "tooling"},
+		},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: "/home/user/frontend",
+		}},
+	}
+	_, err := resolveOrderStoreTarget("/city", cfg, orders.Order{Name: "run", Rig: "frontend", Pool: "runner"})
+	if err == nil {
+		t.Fatal("resolveOrderStoreTarget: expected ambiguous pool error, got nil")
+	}
+	if !strings.Contains(err.Error(), `ambiguous pool "runner" for city order`) {
+		t.Fatalf("error = %q, want ambiguous city pool", err)
 	}
 }
 

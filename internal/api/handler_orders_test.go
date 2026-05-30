@@ -8,10 +8,12 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -754,6 +756,107 @@ func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
 	}
 	if item.UpdatedAt == item.StartedAt {
 		t.Fatalf("updated_at = %q, started_at = %q, want updated_at to reflect newer run activity", item.UpdatedAt, item.StartedAt)
+	}
+}
+
+func TestHandleOrdersFeedReportsResolvedCityPoolTargetForRigOrder(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.cfg.Agents = append(fs.cfg.Agents, config.Agent{
+		Name:        "runner",
+		BindingName: "shared",
+		Provider:    "test-agent",
+	})
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Pool: "runner", Rig: "myrig"},
+	}
+
+	tracking, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:     "order:nightly-review:rig:myrig",
+		Status:    "closed",
+		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create tracking bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	}
+	item := resp.Items[0]
+	if item.BeadID != tracking.ID {
+		t.Fatalf("bead_id = %q, want %q", item.BeadID, tracking.ID)
+	}
+	if item.Target != "shared.runner" {
+		t.Fatalf("target = %q, want shared.runner", item.Target)
+	}
+	if item.StoreRef != "city:test-city" {
+		t.Fatalf("store_ref = %q, want city:test-city", item.StoreRef)
+	}
+}
+
+func TestHandleOrdersFeedReportsPartialForAmbiguousOrderPool(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.cfg.Agents = append(fs.cfg.Agents,
+		config.Agent{Name: "runner", BindingName: "alpha", Provider: "test-agent"},
+		config.Agent{Name: "runner", BindingName: "beta", Provider: "test-agent"},
+	)
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Pool: "runner", Rig: "myrig"},
+	}
+
+	_, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:     "order:nightly-review:rig:myrig",
+		Status:    "closed",
+		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create tracking bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items         []monitorFeedItemResponse `json:"items"`
+		Partial       bool                      `json:"partial"`
+		PartialErrors []string                  `json:"partial_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 0 {
+		t.Fatalf("len(items) = %d, want 0 for skipped ambiguous target", len(resp.Items))
+	}
+	if !resp.Partial {
+		t.Fatal("partial = false, want true")
+	}
+	if len(resp.PartialErrors) != 1 || !strings.Contains(resp.PartialErrors[0], "nightly-review:rig:myrig") {
+		t.Fatalf("partial_errors = %#v, want offending order named", resp.PartialErrors)
 	}
 }
 

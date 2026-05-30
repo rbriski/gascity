@@ -57,6 +57,9 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 			}
 		}
 	} else if !os.IsNotExist(err) {
+		if envPort != "" {
+			return envPort, nil
+		}
 		return "", fmt.Errorf("read provider runtime state: %w", err)
 	} else if hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath); hintErr == nil && found {
 		if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, hint); ok {

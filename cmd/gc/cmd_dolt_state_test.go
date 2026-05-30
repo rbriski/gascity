@@ -358,6 +358,24 @@ func TestChooseManagedDoltPortPrefersLiveProviderStateOverStaleEnv(t *testing.T)
 	}
 }
 
+func TestChooseManagedDoltPortFallsBackToEnvWhenProviderStateCorrupt(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	if err := os.WriteFile(stateFile, []byte("{not-json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state file: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != "4406" {
+		t.Fatalf("chooseManagedDoltPort = %q, want env fallback 4406", got)
+	}
+}
+
 func TestChooseManagedDoltPortUsesCanonicalSeedForSymlinkedCityPath(t *testing.T) {
 	aliasCity, realCity := symlinkedCityPaths(t)
 

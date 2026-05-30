@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
+	"github.com/gastownhall/gascity/internal/orderroute"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
 )
@@ -381,7 +382,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
+		target, routeErr, err := resolveOrderDispatchStoreTarget(cityPath, m.cfg, a)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
@@ -517,6 +518,10 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+		if routeErr != nil {
+			m.failOrderRouteBeforeLaunch(ctx, store, trackingBead.ID, scoped, a, routeErr)
+			continue
+		}
 
 		// Fire with timeout; inflight tracks the spawned goroutine so
 		// drain can wait for tracking-bead outcome persistence before
@@ -524,6 +529,34 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		a := a // capture loop variable
 		m.addInflight()
 		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+	}
+}
+
+func (m *memoryOrderDispatcher) failOrderRouteBeforeLaunch(ctx context.Context, store beads.Store, trackingID, scoped string, a orders.Order, routeErr error) {
+	m.rec.Record(events.Event{
+		Type:    events.OrderFired,
+		Actor:   "controller",
+		Subject: scoped,
+	})
+
+	var headSeq uint64
+	if a.Trigger == "event" && m.ep != nil {
+		var err error
+		headSeq, err = m.ep.LatestSeq()
+		if err != nil {
+			routeErr = fmt.Errorf("reading event cursor: %w", err)
+		}
+	}
+	logDispatchError(m.stderr, "gc: order %s: %v", scoped, routeErr)
+	m.rec.Record(events.Event{
+		Type:    events.OrderFailed,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: routeErr.Error(),
+	})
+	m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+	if err := closeOrderTrackingBead(ctx, store, trackingID); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", scoped, trackingID, err)
 	}
 }
 
@@ -1648,7 +1681,7 @@ func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
 // city remain stable. Dotted values that do not match a configured bound
 // target are preserved for backward compatibility.
 func qualifyOrderPool(a orders.Order, cfg *config.City) (string, error) {
-	return qualifyPool(a.Pool, a.Rig, cfg, orderPoolSourceDirHint(a))
+	return orderroute.QualifyOrderPool(a, cfg)
 }
 
 func orderPoolSourceDirHint(a orders.Order) string {
@@ -1659,99 +1692,5 @@ func orderPoolSourceDirHint(a orders.Order) string {
 }
 
 func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (string, error) {
-	if strings.Contains(pool, "/") {
-		return pool, nil
-	}
-	if cfg == nil {
-		if rig == "" {
-			return pool, nil
-		}
-		return rig + "/" + pool, nil
-	}
-
-	cleanHint := ""
-	if sourceDirHint != "" {
-		cleanHint = filepath.Clean(sourceDirHint)
-	}
-
-	if rig != "" {
-		qualified, matched, err := qualifyPoolInDir(pool, rig, fmt.Sprintf("rig %q", rig), cfg, cleanHint)
-		if err != nil {
-			return "", err
-		}
-		if matched {
-			return rig + "/" + qualified, nil
-		}
-		qualified, matched, err = qualifyPoolInDir(pool, "", "city order", cfg, cleanHint)
-		if err != nil {
-			return "", err
-		}
-		if matched {
-			return qualified, nil
-		}
-		return rig + "/" + pool, nil
-	}
-
-	qualified, matched, err := qualifyPoolInDir(pool, "", "city order", cfg, cleanHint)
-	if err != nil {
-		return "", err
-	}
-	if matched {
-		return qualified, nil
-	}
-	return pool, nil
-}
-
-func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint string) (string, bool, error) {
-	var exactQualified []string
-	var sourceScopedMatches []string
-	var localBareMatches []string
-	var bareMatches []string
-	for i := range cfg.Agents {
-		a := &cfg.Agents[i]
-		if a.Dir != dir {
-			continue
-		}
-		switch {
-		case strings.Contains(pool, ".") && a.BindingQualifiedName() == pool:
-			exactQualified = appendUniquePoolTarget(exactQualified, a.BindingQualifiedName())
-		case a.Name == pool:
-			bareMatches = appendUniquePoolTarget(bareMatches, a.BindingQualifiedName())
-			if a.BindingName == "" {
-				localBareMatches = appendUniquePoolTarget(localBareMatches, a.BindingQualifiedName())
-			}
-			if cleanHint != "" && filepath.Clean(a.SourceDir) == cleanHint {
-				sourceScopedMatches = appendUniquePoolTarget(sourceScopedMatches, a.BindingQualifiedName())
-			}
-		}
-	}
-
-	switch {
-	case len(exactQualified) == 1:
-		return exactQualified[0], true, nil
-	case len(exactQualified) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
-	case len(sourceScopedMatches) == 1:
-		return sourceScopedMatches[0], true, nil
-	case len(sourceScopedMatches) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
-	case len(localBareMatches) == 1:
-		return localBareMatches[0], true, nil
-	case len(localBareMatches) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
-	case len(bareMatches) == 1:
-		return bareMatches[0], true, nil
-	case len(bareMatches) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
-	}
-	return pool, false, nil
-}
-
-func appendUniquePoolTarget(values []string, want string) []string {
-	for _, value := range values {
-		if value == want {
-			return values
-		}
-	}
-	return append(values, want)
+	return orderroute.QualifyPool(pool, rig, cfg, sourceDirHint)
 }

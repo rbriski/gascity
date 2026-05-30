@@ -16,8 +16,10 @@ Slice 1 of architect ga-lsois deletes the silent `:=3307` /
 `:-3307` fallback from both `runtime.sh` (dolt pack) and
 `dolt-target.sh` (maintenance pack) and replaces it with a shared
 `resolve_dolt_port_or_die` helper that emits a structured stderr
-error and exits **78** (`EX_CONFIG`). Operator overrides via
-`GC_DOLT_PORT` still take precedence.
+error and exits **78** (`EX_CONFIG`). Validated managed runtime
+state now takes precedence over inherited `GC_DOLT_PORT`; the
+environment value is a fallback seed only when no live managed state
+is available.
 
 The designer (ga-u0lx9p) pinned every byte the builder needs:
 

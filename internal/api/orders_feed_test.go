@@ -41,7 +41,11 @@ func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
 	if got := orderTrackingStatus(bead); got != "failed" {
 		t.Fatalf("orderTrackingStatus = %q, want failed", got)
 	}
-	if got := orderTrackingTarget(orders.Order{}, false, bead); got != "exec" {
+	got, err := orderTrackingTarget(nil, orders.Order{}, false, bead)
+	if err != nil {
+		t.Fatalf("orderTrackingTarget error = %v", err)
+	}
+	if got != "exec" {
 		t.Fatalf("orderTrackingTarget = %q, want exec", got)
 	}
 	if got := orderTrackingType(orders.Order{}, false, bead); got != "exec" {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -92,9 +93,13 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		if len(env) > 0 {
-			cmd.Env = mergeEnv(os.Environ(), env)
+		baseEnv := processenv.WithDoltAdaptiveEncodingMitigation(os.Environ())
+		overrides := maps.Clone(env)
+		if overrides == nil {
+			overrides = map[string]string{}
 		}
+		processenv.ApplyDoltAdaptiveEncodingMitigation(overrides)
+		cmd.Env = mergeEnv(baseEnv, overrides)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()

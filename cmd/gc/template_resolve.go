@@ -591,6 +591,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		// agent's cwd with the wrong data_dir.
 		"BEADS_DOLT_AUTO_START": "0",
 	}
+	applyDoltAdaptiveEncodingMitigationEnv(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)

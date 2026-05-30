@@ -416,6 +416,26 @@ func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T)
 	}
 }
 
+func TestGcBeadsBdPinsDoltAdaptiveEncodingOff(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	script := string(scriptData)
+	for _, want := range []string{
+		"DOLT_USE_ADAPTIVE_ENCODING=false",
+		"export DOLT_USE_ADAPTIVE_ENCODING",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd script missing %q", want)
+		}
+	}
+}
+
 func TestGcBeadsBdShellFallbackSanitizesArchiveLevel(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {

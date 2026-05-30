@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -244,8 +245,9 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 			Name:    "stub",
 			Command: "/bin/echo",
 			Env: map[string]string{
-				"GC_CITY":      "/wrong/city",
-				"GC_CITY_PATH": "/wrong/city",
+				"GC_CITY":                             "/wrong/city",
+				"GC_CITY_PATH":                        "/wrong/city",
+				processenv.DoltAdaptiveEncodingEnvKey: "true",
 			},
 		},
 		"",
@@ -260,6 +262,14 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 	}
 	if got := cfg.Runtime.SessionEnv["GC_CITY_PATH"]; got != cityPath {
 		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q (city anchor must win over provider env)", got, cityPath)
+	}
+	if got := cfg.Runtime.SessionEnv[processenv.DoltAdaptiveEncodingEnvKey]; got != processenv.DoltAdaptiveEncodingDisabledValue {
+		t.Errorf("SessionEnv[%s] = %q, want %q",
+			processenv.DoltAdaptiveEncodingEnvKey, got, processenv.DoltAdaptiveEncodingDisabledValue)
+	}
+	if got := cfg.Runtime.Hints.Env[processenv.DoltAdaptiveEncodingEnvKey]; got != processenv.DoltAdaptiveEncodingDisabledValue {
+		t.Errorf("Hints.Env[%s] = %q, want %q",
+			processenv.DoltAdaptiveEncodingEnvKey, got, processenv.DoltAdaptiveEncodingDisabledValue)
 	}
 }
 

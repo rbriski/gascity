@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/processenv"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -44,7 +45,13 @@ func NewStore(script string) *Store {
 }
 
 func execProcessEnv(overrides map[string]string) []string {
-	out := make([]string, 0, len(os.Environ())+len(overrides))
+	projected := make(map[string]string, len(overrides)+1)
+	for key, value := range overrides {
+		projected[key] = value
+	}
+	processenv.ApplyDoltAdaptiveEncodingMitigation(projected)
+
+	out := make([]string, 0, len(os.Environ())+len(projected))
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok || stripExecEnvKey(key) {
@@ -52,20 +59,20 @@ func execProcessEnv(overrides map[string]string) []string {
 		}
 		out = append(out, entry)
 	}
-	keys := make([]string, 0, len(overrides))
-	for key := range overrides {
+	keys := make([]string, 0, len(projected))
+	for key := range projected {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		out = append(out, key+"="+overrides[key])
+		out = append(out, key+"="+projected[key])
 	}
 	return out
 }
 
 func stripExecEnvKey(key string) bool {
 	switch key {
-	case "GC_BEADS_PREFIX", "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PROVIDER", "GC_RIG", "GC_RIG_ROOT", "GC_STORE_ROOT", "GC_STORE_SCOPE":
+	case processenv.DoltAdaptiveEncodingEnvKey, "GC_BEADS_PREFIX", "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PROVIDER", "GC_RIG", "GC_RIG_ROOT", "GC_STORE_ROOT", "GC_STORE_SCOPE":
 		return true
 	}
 	return strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "GC_DOLT_")

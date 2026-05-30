@@ -762,5 +762,5 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // doltServerEnv returns the environment applied to every managed dolt
 // sql-server we launch.
 func doltServerEnv(parent []string) []string {
-	return append([]string(nil), parent...)
+	return withDoltAdaptiveEncodingMitigationEnv(parent)
 }

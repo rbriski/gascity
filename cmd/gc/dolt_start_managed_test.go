@@ -60,10 +60,26 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 }
 
 func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
-	parent := []string{"DOLT_GC_SCHEDULER="}
+	parent := []string{"DOLT_GC_SCHEDULER=", doltAdaptiveEncodingEnvKey + "=true"}
 	out := doltServerEnv(parent)
-	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
+	schedulerCount := 0
+	adaptiveCount := 0
+	for _, entry := range out {
+		switch entry {
+		case "DOLT_GC_SCHEDULER=":
+			schedulerCount++
+		case doltAdaptiveEncodingEnvKey + "=" + doltAdaptiveEncodingDisabledValue:
+			adaptiveCount++
+		case doltAdaptiveEncodingEnvKey + "=true":
+			t.Fatalf("adaptive encoding ambient true leaked into managed Dolt env: %v", out)
+		}
+	}
+	if schedulerCount != 1 {
 		t.Fatalf("explicit empty-value env not preserved: %v", out)
+	}
+	if adaptiveCount != 1 {
+		t.Fatalf("managed Dolt env should include exactly one %s=%s entry: %v",
+			doltAdaptiveEncodingEnvKey, doltAdaptiveEncodingDisabledValue, out)
 	}
 }
 

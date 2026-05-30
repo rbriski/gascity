@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/processenv"
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -1004,12 +1005,13 @@ func TestRunSanitizesAmbientLegacyAndStoreTargetEnv(t *testing.T) {
 	t.Setenv("GC_STORE_SCOPE", "city")
 	t.Setenv("GC_BEADS_PREFIX", "ambient")
 	t.Setenv("GC_PROVIDER", "ambient-provider")
+	t.Setenv(processenv.DoltAdaptiveEncodingEnvKey, "true")
 
 	script := writeScript(t, dir, `
 case "$1" in
   create)
-    printf 'BEADS_DIR=%s\nGC_DOLT_HOST=%s\nGC_STORE_ROOT=%s\nGC_STORE_SCOPE=%s\nGC_BEADS_PREFIX=%s\nGC_PROVIDER=%s\nGC_RIG=%s\nGC_RIG_ROOT=%s\n' \
-      "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_PROVIDER:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" > "`+outFile+`"
+    printf 'BEADS_DIR=%s\nGC_DOLT_HOST=%s\nDOLT_USE_ADAPTIVE_ENCODING=%s\nGC_STORE_ROOT=%s\nGC_STORE_SCOPE=%s\nGC_BEADS_PREFIX=%s\nGC_PROVIDER=%s\nGC_RIG=%s\nGC_RIG_ROOT=%s\n' \
+      "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${DOLT_USE_ADAPTIVE_ENCODING:-}" "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_PROVIDER:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" > "`+outFile+`"
     cat >/dev/null
     echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}'
     ;;
@@ -1038,6 +1040,7 @@ esac
 	for _, want := range []string{
 		"BEADS_DIR=\n",
 		"GC_DOLT_HOST=\n",
+		processenv.DoltAdaptiveEncodingEnvKey + "=" + processenv.DoltAdaptiveEncodingDisabledValue + "\n",
 		"GC_STORE_ROOT=/scope/root\n",
 		"GC_STORE_SCOPE=rig\n",
 		"GC_BEADS_PREFIX=fe\n",

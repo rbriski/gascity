@@ -20,6 +20,12 @@
 
 set -e
 
+# Temporary Dolt corruption mitigation for dolthub/dolt#11131. Force legacy
+# text/blob encoding for every managed dolt, dolt CLI, and bd process launched
+# through this bridge until upstream ships a fixed schema-change path.
+DOLT_USE_ADAPTIVE_ENCODING=false
+export DOLT_USE_ADAPTIVE_ENCODING
+
 # --- Configuration ---
 
 # DOLT_PORT is set after derived paths are resolved (see allocate_port below).

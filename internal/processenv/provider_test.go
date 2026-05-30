@@ -58,18 +58,19 @@ func TestProviderProcessPassthroughEnvIncludesProviderAndRuntimeBaseline(t *test
 	got := ProviderProcessPassthroughEnv()
 
 	for key, want := range map[string]string{
-		"HOME":                   homeDir,
-		"PATH":                   "/usr/local/bin:/usr/bin:/bin",
-		"LANG":                   "en_US.UTF-8",
-		"LC_ALL":                 "",
-		"LC_CTYPE":               "",
-		"XDG_CONFIG_HOME":        filepath.Join(homeDir, ".config"),
-		"XDG_STATE_HOME":         filepath.Join(homeDir, ".local", "state"),
-		"ANTHROPIC_AUTH_TOKEN":   "test-anthropic-token",
-		"OLLAMA_API_KEY":         "test-ollama-token",
-		"AWS_ACCESS_KEY_ID":      "test-aws-key",
-		"CLAUDECODE":             "",
-		"CLAUDE_CODE_ENTRYPOINT": "",
+		"HOME":                     homeDir,
+		"PATH":                     "/usr/local/bin:/usr/bin:/bin",
+		"LANG":                     "en_US.UTF-8",
+		"LC_ALL":                   "",
+		"LC_CTYPE":                 "",
+		"XDG_CONFIG_HOME":          filepath.Join(homeDir, ".config"),
+		"XDG_STATE_HOME":           filepath.Join(homeDir, ".local", "state"),
+		"ANTHROPIC_AUTH_TOKEN":     "test-anthropic-token",
+		"OLLAMA_API_KEY":           "test-ollama-token",
+		"AWS_ACCESS_KEY_ID":        "test-aws-key",
+		"CLAUDECODE":               "",
+		"CLAUDE_CODE_ENTRYPOINT":   "",
+		DoltAdaptiveEncodingEnvKey: DoltAdaptiveEncodingDisabledValue,
 	} {
 		if got[key] != want {
 			t.Errorf("ProviderProcessPassthroughEnv()[%s] = %q, want %q", key, got[key], want)
@@ -77,6 +78,34 @@ func TestProviderProcessPassthroughEnvIncludesProviderAndRuntimeBaseline(t *test
 	}
 	if _, ok := got["AWS_PAGER"]; ok {
 		t.Errorf("ProviderProcessPassthroughEnv()[AWS_PAGER] = %q, want absent", got["AWS_PAGER"])
+	}
+}
+
+func TestDoltAdaptiveEncodingMitigationOverridesAmbient(t *testing.T) {
+	t.Setenv(DoltAdaptiveEncodingEnvKey, "true")
+
+	got := ProviderProcessPassthroughEnv()
+	if got[DoltAdaptiveEncodingEnvKey] != DoltAdaptiveEncodingDisabledValue {
+		t.Fatalf("ProviderProcessPassthroughEnv()[%s] = %q, want %q",
+			DoltAdaptiveEncodingEnvKey, got[DoltAdaptiveEncodingEnvKey], DoltAdaptiveEncodingDisabledValue)
+	}
+
+	entries := WithDoltAdaptiveEncodingMitigation([]string{
+		"PATH=/bin",
+		DoltAdaptiveEncodingEnvKey + "=true",
+		"HOME=/tmp/gc",
+	})
+	seen := 0
+	for _, entry := range entries {
+		if entry == DoltAdaptiveEncodingEnvKey+"="+DoltAdaptiveEncodingDisabledValue {
+			seen++
+		}
+		if entry == DoltAdaptiveEncodingEnvKey+"=true" {
+			t.Fatalf("WithDoltAdaptiveEncodingMitigation leaked ambient true entry: %v", entries)
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("WithDoltAdaptiveEncodingMitigation emitted %d mitigation entries, want 1: %v", seen, entries)
 	}
 }
 

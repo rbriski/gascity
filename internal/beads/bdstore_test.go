@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/processenv"
 )
 
 // fakeRunner returns a CommandRunner that returns canned output for specific
@@ -2607,6 +2608,7 @@ func TestBdStoreDepListEmpty(t *testing.T) {
 func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	t.Setenv("GC_CITY_PATH", "/wrong")
 	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv(processenv.DoltAdaptiveEncodingEnvKey, "true")
 
 	dir := t.TempDir()
 	runner := beads.ExecCommandRunnerWithEnv(map[string]string{
@@ -2614,20 +2616,23 @@ func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 		"GC_DOLT_PORT": "31364",
 	})
 
-	out, err := runner(dir, "sh", "-c", `printf '%s\n%s\n' "$GC_CITY_PATH" "$GC_DOLT_PORT"`)
+	out, err := runner(dir, "sh", "-c", `printf '%s\n%s\n%s\n' "$GC_CITY_PATH" "$GC_DOLT_PORT" "$DOLT_USE_ADAPTIVE_ENCODING"`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("lines = %q, want 2 lines", string(out))
+	if len(lines) != 3 {
+		t.Fatalf("lines = %q, want 3 lines", string(out))
 	}
 	if lines[0] != "/city" {
 		t.Fatalf("GC_CITY_PATH = %q, want %q", lines[0], "/city")
 	}
 	if lines[1] != "31364" {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", lines[1], "31364")
+	}
+	if lines[2] != processenv.DoltAdaptiveEncodingDisabledValue {
+		t.Fatalf("%s = %q, want %q", processenv.DoltAdaptiveEncodingEnvKey, lines[2], processenv.DoltAdaptiveEncodingDisabledValue)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("runner should preserve working dir usability: %v", err)

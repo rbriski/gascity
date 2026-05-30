@@ -53,6 +53,17 @@ func mustSessionBackendEnv(t *testing.T, cityPath, rigRoot string, rigs []config
 	return env
 }
 
+func envEntriesMap(entries []string) map[string]string {
+	out := map[string]string{}
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 func requireErrorContains(t *testing.T, err error, want string) {
 	t.Helper()
 	if err == nil {
@@ -81,6 +92,24 @@ func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "GC_DOLT=") {
 			t.Fatalf("cityRuntimeProcessEnv leaked ambient GC_DOLT control var: %q", entry)
+		}
+	}
+}
+
+func TestDoltAdaptiveEncodingMitigationProjectedAcrossRuntimeEnvs(t *testing.T) {
+	t.Setenv(doltAdaptiveEncodingEnvKey, "true")
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	for name, env := range map[string]map[string]string{
+		"city runtime":    cityRuntimeEnvMapForCity(cityPath),
+		"bd runtime":      mustBdRuntimeEnv(t, cityPath),
+		"session backend": mustSessionBackendEnv(t, cityPath, "", nil),
+		"managed dolt":    envEntriesMap(doltServerEnv([]string{doltAdaptiveEncodingEnvKey + "=true", "PATH=/bin"})),
+		"process":         envEntriesMap(mustCityRuntimeProcessEnv(t, cityPath)),
+	} {
+		if got := env[doltAdaptiveEncodingEnvKey]; got != doltAdaptiveEncodingDisabledValue {
+			t.Fatalf("%s %s = %q, want %q", name, doltAdaptiveEncodingEnvKey, got, doltAdaptiveEncodingDisabledValue)
 		}
 	}
 }

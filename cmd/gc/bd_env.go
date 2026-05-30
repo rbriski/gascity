@@ -1059,7 +1059,9 @@ func isRecoverableManagedDoltEnvError(err error) bool {
 }
 
 func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
-	return citylayout.CityRuntimeEnvMapForRuntimeDir(cityPath, citylayout.TrustedAmbientCityRuntimeDir(cityPath))
+	env := citylayout.CityRuntimeEnvMapForRuntimeDir(cityPath, citylayout.TrustedAmbientCityRuntimeDir(cityPath))
+	applyDoltAdaptiveEncodingMitigationEnv(env)
+	return env
 }
 
 // cityIdentityAnchorsForCity returns only the three identity anchors
@@ -1173,6 +1175,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_POSTGRES_PASSWORD",
 		"BEADS_POSTGRES_PORT",
 		"BEADS_POSTGRES_USER",
+		doltAdaptiveEncodingEnvKey,
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
 		"GC_CITY_PATH",

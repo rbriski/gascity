@@ -52,6 +52,7 @@ func cityAnchoredSessionEnv(cityPath string, providerEnv map[string]string) map[
 	for k, v := range anchors {
 		out[k] = v
 	}
+	processenv.ApplyDoltAdaptiveEncodingMitigation(out)
 	return out
 }
 

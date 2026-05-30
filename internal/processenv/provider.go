@@ -10,6 +10,39 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
+const (
+	// DoltAdaptiveEncodingEnvKey is temporarily pinned off for all GC-managed
+	// Dolt and beads processes while dolthub/dolt#11131 is unresolved.
+	DoltAdaptiveEncodingEnvKey = "DOLT_USE_ADAPTIVE_ENCODING"
+	// DoltAdaptiveEncodingDisabledValue disables Dolt adaptive text/blob encoding.
+	DoltAdaptiveEncodingDisabledValue = "false"
+
+	doltAdaptiveEncodingEnvKeyWithEquals = DoltAdaptiveEncodingEnvKey + "="
+)
+
+// ApplyDoltAdaptiveEncodingMitigation pins Dolt's adaptive text/blob encoding
+// off in an env map. This prevents legacy TEXT rows from being reinterpreted
+// as adaptive values during metadata-only TEXT->LONGTEXT migrations.
+func ApplyDoltAdaptiveEncodingMitigation(env map[string]string) {
+	if env == nil {
+		return
+	}
+	env[DoltAdaptiveEncodingEnvKey] = DoltAdaptiveEncodingDisabledValue
+}
+
+// WithDoltAdaptiveEncodingMitigation returns environ with any inherited Dolt
+// adaptive-encoding setting replaced by the temporary safe value.
+func WithDoltAdaptiveEncodingMitigation(environ []string) []string {
+	out := make([]string, 0, len(environ)+1)
+	for _, entry := range environ {
+		if strings.HasPrefix(entry, doltAdaptiveEncodingEnvKeyWithEquals) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, doltAdaptiveEncodingEnvKeyWithEquals+DoltAdaptiveEncodingDisabledValue)
+}
+
 // providerCredentialEnvPrefixes lists provider-specific env-var name prefixes
 // whose values are treated as agent-provider credentials and forwarded into
 // the supervisor's persistent env and spawned agent processes.
@@ -157,5 +190,6 @@ func ProviderProcessPassthroughEnv() map[string]string {
 	}
 	m["CLAUDECODE"] = ""
 	m["CLAUDE_CODE_ENTRYPOINT"] = ""
+	ApplyDoltAdaptiveEncodingMitigation(m)
 	return m
 }

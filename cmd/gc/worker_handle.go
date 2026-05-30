@@ -288,6 +288,7 @@ func resolvedWorkerSessionConfigWithConfig(
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
+	applyDoltAdaptiveEncodingMitigationEnv(sessionEnv)
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
@@ -522,6 +523,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
 	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	applyDoltAdaptiveEncodingMitigationEnv(sessionEnv)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty

@@ -65,6 +65,15 @@ func TestPassthroughEnvPicksUpGCBeads(t *testing.T) {
 	}
 }
 
+func TestPassthroughEnvPinsDoltAdaptiveEncodingOff(t *testing.T) {
+	t.Setenv(doltAdaptiveEncodingEnvKey, "true")
+	got := passthroughEnv()
+	if got[doltAdaptiveEncodingEnvKey] != doltAdaptiveEncodingDisabledValue {
+		t.Fatalf("passthroughEnv()[%s] = %q, want %q",
+			doltAdaptiveEncodingEnvKey, got[doltAdaptiveEncodingEnvKey], doltAdaptiveEncodingDisabledValue)
+	}
+}
+
 func TestPassthroughEnvOmitsUnset(t *testing.T) {
 	t.Setenv("GC_DOLT", "")
 	got := passthroughEnv()

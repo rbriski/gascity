@@ -1291,7 +1291,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	switch provider {
 	case "file":
 		return openCompatibleFileStore(scopeRoot, runtimeCityPath)
-	case "coordstore", "sqlite-cgo":
+	case "sqlite", "sqlite-cgo":
 		return openCoordStoreAt(scopeRoot, runtimeCityPath)
 	case "hqstore":
 		return openHQStoreAt(scopeRoot, runtimeCityPath)

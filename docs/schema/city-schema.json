@@ -938,7 +938,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\n\"coordstore\" (SQLite-CGo, opt-in), or \"exec:\u003cscript\u003e\" for a\nuser-supplied script.",
+          "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\n\"sqlite\" (SQLite-CGo, opt-in; also accepts the \"sqlite-cgo\" alias),\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
           "default": "bd"
         }
       },

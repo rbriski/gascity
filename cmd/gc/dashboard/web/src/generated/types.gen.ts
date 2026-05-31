@@ -756,7 +756,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2612,6 +2612,13 @@ export type SessionRenameInputBody = {
     title: string;
 };
 
+export type SessionResetStalledPayload = {
+    elapsed_s: number;
+    reset_committed_at: string;
+    session_name: string;
+    template: string;
+};
+
 export type SessionRespondInputBody = {
     /**
      * Response action (e.g. allow, deny).
@@ -3350,6 +3357,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
+    type: 'session.reset_stalled';
+} & TypedEventStreamEnvelopeSessionResetStalled) | ({
     type: 'session.stopped';
 } & TypedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
@@ -4032,6 +4041,20 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.reset_stalled
+ */
+export type TypedEventStreamEnvelopeSessionResetStalled = {
+    actor: string;
+    message?: string;
+    payload: SessionResetStalledPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.reset_stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.stopped
  */
 export type TypedEventStreamEnvelopeSessionStopped = {
@@ -4269,6 +4292,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
+    type: 'session.reset_stalled';
+} & TypedTaggedEventStreamEnvelopeSessionResetStalled) | ({
     type: 'session.stopped';
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
@@ -4994,6 +5019,21 @@ export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
     subject?: string;
     ts: string;
     type: 'session.quarantined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.reset_stalled
+ */
+export type TypedTaggedEventStreamEnvelopeSessionResetStalled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionResetStalledPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.reset_stalled';
     workflow?: WorkflowEventProjection;
 };
 

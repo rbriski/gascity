@@ -46,6 +46,11 @@ const SourceStoreRefMetadataKey = "gc.source_store_ref"
 // strict stores that require a human-readable close reason accept the cleanup.
 const WorkflowSubtreeClosedReason = "source workflow cleanup: subtree force-closed by CloseWorkflowSubtree"
 
+// WorkflowGeneratedSpecClosedReason is stamped on generated spec beads that
+// remain open after their workflow root closes. Generated specs are topology
+// bookkeeping, not user work; leaving them open after root closure leaks wisps.
+const WorkflowGeneratedSpecClosedReason = "source workflow cleanup: generated spec bead closed after root closure"
+
 // WorkflowSkippedCloseReason is the canonical close_reason stamped on
 // workflow-subtree beads when they are force-closed via the
 // gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
@@ -358,11 +363,12 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	if store == nil || rootID == "" {
 		return nil, nil
 	}
-	root, err := store.Get(rootID)
+	reader := beads.HandlesFor(store).Live
+	root, err := reader.Get(rootID)
 	if err != nil {
 		return nil, err
 	}
-	descendants, err := store.List(beads.ListQuery{
+	descendants, err := reader.List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			"gc.root_bead_id": rootID,
@@ -453,6 +459,36 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	return store.CloseAll(ordered, map[string]string{
 		"gc.outcome":   "skipped",
 		"close_reason": WorkflowSubtreeClosedReason,
+	})
+}
+
+// CloseWorkflowGeneratedSpecs closes open generated spec beads owned by a
+// workflow root without closing ordinary workflow work beads.
+func CloseWorkflowGeneratedSpecs(store beads.Store, rootID string) (int, error) {
+	matched, err := ListWorkflowBeads(store, rootID)
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]string, 0, len(matched))
+	for _, bead := range matched {
+		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(bead.Metadata["gc.kind"]), "spec") {
+			continue
+		}
+		ids = append(ids, bead.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, err
+	}
+	return store.CloseAll(ordered, map[string]string{
+		"gc.outcome":   "pass",
+		"close_reason": WorkflowGeneratedSpecClosedReason,
 	})
 }
 

@@ -137,6 +137,33 @@ check and the stale order-wisp sweep now both traverse graph-v2 dependents
 linked by `tracks` and `blocks`, not only legacy `parent-child` descendants,
 which matches the live patrol molecules.
 
+The manual order-tracking sweep now has a dry-run mode and a faster graph-v2
+batch path. Explicit order-name sweeps open only the matching city/rig stores
+instead of every configured scope. With `--include-wisps`, the sweep first uses
+`gc.root_bead_id` metadata to collect graph descendants in one open-wisp scan
+and then closes the stale subtree with `CloseAll`, avoiding slow per-edge
+dependency ordering for graph-v2 roots whose ownership metadata is complete.
+If a scoped stale candidate lacks root metadata, the sweep falls back to the
+graph walker so mixed stores with both metadata-complete and legacy graph-only
+wisps are not skipped.
+`BdStore.CloseAll` also now writes shared close metadata for multi-ID batches
+with one `bd update --json <ids...> --set-metadata ...` call before closing,
+instead of issuing one metadata update per bead.
+
+Live `ga` inspection after the order cleanup found the next raw-count leak:
+generated `spec` wisps under workflow roots that had already closed. Normal
+explicit workflow cleanup (`sourceworkflow.CloseWorkflowSubtree`) already
+closed `gc.root_bead_id` descendants, but the bd on-close hook only cleaned
+explicit attachments and did not close generated spec bookkeeping when a
+workflow root completed normally. `wisp autoclose` now closes open generated
+spec beads owned by a closed workflow root via
+`sourceworkflow.CloseWorkflowGeneratedSpecs`; the helper reads workflow
+descendants through the live handle so no-history/wisp-backed rows are visible.
+The bead-policy storage wrapper now forwards the underlying store's cached/live
+handles, and the autoclose resolver uses an explicit
+`GC_CITY`/`GC_CITY_PATH` for external rig runtimes that have a legacy `.gc`
+directory but no `city.toml`.
+
 `TestPlainIdleOpenBeadCountsStayBounded` and
 `TestGastownIdleOpenBeadCountsStayBounded` now run in Tier B nightly
 acceptance. `.github/workflows/nightly.yml` schedules the Tier B job daily at
@@ -215,13 +242,13 @@ still refuses to create arbitrary paths from a malformed error message.
 
 | Path | Beads opened | Bookkeeping owner |
 | --- | --- | --- |
-| `internal/molecule/graph_apply.go` graph workflow instantiation | Wisp root plus logical/step wisps. Non-root graph steps are linked to the root with `tracks`; explicit ordering uses `blocks`; legacy containment uses `parent-child`. | Normal workflow execution closes runnable steps. `molecule.CloseSubtree` closes owned descendants during explicit cleanup. `reaper.sh` now closes stale step leftovers when all reaper-owned dependency targets are closed, and closes stale inactive workflow roots only when root-specific dependency/dependent guards prove there is no live graph pressure. |
+| `internal/molecule/graph_apply.go` graph workflow instantiation | Wisp root plus logical/step wisps. Non-root graph steps are linked to the root with `tracks`; explicit ordering uses `blocks`; legacy containment uses `parent-child`. Retry/ralph/fanout helpers can also create generated `spec` wisps with `gc.root_bead_id` ownership metadata. | Normal workflow execution closes runnable steps. `molecule.CloseSubtree` and `sourceworkflow.CloseWorkflowSubtree` close owned descendants during explicit cleanup. `wisp autoclose` now closes generated spec bookkeeping when the workflow root itself closes, and `reaper.sh` closes stale step leftovers when all reaper-owned dependency targets are closed. Stale inactive workflow roots close only when root-specific dependency/dependent guards prove there is no live graph pressure. |
 | `cmd/gc/order_dispatch.go` order dispatch | Ephemeral order-tracking bead labeled `gc:order-tracking`; wisp orders also create a molecule/wisp root via `molecule.Instantiate`. | `dispatchOne` defers `closeOrderTrackingBead`. Cooldown last-run checks use tracking history, but the final due-dispatch gate now still performs the strict open-wisp descendant check so closed tracking history cannot mask unprocessed order work. That descendant walk includes graph-v2 `tracks`/`blocks` dependents as well as parent-child descendants. Wisp roots are intentionally not auto-closed solely because descendants finish; the reaper handles stale roots/steps only when dependency evidence proves closure is safe. |
 | `cmd/gc/dispatch_runtime.go` control-dispatcher serve loop | Graph-v2 control beads such as `check`, `drain`, `fanout`, `retry`, `retry-eval`, `scope-check`, and `workflow-finalize` drive workflow progression and may appear in the controller work query. | Routed control work now always reaches `runControlDispatcherWithStoreAndConfig`. Unsupported or misrouted kinds are quarantined with explicit `gc.control_quarantined` metadata; legacy oversized attempt-log failures return a visible serve error instead of masquerading as idle. |
 | Graph-v2 helper paths in `internal/graphv2/invocation.go`, `internal/dispatch/drain.go`, `internal/dispatch/retry.go`, and `internal/dispatch/ralph.go` | Synthetic input convoys, drain-unit convoys, retry attempt/eval beads, and cloned ralph retry/check beads. | Control dispatch owns normal progression and terminal metadata. The synthetic convoys are linked with `tracks` so convoy close/check paths can close completed units; retry and ralph clones remain graph-owned work and fall under graph-v2 finalization plus stale dependency-edge cleanup if stranded. |
 | `examples/gastown/packs/gastown/formulas/mol-deacon-patrol.toml` patrol loop | One root-only deacon patrol wisp per cycle. Each cycle pours the next patrol wisp and assigns it to the same deacon session. | Version 15 burns the current patrol wisp before the backoff sleep, then re-enters `gc hook` after sleeping. This keeps at most the successor wisp open across the backoff window. |
 | Graph-v2 routing decorators in `internal/graphroute/graphroute.go` and `cmd/gc/cmd_sling.go` | Workflow roots plus routed child steps. `gc.run_target` remains a formula-authoring hint; `gc.routed_to` is the persisted claim key. | Patched roots now persist `gc.routed_to` so the runtime claim path can see them. Existing roots can be backfilled by `gc doctor --fix` through `run-target-routed-to-backfill`. |
-| `cmd/gc/bead_policy_store.go` storage policy wrapper | Applies default ephemeral storage to wisp/order-tracking policies and no-history storage to session/wait/nudge policies. | Policy only selects storage tier; lifecycle is owned by the creating subsystem and maintenance scripts. |
+| `cmd/gc/bead_policy_store.go` storage policy wrapper | Applies default ephemeral storage to wisp/order-tracking policies and no-history storage to session/wait/nudge policies. | Policy only selects storage tier; lifecycle is owned by the creating subsystem and maintenance scripts. The wrapper forwards underlying cached/live handles so lifecycle code that asks for live reads is not downgraded to cache-backed reads. |
 | Session pool creation in `cmd/gc/build_desired_state.go` and lifecycle paths | Session beads, including generic ephemeral session beads for managed pools. | Session lifecycle/reconciler close or retire sessions. `reaper.sh` prunes closed `gm-*` session beads through `bd prune` and prunes terminal drained session states through `gc session prune`; orphan-sweep preserves live ephemeral session assignees. |
 | `cmd/gc/cmd_wait.go` and `cmd/gc/nudge_beads.go` session wait/nudge queue | Wait beads labeled `gc:wait`; queued nudge beads labeled `gc:nudge`, including wait-delivery nudges. | Waits close through ready delivery, cancel, expire, or failure paths. Nudge dispatch marks terminal state and closes through `markQueuedNudgeTerminal`; session-close and wait-cancel paths withdraw queued wait nudges. |
 | `internal/mail/beadmail` mail provider | Ephemeral message beads for sends and replies. | Mail is user/controller work, not stale non-message workflow debris. Reaper excludes messages from the non-message leak alert and tracks mail backlog through the separate mail-wisp threshold. |
@@ -243,10 +270,10 @@ session aliases already covered by the session row (`adoption_barrier`,
 | `examples/gastown/packs/maintenance/assets/scripts/reaper.sh` | Close stale non-closed wisps with closed dependency targets; close isolated generated step-spec debris; close stale inactive workflow roots with no live dependency pressure; purge old closed wisps; auto-close stale city issues; prune closed `gm-*` session beads; prune terminal drained session-state beads; escalate only stale non-message open-wisp backlog. | Patched for `parent-child`/`tracks`/`blocks` closure and purge protection through `wisp_dependencies`, plus a narrow unassigned `Step spec for ...` no-edge cleanup, guarded workflow-root cleanup, a `gc session prune --state drained` pass for legacy drained-asleep session rows, and a stale-only alert query so fresh workflow load is not reported as a reaper leak. |
 | `examples/gastown/packs/maintenance/assets/scripts/wisp-compact.sh` | Promote old non-closed ephemeral beads for stuck detection and delete expired closed wisps. | Still separate from the safe-close decision. It must not become an age-only closer. |
 | `internal/molecule/cleanup.go` | Close molecule subtrees by ownership metadata and parent-child descendants. | Handles explicit teardown, not abandoned workflow drift. |
-| `cmd/gc/wisp_gc.go` / `wisp autoclose` | Close attached workflow roots and owned workflow beads from CLI-driven cleanup. Purge expired closed wisps, order-tracking beads, and closed graph-v2 workflow-root closures. | Patched to include workflow-root closure GC through indexed metadata queries guarded by `sourceworkflow.IsWorkflowRoot`. |
+| `cmd/gc/wisp_gc.go` / `wisp autoclose` | Close attached workflow roots and owned workflow beads from CLI-driven cleanup. Purge expired closed wisps, order-tracking beads, and closed graph-v2 workflow-root closures. | Patched to include workflow-root closure GC through indexed metadata queries guarded by `sourceworkflow.IsWorkflowRoot`. The on-close hook also closes generated spec beads owned by a closed workflow root, using live/TierBoth reads so no-history graph rows are visible. |
 | `cmd/gc/dispatch_runtime.go` / `cmd/gc/cmd_convoy_dispatch.go` | Drain and execute graph-v2 control beads claimed by the control dispatcher. | The serve loop no longer pre-skips unexpected `gc.kind` values or suppresses legacy oversized attempt-log errors. Unexpected queued beads flow into the existing hard-error quarantine path, and oversized attempt-log errors stop the command with a named cause. |
 | `cmd/gc/order_dispatch.go` | Close order-tracking beads after dispatch attempt completion and prevent duplicate formula-order dispatch while prior order wisps are still open. | Existing defer is the primary owner; stale tracking-bead bugs should be treated as order-dispatch defects. The final due-dispatch open-work gate now bypasses the tracking-index shortcut and checks open order wisp descendants, including graph-v2 dependents, before creating another tracking bead. |
-| `cmd/gc/cmd_order.go` / `cmd/gc/order_dispatch.go` order-tracking sweeps | Close orphaned or stale `gc:order-tracking` beads and stale order wisp subtrees. | Runs from the built-in `order-tracking-sweep` order and manual `gc order tracking sweep`; close reasons are stamped before close so stale/order-orphan cleanup is observable. `--include-wisps` now collects graph-v2 `tracks`/`blocks` dependents in the stale order subtree, not only parent-child descendants. |
+| `cmd/gc/cmd_order.go` / `cmd/gc/order_dispatch.go` order-tracking sweeps | Close orphaned or stale `gc:order-tracking` beads and stale order wisp subtrees. | Runs from the built-in `order-tracking-sweep` order and manual `gc order sweep-tracking`; close reasons are stamped before close so stale/order-orphan cleanup is observable. `--dry-run` previews both tracking beads and stale order wisp subtrees. `--include-wisps` now uses graph-v2 root metadata for batch subtree collection when possible and falls back to `tracks`/`blocks`/`parent-child` traversal for legacy shapes. |
 | `cmd/gc/cmd_wait.go`, `cmd/gc/cmd_nudge.go`, and `internal/session/waits.go` | Close terminal wait beads and queued nudge beads. | Wait set/cancel/delivery/expiry paths call `setWaitTerminalState` and close the wait bead. Nudge terminal paths stamp `terminal_reason`, `commit_boundary`, and `terminal_at` before close; session close cancels outstanding waits. |
 | `cmd/gc/cmd_mail.go` / `internal/mail/beadmail` auto-handoff injection cleanup | Archive system auto-handoff mail after it has been injected into the next provider hook context; provide an explicit all-recipient filtered archive path for legacy system-mail cleanup. | The inject path deliberately bypasses the supervisor API so the local provider can perform the archive side effect. The beadmail provider checks both system labels before deleting; ordinary injected mail still stays open. Filtered archive now requires either `--to` or `--all-recipients`, still requires a subject/from content filter, stays bounded by `--limit`, and can require an empty body before deleting legacy system mail. |
 | `internal/extmsg/binding_service.go`, `internal/extmsg/group_service.go`, and `internal/extmsg/transcript_service.go` | Close superseded external-message bindings, memberships, and participants. | Projection cleanup is domain-specific: old bindings close on replacement/unbind, memberships close on leave, and group participants close on removal. Transcript entries and transcript state are retained projection history and need explicit retention policy if they ever become a growth source. |
@@ -336,6 +363,37 @@ session aliases already covered by the session row (`adoption_barrier`,
   passed after the dispatcher fix, including the existing
   `TestOrderDispatchCooldownUsesTrackingIndexWithoutOrderRunScans` guard that
   keeps not-due cooldown checks on the indexed tracking-history path.
+- `go test ./cmd/gc -run 'TestSweepStaleOrderTrackingDryRun(CountsGraphSubtreeWithoutClosing|SkipsCloseOrdering|UsesRootMetadataDescendants)$' -count=1`
+  failed before the dry-run and graph-metadata sweep paths because preview mode
+  did not exist, close-order validation still ran in dry-run, and metadata-only
+  graph descendants were invisible. It passed after dry-run counted candidates
+  without mutating and graph-v2 root metadata became the fast descendant path.
+- `go test ./cmd/gc -run 'TestSweepStaleOrderTrackingWithWisps(ClosesMetadataGraphSubtreeWithoutCloseOrdering|ClosesGraphDependentSubtree|ClosesOldOpenWispSubtree|PropagatesCloseOrderError)$' -count=1`
+  passed for stale order wisp cleanup across metadata-owned graph roots,
+  legacy graph dependents, old parent-child shapes, and close-order failure
+  propagation.
+- `go test ./cmd/gc -run 'TestCmdOrderSweepTracking(TargetedCityOrderSkipsUnrelatedRigStore|DryRunReportsWithoutClosing)$' -count=1`
+  failed before targeted sweeps skipped unrelated stores and the CLI exposed a
+  dry-run flag; it passed after explicit order names constrained the opened
+  stores and dry-run reported candidates without closing them.
+- `go test ./internal/beads -run 'TestBdStoreCloseAll(WritesSharedMetadataInSingleBatch|ReturnsMetadataWriteFailure|ForwardsCloseReason)$' -count=1`
+  failed before multi-ID close metadata used a single `bd update --json`
+  command, then passed after `BdStore.CloseAll` batched shared metadata while
+  preserving existing close-reason behavior.
+- `go test ./internal/sourceworkflow -run 'Test(ListWorkflowBeadsQueriesBothTiersForRootOwnedDescendants|CloseWorkflowGeneratedSpecsClosesOnlyOpenSpecs|CloseWorkflowSubtree)' -count=1`
+  failed before workflow-owned descendant listing used live/TierBoth reads and
+  before generated-spec closure existed. It passed after closed workflow roots
+  could close only open generated `spec` descendants while leaving ordinary
+  workflow work untouched.
+- `go test ./cmd/gc -run 'TestWispAutoclose(ReadsClosedWorkflowRootFromLiveHandle|ClosesGeneratedSpecsForClosedWorkflowRoot|SkipsGeneratedSpecsForClosedWorkflowChild)' -count=1`
+  failed before the hook used live handles through the bead-policy wrapper and
+  before closed workflow roots closed generated specs. It passed after
+  `beadPolicyStore` preserved handles and the hook limited generated-spec
+  cleanup to closed workflow roots.
+- `go test ./cmd/gc -run 'TestAutocloseCityPathForStoreRoot(UsesExplicitCityForExternalRigRuntime|PrefersStoreRootCityOverInheritedGCCity)' -count=1`
+  failed before external rig runtimes with a legacy `.gc` directory used the
+  explicit city path. It now passes while preserving the existing invariant
+  that a real store-root city with `city.toml` wins over ambient `GC_CITY`.
 - `go test ./cmd/gc -run 'Test(MailCheckInjectArchivesAutoHandoffMessages|MailCheckInjectLeavesTruncatedAutoHandoffMessages|RouteMailCheckInjectUsesLocalPathForArchiveSideEffects|CmdHandoffAutoSendsMailWithoutBlocking)$' -count=1`
   failed before the auto-handoff mail cleanup patch because injected
   `context cycle` messages stayed open and the routed inject path used the API;
@@ -496,6 +554,35 @@ session aliases already covered by the session row (`adoption_barrier`,
   order-tracking history bypass and graph-dependent traversal gap fixed in
   `cmd/gc/order_dispatch.go`; the live city still needs the branch binary
   deployed before these scheduled patrol duplicates stop recurring.
+- Branch binary order-sweep cleanup on 2026-06-01T16:00Z used an isolated
+  `GC_HOME` import cache and the live `/data/projects/maintainer-city` Dolt
+  server. Dry-run first reported
+  `would close 0 stale order-tracking bead(s), 569 stale order wisp bead(s)`
+  for `seth-patrol` and `wendy-patrol`; the live sweep closed all `569`
+  stamped stale order wisps after the batched `BdStore.CloseAll` metadata fix.
+  A later fresh dry-run at 2026-06-01T16:49Z found another 10 candidates as
+  active patrol work crossed the 2h stale cutoff; the live sweep closed `29`
+  stale order wisps, and the follow-up dry-run reported
+  `would close 0 stale order-tracking bead(s), 0 stale order wisp bead(s)`.
+  After the mixed metadata/legacy graph fallback was added, a final 2026-06-01T17:12Z
+  dry-run found `78` additional legacy graph-only candidates; the live sweep
+  closed those `78`, and the follow-up dry-run again reported
+  `would close 0 stale order-tracking bead(s), 0 stale order wisp bead(s)`.
+  Post-cleanup `mc` raw open wisps were below threshold (`mc=140` at
+  2026-06-01T17:12Z).
+- Live `ga` generated-spec cleanup on 2026-06-01T16:52Z closed `429` open
+  generated `spec` wisps whose `gc.root_bead_id` pointed to already-closed
+  workflow roots. The branch hook path was used after fixing live-handle
+  preservation through `beadPolicyStore` and explicit city resolution for the
+  external `gascity` rig. Post-cleanup raw counts were `ga=223`, `mc=140`,
+  and `gt=0`; the only remaining open `ga` generated specs were under live
+  workflow roots (`ga-6kh94ch` and `ga-7lf5wic` open, `ga-6bfy5ux`,
+  `ga-m1fp0sw`, and `ga-xegqn10` in progress).
+- Branch reaper dry-run after the order and generated-spec live cleanups
+  reported `stale_wisps:65`, `mail_wisps:93`, and `would_close_wisps:0`
+  with no mutation. This satisfies the literal raw `<500` evidence for the
+  current `ga-k5ds4` acceptance check in the live `ga`, `mc`, and Gastown
+  (`gt`) stores as of 2026-06-01T17:12Z.
 - Dolt compaction remains blocked for `mc` by
   `/data/projects/maintainer-city/.gc/runtime/packs/dolt/compact-quarantine/mc`
   (`post-flatten value hash changed without row-count increase`,

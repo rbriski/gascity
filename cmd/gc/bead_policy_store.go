@@ -62,6 +62,15 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 	}
 }
 
+func (s *beadPolicyStore) Handles() beads.StoreHandles {
+	if s == nil || s.Store == nil {
+		return beads.StoreHandles{}
+	}
+	handles := beads.HandlesFor(s.Store)
+	handles.Writer = s
+	return handles
+}
+
 func (s *beadPolicyStore) IDPrefix() string {
 	if s == nil {
 		return ""

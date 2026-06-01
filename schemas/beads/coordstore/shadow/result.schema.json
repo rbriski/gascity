@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc beads coordstore shadow --json result",
+  "description": "One JSONL record summarizing parity between the bd source and SQLite-CGo coordstore target.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "source_count",
+    "target_count",
+    "filtered_source",
+    "filtered_target"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ok": {
+      "const": true
+    },
+    "source_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "target_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "filtered_source": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "filtered_target": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "missing": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extra": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "corrupted": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

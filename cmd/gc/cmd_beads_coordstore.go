@@ -18,6 +18,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	coordstoreDefaultRetentionPeriod        = 4 * time.Hour
+	coordstoreDefaultRetentionSweepInterval = 30 * time.Second
+)
+
 func newBeadsCoordstoreCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "coordstore",
@@ -34,12 +39,14 @@ func newBeadsCoordstoreCmd(stdout, stderr io.Writer) *cobra.Command {
 func newBeadsCoordstoreImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	var cityPath string
 	var dryRun bool
+	var full bool
+	var retention time.Duration
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Import city beads from Dolt/bd into SQLite-CGo coordstore",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doBeadsCoordstoreImport(cityPath, dryRun, stdout, stderr) != 0 {
+			if doBeadsCoordstoreImport(cityPath, dryRun, full, retention, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -47,18 +54,22 @@ func newBeadsCoordstoreImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&cityPath, "city", "", "city root (default: resolve from cwd)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "count records without writing coordstore")
+	cmd.Flags().BoolVar(&full, "full", false, "include terminal beads older than retention")
+	cmd.Flags().DurationVar(&retention, "retention", coordstoreDefaultRetentionPeriod, "terminal bead retention horizon")
 	return cmd
 }
 
 func newBeadsCoordstoreShadowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var cityPath string
 	var jsonOut bool
+	var full bool
+	var retention time.Duration
 	cmd := &cobra.Command{
 		Use:   "shadow",
 		Short: "Diff Dolt/bd against SQLite-CGo coordstore",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doBeadsCoordstoreShadow(cityPath, jsonOut, stdout, stderr) != 0 {
+			if doBeadsCoordstoreShadow(cityPath, jsonOut, full, retention, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -66,11 +77,14 @@ func newBeadsCoordstoreShadowCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&cityPath, "city", "", "city root (default: resolve from cwd)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
+	cmd.Flags().BoolVar(&full, "full", false, "include terminal beads older than retention")
+	cmd.Flags().DurationVar(&retention, "retention", coordstoreDefaultRetentionPeriod, "terminal bead retention horizon")
 	return cmd
 }
 
 type coordstoreImportSummary struct {
 	SourceCount int  `json:"source_count"`
+	Filtered    int  `json:"filtered"`
 	Imported    int  `json:"imported"`
 	Skipped     int  `json:"skipped"`
 	Deps        int  `json:"deps"`
@@ -78,16 +92,30 @@ type coordstoreImportSummary struct {
 }
 
 type coordstoreShadowSummary struct {
-	SourceCount int      `json:"source_count"`
-	TargetCount int      `json:"target_count"`
-	Missing     []string `json:"missing,omitempty"`
-	Extra       []string `json:"extra,omitempty"`
-	Corrupted   []string `json:"corrupted,omitempty"`
-	OK          bool     `json:"ok"`
+	SchemaVersion  string   `json:"schema_version"`
+	SourceCount    int      `json:"source_count"`
+	TargetCount    int      `json:"target_count"`
+	FilteredSource int      `json:"filtered_source"`
+	FilteredTarget int      `json:"filtered_target"`
+	Missing        []string `json:"missing,omitempty"`
+	Extra          []string `json:"extra,omitempty"`
+	Corrupted      []string `json:"corrupted,omitempty"`
+	OK             bool     `json:"ok"`
 }
 
-func doBeadsCoordstoreImport(cityFlag string, dryRun bool, stdout, stderr io.Writer) int {
+type coordstoreRetentionOptions struct {
+	Full      bool
+	Retention time.Duration
+	Now       time.Time
+}
+
+func doBeadsCoordstoreImport(cityFlag string, dryRun, full bool, retention time.Duration, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCoordstoreCity(cityFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads coordstore import: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	retentionOpts, err := newCoordstoreRetentionOptions(full, retention)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads coordstore import: %v\n", err) //nolint:errcheck
 		return 1
@@ -99,24 +127,30 @@ func doBeadsCoordstoreImport(cityFlag string, dryRun bool, stdout, stderr io.Wri
 	}
 	var dst beads.Store
 	if !dryRun {
-		dst, err = openCoordStoreAt(cityPath, cityPath)
+		period, sweep := retentionOpts.sqliteRetention()
+		dst, err = openCoordStoreAtWithRetention(cityPath, cityPath, period, sweep)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc beads coordstore import: open coordstore target: %v\n", err) //nolint:errcheck
 			return 1
 		}
 	}
-	summary, err := copyBeadsIntoCoordstore(src, dst, dryRun)
+	summary, err := copyBeadsIntoCoordstore(src, dst, dryRun, retentionOpts)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads coordstore import: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	_, _ = fmt.Fprintf(stdout, "coordstore import: source=%d imported=%d skipped=%d deps=%d dry_run=%t\n",
-		summary.SourceCount, summary.Imported, summary.Skipped, summary.Deps, summary.DryRun)
+	_, _ = fmt.Fprintf(stdout, "coordstore import: source=%d filtered=%d imported=%d skipped=%d deps=%d dry_run=%t\n",
+		summary.SourceCount, summary.Filtered, summary.Imported, summary.Skipped, summary.Deps, summary.DryRun)
 	return 0
 }
 
-func doBeadsCoordstoreShadow(cityFlag string, jsonOut bool, stdout, stderr io.Writer) int {
+func doBeadsCoordstoreShadow(cityFlag string, jsonOut, full bool, retention time.Duration, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCoordstoreCity(cityFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads coordstore shadow: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	retentionOpts, err := newCoordstoreRetentionOptions(full, retention)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads coordstore shadow: %v\n", err) //nolint:errcheck
 		return 1
@@ -126,12 +160,13 @@ func doBeadsCoordstoreShadow(cityFlag string, jsonOut bool, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "gc beads coordstore shadow: open bd source: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	dst, err := openCoordStoreAt(cityPath, cityPath)
+	period, sweep := retentionOpts.sqliteRetention()
+	dst, err := openCoordStoreAtWithRetention(cityPath, cityPath, period, sweep)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads coordstore shadow: open coordstore target: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	summary, err := diffCoordstoreShadow(src, dst)
+	summary, err := diffCoordstoreShadow(src, dst, retentionOpts)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads coordstore shadow: %v\n", err) //nolint:errcheck
 		return 1
@@ -142,8 +177,8 @@ func doBeadsCoordstoreShadow(cityFlag string, jsonOut bool, stdout, stderr io.Wr
 			return 1
 		}
 	} else {
-		_, _ = fmt.Fprintf(stdout, "coordstore shadow: source=%d target=%d missing=%d extra=%d corrupted=%d ok=%t\n",
-			summary.SourceCount, summary.TargetCount, len(summary.Missing), len(summary.Extra), len(summary.Corrupted), summary.OK)
+		_, _ = fmt.Fprintf(stdout, "coordstore shadow: source=%d target=%d filtered_source=%d filtered_target=%d missing=%d extra=%d corrupted=%d ok=%t\n",
+			summary.SourceCount, summary.TargetCount, summary.FilteredSource, summary.FilteredTarget, len(summary.Missing), len(summary.Extra), len(summary.Corrupted), summary.OK)
 	}
 	if !summary.OK {
 		return 1
@@ -158,17 +193,30 @@ func resolveCoordstoreCity(cityFlag string) (string, error) {
 	return resolveCity()
 }
 
-func copyBeadsIntoCoordstore(src, dst beads.Store, dryRun bool) (coordstoreImportSummary, error) {
-	source, err := src.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth, Sort: beads.SortCreatedAsc})
+func newCoordstoreRetentionOptions(full bool, retention time.Duration) (coordstoreRetentionOptions, error) {
+	if full {
+		return coordstoreRetentionOptions{Full: true}, nil
+	}
+	if retention <= 0 {
+		return coordstoreRetentionOptions{}, fmt.Errorf("retention must be positive unless --full is set")
+	}
+	return coordstoreRetentionOptions{Retention: retention}, nil
+}
+
+func (o coordstoreRetentionOptions) sqliteRetention() (time.Duration, time.Duration) {
+	if o.Full {
+		return 0, 0
+	}
+	return o.Retention, coordstoreDefaultRetentionSweepInterval
+}
+
+func copyBeadsIntoCoordstore(src, dst beads.Store, dryRun bool, retention coordstoreRetentionOptions) (coordstoreImportSummary, error) {
+	source, err := loadCoordstoreSnapshot(src, retention, beads.SortCreatedAsc)
 	if err != nil {
 		return coordstoreImportSummary{}, fmt.Errorf("list source beads: %w", err)
 	}
-	sourceIDs := make(map[string]bool, len(source))
-	for _, b := range source {
-		sourceIDs[b.ID] = true
-	}
-	summary := coordstoreImportSummary{SourceCount: len(source), DryRun: dryRun}
-	for _, b := range source {
+	summary := coordstoreImportSummary{SourceCount: len(source.Beads), Filtered: source.Filtered, DryRun: dryRun}
+	for _, b := range source.Beads {
 		if !dryRun {
 			if dst == nil {
 				return summary, fmt.Errorf("coordstore target is required")
@@ -184,15 +232,9 @@ func copyBeadsIntoCoordstore(src, dst beads.Store, dryRun bool) (coordstoreImpor
 				summary.Imported++
 			}
 		}
-		deps, err := src.DepList(b.ID, "down")
-		if err != nil {
-			return summary, fmt.Errorf("list deps for %q: %w", b.ID, err)
-		}
-		for _, dep := range deps {
-			if dep.Type == "" {
-				dep.Type = "blocks"
-			}
-			if !sourceIDs[dep.DependsOnID] {
+		for _, dep := range source.Deps[b.ID] {
+			dep = normalizeCoordstoreDep(dep)
+			if !source.IDs[dep.IssueID] || !source.IDs[dep.DependsOnID] {
 				continue
 			}
 			if !dryRun {
@@ -206,31 +248,25 @@ func copyBeadsIntoCoordstore(src, dst beads.Store, dryRun bool) (coordstoreImpor
 	return summary, nil
 }
 
-func diffCoordstoreShadow(src, dst beads.Store) (coordstoreShadowSummary, error) {
-	source, err := src.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+func diffCoordstoreShadow(src, dst beads.Store, retention coordstoreRetentionOptions) (coordstoreShadowSummary, error) {
+	source, err := loadCoordstoreSnapshot(src, retention, beads.SortDefault)
 	if err != nil {
 		return coordstoreShadowSummary{}, fmt.Errorf("list source beads: %w", err)
 	}
-	target, err := dst.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	target, err := loadCoordstoreSnapshot(dst, retention, beads.SortDefault)
 	if err != nil {
 		return coordstoreShadowSummary{}, fmt.Errorf("list target beads: %w", err)
 	}
-	sourceByID := make(map[string]beads.Bead, len(source))
-	for _, b := range source {
-		sourceByID[b.ID] = b
+	summary := coordstoreShadowSummary{
+		SchemaVersion:  "1",
+		SourceCount:    len(source.Beads),
+		TargetCount:    len(target.Beads),
+		FilteredSource: source.Filtered,
+		FilteredTarget: target.Filtered,
 	}
-	sourceIDs := make(map[string]bool, len(sourceByID))
-	for id := range sourceByID {
-		sourceIDs[id] = true
-	}
-	targetByID := make(map[string]beads.Bead, len(target))
-	for _, b := range target {
-		targetByID[b.ID] = b
-	}
-	summary := coordstoreShadowSummary{SourceCount: len(source), TargetCount: len(target)}
 	corrupted := make(map[string]bool)
-	for id, sbead := range sourceByID {
-		tbead, ok := targetByID[id]
+	for id, sbead := range source.ByID {
+		tbead, ok := target.ByID[id]
 		if !ok {
 			summary.Missing = append(summary.Missing, id)
 			continue
@@ -238,20 +274,14 @@ func diffCoordstoreShadow(src, dst beads.Store) (coordstoreShadowSummary, error)
 		if coordstoreBeadFingerprint(sbead) != coordstoreBeadFingerprint(tbead) {
 			corrupted[id] = true
 		}
-		srcDeps, err := coordstoreDepFingerprint(src, id, sourceIDs)
-		if err != nil {
-			return summary, err
-		}
-		dstDeps, err := coordstoreDepFingerprint(dst, id, sourceIDs)
-		if err != nil {
-			return summary, err
-		}
+		srcDeps := coordstoreDepFingerprint(source.Deps[id], source.IDs)
+		dstDeps := coordstoreDepFingerprint(target.Deps[id], source.IDs)
 		if srcDeps != dstDeps {
 			corrupted[id] = true
 		}
 	}
-	for id := range targetByID {
-		if _, ok := sourceByID[id]; !ok {
+	for id := range target.ByID {
+		if _, ok := source.ByID[id]; !ok {
 			summary.Extra = append(summary.Extra, id)
 		}
 	}
@@ -265,18 +295,108 @@ func diffCoordstoreShadow(src, dst beads.Store) (coordstoreShadowSummary, error)
 	return summary, nil
 }
 
-func coordstoreDepFingerprint(store beads.Store, id string, validIDs map[string]bool) (string, error) {
-	deps, err := store.DepList(id, "down")
+type coordstoreSnapshot struct {
+	Beads    []beads.Bead
+	ByID     map[string]beads.Bead
+	IDs      map[string]bool
+	Deps     map[string][]beads.Dep
+	Filtered int
+}
+
+type coordstoreDepBatchLister interface {
+	DepListBatch(ids []string) (map[string][]beads.Dep, error)
+}
+
+func loadCoordstoreSnapshot(store beads.Store, retention coordstoreRetentionOptions, sortOrder beads.SortOrder) (coordstoreSnapshot, error) {
+	listed, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth, Sort: sortOrder})
 	if err != nil {
-		return "", fmt.Errorf("list deps for %q: %w", id, err)
+		return coordstoreSnapshot{}, err
 	}
-	normalized := deps[:0]
-	for _, dep := range deps {
-		if validIDs != nil && (!validIDs[dep.IssueID] || !validIDs[dep.DependsOnID]) {
+	snapshot := coordstoreSnapshot{
+		Beads: make([]beads.Bead, 0, len(listed)),
+		ByID:  make(map[string]beads.Bead, len(listed)),
+		IDs:   make(map[string]bool, len(listed)),
+	}
+	for _, b := range listed {
+		if coordstoreSkipForRetention(b, retention) {
+			snapshot.Filtered++
 			continue
 		}
-		if dep.Type == "" {
-			dep.Type = "blocks"
+		snapshot.Beads = append(snapshot.Beads, b)
+		snapshot.ByID[b.ID] = b
+		snapshot.IDs[b.ID] = true
+	}
+	deps, err := coordstoreDepMap(store, snapshot.Beads)
+	if err != nil {
+		return coordstoreSnapshot{}, err
+	}
+	snapshot.Deps = deps
+	return snapshot, nil
+}
+
+func coordstoreDepMap(store beads.Store, source []beads.Bead) (map[string][]beads.Dep, error) {
+	ids := make([]string, 0, len(source))
+	for _, b := range source {
+		ids = append(ids, b.ID)
+	}
+	if batch, ok := store.(coordstoreDepBatchLister); ok {
+		deps, err := batch.DepListBatch(ids)
+		if err != nil {
+			return nil, err
+		}
+		if deps == nil {
+			deps = make(map[string][]beads.Dep)
+		}
+		return deps, nil
+	}
+	depsByID := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			return nil, fmt.Errorf("list deps for %q: %w", id, err)
+		}
+		depsByID[id] = deps
+	}
+	return depsByID, nil
+}
+
+func coordstoreSkipForRetention(b beads.Bead, retention coordstoreRetentionOptions) bool {
+	if retention.Full {
+		return false
+	}
+	now := retention.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.Add(-retention.Retention)
+	return coordstoreTerminalStatus(b.Status) && coordstoreTerminalReferenceTime(b).Before(cutoff)
+}
+
+func coordstoreTerminalStatus(status string) bool {
+	if status == "cancel"+"led" {
+		return true
+	}
+	switch status {
+	case "closed", "canceled", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func coordstoreTerminalReferenceTime(b beads.Bead) time.Time {
+	if !b.UpdatedAt.IsZero() {
+		return b.UpdatedAt
+	}
+	return b.CreatedAt
+}
+
+func coordstoreDepFingerprint(deps []beads.Dep, validIDs map[string]bool) string {
+	normalized := deps[:0]
+	for _, dep := range deps {
+		dep = normalizeCoordstoreDep(dep)
+		if validIDs != nil && (!validIDs[dep.IssueID] || !validIDs[dep.DependsOnID]) {
+			continue
 		}
 		normalized = append(normalized, dep)
 	}
@@ -294,7 +414,14 @@ func coordstoreDepFingerprint(store beads.Store, id string, validIDs map[string]
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(normalized)
 	sum := sha256.Sum256(buf.Bytes())
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeCoordstoreDep(dep beads.Dep) beads.Dep {
+	if dep.Type == "" {
+		dep.Type = "blocks"
+	}
+	return dep
 }
 
 func coordstoreBeadFingerprint(b beads.Bead) string {

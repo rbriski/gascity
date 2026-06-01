@@ -1228,6 +1228,10 @@ func openHQStoreUncached(scopeRoot, cityPath, storeDir string) (*beads.HQStore, 
 }
 
 func openCoordStoreAt(scopeRoot, cityPath string) (beads.Store, error) {
+	return openCoordStoreAtWithRetention(scopeRoot, cityPath, coordstoreDefaultRetentionPeriod, coordstoreDefaultRetentionSweepInterval)
+}
+
+func openCoordStoreAtWithRetention(scopeRoot, cityPath string, retentionPeriod, retentionSweepInterval time.Duration) (beads.Store, error) {
 	storeDir, err := canonicalCoordStoreDir(scopeRoot)
 	if err != nil {
 		return nil, err
@@ -1239,7 +1243,7 @@ func openCoordStoreAt(scopeRoot, cityPath string) (beads.Store, error) {
 	return beads.OpenSQLiteCGOStore(
 		storeDir,
 		beads.WithSQLiteCGOStoreIDPrefix(issuePrefixForScope(scopeRoot, cityPath, cfg)),
-		beads.WithSQLiteCGOStoreRetention(4*time.Hour, 30*time.Second),
+		beads.WithSQLiteCGOStoreRetention(retentionPeriod, retentionSweepInterval),
 	)
 }
 

@@ -833,7 +833,40 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 		}
 		return runProviderOpWithEnv(script, providerEnv, args...)
 	}
+	if shouldInitDefaultRigBdStore(cityPath, dir, provider) {
+		return initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase)
+	}
 	return nil
+}
+
+func shouldInitDefaultRigBdStore(cityPath, dir, provider string) bool {
+	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(dir) == "" {
+		return false
+	}
+	if samePath(resolveStoreScopeRoot(cityPath, dir), resolveStoreScopeRoot(cityPath, cityPath)) {
+		return false
+	}
+	provider = strings.TrimSpace(provider)
+	return provider != "" && provider != "file" && !strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider)
+}
+
+func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
+	canonicalDoltDatabase := strings.TrimSpace(doltDatabase)
+	if canonicalDoltDatabase == "" {
+		canonicalDoltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	}
+	env := map[string]string{
+		"BEADS_DIR": filepath.Join(dir, ".beads"),
+	}
+	applyExportSuppressionEnv(env)
+	args := []string{"init", "--server", "-p", prefix, "--skip-hooks"}
+	if canonicalDoltDatabase != "" {
+		args = append(args, "--database", canonicalDoltDatabase)
+	}
+	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
+		return fmt.Errorf("bd init: %w", err)
+	}
+	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 }
 
 func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) error {

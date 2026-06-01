@@ -2733,6 +2733,106 @@ func TestInitBeadsForDir_fileLegacyRigPreservesSharedCityStore(t *testing.T) {
 	}
 }
 
+func TestInitBeadsForDirSqliteCityInitializesRigBdStore(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "tincan")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "sqlite-city"
+prefix = "ga"
+
+[beads]
+provider = "sqlite"
+
+[[rigs]]
+name = "tincan"
+path = "tincan"
+prefix = "tc"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "bd.log")
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'pwd=%%s BEADS_DIR=%%s args=%%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> %q
+case "$1" in
+  init)
+    mkdir -p "${BEADS_DIR:-$PWD/.beads}"
+    exit 0
+    ;;
+  list)
+    printf '[]\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, logFile)
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := initBeadsForDir(cityDir, rigDir, "tc", "tc"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"pwd=" + rigDir,
+		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
+		"init --server -p tc --skip-hooks --database tc",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("bd log missing %q:\n%s", want, log)
+		}
+	}
+	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "bd" {
+		t.Fatalf("rawBeadsProviderForScope(rig) = %q, want bd", got)
+	}
+	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "sqlite" {
+		t.Fatalf("rawBeadsProviderForScope(city) = %q, want sqlite", got)
+	}
+
+	configState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadConfigState: %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadConfigState() = !ok, want canonical rig config")
+	}
+	if configState.IssuePrefix != "tc" {
+		t.Fatalf("IssuePrefix = %q, want tc", configState.IssuePrefix)
+	}
+	metaData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(metadata): %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("Unmarshal(metadata): %v", err)
+	}
+	for key, want := range map[string]string{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "tc",
+	} {
+		if got := strings.TrimSpace(fmt.Sprint(meta[key])); got != want {
+			t.Fatalf("metadata %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func writeMinimalCityToml(t *testing.T, cityDir string) {
 	t.Helper()
 	content := `[workspace]

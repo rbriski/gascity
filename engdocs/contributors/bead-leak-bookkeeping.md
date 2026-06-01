@@ -144,6 +144,14 @@ self-heal only when the script can re-derive a remote, active branch/refspec,
 remote branch head, and prove that remote head is reachable from the local
 Dolt log. Unverified legacy markers still stop before any force-push.
 
+The compactor now also purges per-database `.dolt/git-remote-cache`
+directories before quarantine, pending-push, and commit-threshold checks. Those
+directories are rebuildable fetch caches, not canonical table storage, and live
+inspection found they can dwarf the actual Noms data even when a database is far
+below the flatten threshold. This cleanup is independent of history flattening:
+dry-run reports the cache it would purge, while a live run removes only that
+cache directory and can still skip flattening for below-threshold databases.
+
 ## Creation Paths
 
 | Path | Beads opened | Bookkeeping owner |
@@ -166,6 +174,7 @@ Dolt log. Unverified legacy markers still stop before any force-push.
 | `cmd/gc/wisp_gc.go` / `wisp autoclose` | Close attached workflow roots and owned workflow beads from CLI-driven cleanup. Purge expired closed wisps, order-tracking beads, and closed graph-v2 workflow-root closures. | Patched to include workflow-root closure GC through indexed metadata queries guarded by `sourceworkflow.IsWorkflowRoot`. |
 | `cmd/gc/order_dispatch.go` | Close order-tracking beads after dispatch attempt completion. | Existing defer is the primary owner; stale tracking-bead bugs should be treated as order-dispatch defects. |
 | `cmd/gc/doctor_run_target_backfill.go` | Mechanical repair for workflow roots with `gc.run_target` but missing `gc.routed_to`. | New `gc doctor --fix` check backfills the canonical claim key without touching non-workflow beads or already-routed roots. |
+| `examples/dolt/commands/compact/run.sh` | Bound Dolt storage by flattening high-commit databases, running full GC, retrying safe pending-push/pending-GC markers, and pruning rebuildable `.dolt/git-remote-cache` directories. | Patched so remote-cache cleanup runs before commit-count skips and before blocking quarantine markers; dry-run reports the exact cache path without deleting it. |
 
 ## Verification Snapshot
 
@@ -180,6 +189,8 @@ Dolt log. Unverified legacy markers still stop before any force-push.
 - `go test ./examples/dolt -count=1` passed for the compactor endpoint,
   explicit target discovery, pending-push dry-run marker checks, and safe
   legacy pending-push marker recovery.
+- `go test ./examples/dolt -run 'TestCompactScript(PurgesRemoteCacheBelowThresholdWithoutFlattening|DryRunReportsRemoteCacheWithoutRemoving)$' -count=1`
+  failed before the remote-cache cleanup patch and passed after it.
 - `go test -tags acceptance_b -timeout 10m -v ./test/acceptance/tier_b -run TestGastownIdleOpenBeadCountsStayBounded`
   passed on 2026-06-01, proving the idle Gastown regression itself against the
   current branch. Nightly coverage is wired through
@@ -210,7 +221,7 @@ Dolt log. Unverified legacy markers still stop before any force-push.
 - `go vet ./...` and `git diff --check` passed.
 - `.githooks/pre-commit` ran with `core.hooksPath=.githooks`; it failed in
   unrelated baseline `cmd/gc` shards. Latest log directory:
-  `/data/tmp/gc-local-tests.2j5mNP`.
+  `/data/tmp/gc-local-tests.P48tn7`.
 
 ## Remaining Work
 
@@ -291,6 +302,24 @@ Dolt log. Unverified legacy markers still stop before any force-push.
   `local_branch=main`, `remote_branch=main`, proves remote head
   `7kon6u7jt09nhukq4urpqc598am91u5o` is in the local `ga` Dolt log, and exits
   cleanly with `pending_push=present — dry-run (would retry remote push)`. No
-  mutating remote push was run from this report pass. A combined
+  mutating remote push was run from this report pass. As of
+  2026-06-01T11:24:25Z, `ga` still has a rebuildable
+  `.dolt/git-remote-cache` directory of about `1.2G`; a branch dry-run reports
+  it would purge that cache before retrying the pending remote push, but the
+  live purge was intentionally not run because the non-dry path would also
+  execute the pending-push retry. A combined
   `GC_DOLT_COMPACT_ONLY_DBS=ga,mc` dry-run now exits nonzero only because of the
   remaining `mc` quarantine; `ga` reaches the recoverable dry-run retry path.
+- Live remote-cache remediation on 2026-06-01T11:24:25Z used the branch
+  compactor against `/data/services/gascity-local-dolt` with
+  `GC_DOLT_MANAGED_LOCAL=0` and explicit `127.0.0.1:3307`. Dry-run first proved
+  `gt` would only purge
+  `/data/services/gascity-local-dolt/gt/.dolt/git-remote-cache` and then skip
+  flattening at `133` commits. The live run purged that cache and left `gt`
+  unchanged at `133` commits, `0` status rows, `15` issues, `1381` wisps, and
+  database hash `3mkjngdd1bt41a7absg1acpngnkbkht4`. Additional live runs
+  purged remote caches for `mc`, `bd`, `gp`, and `my_db`; `mc` still stopped on
+  its integrity quarantine before any GC. Local Dolt storage dropped from about
+  `21G` before the `gt` purge to `3.1G` after the cache purges. The remaining
+  per-database sizes are dominated by `ga=2.3G` and `mc=1.8G`, with only `ga`
+  still showing a `.dolt/git-remote-cache` directory.

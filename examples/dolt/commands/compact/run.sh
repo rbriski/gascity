@@ -14,6 +14,9 @@
 # Running as an exec order gives us direct SQL access via the dolt CLI.
 #
 # Algorithm (flatten mode):
+#   0. Purge Dolt git remote caches. These are rebuildable fetch caches and can
+#      dwarf live table data even when the database is below the flatten
+#      threshold.
 #   1. Pre-flight: record row counts and value hashes for all user tables and
 #      require HEAD to remain stable across a bounded retry loop.
 #   2. Soft-reset to the root commit; all data stays staged.
@@ -878,6 +881,27 @@ oldgen_has_files() {
   [ -n "$(find "$oldgen_dir" -mindepth 1 -print -quit 2>/dev/null)" ]
 }
 
+purge_remote_cache() {
+  db="$1"
+  valid_database_name "$db" || {
+    printf 'compact: db=%s invalid database name for remote-cache purge — fail\n' "$db" >&2
+    return 1
+  }
+  remote_cache_dir="$DOLT_DATA_DIR/$db/.dolt/git-remote-cache"
+  [ -d "$remote_cache_dir" ] || return 0
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s remote_cache=present - dry-run (would purge) path=%s\n' \
+      "$db" "$remote_cache_dir"
+    return 0
+  fi
+  if ! rm -rf -- "$remote_cache_dir"; then
+    printf 'compact: db=%s remote_cache purge failed path=%s\n' \
+      "$db" "$remote_cache_dir" >&2
+    return 1
+  fi
+  printf 'compact: db=%s remote_cache=purged path=%s\n' "$db" "$remote_cache_dir"
+}
+
 compact_marker_path() {
   dir="$1"
   db="$2"
@@ -1429,6 +1453,8 @@ flatten_database() {
         ;;
     esac
   fi
+
+  purge_remote_cache "$db" || return 1
 
   if has_compact_marker "$quarantine_dir" "$db"; then
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")

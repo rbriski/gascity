@@ -848,6 +848,58 @@ func TestCompactScriptSkipsBelowThresholdWithoutFlattening(t *testing.T) {
 	}
 }
 
+func TestCompactScriptPurgesRemoteCacheBelowThresholdWithoutFlattening(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	cacheFile := filepath.Join(fixture.dataDir, "beads", ".dolt", "git-remote-cache", "cache", "repo.git", "objects", "pack", "pack.pack")
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
+		t.Fatalf("mkdir remote cache fixture: %v", err)
+	}
+	if err := os.WriteFile(cacheFile, []byte("cached remote pack"), 0o644); err != nil {
+		t.Fatalf("write remote cache fixture: %v", err)
+	}
+
+	out, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "remote_cache=purged") {
+		t.Fatalf("output missing remote-cache purge notice:\n%s", out)
+	}
+	cacheDir := filepath.Join(fixture.dataDir, "beads", ".dolt", "git-remote-cache")
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("remote cache should be removed for below-threshold db, stat=%v", err)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(data), "DOLT_RESET") || strings.Contains(string(data), "DOLT_COMMIT") {
+		t.Fatalf("remote-cache purge must not require flattening:\n%s", data)
+	}
+}
+
+func TestCompactScriptDryRunReportsRemoteCacheWithoutRemoving(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	cacheFile := filepath.Join(fixture.dataDir, "beads", ".dolt", "git-remote-cache", "cache", "repo.git", "objects", "pack", "pack.pack")
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
+		t.Fatalf("mkdir remote cache fixture: %v", err)
+	}
+	if err := os.WriteFile(cacheFile, []byte("cached remote pack"), 0o644); err != nil {
+		t.Fatalf("write remote cache fixture: %v", err)
+	}
+
+	out, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("compact dry-run failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "remote_cache=present - dry-run (would purge)") {
+		t.Fatalf("output missing dry-run remote-cache notice:\n%s", out)
+	}
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("dry-run should leave remote cache in place: %v", err)
+	}
+}
+
 func TestCompactScriptDefaultThresholdIs2000(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success")

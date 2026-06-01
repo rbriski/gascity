@@ -329,13 +329,20 @@ func assertStoreRoutedTo(t *testing.T, store beads.Store, beadID, want string) {
 // sharedTestFormulaDir is a package-level temp directory containing minimal
 // formula TOML files for all formula names commonly used in sling tests.
 var (
-	sharedTestFormulaDir string
-	sharedTestCityDir    string
+	sharedTestFixtureRoot string
+	sharedTestFormulaDir  string
+	sharedTestCityDir     string
 )
 
 func initSharedSlingTestFixtures(root string) {
-	dir, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSlingFormulaDirPrefix))
+	fixtureRoot, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSharedFixtureDirPrefix))
 	if err != nil {
+		panic(err)
+	}
+	sharedTestFixtureRoot = fixtureRoot
+
+	dir := filepath.Join(fixtureRoot, "formulas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(err)
 	}
 	for _, name := range []string{
@@ -350,8 +357,8 @@ func initSharedSlingTestFixtures(root string) {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSlingCityDirPrefix))
-	if err != nil {
+	cityDir := filepath.Join(fixtureRoot, "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir

@@ -944,6 +944,10 @@
           "type": "string",
           "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
           "default": "bd"
+        },
+        "backend": {
+          "type": "string",
+          "description": "Backend selects the bd storage engine when Provider is \"bd\".\nEmpty defaults to \"dolt\"; T3Code uses \"doltlite\" for local dev stores."
         }
       },
       "additionalProperties": false,
@@ -1719,6 +1723,33 @@
       ],
       "description": "NamedSession defines a canonical persistent session backed by an agent template."
     },
+    "NamedSessionPatch": {
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Dir is the targeting key. Empty targets a city-scoped named session."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name is the canonical named-session identity. Use this to disambiguate\nsessions that share the same template."
+        },
+        "template": {
+          "type": "string",
+          "description": "Template is a compatibility targeting key when Name is omitted."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "always"
+          ],
+          "description": "Mode overrides the named-session controller mode (\"on_demand\" or \"always\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
+    },
     "OptionChoice": {
       "properties": {
         "value": {
@@ -1872,6 +1903,13 @@
           },
           "type": "array",
           "description": "Agents targets agents by (dir, name)."
+        },
+        "named_session": {
+          "items": {
+            "$ref": "#/$defs/NamedSessionPatch"
+          },
+          "type": "array",
+          "description": "NamedSessions targets configured named sessions by (dir, template)."
         },
         "rigs": {
           "items": {

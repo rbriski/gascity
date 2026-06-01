@@ -945,6 +945,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Patches: accumulate from fragments (applied after all merges).
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
+	base.Patches.NamedSessions = append(base.Patches.NamedSessions, fragment.Patches.NamedSessions...)
 	base.Patches.Rigs = append(base.Patches.Rigs, fragment.Patches.Rigs...)
 	base.Patches.Providers = append(base.Patches.Providers, fragment.Patches.Providers...)
 	base.Patches.GitHubPRMonitors = append(base.Patches.GitHubPRMonitors, fragment.Patches.GitHubPRMonitors...)

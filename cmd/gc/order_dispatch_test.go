@@ -6213,6 +6213,51 @@ func TestHasOpenWorkStrictBlocksOnWispWithOpenChildren(t *testing.T) {
 	}
 }
 
+func TestHasOpenWorkStrictFindsOlderInFlightWispBehindOrphanRoots(t *testing.T) {
+	const formerOpenWorkProbeLimit = 50
+
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	rows := []beads.Bead{{
+		ID:        "gc-inflight-root",
+		Title:     "older in-flight wisp",
+		Status:    "open",
+		Type:      "molecule",
+		CreatedAt: base,
+		UpdatedAt: base,
+		Labels:    []string{"order-run:digest"},
+	}, {
+		ID:        "gc-inflight-child",
+		Title:     "still running",
+		Status:    "open",
+		Type:      "task",
+		ParentID:  "gc-inflight-root",
+		CreatedAt: base.Add(time.Second),
+		UpdatedAt: base.Add(time.Second),
+	}}
+	for i := 0; i < formerOpenWorkProbeLimit+1; i++ {
+		created := base.Add(time.Duration(i+2) * time.Second)
+		rows = append(rows, beads.Bead{
+			ID:        fmt.Sprintf("gc-orphan-root-%02d", i),
+			Title:     "newer orphan wisp root",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: created,
+			UpdatedAt: created,
+			Labels:    []string{"order-run:digest"},
+		})
+	}
+	store := beads.NewMemStoreFrom(len(rows), rows, nil)
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("older wisp with open descendants must block even after newer orphan roots exceed the old probe window")
+	}
+}
+
 func TestHasOpenWorkStrictBlocksOnWispWithPartiallyClosedChildren(t *testing.T) {
 	store := beads.NewMemStore()
 

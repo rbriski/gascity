@@ -142,6 +142,12 @@ var readyExcludeTypes = map[string]bool{
 	"rig":           true, // rig identity beads
 }
 
+var readyBlockingDependencyTypes = map[string]bool{
+	"blocks":             true,
+	"waits-for":          true,
+	"conditional-blocks": true,
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
@@ -196,6 +202,10 @@ func IsReadyExcludedBead(b Bead) bool {
 // ready) and cmd_hook.isFutureDeferredHookCandidate.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.DeferUntil != nil && b.DeferUntil.After(now)
+}
+
+func isReadyBlockingDependencyType(t string) bool {
+	return readyBlockingDependencyTypes[t]
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

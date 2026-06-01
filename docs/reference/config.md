@@ -254,6 +254,7 @@ BeadsConfig holds bead store settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default), "file", or "exec:&lt;script&gt;" for a user-supplied script. |
+| `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 
 ## ChatSessionsConfig
 
@@ -484,6 +485,17 @@ NamedSession defines a canonical persistent session backed by an agent template.
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
 | `mode` | string |  |  | Mode controls when the controller ensures this named session is live. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Note: mode="always" is independent of min_active_sessions; both produce sessions, and gc doctor reports accidental duplicate-pool combinations. Enum: `on_demand`, `always` |
 
+## NamedSessionPatch
+
+NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dir` | string |  |  | Dir is the targeting key. Empty targets a city-scoped named session. |
+| `name` | string |  |  | Name is the canonical named-session identity. Use this to disambiguate sessions that share the same template. |
+| `template` | string |  |  | Template is a compatibility targeting key when Name is omitted. |
+| `mode` | string |  |  | Mode overrides the named-session controller mode ("on_demand" or "always"). Enum: `on_demand`, `always` |
+
 ## OptionChoice
 
 OptionChoice is one allowed value for a "select" option.
@@ -547,6 +559,7 @@ Patches holds all patch blocks from composition.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
+| `named_session` | []NamedSessionPatch |  |  | NamedSessions targets configured named sessions by (dir, template). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |
 | `github_pr_monitor` | []GitHubPRMonitorPatch |  |  | GitHubPRMonitors targets GitHub PR readiness monitors by name. |

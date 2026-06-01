@@ -1178,6 +1178,9 @@ type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default), "file",
 	// or "exec:<script>" for a user-supplied script.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
+	// Backend selects the bd storage engine when Provider is "bd".
+	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
+	Backend string `toml:"backend,omitempty"`
 }
 
 // SessionConfig holds session provider settings.

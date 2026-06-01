@@ -914,6 +914,10 @@ func depsFromBeadFields(b Bead) []Dep {
 	return deps
 }
 
+func beadCarriesDependencyFields(b Bead) bool {
+	return len(b.Dependencies) > 0 || len(b.Needs) > 0
+}
+
 func cloneDeps(deps []Dep) []Dep {
 	if len(deps) == 0 {
 		return nil

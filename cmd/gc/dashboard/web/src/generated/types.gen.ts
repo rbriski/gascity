@@ -256,6 +256,7 @@ export type AsyncAcceptedResponse = {
 export type Bead = {
     assignee?: string;
     created_at: string;
+    defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
     ephemeral?: boolean;
@@ -287,6 +288,10 @@ export type BeadCreateInputBody = {
      * Assigned agent.
      */
     assignee?: string;
+    /**
+     * Hide the bead from ready views until this time.
+     */
+    defer_until?: string;
     /**
      * Bead description.
      */

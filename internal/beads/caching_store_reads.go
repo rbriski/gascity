@@ -342,9 +342,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		statusByID := make(map[string]string, len(c.beads))
 		depsByID := make(map[string][]Dep, len(c.deps))
 		openBeads := make([]Bead, 0, len(c.beads))
+		now := time.Now().UTC()
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
-			if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+			if IsReadyCandidate(b, now) {
 				openBeads = append(openBeads, cloneBead(b))
 			}
 		}
@@ -394,9 +395,10 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+		if IsReadyCandidate(b, now) {
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}

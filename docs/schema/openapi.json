@@ -817,6 +817,10 @@
             "format": "date-time",
             "type": "string"
           },
+          "defer_until": {
+            "format": "date-time",
+            "type": "string"
+          },
           "dependencies": {
             "items": {
               "$ref": "#/components/schemas/Dep"
@@ -910,6 +914,11 @@
         "properties": {
           "assignee": {
             "description": "Assigned agent.",
+            "type": "string"
+          },
+          "defer_until": {
+            "description": "Hide the bead from ready views until this time.",
+            "format": "date-time",
             "type": "string"
           },
           "description": {

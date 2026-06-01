@@ -2188,6 +2188,8 @@ export interface components {
             assignee?: string;
             /** Format: date-time */
             created_at: string;
+            /** Format: date-time */
+            defer_until?: string;
             dependencies?: components["schemas"]["Dep"][] | null;
             description?: string;
             ephemeral?: boolean;
@@ -2215,6 +2217,11 @@ export interface components {
         BeadCreateInputBody: {
             /** @description Assigned agent. */
             assignee?: string;
+            /**
+             * Format: date-time
+             * @description Hide the bead from ready views until this time.
+             */
+            defer_until?: string;
             /** @description Bead description. */
             description?: string;
             /** @description Bead labels. */

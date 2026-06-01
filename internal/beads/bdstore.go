@@ -463,6 +463,7 @@ type bdIssue struct {
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
 	Ephemeral    bool         `json:"ephemeral,omitempty"`
+	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -589,6 +590,7 @@ func (b *bdIssue) toBead() Bead {
 		Metadata:     b.Metadata,
 		Dependencies: deps,
 		Ephemeral:    b.Ephemeral,
+		DeferUntil:   cloneTimePtr(b.DeferUntil),
 	}
 }
 
@@ -679,6 +681,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if b.Ephemeral {
 		args = append(args, "--ephemeral")
+	}
+	if b.DeferUntil != nil {
+		args = append(args, "--defer", b.DeferUntil.Format(time.RFC3339))
 	}
 	metadata := maps.Clone(b.Metadata)
 	if b.From != "" {
@@ -1763,12 +1768,10 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, 0, len(issues))
+	now := time.Now().UTC()
 	for i := range issues {
 		bead := issues[i].toBead()
-		if IsReadyExcludedType(bead.Type) {
-			continue
-		}
-		if bead.Ephemeral {
+		if !IsReadyCandidate(bead, now) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {

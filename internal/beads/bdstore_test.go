@@ -168,6 +168,27 @@ func TestBdStoreCreatePassesPriority(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesDeferUntil(t *testing.T) {
+	var gotArgs []string
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","defer_until":"` + deferUntil.Format(time.RFC3339) + `"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{Title: "test", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--defer "+deferUntil.Format(time.RFC3339)) {
+		t.Fatalf("args = %q, want defer flag", args)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
 func TestBdStoreCreateError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")
@@ -1810,6 +1831,32 @@ func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 	}
 	if got[0].ID != "bd-task" {
 		t.Fatalf("Ready()[0].ID = %q, want %q", got[0].ID, "bd-task")
+	}
+}
+
+func TestBdStoreReadyFiltersFutureDeferredRows(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-deferred","title":"not yet","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","defer_until":"` + future + `"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready() returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-task" {
+		t.Fatalf("Ready()[0].ID = %q, want bd-task", got[0].ID)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3952,6 +3953,54 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 	if !slices.Equal(waitCalls, want) {
 		t.Fatalf("wait calls = %#v, want %#v", waitCalls, want)
+	}
+}
+
+// TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout is the
+// regression guard for the bug where a single transient work-query timeout
+// (the bead store briefly saturated) killed the entire control-dispatcher
+// --follow loop, leaving the rig un-dispatched while its session bead still
+// reported "active". The loop must survive transient failures and only exit on
+// genuinely fatal ones.
+func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevList := workflowServeList
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+	})
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+		return false, nil
+	}
+
+	// Drain 1 hits a transient work-query timeout (wraps DeadlineExceeded) — the
+	// loop must survive it. Drain 2 returns a genuinely fatal error — the loop
+	// must exit on that.
+	transientErr := fmt.Errorf("querying control work: running work query %q: timed out after 30s: %w", "bd ready", context.DeadlineExceeded)
+	fatalErr := errors.New("malformed work query: jq: command not found")
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls == 1 {
+			return nil, transientErr
+		}
+		return nil, fatalErr
+	}
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, fatalErr) {
+		t.Fatalf("runWorkflowServeFollow err = %v, want fatal error after surviving the transient timeout", err)
+	}
+	if calls != 2 {
+		t.Fatalf("workflowServeList calls = %d, want 2 (survive transient, then exit on fatal)", calls)
 	}
 }
 

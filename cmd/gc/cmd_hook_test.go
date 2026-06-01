@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,8 +12,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+// TestShellWorkQueryTimeoutClassifiesTransient guards the contract the
+// control-dispatcher --follow loop depends on: a work-query timeout must be
+// classifiable as a transient store error (wrapping context.DeadlineExceeded)
+// so the loop retries instead of dying when the bead store is briefly loaded.
+func TestShellWorkQueryTimeoutClassifiesTransient(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	prev := hookWorkQueryTimeout
+	hookWorkQueryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { hookWorkQueryTimeout = prev })
+
+	_, err := shellWorkQueryWithEnv("sleep 5", "", nil)
+	if err == nil {
+		t.Fatal("shellWorkQueryWithEnv err = nil, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("err = %v, want human-facing timed-out message preserved", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+	if !dispatch.IsTransientControllerError(err) {
+		t.Fatalf("dispatch.IsTransientControllerError(%v) = false, want true", err)
+	}
+}
 
 func TestCmdHookQueryKillEmitsCurrentSessionTemplate(t *testing.T) {
 	clearGCEnv(t)

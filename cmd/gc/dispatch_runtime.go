@@ -556,7 +556,20 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	for {
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
-			return err
+			// A transient work-query/store failure — most commonly the
+			// work-query timeout (hookWorkQueryTimeout) when the bead store is
+			// briefly saturated — must NOT terminate this long-running serve
+			// loop. drainWorkflowServeWork already surfaced the failure on the
+			// event bus for reconciler visibility (#1496/#1497); returning here
+			// kills the dispatcher process (pane exits non-zero) and leaves the
+			// rig un-dispatched while its session bead still reports "active".
+			// Downgrade to a no-progress sweep so the idle backoff retries it;
+			// only genuinely fatal errors end the loop.
+			if !dispatch.IsTransientControllerError(err) {
+				return err
+			}
+			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
+			drainResult = workflowServeDrainResult{}
 		}
 		if drainResult.processedAny || drainResult.pendingAny {
 			idleSweeps = 0

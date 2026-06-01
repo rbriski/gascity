@@ -5420,8 +5420,10 @@ func TestReapStaleSessionBeads(t *testing.T) {
 	// is deterministic regardless of wall-clock latency.
 	type clockMode int
 	const (
-		clockPastGrace   clockMode = iota // 2 min past bead creation
-		clockWithinGrace                  // 30s past bead creation
+		clockPastGrace             clockMode = iota // 2 min past bead creation
+		clockWithinGrace                            // 30s past bead creation
+		clockPastPendingGrace                       // 6 min past bead creation
+		clockPastNeverStartedGrace                  // 11 min past bead creation
 	)
 
 	tests := []struct {
@@ -5450,7 +5452,14 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			wantOpen:   0,
 		},
 		{
-			name: "pending_create_creating_kept",
+			name: "pending_create_never_started_within_grace_kept",
+			// A never-started pending_create bead (no last_woke_at) survives the
+			// normal creating-state timeout: it has not reached preWakeCommit so
+			// its start may still be in flight behind a busy pool queue. It is
+			// held to the reconciler's never-started lease
+			// (pendingCreateNeverStartedTimeout, 10m), not the shorter
+			// stalePendingCreateTimeout (clockPastGrace is 2 min, past the 1-min
+			// creating timeout but well within the 10-min never-started window).
 			beads: []beads.Bead{{
 				Title:  "worker",
 				Type:   sessionBeadType,
@@ -5465,6 +5474,29 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			clock:      clockPastGrace,
 			wantReaped: 0,
 			wantOpen:   1,
+		},
+		{
+			name: "pending_create_never_started_past_never_started_grace_reaped",
+			// gc-5tyf5: the phantom-accumulation leak. A never-started pool bead
+			// stuck in creating with pending_create_claim=true and a dead tmux
+			// (e.g. a failed rollback) must eventually be reaped — but only once
+			// it is past the never-started window (10m), not the shorter 5-min
+			// pending grace, so a slow provider.Start() is never reaped out from
+			// under the reconciler's still-active never-started lease.
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":         "worker-1",
+					"state":                "creating",
+					"pending_create_claim": "true",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastNeverStartedGrace,
+			wantReaped: 1,
+			wantOpen:   0,
 		},
 		{
 			name: "pending_create_active_kept",
@@ -5698,6 +5730,10 @@ func TestReapStaleSessionBeads(t *testing.T) {
 				clk = &clock.Fake{Time: firstCreatedAt.Add(2 * time.Minute)}
 			case clockWithinGrace:
 				clk = &clock.Fake{Time: firstCreatedAt.Add(30 * time.Second)}
+			case clockPastPendingGrace:
+				clk = &clock.Fake{Time: firstCreatedAt.Add(6 * time.Minute)}
+			case clockPastNeverStartedGrace:
+				clk = &clock.Fake{Time: firstCreatedAt.Add(11 * time.Minute)}
 			}
 
 			// Set up drain tracker with draining beads.
@@ -5779,6 +5815,90 @@ func TestReapStaleSessionBeads_HonorsRecentWakeGrace(t *testing.T) {
 	}
 	if len(open) != 1 {
 		t.Fatalf("open beads = %d, want 1", len(open))
+	}
+}
+
+// TestReapStaleSessionBeads_NeverStartedPendingCreateNotReapedInPendingWindow
+// pins the gc-5tyf5 over-reaping fix: a never-started pending-create bead (no
+// last_woke_at) sitting at 7 minutes — past the 5-minute stalePendingCreateTimeout
+// but within the 10-minute never-started lease — must NOT be reaped. Reaping it
+// would close the bead out from under a slow but still-in-flight provider.Start(),
+// letting the reconciler spawn a replacement that double-binds the tmux name.
+func TestReapStaleSessionBeads_NeverStartedPendingCreateNotReapedInPendingWindow(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-1",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			// No last_woke_at: this start never reached preWakeCommit.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// 7 minutes: past stalePendingCreateTimeout (5m) but within the
+	// never-started lease (pendingCreateNeverStartedTimeout, 10m).
+	now := created.CreatedAt.Add(7 * time.Minute)
+
+	var stderr bytes.Buffer
+	if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (never-started bead within 10m lease must survive)\nstderr: %s", got, stderr.String())
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open beads = %d, want 1", len(open))
+	}
+}
+
+// TestReapStaleSessionBeads_StartedPendingCreateReapedPastPendingGrace pins the
+// other half of the gc-5tyf5 fix: a started pending-create bead (one that
+// reached preWakeCommit and recorded last_woke_at) stuck creating with a dead
+// tmux IS reaped once it is past the 5-minute stalePendingCreateTimeout. The
+// faster reap is boylec's intended behavior for started-but-stuck creates; it
+// applies only because last_woke_at is present.
+func TestReapStaleSessionBeads_StartedPendingCreateReapedPastPendingGrace(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-1",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	now := created.CreatedAt.Add(7 * time.Minute)
+	// last_woke_at recorded 1 minute after creation (start reached preWakeCommit)
+	// and now 6 minutes stale: this bead is "started" and governed by the
+	// 5-minute pending grace, which its start boundary is now past.
+	startedWoke := created.CreatedAt.Add(1 * time.Minute).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(created.ID, "last_woke_at", startedWoke); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+		t.Fatalf("reapStaleSessionBeads() = %d, want 1 (started bead past 5m pending grace must be reaped)\nstderr: %s", got, stderr.String())
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open beads = %d, want 0", len(open))
 	}
 }
 

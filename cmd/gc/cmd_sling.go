@@ -1174,7 +1174,12 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			step.Metadata = maps.Clone(step.Metadata)
 		}
 		if step.IsRoot {
-			step.Metadata["gc.run_target"] = routedTo
+			// Mirror of graphroute.DecorateGraphWorkflowRecipe: the root persists
+			// gc.routed_to (the sole canonical key the worker claim path reads)
+			// so a pool-routed root is claimable rather than idle-reaped
+			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
+			step.Metadata["gc.routed_to"] = routedTo
+			delete(step.Metadata, "gc.run_target")
 			continue
 		}
 		if sling.IsWorkflowTopologyKind(step.Metadata["gc.kind"]) {

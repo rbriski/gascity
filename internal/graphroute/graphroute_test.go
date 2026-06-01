@@ -238,6 +238,7 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		Steps: []formula.RecipeStep{
 			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
 				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+				"gc.run_target": "stale-target",
 			}},
 			{ID: "wf-test.work", Metadata: map[string]string{}},
 		},
@@ -248,8 +249,11 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
 	root := r.Steps[0]
-	if root.Metadata["gc.run_target"] != "mayor" {
-		t.Errorf("root gc.run_target = %q, want mayor", root.Metadata["gc.run_target"])
+	if root.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("root gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	}
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Errorf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
 	}
 	if root.Metadata["gc.source_bead_id"] != "src-1" {
 		t.Errorf("root gc.source_bead_id = %q, want src-1", root.Metadata["gc.source_bead_id"])
@@ -261,6 +265,39 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	work := r.Steps[1]
 	if work.Metadata["gc.routed_to"] != "mayor" {
 		t.Errorf("work gc.routed_to = %q, want mayor", work.Metadata["gc.routed_to"])
+	}
+}
+
+// TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim locks in the
+// #2763 writer-side fix: a graph.v2 workflow root must persist gc.routed_to —
+// the canonical delivery key every runtime demand/claim/scale reader consults —
+// not gc.run_target alone. Before this, the root stamped only gc.run_target, so
+// a root routed to a pool was spawned-for by scale_check (which reads
+// gc.run_target) but never claimed by the worker (whose query reads
+// gc.routed_to); the work sat unclaimed and was idle-reaped silently. As part of
+// deprecating gc.run_target as a persisted routing field (ga-eld2x), the root is
+// brought onto the same key as every other bead — including its own children.
+func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
+	}}
+	r := &formula.Recipe{
+		Name: "wf-test",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			}},
+			{ID: "wf-test.work", Metadata: map[string]string{}},
+		},
+	}
+	deps := Deps{Resolver: testAgentResolver{}}
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", nil, "test-city", cfg, deps); err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+	root := r.Steps[0]
+	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("root gc.routed_to = %q, want mayor (root must be claimable via the canonical routing key; #2763 / ga-eld2x)", got)
 	}
 }
 

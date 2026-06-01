@@ -1555,16 +1555,22 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	// Tiered query: check that tier 3 (run_target preferred, routed_to fallback)
-	// and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "for key in gc.run_target gc.routed_to") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routing-key precedence: %q", got)
-	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+	// Tiered query: tier 3 routes via gc.routed_to, with a temporary
+	// gc.run_target migration fallback for pre-backfill workflow roots, and
+	// tiers 1-2 resolve by assignee.
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
+	}
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
+		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
+	}
+	for _, want := range []string{`.metadata`, `.[:1]`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveWorkQuery() missing run_target migration filter fragment %q: %q", want, got)
+		}
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
@@ -1748,7 +1754,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *te
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --include-ephemeral --metadata-field gc.run_target=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=1")
+  "ready --include-ephemeral --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=1")
     printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
@@ -1771,7 +1777,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesOldestBeforePriority(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --include-ephemeral"*"--metadata-field gc.run_target=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
     printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
     ;;
   *)
@@ -1794,11 +1800,11 @@ func TestEffectiveWorkQueryRoutedFallbackUsesNativeOldestSort(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --include-ephemeral"*"--metadata-field gc.run_target=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
     printf '[]'
     ;;
-  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
-    printf '[{"id":"older-fallback","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
+  *"ready --include-ephemeral"*"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
+    printf '[{"id":"older-fallback","priority":2,"created_at":"2026-05-20T06:09:30Z","metadata":{"gc.kind":"workflow","gc.run_target":"hello-world/worker"}}]'
     ;;
   *)
     printf '[]'
@@ -1841,8 +1847,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	wantSnippets := []string{
 		`bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json`,
 		`bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
-		`for key in gc.run_target gc.routed_to`,
+		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantSnippets {
@@ -1861,8 +1866,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	wantSnippets := []string{
 		`bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json`,
 		`bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
-		`for key in gc.run_target gc.routed_to`,
+		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantSnippets {
@@ -1919,88 +1923,80 @@ esac
 	}
 }
 
-// TestEffectiveWorkQueryPrefersRunTarget is the #2763 regression: the worker
-// claim path (EffectiveWorkQuery Tier 3) must return a graph.v2 workflow root
-// that stamps only gc.run_target (gc.routed_to unset). Before the fix the
-// reconciler spawned the worker on gc.run_target demand but the worker's claim
-// query read only gc.routed_to and saw an empty queue, so the root was never
-// claimed and the worker idle-reaped — silently orphaning the work. The fake
-// bd returns work solely for the gc.run_target predicate.
-func TestEffectiveWorkQueryPrefersRunTarget(t *testing.T) {
+// TestEffectiveWorkQueryClaimsRoutedToRoot verifies the worker claim path
+// (EffectiveWorkQuery Tier 3) claims a routed root via canonical gc.routed_to.
+// The fake bd returns work only for the gc.routed_to predicate.
+func TestEffectiveWorkQueryClaimsRoutedToRoot(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*)
-    printf '[{"id":"graph-root","issue_type":"workflow"}]'
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"routed-root","issue_type":"workflow"}]'
     ;;
-  *)
-    printf '[]'
-    ;;
+  *) printf '[]' ;;
 esac
 `)
-	if !strings.Contains(out, "graph-root") {
-		t.Fatalf("EffectiveWorkQuery() did not claim the run_target-only graph root: %q", out)
+	if !strings.Contains(out, "routed-root") {
+		t.Fatalf("EffectiveWorkQuery() did not claim the routed_to root: %q", out)
 	}
 }
 
-// TestEffectiveWorkQueryFallsBackToRoutedTo verifies the gc.routed_to
-// compatibility fallback still claims legacy roots stamped only with
-// gc.routed_to (gc.run_target unset) — e.g. the legacy --formula wisp path
-// that the #2763 reader change must not regress.
-func TestEffectiveWorkQueryFallsBackToRoutedTo(t *testing.T) {
+func TestEffectiveWorkQueryClaimsRunTargetOnlyRootDuringMigration(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; migration fallback filters routed_to with jq")
+	}
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*) printf '[]' ;;
   *"--metadata-field gc.routed_to=hello-world/worker"*)
-    printf '[{"id":"legacy-root","issue_type":"wisp"}]'
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"legacy-root","issue_type":"workflow"}]'
     ;;
   *) printf '[]' ;;
 esac
 `)
 	if !strings.Contains(out, "legacy-root") {
-		t.Fatalf("EffectiveWorkQuery() did not claim the routed_to-only legacy root: %q", out)
+		t.Fatalf("EffectiveWorkQuery() did not claim the run_target-only root: %q", out)
 	}
 }
 
-// TestEffectiveWorkQueryRunTargetWinsOverRoutedTo locks the precedence: when a
-// bead matches both keys, the preferred gc.run_target result is claimed and the
-// gc.routed_to result is not surfaced.
-func TestEffectiveWorkQueryRunTargetWinsOverRoutedTo(t *testing.T) {
+func TestEffectiveWorkQueryIgnoresDivergentRunTargetWhenRoutedToPresent(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; migration fallback filters routed_to with jq")
+	}
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*)
-    printf '[{"id":"run-target-root","issue_type":"workflow"}]'
-    ;;
   *"--metadata-field gc.routed_to=hello-world/worker"*)
-    printf '[{"id":"routed-to-root","issue_type":"wisp"}]'
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*)
+    printf '[{"id":"divergent-root","metadata":{"gc.routed_to":"hello-world/controller","gc.run_target":"hello-world/worker","gc.kind":"workflow"}}]'
     ;;
   *) printf '[]' ;;
 esac
 `)
-	if !strings.Contains(out, "run-target-root") {
-		t.Fatalf("EffectiveWorkQuery() did not prefer the gc.run_target root: %q", out)
-	}
-	if strings.Contains(out, "routed-to-root") {
-		t.Fatalf("EffectiveWorkQuery() surfaced the gc.routed_to root despite a run_target match: %q", out)
+	if strings.Contains(out, "divergent-root") {
+		t.Fatalf("EffectiveWorkQuery() claimed divergent legacy root through gc.run_target: %q", out)
 	}
 }
 
-// TestEffectivePoolDemandQueryPrefersRunTarget verifies the spawn-side half of
-// the #2763 symmetry: the reconciler count-form counts gc.run_target demand for
-// a graph.v2 root that stamps only gc.run_target, so it keeps the worker it
-// spawned alive rather than treating the queue as empty.
-func TestEffectivePoolDemandQueryPrefersRunTarget(t *testing.T) {
+// TestEffectivePoolDemandQueryCountsRoutedTo verifies the reconciler count-form
+// counts gc.routed_to demand — the spawn-side counterpart to the worker claim
+// path for the canonical persisted routing key.
+func TestEffectivePoolDemandQueryCountsRoutedTo(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; count-form exercises a jq pipeline")
 	}
@@ -2008,7 +2004,7 @@ func TestEffectivePoolDemandQueryPrefersRunTarget(t *testing.T) {
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
 case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*)
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
     printf '[{"id":"a"},{"id":"b"}]'
     ;;
   *)
@@ -2017,7 +2013,70 @@ case "$*" in
 esac
 `)
 	if strings.TrimSpace(out) != "2" {
-		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (run_target demand)", strings.TrimSpace(out))
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (routed_to demand)", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryCountsRunTargetOnlyRootDuringMigration(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"legacy-root"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (run_target migration demand)", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryIgnoresDivergentRunTargetWhenRoutedToPresent(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*)
+    printf '[{"id":"divergent-root","metadata":{"gc.routed_to":"hello-world/controller","gc.run_target":"hello-world/worker","gc.kind":"workflow"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 for divergent legacy route", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryTreatsEmptyReadyOutputAsZero(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+exit 0
+`)
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 for empty bd output", strings.TrimSpace(out))
 	}
 }
 
@@ -2060,9 +2119,11 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 // reconciler's pool-demand path (EffectivePoolDemandQuery) and the
 // worker's claim path (EffectiveWorkQuery Tier 3) must derive their
 // "is there work on this routed queue?" predicate from the same
-// bdReadyPoolDemandShell helper and walk the same routing keys
-// (gc.run_target preferred, gc.routed_to fallback; #2763). Adding a tier to
-// one without updating the other re-introduces the spawn-storm bug.
+// bdReadyPoolDemandShell helper. Adding a tier to one without updating
+// the other re-introduces the spawn-storm bug — this test ensures both
+// reference the same predicate helpers for the canonical routing key and the
+// temporary migration fallback. The worker first-row path bounds its migration
+// scan, while the reconciler count path keeps the unbounded count form.
 func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2092,16 +2153,25 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20")
+			if !strings.Contains(wq, migrationWorkPredicate) {
+				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
+			}
+			for _, want := range []string{`.metadata`, `.[:1]`} {
+				if !strings.Contains(wq, want) {
+					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
+				}
+			}
 			countPredicate := bdReadyPoolDemandShell("--limit 0")
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			keyList := poolDemandKeyListShell()
-			if !strings.Contains(wq, "for key in "+keyList) {
-				t.Errorf("EffectiveWorkQuery() missing shared key order %q in %q", keyList, wq)
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0")
+			if !strings.Contains(demand, migrationCountPredicate) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}
-			if !strings.Contains(demand, "for key in "+keyList) {
-				t.Errorf("EffectivePoolDemandQuery() missing shared key order %q in %q", keyList, demand)
+			if !strings.Contains(demand, `.metadata`) {
+				t.Errorf("EffectivePoolDemandQuery() missing migration routed_to filter in %q", demand)
 			}
 			if !strings.Contains(wq, tt.target) {
 				t.Errorf("EffectiveWorkQuery() missing target argument %q in %q", tt.target, wq)
@@ -2109,13 +2179,46 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 			if !strings.Contains(demand, tt.target) {
 				t.Errorf("EffectivePoolDemandQuery() missing target argument %q in %q", tt.target, demand)
 			}
-			for _, key := range poolDemandKeys {
-				embedded := key + "=" + tt.target
-				if strings.Contains(wq, embedded) {
-					t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
-				}
+			embedded := "gc.routed_to=" + tt.target
+			if strings.Contains(wq, embedded) {
+				t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
+			}
+			if strings.Contains(demand, embedded) {
+				t.Errorf("EffectivePoolDemandQuery() embeds target in predicate %q in %q", embedded, demand)
+			}
+			legacyEmbedded := "gc.run_target=" + tt.target
+			if strings.Contains(wq, legacyEmbedded) {
+				t.Errorf("EffectiveWorkQuery() embeds target in migration predicate %q in %q", legacyEmbedded, wq)
+			}
+			if strings.Contains(demand, legacyEmbedded) {
+				t.Errorf("EffectivePoolDemandQuery() embeds target in migration predicate %q in %q", legacyEmbedded, demand)
 			}
 		})
+	}
+}
+
+func TestEffectivePoolDemandQueryDedupsMigrationOverlap(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"same-root"}]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"same-root"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (overlap must dedup by bead id)", strings.TrimSpace(out))
 	}
 }
 
@@ -5149,7 +5252,7 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"template='myrig/dog'", "for key in gc.run_target gc.routed_to", `--metadata-field "$key=$template"`, "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='myrig/dog'", `--metadata-field "gc.routed_to=$template"`, `--metadata-field "gc.run_target=$template"`, `--metadata-field "gc.kind=workflow"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -5168,7 +5271,7 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"template='myrig/dog'", "for key in gc.run_target gc.routed_to", `--metadata-field "$key=$template"`, "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='myrig/dog'", `--metadata-field "gc.routed_to=$template"`, `--metadata-field "gc.run_target=$template"`, `--metadata-field "gc.kind=workflow"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -5227,7 +5330,7 @@ case "$1" in
   list)
     printf '%s\n' "$*" >> "$BD_LOG"
     case "$*" in
-      *"--metadata-field gc.run_target=hello-world/dog"*) printf '[{"id":"ga-run-target","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}}]' ;;
+      *"--metadata-field gc.run_target=hello-world/dog"*"--metadata-field gc.kind=workflow"*) printf '[{"id":"ga-run-target","type":"workflow","metadata":{"gc.kind":"workflow","gc.run_target":"hello-world/dog"}}]' ;;
       *) printf '[]' ;;
     esac
     ;;
@@ -5239,7 +5342,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "list --include-ephemeral --metadata-field gc.run_target=hello-world/dog --status=in_progress --no-assignee --json") {
+	if !strings.Contains(log, "list --include-ephemeral --metadata-field gc.run_target=hello-world/dog --metadata-field gc.kind=workflow --status=in_progress --no-assignee --json") {
 		t.Fatalf("hook log = %q, want ephemeral-aware run_target list query", log)
 	}
 	if !strings.Contains(log, "update ga-run-target --status open") {
@@ -5260,7 +5363,11 @@ set -eu
 case "$1" in
   list)
     printf '%s\n' "$*" >> "$BD_LOG"
-    printf '[{"id":"ga-dup","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}},{"id":"ga-dup","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]'
+    case "$*" in
+      *"--metadata-field gc.routed_to=hello-world/dog"*) printf '[{"id":"ga-dup","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]' ;;
+      *"--metadata-field gc.run_target=hello-world/dog"*) printf '[{"id":"ga-dup","type":"workflow","metadata":{"gc.kind":"workflow","gc.routed_to":"hello-world/dog","gc.run_target":"hello-world/dog"}}]' ;;
+      *) printf '[]' ;;
+    esac
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
@@ -5289,7 +5396,7 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"template='mayor'", "for key in gc.run_target gc.routed_to", `--metadata-field "$key=$template"`, "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='mayor'", `--metadata-field "gc.routed_to=$template"`, `--metadata-field "gc.run_target=$template"`, `--metadata-field "gc.kind=workflow"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}

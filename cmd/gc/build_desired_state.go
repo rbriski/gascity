@@ -460,7 +460,7 @@ func buildDesiredStateWithSessionBeads(
 		if len(assignedWorkBeads) > 0 {
 			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
 			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s run_target=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Metadata["gc.run_target"], wb.Status) //nolint:errcheck
+				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Status) //nolint:errcheck
 			}
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
@@ -1024,7 +1024,8 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		counted := make(map[string]struct{})
 
 		// Source 1: Ready()/CachedReady() iteration. Surfaces the
-		// actionable-type set (task, etc.) matched against gc.routed_to.
+		// actionable-type set (task, etc.) matched against canonical routing
+		// metadata, with the temporary gc.run_target migration fallback.
 		// Legacy formula step beads are NOT here because PR #1154 added
 		// "step" to readyExcludeTypes; molecule wisps are NOT here
 		// because workflow containers were already excluded.
@@ -1040,12 +1041,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			// gc.run_target (per-step) takes precedence over gc.routed_to
-			// (convoy-wide default). See dispatch/fanout.go and adaf6ec.
-			template := strings.TrimSpace(b.Metadata["gc.run_target"])
-			if template == "" {
-				template = strings.TrimSpace(b.Metadata["gc.routed_to"])
-			}
+			template := controllerDemandRouteTarget(b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
@@ -1066,7 +1062,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// (per PR #1154 / issue #1039 — formula steps are not actionable
 		// work, the molecule is the container). The list filter is
 		// metadata-only (open + gc.pool_demand=<sentinel>); the
-		// unassigned + matching-routed_to checks apply below as for the
+		// unassigned + matching-route checks apply below as for the
 		// Ready source.
 		//
 		// Live: true skips the CachingStore in-memory snapshot and reads
@@ -1098,13 +1094,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if beads.IsDeferred(b, now) {
 				continue
 			}
-			// gc.run_target (per-step) takes precedence over gc.routed_to
-			// here too; this source handles pool-demand wisps that Ready()
-			// intentionally filters out.
-			template := strings.TrimSpace(b.Metadata["gc.run_target"])
-			if template == "" {
-				template = strings.TrimSpace(b.Metadata["gc.routed_to"])
-			}
+			template := controllerDemandRouteTarget(b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
@@ -1200,15 +1190,7 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			// gc.run_target (per-step) takes precedence over gc.routed_to
-			// (convoy-wide default). Without this, every child of a
-			// tellus-dev convoy looks routed to the convoy entry agent
-			// and named-singleton demand (architect/product-owner/...)
-			// is never computed. See dispatch/fanout.go and adaf6ec.
-			routedTo := strings.TrimSpace(b.Metadata["gc.run_target"])
-			if routedTo == "" {
-				routedTo = strings.TrimSpace(b.Metadata["gc.routed_to"])
-			}
+			routedTo := routedToOrLegacyWorkflowTarget(b)
 			if routedTo == "" {
 				continue
 			}
@@ -1229,6 +1211,23 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 		}
 	}
 	return demand, partialTemplates, errs
+}
+
+func controllerDemandRouteTarget(b beads.Bead, templates map[string]struct{}) string {
+	for _, candidate := range controllerDemandRouteCandidates(b) {
+		if _, ok := templates[candidate]; ok {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// controllerDemandRouteCandidates keeps controller-side readers compatible
+// with pre-ga-eld2x workflow roots. It matches the shell claim/count shape:
+// canonical gc.routed_to first, then gc.run_target only for workflow roots
+// stamped before root routing switched to gc.routed_to.
+func controllerDemandRouteCandidates(b beads.Bead) []string {
+	return routedToAndLegacyWorkflowCandidates(b)
 }
 
 func markScaleCheckPartialTemplate(partials map[string]bool, template string) map[string]bool {

@@ -11195,6 +11195,199 @@ func setupBdContractCityForTest(t *testing.T) string {
 	return tmp
 }
 
+// writeBreakerAwarePreflightFakes sets up a fake gc-beads-bd script whose
+// `health` op writes its name to opsFile then fails with healthStderr, and
+// whose `recover` op writes its name and exits 0. Returns the ops-log path
+// for later assertion.
+func writeBreakerAwarePreflightFakes(t *testing.T, cityPath, healthStderr string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opsFile := filepath.Join(t.TempDir(), "provider-ops.log")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$1" >> %q
+case "$1" in
+  health)
+    printf '%%s\n' %q >&2
+    exit 1
+    ;;
+  recover)
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, opsFile, healthStderr)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return opsFile
+}
+
+func TestIsBreakerOpenError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "unrelated", err: errors.New("connection refused"), want: false},
+		{
+			name: "canonical breaker message",
+			err: errors.New(
+				`exec beads health: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)`,
+			),
+			want: true,
+		},
+		{
+			name: "first substring only",
+			err:  errors.New("dolt circuit breaker is open"),
+			want: true,
+		},
+		{
+			name: "second substring only",
+			err:  errors.New("server appears down, failing fast"),
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isBreakerOpenError(tc.err); got != tc.want {
+				t.Fatalf("isBreakerOpenError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	opsFile := writeBreakerAwarePreflightFakes(t, cityPath,
+		"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)")
+
+	cityKey := normalizePathForCompare(cityPath)
+	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
+
+	err := healthBeadsProvider(cityPath)
+	if err == nil {
+		t.Fatalf("healthBeadsProvider() error = nil, want breaker-open health err")
+	}
+	if !isBreakerOpenError(err) {
+		t.Fatalf("healthBeadsProvider() error = %v, want breaker-open substring", err)
+	}
+
+	ops, readErr := os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	opLines := strings.Fields(strings.TrimSpace(string(ops)))
+	if len(opLines) != 1 || opLines[0] != "health" {
+		t.Fatalf("provider ops = %q, want only health (recover must be skipped when breaker open)", string(ops))
+	}
+	if _, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
+		t.Fatalf("breaker-skip should NOT update lastBeadsProviderRecover for %q", cityPath)
+	}
+}
+
+func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
+
+	cityKey := normalizePathForCompare(cityPath)
+	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
+
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	clock := []time.Time{t0, t0.Add(5 * time.Second)}
+	var idx int
+	prevNow, prevCD := providerRecoverNow, providerRecoverCooldown
+	providerRecoverNow = func() time.Time {
+		v := clock[idx]
+		if idx < len(clock)-1 {
+			idx++
+		}
+		return v
+	}
+	providerRecoverCooldown = func() time.Duration { return 30 * time.Second }
+	t.Cleanup(func() {
+		providerRecoverNow, providerRecoverCooldown = prevNow, prevCD
+	})
+
+	// First call: health fails (non-breaker) → records timestamp + invokes
+	// recover. Downstream publish/wait may error; we only assert the OPS log.
+	_ = healthBeadsProvider(cityPath)
+	// Second call (5s later, < 30s cooldown): recover must be skipped.
+	_ = healthBeadsProvider(cityPath)
+
+	ops, readErr := os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	got := strings.Fields(strings.TrimSpace(string(ops)))
+	if h, r := countOps(got, "health", "recover"); h < 2 || r != 1 {
+		t.Fatalf("provider ops = %v; want health>=2 and recover==1 (2nd recover gated by cooldown)", got)
+	}
+}
+
+func TestHealthBeadsProviderAllowsRecoverAfterCooldown(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
+
+	cityKey := normalizePathForCompare(cityPath)
+	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
+
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	clock := []time.Time{t0, t0.Add(60 * time.Second)}
+	var idx int
+	prevNow, prevCD := providerRecoverNow, providerRecoverCooldown
+	providerRecoverNow = func() time.Time {
+		v := clock[idx]
+		if idx < len(clock)-1 {
+			idx++
+		}
+		return v
+	}
+	providerRecoverCooldown = func() time.Duration { return 30 * time.Second }
+	t.Cleanup(func() {
+		providerRecoverNow, providerRecoverCooldown = prevNow, prevCD
+	})
+
+	_ = healthBeadsProvider(cityPath)
+	_ = healthBeadsProvider(cityPath)
+
+	ops, readErr := os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	got := strings.Fields(strings.TrimSpace(string(ops)))
+	if h, r := countOps(got, "health", "recover"); h < 2 || r != 2 {
+		t.Fatalf("provider ops = %v; want health>=2 and recover==2 (2nd recover allowed past cooldown)", got)
+	}
+}
+
+func countOps(ops []string, names ...string) (int, int) {
+	counts := make(map[string]int, len(names))
+	for _, op := range ops {
+		counts[op]++
+	}
+	if len(names) != 2 {
+		panic("countOps expects two op names")
+	}
+	return counts[names[0]], counts[names[1]]
+}
+
 func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) func() {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

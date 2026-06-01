@@ -61,6 +61,40 @@ var cityDoltConfigs sync.Map // cityPath → config.DoltConfig
 // concurrent provider operation per city (serialize lifecycle ops).
 var providerOpSemaphores sync.Map // cityPath → chan struct{}
 
+// lastBeadsProviderRecover records the timestamp of the most recent
+// recover attempt per city so healthBeadsProvider can refuse a 2nd
+// recover within providerRecoverCooldown of the prior one. Together
+// with the breaker-aware skip, this breaks the low-RSS restart-loop
+// where each patrol tick re-trips the bd circuit breaker and
+// re-desyncs the managed-dolt PID.
+var lastBeadsProviderRecover sync.Map // cityPath → time.Time
+
+// providerRecoverCooldown is the minimum interval between consecutive
+// managed-dolt recover attempts on a single city. Stubbable for tests.
+// 30s is the lower bound suggested by issue #2792 — long enough to
+// span the bd breaker cooldown + dolt startup, short enough that a
+// genuinely-degraded server still recovers on the next tick.
+var providerRecoverCooldown = func() time.Duration { return 30 * time.Second }
+
+// providerRecoverNow is the clock for the recover-backoff window.
+// Stubbable for tests.
+var providerRecoverNow = time.Now
+
+// isBreakerOpenError reports whether err looks like a bd circuit
+// breaker fail-fast — emitted by the bd client when the breaker is
+// open. The two substrings hedge against either half of the canonical
+// message being rephrased upstream; they match the strings the
+// integration suite already asserts on
+// (test/integration/integration_test.go).
+func isBreakerOpenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "dolt circuit breaker is open") ||
+		strings.Contains(s, "server appears down, failing fast")
+}
+
 func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 	return cfg.Host != "" || cfg.Port != 0 || cfg.ArchiveLevel != nil
 }
@@ -985,6 +1019,25 @@ func healthBeadsProvider(cityPath string) error {
 				if !owned {
 					return err
 				}
+				// Breaker-aware preflight: if the bd circuit breaker is
+				// open, a recovery is already in flight (#2533 clears the
+				// breaker on kill). Skip recover here so the next restart
+				// doesn't re-trip the breaker and re-desync the PID.
+				if isBreakerOpenError(err) {
+					return err
+				}
+				// Recover backoff: refuse a 2nd recover within
+				// providerRecoverCooldown of the prior one, keyed per
+				// city. This alone breaks the low-RSS restart-loop where
+				// each tick (~60-110s apart) starts a fresh recover.
+				cityKey := normalizePathForCompare(cityPath)
+				now := providerRecoverNow()
+				if v, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
+					if last, ok := v.(time.Time); ok && now.Sub(last) < providerRecoverCooldown() {
+						return err
+					}
+				}
+				lastBeadsProviderRecover.Store(cityKey, now)
 			}
 			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)

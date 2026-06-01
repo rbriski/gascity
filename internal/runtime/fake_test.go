@@ -287,6 +287,24 @@ func TestFakeRemoveMeta(t *testing.T) {
 	}
 }
 
+func TestFakeRemoveMetaErrorForSessionKey(t *testing.T) {
+	f := NewFake()
+	_ = f.SetMeta("session-a", "GC_DRAIN", "123")
+	f.RemoveMetaErrors["session-a"] = map[string]error{"GC_DRAIN": errors.New("remove denied")}
+
+	if err := f.RemoveMeta("session-a", "GC_DRAIN"); err == nil {
+		t.Fatal("RemoveMeta error = nil, want configured error")
+	}
+	val, _ := f.GetMeta("session-a", "GC_DRAIN")
+	if val != "123" {
+		t.Errorf("GetMeta after failed remove = %q, want original value", val)
+	}
+
+	if err := f.RemoveMeta("session-a", "OTHER"); err != nil {
+		t.Fatalf("RemoveMeta unrelated key: %v", err)
+	}
+}
+
 func TestFakeListRunning(t *testing.T) {
 	f := NewFake()
 	_ = f.Start(context.Background(), "gc-city-mayor", Config{})

@@ -2780,6 +2780,8 @@ func sessionHasOpenAssignedWispWork(store beads.Store, assignee, status string) 
 	if cache, ok := store.(interface {
 		CachedList(beads.ListQuery) ([]beads.Bead, bool)
 	}); ok {
+		// This positive-only probe intentionally keeps the tier-scoped cache
+		// helper: HandlesFor(...).Cached.List reads both tiers by contract.
 		if items, ok := cache.CachedList(query); ok {
 			if hasNonSessionAssignedWork(items) {
 				return true, nil

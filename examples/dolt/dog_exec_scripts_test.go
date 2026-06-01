@@ -369,7 +369,7 @@ set_hash() {
 case "$query" in
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_success_requires_cache|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_success_requires_cache|remote_missing_cache_once|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
         print_cell 1
         ;;
       *)
@@ -391,7 +391,7 @@ case "$query" in
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes"*)
     case "$mode" in
-      remote_success|remote_success_requires_cache|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
+      remote_success|remote_success_requires_cache|remote_missing_cache_once|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
         print_cell 1
         ;;
       multiple_remotes_with_origin|multiple_remotes_no_origin)
@@ -408,7 +408,7 @@ case "$query" in
     ;;
   *"SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"*)
     case "$mode" in
-      remote_success|remote_success_requires_cache|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_success_requires_cache|remote_missing_cache_once|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
         print_cell origin
         ;;
       explicit_backup_remote)
@@ -424,6 +424,13 @@ case "$query" in
     if [ "$mode" = "remote_success_requires_cache" ] && [ ! -f "${GC_DOLT_DATA_DIR:-}/$db/.dolt/git-remote-cache/fetch-required" ]; then
       printf 'remote cache missing before fetch\n' >&2
       exit 55
+    fi
+    if [ "$mode" = "remote_missing_cache_once" ]; then
+      repo_path="${GC_DOLT_DATA_DIR:-}/$db/.dolt/git-remote-cache/cachehash/repo.git"
+      if [ ! -d "$repo_path" ]; then
+        printf "failed to read latest version of remote db: fatal: not a git repository: '%%s'\n" "$repo_path" >&2
+        exit 55
+      fi
     fi
     if [ "$mode" = "remote_fetch_failure" ]; then
       printf 'fetch unavailable\n' >&2
@@ -1049,6 +1056,51 @@ func TestCompactScriptRunsLocalFullGCBeforePendingPushRetry(t *testing.T) {
 	}
 	if strings.Contains(log, "DOLT_RESET") || strings.Contains(log, "DOLT_COMMIT") {
 		t.Fatalf("pending-push local full GC must not flatten again:\n%s", log)
+	}
+}
+
+func TestCompactScriptRepairsMissingGitRemoteCacheBeforePendingPushRetry(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if err := os.MkdirAll(filepath.Dir(pendingPush), 0o755); err != nil {
+		t.Fatalf("mkdir pending-push fixture: %v", err)
+	}
+	if err := os.WriteFile(pendingPush, []byte(
+		"db=beads\n"+
+			"reason=flatten and full GC succeeded but remote push failed\n"+
+			"created_at="+time.Now().UTC().Format("2006-01-02T15:04:05Z")+"\n"+
+			"remote=origin\n"+
+			"expected_remote_head=headcommit\n"+
+			"expected_remote_head_verified=1\n"+
+			"compacted_from_head=headcommit\n"+
+			"local_branch=main\n"+
+			"remote_branch=main\n",
+	), 0o600); err != nil {
+		t.Fatalf("write pending-push fixture: %v", err)
+	}
+
+	out, err := fixture.run(t, "remote_missing_cache_once", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("pending-push retry should repair missing git remote cache and push: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "git_remote_cache=initialized") ||
+		!strings.Contains(out, "pushed compacted main") {
+		logData, _ := os.ReadFile(fixture.doltLog)
+		t.Fatalf("output missing remote-cache repair and push success:\n%s\nlog:\n%s", out, logData)
+	}
+	repoPath := filepath.Join(fixture.dataDir, "beads", ".dolt", "git-remote-cache", "cachehash", "repo.git")
+	if _, err := os.Stat(filepath.Join(repoPath, "HEAD")); err != nil {
+		t.Fatalf("expected initialized bare git cache at %s: %v", repoPath, err)
+	}
+	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
+		t.Fatalf("successful repaired retry should clear marker, stat err=%v", err)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Count(string(logData), "CALL DOLT_FETCH('origin')") < 2 {
+		t.Fatalf("retry should re-run fetch after cache repair:\n%s", logData)
 	}
 }
 

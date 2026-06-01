@@ -668,6 +668,73 @@ fetch_remote() {
   dolt_query "$db" "CALL DOLT_FETCH('$remote')"
 }
 
+repair_missing_git_remote_cache_from_error() {
+  db="$1"
+  err_file="$2"
+  repo_path=$(sed -n "s/.*not a git repository: '\([^']*\/repo\.git\)'.*/\1/p" "$err_file" | sed -n '1p')
+  [ -n "$repo_path" ] || return 1
+
+  cache_root="$DOLT_DATA_DIR/$db/.dolt/git-remote-cache"
+  case "$repo_path" in
+    "$cache_root"/*/repo.git)
+      ;;
+    *)
+      printf 'compact: db=%s git_remote_cache repair refused path=%s outside cache_root=%s\n' \
+        "$db" "$repo_path" "$cache_root" >&2
+      return 1
+      ;;
+  esac
+  if ! command -v git >/dev/null 2>&1; then
+    printf 'compact: db=%s git_remote_cache repair requires git on PATH\n' "$db" >&2
+    return 1
+  fi
+  if [ -e "$repo_path" ] && [ ! -d "$repo_path" ]; then
+    printf 'compact: db=%s git_remote_cache repair refused non-directory path=%s\n' \
+      "$db" "$repo_path" >&2
+    return 1
+  fi
+  repo_parent=${repo_path%/repo.git}
+  if ! mkdir -p "$repo_parent"; then
+    printf 'compact: db=%s git_remote_cache repair failed to create parent=%s\n' \
+      "$db" "$repo_parent" >&2
+    return 1
+  fi
+  if ! git init --bare "$repo_path" >/dev/null 2>&1; then
+    printf 'compact: db=%s git_remote_cache repair failed to initialize path=%s\n' \
+      "$db" "$repo_path" >&2
+    return 1
+  fi
+  if [ ! -f "$repo_path/HEAD" ]; then
+    if ! printf 'ref: refs/heads/main\n' > "$repo_path/HEAD"; then
+      printf 'compact: db=%s git_remote_cache repair failed to write HEAD path=%s\n' \
+        "$db" "$repo_path/HEAD" >&2
+      return 1
+    fi
+  fi
+  printf 'compact: db=%s git_remote_cache=initialized path=%s — retrying fetch\n' \
+    "$db" "$repo_path"
+  return 0
+}
+
+fetch_remote_with_cache_repair() {
+  db="$1"
+  remote="$2"
+  err_file="$3"
+  : > "$err_file"
+  fetch_remote "$db" "$remote" >/dev/null 2>"$err_file" && return 0
+  repair_initial_fetch_rc=$?
+  if repair_missing_git_remote_cache_from_error "$db" "$err_file"; then
+    : > "$err_file"
+    retry_rc=0
+    fetch_remote "$db" "$remote" >/dev/null 2>"$err_file" || retry_rc=$?
+    if [ "$retry_rc" -eq 0 ]; then
+      return 0
+    fi
+    return "$retry_rc"
+  fi
+  return "$repair_initial_fetch_rc"
+}
+
 remote_branch_head() {
   db="$1"
   remote="$2"
@@ -1175,7 +1242,7 @@ push_remote_after_compaction() {
 
   fetch_rc=0
   fetch_err_tmp=$(mktemp)
-  fetch_remote "$db" "$remote" >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+  fetch_remote_with_cache_repair "$db" "$remote" "$fetch_err_tmp" || fetch_rc=$?
   if [ "$fetch_rc" -ne 0 ]; then
     printf 'compact: db=%s remote=%s fetch failed rc=%s before push after local compaction\n' \
       "$db" "$remote" "$fetch_rc" >&2
@@ -1647,7 +1714,7 @@ flatten_database() {
     printf 'compact: db=%s remote=%s — fetching before flatten...\n' "$db" "$remote"
     fetch_rc=0
     fetch_err_tmp=$(mktemp)
-    fetch_remote "$db" "$remote" >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+    fetch_remote_with_cache_repair "$db" "$remote" "$fetch_err_tmp" || fetch_rc=$?
     if [ "$fetch_rc" -ne 0 ]; then
       printf 'compact: db=%s remote=%s fetch failed rc=%s — proceeding from local source of truth\n' \
         "$db" "$remote" "$fetch_rc" >&2

@@ -69,6 +69,14 @@ with `sourceworkflow.IsWorkflowRoot` before deleting the root closure. Open or
 recent workflow roots are left alone, and roots matching both metadata queries
 are de-duplicated.
 
+The Dolt compactor also now accepts the order-dispatched explicit loopback
+external target shape (`GC_DOLT_MANAGED_LOCAL=0`, local `GC_DOLT_HOST`, explicit
+`GC_DOLT_PORT`) without requiring managed runtime state. Non-local external
+targets still skip without querying. This covers cities such as
+`/data/projects/maintainer-city`, where the canonical endpoint is a locally
+managed-by-operator Dolt server on `127.0.0.1:3307`, not a `gc start` managed
+runtime.
+
 ## Creation Paths
 
 | Path | Beads opened | Bookkeeping owner |
@@ -106,3 +114,12 @@ are de-duplicated.
   non-closed wisps older than 24h. The remaining above-threshold open count is
   dominated by fresh active workflow wisps from the non-idle live queue, not
   old reaper-eligible backlog.
+- Live Dolt compactor dry-run evidence on 2026-06-01 against
+  `/data/projects/maintainer-city` using the branch script and the
+  order-dispatched explicit loopback external-target environment reached `mc`
+  instead of skipping the endpoint. It then stopped on an existing integrity
+  quarantine marker:
+  `/data/projects/maintainer-city/.gc/runtime/packs/dolt/compact-quarantine/mc`
+  with `reason=post-flatten value hash changed without row-count increase` and
+  `created_at=2026-05-20T11:14:29Z`. That marker requires separate manual
+  integrity review before live compaction or full GC can run for `mc`.

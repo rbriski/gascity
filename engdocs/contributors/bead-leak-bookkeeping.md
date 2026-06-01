@@ -58,6 +58,14 @@ non-message counts were low. The reaper anomaly now counts only non-message
 wisps older than `GC_REAPER_MAX_AGE`; fresh active workflow rows no longer page
 as leak evidence. Mail wisps keep their separate optional backlog threshold.
 
+`ga-vwnt1` fixed a deacon patrol formula leak source. The
+`mol-deacon-patrol` final step used to pour the next patrol wisp, sleep for the
+backoff interval, and only then burn the current wisp. A restart during that
+sleep could strand the current patrol wisp open. Version 15 now resolves the
+current wisp, pours and assigns the successor, burns the current wisp
+immediately, then sleeps and re-enters `gc hook`; the backoff belongs to the
+already-assigned successor instead of an open predecessor.
+
 `ga-6pbt8` identified that `runControlDispatcherWithStoreAndConfig`
 hard-quarantined every `ProcessControl` error except `ErrControlPending`.
 That swallowed transient store/controller faults before the serve loop could use
@@ -140,6 +148,7 @@ Dolt log. Unverified legacy markers still stop before any force-push.
 | --- | --- | --- |
 | `internal/molecule/graph_apply.go` graph workflow instantiation | Wisp root plus logical/step wisps. Non-root graph steps are linked to the root with `tracks`; explicit ordering uses `blocks`; legacy containment uses `parent-child`. | Normal workflow execution closes runnable steps. `molecule.CloseSubtree` closes owned descendants during explicit cleanup. `reaper.sh` now closes stale leftovers when all reaper-owned dependency targets are closed. |
 | `cmd/gc/order_dispatch.go` order dispatch | Ephemeral order-tracking bead labeled `gc:order-tracking`; wisp orders also create a molecule/wisp root via `molecule.Instantiate`. | `dispatchOne` defers `closeOrderTrackingBead`. Wisp roots are intentionally not auto-closed solely because descendants finish; the reaper handles stale roots/steps only when dependency evidence proves closure is safe. |
+| `examples/gastown/packs/gastown/formulas/mol-deacon-patrol.toml` patrol loop | One root-only deacon patrol wisp per cycle. Each cycle pours the next patrol wisp and assigns it to the same deacon session. | Version 15 burns the current patrol wisp before the backoff sleep, then re-enters `gc hook` after sleeping. This keeps at most the successor wisp open across the backoff window. |
 | Graph-v2 routing decorators in `internal/graphroute/graphroute.go` and `cmd/gc/cmd_sling.go` | Workflow roots plus routed child steps. `gc.run_target` remains a formula-authoring hint; `gc.routed_to` is the persisted claim key. | Patched roots now persist `gc.routed_to` so the runtime claim path can see them. Existing roots can be backfilled by `gc doctor --fix` through `run-target-routed-to-backfill`. |
 | `cmd/gc/bead_policy_store.go` storage policy wrapper | Applies default ephemeral storage to wisp/order-tracking policies and no-history storage to session/wait/nudge policies. | Policy only selects storage tier; lifecycle is owned by the creating subsystem and maintenance scripts. |
 | Session pool creation in `cmd/gc/build_desired_state.go` and lifecycle paths | Session beads, including generic ephemeral session beads for managed pools. | Session lifecycle/reconciler close or retire sessions. `reaper.sh` prunes closed `gm-*` session beads through `bd prune` and prunes terminal drained session states through `gc session prune`; orphan-sweep preserves live ephemeral session assignees. |
@@ -159,7 +168,9 @@ Dolt log. Unverified legacy markers still stop before any force-push.
 ## Verification Snapshot
 
 - `go test ./examples/gastown -count=1` passed for the reaper and wisp-GC
-  changes.
+  changes and the deacon patrol burn-before-backoff regression.
+- `go test ./examples/gastown -run TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff -count=1`
+  failed before the `mol-deacon-patrol` version 15 change and passed after it.
 - `go test ./internal/session -count=1` passed for the session prune timestamp
   and drained-asleep alias changes.
 - `go test ./cmd/gc -run 'TestCmdSessionPrune|TestSessionActionJSONSchema' -count=1`

@@ -3229,3 +3229,93 @@ title = "Test"
 		}
 	}
 }
+
+func TestParseFile_ContentHash(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte(`formula = "mol-hash-test"
+version = 3
+
+[[steps]]
+id = "do-thing"
+title = "Do the thing"
+`)
+	path := filepath.Join(dir, "mol-hash-test.toml")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewParser(dir)
+	f, err := p.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	if f.ContentHash == "" {
+		t.Fatal("ContentHash should be set after ParseFile")
+	}
+
+	// Hash should be deterministic
+	want := ContentHash(content)
+	if f.ContentHash != want {
+		t.Errorf("ContentHash = %q, want %q", f.ContentHash, want)
+	}
+
+	// Hash should be 64 hex chars (SHA-256)
+	if len(f.ContentHash) != 64 {
+		t.Errorf("ContentHash length = %d, want 64", len(f.ContentHash))
+	}
+}
+
+func TestParseFile_ContentHashChangesWithContent(t *testing.T) {
+	dir := t.TempDir()
+	v1 := []byte(`formula = "mol-evolve"
+version = 1
+
+[[steps]]
+id = "step-a"
+title = "Step A"
+`)
+	v2 := []byte(`formula = "mol-evolve"
+version = 2
+
+[[steps]]
+id = "step-a"
+title = "Step A (updated)"
+`)
+	path := filepath.Join(dir, "mol-evolve.toml")
+	if err := os.WriteFile(path, v1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := NewParser(dir)
+	f1, err := p1.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile v1: %v", err)
+	}
+
+	if err := os.WriteFile(path, v2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p2 := NewParser(dir)
+	f2, err := p2.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile v2: %v", err)
+	}
+
+	if f1.ContentHash == f2.ContentHash {
+		t.Error("content hash should differ between v1 and v2")
+	}
+}
+
+func TestParse_InMemory_NoContentHash(t *testing.T) {
+	p := NewParser()
+	f, err := p.Parse([]byte(`{"formula":"mol-inmem","steps":[]}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if f.ContentHash != "" {
+		t.Errorf("ContentHash should be empty for in-memory parse, got %q", f.ContentHash)
+	}
+}

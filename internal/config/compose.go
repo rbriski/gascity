@@ -626,9 +626,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
 	// names reflect the effective workspace identity.
-	if err := ValidateNamedSessions(root); err != nil {
+	namedSessionWarnings, err := ValidateNamedSessions(root)
+	if err != nil {
 		return nil, nil, err
 	}
+	prov.Warnings = append(prov.Warnings, namedSessionWarnings...)
 
 	if err := ValidateGitHubPRMonitors(root); err != nil {
 		return nil, nil, err

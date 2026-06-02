@@ -227,6 +227,54 @@ schema = 2
 	}
 }
 
+func TestLoadCityConfigFSToleratesMissingNamedSessionTemplate(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city/pk"] = true
+	fs.Files["/city/pk/pack.toml"] = []byte(`[pack]
+name = "pk"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[imports.pk]
+source = "pk"
+
+[[named_session]]
+template = "pk.mayor"
+
+[[named_session]]
+name = "rizato"
+template = "pk.ghost"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+`)
+
+	var stderr bytes.Buffer
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v; a single broken named session must not brick config load", err)
+	}
+	if cfg == nil {
+		t.Fatal("loadCityConfigFS returned nil config")
+	}
+	// The valid sibling still resolves.
+	if config.FindNamedSession(cfg, "pk.mayor") == nil {
+		t.Fatal("FindNamedSession(pk.mayor) = nil, want the valid session to survive")
+	}
+	// The broken one is reported as a non-fatal warning on stderr.
+	if !strings.Contains(stderr.String(), `"rizato"`) ||
+		!strings.Contains(stderr.String(), "named session disabled until its template resolves") {
+		t.Fatalf("expected disabled-named-session warning on stderr, got %q", stderr.String())
+	}
+}
+
 func TestLoadCityConfigFSEmitsMigrationWarningsAcrossCalls(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]

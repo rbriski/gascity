@@ -3710,16 +3710,24 @@ func ValidateAgents(agents []Agent) error {
 }
 
 // ValidateNamedSessions checks named session declarations after pack expansion.
-func ValidateNamedSessions(cfg *City) error {
+// It returns non-fatal warnings (e.g. a named session whose backing template
+// did not resolve) alongside any fatal structural error.
+func ValidateNamedSessions(cfg *City) (warnings []string, err error) {
 	return validateNamedSessions(cfg, true)
 }
 
 // validateNamedSessions checks named session declarations for structural
-// errors. When requireBackingTemplate is true, it also requires every named
-// session to resolve to an expanded backing agent template.
-func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
+// errors. When requireBackingTemplate is true, a named session whose backing
+// agent template does not resolve after pack expansion is reported as a
+// non-fatal warning and the session is skipped, rather than failing the whole
+// config load. This keeps one broken named session from bricking every command
+// (a typo'd template should not stop `gc session attach <other>`). The session
+// still errors clearly when a command actually targets it, at materialization
+// time. Genuine structural problems (duplicate identity, invalid scope/mode,
+// name collisions, capacity overflow) remain fatal.
+func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []string, err error) {
 	if cfg == nil || len(cfg.NamedSessions) == 0 {
-		return nil
+		return nil, nil
 	}
 	type sessionKey struct{ dir, identity string }
 	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
@@ -3729,53 +3737,56 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 	for i := range cfg.NamedSessions {
 		s := &cfg.NamedSessions[i]
 		if s.Template == "" {
-			return fmt.Errorf("named_session[%d]: template is required", i)
+			return nil, fmt.Errorf("named_session[%d]: template is required", i)
 		}
 		if !validNamedSessionTemplate.MatchString(s.Template) {
-			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
+			return nil, fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
 		}
 		if s.Name != "" && !validAgentName.MatchString(s.Name) {
-			return fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
+			return nil, fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
 		}
 		switch s.Scope {
 		case "", "city", "rig":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
+			return nil, fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
 		}
 		switch s.ModeOrDefault() {
 		case "on_demand", "always":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
+			return nil, fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
 		}
 		key := sessionKey{dir: s.Dir, identity: s.IdentityName()}
 		if seen[key] {
-			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
+			return nil, fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
 		}
 		seen[key] = true
 		agent := FindAgent(cfg, s.TemplateQualifiedName())
-		if agent == nil {
-			if requireBackingTemplate {
-				return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())
-			}
+		if agent == nil && requireBackingTemplate {
+			// Non-fatal: a named session whose backing template did not
+			// resolve is skipped, not a hard error. Skipping here also
+			// keeps it out of the name-reservation and always-mode capacity
+			// bookkeeping below, since a disabled session holds no slot.
+			warnings = append(warnings, disabledNamedSessionWarning(s))
+			continue
 		}
 		identity := s.QualifiedName()
 		sessionName := NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
 		if other, ok := reservedAliases[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, sessionName,
 			)
 		}
 		if other, ok := reservedSessionNames[identity]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, identity,
 			)
 		}
 		if other, ok := reservedSessionNames[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: deterministic session_name %q collides with configured named session %q",
 				identity, sessionName, other,
 			)
@@ -3785,21 +3796,44 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), *maxActive, agent.QualifiedName(),
 				)
 			}
 			policy := ResolveSessionSleepPolicy(cfg, agent)
 			if normalized := NormalizeSleepAfterIdle(policy.Value); normalized != "" && normalized != SessionSleepOff {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q is incompatible with sleep_after_idle=%q on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), normalized, agent.QualifiedName(),
 				)
 			}
 		}
 	}
-	return nil
+	return warnings, nil
+}
+
+// disabledNamedSessionMarker is a stable suffix on the warning emitted when a
+// named session is skipped because its backing template did not resolve after
+// pack expansion. CLI warning classification keys off this marker, so keep it
+// in sync with IsDisabledNamedSessionWarning.
+const disabledNamedSessionMarker = "; named session disabled until its template resolves"
+
+// disabledNamedSessionWarning formats the non-fatal warning for a named session
+// whose backing template could not be resolved.
+func disabledNamedSessionWarning(s *NamedSession) string {
+	return fmt.Sprintf(
+		"named_session %q: backing template %q not found after pack expansion%s",
+		s.QualifiedName(), s.TemplateQualifiedName(), disabledNamedSessionMarker,
+	)
+}
+
+// IsDisabledNamedSessionWarning reports whether a load warning is the non-fatal
+// notice that a named session was skipped because its backing template did not
+// resolve. CLI warning filters use this to print the notice and keep it
+// non-fatal in strict mode.
+func IsDisabledNamedSessionWarning(warning string) bool {
+	return strings.HasSuffix(warning, disabledNamedSessionMarker)
 }
 
 // validateDependsOn checks that all depends_on references are valid agent
@@ -4032,7 +4066,7 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// Load intentionally skips include and pack expansion, so validate the
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
-	if err := validateNamedSessions(cfg, false); err != nil {
+	if _, err := validateNamedSessions(cfg, false); err != nil {
 		return nil, err
 	}
 	if err := ValidateGitHubPRMonitors(cfg); err != nil {

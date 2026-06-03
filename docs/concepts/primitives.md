@@ -122,7 +122,7 @@ Config is assembled from several sources:
 - **`city.toml`** — the root config file at the city directory root; the entry point the controller reads first and the file you always edit.
 - **Fragment files** — additional TOML files pulled in via an `include` field in `city.toml`.
 - **`pack.toml`** — reusable configuration directories (packs) that define agents and prompts.
-- **`agents/<name>/agent.toml`** — one file per agent; optional per-agent overrides (provider, rig scope, model, pool size). Lives under the `agents/` directory of *any* pack — the city's own root pack, an imported pack, or a rig-level import.
+- **`agents/<name>/agent.toml`** — one file per agent; optional per-agent overrides (provider, rig scope, model, pool size). Lives under the `agents/` directory of *any* pack — the city root (yes, a city is also a pack, called the root pack), an imported pack, or a rig-level import.
 - **`formulas/*.toml`** — one file per formula; can live at the city root (`<city-root>/formulas/`) or inside a pack (`<pack-dir>/formulas/`).
 - **`orders/*.toml`** — one file per order (a formula with an Event Bus gate condition); same placement rules as formula files.
 
@@ -133,7 +133,7 @@ These files serve distinct purposes:
 - **`agents/<name>/agent.toml`** is the *per-agent* config: how one agent diverges from the defaults — its provider, rig scope, model, or pool size. Optional; omit it and the agent inherits everything.
 - **Formula and order files** are the *workflow* config: the step-by-step definitions that instantiating a molecule or firing an order consumes at runtime. They can live at the city root or inside a pack.
 
-**What it does for you:** `city.toml` is where you say *how* your city runs; packs, formula files, and order files are where you say *what* your agents do. Together they form the full picture of your city's desired state, with no separate state file to maintain.
+**What it does for you:** `city.toml` is where you say *how* your city runs; packs and their `agents/<name>/agent.toml` files are where you define *which* agents exist and *what* each one does; formula and order files are where you define the workflows they run. Together they form the full picture of your city's desired state, with no separate state file to maintain.
 
 A minimal two-agent city declares each agent as its own directory under
 `agents/`. Scaffold them with `gc agent add`:

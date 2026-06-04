@@ -1062,16 +1062,28 @@ func (cs *controllerState) ResumeRig(name string) error {
 
 // SuspendCity sets workspace.suspended = true.
 func (cs *controllerState) SuspendCity() error {
-	return cs.mutateAndPoke(func() error {
+	if err := cs.mutateAndPoke(func() error {
 		return cs.editor.SuspendCity()
-	})
+	}); err != nil {
+		return err
+	}
+	if cs.eventProv != nil {
+		cs.eventProv.Record(events.Event{Type: events.CitySuspended, Actor: "gc"})
+	}
+	return nil
 }
 
 // ResumeCity sets workspace.suspended = false.
 func (cs *controllerState) ResumeCity() error {
-	return cs.mutateAndPoke(func() error {
+	if err := cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeCity()
-	})
+	}); err != nil {
+		return err
+	}
+	if cs.eventProv != nil {
+		cs.eventProv.Record(events.Event{Type: events.CityResumed, Actor: "gc"})
+	}
+	return nil
 }
 
 // CreateAgent adds a new agent to city.toml.

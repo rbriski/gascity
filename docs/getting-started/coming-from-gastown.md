@@ -390,5 +390,6 @@ If you already know Gas Town, this is the shortest path to becoming effective in
 3. Read [Tutorial 07 — Orders](/tutorials/07-orders) and mentally remap "plugins" to "orders".
 4. Read [Tutorial 05 — Formulas](/tutorials/05-formulas) and remember that formulas are resolved by Gas City but executed by the configured beads backend.
 5. Work through [Tutorial 02 — Agents](/tutorials/02-agents) and [Shareable Packs](/guides/shareable-packs) to see the PackV2 `agents/<name>/` layout end to end.
+6. Read [A Complete Gastown Example](/guides/gastown-config-recipes#a-complete-gastown-example) — the city, root pack, and nested pack assembled into one runnable topology.
 
-If you keep those five points straight, most of the Gas Town to Gas City ramp goes quickly.
+If you keep those points straight, most of the Gas Town to Gas City ramp goes quickly.

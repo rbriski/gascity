@@ -1702,7 +1702,7 @@ gc init
   gc init --default-provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
-  gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file ./my-city.toml ~/bright-lights
   gc init --file city.toml --preserve-existing .
 ```
 

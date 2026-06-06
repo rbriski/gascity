@@ -275,7 +275,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Command:     "grok",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
-			"model":           "grok-build",
+			"model":           "grok-composer-2.5",
 		},
 		// The grok TUI accepts no positional or flag-delivered initial
 		// prompt (`-p/--single` is print-and-exit), so prompts are

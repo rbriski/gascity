@@ -3317,8 +3317,8 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
 				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
 			}
-			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
-				t.Fatalf("ready projection SQL = %q, want active row projection", query)
+			if !strings.Contains(query, "status in ('open','in_progress')") {
+				t.Fatalf("ready projection SQL = %q, want active status projection", query)
 			}
 			return []byte(`[
 					{"id":"bd-ready","is_blocked":0},

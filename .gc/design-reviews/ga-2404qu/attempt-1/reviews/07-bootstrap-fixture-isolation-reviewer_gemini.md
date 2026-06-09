@@ -1,73 +1,91 @@
-# Ritu Raman — DeepSeek V4 Flash Perspective Independent Review (Iteration 17 / Attempt 1)
+# Ritu Raman — Bootstrap Fixture Isolation Perspective Independent Review (Iteration 18 / Attempt 1)
 
 **Verdict:** approve-with-risks
 
-**Lane:** Bootstrap embed cleanup, deterministic test fixtures, test-only no-Core path containment, hidden dependency discovery.
+**Lane:** Bootstrap embed cleanup, deterministic test fixtures, test-only no-Core path containment, hidden-dependency discovery.
 
-## Summary
+This independent review evaluates the Iteration 18 / Attempt 1 draft of the Core and Gastown Pack Split design (`.gc/design-review-inputs/core-gastown-pack-migration/design.md`) against the `requirements.md` and the live codebase at the `rig_root` (`/data/projects/gascity`).
 
-The proposed design for the Core and Gastown pack split successfully addresses the physical isolation of Core assets and test-fixture safety. Shifting bootstrap tests to inline synthetic `fstest.MapFS` fixtures and retiring the production skip behavior under `GC_BOOTSTRAP` are major architectural wins. 
+---
 
-However, from a DeepSeek-style forensic review perspective, several hidden mechanism-level dependencies, compilation risks, and cross-document inconsistencies remain unaddressed. If these are not resolved before downstream migration slices, they will lead to compilation failures or silent runtime regressions.
+## Executive Summary
+
+As Ritu Raman, the **Bootstrap Fixture Isolation Reviewer**, I am issuing a **Verdict: Approve-With-Risks** for the Iteration 18 / Attempt 1 draft of the Core and Gastown Pack Split design. 
+
+The latest Attempt 17 additions—specifically the transition to a **source-symbol guarded, symbol-aware scanner** and the explicit definition of `bootstrapAssets` as a private, non-nil empty filesystem returning `fs.ErrNotExist`—represent monumental steps forward. They successfully resolve previous blockers around path-string-only guards and nil-FS panic vectors. 
+
+However, several critical "mechanism-coupled" dependencies and test-path hardcodings remain unaddressed in the explicit inventory and slice dispositions. If handed to developers as-is, they will cause immediate test breakages, compiler errors, or stale runtime state. Specifically, `cmd/gc/prompt_test.go` reads Core prompt assets directly from disk using the old path, and several Go functions still reference retired system packs. These must be resolved and explicitly inventoried before the design can be considered fully complete.
+
+---
+
+## Top Strengths of Current Design
+
+* **Symbol-Aware AST-Based Scanner (§2609–2614):** Upgrading from fragile path-string matches to a source-symbol scanner that tracks references to `bootstrap.BootstrapPacks`, `bootstrap.PackNames`, `bootstrapSkillDirs()`, and `GC_BOOTSTRAP` provides a robust, future-proof discovery mechanism that prevents silent coupling regressions.
+* **Deterministic, Non-Nil Private Empty Filesystem (§2616–2619):** Specifying that production `bootstrapAssets` defaults to a private empty filesystem returning `fs.ErrNotExist` eliminates the risk of latent `nil` pointer dereference panics while providing a clear diagnostic when no fixture is injected.
+* **Hermetic Inline Fixtures (§2619–2621):** Shifting test fixtures to inline `fstest.MapFS` with synthetic paths (e.g., `packs/test-core`) ensures that low-level config/bootstrap tests can run in fully air-gapped CI environments without copying or drifting against production Core assets.
+* **Negative Read-Guard Assertion (§2627–2628):** Adding a negative materialization test that explicitly fails if any production code path reads `internal/bootstrap/packs/core` ensures absolute physical containment of the legacy bootstrap source tree.
+
+---
+
+## Critical Risks & Gaps (Evidence-Based)
+
+### 1. Incomplete Hidden-Dependency Inventory & Code Dispositions
+While the new symbol guard catches these dependencies reactively, the design's explicit tables and prose inventory (§3180–3185 / Attempt-14 table) have not been reconciled to include the following mechanism-coupled production files and functions:
+* **`requiredBuiltinPackNames` ([cmd/gc/embed_builtin_packs.go:237](file:///data/projects/gascity/cmd/gc/embed_builtin_packs.go#L237)):** Still hardcodes `required := []string{"core", "maintenance"}`. When `maintenance` is retired as a standalone pack, this function must be updated or it will cause fatal startup failures due to the absence of the `maintenance` pack.
+* **`publicSubpathForPack` ([internal/builtinpacks/registry.go:126](file:///data/projects/gascity/internal/builtinpacks/registry.go#L126)):** Maps pack names to public repo subpaths, explicitly mapping `"maintenance"` and `"gastown"`. This must be updated to remove `"maintenance"` once the pack is retired.
+* **`internal/materialize/skills.go` (Lines 46, 206, 684–685):** Sources Core skills through `bootstrapSkillDirs()` and `bootstrap.PackNames()`. The design states that Core skill resolution moves to systempack sources (§2627) but never assigns a slice to rewrite this file.
+
+### 2. `cmd/gc/prompt_test.go` Direct Disk-Read of Core Prompts
+* **The Risk:** [cmd/gc/prompt_test.go:781–782](file:///data/projects/gascity/cmd/gc/prompt_test.go#L781-L782) reads two Core prompt files directly from disk:
+  ```go
+  "internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
+  "internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
+  ```
+* **The Gap:** This is a `cmd/gc` test reading files directly from the source tree via `os.ReadFile`. It bypasses the `internal/config` test-only loaders and is not covered by the synthetic test-only hatch. The moment `internal/bootstrap/packs/core` is deleted, this test will fail with `ENOENT`.
+* **Required Change:** Mandate that `cmd/gc/prompt_test.go` is refactored to read prompt assets from the embedded `core.PackFS` filesystem instead of relative disk paths. This aligns the test with the required single-embed model and makes it immune to source-tree deletions.
+
+### 3. Stale "Dual Embed" Documentation Rationale
+* **The Risk:** [internal/bootstrap/packs/core/embed.go:1–5](file:///data/projects/gascity/internal/bootstrap/packs/core/embed.go#L1-5) contains the following comment:
+  ```go
+  // Package core embeds the core bootstrap pack for bundling into the gc
+  // binary. The same content is also reachable through the bootstrap's global
+  // packs/** embed, but exposing a dedicated PackFS lets cmd/gc's per-city...
+  ```
+* **The Gap:** This comment explicitly documents the current dual-embed behavior as an intentional design. Once the production `//go:embed packs/**` is removed, this comment becomes incorrect and misleading.
+* **Required Change:** Explicitly mandate that this comment is deleted or rewritten during the Core extraction slice to reflect the single-embed model.
+
+### 4. Obsolete `GC_BOOTSTRAP` Env-Mutation Scaffolding
+* **The Risk:** [internal/doctor/implicit_import_cache_check.go:235–249](file:///data/projects/gascity/internal/doctor/implicit_import_cache_check.go#L235-L249) defines `ensureBootstrapForDoctor` which unsets, saves, and restores `GC_BOOTSTRAP` around `bootstrap.EnsureBootstrap`.
+* **The Gap:** Once `bootstrap.EnsureBootstrap` becomes a no-op (except for pruning retired entries) and `GC_BOOTSTRAP=skip` is deleted from production semantics (§2623), this environment-variable dance is obsolete and potentially harmful to state tracking.
+* **Required Change:** Formally slate `ensureBootstrapForDoctor` for deletion or refactoring in the Core extraction slice, routing implicit checks through standard packsource classifiers instead.
 
 ---
 
 ## Technical Evaluation of Invariant Questions
 
 ### Q1. Does `internal/bootstrap` stop embedding production Core while keeping bootstrap tests deterministic through explicit isolated fixtures?
-* **Yes, in principle:** Removing `//go:embed packs/**` and pointing `bootstrapAssets` to an empty/erroring filesystem prevents the production binary from carrying duplicate Core assets.
-* **Risks:** The transition must completely delete the embedded variable declarations and comments to avoid compile-time failures when no files match the `packs/**` glob pattern. Tests must explicitly use inline `fstest.MapFS` to guarantee determinism without on-disk file dependencies.
+* **Yes:** The removal of `//go:embed packs/**` and the default initialization of `bootstrapAssets` to a private `errFS` returning `fs.ErrNotExist` successfully prevents the production binary from carrying duplicate Core assets. Tests achieve determinism by explicitly injecting inline `fstest.MapFS` fixtures.
 
 ### Q2. How is fixture drift against the shipped Core pack detected without causing low-level config tests to exercise production assets accidentally?
-* **Decoupled Verification:** Content fidelity and drift detection are moved entirely to systempacks integration tests, while low-level tests verify parsing and loading behavior on synthetic schemas.
-* **Leakage Prevention:** To keep tests from accidentally reading real Core from the workspace, the design relies on isolated test setups (e.g., `t.TempDir()`) and a path-string guard. However, a path-string guard alone is insufficient; symbolic imports and global references must also be blocked via an import-graph and symbol scanner.
+* **Decoupled Verification:** Core fidelity verification is moved entirely to systempacks integration tests, while low-level tests verify parsing/loading behavior on synthetic schemas.
+* **Accidental Leakage Prevention:** The transition to AST source-symbol scanning (monitoring symbols like `bootstrap.PackNames` and `GC_BOOTSTRAP`) and the negative read-guard assertion (§2628) ensure that low-level config tests do not accidentally read or couple with real production Core.
 
 ### Q3. Are tests needing no-Core behavior using structurally test-only lower-level loaders rather than runtime flags or environment switches?
-* **Yes:** The environment variable `GC_BOOTSTRAP=skip` is retired for production commands. Tests requiring no-Core behavior must call lower-level config loader packages directly. 
-
----
-
-## Critical Risks, Gaps & Hidden Dependencies
-
-### 1. The Redundant `GC_BOOTSTRAP` Env-Mutation Scaffolding
-* **The Code Path:** `internal/doctor/implicit_import_cache_check.go` (`ensureBootstrapForDoctor`) unsets, saves, and restores `GC_BOOTSTRAP` around `bootstrap.EnsureBootstrap`.
-* **The Gap:** When `bootstrap.EnsureBootstrap` becomes a no-op (except for retired-entry pruning), this save/restore dance is obsolete and confusing.
-* **Required Change:** Slate `ensureBootstrapForDoctor` for refactoring/deletion. All doctor-level implicit-import checking should use the central mutation coordinator and standard packsource resolution instead.
-
-### 2. Compilation Vulnerability of Empty Go Embeds
-* **The Code Path:** `internal/bootstrap/bootstrap.go` contains `//go:embed packs/**`.
-* **The Gap:** Once `internal/bootstrap/packs/core` is deleted, the `packs/` folder is empty. Go compilation fails immediately if a `//go:embed` pattern matches no files.
-* **Required Change:** Mandate the absolute deletion of the `//go:embed` directive and its associated `embeddedBootstrapPacks` variable in the Core extraction slice.
-
-### 3. Missing Hidden-Dependency Inventory Rows
-* **The Gap:** The design's inventory of hidden dependencies misses key functions:
-  * `publicSubpathForPack` in `internal/builtinpacks/registry.go` (which maps public aliases).
-  * `requiredBuiltinPackNames` in `cmd/gc/embed_builtin_packs.go` (which requires `"maintenance"`).
-  * `cmd/gc/prompt_test.go` (which reads Core prompts via relative on-disk paths).
-* **Required Change:** Add these files and functions to the migration checklist with explicit dispositions. `prompt_test.go` must be refactored to read prompts via `core.PackFS` instead of relative disk paths.
-
-### 4. Contradictory Fixture Path Contract
-* **The Gap:** The design allows a "tiny compatibility embed under `internal/bootstrap/testdata/packs/core`" but also states that the source guard "rejects any path constant referencing `internal/bootstrap/packs/core`."
-* **Required Change:** Use a synthetic test-only path like `packs/test-core` and name `test-core` explicitly. Update collision tests to use `Name: "core"` to preserve collision semantics while keeping the path synthetic.
-
-### 5. `pruneStaleGeneratedPackFiles` Behavior on Retired Directories
-* **The Gap:** Stale generated directories (`.gc/system/packs/maintenance` and `.gc/system/packs/gastown`) are ignored on startup, but `pruneStaleGeneratedPackFiles` normally deletes unneeded pack files.
-* **Required Change:** Explicitly modify `pruneStaleGeneratedPackFiles` to skip these retired directories so user-modified files in former system packs are not accidentally deleted.
+* **Yes:** Production CLI pathways do not support environment switches or runtime flags for skipping Core. Tests requiring no-Core behavior must call lower-level config loader packages directly.
 
 ---
 
 ## Required Changes Checklist
 
-1. **Delete Doctor Env-Mutation Helper:** Add `internal/doctor/implicit_import_cache_check.go` (`ensureBootstrapForDoctor`) to the Core extraction slice. Route implicit checks through standard packsource classifiers.
-2. **Complete Deletion of Embed Comment/Variable:** Explicitly delete the `//go:embed packs/**` comment and `embeddedBootstrapPacks` variable from `internal/bootstrap/bootstrap.go`.
-3. **Require Mock-Resiliency for Bindings:** Add an explicit test invariant requiring the loader/config layer to handle the complete absence of `gc.bindings` table.
-4. **Refactor `prompt_test.go` to use `PackFS`:** Mandate that `cmd/gc/prompt_test.go` uses embedded `core.PackFS` rather than direct `os.ReadFile`.
-5. **Pruning Exclusions:** Update `pruneStaleGeneratedPackFiles` to ignore retired directories.
-6. **Unified Doctor Wording:** Update `implicit_import_cache_check.go` removal wording to: *"Maintenance is retired; Core supplies generic maintenance and public Gastown supplies Gastown-specific behavior"* instead of *"supplied implicitly"*.
+1. **Complete Hidden-Dependency Tables:** Reconcile the explicit tables with the symbol guard by adding rows for `requiredBuiltinPackNames` (`embed_builtin_packs.go`), `publicSubpathForPack` (`registry.go`), and `internal/materialize/skills.go`, assigning them clear refactoring dispositions and slice assignments.
+2. **Refactor `prompt_test.go`:** Explicitly mandate that `cmd/gc/prompt_test.go` is refactored to read prompts from the embedded `core.PackFS` instead of relative disk paths.
+3. **Clean Up Dual-Embed Comments:** Require the deletion or modification of the stale comment in `internal/bootstrap/packs/core/embed.go` that describes the dual-embed design.
+4. **Retire Doctor Env Mutation Helper:** Remove the `ensureBootstrapForDoctor` environment-variable mutation logic in `implicit_import_cache_check.go` since `GC_BOOTSTRAP=skip` is deleted from production semantics.
+5. **Pruning Exclusions for Retired Directories:** Ensure `pruneStaleGeneratedPackFiles` is updated to explicitly ignore/skip retired systempack directories under `.gc/system/packs/` (e.g., `maintenance`, `gastown`) to prevent accidental deletion of user-modified custom configurations in former system pack folders.
 
 ---
 
 ## Reflective Questions
 
-* **Why maintain `internal/bootstrap`?** After extracting Core, `internal/bootstrap` becomes a skeleton package doing little more than retired pruning. Should its remaining prunings move to `internal/systempacks` or `internal/packsource`, allowing us to delete `internal/bootstrap` entirely?
-* **Deterministic Air-Gapped Testing:** How do we guarantee packcompat tests can verify remote public Gastown versions in fully air-gapped CI environments? Is a local vendor-caching fallback planned?
+* **Can we delete `internal/bootstrap` entirely?** Once the Core pack is fully extracted and the Maintenance pack is retired, `internal/bootstrap` is reduced to a skeleton package carrying out retired implicit-import pruning. Could this pruning logic be consolidated into `internal/systempacks` or `internal/packsource`, allowing us to delete the entire `internal/bootstrap` package and clean up the Go codebase?
+* **Air-Gapped Pack Verification:** How will the `test/packcompat` integration suite verify remote public Gastown versions in fully air-gapped CI environments? Is a local vendor-caching or registry-mirror fallback explicitly planned for the cache/rollback ledger?

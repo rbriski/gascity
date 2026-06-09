@@ -1,62 +1,85 @@
-# Iris Kowalski - Gemini
+# Iris Kowalski - DeepSeek V4 Flash (Gemini Run)
 
 **Verdict:** block
 
-I have reviewed `plans/core-gastown-pack-migration/implementation-plan.md` against `requirements.md` and the `gc.mayor.implementation-plan.v1` schema, focusing specifically on my lane: independently deployable slices, rollout timelines, test-suite integrity, exact gates, and cross-document/cross-repo sequencing. 
+**Lane:** independently deployable slices, decomposition readiness, prerequisite honesty, exact gates, cross-repo sequencing and test coverage.
 
-While the 7-slice rollout is exceptionally thoughtful about avoiding unverified mega-commits and has robust validation matrices, the timeline contains a dangerous collision-detection blind spot in Slice 3, a sequencing contradiction with `dolt-target.sh` in Slice 2, and a high-probability breakage vector for the fast unit test suite under the proposed `GC_BOOTSTRAP` semantics. Consequently, I must block.
+Reviewed against the Iteration 2 / Attempt 2 draft of `plans/core-gastown-pack-migration/implementation-plan.md` and `plans/core-gastown-pack-migration/requirements.md` in the active repository workspace.
+
+---
+
+## Executive Summary
+
+As Iris Kowalski, conducting the **Rollout Decomposition Gates (DeepSeek V4 Flash)** review, my verdict is **Verdict: block**.
+
+The Iteration 2 (Attempt 2) draft has made exceptional progress in structural compliance. It fully restructured the plan into the required Mayor schema sections, added the critical `## Data And State` segment, and purged the previous attempt-resolution ledgers and commentary. It also defines outstanding transactional safety mechanisms for the doctor (such as the `FixIntent` coordinator and CST-based TOML preservation).
+
+However, from the perspective of rollout slicing, test-suite integrity, and decomposition readiness, the design contains several critical blocker gaps that make it impossible to safely cut implementation beads. The most severe issues are a total lack of explicit sequencing for the runtime-state migration, unresolved architectural contradictions regarding active controller triggers and locking, and an active test-suite breakage vector from narrowing `GC_BOOTSTRAP=skip` without providing lightweight test fixtures. We must resolve these concerns before unblocking decomposition.
 
 ---
 
 ## Top Strengths
 
-- **Exceptional Slicing Hygiene:** Splitting the migration into 7 distinct, sequentially validated slices directly addresses the anti-batching requirements. The distinction between public compatibility pin (Slice 2) and activation pin (Slice 5) is robust.
-- **Rigorously Gated Transitions:** Prohibiting a test-only loader bypass for the no-Maintenance gate is a phenomenal safety invariant. Requiring candidate builds to validate real production loading paths before merge prevents silent regressions.
-- **Clear Rollback Boundaries:** The release compatibility matrix explicitly covers old/new binary × old/new pack skew, including explicit rollback boundaries and one-way upgrade limits tied directly to release notes.
+- **Strict Mayor Schema Compliance (§1–11, §344–392, §453–529)**: The document now perfectly matches the `gc.mayor.implementation-plan.v1` layout. Restructuring `## Data And State` and renaming sections directly resolves the Iteration 1 schema blocker.
+- **Purged Historical Commentary and Provenance Debt**: Moving the oversized, non-schema attempt resolution logs out of the implementation plan leaves a clean, highly readable, and focused engineering specification.
+- **Phenomenal Transactional Doctor Safety (§246–264)**: Transitioning from legacy direct check mutations to a single `FixIntent` coordinator with advisory lock-before-preflight, TOCTOU closure, and CST-based comment/formatting preservation represents stellar first-principles systems engineering.
+- **Rigorously Gated Transitional Loader Invariant (§180–186)**: Rejecting test-only loader bypasses for the no-Maintenance gate and requiring candidate branches to validate real production loading paths prevents silent regressions.
 
 ---
 
-## Critical Risks
+## Critical Risks & Gaps (The Blockers)
 
-### 1. [Blocker] The Slice 3 Shadowing Blind-Spot (Timeline Discrepancy)
-- **The Gap:** The `Bootstrap Cleanup` section (lines 2523-2526) states: *"Remove `core` and `registry` from `bootstrapManagedImportNames` in `internal/config/compose.go` in the same slice that permanently empties `BootstrapPacks` [Slice 3, Core Extraction]"*.
-- **The Conflict:** However, the strict pre-resolution file-set integrity, typed `RequiredSystemPackParticipation`, and collision gates are not introduced until Slice 4 (*"Core loading/doctor slice"*, lines 2765-2773).
-- **The Risk:** If you remove `core` and `registry` from `bootstrapManagedImportNames` in Slice 3, but the new loader validation and collision checks are not yet active until Slice 4, you create a temporary shadowing blind spot. During Slice 3, any user pack or import could shadow `core` or `registry` undetected. To maintain continuous safety invariants, these checks cannot be decoupled; the removal from `bootstrapManagedImportNames` must happen *after* or *simultaneously* with the activation of the Slice 4 collision/participation gates.
+### 1. [Blocker] Complete Absence of Runtime-State Migration in Rollout Slices (§266–274 vs §453–503)
+- **The Gap**: While Proposed Implementation (§266–274) and Data And State (§377–381) describe the runtime-state migration (JSONL archives, spawn-storm ledgers, refs/remotes, etc.) in detail, **the Rollout And Recovery timeline (§453–503) completely fails to sequence or execute it.**
+- **The Impact**: Slices 1–7 do not mention where the runtime-state migration script/logic is introduced, nor when the active migration is triggered on existing cities. A decomposer cannot cut beads from this plan because it is undefined whether migration is a Slice 4 (coordinator introduction) or Slice 5 (activation pin & Maintenance removal) responsibility, or if it requires a dedicated intermediate slice. 
 
-### 2. [Blocker] The `GC_BOOTSTRAP=skip` Test-Suite Breakage Risk
-- **The Gap:** `cmd/gc/main_test.go` sets `GC_BOOTSTRAP=skip` as a suite-wide default (lines 45, 62) to keep minimal, fake-backend, and offline tests running fast and cleanly without full environment materialization.
-- **The Conflict:** Under the `Bootstrap Cleanup` section (lines 2540-2544), the plan states: *"Retire `GC_BOOTSTRAP=skip` as a production behavior switch. If retained for tests, it may skip only empty bootstrap fixture materialization; it must not skip `internal/systempacks` materialization, required Core file-set integrity, retired-source classification, collision checks, or typed participation validation."*
-- **The Risk:** If `GC_BOOTSTRAP=skip` is narrowed so that it no longer skips `internal/systempacks` materialization and validation, then **every single test** in `main_test.go` and testscript suites will attempt full required Core materialization and participation checks. Since many fast unit tests run in highly isolated, empty directories or fake environments, they do not have a valid Core pack or a global cache. Forcing them to execute these production gates will cause mass failures across hundreds of previously green unit tests, breaking the fast unit baseline.
+### 2. [Blocker] Unresolved Concurrency and Trigger Contradictions in Migration Domain (§256–257 vs §268–269)
+- **The Gap**: The plan mandates that the mutation coordinator "refuses automatic fix with manual guidance" if "a controller for the same city is running" (§256–257). However, runtime-state migration is a startup-time concern. When a new-binary controller boots, it must migrate legacy old-path state before running.
+- **The Conflict**: If the controller triggers the coordinator at startup, then the controller is active, which violates the coordinator's own rule to refuse automatic fixes.
+- **The Decomposition Failure**: The locking and trigger domains are self-contradictory. The design must explicitly define a safe bypass for the controller's own startup-migration path under the shared advisory lock, or explicitly mandate that migration is strictly offline and doctor-only, with the controller refusing to run on legacy un-migrated paths.
 
-### 3. [Major] The `dolt-target.sh` Rollout Sequencing Mismatch
-- **The Gap:** Slice 2 states that it will *"update `examples/dolt` formulas and references that depend on legacy Maintenance scripts or role targets"* (lines 2744-2747).
-- **The Conflict:** `examples/dolt/assets/scripts/port_resolve.sh` currently hardcodes a path pointing to `packs/maintenance/.../dolt-target.sh`. However, the required `dolt-target.sh` asset is not extracted/moved into Core (`internal/packs/core`) until Slice 3 (Core Extraction), or permanently folded until Slice 5.
-- **The Risk:** During Slice 2, the `internal/packs/core` package does not exist yet. If Slice 2 attempts to rewire `examples/dolt` to point to Core's version of `dolt-target.sh`, those references will break immediately. The plan must clarify what `examples/dolt` resolves `dolt-target.sh` from during the Slice 2 gap, or sequence the extraction of `dolt-target.sh` into an earlier prerequisite slice.
+### 3. [Blocker] Narowed `GC_BOOTSTRAP=skip` Test-Suite Breakage (§318–322)
+- **The Gap**: The plan narrows `GC_BOOTSTRAP=skip` so that it may only skip empty bootstrap fixture materialization, explicitly prohibiting it from skipping `internal/systempacks` materialization, Core file-set integrity, retired-source classification, or typed participation validation (§318–322).
+- **The Conflict**: Fast unit tests in `main_test.go` and testscripts run in isolated, empty directories or fake environments lacking Core packs or global caches.
+- **The Risk**: Forcing every fast unit test to execute production validation and materialization gates will cause massive failures across hundreds of previously green tests, destroying the fast unit test baseline. The plan must specify lightweight, mapFS-backed, or pre-populated in-memory fixtures specifically for test isolation under narrowed skip semantics.
 
-### 4. [Minor] Vestigial `ensureBootstrapForDoctor` Hidden Dependency Leak
-- **The Gap:** `internal/doctor/implicit_import_cache_check.go` contains `ensureBootstrapForDoctor` (lines 235-249), which actively unsets, saves, and restores `GC_BOOTSTRAP` around a direct `EnsureBootstrap` call.
-- **The Conflict:** Once `BootstrapPacks` is permanently empty and bootstrap assets are a non-nil empty filesystem in Slice 3, calling `EnsureBootstrap` becomes a complete no-op in production.
-- **The Risk:** Leaving this unhandled results in a dead-code mutation and active environmental manipulation for a no-op function. The plan should explicitly schedule the deprecation and removal of `ensureBootstrapForDoctor` or its adaptation to the new `internal/systempacks` infrastructure.
+### 4. [Major] Slogan-Level "Push-Cursor Reconciliation" (§267, §378)
+- **The Gap**: The plan names "push-cursor reconciliation" as a recorded field but never defines the actual rule or algorithm to make duplicate offsite pushes impossible when upgraded and downgraded binaries alternate. Suppressing diagnostics is not a sufficient safeguard against corrupting shared remote git refs.
+
+### 5. [Major] Spawn-Storm Ledger Split-Brain Throttling Bypass (§380–381)
+- **The Gap**: If the new binary ignores the legacy ledger count during version skew, neither old nor new binaries see the combined spawn-storm count. A genuine spawn storm driven by both binaries will stay under their respective individual thresholds, bypassing the throttling safety mechanism. The design must specify that the new binary's threshold evaluator read-unions the retained legacy ledger counts during the skew window.
+
+### 6. [Major] Overpromised "Deterministic Re-Upgrade Flow" (§271–273, §379–380)
+- **The Gap**: If both legacy append-style stores and the new Core-owned stores have post-marker writes, their histories have diverged. Merging them automatically is mathematically impossible without data loss. The design must restrict "deterministic re-upgrade" strictly to cases where the new Core-owned paths are untouched (pure rollback-then-re-upgrade), and enforce manual operator intervention if both sides have diverged.
 
 ---
 
 ## Missing Evidence
 
-- **Proof of Fast Unit Test Preservation:** There is no evidence or proof-of-concept showing how minimal offline/fake-backend tests (which rely on `GC_BOOTSTRAP=skip`) will remain green and performant without full Core materialization under the narrowed semantics.
-- **Concrete Transition Plan for `ensureBootstrapForDoctor`:** No explicit timeline or transition steps are provided to clean up or adapt the doctor's bootstrap unsetting/restoring logic once bootstrap is permanently empty.
+- **Checked-in Asset Migration Ledger (AC6) and Behavior-Preservation Manifest (AC7)**: The plan states these are stored under `plans/core-gastown-pack-migration/artifacts/` during planning. However, no such directory or files exist in the active repository workspace.
+- **Proof of Fast Unit Test Preservation**: There is no proof-of-concept or schema showing how offline/fake-backend tests will remain green and fast without full Core materialization under the narrowed `GC_BOOTSTRAP` semantics.
+- **Source Grounding of Runtime-State Migration**: The plan fails to ground the migration in concrete script names (e.g., `jsonl-export.sh`, `spawn-storm-detect.sh`), Go files, specific JSON fields (`pending_archive_push`), or paths (`.gc/jsonl-archive`).
 
 ---
 
 ## Required Changes
 
-1. **Synchronize Collision Gates:** Move the removal of `core` and `registry` from `bootstrapManagedImportNames` from Slice 3 to Slice 4, aligning it directly with the introduction of `internal/systempacks` strict pre-resolution file-set integrity and typed participation gates.
-2. **Preserve `GC_BOOTSTRAP=skip` Test Isolation:** Allow `GC_BOOTSTRAP=skip` to continue skipping full system pack materialization and typed participation validation specifically for test suites/testscript environments, or explicitly provide a lightweight, pre-populated memory/mapFS mock for `internal/systempacks` to prevent suite-wide test breakage.
-3. **Correct `dolt-target.sh` Sequencing:** Defer rewiring `examples/dolt`'s `dolt-target.sh` references until Slice 3 (when `internal/packs/core` is actually created and populated), or extract `dolt-target.sh` to a standalone prerequisite location before Slice 2.
-4. **Deprecate `ensureBootstrapForDoctor`:** Explicitly add the cleanup/removal of `ensureBootstrapForDoctor` to Slice 4 or Slice 7 as part of the overall bootstrap and doctor refactoring.
+1. **Explicitly Sequence Runtime-State Migration**: Clearly sequence the runtime-state migration within the rollout slices (e.g., as part of Slice 4, Slice 5, or an explicit Slice 4b), and define its exact gating and rollback invariants.
+2. **Reconcile Trigger and Locking Domains**: Define how the controller's startup migration bypasses the coordinator's "running controller" check under the shared advisory lock, or declare the migration strictly offline.
+3. **Provide Lightweight Test Fixtures for Systempacks**: Specify lightweight, mapFS-backed or pre-populated memory mocks for `internal/systempacks` specifically for unit test suites to preserve test isolation.
+4. **Define Push Reconciliation and Read-Union Throttling Rules**: Explicitly define the duplicate push prevention rule and the read-union algorithm for the spawn-storm ledger.
+5. **Limit Re-Upgrade and Clarify Copy-vs-Move**: Define migration as a non-destructive copy-then-mark protocol, and restrict automatic re-upgrade to untouched new paths, requiring manual operator reconciliation for diverged states.
+6. **Ground Implementation Details**: Restore concrete filenames, JSON fields, and paths to the Proposed Implementation section.
 
 ---
 
-## Questions
+## Lane-Specific Questions
 
-1. How will we ensure that highly-isolated, fake-backend unit tests remain green without having to materialize or fetch Core assets on every test run if `GC_BOOTSTRAP=skip` is retired from skipping system pack loading?
-2. Can we extract `dolt-target.sh` to Core in Slice 1 or 2 to allow the `examples/dolt` formula rewiring in Slice 2 to remain valid and independent?
+### Q1: Can tasks be cut so each slice names concrete files, acceptance gates, cross-repo prerequisites, and a revert or one-way upgrade boundary before merge?
+**Answer**: No, not yet. Because the runtime-state migration is completely unsequenced in the rollout timeline (§453–503), and because the transition rules for `ensureBootstrapForDoctor` and `dolt-target.sh` are undefined or generalized out of the slices, a decomposer cannot cut safe beads from this plan. Slices 4 and 5 must be expanded to explicitly place these tasks and define their rollback boundaries.
+
+### Q2: Are open questions truly resolved, or are ownership audits, generated artifacts, and gascity-packs branch availability deferred as hidden blockers?
+**Answer**: They are deferred as hidden blockers. The requirements are in `status: questions`, and the required AC6 asset ledger and AC7 behavior manifest are absent in the planning directory. Saying "Open Questions: None" while these planning-phase artifacts do not exist violates prerequisite honesty. The plan must remain in `status: blocked` / `blocked:prerequisite` until the planning artifacts are checked-in or generated.
+
+### Q3: Does each intermediate commit pass the documented local gates and exercise production loaders rather than copied fixtures or direct `config.Load` shortcuts?
+**Answer**: As written, they would fail. Narrowing `GC_BOOTSTRAP=skip` without specifying lightweight mocks or mapFS fixtures for the required loader will break the fast unit baseline (`make test-fast-parallel`) across intermediate commits, violating the rollout's own test-green invariant.

@@ -1,10 +1,10 @@
-# Hiroshi Tanabe — Gemini (Bootstrap Fixture Isolation Reviewer, Attempt 4, Independent DeepSeek V4 Flash Style)
+# Hiroshi Tanabe — Gemini (Bootstrap Fixture Isolation Reviewer, Attempt 1, Independent DeepSeek V4 Flash Style)
 
 **Verdict:** block
 
 > **Lane:** production Core embed removal, non-nil empty bootstrap `fs.FS`, fixture-only tests, `GC_BOOTSTRAP=skip` containment, hidden-dependency inventory.
 >
-> Reviewed against the Attempt 4 design document (`.gc/design-reviews/ga-1ekw9l/attempt-4/design-before.md`, 656 lines, `updated_at: 2026-06-09T07:28:00Z`) — §"Bootstrap Fixture Isolation" (lines 370–396), §"Requirements & Background" (lines 17-84), and §"Data And State" (lines 426–486).
+> Reviewed against the Attempt 1 design document (`.gc/design-reviews/ga-1ekw9l/attempt-1/design-after.md`, 529 lines, `updated_at: 2026-06-09T01:20:00Z`) — §"Bootstrap Fixture Isolation" (lines 304–323), §"Summary" (lines 15–28), and §"Data And State" (lines 344–380).
 >
 > This independent review is produced using the DeepSeek V4 Flash persona, focusing specifically on cross-document consistency, missing edge cases, and assumptions other reviewers may accept too quickly.
 
@@ -40,7 +40,7 @@ The current plan conflates two different axes: mechanism tests and content tests
 1. **Mechanism-only tests** (such as bootstrap FS checks) must use a custom, private, non-nil empty `fs.FS` or minimal inline `fstest.MapFS` fixtures.
 2. **Content-fidelity tests** (such as `hooks_test.go` asserting overlays or `prompt_test.go` asserting prompt content) *cannot* run against an empty FS. They must read relocated assets from `internal/packs/core`.
 
-The plan's blanket instruction that "tests that need bootstrap assets use an empty `fs.FS` fixture or minimal inline fixture" (lines 378–380) contradicts the needs of these content-fidelity tests. The plan must split the guidance: mechanism-tests use empty/minimal `fs.FS` inline, while content-tests read from the relocated `internal/packs/core`. Furthermore, the audit list must be split into env-axis versus path-axis to capture all path-coupled dependents (such as `prompt_test.go` and `bundled_import_test.go`) that a simple `GC_BOOTSTRAP` grep would miss.
+The plan's blanket instruction that "tests that need bootstrap assets use an empty `fs.FS` fixture or minimal inline fixture" (lines 312–314) contradicts the needs of these content-fidelity tests. The plan must split the guidance: mechanism-tests use empty/minimal `fs.FS` inline, while content-tests read from the relocated `internal/packs/core`. Furthermore, the audit list must be split into env-axis versus path-axis to capture all path-coupled dependents (such as `prompt_test.go` and `bundled_import_test.go`) that a simple `GC_BOOTSTRAP` grep would miss.
 
 ### Q3: Is GC_BOOTSTRAP=skip narrowed to fixture or no-Core tests and structurally unreachable as a production required-system-pack bypass?
 
@@ -57,23 +57,23 @@ To achieve true containment, the plan must:
 
 ### 1. [Blocker] Unresolved Empty Embed Directive Causes Hard Compilation Failure
 * **The Assumption**: Other reviewers assume deleting `internal/bootstrap/packs/core` is simple.
-* **The Reality**: `internal/bootstrap/bootstrap.go:22` is `//go:embed packs/**`. `internal/bootstrap/packs/` contains *only* `core`. Deleting `internal/bootstrap/packs/core` means `packs/**` matches zero files, which causes a hard Go compilation error: `pattern packs/**: no matching files found`.
-* **The Blocker**: The plan states "Production bootstrap no longer embeds Core assets" (line 378) but does not state that the `//go:embed` directive is removed or retargeted, nor that `bootstrapAssets` is re-declared. This causes immediate compilation failure on the master branch.
+* **The Reality**: `internal/bootstrap/bootstrap.go` contains `//go:embed packs/**`. `internal/bootstrap/packs/` contains *only* `core`. Deleting `internal/bootstrap/packs/core` means `packs/**` matches zero files, which causes a hard Go compilation error: `pattern packs/**: no matching files found`.
+* **The Blocker**: The plan states "Production bootstrap no longer embeds Core assets" (line 312) but does not state that the `//go:embed` directive is removed or retargeted, nor that `bootstrapAssets` is re-declared. This causes immediate compilation failure on the master branch.
 * **Required Change**: State explicitly that the `//go:embed packs/**` directive is removed/retargeted, and that `bootstrapAssets` is re-initialized to a concrete, non-nil empty `fs.FS`.
 
 ### 2. [Blocker] Production-Side Test-Dependency Leak (The `fstest` Dilemma)
-* **The Assumption**: The plan suggests defining a non-nil production `bootstrap.EmptyFS` implementation (lines 384–386).
+* **The Assumption**: The plan suggests defining a non-nil production `bootstrap.EmptyFS` implementation (lines 313–314).
 * **The Reality**: If developers use `fstest.MapFS{}` to implement this in production `internal/bootstrap/bootstrap.go`, they will import `testing/fstest` in production code. Importing any part of the `testing` package in production code is strictly forbidden as it leaks command-line flags and bloats the production binary.
 * **Required Change**: The plan must explicitly mandate that `EmptyFS` is implemented as a custom, lightweight, package-private struct in `internal/bootstrap/bootstrap.go` (e.g., `type emptyFS struct{}` implementing `fs.FS`) to prevent importing any `testing` sub-packages in production.
 
 ### 3. [Major] The Slice 3 Bootstrap Collision Protection Gap (Rollout Race Condition)
-* **The Assumption**: The plan states that the migration "Keeps existing bootstrap collision protection... active through Slice 3 (Core Extraction) and removed only in Slice 4" (lines 247–249).
+* **The Assumption**: The plan states that the migration "Keeps existing bootstrap collision protection... active through Slice 3 (Core Extraction) and removed only in Slice 4".
 * **The Reality**: The moment the embedded `packs/core` files are deleted in Slice 3, the bootstrap-level collision logic has nothing to collide with!
 * **The Blocker**: Because the old collision logic relies on comparing against the embedded asset set, deleting the files in Slice 3 makes the collision check a complete no-op for Core. This creates a dangerous rollout window in Slice 3 where no collision protection exists, before the new required-system-pack collision gates are introduced in Slice 4.
 * **Required Change**: Close this gap. The plan must either introduce the required-system-pack collision gates in the same slice as Core embed removal (Slice 3) or explicitly document the temporary risk boundary and mitigation.
 
 ### 4. [Minor] Fragile Hardcoded Fixture-Guard Prohibited List
-* **The Assumption**: The plan states that fixture guard tests fail if test paths copy directories like `formulas/`, `orders/`, `overlay/`, `skills/`, or `assets/prompts/` (lines 381–382).
+* **The Assumption**: The plan states that fixture guard tests fail if test paths copy directories like `formulas/`, `orders/`, `overlay/`, `skills/`, or `assets/prompts/` (lines 315–316).
 * **The Reality**: If Core gains a new directory in a future release, a hardcoded list in the guard test will silently fail to protect it, allowing test-only copy drift to re-emerge.
 * **Required Change**: Mandate that the fixture-guard prohibited list is dynamically derived from the actual subdirectories of the live `internal/packs/core` package, rather than being hand-curated and prone to rot.
 

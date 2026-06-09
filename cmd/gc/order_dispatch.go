@@ -288,6 +288,7 @@ type memoryOrderDispatcher struct {
 }
 
 type orderDispatchTrackingIndex struct {
+	mu      sync.Mutex
 	entries map[string]map[string]orderTrackingSummary
 	errs    map[string]error
 }
@@ -828,6 +829,8 @@ func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeK
 }
 
 func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	key := storeKey + "\x00history"
 	if err, ok := idx.errs[key]; ok {
 		return nil, err
@@ -858,6 +861,8 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 }
 
 func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	if err, ok := idx.errs[storeKey]; ok {
 		return nil, err
 	}

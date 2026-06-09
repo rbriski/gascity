@@ -1,16 +1,16 @@
-# Ingrid Kovac — ZFC & Role-Neutrality Guardian Perspective Independent Review (Iteration 19 / Attempt 1)
+# Ingrid Kovac — ZFC & Role-Neutrality Guardian Perspective Independent Review (Iteration 20 / Attempt 1)
 
 **Verdict:** BLOCK
 
 **Scope:** Zero hardcoded roles, Core role neutrality, `dog` exception containment, SDK self-sufficiency, Go-source migration guard coverage, cross-document consistency, and architectural coherence.
 
-This independent review evaluates the Iteration 19 / Attempt 1 draft of the Core and Gastown Pack Split design (`.gc/design-review-inputs/core-gastown-pack-migration/design.md`) against `requirements.md` and the live codebase at the `rig_root` (`/data/projects/gascity`).
+This independent review evaluates the Iteration 20 / Attempt 1 draft of the Core and Gastown Pack Split design (`.gc/design-review-inputs/core-gastown-pack-migration/design.md`) against `requirements.md` and the live codebase at the `rig_root` (`/data/projects/gascity`).
 
 ---
 
 ## Executive Summary
 
-As Ingrid Kovac, the **ZFC and Role-Neutrality Guardian**, I am issuing a firm **Verdict: BLOCK** for Attempt 17's design specifications under Iteration 19.
+As Ingrid Kovac, the **ZFC and Role-Neutrality Guardian**, I am issuing a firm **Verdict: BLOCK** for Attempt 20's design specifications under Iteration 20.
 
 While the current design snapshot introduces exceptional architectural advancements—specifically the default-deny loader inventory (§2408), the ownership-aware scanner (§2483), the `dog` containerization via symbolic bindings (§2456), and the robust doctor mutation coordinator (§2547)—it contains critical internal contradictions, un-dispositioned Go file surfaces, and self-imposed deadlocks that prevent clean implementation.
 
@@ -22,7 +22,7 @@ The design cannot be declared final or implementable until the following contrad
 
 ---
 
-## Top Strengths of Attempt 17
+## Top Strengths of Attempt 20
 
 * **`dog` Containerization via Bindings (§2456):** The transition to the `[gc.bindings.maintenance_worker]` table with default `"dog"` successfully contains role logic in configuration. This ensures SDK self-sufficiency when renamed or omitted, and prevents `"dog"` from becoming a hardcoded Go special case.
 * **Default-Deny Production Loader Inventory (§2408):** Mandating `plans/core-gastown-pack-migration/loader-inventory.generated.yaml` as the binding source for all production config reads, and requiring them to route through `LoadRuntimeCity` or `LoadRuntimeCityNoRefresh`, ensures unauthorized config-loading bypasses cannot slip in.
@@ -53,7 +53,7 @@ The design cannot be declared final or implementable until the following contrad
 * **The Risk:** The scanner is described as scanning "comments" and "prompt prose", rejecting sub-identifier surfaces of hardcoded roles (`mayor`, `witness`, etc.) unless a row allows them (§2489).
 * **The Gap:** Active code files such as `internal/api/handler_agents.go` at line 553 contains the comment:
   `//   - "role" otherwise — a singleton agent (e.g. mayor, witness) that lives`
-  This comment resides in Gas City Core Go code. Under Attempt 17's strict rules, this will trigger a fatal role-neutrality scanner violation when the Go files are scanned.
+  This comment resides in Gas City Core Go code. Under Attempt 20's strict rules, this will trigger a fatal role-neutrality scanner violation when the Go files are scanned.
 * **Recommendation:** Explicitly mandate in the design's Go migration plan that such comments must be updated or cleaned up to use neutral terms (e.g., "singleton agent" instead of "e.g. mayor, witness") prior to running the scanner.
 
 ### 4. Core Asset Classification Missing

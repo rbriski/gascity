@@ -20,6 +20,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -62,6 +63,12 @@ type controllerState struct {
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
+
+	// emergencyCh receives emergency.Record values from the gc emergency
+	// subsystem. startEmergencyEventRelay drains this channel and mirrors
+	// each record into the city event log as an emergency.signaled event.
+	// Nil when the emergency relay is not configured.
+	emergencyCh chan emergency.Record
 
 	// True after an API config mutation refreshes controller state ahead of the
 	// runtime reload loop. Runtime reloads from older revisions are ignored

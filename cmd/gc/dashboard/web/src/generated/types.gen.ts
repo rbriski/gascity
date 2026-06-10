@@ -801,7 +801,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2338,6 +2338,21 @@ export type ReadinessResponse = {
     };
 };
 
+export type Record = {
+    actor: string;
+    created_at: string;
+    hostname?: string;
+    id: string;
+    message: string;
+    metadata?: {
+        [key: string]: string;
+    };
+    ref_bead?: string;
+    severity: string;
+    source_path?: string;
+    source_pid?: number;
+};
+
 export type RequestFailedPayload = {
     /**
      * Machine-readable error code.
@@ -3423,6 +3438,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'emergency.acked';
+} & TypedEventStreamEnvelopeEmergencyAcked) | ({
+    type: 'emergency.signaled';
+} & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
@@ -3733,6 +3752,34 @@ export type TypedEventStreamEnvelopeCustom = {
     subject?: string;
     ts: string;
     type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope emergency.acked
+ */
+export type TypedEventStreamEnvelopeEmergencyAcked = {
+    actor: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.acked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope emergency.signaled
+ */
+export type TypedEventStreamEnvelopeEmergencySignaled = {
+    actor: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.signaled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4470,6 +4517,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'emergency.acked';
+} & TypedTaggedEventStreamEnvelopeEmergencyAcked) | ({
+    type: 'emergency.signaled';
+} & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
@@ -4795,6 +4846,36 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
     subject?: string;
     ts: string;
     type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope emergency.acked
+ */
+export type TypedTaggedEventStreamEnvelopeEmergencyAcked = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.acked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope emergency.signaled
+ */
+export type TypedTaggedEventStreamEnvelopeEmergencySignaled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.signaled';
     workflow?: WorkflowEventProjection;
 };
 

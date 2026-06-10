@@ -1,80 +1,65 @@
-# Takeshi Yamamoto - DeepSeek V4 Flash (Attempt 16 Review)
+# Takeshi Yamamoto — DeepSeek V4 Flash (Independent Review, Attempt 19)
 
-**Verdict:** block
+**Verdict:** approve-with-risks
 
-**Review scope:** Pure decider enforcement, optimistic concurrency, commit-event-intent ordering, stale-fact defense, and boundary-inventory-enforceability for the Decider Atomicity Enforcer mandate. This reviews the current Attempt 16 iteration of `internal/session/DESIGN.md` (Attempt 16 input) against `REQUIREMENTS.md`, `AGENTS.md`, and the active checkout source.
+**Review scope:** Pure decider enforcement, optimistic concurrency, commit-event-intent ordering, stale-fact defense, and boundary-inventory-enforceability for the Decider Atomicity Enforcer mandate. This reviews the current Attempt 19 iteration of [DESIGN.md](file:///data/projects/gascity/internal/session/DESIGN.md) against `REQUIREMENTS.md`, `AGENTS.md`, and the active checkout source.
 
 ---
 
 ## Top Strengths
 
-- **Rigorous Coexistence and Rollback Mapping**: The newly introduced `Migration Coexistence And Rollback` section (DESIGN.md:430-451) is a major architectural milestone. Requiring a detailed migration row with predecessor/successor order, field-family ownership transitions, raw-writer retirement conditions, and cross-process fences addresses the high risk of split-brain writes on overlapping CLI and controller files.
-- **Detailed Schema for Matrix Boundaries**: Adding explicit row-schema requirements to `BOUNDARY_MATRIX.yaml` (including policy owner, allowed inputs/outputs, destructive-action safety rules, and wake-cause production owner) ensures that the boundary between session deciders and reconciler adapters is fully audited rather than left to implicit understanding.
-- **SSE/OpenAPI Event Alignment**: Section 8's new requirements for event taxonomy (specifically inventorying standard events like `session.woke`, `session.stranded`, and `session.drain_acked_with_assigned_work` against public SSE/OpenAPI client visibility) ensures that event tracking serves as a typed and observable system state projection rather than un-modeled log spam.
+- **Store Capability Matrix Requirement**: The introduction of `STORE_CAPABILITY_MATRIX.yaml` as an absolute preflight gate for mutating slices (documented in [DESIGN.md:95](file:///data/projects/gascity/internal/session/DESIGN.md#L95), [DESIGN.md:211](file:///data/projects/gascity/internal/session/DESIGN.md#L211), [DESIGN.md:229](file:///data/projects/gascity/internal/session/DESIGN.md#L229), [DESIGN.md:456](file:///data/projects/gascity/internal/session/DESIGN.md#L456), and [DESIGN.md:578](file:///data/projects/gascity/internal/session/DESIGN.md#L578)) is a major architectural improvement. Forcing each mutating operation to explicitly document and rely on the persistence layer's actual capabilities (rather than assuming the presence of transactions or versioned APIs) prevents speculative design drift.
+- **Strict Reconciler-Session Split**: The demarcation of boundaries in "Reconciler, Runtime, And Session Split" (documented in [DESIGN.md:73](file:///data/projects/gascity/internal/session/DESIGN.md#L73), [DESIGN.md:100](file:///data/projects/gascity/internal/session/DESIGN.md#L100), [DESIGN.md:121](file:///data/projects/gascity/internal/session/DESIGN.md#L121), and [DESIGN.md:752-758](file:///data/projects/gascity/internal/session/DESIGN.md#L752-L758)) is clean. Session state is kept clear of scheduling, budget, and desired pool sizes, which are correctly maintained inside the reconciler/controller.
+- **Typed Event Payload Requirement**: Requiring standard `session.*` events to register explicit typed payloads instead of default `events.NoPayload` envelopes (documented in [DESIGN.md:70](file:///data/projects/gascity/internal/session/DESIGN.md#L70), [DESIGN.md:216](file:///data/projects/gascity/internal/session/DESIGN.md#L216), and [DESIGN.md:775-785](file:///data/projects/gascity/internal/session/DESIGN.md#L775-L785)) ensures that public SSE/OpenAPI streams and safety-critical subscribers consume typed facts rather than relying on unmodeled envelope headers.
 
 ---
 
 ## Critical Risks
 
-### 1. [Blocker] Pure Decider Purity Compromised by System Wall-Clock Reads
-The core invariant of the decider model is that session deciders are pure functions consuming only immutable, explicit facts. However, `ProjectLifecycle`—the load-bearing decider—retains local wall-clock fallbacks when `input.Now` is zero (`internal/session/lifecycle_projection.go:380-382` and `608-610`):
-```go
-	now := input.Now
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-```
-If a caller fails to pass an explicit timestamp, the decider yields non-deterministic projection results based on the local OS clock. This breaks test replayability and makes state-machine predictability impossible. Purity must be call-level and absolute: the `now` field on `LifecycleInput` must be mandatory, and the system clock fallback must be completely removed.
+### 1. [Major] The TOCTOU "Read-Then-Write" Table Contradiction
+- **Evidence:** [DESIGN.md:95](file:///data/projects/gascity/internal/session/DESIGN.md#L95) vs [DESIGN.md:66](file:///data/projects/gascity/internal/session/DESIGN.md#L66) and [DESIGN.md:555-560](file:///data/projects/gascity/internal/session/DESIGN.md#L555-L560).
+- **Why it matters:** The table row on [DESIGN.md:95](file:///data/projects/gascity/internal/session/DESIGN.md#L95) lists "durable value/token/revision precondition with immediate reread" as one of the valid options for a fence strategy. However, [DESIGN.md:66](file:///data/projects/gascity/internal/session/DESIGN.md#L66) explicitly strikes "Durable precondition with immediate reread" from the valid fence list, and [DESIGN.md:555-560](file:///data/projects/gascity/internal/session/DESIGN.md#L555-L560) states that `"reread then write" is not a valid strategy because a client-side reread followed by an unconditional write remains a TOCTOU race across CLI/API/controller processes`. 
+This intra-document contradiction introduces severe ambiguity. If a developer uses the table on line 95 as their reference, they might implement a race-prone "reread and check" sequence and label it a fence, which fails to protect against multi-process lost-update races due to `beads.Store`'s projection lag (`BdStore.waitForUpdateProjection` at [bdstore.go:1037](file:///data/projects/gascity/internal/beads/bdstore.go#L1037)).
+- **Required Resolution:** Clean up the finding table's row on [DESIGN.md:95](file:///data/projects/gascity/internal/session/DESIGN.md#L95) to match the final contract on line 555, striking client-side "reread then write" entirely as a valid fence strategy.
 
-### 2. [Blocker] Multi-Process TOCTOU Race and Unfenced Store Commit
-The design positions `WithSessionMutationLock` as a primary tool to serialize metadata mutations and avoid concurrent modification races. However, `WithSessionMutationLock` in `internal/session/chat.go:165-199` is implemented as a purely **in-memory, single-process mutex lock** using Go's `sync.Mutex` and an in-process map:
-```go
-var (
-	sessionMutationLocksMu sync.Mutex
-	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
-)
-```
+### 2. [Major] Single-Process lock `WithSessionMutationLock` Cannot Protect Multi-Process Writes
+- **Evidence:** [chat.go:165-199](file:///data/projects/gascity/internal/session/chat.go#L165-L199) and [DESIGN.md:555-560](file:///data/projects/gascity/internal/session/DESIGN.md#L555-L560).
+- **Why it matters:** The design positions `WithSessionMutationLock` as a primary tool to serialize metadata mutations and avoid concurrent modification races. However, this is implemented as a purely **in-memory, single-process mutex lock** using Go's `sync.Mutex` and an in-process map. 
 While this prevents concurrent writes within a single process (such as multiple threads inside the controller daemon), the **Gas City CLI runs in a completely separate OS process** from the controller daemon. When the operator runs a CLI command (like `gc stop`) and the daemon runs its reconciler loop concurrently on the same session bead:
-1. Both processes have entirely independent memory spaces and cannot see each other's in-memory mutexes.
-2. They will execute concurrent read-compare-write sequence blocks on `beads.Store` with no physical synchronization.
-3. Because `beads.Store` does not support atomic compare-and-swap (CAS) or transaction-level revision locking on metadata keys, both processes will race, leading to lost updates or corrupted states.
+  1. Both processes have entirely independent memory spaces and cannot see each other's in-memory mutexes.
+  2. They will execute concurrent read-compare-write sequence blocks on `beads.Store` with no physical synchronization.
+  3. Because `beads.Store` does not support atomic compare-and-swap (CAS) or transaction-level revision locking on metadata keys, both processes will race, leading to lost updates or corrupted states.
+- **Required Resolution:** The design must acknowledge that single-process Go mutexes are insufficient for multi-process safety, and define a standard multi-process synchronization strategy (such as file locking, store-level validation hooks, or conditional-commit fences) to protect concurrent writers.
 
-The design doc avoids specifying how multi-process atomicity is actually achieved, pushing the problem to individual implementation slices via "Each slice must define an operation-specific command contract" (DESIGN.md:235-237). Without a global, cross-process synchronization standard (such as a filesystem/dolt-level lock, validation hooks inside the store, or conditional fence writes), this is a major architectural gap.
+### 3. [Major] Pure Decider Purity Compromised by System Wall-Clock Reads
+- **Evidence:** [lifecycle_projection.go:379-382](file:///data/projects/gascity/internal/session/lifecycle_projection.go#L379-L382) and lines [607-610](file:///data/projects/gascity/internal/session/lifecycle_projection.go#L607-L610).
+- **Why it matters:** The core invariant of the decider model is that session deciders are pure functions consuming only immutable, explicit facts. However, `ProjectLifecycle` and `creatingStateIsStale` retain local wall-clock fallbacks when `input.Now` is zero:
+  ```go
+  now := input.Now
+  if now.IsZero() {
+      now = time.Now().UTC()
+  }
+  ```
+  If a caller fails to pass an explicit timestamp, the decider yields non-deterministic projection results based on the local OS clock. This breaks test replayability and state-machine predictability. The design's new pure-decider guard requirement ([DESIGN.md:766](file:///data/projects/gascity/internal/session/DESIGN.md#L766)) explicitly states that "Mutation-feeding deciders take a mandatory non-zero `now` fact and reject zero values" and must not import "ambient time" ([DESIGN.md:762](file:///data/projects/gascity/internal/session/DESIGN.md#L762)). However, the code itself contains active clock reads. Purity must be call-level and absolute: the `now` field on `LifecycleInput` must be mandatory, and the system clock fallback must be completely removed from `lifecycle_projection.go`.
+- **Required Resolution:** Completely remove the system clock fallback from [lifecycle_projection.go](file:///data/projects/gascity/internal/session/lifecycle_projection.go) and make the `now` timestamp a mandatory, non-zero field on `LifecycleInput`.
 
-### 3. [Blocker] Sequential Non-Atomic Partial-State Metadata Writes
-The underlying `beads.Store` implementations apply metadata batch mutations sequentially rather than atomically. In `internal/beads/bdstore.go:877-889`, `SetMetadataBatch` sorting and sequential processing performs unconditional writes:
-```go
-	for _, k := range keys {
-		args = append(args, "--set-metadata", k+"="+kvs[k])
-	}
-```
-Similarly, in `internal/beads/hqstore_core.go:393`, `SetMetadataBatch` merges keys directly under an in-process lock. If a process crashes or a store error occurs mid-loop, a session bead is left in a corrupted, partially mutated state (e.g. `state` updated to `creating` but the `instance_token` write is missing or incomplete). The design doc lists "partial-state matrix" as a required field on every operation-specific command contract, but does not provide a global, reusable repair mechanism for partial writes, leaving individual slices to handle complex recoverability independently.
-
-### 4. [Blocker] Dual Close-Path Divergence and Concurrency Gaps
-The codebase continues to contain two structurally divergent and concurrent close paths:
-- **`CloseDetailed`** (`internal/session/manager.go:862`): stops the provider, cancels waits, clears wake/hold overrides, retires named session identifiers, and closes the bead.
-- **`closeBead`** (`cmd/gc/session_beads.go:2144`): directly writes basic metadata and closes the bead without wait cancellation, override clearing, or identifier retirement.
-
-Because `closeBead` is frequently invoked by the reconciler and lifecycle paths in `cmd/gc` without wait cancellation or override clearing, closed session beads will routinely retain active wake/hold overrides in the database, risking unintended recreations or misrouting on subsequent reconciler ticks. The design must mandate the complete unification of these close paths into a single session-owned command.
-
-### 5. [Major] Scope Creep on Slice 0 - Reconciler/Pool Evidence Blocking Session Boundary
-The non-mutating Slice 0 gate forces the preflight to repair or owner-retire evidence for `SESSION-RECON-002` (Cold pool scale from zero), `SESSION-RECON-003` (Existing rig session prevents cold wake), `SESSION-RECON-006` (Provider health gate), and `SESSION-RECON-007` (Progress-aware health) before dependent slices can proceed.
-However, pool scaling, provider health gates, and progress thresholding are explicitly reconciler/pool adapter behaviors that the `Boundary Matrix` places *outside* `internal/session`. Forcing the non-mutating Session Slice 0 to validate and resolve stale reconciler-specific requirement evidence is an unnecessary scope creep. It creates a premature dependency on the reconciler's internal state machine.
-
-### 6. [Major] Ongoing Workflow Metadata and Directory Mismatch
-The physical subtask bead (`ga-vd97hl`) is created with `gc.attempt: 1` even though it is executing as part of logical attempt/iteration 16 (indicated by `gc.scope_ref`). This forces reviews to either be written to the obsolete `attempt-1/` directory or require manual directory overrides to be visible in `attempt-16/`. While this is seen as "just workflow plumbing" by other reviewers, it introduces serious cross-document and cross-directory review dispersion that hinders automated verification.
+### 4. [Major] Lack of Unified Close-Path Command
+- **Evidence:** [manager.go:862](file:///data/projects/gascity/internal/session/manager.go#L862) (`CloseDetailed`) versus [session_beads.go:2144](file:///data/projects/gascity/cmd/gc/session_beads.go#L2144) (`closeBead`).
+- **Why it matters:** The codebase continues to contain two structurally divergent and concurrent close paths:
+  - **`CloseDetailed`**: stops the provider, cancels waits, clears wake/hold overrides, retires named session identifiers, and closes the bead.
+  - **`closeBead`**: directly writes basic metadata and closes the bead without wait cancellation, override clearing, or identifier retirement.
+  
+  Because `closeBead` is frequently invoked by the reconciler and lifecycle paths in `cmd/gc` without wait cancellation or override clearing, closed session beads will routinely retain active wake/hold overrides in the database, risking unintended recreations or misrouting on subsequent reconciler ticks. The design must mandate the complete unification of these close paths into a single session-owned command.
+- **Required Resolution:** Fold `closeBead` and `CloseDetailed` into a single session-owned close command that guarantees wait cancellation, override clearing, and identity retirement are always applied atomically or resolved via an explicit, durable repair loop.
 
 ---
 
 ## Required Changes
 
-1. **Enforce Call-Level Decider Purity**: Completely remove the local clock fallback from `lifecycle_projection.go` and make the `now` timestamp a mandatory, non-zero field on `LifecycleInput`.
+1. **Enforce Call-Level Decider Purity**: Completely remove the local clock fallback from [lifecycle_projection.go](file:///data/projects/gascity/internal/session/lifecycle_projection.go) and make the `now` timestamp a mandatory, non-zero field on `LifecycleInput`.
 2. **Standardize Cross-Process Concurrency Control**: Define a global architectural standard for cross-process concurrency control (e.g. dolt-level conditional write fences, store-level validation hooks, or file locks) to resolve the single-process limitation of `WithSessionMutationLock`.
-3. **Establish Reusable Partial-State Recovery**: Provide a unified, centralized recovery/repair helper rather than leaving individual slices to define custom partial-state handling for multi-key metadata batches.
+3. **Eliminate the Client-Side Precondition Illusion**: Align the finding table's row on [DESIGN.md:95](file:///data/projects/gascity/internal/session/DESIGN.md#L95) with the contract on line 555, striking client-side "reread then write" entirely as a valid fence strategy.
 4. **Unify Close Paths**: Fold `closeBead` and `CloseDetailed` into a single session-owned close command that guarantees wait cancellation, override clearing, and identity retirement are always applied atomically or resolved via an explicit, durable repair loop.
-5. **Protect/Eliminate `instance_token` Backfills**: Move the `instance_token` backfills inside a validated transaction or the unified `PreWakePatch` batch.
-6. **Refactor Slice 0 Entry Scope**: Remove the requirement to resolve reconciler/pool requirement evidence (`SESSION-RECON-002`, `003`, `006`, `007`) from the Session Slice 0 entry criteria, moving that burden to pool/reconciler-specific slices.
-7. **Materialize Slice 0 Artifacts**: Create and fully integrate the required Slice 0 preflight artifacts and tests in the codebase as active CI gates before approving decomposition.
 
 ---
 

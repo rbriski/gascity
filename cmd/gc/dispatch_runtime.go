@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
-	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // cliGraphrouteDeps builds the graphroute dependencies used by CLI
@@ -115,7 +115,10 @@ func followSleepDuration(idleSweeps int) time.Duration {
 	return d
 }
 
-const workflowServeScanLimit = 20
+const (
+	workflowServeScanLimit               = 20
+	workflowServeControlReadyQueryPrefix = "gc-control-ready-v1:"
+)
 
 // runConvoyControlServe is the entry point for `gc convoy control --serve`.
 func runConvoyControlServe(args []string, stdout, stderr io.Writer) error {
@@ -318,7 +321,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// on every iteration. #793.
 	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
-		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+		workQuery = workflowServeControlReadyQuery(agentCfg, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
@@ -721,64 +724,40 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 }
 
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
-	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
-}
-
-func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
-	limit := fmt.Sprintf("%d", workflowServeScanLimit)
-	includeEphemeral := ""
-	if beadsCfg.UsesBD105ReadySemantics() {
-		includeEphemeral = " --include-ephemeral"
+	spec := workflowServeControlReadySpec{
+		Target:       target,
+		LegacyTarget: workflowServeLegacyControlRoute(target),
+		// Pre-1.3 builds routed control beads to the binding-stripped bare
+		// name "control-dispatcher". Carrying it in the spec lets the
+		// supervisor-cache consumer claim that in-flight work after an upgrade
+		// scaled the qualified dispatcher, mirroring the pre-cache shell loop's
+		// GC_CONTROL_BARE_TARGET routed scan.
+		BareTarget: controlDispatcherBareRoute(target),
 	}
-	jqFilter := fmt.Sprintf(
-		`reduce add[] as $item ([]; if (($item.metadata // {})[%q] // "") != "" then . elif any(.[]; .id == $item.id) then . else . + [$item] end)`,
-		beadmeta.InstantiatingMetadataKey,
-	)
-	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
-	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
-	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
-	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		queryPrefix += ` GC_CONTROL_SESSION_NAME=` + shellquote.Quote(name)
+		spec.ControlSessionName = name
 		break
 	}
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
+	data, err := json.Marshal(spec)
+	if err != nil {
+		return ""
 	}
-	if bare := controlDispatcherBareRoute(target); bare != "" {
-		queryPrefix += ` GC_CONTROL_BARE_TARGET=` + shellquote.Quote(bare)
-	}
-	query := queryPrefix + ` sh -c '` +
-		`set -e; ` +
-		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
-		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
-		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`}; ` +
-		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`assignee_ready "$cand"; ` +
-		`done; ` +
-		`done; ` +
-		`routed_ready "$GC_CONTROL_TARGET"; ` +
-		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
-		`routed_ready "${GC_CONTROL_BARE_TARGET:-}"; ` +
-		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
-	return query
+	return workflowServeControlReadyQueryPrefix + base64.RawURLEncoding.EncodeToString(data)
+}
+
+type workflowServeControlReadySpec struct {
+	Target             string `json:"target"`
+	ControlSessionName string `json:"control_session_name,omitempty"`
+	LegacyTarget       string `json:"legacy_target,omitempty"`
+	BareTarget         string `json:"bare_target,omitempty"`
 }
 
 func workflowServeLegacyControlRoute(target string) string {
@@ -823,6 +802,12 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
+	if spec, ok, err := parseWorkflowServeControlReadyQuery(workQuery); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nextWorkflowServeControlReadyBeads(spec, env)
+	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {
 		return nil, err
@@ -859,4 +844,153 @@ func writeDispatchWakeFile(cityPath string) {
 		return
 	}
 	_ = f.Close()
+}
+
+func parseWorkflowServeControlReadyQuery(workQuery string) (workflowServeControlReadySpec, bool, error) {
+	encoded, ok := strings.CutPrefix(strings.TrimSpace(workQuery), workflowServeControlReadyQueryPrefix)
+	if !ok {
+		return workflowServeControlReadySpec{}, false, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return workflowServeControlReadySpec{}, true, fmt.Errorf("decode control ready query: %w", err)
+	}
+	var spec workflowServeControlReadySpec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return workflowServeControlReadySpec{}, true, fmt.Errorf("parse control ready query: %w", err)
+	}
+	spec.Target = strings.TrimSpace(spec.Target)
+	spec.ControlSessionName = strings.TrimSpace(spec.ControlSessionName)
+	spec.LegacyTarget = strings.TrimSpace(spec.LegacyTarget)
+	spec.BareTarget = strings.TrimSpace(spec.BareTarget)
+	if spec.Target == "" {
+		return workflowServeControlReadySpec{}, true, fmt.Errorf("control ready query missing target")
+	}
+	return spec, true, nil
+}
+
+func nextWorkflowServeControlReadyBeads(spec workflowServeControlReadySpec, env map[string]string) ([]hookBead, error) {
+	cityPath := strings.TrimSpace(env["GC_CITY_PATH"])
+	if cityPath == "" {
+		cityPath = strings.TrimSpace(env["GC_CITY"])
+	}
+	if cityPath == "" {
+		cityPath = strings.TrimSpace(env["GC_STORE_ROOT"])
+	}
+	if cityPath == "" {
+		return nil, fmt.Errorf("control ready query missing city path")
+	}
+	client := apiClient(cityPath)
+	if client == nil {
+		if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled && apiRouteControllerAliveHook(cityPath) != 0 {
+			client = apiRouteSupervisorClientHook(cityPath)
+		}
+	}
+	if client == nil {
+		return nil, fmt.Errorf("control ready query requires supervisor API: %s", apiClientFallbackReason(cityPath))
+	}
+	ready, err := client.ListReadyBeads()
+	if err != nil {
+		return nil, fmt.Errorf("list ready beads from supervisor cache: %w", err)
+	}
+	return filterWorkflowServeControlReadyBeads(ready.Body, spec, env), nil
+}
+
+func filterWorkflowServeControlReadyBeads(ready []beads.Bead, spec workflowServeControlReadySpec, env map[string]string) []hookBead {
+	seen := map[string]struct{}{}
+	var out []hookBead
+	addMatches := func(match func(beads.Bead) bool) {
+		added := 0
+		for _, b := range ready {
+			if added >= workflowServeScanLimit {
+				return
+			}
+			if !match(b) || !workflowServeControlReadyBeadEligible(b) {
+				continue
+			}
+			if _, ok := seen[b.ID]; ok {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			out = append(out, hookBead{ID: b.ID, Metadata: hookBeadMetadata(b.Metadata)})
+			added++
+		}
+	}
+
+	for _, assignee := range workflowServeControlReadyAssignees(spec, env) {
+		assignee := assignee
+		addMatches(func(b beads.Bead) bool {
+			return b.Assignee == assignee
+		})
+	}
+	for _, route := range workflowServeControlReadyRoutes(spec) {
+		route := route
+		addMatches(func(b beads.Bead) bool {
+			if strings.TrimSpace(b.Assignee) != "" {
+				return false
+			}
+			return b.Metadata["gc.run_target"] == route ||
+				b.Metadata["gc.routed_to"] == route ||
+				b.Metadata[graphroute.GraphExecutionRouteMetaKey] == route
+		})
+	}
+	return out
+}
+
+func workflowServeControlReadyBeadEligible(b beads.Bead) bool {
+	return strings.TrimSpace(b.ID) != "" && strings.TrimSpace(b.Type) != "epic"
+}
+
+func workflowServeControlReadyAssignees(spec workflowServeControlReadySpec, env map[string]string) []string {
+	var out []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == value {
+				return
+			}
+		}
+		out = append(out, value)
+	}
+	addWithLegacy := func(value string) {
+		add(value)
+		value = strings.TrimSpace(value)
+		if strings.HasSuffix(value, config.ControlDispatcherAgentName) {
+			add(strings.TrimSuffix(value, config.ControlDispatcherAgentName) + "workflow-control")
+		}
+	}
+	addWithLegacy(spec.ControlSessionName)
+	for _, key := range []string{"GC_CONTROL_SESSION_NAME", "GC_SESSION_NAME", "GC_ALIAS"} {
+		addWithLegacy(env[key])
+	}
+	addWithLegacy(spec.Target)
+	addWithLegacy(env["GC_SESSION_ID"])
+	return out
+}
+
+func workflowServeControlReadyRoutes(spec workflowServeControlReadySpec) []string {
+	var out []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == value {
+				return
+			}
+		}
+		out = append(out, value)
+	}
+	add(spec.Target)
+	add(spec.LegacyTarget)
+	// Pre-1.3 builds routed control work to the binding-stripped bare name;
+	// scan it too so an upgraded qualified dispatcher claims that persisted
+	// in-flight work instead of stranding it (mirrors the pre-cache shell
+	// loop's GC_CONTROL_BARE_TARGET routed_ready scan).
+	add(spec.BareTarget)
+	return out
 }

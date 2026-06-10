@@ -844,6 +844,30 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	}, nil
 }
 
+// ListReadyBeads fetches ready beads across all rigs via
+// GET /v0/city/{cityName}/beads/ready. The endpoint is served from the
+// supervisor cache projection so controller-side consumers can avoid direct
+// backing-store reads.
+func (c *Client) ListReadyBeads() (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameBeadsReadyParams{})
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // GetBead fetches one bead by ID via
 // GET /v0/city/{cityName}/bead/{id}. Returns the bead detail with cache age
 // so callers can attach _cache_age_s (JSON) or a staleness banner (human).

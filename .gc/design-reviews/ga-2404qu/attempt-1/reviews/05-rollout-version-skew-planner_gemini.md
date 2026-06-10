@@ -1,73 +1,96 @@
-# Yuki Hayashi — Rollout and Version Skew Perspective Independent Review (Iteration 21 / Attempt 21)
+# Yuki Hayashi — Rollout and Version Skew Perspective Independent Review (DeepSeek V4 Flash)
 
-**Verdict:** approve-with-risks
+**Verdict:** BLOCK (Requires resolution of critical edge-case parser holes and version-skew definition gaps before merging)
 
-**Scope:** Rollout sequencing, version skew, public pack pin integrity, intermediate state safety, and rollback granularity.
+**Scope:** Two-repo rollout sequencing, public pack pin integrity, intermediate state safety, and rollback/downgrade granularity.
 
-This review evaluates the Iteration 21 / Attempt 21 draft of `design.md` against `requirements.md` and the existing codebase behavior.
+This independent review evaluates the draft of `design.md` (specifically §2949-3033, §3983-4118) from the perspective of **Yuki Hayashi (Rollout and Version Skew Planner)**.
 
 ---
 
 ## Executive Summary
 
-The Iteration 21 design document exhibits an exceptionally mature, safety-first approach to managing the Core and Gastown pack split. By defining a robust **7-Slice Rollout Plan** (§3372–3457) and establishing a comprehensive **Release Compatibility Matrix** (§3465–3472), the design successfully avoids "flag-day" release risks, provides explicit roll-back guarantees, and ensures that intermediate states remain test-green and deployable.
+The proposed 7-slice rollout design (§3983–4096) is highly sophisticated and successfully avoids traditional "flag-day" deployment risks by decoupling the release of `gascity-packs` (Slice 1) from the adoption of the public pins in Gas City (Slices 2, 5, 6). The non-destructive startup policy (§2975) that preserves stale legacy directories is excellent and prevents catastrophic data loss.
 
-Specifically, the design addresses key version skew and rollout challenges:
-1. **Decoupled Repo Sequencing (§3377):** `gascity-packs` lands the public Gastown behavior first, ensuring the public commit is available before Gas City updates its internal pin (§3389, §3496).
-2. **Non-Destructive Cleanup (§2975):** Legacy directories (`.gc/system/packs/maintenance` or `gastown`) are ignored rather than deleted on startup, preserving operator edits and facilitating seamless binary rollbacks.
-3. **Robust Cache Keying (§2947):** `RepoCacheKey` for public Gastown uses the normalized source and exact version pin to avoid collision with historical synthetic aliases.
+However, a rigorous analysis from the DeepSeek V4 Flash perspective reveals **two critical blockers** and several major risks that compromise the fail-closed guarantees of the migration. Specifically, the design relies on an inactive-loader parser validation that does not cover the formula asset type, and it contains a logical flaw where post-activation binaries could run stale pins with warning-only loading, leading to silent, critical maintenance failures.
 
-While the core rollout architecture is incredibly solid, this independent review highlights a few deep, nuanced risks regarding rollback behavior and concurrent environment operations that must be addressed before finalization.
-
----
-
-## Top Strengths
-
-- **No Flag-Day Dependency (§3375, §3496):** The sequencing guarantees that `gascity-packs` is updated and verified before Gas City attempts to pin it, preventing references to unavailable public commits.
-- **Table-Driven Release Compatibility Matrix (§3465–3472):** Spelling out expected behaviors across four binary/pack skew combinations (and rollback) provides clear guidance for developers and ensures backward compatibility.
-- **Preservation of Ignored Legacy Paths (§2975):** Avoiding aggressive startup deletion of stale system pack directories prevents accidental data loss and ensures that a downgraded binary immediately regains access to its required assets.
-- **Fail-Closed Verification on Materialization (§137, §2954):** Disallowing silent fallback to obsolete embedded templates ensures that any installation or reachability issue is reported loudly and cleanly, maintaining the integrity of the public pin.
-
----
-
-## Nuanced Risks & Recommendations
-
-To guarantee a completely seamless and risk-free rollout, the following operational and technical risks are identified with specific recommendations:
-
-### 1. Mixed-Binary Version Skew in Active Cities
-- **The Risk:** In a multi-agent environment, if a city's controller is upgraded to the new binary while active agent sessions (running in background tmux panes or sub-processes) are still running the old binary, those background sessions might execute stale commands or run legacy, unsafe `gc doctor --fix` routines, potentially leading to metadata corruption or state conflicts.
-- **Recommendation:** Mandate in the release/migration notes that operators must perform a clean shutdown of all active city sessions (e.g., via `gc stop`) before upgrading the `gc` binary. Add a preflight or startup check in the new controller that warns if active processes from a different binary version are detected in the city.
-
-### 2. Network Reachability and Offline Test Seeding
-- **The Risk:** Fresh `gc init --template gastown` resolves the public pack from the network source or remote cache (§2954). If the test harness running `TestPinnedPublicGastownBehavior` (§3402) in Slice 2 does not strictly pre-populate and isolate the local cache, tests may attempt unexpected network calls, causing intermittent failures in air-gapped CI environments.
-- **Recommendation:** Ensure that the test harness for `TestPinnedPublicGastownBehavior` strictly runs in a hermetic local-fixture mode where the ordinary remote cache is pre-seeded with a local mock of the pinned Gastown commit, verifying that `gc init` succeeds completely offline when the cache is populated.
-
-### 3. Rollback Capability of Doctor-Mutated `city.toml` (Legacy Maintenance Removal)
-- **The Risk:** If the new binary's doctor removes the legacy `[[imports]]` table entry for `maintenance` from `city.toml` (§3478), a subsequent binary rollback to the old version will result in a city configuration that lacks the `Maintenance` import. Since the old binary does not contain the generic maintenance behavior folded into its Core layer, the city will load and run, but will completely lack active cleanup, health patrol, or closed-order tracking. This is a silent capability degradation. The design states that "doctor-mutated city manifests must remain readable by old binaries," but "readability" (not crashing on load) is a weaker condition than "behavioral continuity" (actually executing the required maintenance processes).
-- **Recommendation:** Update the rollback guidance to explicitly instruct operators that downgrading the binary requires restoring the legacy `maintenance` import to `city.toml` if the city was doctor-fixed under the new binary. Alternatively, have the old binary's preflight check warn if a city lacks a maintenance mechanism.
-
-### 4. Concurrent Materialization of Shared Public Cache (Global Lock Gap)
-- **The Risk:** The mutation coordinator uses a city-local lock (`.gc/controller.lock`) before performing doctor fixes or staging Core materialization. However, the ordinary remote cache for public packs is typically shared globally across multiple cities on the same machine (e.g., in `~/.gc/cache` or similar). If two separate cities are initialized or updated concurrently, they may both attempt to resolve and materialize the exact same `PublicGastownPackVersion` to the shared remote cache. Without a global, cross-process cache-write lock, this concurrency creates a race condition that can result in a corrupted or partially materialized public pack folder, causing subsequent loads to fail closed.
-- **Recommendation:** Mandate the use of a global, cross-process file lock (e.g., via `flock` on the cache folder or a lock file in `.gc/cache/`) during the download and materialization phase of any remote pack, ensuring that concurrent processes safely serialize writes to the shared cache.
+This review blocks the current design draft and provides exact, executable remedies that must be incorporated into the design document before proceeding with implementation.
 
 ---
 
 ## Evaluation of the Three Key Questions
 
 ### 1. What does a fresh `gc init --template gastown` produce between the `gascity-packs` landing and the Gas City `PublicGastownPackVersion` pin update, and is that state deployable?
-- **Planner Finding:** **Deployable and Stable.** During this intermediate window, the operator's local `gc` binary remains unchanged and continues to use the existing in-tree Gastown template or synthetic cache alias. Since the in-tree assets are not deleted until the final Slice 7 (§3449), the operator is completely unaffected by the remote land. Once the Gas City binary is updated (Slice 2), it transitions to resolving the public pack from the remote pin, which is verified and green before release.
+- **Finding:** **Deployable and Stable.** During this transitional window, Gas City remains at the old commit pin (`current_baseline` in `public-gastown-pins.yaml`). Operators initializing new cities will resolve the bundled, in-tree Gastown template or synthetic cache alias. Since the in-tree assets are not purged until Slice 7 (§4084), this state is fully functional and deployable. It perfectly maintains the status quo without pre-maturely activating unpinned public behaviors.
 
 ### 2. Is `PublicGastownPackVersion` pinned to immutable content with materialization-time verification rather than a mutable branch or tag?
-- **Planner Finding:** **Yes.** The design mandates pinning to an "immutable compatibility/activation commit" (§37, §3390, §3424) rather than a mutable branch or tag. Verification occurs at materialization-time via `RepoCacheKey` and ordinary remote-pack cache paths keyed by repository source and immutable version (§2943, §2947).
+- **Finding:** **Yes, but with an offline verification gap.** The pin is explicitly defined as an immutable SHA commit hash (§11, §38). Materialization-time verification is performed via a unified `RepoCacheKey` composed of the normalized source, immutable version, and subpath (§3015). However, for offline/air-gapped environments utilizing the synthetic-cache promotion helper (§3008), the design fails to specify a hard offline trust anchor to verify the synthetic bytes against the pinned commit digest, introducing a risk of untrusted cache promotion.
 
 ### 3. Can Gas City registry changes be reverted after operators fetched the new public pack without leaving cities with neither Maintenance nor Gastown behavior?
-- **Planner Finding:** **Yes.** This is guaranteed by the design's non-destructive startup policy (§2975) which ignores rather than deletes legacy directories, combined with the fact that the new public Gastown pack remains backward-compatible with older host Core binaries (§3468). If a rollback occurs, the old binary immediately recovers in-tree assets or reads the ignored-but-preserved local directories, ensuring continuous behavior (subject to the `city.toml` import restore noted in Risk 3 above).
+- **Finding:** **No, not without manual operator intervention (Silent Capability Loss).** If an operator upgrades to a post-activation binary, the `gc doctor --fix` routine will remove the legacy `maintenance` import from `city.toml` (§4125). If the operator subsequently downgrades to an older binary (e.g., due to an incident), the old binary will load the city successfully but will run with *zero* maintenance processes (since the old binary expects the `maintenance` import to run maintenance, and does not have maintenance folded into its Core layer). This is a silent capability degradation that violates our safety invariants.
 
 ---
 
-## Recommendations for Finalization
+## Critical Risks & Deep-Dive Findings
 
-1. **Mandate "Clean Stop" Upgrade Procedure:** Include a clear requirement in the migration guide that all active city sessions must be stopped before upgrading the binary.
-2. **Seeded Offline Cache Tests:** Add a dedicated test assertion in `TestPinnedPublicGastownBehavior` that verifies `gc init` fails cleanly when offline with an empty cache, but succeeds completely offline when the cache is pre-seeded.
-3. **Document Rollback Import Restoration:** Add an explicit rollback step in the operator documentation detailing that if a city was doctor-fixed to remove the `maintenance` import, rolling back to an older binary requires manually re-adding that import to `city.toml` to restore core maintenance services.
-4. **Implement Global Cache Write Lock:** Add cross-process file-locking around the materialization of remote packs to the shared cache to prevent concurrent materialization corruption.
+### 1. [BLOCKER] The Ignored-Formula Parser Hole (Formula-Level Undecoded TOML Bypass)
+The design asserts that the activation pin is unsupported by older binaries (`v1.2.1`) because activation assets carry `target_binding`/`gc.run_target_binding` keys which older binaries will reject as fatal undecoded TOML via `fatalUndecodedWarnings` (§2970–2975, §4112–4113).
+- **The Gap:** This citation only applies to config/pack-level TOML files resolved by `internal/config`. In the actual `v1.2.1` codebase, formula parsing (resolved under `internal/formula/parser.go`) uses `toml.Unmarshal` without checking undecoded metadata, and the `Step` struct has no `target_binding` or `run_target_binding` fields.
+- **The Impact:** Old binaries running against the activation public pack will silently unmarshal the formula files, ignore the unknown `target_binding` keys, and proceed with behavior execution. The expected "fail-closed before behavior discovery" behavior is bypassed entirely, leading to silent, unpredictable execution errors and state corruption in the field.
+
+### 2. [BLOCKER] Stale-Pin "Warn-and-Load" Vulnerability under Post-Activation Binaries
+The canonical version-skew rule states that any locked public Gastown commit equal to any pin-ledger row (including `current_baseline` and `compatibility`) loads normally with at most a warning (§2956–2960). The release compatibility matrix collapses this under "new binary | old pack" with normal load for ledger-listed commits (§4114–4115).
+- **The Gap:** A post-activation binary (Slice 5+) has completely removed the Maintenance pack from its required system packs (§4058). If such a binary loads a city locked to the `current_baseline` or `compatibility` pin, those older packs do not carry the migrated maintenance behaviors, and the post-activation binary no longer bundles them.
+- **The Impact:** The city will load successfully but will run with *neither* Core maintenance nor Gastown-specific maintenance. This creates the exact silent missing-maintenance behavior gap that the migration is designed to prevent.
+
+### 3. [MAJOR] Concurrent Materialization of Shared Public Cache (Global Lock Gap)
+The mutation coordinator uses a city-local lock (`.gc/controller.lock`) to serialize doctor fixes. However, the ordinary remote cache for public packs (e.g., `~/.gc/cache/` or similar) is shared globally across multiple cities on the same host machine.
+- **The Gap:** If two separate cities on the same machine are initialized or updated concurrently (e.g., during parallel task execution or concurrent CI runs), they will both attempt to resolve, download, and materialize the same `PublicGastownPackVersion` to the shared cache folder.
+- **The Impact:** In the absence of a global, cross-process cache-write lock, this concurrency creates a race condition that can result in a corrupted, partially materialized public pack directory, causing subsequent loads to fail closed.
+
+### 4. [MAJOR] Missing Offline Trust Anchor for Synthetic-Cache Promotion
+The design allows offline operators to promote a legacy synthetic public Gastown cache into the ordinary remote cache using a digest-validated helper (§3008–3014).
+- **The Gap:** On an air-gapped host, there is no network connection to fetch and verify the content digest of the pinned commit. If the offline promotion helper only validates the cache against its own self-computed hash, there is no cryptographically secure chain of custody ensuring that the promoted bytes actually match the true git commit's subpath.
+- **The Impact:** A corrupted or tampered local cache could be promoted to a "validated" remote cache entry, bypassing the content-verification checks.
+
+### 5. [MINOR] Mutable Reachability vs Immutable Content
+Each ledger row records a "durable public ref" (§30), but there is no explicit requirement for the `gascity-packs` repository to enforce branch protection, tags, or releases for the pinned commits.
+- **The Gap:** While the content is immutable via SHA-1 hashes, the reachability of that content is mutable. If a developer force-pushes `main` or deletes a branch on `gascity-packs` before the pin is consumed in Slice 5, the commit could be garbage-collected by GitHub, causing fresh inits and cache-evicted cities in the field to fail network resolution.
+
+---
+
+## Required Changes & Actionable Recommendations
+
+To transition this review to an approval, the following modifications must be made to the design document:
+
+### 1. Fix the Old-Binary Fail-Closed Mechanism (Formula Level)
+- **Change:** Do not rely on `fatalUndecodedWarnings` on formula assets. Add a pack-level minimum schema or binary version constraint field (e.g., `minimum_gc_binary = "v1.3.0"`) inside the `pack.toml` file of the activation pack.
+- **Requirement:** Add an executable gate in Slice 1 that explicitly runs a compiled `v1.2.1` binary against the actual activation checkout to prove that it fails-closed immediately on load, and document this execution transcript in the ledger.
+
+### 2. Implement a Phase-Aware Compatibility Matrix
+- **Change:** Rewrite the canonical version-skew rule (§2956–2960) to be phase-aware. Replace "any ledger row loads normally" with a structured mapping where each ledger row is mapped to its supported loader phases:
+
+| Gas City Binary Family | `current_baseline` | `compatibility` | `activation` |
+| --- | --- | --- | --- |
+| **Old Binary (`v1.2.1`)** | Supported (Warn-free) | Supported (Warn-only) | Unsupported (Fatal) |
+| **Compatibility-Era Binary** | Supported (Warn-only) | Supported (Warn-free) | Unsupported (Fatal) |
+| **Post-Activation Binary** | Unsupported (Fatal) | Unsupported (Fatal) | Supported (Warn-free) |
+
+- **Requirement:** Ensure that if a post-activation binary encounters a city locked to `current_baseline` or `compatibility`, it fails-closed immediately with diagnostic `public_gastown.pin_skew` and error-severity doctor output.
+
+### 3. Add Downgrade Guidance and Old-Binary Warning
+- **Change:** Update the rollback guidance (§4117) to explicitly state:
+  > [!IMPORTANT]
+  > "If a city was doctor-fixed under a post-activation binary (removing the `maintenance` import) and is subsequently rolled back to a pre-activation binary, the operator must manually restore the `maintenance` import to `city.toml` to prevent silent loss of maintenance execution."
+- **Requirement:** Ensure this warning is output by the doctor tool of the pre-activation tree if it detects a city with no maintenance import.
+
+### 4. Implement a Global Cache Write Lock
+- **Change:** Add a requirement in the Registry and Cache section (§2987) mandating that any download, extraction, or materialization of a remote pack into the shared global cache directory must obtain a global, cross-process file-level lock (e.g., via `flock` or equivalent) on the cache directory.
+
+### 5. Define the Offline Trust Anchor
+- **Change:** Explicitly define the expected content digest of the pinned commit as a binary constant beside `PublicGastownPackVersion` in `internal/config/public_packs.go` (e.g., `PublicGastownPackDigest`).
+- **Requirement:** The offline promotion helper must validate the synthetic cache's files against this hardcoded digest before promoting the cache, guaranteeing a cryptographically secure offline chain of custody.
+
+### 6. Protect Durable Refs on Gascity-Packs
+- **Change:** Mandate that for every commit SHA recorded as a pin in `public-gastown-pins.yaml`, a corresponding immutable git tag (e.g., `v1.0.0-compat` or similar) must be created and protected in the `gascity-packs` repository to prevent deletion or garbage collection.
+- **Requirement:** Add a live network-reachability check of these tags to the Slice 5 and Slice 6 gate lists.

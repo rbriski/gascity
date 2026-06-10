@@ -8,7 +8,7 @@ Lane: independently deployable slices, decomposition readiness, prerequisite hon
 
 ## 1. Executive Summary
 
-As Iris Kowalski, the **Rollout & Decomposition Gates Reviewer**, I have performed an independent, evidence-backed, and first-principles review of the current design document (`plans/core-gastown-pack-migration/implementation-plan.md`, 835 lines, `updated_at: 2026-06-09T13:20:59Z`). 
+As Iris Kowalski, the **Rollout & Decomposition Gates Reviewer**, I have performed an independent, evidence-backed, and first-principles review of the current design document (`plans/core-gastown-pack-migration/implementation-plan.md`, 835 lines, `updated_at: 2026-06-09T01:20:00Z`). 
 
 The current plan represents a quantum leap in quality. It introduces a comprehensive **Decomposition Readiness Gate** (lines 689–722) including a detailed AC-to-proof-artifact matrix, and a structured **Slice-to-gate table** (lines 793–808) mapping dependencies, test commands, and one-way boundaries for all twelve rollout phases (Slices 1a to 7). These additions directly resolve previous concerns about unstructured rollout prose and unprovable milestones.
 
@@ -31,7 +31,7 @@ However, a close examination of cross-slice dependencies, rollback mechanisms, a
 ## 3. Critical Risks & Too-Quickly Accepted Assumptions
 
 ### 3.1. [Blocker] Bootstrap Isolation Dependency Paradox (Slice 3 vs. Slice 4a)
-* **The Assumption:** Under Slice 3 (lines 485–487 & 746–750), the plan specifies:
+* **The Assumption:** Under Slice 3 (lines 747–750), the plan specifies:
   > `ensureBootstrapForDoctor` is either deleted in the same slice or rewritten to call `internal/systempacks` diagnostics without materializing bootstrap Core.
 * **The Reality:** The new `internal/systempacks` package and its diagnostic surfaces are only introduced in **Slice 4a** (lines 752–755 & 802).
 * **The Blocker:** In Slice 3, `internal/systempacks` does not yet exist. Rewriting `ensureBootstrapForDoctor` to import or call `internal/systempacks` in Slice 3 creates a compile-time failure. This is a severe cross-slice dependency violation.
@@ -51,14 +51,14 @@ However, a close examination of cross-slice dependencies, rollback mechanisms, a
 * **Required Change:** The rollback contract must explicitly state that a downgrade to an old binary requires running a coordinator-driven restore/downgrade command that re-injects the Maintenance system pack and its imports back into the city files.
 
 ### 3.4. [Major] The `GC_BOOTSTRAP=skip` / Gate 1 Paradox
-* **The Assumption:** Under §"Bootstrap Fixture Isolation" (lines 489–493), `GC_BOOTSTRAP=skip` must not skip `internal/systempacks` materialization and strict required Core file-set integrity.
+* **The Assumption:** Under §"Bootstrap Fixture Isolation" (lines 531–538), `GC_BOOTSTRAP=skip` must not skip `internal/systempacks` materialization and strict required Core file-set integrity.
 * **The Reality:** Unit and testscript tests use `GC_BOOTSTRAP=skip` specifically to run in lightweight, isolated environments where the production Core fileset is intentionally *not* materialized on disk.
 * **The Blocker:** If Gate 1 (pre-resolution fileset integrity) is strictly enforced under `GC_BOOTSTRAP=skip` without exception, then every lightweight isolated unit test in the suite will fail closed immediately because there is no production Core directory to validate.
 * **Required Change:** Specify that in test mode under `GC_BOOTSTRAP=skip`, the fileset validator (Gate 1) runs against the empty/minimal mock bootstrap fixture (`bootstrap.EmptyFS`) or accepts a pre-computed test digest, rather than demanding a full production fileset.
 
 ### 3.5. [Major] Slice 5a Duplicate-Active Deadlock
 * **The Assumption:** Slice 5a (lines 766–770) loads the public activation pin while local legacy Maintenance and Gastown directories are still present on disk.
-* **The Reality:** The zero-duplicate-active gate (lines 228–229) triggers if same-named behavior IDs or packs are loaded from multiple sources.
+* **The Reality:** The zero-duplicate-active gate (lines 764–774) triggers if same-named behavior IDs or packs are loaded from multiple sources.
 * **The Blocker:** Loading the public activation pin (which contains the moved Gastown/Maintenance assets) while the legacy local folders still exist will trigger a collision, crashing the loader and blocking the verification step.
 * **Required Change:** Specify that during Slice 5a, the `internal/packsource` classifier must explicitly ignore or suppress active discovery of local legacy folders when the loader is operating under an activation pin.
 

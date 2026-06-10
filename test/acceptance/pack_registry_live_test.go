@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -135,10 +136,7 @@ func TestPackRegistryLiveImportsEveryCatalogPack(t *testing.T) {
 		if locked.Version != pack.Version || locked.Commit != pack.Commit {
 			t.Fatalf("packs.lock entry for %s = version %q commit %q, want %q %q", pack.Name, locked.Version, locked.Commit, pack.Version, pack.Commit)
 		}
-		cachePath, err := packman.RepoCachePath(pack.Source, pack.Commit)
-		if err != nil {
-			t.Fatalf("RepoCachePath(%s): %v", pack.Name, err)
-		}
+		cachePath := config.GlobalRepoCachePath(env.Get("GC_HOME"), pack.Source, pack.Commit)
 		packPath := filepath.Join(cachePath, remotesource.Parse(pack.Source).Subpath, "pack.toml")
 		if _, err := os.Stat(packPath); err != nil {
 			t.Fatalf("cached pack %s missing pack.toml at %s: %v", pack.Name, packPath, err)

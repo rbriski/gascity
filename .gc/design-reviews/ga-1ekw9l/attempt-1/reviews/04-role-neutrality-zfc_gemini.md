@@ -1,117 +1,98 @@
-# Anand Krishnaswamy — Role Neutrality & ZFC Invariant Reviewer (Iteration 10 / Attempt 1, Independent DeepSeek V4 Flash Style)
+# Anand Krishnaswamy — Role Neutrality & ZFC Invariant Reviewer (Attempt 12 / Independent DeepSeek V4 Flash Style)
 
-**Verdict:** block
+**Verdict:** BLOCK (Iterate Required)
 
 > **Lane:** Zero hardcoded roles in Go and assets, the symbolic maintenance-worker binding, SDK self-sufficiency, and ZFC (Zero Framework Cognition) judgment containment.
 >
-> Reviewed against the Iteration 10 design document (`plans/core-gastown-pack-migration/implementation-plan.md`, 835 lines, `updated_at: 2026-06-09T13:20:59Z`) — specifically §"Role Neutrality And Configurable Bindings" (lines 409–458), §"Required System Pack Loader" (lines 221–312), §"Data And State" (lines 532–603), and §"Testing" (specifically Go and Asset Role-Surface and Scanner tests at lines 624–638).
+> Reviewed against the Attempt 12 implementation plan (`plans/core-gastown-pack-migration/implementation-plan.md`, 1416 lines, `updated_at: 2026-06-10T08:33:51Z`) — specifically §"Role Neutrality And Configurable Bindings" (lines 759–859), §"Bootstrap Fixture Isolation" (lines 860–924), and §"Operator Docs And Generated References" (lines 925–950).
 >
-> This independent review is produced using the DeepSeek V4 Flash style, focusing rigorously on first-principles ZFC compliance, cross-document state consistency, and identifying assumptions other reviewers may accept too quickly.
+> This independent review is produced using the DeepSeek V4 Flash style, focusing rigorously on first-principles ZFC compliance, cross-document consistency, identifying missing edge cases, and exposing hidden assumptions other reviewers may accept too quickly.
 
 ---
 
 ## Schema Conformance
 
-**Conforms.** The Iteration 10 implementation plan includes all required top-level sections in the correct order, carries the required front matter (`phase: implementation-plan`), and `Open Questions` is correctly marked as `None`. The role neutrality, symbolic binding resolver, and active-root scanner designs are properly integrated into the Proposed Implementation, Data And State, Testing, and Rollout sections, rather than being appended as unstructured review prose.
+**Conforms.** The Attempt 12 implementation plan contains all required top-level sections in the correct order, carries the required front matter (`phase: implementation-plan`), and correctly integrates the role neutrality, symbolic binding resolver, and active-root scanner designs into the Proposed Implementation, Data And State, Testing, and Rollout sections rather than appending them as unstructured prose.
 
 ---
 
 ## Top Strengths of the Proposed Design
 
-1. **Concrete Binding Indirection without Go-Level Fallbacks:**
-   The plan's implementation of `[gc.bindings.*]`, `[system_packs.*.bindings]`, `target_binding`, `gc.run_target_binding`, and `GC_CORE_MAINTENANCE_WORKER` provides a robust, data-driven layer of indirection. Eliminating Go-level fallbacks that substitute concrete role names (lines 445–446) is a vital first-principles alignment with Zero Framework Cognition (ZFC).
-2. **Active Root Containment and Enumeration Guarding:**
-   Constraining loaders, installers, compilers, prompt scanners, and doctor checks to resolve directory roots via `internal/packsource.ActiveRootsFor(kind)` (lines 418–424) is an excellent architectural boundary. This structurally prevents ad-hoc globbing and prefix-based path scans, which historically has been the primary vector for stale or out-of-scope asset leaks.
-3. **Decoupled SDK Self-Sufficiency and Participation Gates:**
-   Decoupling controller-owned SDK infrastructure operations from configured user agents (lines 435–437) ensures that removing or renaming the maintenance worker does not dead-lock the system. Furthermore, verifying required-pack participation at config-resolution time via a typed `RequiredSystemPackParticipation` record ensures that Core's participation is a runtime invariant.
+1. **Clean Removal of Legacy Theme and Emoji Hardcoding (Slice 3):**
+   The plan's commitment to delete `roleEmoji` (`internal/runtime/tmux/tmux.go:80-89`) and the `MayorTheme`/`DeaconTheme`/`DogTheme` functions (`internal/runtime/tmux/theme.go:33-47`) in Slice 3 is excellent. Replacing these compile-bound Go symbols with a generic, data-driven theming model declared via `[appearance.themes.<name>]` in the Gastown public pack and backed by a neutral Core default palette is a textbook ZFC-aligned solution.
+2. **Comprehensive Role-Surface Manifest Scope:**
+   Explicitly including API classifications (`classifyAgentKind`/`agent_kind` field), generated client/dashboard types, dashboard CSS classes (`dog-*`), and core-owned asset IDs (`mol-dog-jsonl`, `mol-dog-reaper`) in the role-surface manifest and regeneration gates (Slice 3 and 5b) addresses the previous gaps perfectly. It ensures that role-neutrality is treated as a systemic, compile-to-UI invariant rather than a superficial Go-source regex match.
+3. **Explicit Data-Declared Binding Authority and Precedence:**
+   Freezing binding declarations in `pack.toml` under `[bindings.<key>]` with `required` (bool), `default` (string), and `description` attributes (lines 810–814) successfully removes the Go runtime from the business of classifying binding requirements. Establishing a total precedence hierarchy (`city` > `system_pack` > `env` > `pack default`) provides a clear, predictable resolution pathway.
+4. **Active Root Containment via `ActiveRootsFor`:**
+   Enforcing that loaders, installers, cache readers, and doctor checks resolve pack paths strictly through `internal/packsource.ActiveRootsFor(kind)` prevents ad-hoc globbing and path-traversal bugs. The scanner check that rejects raw file-system walks over pack roots enforces this architectural boundary at compile time.
 
 ---
 
-## Critical Risks & Architectural Inconsistencies
+## Critical Risks & Architectural Gaps
 
-### 1. [Blocker] Un-de-roled Default Scaffolding in `gc init` and Config Defaults
-* **The Risk:** In `internal/config/config.go`, the out-of-the-box non-Gastown SDK defaults `DefaultCity` and `WizardCity` still explicitly hardcode the `"mayor"` agent and `"prompts/mayor.md"` prompt template.
-* **The Impact:** Running `gc init` or spawning a fresh default city creates an active city that depends on a literal `"mayor"` role and template. This violates the zero-hardcoded-roles SDK guarantee. Since AC8 scopes role neutrality to "init/template resolution," the static scanner will flag this unless it is allowlisted—and allowlisting a live SDK default defeats the entire de-roling migration.
-* **The Gap:** While "default scaffolding" is listed under the manifest coverage in line 414, the plan never specifies the neutral end-state for these functions.
-* **Resolution:** Explicitly declare the role-neutral scaffolding for `gc init`. The default city must scaffold zero agents and zero named sessions, or alternatively use purely symbolic-binding equivalents. Add an AC8 check proving the non-Gastown default path contains no concrete role literals.
+### 1. [Blocker] Non-Generic Environment Override Layer (`GC_CORE_MAINTENANCE_WORKER`) (ZFC Violation)
+* **The Risk:** The plan specifies that the environment injection layer resolves the environment variable `GC_CORE_MAINTENANCE_WORKER` (lines 819-820, 825).
+* **The Impact:** This is a clear violation of **Zero Framework Cognition (ZFC)**. Hardcoding a specific binding-specific environment variable (`GC_CORE_MAINTENANCE_WORKER`) directly in the Go configuration loader means the Go framework retains explicit, compile-bound cognition of a specific role concept. If a user or an external pack introduces a new required binding (e.g., `escalation_recipient`), they cannot override it via the environment because the loader only knows how to inject `GC_CORE_MAINTENANCE_WORKER`.
+* **Resolution:** Replace the single hardcoded `GC_CORE_MAINTENANCE_WORKER` variable with a generic, dynamic environment binding scheme. The configuration loader must translate all variables prefixed with `GC_BINDINGS_<KEY_IN_UPPERCASE>` into their respective binding overrides. Go source code must not contain any literal reference to a specific binding-named environment variable.
 
-### 2. [Blocker] Warmup Mail Fallback Hardcoded to `mayor` in Core CLI Logic
-* **The Risk:** `cmd/gc/cmd_start_warmup.go` hardcodes `defaultWarmupMailTo = "mayor"`. Warmup runs under `gc start` (a core SDK/controller command).
-* **The Impact:** When running `gc start` on a city with a renamed or omitted maintenance worker, warmup failure mail will attempt to send to a non-existent `"mayor"`. This directly contradicts the plan's own "No Go fallback may substitute `mayor`, `deacon`, `dog`, or another concrete role name" rule (lines 445-446).
-* **The Gap:** The plan lists "warmup mail defaults" under manifest coverage (lines 414-415) but fails to define a warmup-recipient binding, leaving this hardcoded fallback active.
-* **Resolution:** Define how the warmup mail recipient resolves with no Go fallback. It must resolve via a symbolic binding (e.g., `escalation_recipient`), or skip with a typed diagnostic when unbound. Name `cmd/gc/cmd_start_warmup.go` and its Core end-state in the design.
+### 2. [Major] Cascading Failures for Downstream Steps with Disabled/Omitted Optional Bindings
+* **The Risk:** The plan states: *"a disabled or omitted optional binding skips user-agent work with a typed diagnostic naming the binding key"* (lines 830–831). 
+* **The Impact:** When a step's user-agent work is skipped because its binding is omitted or disabled, it produces no output data. If a downstream step has a control or data dependency on this step (e.g., reading its output files or relying on its completion status), the downstream step will crash or fail loudly with a missing-dependency or bad-input error.
+* **The Gap:** The plan is silent on how downstream dependencies in a formula or molecule propagate when an upstream step is skipped. It does not define whether "skipping user-agent work" translates to a first-class `skipped` bead status, a cascading skip for downstream dependent steps, or a mock/neutral success state.
+* **Resolution:** Define the exact execution-state and data-propagation rules for skipped optional steps. Specify whether downstream dependent steps are skipped automatically (cascading skip) or if they must handle empty inputs gracefully.
 
-### 3. [Blocker] Compile-bound Tmux Theme and Emoji Maps in Go Runtime
-* **The Risk:** `internal/runtime/tmux/theme.go` defines `MayorTheme()`, `DeaconTheme()`, and `DogTheme()`. Furthermore, `internal/runtime/tmux/tmux.go` defines a static emoji/icon map keyed on literal roles like `"mayor"`, `"deacon"`, `"witness"`, `"refinery"`, `"crew"`, `"polecat"`, `"coordinator"`, `"health-check"`.
-* **The Impact:** These Go functions and map keys are compile-bound in the runtime packages; they cannot be moved to configuration packs.
-* **The Gap:** The design states tmux theme APIs are "assigned by manifest rows before source moves" (line 452). This is a category error; Go functions cannot be relocated to config packs.
-* **Resolution:** Fully de-role `internal/runtime/tmux`. Drive status themes and emoji maps dynamically from config/pack bindings or a consistent hash fallback (`AssignTheme(agentName)`). Rename `ConfigureGasTownSession` to a neutral name.
+### 3. [Major] Unaddressed Conflict Resolution for Duplicate Binding Declarations
+* **The Risk:** In a multi-pack city, multiple active packs might declare the same binding key in their respective `pack.toml` files.
+* **The Impact:** If Pack A declares `foo` as `required = true` with no default, while Pack B declares `foo` as `required = false` with a default `"helper"`, the system is in an unresolvable transitive conflict state.
+* **The Gap:** While AC3 addresses pack-resolution diamond conflicts, the plan does not define how the binding parser resolves conflicting metadata (requiredness, defaults, descriptions) for identical binding keys across different active packs.
+* **Resolution:** Add a strict conflict-resolution rule for binding declarations. If two active packs declare the same binding key with conflicting `required` flags or different `default` values, the configuration loader must fail-closed during preflight loading with a descriptive duplicate-binding diagnostic.
 
-### 4. [Major] Suffix Binding Gap & `binding_prefix` Template Dependencies
-* **The Risk:** Prompt templates currently resolve prefixes using `binding_prefix` but leave role name suffixes (e.g., `dog`, `deacon`, `witness`) hardcoded in the templates (e.g., `{{ .BindingPrefix }}dog` or prompt files like `prompts/mayor.md` without suffixes).
-* **The Impact:** The new symbolic binding system is not reconciled with how suffix-level prompt templates are resolved, which will result in code that still hardcodes literal suffixes.
-* **Resolution:** Require that all role suffixes in prompt templates are replaced by symbolic bindings, deprecating prefix-only `binding_prefix` in favor of fully symbolic config-driven bindings.
+### 4. [Major] In-Flight Beads with Legacy Route Literals (`dog`) Stalled Mid-Flight
+* **The Risk:** The plan introduces a fail-closed rule for persisted bead/molecule metadata: *"unresolvable literals fail that step closed with a typed diagnostic... and are never silently re-routed"* (lines 837–843).
+* **The Impact:** If an operator upgrades a running city and renames the maintenance worker from `dog` to `reconciler`, all active, in-flight beads that were routed to `dog` will immediately fail closed upon the next evaluation loop.
+* **The Gap:** While the plan specifies that `mol-dog-jsonl` and `mol-dog-reaper` are renamed and aliased in the order skip ledger (lines 786–790), it provides no migration path for live, active database beads carrying `gc.routed_to = "dog"`. Expecting operators to manually edit database tables or abort all running molecules mid-flight is a severe operational hazard.
+* **Resolution:** Extend `gc doctor --fix` to safely rewrite `gc.routed_to`, `gc.run_target`, mail recipients, and nudge targets in active, open beads from legacy literal roles (e.g., `dog`) to the configured symbolic binding names during upgrade.
 
-### 5. [Major] Scanner Excludes `dog` and Lacks Expiry Failures
-* **The Risk:** The scanner's denied token set (lines 426-427) completely excludes `"dog"`.
-* **The Impact:** Developers can silently hardcode `"dog"` in Go files or scripts without failing CI.
-* **Resolution:** Add `"dog"`, `"coordinator"`, and `"health-check"` to the scanned denied token set, allowing `"dog"` *only* in the designated Core default pack configuration file and its associated tests. Enforce that any allowlist row with an expired `expiry` date fails the build in CI.
-
-### 6. [Major] Declarative Required-versus-Optional Binding Semantics Gap (ZFC Violation)
-* **The Risk:** The plan distinguishes between "missing optional bindings" and "missing required provider-pack escalation bindings" (lines 443-444), but never specifies where this optional-vs-required designation is declared.
-* **The Impact:** If Go classifies a binding as required or optional by its name or purpose, that is a ZFC judgment call.
-* **Resolution:** Ensure that whether a binding is optional or required is declared as metadata within the formula/order/pack config itself rather than checking hardcoded names in Go.
-
-### 7. [Major] Missing Structural Binding Evidence and Target-Field Resolution Trace
-* **The Risk:** The plan specifies how the binding resolver behaves, but does not provide an auditable trace.
-* **The Impact:** Given the current tree has many literal role strings, token scanning alone cannot prove that active behavior came through the generic resolver rather than through string interpolation or a helper-specific fallback.
-* **Resolution:** Require a machine-readable `BindingResolution` trace schema that records consumer id, consumer kind, source pack, binding key, required/optional mode, source of the selected binding, resolved target, absence behavior, and diagnostic id.
+### 5. [Minor] Test-Fixture "Dog" Hardcoding and Leakage
+* **The Risk:** The plan allows `dog` to appear in configuration tests (lines 806–808).
+* **The Impact:** If all tests continue to use `dog` as their primary target, the system may pass CI while retaining implicit string-matching or prefix-matching dependencies on `dog` in active behavior.
+* **Resolution:** Enforce that all core maintenance and routing tests run under at least one randomized, non-default executor name (e.g., `reconciler-8f9d`) to prove that active routing is completely independent of the literal string `"dog"`.
 
 ---
 
 ## Detailed Responses to Lane-Specific Questions
 
 ### Q1: After binding indirection, does any Go, prompt asset, script, formula, order, generated help, or API route still branch on dog, Mayor, Maintenance, or another concrete role name?
-
-**Answer: Yes, several compile-bound role leakage vectors remain unneutralized in Core:**
-1. **Default Scaffolding (`DefaultCity` / `WizardCity`):** Still contains hardcoded inline references to `"mayor"` and `"prompts/mayor.md"`.
-2. **Warmup Mail Fallback:** `cmd/gc/cmd_start_warmup.go` hardcodes `defaultWarmupMailTo = "mayor"`.
-3. **Compile-bound Tmux Helpers:** `internal/runtime/tmux/theme.go` defines `MayorTheme/DeaconTheme/DogTheme`, and `tmux.go` maps emoji icons to literal role keys like `"mayor"`, `"deacon"`, and `"witness"`.
-4. **Required Provider Packs (`bd`/`dolt`):** Provider-pack scripts contain hardcoded routes like `gc mail send mayor/` or `gc session nudge deacon/` which will fail on non-Gastown cities.
-5. **Prompt Template Suffixes:** Suffix role names remain hardcoded in templates behind `binding_prefix`.
+* **Answer:** With the Attempt 12 updates, the compile-bound branching on tmux themes, emoji maps, and warmup mail defaults has been successfully removed from Go and shifted to data-driven config declarations. However, a ZFC-violating exception remains in the Go environment loading layer, which still explicitly references the concrete role variable `GC_CORE_MAINTENANCE_WORKER` instead of a generic binding override prefix.
 
 ### Q2: Can controller-owned SDK operations still run when the configured maintenance worker is renamed or omitted, with no dependency on a user agent entry?
-
-**Answer: Yes, but with unresolved ZFC and declaration gaps:**
-* If the `maintenance_worker` is renamed (e.g., from `dog` to `reconciler`), the framework resolves the target at runtime via `gc.run_target_binding` / `target_binding`, which is robust.
-* However, if the `maintenance_worker` is omitted entirely from the config, the plan's behavior is unstated. Line 443 states: `"Missing optional bindings skip user-agent work with a typed diagnostic."` Under **ZFC**, the Go code must not make a judgment call about omitting required system-level transport workers; the config parser must fail-closed during pre-flight configuration validation or raise a descriptive pre-flight error rather than letting the dispatcher make an ad-hoc runtime judgment.
-* Furthermore, the plan distinguishes between "missing optional bindings" and "missing required provider-pack escalation bindings" (lines 443-444), but never specifies where this optional-vs-required designation is declared. If Go classifies a binding as required or optional by its name or purpose, that is the judgment call ZFC forbids.
+* **Answer:** Yes. The introduction of `[bindings.<key>]` tables in `pack.toml` with declared requiredness ensures that the Go controller executes generic loading and scheduling rules over metadata, preventing hardcoded Go-level judgment calls. However, cascading control and data dependencies for downstream steps when optional bindings are omitted or disabled remain undefined and present a runtime risk.
 
 ### Q3: Are role-name allowlists narrow, time-bounded, and failing when compatibility fixtures leak into live behavior?
-
-**Answer: No, the allowlist model lacks strict temporal enforcement and excludes `dog` entirely:**
-1. **The Scanner ignores `dog`:** The plan's proposed list of denied tokens (`mayor, deacon, witness, refinery, polecat, boot, crew, gastown`) completely omits `dog`. While `dog` is allowed in the Core default pack config, omitting it from the denied set means developers can silently hardcode `dog` in Go source code or script bodies without triggering a build failure.
-2. **Missing Expiry Enforcement:** While the plan mentions that allowlist rows require an `expiry` date (line 594), it specifies no CI enforcement gate that fails the build when a row is past its expiry date. Without this, allowlists will grow indefinitely.
+* **Answer:** Yes. Constraining allowlist rows to specific contexts (narrowly scoped migration docs, generated review artifacts, source-attribution examples, and absence-test fixtures) aligns with AC8. The inclusion of the active behavior scanner and the wording matrix with build-time failure on expired rows provides the required enforcement. However, tests must be forced to use randomized names to ensure compatibility fixtures do not mask hidden string dependencies.
 
 ---
 
 ## Required Changes
 
-Before the design can transition to implementation, the following changes must be incorporated into the proposed implementation plan:
+Before the implementation plan can be approved for decomposition, the following changes must be made:
 
-1. **De-role Default Scaffolding (`gc init`):** Declare the role-neutral default for `DefaultCity` and `WizardCity`. They must emit a city with no agents/named sessions, or use symbolic-binding equivalents. Add an AC8 gate proving the non-Gastown default path contains no role literals.
-2. **De-role Warmup Mail:** Define how the warmup mail recipient resolves with no Go role fallback. Name `cmd/gc/cmd_start_warmup.go` and its Core end-state.
-3. **De-role Tmux Themes & Icons:** Deprecate `MayorTheme()`, `DeaconTheme()`, and `DogTheme()` in `internal/runtime/tmux/theme.go`. Drive status themes and emoji maps dynamically from config/pack bindings. Rename `ConfigureGasTownSession`.
-4. **Suffix-Level Symbolic Bindings:** Require that all role suffixes in prompt templates are replaced by symbolic bindings, deprecating prefix-only `binding_prefix` in favor of config-driven bindings.
-5. **De-role Required Provider Packs (`dolt`):** Map all hardcoded `mayor`/`deacon` mail/nudge escalation routes inside `examples/dolt` to configurable symbolic recipients, and fail CI on any hardcoded literal role route in a required provider pack.
-6. **Specify Required-vs-Optional Semantics as Declarative Data:** Ensure that whether a binding is optional or required is declared as metadata within the formula/order/pack config itself rather than checking hardcoded names in Go.
-7. **Add `dog` to Denied Set and Enforce Expiry:** Add `dog`, `coordinator`, and `health-check` to the active behavior denied token list (with narrow allowlists for Core defaults, Dolt/store-maintenance terms, and tests). Enforce that any allowlist row with an expired `expiry` date fails the build in CI.
-8. **Add Binding-Resolution Trace Schema:** Expose a machine-readable resolution record/trace schema for target fields (`gc.routed_to`, mail/nudge targets, warmup recipient, prompt fallbacks) to verify all active routing flows through the generic resolver.
+1. **Generalise the Environment Layer (ZFC Correctness):**
+   * Change the env override logic in the config parser to resolve environment variables generically using a `GC_BINDINGS_<KEY>` pattern (e.g., `GC_BINDINGS_CORE_MAINTENANCE_WORKER` or `GC_BINDINGS_MAINTENANCE_WORKER`). Remove all literal references to `GC_CORE_MAINTENANCE_WORKER` from production Go source files.
+2. **Define Downstream Skipped Propagation:**
+   * Add a paragraph in the "Role Neutrality And Configurable Bindings" section defining how downstream dependent steps behave when an upstream step is skipped due to a disabled/omitted optional binding (e.g., cascading skips vs empty inputs).
+3. **Add Binding Declaration Collision Rules:**
+   * Explicitly state that the configuration loader will fail-closed during preflight loading if two active packs declare the same binding key with conflicting properties (`required` flag or `default` values).
+4. **Provide Task-Store (Bead) Migration Path:**
+   * Add a task in Slice 5b or Slice 10 to extend `gc doctor --fix` to remediate active, in-flight beads in the Dolt task store whose route metadata (`gc.routed_to`, `gc.run_target`, mail, nudge) still contains legacy role names (`dog`, `mayor`).
+5. **Mandate Randomized Test-Fixture Names:**
+   * Add an assertion under "Testing" requiring that core-owned maintenance and routing tests run under randomized worker names to prove the system is robust against non-default configurations.
 
 ---
 
 ## Questions
 
-1. Is `gc start` warmup Core SDK infrastructure or Gastown-owned? If Core, the recipient must be neutral/bound; if Gastown, the warmup-mail default belongs in the public pack entirely.
-2. For Core-retained surfaces the manifest assigns "to Core," is the only de-roling primitive the maintenance-worker binding, or will the plan provide a general symbolic binding table (default-city agents, warmup recipient, tmux theme/icon)?
-3. Does the CI scanner enforce a strict build failure if any allowlist row has expired?
+1. Will the environment override layer support all declared bindings generically via a `GC_BINDINGS_<UPPERCASE_KEY>` scheme?
+2. How does a downstream step detect that an upstream optional step was skipped vs failed vs completed?
+3. Will `gc doctor --fix` be extended to remediate in-flight task-store (bead) route literals?

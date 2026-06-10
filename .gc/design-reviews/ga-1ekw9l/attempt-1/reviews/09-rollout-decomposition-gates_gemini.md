@@ -1,91 +1,102 @@
-# Iris Kowalski — DeepSeek V4 Flash (Rollout & Decomposition Gates Reviewer, Independent Review)
+# Iris Kowalski — Rollout and Decomposition Gates Reviewer (Iteration 12 / Attempt 12, Independent DeepSeek V4 Flash Style)
 
 **Verdict:** block
 
-Lane: independently deployable slices, decomposition readiness, prerequisite honesty, exact gates, cross-repo sequencing, test coverage. Judged against `gc.mayor.implementation-plan.v1` (`/data/projects/gascity-packs-worktrees/gc-plan-pack/gascity/assets/skills/mayor/implementation-plan.schema.md`).
+> **Lane:** Independently deployable slices, decomposition readiness, prerequisite honesty, exact gates, cross-repo sequencing, and test coverage.
+> 
+> Reviewed against the Iteration 12 / Attempt 12 implementation plan (`plans/core-gastown-pack-migration/implementation-plan.md`, 310 lines, `updated_at: 2026-06-10T08:17:00Z`) — specifically §"GC Import Launch Implementation Plan" and Slices/Tasks 1 through 8.
+> 
+> This independent review is produced using the DeepSeek V4 Flash style, focusing rigorously on first-principles trust boundaries, cross-document state consistency, and unstated runtime assumptions.
 
 ---
 
-## 1. Executive Summary
+## Schema Conformance
 
-As Iris Kowalski, the **Rollout & Decomposition Gates Reviewer**, I have performed an independent, evidence-backed, and first-principles review of the current design document (`plans/core-gastown-pack-migration/implementation-plan.md`, 835 lines, `updated_at: 2026-06-09T01:20:00Z`). 
-
-The current plan represents a quantum leap in quality. It introduces a comprehensive **Decomposition Readiness Gate** (lines 689–722) including a detailed AC-to-proof-artifact matrix, and a structured **Slice-to-gate table** (lines 793–808) mapping dependencies, test commands, and one-way boundaries for all twelve rollout phases (Slices 1a to 7). These additions directly resolve previous concerns about unstructured rollout prose and unprovable milestones.
-
-However, a close examination of cross-slice dependencies, rollback mechanisms, and test execution environments reveals **three critical bootstrapping deadlocks** and **one major rollback vulnerability** that must block full implementation approval.
+**Conforms with reservations.** The Iteration 12 / Attempt 12 implementation plan structurally aligns with the required top-level section ordering mandated by `implementation-plan.schema.md`, includes correct front matter, and lists `Open Questions` as `None`. However, the drastic rescoping of the plan has resulted in a complete regression of the rollout architecture. Specifically, the comprehensive **Decomposition Readiness Gate** and **Slice-to-gate table** from the previous iterations have been entirely stripped. Replacing rigorous, physical verification matrices with abstract prose-based phases violates the core engineering intent of the schema.
 
 ---
 
-## 2. Grounding & Live Tree Verification
+## Top Strengths of the Design
 
-* **Present and Matching:** 
-  * A structured `Decomposition Readiness Gate` table mapping AC1–AC17 to proof artifacts (lines 704–723).
-  * A `Slice-to-gate table` binding Slices 1a–7 to start/merge gates and boundaries (lines 793–808).
-  * Clear encapsulation of system-pack loading APIs (`LoadRuntimeCity` and `LoadRuntimeCityNoRefresh`) under `internal/systempacks` (lines 171–214).
-* **Missing/Inconsistent Live State:**
-  * `plans/core-gastown-pack-migration/support/` is partially absent; the required validators, schemas, and matrices (e.g., `acceptance-proof-matrix.yaml`, `source-consumer-closure.yaml`) are designated as external prerequisites rather than active, checked-in codebase files.
-  * Dependency sequencing conflicts exist between Slice 3 and Slice 4a, as well as Slice 2 and Slice 4b.
+- **Clear Phase Sequencing of Cleanups (Task 3, lines 114–133):** Postponing the package-registry and implicit-import cleanup to Phase 2 ensures that the foundation contract (Phase 1) is stable before removing legacy artifacts, minimizing the risk of partial loader failures.
+- **Wizard/Init PackV2 Transition (Task 5, lines 154–172):** Moving `gc init` Gastown generation to write PackV2-native imports directly in `pack.toml` rather than relying on legacy city fields is a robust end-state design choice that prevents configuration drift.
+- **Explicit Authoritative Doc Convergence (Task 8, lines 220–240):** Embedding documentation updates as an explicit, gated task in Phase 5—rather than treating it as post-implementation debt—is excellent practice for operator-facing rollouts.
 
 ---
 
-## 3. Critical Risks & Too-Quickly Accepted Assumptions
+## Critical Risks & Consensus Blockers
 
-### 3.1. [Blocker] Bootstrap Isolation Dependency Paradox (Slice 3 vs. Slice 4a)
-* **The Assumption:** Under Slice 3 (lines 747–750), the plan specifies:
-  > `ensureBootstrapForDoctor` is either deleted in the same slice or rewritten to call `internal/systempacks` diagnostics without materializing bootstrap Core.
-* **The Reality:** The new `internal/systempacks` package and its diagnostic surfaces are only introduced in **Slice 4a** (lines 752–755 & 802).
-* **The Blocker:** In Slice 3, `internal/systempacks` does not yet exist. Rewriting `ensureBootstrapForDoctor` to import or call `internal/systempacks` in Slice 3 creates a compile-time failure. This is a severe cross-slice dependency violation.
-* **Required Change:** Defer the rewriting of `ensureBootstrapForDoctor` to Slice 4a, or introduce a stubbed/empty `internal/systempacks` package in Slice 3 that only supports the minimal diagnostics needed by the doctor.
+### 1. Structural Disconnect Between Slice Graph and Task List (Lane Mandate / Q1)
 
-### 3.2. [Blocker] Circular Bootstrapping/Coexistence Proof Deadlock (Slice 1b vs. Slice 2)
-* **The Assumption:** Under Slice 1b (lines 729–732 & 798), `gascity-packs` must produce a `packcompat` transcript proving coexistence with the "current" Gas City loader.
-* **The Reality:** The `packcompat` test harness and the new config-adopted remote resolution rules do not exist in the "current" Gas City loader—they are only introduced in Gas City in Slice 2 and Slice 4a.
-* **The Blocker:** `gascity-packs` cannot run or generate a `packcompat` transcript using Gas City tooling that hasn't been written yet, creating an unresolvable chicken-and-egg deadlock between the two repos.
-* **Required Change:** Explicitly define a dual-development or staging branch workflow where the `packcompat` harness can run against a local check-out of Gas City's candidate loader before the immutable compatibility pin is merged.
+The plan introduces a conceptual "Slice Graph" (lines 43–63) outlining Slices A through E and their topological dependencies. However, the subsequent **Task List** (lines 63–247) completely discards this taxonomy, organizing the work instead into five **Phases** (Phases 1–5) containing Tasks 1 to 8.
+- **The Risk:** There is no mapping showing which tasks belong to which slices. For instance, it is impossible to determine whether Task 2 belongs to Slice A or Slice E, or how Phase 3 maps to Slice C. This disconnect makes independent slice-level deployment and testing unprovable.
+- **Required Resolution:** Re-align the Task List so that every Task is explicitly bound to a named Slice from the graph, or replace the abstract Slice Graph with a concrete, linear Phase-gate dependency table.
 
-### 3.3. [Blocker] Rollback Vulnerability to Old Binary's Maintenance Dependency (Compatibility Matrix Row 5)
-* **The Assumption:** The Release Compatibility Matrix (lines 818–819) asserts:
-  > `rollback from new to old | existing city -> Doctor-mutated manifests are either readable by old binaries or release notes name explicit downgrade limits...`
-* **The Reality:** Old Gas City binaries hardcode a strict dependency on the `maintenance` system pack under `requiredBuiltinPackNames` (lines 37–41). The new binary's doctor mutation (Slice 4b/5b) removes Maintenance from required host packs and rewrites city configurations.
-* **The Blocker:** If an operator rolls back a mutated city from the new binary to the old binary, the old binary will fail closed because it cannot find or load the required Maintenance system pack. Rolling back the binary *without* rolling back the city's files is a silent deployment failure mode.
-* **Required Change:** The rollback contract must explicitly state that a downgrade to an old binary requires running a coordinator-driven restore/downgrade command that re-injects the Maintenance system pack and its imports back into the city files.
+### 2. Elimination of the Decomposition Readiness Gate and Rollback Boundaries (Lane Mandate / RF1 / Q1)
 
-### 3.4. [Major] The `GC_BOOTSTRAP=skip` / Gate 1 Paradox
-* **The Assumption:** Under §"Bootstrap Fixture Isolation" (lines 531–538), `GC_BOOTSTRAP=skip` must not skip `internal/systempacks` materialization and strict required Core file-set integrity.
-* **The Reality:** Unit and testscript tests use `GC_BOOTSTRAP=skip` specifically to run in lightweight, isolated environments where the production Core fileset is intentionally *not* materialized on disk.
-* **The Blocker:** If Gate 1 (pre-resolution fileset integrity) is strictly enforced under `GC_BOOTSTRAP=skip` without exception, then every lightweight isolated unit test in the suite will fail closed immediately because there is no production Core directory to validate.
-* **Required Change:** Specify that in test mode under `GC_BOOTSTRAP=skip`, the fileset validator (Gate 1) runs against the empty/minimal mock bootstrap fixture (`bootstrap.EmptyFS`) or accepts a pre-computed test digest, rather than demanding a full production fileset.
+In the Iteration 12 rescoped plan, the entire **Decomposition Readiness Gate** and per-slice **Rollback/One-way boundary** machinery have been completely removed.
+- **The Risk:** Slices/Phases are planned to be merged sequentially (via Checkpoints A, B, and C) without defining any physical start gates, rollback commands, or one-way upgrade boundaries. This re-introduces **Red Flag #1 (Fragile Batching)**: if Phase 3 fails in production, there is no documented or verified recovery path to restore the system to Phase 2 state.
+- **Required Resolution:** Restore a structured **Slice-to-gate table** mapping every deployable unit to:
+  1. A physical start gate (e.g., checked-in prerequisite commits or proof artifacts).
+  2. A physical merge gate.
+  3. A concrete rollback mechanism or one-way boundary predicate.
 
-### 3.5. [Major] Slice 5a Duplicate-Active Deadlock
-* **The Assumption:** Slice 5a (lines 766–770) loads the public activation pin while local legacy Maintenance and Gastown directories are still present on disk.
-* **The Reality:** The zero-duplicate-active gate (lines 764–774) triggers if same-named behavior IDs or packs are loaded from multiple sources.
-* **The Blocker:** Loading the public activation pin (which contains the moved Gastown/Maintenance assets) while the legacy local folders still exist will trigger a collision, crashing the loader and blocking the verification step.
-* **Required Change:** Specify that during Slice 5a, the `internal/packsource` classifier must explicitly ignore or suppress active discovery of local legacy folders when the loader is operating under an activation pin.
+### 3. "Unit-Only Proof" for High-Risk Loader and Doctor Changes (RF3)
 
----
+The checkpoints defined in the plan rely exclusively on fast, targeted unit tests to authorize merging and moving to subsequent tasks:
+- **The Risk:** Checkpoint A (lines 105–111) and Checkpoint B (lines 188–195) list only targeted unit tests for `cmd/gc`, `internal/config`, `internal/packman`, `internal/migrate`, and `internal/doctor` as merge proof. These packages govern critical, high-risk loader and database mutation behaviors. Running only unit tests violates **Red Flag #3** by ignoring sharded process and integration coverage until Checkpoint C, allowing complex race conditions, lock contention, and version-skew failures to merge undetected into the mainline.
+- **Required Resolution:** Mandate that intermediate Checkpoints A and B must execute the full sharded process and integration targets (`make test-cmd-gc-process-parallel` and `make test-integration-shards-parallel`) before any behavior-changing PR is merged.
 
-## 4. Evaluation against Lane Anti-patterns
+### 4. Hidden Circularity Blocker for Offline CI and Gastown Init (Q2)
 
-| Anti-pattern / Risk | Mitigation in Plan | Status |
-| :--- | :--- | :--- |
-| **Fragile Batching:** Bundling pin changes, source deletion, doctor mutation, and activation into one landing. | **Resolved.** Slices 2 (pin), 3 (Core), 4a/b (systempacks/doctor), 5a/b (activation/Maintenance fold), and 7 (deletion) provide excellent separation. | **Pass** |
-| **Prerequisite Dishonesty:** Claiming decomposition readiness while required templates/manifests are missing. | **Resolved.** The plan now explicitly blocks all downstream behavior-changing slices behind the physical validation and citation of AC6, AC7, and AC14–AC17 support artifacts. | **Pass** |
-| **Unit-Only Proof:** Relying only on fast unit tests for complex integration boundaries. | **Resolved.** Testing (lines 681–685) mandates running the sharded process and integration targets (`make test-integration-shards-parallel`) for high-risk slices. | **Pass** |
+Task 5 (lines 154–172) changes Gastown init to write PackV2 imports pointing directly to `https://github.com/gastownhall/gascity-packs.git//gastown` with an immutable `sha:` pin.
+- **The Risk:** To test this end-to-end (as required by Checkpoint B), the candidate binary must resolve this remote import. However, if the repository branch or commit does not yet exist on GitHub, or if the CI runner operates in an offline/sandboxed environment, the test will fail closed or stall. The plan fails to specify how local, offline test overrides (e.g., using a local checkout of `gascity-packs` via git redirects or mirror-seeding) are configured during the staging window.
+- **Required Resolution:** Define a clear offline staging/testing mechanism (e.g., utilizing local Git directory mapping or a mock cache registry) that allows `init_lifecycle_test.go` to run without making live network requests to GitHub.
+
+### 5. Silent Regression of the Bypass Scanner (Q3)
+
+The previous implementation plan featured a strict "deny-by-default bypass scanner" to prevent code changes from bypassing the production loader via direct `config.Load` shortcuts. In Iteration 12, this scanner has been quietly removed.
+- **The Risk:** Developers can now land direct configuration-load bypasses in `cmd/gc/` or supervisor packages undetected, eroding the SDK loading invariants and leading to silent, behavior-changing bugs.
+- **Required Resolution:** Reintroduce a static token scanner or pre-commit hook that checks for unauthorized direct `config.Load` or `session.NewManager` calls outside the canonical `worker.Handle` boundary.
 
 ---
 
-## 5. Required Plan Updates
+## Missing Evidence
 
-1. **Fix Slice 3 vs. 4a Dependency:** Move the rewriting of `ensureBootstrapForDoctor` to Slice 4a, or define a stub package in Slice 3.
-2. **Resolve Circular Bootstrapping:** Specify a dual-development or staging checkout workflow to allow `packcompat` to run on draft pins before they are merged.
-3. **Define Binary Downgrade Repair:** Require a dedicated doctor command or explicit recovery guide to re-inject Maintenance imports when rolling back from a mutated city to an old binary.
-4. **Resolve `GC_BOOTSTRAP=skip` Paradox:** Clarify that Gate 1 validates against `bootstrap.EmptyFS` or a test digest when running unit tests under `GC_BOOTSTRAP=skip`.
-5. **Avert Duplicate-Active Collisions:** Require `internal/packsource` to ignore legacy local directories during Slice 5a's public-pin validation.
+1. **No Slice-to-Gate Mapping Table:** The plan does not map Slices (A–E) to Tasks (1–8) or define start/merge gates.
+2. **No Intermediate Rollback Procedures:** No rollback commands are specified for intermediate checkpoint failures.
+3. **No Offline Test Configuration:** The plan provides no instructions on how to mock or redirect GitHub PackV2 imports for offline or CI test execution.
+4. **No Static Bypass Scanner:** The plan lacks any mechanical enforcer to prevent direct configuration loading bypasses.
 
 ---
 
-## 6. Questions
+## Required Changes
 
-1. **Slice 3 Import:** How can Slice 3 import `internal/systempacks` to rewrite `ensureBootstrapForDoctor` when that package is not created until Slice 4a?
-2. **Old Binary Rollback:** If a city's files are mutated to remove Maintenance, how can an old binary (which requires Maintenance) successfully load that city without a manual or automated restoration step?
-3. **Test Mode Gate 1:** What is the exact expected behavior of Gate 1 when a test runs with `GC_BOOTSTRAP=skip` and no production Core assets are present on disk?
+1. **Unify Slices and Tasks:** Explicitly map Tasks 1–8 to the Slices in the Slice Graph, or restructure the graph to match the Phase timeline.
+2. **Restore the Gate Table:** Add a structured table defining the start gate, merge gate, and rollback mechanism for each deployable unit.
+3. **Escalate Checkpoint Testing:** Add `make test-cmd-gc-process-parallel` and `make test-integration-shards-parallel` as required merge proof for Checkpoints A and B.
+4. **Specify Offline Test Overrides:** Detail how the `gc init` tests bypass live network fetching of `gascity-packs` during development and CI runs.
+5. **Re-implement Bypass Scanning:** Restore the bypass scanner to enforce loading invariants across all touched Go files.
+
+---
+
+## Responses to Lane-Specific Questions
+
+### Q1: Can tasks be cut so each slice names concrete files, acceptance gates, cross-repo prerequisites, and a revert or one-way upgrade boundary before merge?
+
+**Answer:** 
+No. The Iteration 12 plan organizes tasks into broad Phases rather than independently deployable slices. The checkpoints lack physical start/merge gates, concrete file lists, or rollback boundaries, leaving the system highly vulnerable to fragile batching and unrecoverable intermediate deployment states.
+
+---
+
+### Q2: Are open questions truly resolved, or are ownership audits, generated artifacts, and gascity-packs branch availability deferred as hidden blockers?
+
+**Answer:** 
+No. The plan lists `Open Questions: None` but defers critical blockers, including the availability of the remote `gascity-packs` candidate commits and the mechanics of running end-to-end init tests in air-gapped CI environments.
+
+---
+
+### Q3: Does each intermediate commit pass the documented local gates and exercise production loaders rather than copied fixtures or direct config.Load shortcuts?
+
+**Answer:** 
+No. Because the static bypass scanner has been removed, there is no mechanical enforcement to prevent the introduction of direct `config.Load` shortcuts. Furthermore, intermediate checkpoints rely exclusively on targeted unit tests that do not exercise the full production loader or integration environment.

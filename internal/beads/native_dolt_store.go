@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,12 +159,49 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 	if err != nil {
 		return nil, err
 	}
+	if accessor, ok := storage.(interface{ DB() *sql.DB }); ok {
+		if repairErr := repairDependenciesIDDefault(ctx, accessor.DB()); repairErr != nil {
+			_ = storage.Close()
+			return nil, fmt.Errorf("repairing dependencies schema: %w", repairErr)
+		}
+	}
 	prefix, err := storage.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		_ = storage.Close()
 		return nil, fmt.Errorf("reading native issue prefix: %w", err)
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
+}
+
+// repairDependenciesIDDefault restores DEFAULT (uuid()) on dependencies.id when
+// migration 0043 ran via PREPARE/EXECUTE, which Dolt silently strips. The check
+// and repair are idempotent: if the DEFAULT is already present, no DDL runs.
+func repairDependenciesIDDefault(ctx context.Context, db *sql.DB) error {
+	var colDefault sql.NullString
+	err := db.QueryRowContext(ctx,
+		`SELECT COLUMN_DEFAULT
+		 FROM INFORMATION_SCHEMA.COLUMNS
+		 WHERE TABLE_SCHEMA = DATABASE()
+		   AND TABLE_NAME = 'dependencies'
+		   AND COLUMN_NAME = 'id'`).Scan(&colDefault)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // column not yet present; migration has not run
+	}
+	if err != nil {
+		return fmt.Errorf("checking dependencies.id default: %w", err)
+	}
+	if colDefault.Valid && strings.TrimSpace(colDefault.String) != "" {
+		return nil // default already set; no repair needed
+	}
+	// Dolt stripped DEFAULT (uuid()) when migration 0043 used PREPARE/EXECUTE.
+	// Restore it directly — this path avoids PREPARE/EXECUTE entirely.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE dependencies ALTER id SET DEFAULT (uuid())`); err != nil {
+		return fmt.Errorf("restoring dependencies.id default: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CALL DOLT_COMMIT('-m', 'schema: restore dependencies.id default stripped by migration 0043')`); err != nil {
+		return fmt.Errorf("committing dependencies.id default repair: %w", err)
+	}
+	return nil
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {

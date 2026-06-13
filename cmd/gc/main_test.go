@@ -175,6 +175,21 @@ func configureFSPressureForTests() {
 // an active root (ga-djbcqt).
 var testTempRootAliveSentinel *os.File
 
+type cleanupTestingM struct {
+	m     testscript.TestingM
+	paths []string
+}
+
+func (m cleanupTestingM) Run() int {
+	code := m.m.Run()
+	for _, path := range m.paths {
+		if path != "" {
+			_ = os.RemoveAll(path)
+		}
+	}
+	return code
+}
+
 func TestMain(m *testing.M) {
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -214,7 +229,11 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(testTempRoot, "tmux")); err != nil {
+	tmuxSocketRoot, tmuxSocketCleanupRoot, err := cmdGCTmuxSocketRoot(testTempRoot)
+	if err != nil {
+		panic(err)
+	}
+	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
 	tmpRoot := os.TempDir()
@@ -252,7 +271,11 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot), map[string]func(){
+	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	if tmuxSocketCleanupRoot != "" {
+		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
+	}
+	testscript.Main(testRunner, map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

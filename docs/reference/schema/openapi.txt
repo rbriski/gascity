@@ -2500,6 +2500,20 @@
         ],
         "type": "object"
       },
+      "ExtMsgChildConversationInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationRef",
+            "description": "Parent conversation to spawn a child (thread) under."
+          },
+          "label": {
+            "description": "Human-friendly label for the child conversation (e.g. thread title).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ExtMsgGroupEnsureInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -19395,6 +19409,79 @@
           }
         },
         "summary": "Get v0 city by city name extmsg bindings"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/child-conversation": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-child-conversation",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgChildConversationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationRef"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name extmsg child conversation"
       }
     },
     "/v0/city/{cityName}/extmsg/groups": {

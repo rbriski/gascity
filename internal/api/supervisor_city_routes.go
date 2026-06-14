@@ -356,6 +356,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Ensure an external messaging group exists",
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleExtMsgGroupEnsure)
+	cityPost(sm, "/extmsg/child-conversation", (*Server).humaHandleExtMsgChildConversation)
 	cityPost(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantUpsert)
 	cityDelete(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantRemove)
 	cityGet(sm, "/extmsg/transcript", (*Server).humaHandleExtMsgTranscriptList)

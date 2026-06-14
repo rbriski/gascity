@@ -938,6 +938,17 @@ export type ExtMsgBindInputBody = {
     session_id: string;
 };
 
+export type ExtMsgChildConversationInputBody = {
+    /**
+     * Parent conversation to spawn a child (thread) under.
+     */
+    conversation?: ConversationRef;
+    /**
+     * Human-friendly label for the child conversation (e.g. thread title).
+     */
+    label?: string;
+};
+
 export type ExtMsgGroupEnsureInputBody = {
     /**
      * Default handle for the group.
@@ -7954,6 +7965,42 @@ export type GetV0CityByCityNameExtmsgBindingsResponses = {
 };
 
 export type GetV0CityByCityNameExtmsgBindingsResponse = GetV0CityByCityNameExtmsgBindingsResponses[keyof GetV0CityByCityNameExtmsgBindingsResponses];
+
+export type PostV0CityByCityNameExtmsgChildConversationData = {
+    body: ExtMsgChildConversationInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/child-conversation';
+};
+
+export type PostV0CityByCityNameExtmsgChildConversationErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0CityByCityNameExtmsgChildConversationError = PostV0CityByCityNameExtmsgChildConversationErrors[keyof PostV0CityByCityNameExtmsgChildConversationErrors];
+
+export type PostV0CityByCityNameExtmsgChildConversationResponses = {
+    /**
+     * OK
+     */
+    200: ConversationRef;
+};
+
+export type PostV0CityByCityNameExtmsgChildConversationResponse = PostV0CityByCityNameExtmsgChildConversationResponses[keyof PostV0CityByCityNameExtmsgChildConversationResponses];
 
 export type GetV0CityByCityNameExtmsgGroupsData = {
     body?: never;

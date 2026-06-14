@@ -120,6 +120,22 @@ type ExtMsgGroupEnsureOutput struct {
 	Body extmsg.ConversationGroupRecord
 }
 
+// ExtMsgChildConversationInput is the Huma input for POST /v0/city/{cityName}/extmsg/child-conversation.
+type ExtMsgChildConversationInput struct {
+	CityScope
+	Body struct {
+		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Parent conversation to spawn a child (thread) under."`
+		Label        string                 `json:"label,omitempty" doc:"Human-friendly label for the child conversation (e.g. thread title)."`
+	}
+}
+
+// ExtMsgChildConversationOutput is the Huma output for POST /v0/extmsg/child-conversation.
+// The body is the materialized child conversation reference (Kind=thread,
+// ParentConversationID set, a provider-assigned ConversationID).
+type ExtMsgChildConversationOutput struct {
+	Body extmsg.ConversationRef
+}
+
 // ExtMsgParticipantUpsertInput is the Huma input for POST /v0/city/{cityName}/extmsg/participants.
 type ExtMsgParticipantUpsertInput struct {
 	CityScope

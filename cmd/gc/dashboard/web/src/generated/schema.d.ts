@@ -676,6 +676,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/extmsg/child-conversation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post v0 city by city name extmsg child conversation */
+        post: operations["post-v0-city-by-city-name-extmsg-child-conversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/extmsg/groups": {
         parameters: {
             query?: never;
@@ -2761,6 +2778,12 @@ export interface components {
             };
             /** @description Session ID to bind. */
             session_id: string;
+        };
+        ExtMsgChildConversationInputBody: {
+            /** @description Parent conversation to spawn a child (thread) under. */
+            conversation?: components["schemas"]["ConversationRef"];
+            /** @description Human-friendly label for the child conversation (e.g. thread title). */
+            label?: string;
         };
         ExtMsgGroupEnsureInputBody: {
             /** @description Default handle for the group. */
@@ -9328,6 +9351,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ListBodySessionBindingRecord"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "post-v0-city-by-city-name-extmsg-child-conversation": {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExtMsgChildConversationInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationRef"];
                 };
             };
             /** @description Error */

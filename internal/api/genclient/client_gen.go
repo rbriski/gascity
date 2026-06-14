@@ -1179,6 +1179,14 @@ type ExtMsgBindInputBody struct {
 	SessionId string `json:"session_id"`
 }
 
+// ExtMsgChildConversationInputBody defines model for ExtMsgChildConversationInputBody.
+type ExtMsgChildConversationInputBody struct {
+	Conversation *ConversationRef `json:"conversation,omitempty"`
+
+	// Label Human-friendly label for the child conversation (e.g. thread title).
+	Label *string `json:"label,omitempty"`
+}
+
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
 type ExtMsgGroupEnsureInputBody struct {
 	// DefaultHandle Default handle for the group.
@@ -5460,6 +5468,12 @@ type GetV0CityByCityNameExtmsgBindingsParams struct {
 	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
 }
 
+// PostV0CityByCityNameExtmsgChildConversationParams defines parameters for PostV0CityByCityNameExtmsgChildConversation.
+type PostV0CityByCityNameExtmsgChildConversationParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameExtmsgGroupsParams defines parameters for GetV0CityByCityNameExtmsgGroups.
 type GetV0CityByCityNameExtmsgGroupsParams struct {
 	// ScopeId Scope ID.
@@ -6158,6 +6172,9 @@ type RegisterExtmsgAdapterJSONRequestBody = ExtMsgAdapterRegisterInputBody
 
 // PostV0CityByCityNameExtmsgBindJSONRequestBody defines body for PostV0CityByCityNameExtmsgBind for application/json ContentType.
 type PostV0CityByCityNameExtmsgBindJSONRequestBody = ExtMsgBindInputBody
+
+// PostV0CityByCityNameExtmsgChildConversationJSONRequestBody defines body for PostV0CityByCityNameExtmsgChildConversation for application/json ContentType.
+type PostV0CityByCityNameExtmsgChildConversationJSONRequestBody = ExtMsgChildConversationInputBody
 
 // EnsureExtmsgGroupJSONRequestBody defines body for EnsureExtmsgGroup for application/json ContentType.
 type EnsureExtmsgGroupJSONRequestBody = ExtMsgGroupEnsureInputBody
@@ -11641,6 +11658,11 @@ type ClientInterface interface {
 	// GetV0CityByCityNameExtmsgBindings request
 	GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0CityByCityNameExtmsgChildConversationWithBody request with any body
+	PostV0CityByCityNameExtmsgChildConversationWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgChildConversation(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, body PostV0CityByCityNameExtmsgChildConversationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameExtmsgGroups request
 	GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -12789,6 +12811,30 @@ func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName st
 
 func (c *Client) GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameExtmsgBindingsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgChildConversationWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgChildConversationRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgChildConversation(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, body PostV0CityByCityNameExtmsgChildConversationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgChildConversationRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -17458,6 +17504,66 @@ func NewGetV0CityByCityNameExtmsgBindingsRequest(server string, cityName string,
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgChildConversationRequest calls the generic PostV0CityByCityNameExtmsgChildConversation builder with application/json body
+func NewPostV0CityByCityNameExtmsgChildConversationRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, body PostV0CityByCityNameExtmsgChildConversationJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgChildConversationRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgChildConversationRequestWithBody generates requests for PostV0CityByCityNameExtmsgChildConversation with any type of body
+func NewPostV0CityByCityNameExtmsgChildConversationRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/child-conversation", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -23977,6 +24083,11 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameExtmsgBindingsWithResponse request
 	GetV0CityByCityNameExtmsgBindingsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgBindingsResponse, error)
 
+	// PostV0CityByCityNameExtmsgChildConversationWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgChildConversationWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgChildConversationResponse, error)
+
+	PostV0CityByCityNameExtmsgChildConversationWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, body PostV0CityByCityNameExtmsgChildConversationJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgChildConversationResponse, error)
+
 	// GetV0CityByCityNameExtmsgGroupsWithResponse request
 	GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error)
 
@@ -25506,6 +25617,29 @@ func (r GetV0CityByCityNameExtmsgBindingsResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameExtmsgBindingsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgChildConversationResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ConversationRef
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgChildConversationResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgChildConversationResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -28337,6 +28471,23 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgBindingsWithResponse(ctx 
 	return ParseGetV0CityByCityNameExtmsgBindingsResponse(rsp)
 }
 
+// PostV0CityByCityNameExtmsgChildConversationWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgChildConversationResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgChildConversationWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgChildConversationResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgChildConversationWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgChildConversationResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgChildConversationWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgChildConversationParams, body PostV0CityByCityNameExtmsgChildConversationJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgChildConversationResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgChildConversation(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgChildConversationResponse(rsp)
+}
+
 // GetV0CityByCityNameExtmsgGroupsWithResponse request returning *GetV0CityByCityNameExtmsgGroupsResponse
 func (c *ClientWithResponses) GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error) {
 	rsp, err := c.GetV0CityByCityNameExtmsgGroups(ctx, cityName, params, reqEditors...)
@@ -31088,6 +31239,39 @@ func ParseGetV0CityByCityNameExtmsgBindingsResponse(rsp *http.Response) (*GetV0C
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ListBodySessionBindingRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgChildConversationResponse parses an HTTP response from a PostV0CityByCityNameExtmsgChildConversationWithResponse call
+func ParsePostV0CityByCityNameExtmsgChildConversationResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgChildConversationResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgChildConversationResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConversationRef
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

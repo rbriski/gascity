@@ -286,6 +286,37 @@ func (s *Server) humaHandleExtMsgGroupEnsure(ctx context.Context, input *ExtMsgG
 	return out, nil
 }
 
+// --- Child conversations ---
+
+// humaHandleExtMsgChildConversation is the Huma-typed handler for
+// POST /v0/extmsg/child-conversation. It is the production trigger for the
+// adapter's EnsureChildConversation callback: it resolves the adapter for the
+// parent conversation, enforces SupportsChildConversations, and forwards the
+// request so the adapter materializes the platform thread.
+func (s *Server) humaHandleExtMsgChildConversation(ctx context.Context, input *ExtMsgChildConversationInput) (*ExtMsgChildConversationOutput, error) {
+	reg, err := s.humaExtmsgAdapterRegistry()
+	if err != nil {
+		return nil, err
+	}
+
+	child, err := extmsg.HandleChildConversation(ctx, extmsg.ChildConversationDeps{Registry: reg}, extmsg.ChildConversationRequest{
+		Parent: input.Body.Conversation,
+		Label:  input.Body.Label,
+	})
+	if err != nil {
+		if errors.Is(err, extmsg.ErrAdapterUnsupported) {
+			return nil, huma.Error400BadRequest(err.Error())
+		}
+		return nil, huma.Error422UnprocessableEntity(err.Error())
+	}
+
+	out := &ExtMsgChildConversationOutput{}
+	if child != nil {
+		out.Body = *child
+	}
+	return out, nil
+}
+
 // --- Participants ---
 
 // humaHandleExtMsgParticipantUpsert is the Huma-typed handler for POST /v0/extmsg/participants.

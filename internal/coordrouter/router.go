@@ -92,6 +92,19 @@ func (r *Router) Create(b beads.Bead) (beads.Bead, error) {
 	return r.Backend(coordclass.Classify(b)).Create(b)
 }
 
+// CreateWithStorage routes a tier-selected create to the owning class's backend,
+// satisfying beads.StorageCreateStore. The policy wrapper above the Router
+// computes the tier (from config) and calls this; the Router only forwards the
+// already-selected tier to the right backend, so the tier survives the split.
+// A backend without tier support gets a plain Create (it has no tiers).
+func (r *Router) CreateWithStorage(b beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
+	backend := r.Backend(coordclass.Classify(b))
+	if sc, ok := backend.(beads.StorageCreateStore); ok {
+		return sc.CreateWithStorage(b, storage)
+	}
+	return backend.Create(b)
+}
+
 // GraphApplyHandle exposes a routed graph-apply capability when the graph-class
 // backend supports one, satisfying beads.GraphApplyHandleProvider so that
 // beads.GraphApplyFor(router) resolves to the routed applier. It reports false
@@ -121,3 +134,30 @@ func (g routedGraphApplier) ApplyGraphPlan(ctx context.Context, plan *beads.Grap
 	}
 	return applier.ApplyGraphPlan(ctx, plan)
 }
+
+// ApplyGraphPlanWithStorage classifies the plan and applies it on the owning
+// class's backend in the caller-selected storage tier, satisfying
+// beads.StorageGraphApplyStore. The policy wrapper above the Router computes the
+// tier; the Router forwards it to the owning backend so a graph.v2 pour keeps its
+// ephemeral/no-history placement after the split. When the backend cannot honor a
+// tier it falls back to the untiered pour for StorageDefault and refuses any other
+// tier rather than silently dropping it.
+func (g routedGraphApplier) ApplyGraphPlanWithStorage(ctx context.Context, plan *beads.GraphApplyPlan, storage beads.StorageClass) (*beads.GraphApplyResult, error) {
+	class := coordclass.ClassifyGraphPlan(plan)
+	applier, ok := beads.GraphApplyFor(g.r.Backend(class))
+	if !ok {
+		return nil, fmt.Errorf("coordrouter: %s backend does not support graph apply", class)
+	}
+	if storageApplier, ok := applier.(beads.StorageGraphApplyStore); ok {
+		return storageApplier.ApplyGraphPlanWithStorage(ctx, plan, storage)
+	}
+	if storage == beads.StorageDefault {
+		return applier.ApplyGraphPlan(ctx, plan)
+	}
+	return nil, fmt.Errorf("coordrouter: %s backend does not support tier-selected graph apply (storage=%q)", class, storage)
+}
+
+var (
+	_ beads.StorageCreateStore     = (*Router)(nil)
+	_ beads.StorageGraphApplyStore = routedGraphApplier{}
+)

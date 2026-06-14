@@ -366,14 +366,18 @@ func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Read
 	}
 }
 
-// bdShimRequireAPI reports whether the shim must route through the controller's
-// HTTP API and refuse the in-process local-store fallback when no controller is
-// reachable. It gates the pure-HTTP end state (ga-2gap48): with it set, the shim
-// errors rather than opening the Router locally — the behavior that becomes the
-// default once startup guarantees a beads-serving API is always up. Default
-// (unset) keeps the transitional local fallback for init/bootstrap/standalone.
-func bdShimRequireAPI() bool {
-	return strings.TrimSpace(os.Getenv("GC_BD_SHIM_REQUIRE_API")) != ""
+// bdShimAllowLocalFallback reports whether the shim may open the in-process
+// Router locally when no controller HTTP API is reachable. The pure-HTTP redirect
+// (ga-2gap48) makes routing through the controller the DEFAULT — the controller
+// owns the store, every worker is a thin client — so a routed verb errors rather
+// than silently opening the Router when no controller is up. The supervisor
+// publishes a city's beads API (publishManagedCity) before it spawns that city's
+// control-dispatcher and agents (cityRuntime.run), so the shim's real consumers
+// always find the API up. GC_BD_SHIM_ALLOW_LOCAL re-enables the local fallback —
+// a TRANSITIONAL escape hatch for bootstrap (init/standalone before any
+// controller); removed once init/standalone also route through a beads API.
+func bdShimAllowLocalFallback() bool {
+	return strings.TrimSpace(os.Getenv("GC_BD_SHIM_ALLOW_LOCAL")) != ""
 }
 
 // bdShimAPIClient returns an HTTP client to the controller's bead API for the
@@ -739,8 +743,8 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if client := bdShimAPIClient(cityPath); client != nil {
 			return dispatchBdShimVerbViaAPI(client, verb, verbArgs, stdout, stderr)
 		}
-		if bdShimRequireAPI() {
-			fmt.Fprintf(stderr, "gc bd-shim: no controller API reachable for %q and GC_BD_SHIM_REQUIRE_API is set; refusing the local-store fallback\n", verb) //nolint:errcheck // best-effort stderr
+		if !bdShimAllowLocalFallback() {
+			fmt.Fprintf(stderr, "gc bd-shim: no controller API reachable for %q; the shim routes bead ops through the controller (ga-2gap48 pure-HTTP). Set GC_BD_SHIM_ALLOW_LOCAL=1 for the transitional local-store fallback.\n", verb) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)

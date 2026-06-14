@@ -41,42 +41,37 @@ accepts "reorganizing startup a bit so the beads subsystem is up immediately."
   otherwise reaches the **supervisor-served** per-city API — `apiClient` (read-path
   CLI, with a local fallback) deliberately does NOT route a supervisor-managed
   city to the supervisor client, so the shim needs its own getter.
-  `GC_BD_SHIM_REQUIRE_API` makes the shim refuse the local fallback (the pure-HTTP
-  behavior, gated). **The deployed convergence e2e sets it**, so it PROVES the
-  pure-HTTP path: with NO local fallback, a real `graph_store=sqlite` city
-  converges a graph.v2 molecule with the worker's complete AND the controller's
-  discovery both going shim → HTTP → controller → Router → SQLite (non-flaky 3×).
+  `GC_BD_SHIM_REQUIRE_API` made the shim refuse the local fallback (then gated).
+- **Phase 3 — DONE (default flipped).** Pure-HTTP is now the **default**: a
+  routed verb with no reachable controller errors rather than opening the Router
+  locally (`bdShimAllowLocalFallback`). `GC_BD_SHIM_ALLOW_LOCAL` re-enables the
+  local fallback as a TRANSITIONAL escape hatch for bootstrap. The startup
+  "reorg" the redirect needs is **already in place** for the shim's consumers:
+  the supervisor `publishManagedCity` (cmd_supervisor.go:1978) publishes a city's
+  beads API BEFORE `cityRuntime.run` (:2206) spawns that city's control-dispatcher
+  and agents — so every shim consumer finds the API up (the convergence e2e now
+  runs pure-HTTP **by default**, no flag, and converges non-flaky).
 
-## Phase 3 — remaining (startup reorg + flip the default)
+## Phase 3 — remaining cleanup (the escape hatch + bootstrap)
 
-The literal `#2`: make `GC_BD_SHIM_REQUIRE_API` the default (remove the local
-fallback). The blocker is bootstrap: `gc init` and standalone `bd`/`gc bd` create
-beads before a per-city controller exists. Notes:
+Pure-HTTP is the default and proven for the shim's real consumers
+(control-dispatcher + agents), whose API is up via the publish-before-spawn
+ordering. What remains to delete the `GC_BD_SHIM_ALLOW_LOCAL` escape hatch
+entirely (the literal "no local path at all"):
 
-- The gc-as-`bd` shim is only on **agent + controller** PATHs (the C4 install,
-  not yet done). Agents/controllers run with a controller up, so for them
-  pure-HTTP is already safe. init/standalone use the real `bd`/filebdshim, not the
-  shim — so flipping the shim default is currently low-risk (only the convergence
-  test installs the shim, and it already runs pure-HTTP).
-- The remaining startup-window concern is the controller's OWN serve-loop
-  discovery (`bd ready`) running before the controller's API is listening;
-  today it would error-and-retry. The convergence test shows it heals in
-  practice, but a clean fix brings the per-city beads API up early.
-- **Smallest startup reorg** (recon-grounded): the supervisor already serves
-  per-city bead routes via one Huma mux (`api.NewSupervisorMux` →
-  `serveCityRequest` → per-city `State`). The per-city `State` (and its store)
-  is built mid-reconcile by `newControllerState` (`cmd/gc/cmd_supervisor.go`
-  ~1950). Bring that up **early in reconcile** (after config load) and register
-  the State before lock/socket/runtime, so the beads API is reachable as soon as
-  the city is known — independent of the full controller. Handle partial-startup
-  cleanup. Then init/standalone can route through HTTP (or `gc init` ensures the
-  supervisor + city registration first).
-
-**Sequencing:** do the startup reorg first (so no-fallback is safe for the
-controller startup window and future bootstrap), THEN remove the shim's local
-fallback (make `GC_BD_SHIM_REQUIRE_API` the default / delete the branch).
-`release-if-current` (handled before the verb switch, opens the local store) and
-`create` (passthrough) also need an API path for a fully pure shim.
+- **Bootstrap** — `gc init` and standalone `bd`/`gc bd` create beads before a
+  per-city controller exists. They do NOT use the gc-as-`bd` shim today (real
+  `bd`/filebdshim), so the escape hatch is unused in practice; it exists for the
+  future where the shim is the universal `bd` (the C4 install). To remove it,
+  init/standalone must route through a beads API: either `gc init` ensures the
+  supervisor + city registration (then seeds via HTTP), or the supervisor serves
+  a per-city beads API for any registered city on demand. The recon-grounded
+  smallest reorg: the supervisor already serves per-city routes via one Huma mux
+  (`NewSupervisorMux` → `serveCityRequest` → per-city `State`); bring the State up
+  for a registered-but-not-fully-started city so its beads API answers before the
+  full controller, with partial-startup cleanup.
+- **`release-if-current`** (handled before the verb switch, opens the local
+  store) and **`create`** (passthrough) need an API path for a fully pure shim.
 
 ## Files
 

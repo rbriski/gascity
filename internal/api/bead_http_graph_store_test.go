@@ -61,6 +61,37 @@ func TestBeadCloseHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	}
 }
 
+// TestBeadReadyFederatesCityStore proves GET /v0/beads/ready surfaces city-scope
+// ready work. The city store is not among the per-rig BeadStores(), so before the
+// fix a single-HQ city's ready work (e.g. a graph.v2 molecule's actionable step)
+// was invisible over HTTP — which would have broken a pure-HTTP worker's discovery.
+func TestBeadReadyFederatesCityStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	b, err := cityStore.Create(beads.Bead{Title: "city work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create city bead: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = cityStore
+	state.stores = nil // no rigs: ready must still surface the city store's work
+	s := New(state)
+
+	out, err := s.humaHandleBeadReady(context.Background(), &BeadReadyInput{})
+	if err != nil {
+		t.Fatalf("humaHandleBeadReady: %v", err)
+	}
+	found := false
+	for _, item := range out.Body.Items {
+		if item.ID == b.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ready did not surface city-store bead %s (items=%d)", b.ID, len(out.Body.Items))
+	}
+}
+
 // TestClientBeadWriteMethodsIssueExpectedRequests proves the new write-path client
 // methods (the bd shim will call these) issue the correct HTTP verb, path, and
 // body against the city-scoped endpoints.

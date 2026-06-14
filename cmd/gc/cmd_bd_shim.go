@@ -68,9 +68,64 @@ func (d bdShimDisposition) String() string {
 // store ops so graph beads in the embedded SQLite store are seen and mutated,
 // not just Dolt work beads. Grown incrementally.
 var bdShimRoutedVerbs = map[string]bool{
-	"close": true,
-	"show":  true,
-	"ready": true,
+	"close":  true,
+	"show":   true,
+	"ready":  true,
+	"update": true,
+	"reopen": true,
+	"delete": true,
+}
+
+// bdUpdateRoutableFlags are the `bd update` flags that map cleanly onto
+// beads.UpdateOpts. A bd update carrying any OTHER flag (--claim, --notes,
+// --note, --persistent, --unset-metadata, ...) has no faithful in-process
+// translation yet, so it passes through to the real bd (byte-identical in the
+// identity phase) rather than silently losing the unmapped effect.
+var bdUpdateRoutableFlags = map[string]bool{
+	"--status":       true,
+	"--set-metadata": true,
+	"--assignee":     true,
+	"--label":        true,
+	"--remove-label": true,
+	"--title":        true,
+	"--type":         true,
+	"--priority":     true,
+	"--description":  true,
+	"--parent":       true,
+	"--json":         true,
+}
+
+// bdUpdateFlagNeedsValue is the subset of routable update flags that consume the
+// following token as their value when written space-separated (--flag value).
+var bdUpdateFlagNeedsValue = map[string]bool{
+	"--status":       true,
+	"--set-metadata": true,
+	"--assignee":     true,
+	"--label":        true,
+	"--remove-label": true,
+	"--title":        true,
+	"--type":         true,
+	"--priority":     true,
+	"--description":  true,
+	"--parent":       true,
+}
+
+// bdUpdateRoutable reports whether a `bd update` arg list uses only flags that
+// map onto beads.UpdateOpts, so the shim can serve it in-process.
+func bdUpdateRoutable(args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue // the id positional or a space-separated flag value
+		}
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		if !bdUpdateRoutableFlags[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // bdReadyRoutableFlags are the `bd ready` flags Router.Ready replicates exactly
@@ -123,8 +178,15 @@ var bdShimGraphTouchingUnroutedVerbs = map[string]bool{
 // graph backend exists). See the bdShimDisposition docs above.
 func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDisposition {
 	if bdShimRoutedVerbs[verb] {
-		if verb == "ready" && !bdReadyRoutable(args) {
-			return bdPassthrough
+		switch verb {
+		case "ready":
+			if !bdReadyRoutable(args) {
+				return bdPassthrough
+			}
+		case "update":
+			if !bdUpdateRoutable(args) {
+				return bdPassthrough
+			}
 		}
 		return bdRoute
 	}
@@ -231,6 +293,44 @@ func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Read
 			return 1
 		}
 		return writeReadyJSON(out, stdout, stderr)
+	case "update":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: update <id> [flags]") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		opts, err := parseBdUpdateOpts(args)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: update %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := store.Update(id, opts); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: update %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	case "reopen":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: reopen <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := store.Reopen(id); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: reopen %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	case "delete":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: delete <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := store.Delete(id); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: delete %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "gc bd-shim: no routed handler for %q\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
@@ -279,6 +379,71 @@ func parseBdReadyQuery(args []string) (beads.ReadyQuery, error) {
 		}
 	}
 	return q, nil
+}
+
+// parseBdUpdateOpts maps the routable `bd update` flags onto a beads.UpdateOpts.
+// It ignores the leading id positional; only flags in bdUpdateRoutableFlags
+// reach here (classifyBdShimVerb passes the rest through), so an unknown flag is
+// silently skipped rather than erroring. --set-metadata is repeatable.
+func parseBdUpdateOpts(args []string) (beads.UpdateOpts, error) {
+	var opts beads.UpdateOpts
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			continue // the id positional or a consumed value
+		}
+		name := a
+		val := ""
+		hasVal := false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name, val, hasVal = a[:eq], a[eq+1:], true
+		}
+		if !hasVal && bdUpdateFlagNeedsValue[name] && i+1 < len(args) {
+			val = args[i+1]
+			hasVal = true
+			i++
+		}
+		switch name {
+		case "--status":
+			s := val
+			opts.Status = &s
+		case "--assignee":
+			s := val
+			opts.Assignee = &s
+		case "--title":
+			s := val
+			opts.Title = &s
+		case "--type":
+			s := val
+			opts.Type = &s
+		case "--description":
+			s := val
+			opts.Description = &s
+		case "--parent":
+			s := val
+			opts.ParentID = &s
+		case "--priority":
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return opts, fmt.Errorf("parse --priority %q: %w", val, err)
+			}
+			opts.Priority = &n
+		case "--label":
+			opts.Labels = append(opts.Labels, val)
+		case "--remove-label":
+			opts.RemoveLabels = append(opts.RemoveLabels, val)
+		case "--set-metadata":
+			k, mv, ok := strings.Cut(val, "=")
+			if !ok {
+				return opts, fmt.Errorf("--set-metadata expects key=value, got %q", val)
+			}
+			if opts.Metadata == nil {
+				opts.Metadata = map[string]string{}
+			}
+			opts.Metadata[k] = mv
+		}
+	}
+	return opts, nil
 }
 
 // runBdShim is the bd-compatible thin-client entry point. It resolves the city,

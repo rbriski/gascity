@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -98,6 +99,14 @@ func TestClassifyBdShimVerb(t *testing.T) {
 		{"ready", []string{"--assignee=w", "--json", "--limit", "1"}, true, bdRoute},
 		{"ready", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--json"}, true, bdPassthrough},
 		{"ready", []string{"--exclude-type=epic", "--json"}, false, bdPassthrough},
+		// update: the cleanly-mappable flag set routes (the canonical graph-worker
+		// close), but flags with no UpdateOpts mapping (--notes/--claim/...)
+		// passthrough — byte-identical in the identity phase.
+		{"update", []string{"x", "--set-metadata", "gc.outcome=pass", "--status", "closed"}, true, bdRoute},
+		{"update", []string{"x", "--notes", "done", "--status=closed"}, true, bdPassthrough},
+		{"update", []string{"x", "--claim"}, true, bdPassthrough},
+		{"reopen", []string{"x"}, true, bdRoute},
+		{"delete", []string{"x", "--force"}, true, bdRoute},
 	}
 	for _, tc := range cases {
 		if got := classifyBdShimVerb(tc.verb, tc.args, tc.split); got != tc.want {
@@ -239,5 +248,74 @@ func TestDispatchBdShimReadyFederatesAssigned(t *testing.T) {
 	}
 	if !ids[wb.ID] || !ids[gb.ID] {
 		t.Fatalf("ready output ids = %v, want both %s (work) and %s (graph)", ids, wb.ID, gb.ID)
+	}
+}
+
+// TestDispatchBdShimUpdateRoutesToOwningBackend proves the canonical graph-worker
+// close — `bd update <id> --set-metadata gc.outcome=pass --status closed` —
+// routes by id to the owning backend: a graph bead's state change lands in
+// SQLite, a work bead's in the work backend.
+func TestDispatchBdShimUpdateRoutesToOwningBackend(t *testing.T) {
+	r := newShimRouter(t)
+	gb, err := r.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	var out, errb bytes.Buffer
+	args := []string{gb.ID, "--set-metadata", "gc.outcome=pass", "--status", "closed"}
+	if code := dispatchBdShimVerb(r, "update", args, nil, &out, &errb); code != 0 {
+		t.Fatalf("update exit = %d, stderr=%q", code, errb.String())
+	}
+	got, err := r.Get(gb.ID)
+	if err != nil {
+		t.Fatalf("re-get graph bead: %v", err)
+	}
+	if got.Status != "closed" || got.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("graph bead = status %q outcome %q, want closed/pass", got.Status, got.Metadata["gc.outcome"])
+	}
+
+	wb, err := r.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if code := dispatchBdShimVerb(r, "update", []string{wb.ID, "--status=in_progress"}, nil, &out, &errb); code != 0 {
+		t.Fatalf("update work exit = %d, stderr=%q", code, errb.String())
+	}
+	wgot, err := r.Get(wb.ID)
+	if err != nil {
+		t.Fatalf("re-get work bead: %v", err)
+	}
+	if wgot.Status != "in_progress" {
+		t.Fatalf("work bead status = %q, want in_progress", wgot.Status)
+	}
+}
+
+// TestDispatchBdShimReopenAndDelete proves `bd reopen` and `bd delete` route by
+// id to the owning backend (the embedded SQLite graph store here).
+func TestDispatchBdShimReopenAndDelete(t *testing.T) {
+	r := newShimRouter(t)
+	gb, err := r.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := dispatchBdShimVerb(r, "close", []string{gb.ID}, nil, &out, &errb); code != 0 {
+		t.Fatalf("close exit = %d, stderr=%q", code, errb.String())
+	}
+	if code := dispatchBdShimVerb(r, "reopen", []string{gb.ID}, nil, &out, &errb); code != 0 {
+		t.Fatalf("reopen exit = %d, stderr=%q", code, errb.String())
+	}
+	got, err := r.Get(gb.ID)
+	if err != nil {
+		t.Fatalf("re-get after reopen: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("reopen left status = %q (still closed)", got.Status)
+	}
+	if code := dispatchBdShimVerb(r, "delete", []string{gb.ID, "--force"}, nil, &out, &errb); code != 0 {
+		t.Fatalf("delete exit = %d, stderr=%q", code, errb.String())
+	}
+	if _, err := r.Get(gb.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("after delete, Get err = %v, want ErrNotFound", err)
 	}
 }

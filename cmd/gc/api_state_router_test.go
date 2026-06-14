@@ -7,25 +7,26 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
-// TestWrapWithCachingStoreInsertsRouter proves B1b's wiring: the controller's
-// store construction now layers policy(Router(caching(backend))) — the Router is
-// present between the policy wrapper and the cache.
-func TestWrapWithCachingStoreInsertsRouter(t *testing.T) {
-	policy := wrapStoreWithBeadPolicies(beads.NewMemStore(), nil) // policy(mem)
-	wrapped := wrapWithCachingStore(nil, policy, nil, false, "")  // policy(Router(caching(mem)))
-	if wrapped == nil {
-		t.Fatal("wrapWithCachingStore returned nil")
+// graphSQLiteCfg returns a city config that opts the graph class onto the
+// embedded SQLite backend.
+func graphSQLiteCfg() *config.City {
+	cfg := &config.City{}
+	cfg.Beads.GraphStore = "sqlite"
+	return cfg
+}
+
+func countSQLiteBackends(r *coordrouter.Router) int {
+	n := 0
+	for _, b := range r.Backends() {
+		if _, ok := b.(*beads.SQLiteStore); ok {
+			n++
+		}
 	}
-	base, _, ok := unwrapBeadPolicyStore(wrapped)
-	if !ok {
-		t.Fatal("expected the result to be policy-wrapped")
-	}
-	if _, isRouter := base.(*coordrouter.Router); !isRouter {
-		t.Fatalf("expected a *coordrouter.Router inside the policy wrapper, got %T", base)
-	}
+	return n
 }
 
 // TestCloseBeadStoreHandlePeelsRouter proves closeBeadStoreHandle reaches the
@@ -39,18 +40,51 @@ func TestCloseBeadStoreHandlePeelsRouter(t *testing.T) {
 	}
 }
 
+// TestRoutedPolicyStoreBuildsRouterOnlyWhenOptedIn proves the opt-in boundary:
+// without graph_store the result is plain policy(workBackend) — no Router, zero
+// overhead, byte-identical to before the split; with graph_store=sqlite it inserts
+// the per-class Router with a registered SQLite graph backend.
+func TestRoutedPolicyStoreBuildsRouterOnlyWhenOptedIn(t *testing.T) {
+	// Default off: no Router.
+	off := routedPolicyStore(beads.NewMemStore(), &config.City{}, t.TempDir())
+	t.Cleanup(func() { _ = closeBeadStoreHandle(off) })
+	base, _, ok := unwrapBeadPolicyStore(off)
+	if !ok {
+		t.Fatal("expected the default result to be policy-wrapped")
+	}
+	if _, isRouter := base.(*coordrouter.Router); isRouter {
+		t.Fatal("default-off must not insert a Router")
+	}
+
+	// Opted in: Router with a SQLite graph backend.
+	dir := t.TempDir()
+	on := routedPolicyStore(beads.NewMemStore(), graphSQLiteCfg(), dir)
+	t.Cleanup(func() { _ = closeBeadStoreHandle(on) })
+	base, _, ok = unwrapBeadPolicyStore(on)
+	if !ok {
+		t.Fatal("expected the opted-in result to be policy-wrapped")
+	}
+	router, isRouter := base.(*coordrouter.Router)
+	if !isRouter {
+		t.Fatalf("graph_store=sqlite must insert a *coordrouter.Router, got %T", base)
+	}
+	if n := countSQLiteBackends(router); n != 1 {
+		t.Fatalf("opted-in Router has %d SQLite backends, want 1", n)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "beads.sqlite")); err != nil {
+		t.Fatalf("expected the SQLite graph file at <scope>/.gc/beads.sqlite: %v", err)
+	}
+}
+
 // TestWrapWithCachingStoreRegistersGraphSQLiteWhenOptedIn is E1: with
-// [beads] graph_store = "sqlite" the controller's store construction registers an
-// embedded SQLite backend for the graph class on the Router, and the store file
-// is created under <scope>/.gc/. Work-class ops keep flowing to the cached work
-// backend; only the graph class relocates.
+// [beads] graph_store = "sqlite" the controller's store construction yields
+// policy(Router(caching(work) + sqlite-graph)) and the store file is created under
+// <scope>/.gc/. The work backend is cached; the graph backend is a distinct
+// SQLite store outside the cache.
 func TestWrapWithCachingStoreRegistersGraphSQLiteWhenOptedIn(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &config.City{}
-	cfg.Beads.GraphStore = "sqlite"
-
-	policy := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg) // policy(mem)
-	wrapped := wrapWithCachingStore(nil, policy, nil, false, dir) // policy(Router(caching(mem)) + sqlite graph)
+	policy := wrapStoreWithBeadPolicies(beads.NewMemStore(), graphSQLiteCfg()) // policy(mem)
+	wrapped := wrapWithCachingStore(nil, policy, nil, false, dir)              // policy(Router(caching(mem)) + sqlite)
 	t.Cleanup(func() { _ = closeBeadStoreHandle(wrapped) })
 
 	base, _, ok := unwrapBeadPolicyStore(wrapped)
@@ -61,44 +95,122 @@ func TestWrapWithCachingStoreRegistersGraphSQLiteWhenOptedIn(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a *coordrouter.Router inside the policy wrapper, got %T", base)
 	}
-
-	var sqliteBackends int
-	for _, b := range router.Backends() {
-		if _, ok := b.(*beads.SQLiteStore); ok {
-			sqliteBackends++
-		}
+	if _, ok := router.Backend(coordclass.ClassWork).(*beads.CachingStore); !ok {
+		t.Fatalf("work backend = %T, want *beads.CachingStore", router.Backend(coordclass.ClassWork))
 	}
-	if sqliteBackends != 1 {
-		t.Fatalf("graph_store=sqlite registered %d *beads.SQLiteStore backends on the Router, want 1", sqliteBackends)
+	if n := countSQLiteBackends(router); n != 1 {
+		t.Fatalf("Router has %d SQLite backends, want exactly 1", n)
 	}
-
 	if _, err := os.Stat(filepath.Join(dir, ".gc", "beads.sqlite")); err != nil {
 		t.Fatalf("expected the SQLite graph file at <scope>/.gc/beads.sqlite: %v", err)
 	}
 }
 
-// TestWrapWithCachingStoreDefaultOffSkipsGraphStore proves the opt-in default:
-// with no graph_store set the Router stays in its identity phase (one backend, no
-// SQLite) and no store file is created — byte-identical to before E1.
-func TestWrapWithCachingStoreDefaultOffSkipsGraphStore(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &config.City{} // GraphStore == ""
+// TestOpenStoreResultAtForCityRoutesGraphToSQLiteWhenOptedIn proves the universal
+// store chokepoint — which every gc process (controller AND workers) funnels
+// through — honors [beads] graph_store = "sqlite": the opened store is a Router
+// whose graph-class creates land in the embedded SQLite backend while work-class
+// creates stay on the (file) work backend. This is the no-socket worker mediation:
+// a worker's in-process store reaches the graph store directly.
+func TestOpenStoreResultAtForCityRoutesGraphToSQLiteWhenOptedIn(t *testing.T) {
+	cityDir := t.TempDir()
+	cityTOML := "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\ngraph_store = \"sqlite\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
 
-	policy := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
-	wrapped := wrapWithCachingStore(nil, policy, nil, false, dir)
-	t.Cleanup(func() { _ = closeBeadStoreHandle(wrapped) })
+	result, err := openStoreResultAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreResultAtForCity: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(result.Store) })
 
-	base, _, _ := unwrapBeadPolicyStore(wrapped)
+	base, _, ok := unwrapBeadPolicyStore(result.Store)
+	if !ok {
+		t.Fatal("expected the opened store to be policy-wrapped")
+	}
 	router, ok := base.(*coordrouter.Router)
 	if !ok {
-		t.Fatalf("expected a *coordrouter.Router inside the policy wrapper, got %T", base)
+		t.Fatalf("graph_store=sqlite: expected a *coordrouter.Router from the chokepoint, got %T", base)
 	}
-	for _, b := range router.Backends() {
-		if _, ok := b.(*beads.SQLiteStore); ok {
-			t.Fatal("default-off must not register a SQLite graph backend")
+	sqliteBackend := func() *beads.SQLiteStore {
+		for _, b := range router.Backends() {
+			if s, ok := b.(*beads.SQLiteStore); ok {
+				return s
+			}
 		}
+		return nil
+	}()
+	if sqliteBackend == nil {
+		t.Fatal("router has no SQLite graph backend")
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".gc", "beads.sqlite")); !os.IsNotExist(err) {
-		t.Fatalf("default-off must not create a SQLite graph file; stat err = %v", err)
+
+	// A graph-classified bead (gc:wisp) routes to SQLite; a work bead does not.
+	// The file work store and the SQLite graph store both mint gc-N ids (the file
+	// provider is dev/test; production work backends — bd/native — use distinct
+	// prefixes), so assert routing by CONTENT, not by cross-backend id lookups.
+	gb, err := router.Create(beads.Bead{Title: "wisp", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	gotGraph, err := sqliteBackend.Get(gb.ID)
+	if err != nil || gotGraph.Title != "wisp" {
+		t.Fatalf("graph bead not in the SQLite backend: got %q, err %v", gotGraph.Title, err)
+	}
+	if _, err := router.Create(beads.Bead{Title: "backlog", Type: "task"}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	// The SQLite graph backend must hold ONLY the one graph bead — the work bead
+	// stayed on the file work backend.
+	graphList, err := sqliteBackend.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("sqlite List: %v", err)
+	}
+	if len(graphList) != 1 || graphList[0].Title != "wisp" {
+		t.Fatalf("SQLite graph backend holds %d bead(s); want only the graph bead %q", len(graphList), "wisp")
+	}
+}
+
+// TestWrapWithCachingStorePeelsAndCachesIncomingRouter proves the controller path
+// for a worker-chokepoint store: openStoreResultAtForCity already built
+// policy(Router(work) + sqlite), so wrapWithCachingStore must cache the work
+// backend IN PLACE — keeping the single already-open SQLite graph backend — rather
+// than double-wrapping or re-opening the graph file.
+func TestWrapWithCachingStorePeelsAndCachesIncomingRouter(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate the chokepoint output: policy(Router(mem) + sqlite).
+	incoming := routedPolicyStore(beads.NewMemStore(), graphSQLiteCfg(), dir)
+	base, _, _ := unwrapBeadPolicyStore(incoming)
+	incomingRouter := base.(*coordrouter.Router)
+	graphBefore := incomingRouter.Backend(coordclass.ClassGraph)
+
+	wrapped := wrapWithCachingStore(nil, incoming, nil, false, dir)
+	t.Cleanup(func() { _ = closeBeadStoreHandle(wrapped) })
+
+	base, _, ok := unwrapBeadPolicyStore(wrapped)
+	if !ok {
+		t.Fatal("expected the result to be policy-wrapped")
+	}
+	router, ok := base.(*coordrouter.Router)
+	if !ok {
+		t.Fatalf("expected a *coordrouter.Router, got %T", base)
+	}
+	// Work backend is now cached.
+	if _, ok := router.Backend(coordclass.ClassWork).(*beads.CachingStore); !ok {
+		t.Fatalf("work backend = %T, want *beads.CachingStore (cached in place)", router.Backend(coordclass.ClassWork))
+	}
+	// Exactly one SQLite backend, and it is the SAME handle (not re-opened).
+	if n := countSQLiteBackends(router); n != 1 {
+		t.Fatalf("Router has %d SQLite backends after caching, want exactly 1 (no re-open)", n)
+	}
+	if router.Backend(coordclass.ClassGraph) != graphBefore {
+		t.Fatal("graph backend was replaced; expected the single already-open SQLite handle to be reused")
 	}
 }

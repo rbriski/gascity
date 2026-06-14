@@ -183,7 +183,19 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	cs := beads.NewCachingStore(baseStore, onChange)
+	// When opt-in graph routing already built a Router (the shared city/worker
+	// chokepoint in openStoreResultAtForCity), cache only its WORK backend and
+	// keep the one already-open graph backend: the cache reconciles work via a bd
+	// subprocess, so the graph backend must stay OUTSIDE the cache or its reads
+	// would go stale across the processes that share the graph file. Otherwise
+	// (rig stores, default cities) cache the bare backend and let routedPolicyStore
+	// add the Router iff the city opted in.
+	existingRouter, _ := baseStore.(*coordrouter.Router)
+	workBackend := baseStore
+	if existingRouter != nil {
+		workBackend = existingRouter.Backend(coordclass.ClassWork)
+	}
+	cs := beads.NewCachingStore(workBackend, onChange)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -191,33 +203,45 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if err := cs.PrimeActive(); err != nil {
 		log.Printf("caching-store: pre-prime failed: %v", err)
 	}
+	// finish layers the policy wrapper over the cached store. For an incoming
+	// Router it swaps the work backend to the cache in place (keeping the graph
+	// backend); otherwise it delegates to routedPolicyStore, which inserts a Router
+	// only when the city opted in. A non-policy-wrapped store stays a bare cache.
+	finish := func() beads.Store {
+		if !policyWrapped {
+			return cs
+		}
+		if existingRouter != nil {
+			existingRouter.Register(coordclass.ClassWork, cs)
+			return wrapStoreWithBeadPolicies(existingRouter, policyStore.cfg)
+		}
+		return routedPolicyStore(cs, policyStore.cfg, scopeRoot)
+	}
 	// No cancellable ctx, or caller opted out of background refresh (suspended
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
 	if ctx.Done() == nil || !backgroundRefresh {
-		if policyWrapped {
-			return routedPolicyStore(cs, policyStore.cfg, scopeRoot)
-		}
-		return cs
+		return finish()
 	}
 	// Full prime runs async — backfills remaining beads for List()
 	// callers (convergence reconcile, sweep, API handlers).
 	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
-	if policyWrapped {
-		return routedPolicyStore(cs, policyStore.cfg, scopeRoot)
-	}
-	return cs
+	return finish()
 }
 
-// routedPolicyStore inserts the per-class Router between the policy wrapper and
-// the cached backend — policy(Router(caching(backend))) — and registers any
-// opt-in graph backend on the Router. In the identity phase (no opt-in) every
-// class resolves to the one cached backend, so the Router is a pure passthrough
-// and relocating a class later is a one-line Register. The Router sits ABOVE the
-// cache deliberately: the cache reconciles only the work backend (via a bd
-// subprocess), so a relocated graph backend must not live under it or its reads
-// would go stale.
-func routedPolicyStore(cached beads.Store, cfg *config.City, scopeRoot string) beads.Store {
-	router := coordrouter.New(cached)
+// routedPolicyStore wraps workBackend in the bead policies, inserting the
+// per-class Router with an opt-in graph backend ONLY when the city sets
+// [beads] graph_store. Default cities get plain policy(workBackend) — no Router,
+// byte-identical and zero per-op overhead. When opted in it returns
+// policy(Router(workBackend + graph)): graph-class ops route to the graph backend
+// while work ops stay on workBackend. The Router sits ABOVE any cache wrapped
+// into workBackend so a relocated graph backend never lives under the cache (which
+// reconciles only the work backend via a bd subprocess, and would otherwise serve
+// stale graph reads across the processes that share the graph file).
+func routedPolicyStore(workBackend beads.Store, cfg *config.City, scopeRoot string) beads.Store {
+	if !graphStoreSQLiteEnabled(cfg) {
+		return wrapStoreWithBeadPolicies(workBackend, cfg)
+	}
+	router := coordrouter.New(workBackend)
 	registerGraphStoreBackend(router, cfg, scopeRoot)
 	return wrapStoreWithBeadPolicies(router, cfg)
 }
@@ -226,19 +250,29 @@ func routedPolicyStore(cached beads.Store, cfg *config.City, scopeRoot string) b
 // to an embedded SQLite store.
 const graphStoreSQLite = "sqlite"
 
+// graphStoreSQLiteEnabled reports whether the city opted the graph class onto the
+// embedded SQLite backend via [beads] graph_store = "sqlite".
+func graphStoreSQLiteEnabled(cfg *config.City) bool {
+	return cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Beads.GraphStore), graphStoreSQLite)
+}
+
 // registerGraphStoreBackend registers an embedded SQLite backend for the graph
-// class on r when the city opts in via [beads] graph_store = "sqlite". The graph
-// store lives at <scopeRoot>/.gc/beads.sqlite, isolating the high-churn formula-v2
-// topology from the Dolt-backed work store. Default-off leaves the Router in its
-// identity phase, so behavior is byte-identical until a city opts in. A failed
-// open is logged loudly and the graph class falls back to the work backend rather
-// than crashing the controller — the loud log surfaces the misconfiguration.
+// class on r. The graph store lives at <scopeRoot>/.gc/beads.sqlite, isolating the
+// high-churn formula-v2 topology from the Dolt-backed work store. A failed open is
+// logged loudly and the graph class falls back to the work backend rather than
+// crashing the process — the loud log surfaces the misconfiguration. Callers gate
+// on graphStoreSQLiteEnabled; the guard here is defensive.
+//
+// Retention sweeping is disabled on these opens: under no-socket many short-lived
+// gc processes open this same file, and N concurrent sweepers deleting terminal
+// records is both wasteful and a write-contention source. Controller-owned
+// retention for the graph store is a follow-up (the ga-2gap48 epic).
 func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, scopeRoot string) {
-	if cfg == nil || !strings.EqualFold(strings.TrimSpace(cfg.Beads.GraphStore), graphStoreSQLite) {
+	if !graphStoreSQLiteEnabled(cfg) {
 		return
 	}
 	dir := filepath.Join(scopeRoot, citylayout.RuntimeRoot)
-	store, err := beads.OpenSQLiteStore(dir)
+	store, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreRetention(0, 0))
 	if err != nil {
 		log.Printf("beads: graph_store=%q requested but opening the SQLite graph store at %s failed: %v; graph beads stay on the work backend", cfg.Beads.GraphStore, dir, err)
 		return

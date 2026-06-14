@@ -520,6 +520,54 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
+// isBdShimInvocation reports whether this gc binary was invoked through the bd
+// shim — i.e. argv[0]'s basename is exactly `bd`. The PATH install symlinks
+// `bd` -> the gc binary; gc invoked under any other name runs normally.
+func isBdShimInvocation(arg0 string) bool {
+	return filepath.Base(arg0) == "bd"
+}
+
+// ensureRealBdResolvable prepends the directory of GC_BD_REAL to PATH so that a
+// bare `bd` exec performed in-process resolves to the real bd binary rather than
+// this shim. The in-process work BdStore execs "bd" (and the Router probes each
+// backend's Get by id, which runs `bd show`), so without this guard a shim
+// installed as `bd` first on PATH would recurse on routed verbs. No-op when
+// GC_BD_REAL is unset/relative or its directory already leads PATH.
+func ensureRealBdResolvable() {
+	raw := strings.TrimSpace(os.Getenv(realBdEnvVar))
+	if raw == "" || !filepath.IsAbs(raw) {
+		return
+	}
+	dir := filepath.Dir(raw)
+	path := os.Getenv("PATH")
+	sep := string(os.PathListSeparator)
+	if path == dir || strings.HasPrefix(path, dir+sep) {
+		return // already first; don't accumulate duplicate entries
+	}
+	if path == "" {
+		_ = os.Setenv("PATH", dir) //nolint:errcheck // best-effort
+		return
+	}
+	_ = os.Setenv("PATH", dir+sep+path) //nolint:errcheck // best-effort
+}
+
+// dispatchBdShimArgv0 runs the bd shim when this gc binary was invoked as `bd`,
+// returning (exitCode, true). Otherwise it returns (0, false) and the caller
+// proceeds with the normal gc command tree. When invoked as bd without
+// GC_BD_REAL set it refuses loudly rather than recursing — a bare bd lookup
+// would resolve back to this shim.
+func dispatchBdShimArgv0(arg0 string, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, bool) {
+	if !isBdShimInvocation(arg0) {
+		return 0, false
+	}
+	if strings.TrimSpace(os.Getenv(realBdEnvVar)) == "" {
+		fmt.Fprintf(stderr, "bd (gc shim): %s must point at the real bd binary when gc runs as the bd shim; refusing to run (a bare bd lookup would recurse into the shim)\n", realBdEnvVar) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	ensureRealBdResolvable()
+	return runBdShim(args, stdin, stdout, stderr), true
+}
+
 // newBdShimCmd registers the hidden `gc bd-shim` subcommand: the bd-compatible
 // thin client. It is hidden because operators invoke it as `bd` (via a PATH
 // install), not by name; exposing it as a gc subcommand keeps it testable and

@@ -320,6 +320,77 @@ func TestDispatchBdShimReopenAndDelete(t *testing.T) {
 	}
 }
 
+// TestIsBdShimInvocation pins which argv[0] basenames trigger shim mode: only an
+// executable named exactly `bd` (the PATH install symlinks bd -> gc). gc invoked
+// normally, or a differently-named helper, must not enter the shim.
+func TestIsBdShimInvocation(t *testing.T) {
+	cases := map[string]bool{
+		"bd":                true,
+		"/usr/local/bin/bd": true,
+		"./bd":              true,
+		"gc":                false,
+		"/x/gc":             false,
+		"bd-real":           false,
+		"/x/bd-shim":        false,
+	}
+	for arg0, want := range cases {
+		if got := isBdShimInvocation(arg0); got != want {
+			t.Errorf("isBdShimInvocation(%q) = %v, want %v", arg0, got, want)
+		}
+	}
+}
+
+// TestEnsureRealBdResolvablePrependsGCBDRealDir proves the recursion guard for
+// the in-process work BdStore (which execs a bare `bd`, including when the Router
+// probes backends by id): the directory of GC_BD_REAL is prepended to PATH so
+// `bd` resolves to the real binary, not this shim — and idempotently.
+func TestEnsureRealBdResolvablePrependsGCBDRealDir(t *testing.T) {
+	dir := t.TempDir()
+	realBd := filepath.Join(dir, "bd-real")
+	if err := os.WriteFile(realBd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BD_REAL", realBd)
+	t.Setenv("PATH", "/usr/bin")
+
+	ensureRealBdResolvable()
+	want := dir + string(os.PathListSeparator) + "/usr/bin"
+	if got := os.Getenv("PATH"); got != want {
+		t.Fatalf("PATH = %q, want %q", got, want)
+	}
+	// Idempotent: a second call must not double-prepend.
+	ensureRealBdResolvable()
+	if got := os.Getenv("PATH"); got != want {
+		t.Fatalf("PATH after second call = %q, want %q (no double prepend)", got, want)
+	}
+}
+
+// TestDispatchBdShimArgv0NonBdIsNotHandled proves gc invoked under its own name
+// is left to the normal cobra root (the shim does not hijack it).
+func TestDispatchBdShimArgv0NonBdIsNotHandled(t *testing.T) {
+	if code, handled := dispatchBdShimArgv0("/x/gc", []string{"version"}, nil, nil, nil); handled {
+		t.Fatalf("dispatchBdShimArgv0 handled a non-bd argv0 (code=%d), want not-handled", code)
+	}
+}
+
+// TestDispatchBdShimArgv0RefusesWithoutGCBDReal proves the misinstall guard: a
+// gc symlinked as bd but with no GC_BD_REAL refuses loudly instead of recursing
+// (a bare bd lookup would resolve back to the shim).
+func TestDispatchBdShimArgv0RefusesWithoutGCBDReal(t *testing.T) {
+	t.Setenv("GC_BD_REAL", "")
+	var stderr bytes.Buffer
+	code, handled := dispatchBdShimArgv0("/agent/bin/bd", []string{"ready"}, nil, nil, &stderr)
+	if !handled {
+		t.Fatal("dispatchBdShimArgv0 did not handle a bd argv0")
+	}
+	if code == 0 {
+		t.Fatal("expected non-zero exit when GC_BD_REAL is unset, got 0")
+	}
+	if !strings.Contains(stderr.String(), "GC_BD_REAL") {
+		t.Fatalf("stderr = %q, want it to mention GC_BD_REAL", stderr.String())
+	}
+}
+
 // TestRunBdShimPassthroughProjectsScopeEnv proves runBdShim routes a passthrough
 // verb to the real bd — resolved via GC_BD_REAL (no PATH lookup) — in the
 // resolved rig scope, with the projected bd env (GC_STORE_* set, BD_EXPORT_AUTO

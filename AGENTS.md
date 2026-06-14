@@ -88,18 +88,36 @@ conflicts with the docs, DX wins. We update the docs to match.
 
 ## Architecture
 
-**Work is the primitive, not orchestration.** Gas City's orchestration
-is a thin layer atop the MEOW stack (beads → molecules → formulas).
-The work definition and tracking infrastructure is what matters; the
-orchestration shape is configurable on top.
+**Work (beads) is the primitive, not orchestration.** Gas City's
+orchestration is a thin layer atop the MEOW stack: beads are the work, and a
+formula is the reusable method applied *over* a convoy of those beads (it
+materializes as a molecule — a root bead plus child step beads). The work
+definition and tracking infrastructure is what matters; the orchestration
+shape is configurable on top.
 
-### The nine concepts
+### Code-layering view (implements the six primitives)
 
-Gas City has five irreducible primitives and four derived mechanisms.
-Removing any primitive makes it impossible to rebuild Gas Town. Every
-mechanism is provably composable from the primitives.
+> **Authoritative user model:** `docs/concepts/primitives.md` defines the
+> six primitives (**Agent** = WHO, **Bead** = WHAT, **Formula** = HOW,
+> **Rig** = WHERE, **Pack** = CONFIGURES, **Event** = OBSERVE). That is the
+> canonical conceptual model. The view below is the *code-layering lens*: it
+> decomposes the Go substrate by layer so contributors can reason about
+> imports, side-effect confinement, and the CI invariants below. It is a
+> finer-grained projection of the same six primitives, not a competing
+> taxonomy.
 
-**Five primitives (Layer 0-1):**
+How the code substrate maps onto the six user-facing primitives:
+
+| Code substrate (this view)                          | User-facing primitive |
+| --------------------------------------------------- | --------------------- |
+| Session + Prompt Templates                          | **Agent** (WHO)       |
+| Task Store (Beads)                                  | **Bead** (WHAT)       |
+| Formulas + Molecules + Dispatch (Sling) + Orders + Health Patrol | **Formula** (HOW) |
+| Rigs (project/repo registered with the city)        | **Rig** (WHERE)       |
+| Config (`pack.toml` / `city.toml`; the City is the local (root) pack — it imports shared packs) | **Pack** (CONFIGURES) |
+| Event Bus                                            | **Event** (OBSERVE)   |
+
+**Layer 0-1 substrate:**
 
 1. **Session** — start/stop/prompt/observe sessions regardless of
    provider. Identity (via `agent.SessionNameFor`), pools, sandboxes,
@@ -107,36 +125,52 @@ mechanism is provably composable from the primitives.
    (`internal/session/lifecycle_projection.go`). Runtime providers
    (tmux, subprocess, exec, k8s, fake) plus routing layers (acp,
    auto, hybrid) live under `internal/runtime/` and plug in behind
-   the Session surface.
+   the Session surface. (Under the **Agent** primitive.)
 2. **Task Store (Beads)** — CRUD + Hook + Dependencies + Labels + Query
-   over work units. Everything is a bead: tasks, mail, molecules, convoys.
+   over work units. Everything is a bead: tasks, mail, convoy members.
+   (The **Bead** primitive.)
 3. **Event Bus** — append-only pub/sub log of all system activity. Two
    tiers: critical (bounded queue) and optional (fire-and-forget).
+   Events are fired by activity as outbound notifications so humans and
+   agents can watch; the bus is the delivery machinery. (Under the
+   **Event** primitive.)
 4. **Config** — TOML parsing with progressive activation (Levels 0-8 from
-   section presence) and multi-layer override resolution.
+   section presence) and multi-layer override resolution. This is the
+   machinery beneath the **Pack** primitive: `pack.toml`/`city.toml`
+   declare agents, formulas, and orders, and the City is the local (root)
+   pack that imports shared packs.
 5. **Prompt Templates** — Go `text/template` in Markdown defining what
-   each role does. The behavioral specification.
+   each role does. The behavioral specification, supplied by a Pack and
+   rendered into a running Agent.
 
-**Four derived mechanisms (Layer 2-4):**
+**Layer 2-4 substrate:**
 
 6. **Messaging** — Mail = `TaskStore.Create(bead{type:"message"})`.
    Nudge = a session-layer operation implemented via
    `runtime.Provider.Nudge()` (and exposed through
    `worker.Handle.Nudge()` at the worker boundary). No new
    primitive needed.
-7. **Formulas & Molecules** — Formula = TOML parsed by Config. Molecule =
-   root bead + child step beads in Task Store. Wisps = ephemeral molecules.
-   Orders = formulas with gate conditions on Event Bus.
+7. **Formulas** — a Formula is the reusable method (TOML parsed by
+   Config) applied *over* a convoy of beads, looping/fanning each to an
+   Agent. (When a formula runs, it materializes as a molecule — a root
+   bead plus child step beads in the Task Store; wisps are the ephemeral
+   variant. That materialization is a v1 implementation detail, not part
+   of what a formula *is*.) Orders = formulas with gate conditions on the
+   Event Bus that automate *when* a formula runs (Health Patrol is one
+   kind of order). All of this is the **Formula** primitive.
 8. **Dispatch (Sling)** — composed: find/spawn agent → select formula →
-   create molecule → hook to agent → nudge → create convoy → log event.
+   materialize work as beads → hook to agent → nudge → create convoy →
+   fire event. (Under the **Formula** primitive.)
 9. **Health Patrol** — probe sessions (Session), compare thresholds
-   (Config), publish stalls (Event Bus), restart with backoff.
+   (Config), publish stalls (Event Bus), restart with backoff. (One kind
+   of order, under the **Formula** primitive.)
 
 ### Layering invariants
 
 1. **No upward dependencies.** Layer N never imports Layer N+1.
 2. **Beads is the universal persistence substrate** for domain state.
-3. **Event Bus is the universal observation substrate.**
+3. **Events are the universal outbound-notification mechanism** — fired by
+   activity so humans and agents can watch; the bus is delivery machinery.
 4. **Config is the universal activation mechanism.**
 5. **Side effects (I/O, process spawning) are confined to Layer 0.**
 6. **The controller drives all SDK infrastructure operations.**
@@ -152,7 +186,7 @@ Capabilities activate progressively via config presence.
 | 2     | Task loop              |
 | 3     | Multiple agents + pool |
 | 4     | Messaging              |
-| 5     | Formulas & molecules   |
+| 5     | Formulas               |
 | 6     | Health monitoring      |
 | 7     | Orders                 |
 | 8     | Full orchestration     |

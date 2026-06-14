@@ -255,6 +255,20 @@ func routedPolicyStore(workBackend beads.Store, cfg *config.City, scopeRoot stri
 // to an embedded SQLite store.
 const graphStoreSQLite = "sqlite"
 
+// graphStoreIDPrefix is the bead-ID prefix the embedded SQLite graph store mints
+// with. It MUST differ from the work backend's prefix (the file store and the
+// native Dolt store both default to "gc"): the Router resolves by-id mutations
+// via Router.backendForID, which returns the first backend whose Get(id)
+// succeeds. If the two stores shared a prefix, their independent gc-N sequences
+// would overlap (work gc-2 and graph gc-2 are different beads), and a worker's
+// `bd close gc-2` on a graph step would land on the work store's gc-2 instead —
+// leaving the graph step open so the molecule never converges. Giving the graph
+// store a disjoint namespace makes backendForID unambiguous. This is the slice
+// of the Router id-namespace separation (ga-y5pwx3) that deployed
+// graph_store=sqlite convergence requires; a fuller fix would route by-id via a
+// declared prefix→backend map rather than Get-first-hit.
+const graphStoreIDPrefix = "gcg"
+
 // graphStoreSQLiteEnabled reports whether the city opted the graph class onto the
 // embedded SQLite backend via [beads] graph_store = "sqlite".
 func graphStoreSQLiteEnabled(cfg *config.City) bool {
@@ -277,7 +291,7 @@ func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, scopeRoo
 		return
 	}
 	dir := filepath.Join(scopeRoot, citylayout.RuntimeRoot)
-	store, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreRetention(0, 0))
+	store, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreRetention(0, 0), beads.WithSQLiteStoreIDPrefix(graphStoreIDPrefix))
 	if err != nil {
 		log.Printf("beads: graph_store=%q requested but opening the SQLite graph store at %s failed: %v; graph beads stay on the work backend", cfg.Beads.GraphStore, dir, err)
 		return

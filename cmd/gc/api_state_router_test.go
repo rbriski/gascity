@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -153,12 +154,17 @@ func TestOpenStoreResultAtForCityRoutesGraphToSQLiteWhenOptedIn(t *testing.T) {
 	}
 
 	// A graph-classified bead (gc:wisp) routes to SQLite; a work bead does not.
-	// The file work store and the SQLite graph store both mint gc-N ids (the file
-	// provider is dev/test; production work backends — bd/native — use distinct
-	// prefixes), so assert routing by CONTENT, not by cross-backend id lookups.
+	// The SQLite graph store mints a DISTINCT id prefix (graphStoreIDPrefix) from
+	// the work backend's "gc", so by-id resolution (Router.backendForID) is
+	// unambiguous: a graph id can never alias a work id even though both stores
+	// run independent N sequences. Assert the prefix is disjoint AND that a by-id
+	// lookup lands on the graph backend.
 	gb, err := router.Create(beads.Bead{Title: "wisp", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
+	}
+	if !strings.HasPrefix(gb.ID, graphStoreIDPrefix+"-") {
+		t.Fatalf("graph bead id %q does not carry the distinct graph prefix %q-", gb.ID, graphStoreIDPrefix)
 	}
 	gotGraph, err := sqliteBackend.Get(gb.ID)
 	if err != nil || gotGraph.Title != "wisp" {
@@ -175,6 +181,61 @@ func TestOpenStoreResultAtForCityRoutesGraphToSQLiteWhenOptedIn(t *testing.T) {
 	}
 	if len(graphList) != 1 || graphList[0].Title != "wisp" {
 		t.Fatalf("SQLite graph backend holds %d bead(s); want only the graph bead %q", len(graphList), "wisp")
+	}
+}
+
+// TestRoutedGraphStoreByIDRoutingSurvivesNumericIDOverlap is the regression
+// guard for the convergence-blocking id-namespace collision (ga-y5pwx3): the
+// work backend and the SQLite graph backend each run an independent N sequence,
+// so without distinct prefixes a work bead and a graph bead would both be "gc-1"
+// — and Router.backendForID (first backend whose Get succeeds, work first) would
+// misroute a by-id close of the graph step to the work store, leaving the graph
+// step open so the molecule never converges. The graph store's distinct
+// graphStoreIDPrefix makes the two namespaces disjoint, so a by-id close lands on
+// the owning backend even when the numeric component overlaps.
+func TestRoutedGraphStoreByIDRoutingSurvivesNumericIDOverlap(t *testing.T) {
+	work := beads.NewMemStore() // mints gc-N like the file/native work store
+	store := routedPolicyStore(work, graphSQLiteCfg(), t.TempDir())
+	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+
+	// Work bead -> work backend (gc-1); graph bead -> SQLite (gcg-1). Same N=1,
+	// disjoint prefixes.
+	wb, err := store.Create(beads.Bead{Title: "backlog", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	gb, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	if !strings.HasPrefix(wb.ID, "gc-") {
+		t.Fatalf("work bead id %q, want a gc- work id", wb.ID)
+	}
+	if !strings.HasPrefix(gb.ID, graphStoreIDPrefix+"-") {
+		t.Fatalf("graph bead id %q, want the distinct %q- graph prefix", gb.ID, graphStoreIDPrefix)
+	}
+	if wb.ID == gb.ID {
+		t.Fatalf("work and graph ids collide (%q): distinct prefixes did not separate the namespaces", wb.ID)
+	}
+
+	// A by-id close of the graph bead must land on the SQLite backend — the
+	// convergence-critical mutation. The work bead with the overlapping N stays open.
+	if err := store.Close(gb.ID); err != nil {
+		t.Fatalf("close graph bead %q: %v", gb.ID, err)
+	}
+	got, err := store.Get(gb.ID)
+	if err != nil {
+		t.Fatalf("get graph bead after close: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("graph bead %q status = %q, want closed (the close misrouted to the work backend)", gb.ID, got.Status)
+	}
+	gotWork, err := store.Get(wb.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Status == "closed" {
+		t.Fatalf("work bead %q was closed by a graph-step close — by-id routing misfired", wb.ID)
 	}
 }
 

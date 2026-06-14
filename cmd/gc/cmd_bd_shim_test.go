@@ -79,21 +79,29 @@ func TestExecRealBdUsesGCBDRealAndPropagatesExit(t *testing.T) {
 func TestClassifyBdShimVerb(t *testing.T) {
 	cases := []struct {
 		verb  string
+		args  []string
 		split bool
 		want  bdShimDisposition
 	}{
-		{"close", false, bdRoute},
-		{"close", true, bdRoute},
-		{"version", false, bdPassthrough},
-		{"version", true, bdPassthrough},
-		{"mol", false, bdPassthrough}, // identity phase: one backend, byte-identical
-		{"mol", true, bdRefuse},       // split phase: would silently miss graph beads
-		{"gate", true, bdRefuse},
-		{"query", true, bdRefuse},
+		{"close", []string{"x"}, false, bdRoute},
+		{"close", []string{"x"}, true, bdRoute},
+		{"show", []string{"x", "--json"}, true, bdRoute},
+		{"version", nil, false, bdPassthrough},
+		{"version", nil, true, bdPassthrough},
+		{"mol", []string{"current", "m"}, false, bdPassthrough}, // identity phase: one backend, byte-identical
+		{"mol", []string{"current", "m"}, true, bdRefuse},       // split phase: would silently miss graph beads
+		{"gate", []string{"check"}, true, bdRefuse},
+		{"query", []string{"ephemeral=true"}, true, bdRefuse},
+		// ready: the simple assigned form routes (graph-aware), but predicate
+		// flags the Router cannot yet replicate (pool-demand; C3/ga-2gap48.11)
+		// passthrough to the work-only bd — byte-identical in the identity phase.
+		{"ready", []string{"--assignee=w", "--json", "--limit", "1"}, true, bdRoute},
+		{"ready", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--json"}, true, bdPassthrough},
+		{"ready", []string{"--exclude-type=epic", "--json"}, false, bdPassthrough},
 	}
 	for _, tc := range cases {
-		if got := classifyBdShimVerb(tc.verb, tc.split); got != tc.want {
-			t.Errorf("classifyBdShimVerb(%q, split=%v) = %v, want %v", tc.verb, tc.split, got, tc.want)
+		if got := classifyBdShimVerb(tc.verb, tc.args, tc.split); got != tc.want {
+			t.Errorf("classifyBdShimVerb(%q, %v, split=%v) = %v, want %v", tc.verb, tc.args, tc.split, got, tc.want)
 		}
 	}
 }
@@ -145,5 +153,91 @@ func TestDispatchBdShimCloseRoutesGraphBeadToSQLite(t *testing.T) {
 	}
 	if wstored.Status != "closed" {
 		t.Fatalf("work bead status = %q, want closed", wstored.Status)
+	}
+}
+
+// newShimRouter builds a Router{work: MemStore(offset), graph: SQLite} for the
+// read dispatch tests, mirroring the production wiring under graph_store=sqlite.
+func newShimRouter(t *testing.T) *coordrouter.Router {
+	t.Helper()
+	work := beads.NewMemStoreFrom(1000, nil, nil)
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+	r := coordrouter.New(work)
+	r.Register(coordclass.ClassGraph, graph)
+	return r
+}
+
+// TestDispatchBdShimShowFederatesGraphBead proves `bd show <id>` returns a graph
+// bead resident in SQLite (federated by the Router), shaped as a one-element bd
+// JSON array a `bd show ... --json | jq '.[0]'` consumer can read.
+func TestDispatchBdShimShowFederatesGraphBead(t *testing.T) {
+	r := newShimRouter(t)
+	gb, err := r.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := dispatchBdShimVerb(r, "show", []string{gb.ID, "--json"}, nil, &out, &errb); code != 0 {
+		t.Fatalf("show exit = %d, stderr=%q", code, errb.String())
+	}
+	parsed, err := decodeHookClaimBeads(out.String())
+	if err != nil {
+		t.Fatalf("a bd-show consumer could not parse output %q: %v", out.String(), err)
+	}
+	if len(parsed) != 1 || parsed[0].ID != gb.ID {
+		t.Fatalf("show output = %+v, want one bead %s", parsed, gb.ID)
+	}
+}
+
+// TestDispatchBdShimShowMissingEmitsEmptyArray proves `bd show <unknown>` emits
+// `[]` and exits 0, matching raw bd (whose empty array a consumer reads as "no
+// such bead"), rather than erroring.
+func TestDispatchBdShimShowMissingEmitsEmptyArray(t *testing.T) {
+	r := newShimRouter(t)
+	var out, errb bytes.Buffer
+	if code := dispatchBdShimVerb(r, "show", []string{"nope-404", "--json"}, nil, &out, &errb); code != 0 {
+		t.Fatalf("show missing exit = %d, stderr=%q", code, errb.String())
+	}
+	parsed, err := decodeHookClaimBeads(out.String())
+	if err != nil {
+		t.Fatalf("empty show output %q not parseable: %v", out.String(), err)
+	}
+	if len(parsed) != 0 {
+		t.Fatalf("show missing parsed to %d beads, want 0", len(parsed))
+	}
+}
+
+// TestDispatchBdShimReadyFederatesAssigned proves the routed simple `bd ready
+// --assignee` federates the assignee's ready work across the work backend and
+// the SQLite graph store — so a worker's assigned-ready probe sees graph steps.
+func TestDispatchBdShimReadyFederatesAssigned(t *testing.T) {
+	r := newShimRouter(t)
+	wb, err := r.Create(beads.Bead{Title: "work item", Type: "task", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	gb, err := r.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}, Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := dispatchBdShimVerb(r, "ready", []string{"--assignee=worker-1", "--json"}, nil, &out, &errb); code != 0 {
+		t.Fatalf("ready exit = %d, stderr=%q", code, errb.String())
+	}
+	parsed, err := decodeHookClaimBeads(out.String())
+	if err != nil {
+		t.Fatalf("ready output %q not parseable: %v", out.String(), err)
+	}
+	ids := make(map[string]bool, len(parsed))
+	for _, b := range parsed {
+		ids[b.ID] = true
+	}
+	if !ids[wb.ID] || !ids[gb.ID] {
+		t.Fatalf("ready output ids = %v, want both %s (work) and %s (graph)", ids, wb.ID, gb.ID)
 	}
 }

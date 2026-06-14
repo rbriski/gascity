@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -65,9 +66,44 @@ func (d bdShimDisposition) String() string {
 
 // bdShimRoutedVerbs are bd subcommands the shim translates to in-process Router
 // store ops so graph beads in the embedded SQLite store are seen and mutated,
-// not just Dolt work beads. Grown incrementally; close lands first.
+// not just Dolt work beads. Grown incrementally.
 var bdShimRoutedVerbs = map[string]bool{
 	"close": true,
+	"show":  true,
+	"ready": true,
+}
+
+// bdReadyRoutableFlags are the `bd ready` flags Router.Ready replicates exactly
+// (Assignee/Limit, plus output/tier flags that are no-ops here). A ready
+// invocation carrying any OTHER flag — the pool-demand predicates
+// (--metadata-field, --unassigned, --exclude-type, --sort, --label, ...) — is
+// not yet federated (predicate parity is C3/ga-2gap48.11), so it passes through
+// to the real bd (byte-identical in the identity phase) rather than silently
+// dropping the filter.
+var bdReadyRoutableFlags = map[string]bool{
+	"--assignee":          true,
+	"--limit":             true,
+	"-n":                  true,
+	"--json":              true,
+	"--include-ephemeral": true,
+}
+
+// bdReadyRoutable reports whether a `bd ready` arg list uses only flags the
+// Router can replicate, so the shim can serve it in-process.
+func bdReadyRoutable(args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue // a bare value (e.g. a space-separated flag arg) — not a gate
+		}
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		if !bdReadyRoutableFlags[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // bdShimGraphTouchingUnroutedVerbs are bd subcommands that read or mutate
@@ -85,8 +121,11 @@ var bdShimGraphTouchingUnroutedVerbs = map[string]bool{
 // classifyBdShimVerb decides how the shim handles a bd subcommand given whether
 // the city is in the split phase (graph_store=sqlite active, so a distinct
 // graph backend exists). See the bdShimDisposition docs above.
-func classifyBdShimVerb(verb string, splitPhase bool) bdShimDisposition {
+func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDisposition {
 	if bdShimRoutedVerbs[verb] {
+		if verb == "ready" && !bdReadyRoutable(args) {
+			return bdPassthrough
+		}
 		return bdRoute
 	}
 	if splitPhase && bdShimGraphTouchingUnroutedVerbs[verb] {
@@ -151,7 +190,7 @@ func execRealBd(args []string, dir string, stdin io.Reader, stdout, stderr io.Wr
 // (or its policy wrapper) so by-id ops land on the owning backend (graph vs
 // work). Stdout byte-parity with raw bd is deferred to the C2a corpus gate
 // (ga-2gap48.10); this enforces the routing + exit-code contract.
-func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Reader, _, stderr io.Writer) int {
+func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	switch verb {
 	case "close":
 		if len(args) < 1 {
@@ -163,10 +202,83 @@ func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Read
 			return 1
 		}
 		return 0
+	case "show":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: show <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		bead, err := store.Get(id)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				// Raw bd prints an empty array (exit 0) for an unknown id; a
+				// `bd show ... --json | jq '.[0]'` consumer reads that as absent.
+				return writeReadyJSON(nil, stdout, stderr)
+			}
+			fmt.Fprintf(stderr, "gc bd-shim: show %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return writeReadyJSON([]beads.Bead{bead}, stdout, stderr)
+	case "ready":
+		q, err := parseBdReadyQuery(args)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		out, err := store.Ready(q)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: ready: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return writeReadyJSON(out, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "gc bd-shim: no routed handler for %q\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+// firstBdPositional returns the first non-flag argument (a bead id), or false
+// when every argument is a flag.
+func firstBdPositional(args []string) (string, bool) {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a, true
+		}
+	}
+	return "", false
+}
+
+// parseBdReadyQuery maps the routable `bd ready` flags to a beads.ReadyQuery.
+// Only --assignee and --limit/-n affect the query; --json and
+// --include-ephemeral are accepted no-ops (output is always JSON, and tier
+// expansion is the policy wrapper's job above the Router). Non-routable
+// predicate flags never reach here — classifyBdShimVerb passes those through.
+func parseBdReadyQuery(args []string) (beads.ReadyQuery, error) {
+	var q beads.ReadyQuery
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--assignee" && i+1 < len(args):
+			q.Assignee = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--assignee="):
+			q.Assignee = strings.TrimPrefix(a, "--assignee=")
+		case (a == "--limit" || a == "-n") && i+1 < len(args):
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return q, fmt.Errorf("parse %s %q: %w", a, args[i+1], err)
+			}
+			q.Limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return q, fmt.Errorf("parse %q: %w", a, err)
+			}
+			q.Limit = n
+		}
+	}
+	return q, nil
 }
 
 // runBdShim is the bd-compatible thin-client entry point. It resolves the city,
@@ -193,7 +305,7 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	switch classifyBdShimVerb(verb, graphStoreSQLiteEnabled(cfg)) {
+	switch classifyBdShimVerb(verb, bdArgs[1:], graphStoreSQLiteEnabled(cfg)) {
 	case bdRoute:
 		store, err := openStoreAtForCity(cityPath, cityPath)
 		if err != nil {

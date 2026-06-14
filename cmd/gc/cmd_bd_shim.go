@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/spf13/cobra"
 )
@@ -365,6 +366,138 @@ func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Read
 	}
 }
 
+// bdShimRequireAPI reports whether the shim must route through the controller's
+// HTTP API and refuse the in-process local-store fallback when no controller is
+// reachable. It gates the pure-HTTP end state (ga-2gap48): with it set, the shim
+// errors rather than opening the Router locally — the behavior that becomes the
+// default once startup guarantees a beads-serving API is always up. Default
+// (unset) keeps the transitional local fallback for init/bootstrap/standalone.
+func bdShimRequireAPI() bool {
+	return strings.TrimSpace(os.Getenv("GC_BD_SHIM_REQUIRE_API")) != ""
+}
+
+// bdShimAPIClient returns an HTTP client to the controller's bead API for the
+// pure-HTTP shim. It prefers a standalone controller (when the city configures an
+// [api] port) and otherwise reaches the supervisor-served per-city API. Unlike
+// apiClient — used by read-path CLI commands, which keep a local store fallback
+// and so deliberately do NOT route a supervisor-managed city through the
+// supervisor client — the shim's target is to route through the controller, so
+// it falls through to the supervisor client for a supervisor-managed city.
+func bdShimAPIClient(cityPath string) *api.Client {
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return nil
+	}
+	if controllerAlive(cityPath) != 0 {
+		if c := standaloneControllerClient(cityPath); c != nil {
+			return c
+		}
+	}
+	return supervisorCityAPIClient(cityPath)
+}
+
+// dispatchBdShimVerbViaAPI serves a routed bd verb by calling the controller's
+// HTTP API (the pure-HTTP redirect: the controller owns the store, every worker
+// is a thin client). It is the API counterpart of dispatchBdShimVerb — reads
+// render the same JSON, mutations map onto the bead write-path client methods.
+func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, stdout, stderr io.Writer) int {
+	switch verb {
+	case "close":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: close <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := client.CloseBead(id); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: closing %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	case "reopen":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: reopen <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := client.ReopenBead(id); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: reopening %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	case "delete":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: delete <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := client.DeleteBead(id); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: deleting %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	case "update":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: update <id> [flags]") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		opts, err := parseBdUpdateOpts(args)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: update %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := client.UpdateBead(id, opts); err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: updating %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	case "show":
+		id, ok := firstBdPositional(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: usage: show <id>") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		read, err := client.GetBead(id)
+		if err != nil {
+			if isBdShimAPINotFound(err) {
+				// Raw bd prints an empty array (exit 0) for an unknown id; a
+				// `bd show ... --json | jq '.[0]'` consumer reads that as absent.
+				return writeReadyJSON(nil, stdout, stderr)
+			}
+			fmt.Fprintf(stderr, "gc bd-shim: show %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return writeReadyJSON([]beads.Bead{read.Body}, stdout, stderr)
+	case "ready":
+		p, err := parseBdReadyParams(args)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		read, err := client.ReadyBeads()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: ready via API: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// /v0/beads/ready takes no predicates; apply the discovery post-filter
+		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
+		return writeReadyJSON(applyBdReadyParams(read.Body, p), stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "gc bd-shim: no routed API handler for %q\n", verb) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+}
+
+// isBdShimAPINotFound reports whether an API client error is a not-found, so
+// `show` can reproduce raw bd's empty-array-for-unknown-id contract instead of
+// failing.
+func isBdShimAPINotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "not_found")
+}
+
 // firstBdPositional returns the first non-flag argument (a bead id), or false
 // when every argument is a flag.
 func firstBdPositional(args []string) (string, bool) {
@@ -596,6 +729,20 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	verb, verbArgs := splitBdGlobalFlags(bdArgs)
 	switch classifyBdShimVerb(verb, verbArgs, graphStoreSQLiteEnabled(cfg)) {
 	case bdRoute:
+		// Pure-HTTP redirect: when a controller is reachable, route the verb
+		// through its HTTP API — the controller owns the store (Router + graph
+		// SQLite) and every worker is a thin client — rather than opening the
+		// in-process Router. The local store path below remains as a TRANSITIONAL
+		// fallback for when no controller is up (init/bootstrap/standalone); it is
+		// removed once the beads subsystem is guaranteed up (the pure-HTTP end
+		// state, ga-2gap48).
+		if client := bdShimAPIClient(cityPath); client != nil {
+			return dispatchBdShimVerbViaAPI(client, verb, verbArgs, stdout, stderr)
+		}
+		if bdShimRequireAPI() {
+			fmt.Fprintf(stderr, "gc bd-shim: no controller API reachable for %q and GC_BD_SHIM_REQUIRE_API is set; refusing the local-store fallback\n", verb) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: opening store: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -32,6 +32,12 @@ import (
 // worktree-bound mol-scoped-work. The worker performs only Router-routable
 // mutations and never `bd update --claim` / `gc hook --claim` / `bd mol|gate`
 // (all of which would bypass or be refused by the shim under graph_store=sqlite).
+//
+// The env sets GC_BD_SHIM_REQUIRE_API, so the shim refuses the local in-process
+// Router fallback: every bd op (the worker's complete AND the controller's
+// discovery) routes shim -> HTTP -> controller -> Router -> SQLite. Convergence
+// here is therefore the pure-HTTP-redirect proof (ga-2gap48), not just the local
+// store path.
 func TestGraphStoreSQLiteDeployedCityConverges(t *testing.T) {
 	env := newGraphStoreSQLiteShimEnv(t)
 
@@ -219,6 +225,12 @@ func newGraphStoreSQLiteShimEnv(t *testing.T) []string {
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(gcBinDir, shimDir, envMap["PATH"]))
 	env = replaceEnv(env, "GC_BD_REAL", bdBinary)
+	// Require the shim to route through the controller's HTTP API and refuse the
+	// local in-process Router fallback, so convergence here PROVES the pure-HTTP
+	// path: the worker's completion and the controller's discovery both go
+	// shim -> HTTP -> controller -> Router -> SQLite. Without this the shim could
+	// silently converge via the local store and the HTTP path would be untested.
+	env = replaceEnv(env, "GC_BD_SHIM_REQUIRE_API", "1")
 
 	startIsolatedSupervisor(t, env, gcHome)
 	return env

@@ -146,6 +146,15 @@ WORKER gc process: policy( Router( bd-work        , sqlite-graph ) )
 The store/engine layer is done. The remaining work is the runtime shell + making an
 **unmodified real worker** reach SQLite.
 
+### UPDATE (2026-06-14): decision made — bd shim built
+
+The worker-integration model is **the bd shim** (option A below). The shim's
+verb engine is built and end-to-end verified — see
+**`engdocs/design/bd-shim.md`** for design + status + remaining work. Commits
+`31a9be4ae`→`adc99f0c1` on this branch. The original analysis below is kept for
+context; the remaining shim work (C4 PATH install, gc-bd direct routing, dep,
+claim-actor, byte-identity corpus) is tracked in that doc.
+
 ### THE KEY DECISION first: worker-integration model (shim vs prompt-flip)
 
 How does a real worker's bead ops reach the Router/SQLite? Prompts/packs today use a

@@ -69,11 +69,19 @@ func implicitCityDiscoveryCeilings() []string {
 }
 
 func implicitIgnoredLegacyRuntimeRoots() []string {
-	runtimeRoot := configuredSupervisorRuntimeRoot()
-	if runtimeRoot == "" {
-		return nil
+	var ignored []string
+	if runtimeRoot := configuredSupervisorRuntimeRoot(); runtimeRoot != "" {
+		ignored = append(ignored, runtimeRoot)
 	}
-	return []string{runtimeRoot}
+	// Also ignore .gc/ under every ancestor of os.TempDir(). When a gc city
+	// is running, its runtime state may live at TMPDIR/.gc/ (e.g. /tmp/.gc/).
+	// Test processes receive a prefixed TMPDIR like /tmp/gct.../; walking up
+	// every ancestor ensures /tmp/.gc/ is ignored when the live city uses
+	// /tmp as its runtime root.
+	for dir := normalizeDiscoveryPath(os.TempDir()); dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		ignored = append(ignored, filepath.Join(dir, citylayout.RuntimeRoot))
+	}
+	return ignored
 }
 
 func configuredSupervisorRuntimeRoot() string {

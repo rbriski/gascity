@@ -105,6 +105,14 @@ func (g *Git) ProbeDefaultBranch() string {
 	return ""
 }
 
+// CheckoutDetach switches the working tree to a detached HEAD at ref.
+func (g *Git) CheckoutDetach(ref string) error {
+	if _, err := g.run("checkout", "--detach", ref); err != nil {
+		return fmt.Errorf("checkout --detach %s: %w", ref, err)
+	}
+	return nil
+}
+
 // WorktreeRemove removes a worktree. If force is true, removes even with
 // uncommitted changes.
 func (g *Git) WorktreeRemove(path string, force bool) error {

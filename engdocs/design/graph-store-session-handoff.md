@@ -135,16 +135,26 @@ WORKER gc process: policy( Router( bd-work        , sqlite-graph ) )
 
 ## What remains (for the literal `gc start` city)
 
-> **The stated goal is NOT yet met.** The goal is *"a real working isolated city …
-> that has run a simple formula sling through the entire process."* What exists is
-> the **engine/test-level** guarantee (the table above — `molecule.Instantiate` pour
-> + `ProcessControl` convergence + Router federation, all green in isolated tests).
-> There is **no real `gc start` city** and **no gc-start e2e harness**. A *real
-> external worker discovering and actioning graph work end-to-end in a deployed city*
-> has not been demonstrated. That is the #1 remaining item.
+> **UPDATE (2026-06-14): option 1 (the full-chain integration test) is DONE.**
+> `internal/dispatch/formula_sling_lifecycle_sqlite_integration_test.go` (commit
+> `fac171833`, bead `ga-1gyv1m`) chains the WHOLE formula-sling lifecycle —
+> instantiate (pour) → discover (`Ready`) → worker complete (mutate + close) →
+> controller converge (`ProcessControl` → `workflow-pass`) → terminal — through a
+> `Router{work: MemStore, graph: SQLite}` and asserts **every** graph create and
+> mutation lands in SQLite, work backend untouched. Two variants: a hand-built
+> graph.v2 recipe AND the **real compiler** via `molecule.Cook` (so
+> `applyGraphControls` emits the `workflow-finalize` bead). This proves *"a simple
+> formula sling runs through the entire process with graph metadata in the
+> in-process store"* end to end, not link by link.
+>
+> What is still NOT done is **option 2**: a literal `gc start` daemon city with a
+> real/scripted external worker process. That runtime harness does not exist yet
+> (a live `gc start` needs an agent API). It is the remaining heavier item if a
+> deployed-city demo (vs. the hermetic engine-level proof) is required.
 
-The store/engine layer is done. The remaining work is the runtime shell + making an
-**unmodified real worker** reach SQLite.
+The store/engine layer and the full-chain lifecycle proof are done. The remaining
+work is the runtime shell (option 2) + making an **unmodified real worker** reach
+SQLite (the bd shim, now built — see `bd-shim.md` — supplies that worker path).
 
 ### UPDATE (2026-06-14): decision made — bd shim built
 

@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -2335,19 +2334,12 @@ provider = "file"
 		t.Fatal("buildStores did not route bd-backed rig through store factory")
 	}
 	frontendStore := underlyingPolicyStoreForTest(stores["frontend"])
-	// Layering is now policy(Router(caching(backend))): peel the Router to its
-	// single identity-phase backend, which is the caching store.
-	router, ok := frontendStore.(*coordrouter.Router)
+	// Default cities (no [beads] graph_store) get no Router — the layering is plain
+	// policy(caching(backend)), byte-identical to before the split. The Router only
+	// appears when graph_store opts the graph class onto a separate backend.
+	cached, ok := frontendStore.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("frontend store = %T, want *coordrouter.Router", frontendStore)
-	}
-	backends := router.Backends()
-	if len(backends) != 1 {
-		t.Fatalf("identity-phase router has %d backends, want 1", len(backends))
-	}
-	cached, ok := backends[0].(*beads.CachingStore)
-	if !ok {
-		t.Fatalf("router backend = %T, want caching store", backends[0])
+		t.Fatalf("frontend store = %T, want *beads.CachingStore (no Router in default mode)", frontendStore)
 	}
 	if cached.Backing() != nativeBacking {
 		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())

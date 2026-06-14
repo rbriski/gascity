@@ -20,6 +20,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordrouter"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -192,7 +193,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
 	if ctx.Done() == nil || !backgroundRefresh {
 		if policyWrapped {
-			return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
+			// Insert the per-class Router between policy and caching:
+			// policy(Router(caching(backend))). In the identity phase every class
+			// resolves to this one cached backend, so the Router is a pure
+			// passthrough; relocating a class later is a one-line Register.
+			return wrapStoreWithBeadPolicies(coordrouter.New(cs), policyStore.cfg)
 		}
 		return cs
 	}
@@ -200,7 +205,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	// callers (convergence reconcile, sweep, API handlers).
 	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
 	if policyWrapped {
-		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
+		// Insert the per-class Router between policy and caching:
+		// policy(Router(caching(backend))). In the identity phase every class
+		// resolves to this one cached backend, so the Router is a pure
+		// passthrough; relocating a class later is a one-line Register.
+		return wrapStoreWithBeadPolicies(coordrouter.New(cs), policyStore.cfg)
 	}
 	return cs
 }
@@ -589,6 +598,18 @@ func closeBeadStoreHandle(store beads.Store) error {
 	}
 	if base, _, ok := unwrapBeadPolicyStore(store); ok {
 		return closeBeadStoreHandle(base)
+	}
+	if router, ok := store.(*coordrouter.Router); ok {
+		// Peel the Router to each distinct backend so StopReconciler + CloseStore
+		// reach the underlying CachingStore(s) — without this the reconciler
+		// goroutine leaks (the *CachingStore check below never matches a Router).
+		var firstErr error
+		for _, backend := range router.Backends() {
+			if err := closeBeadStoreHandle(backend); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {
 		cached.StopReconciler()

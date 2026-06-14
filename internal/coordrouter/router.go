@@ -87,6 +87,27 @@ func (r *Router) Backend(c coordclass.Class) beads.Store {
 	return r.Store
 }
 
+// Backends returns each DISTINCT registered backend (the primary plus any
+// per-class overrides), deduplicated by identity. It exists for lifecycle
+// operations — notably close — so a caller can reach every underlying store the
+// Router fans out to. In the identity phase (all classes → one backend) it
+// returns a single store; after a class relocates it returns each distinct one.
+func (r *Router) Backends() []beads.Store {
+	seen := make(map[beads.Store]bool, len(r.backends)+1)
+	var out []beads.Store
+	add := func(s beads.Store) {
+		if s != nil && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	add(r.Store)
+	for _, c := range coordclass.Classes() {
+		add(r.backends[c])
+	}
+	return out
+}
+
 // Create classifies the bead and routes it to the owning class's backend.
 func (r *Router) Create(b beads.Bead) (beads.Bead, error) {
 	return r.Backend(coordclass.Classify(b)).Create(b)

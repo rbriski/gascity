@@ -97,8 +97,12 @@ func TestClassifyBdShimVerb(t *testing.T) {
 		// flags the Router cannot yet replicate (pool-demand; C3/ga-2gap48.11)
 		// passthrough to the work-only bd — byte-identical in the identity phase.
 		{"ready", []string{"--assignee=w", "--json", "--limit", "1"}, true, bdRoute},
-		{"ready", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--json"}, true, bdPassthrough},
-		{"ready", []string{"--exclude-type=epic", "--json"}, false, bdPassthrough},
+		// Discovery predicates now route (C3): the shim federates store.Ready() and
+		// post-filters, so a graph control bead in SQLite is discoverable.
+		{"ready", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--json"}, true, bdRoute},
+		{"ready", []string{"--exclude-type=epic", "--json"}, false, bdRoute},
+		// A ready flag the shim does not model still passes through (byte-identical).
+		{"ready", []string{"--label", "pool:worker", "--json"}, true, bdPassthrough},
 		// update: the cleanly-mappable flag set routes (the canonical graph-worker
 		// close), but flags with no UpdateOpts mapping (--notes/--claim/...)
 		// passthrough — byte-identical in the identity phase.
@@ -388,6 +392,90 @@ func TestDispatchBdShimArgv0RefusesWithoutGCBDReal(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "GC_BD_REAL") {
 		t.Fatalf("stderr = %q, want it to mention GC_BD_REAL", stderr.String())
+	}
+}
+
+// TestSplitBdGlobalFlags proves the shim finds the bd subcommand past leading
+// global flags — the controller discovers work via `bd --readonly --sandbox
+// ready ...`, where the verb is not args[0].
+func TestSplitBdGlobalFlags(t *testing.T) {
+	cases := []struct {
+		args []string
+		verb string
+		rest []string
+	}{
+		{[]string{"--readonly", "--sandbox", "ready", "--json"}, "ready", []string{"--json"}},
+		{[]string{"ready", "--assignee=x"}, "ready", []string{"--assignee=x"}},
+		{[]string{"close", "id"}, "close", []string{"id"}},
+		{[]string{"--readonly"}, "", nil},
+		{nil, "", nil},
+	}
+	for _, tc := range cases {
+		verb, rest := splitBdGlobalFlags(tc.args)
+		if verb != tc.verb {
+			t.Errorf("splitBdGlobalFlags(%v) verb = %q, want %q", tc.args, verb, tc.verb)
+		}
+		if len(rest) != len(tc.rest) {
+			t.Errorf("splitBdGlobalFlags(%v) rest = %v, want %v", tc.args, rest, tc.rest)
+			continue
+		}
+		for i := range rest {
+			if rest[i] != tc.rest[i] {
+				t.Errorf("splitBdGlobalFlags(%v) rest = %v, want %v", tc.args, rest, tc.rest)
+				break
+			}
+		}
+	}
+}
+
+// TestDispatchBdShimReadyAppliesDiscoveryPredicates proves the routed `bd ready`
+// applies the controller/pool-demand discovery predicates (--metadata-field,
+// --unassigned, --exclude-type) as a federated post-filter, so a graph control
+// bead in SQLite is discoverable through the shim — the crux for a deployed
+// graph_store=sqlite city's convergence.
+func TestDispatchBdShimReadyAppliesDiscoveryPredicates(t *testing.T) {
+	r := newShimRouter(t)
+	routed, err := r.Create(beads.Bead{Title: "routed graph step", Type: "task", Labels: []string{"gc:wisp"}, Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create routed: %v", err)
+	}
+	other, err := r.Create(beads.Bead{Title: "other graph step", Type: "task", Labels: []string{"gc:wisp"}, Metadata: map[string]string{"gc.routed_to": "someone-else"}})
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	assigned, err := r.Create(beads.Bead{Title: "assigned graph step", Type: "task", Labels: []string{"gc:wisp"}, Assignee: "bob", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create assigned: %v", err)
+	}
+	epic, err := r.Create(beads.Bead{Title: "graph epic", Type: "epic", Labels: []string{"gc:wisp"}, Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	args := []string{"--metadata-field", "gc.routed_to=worker", "--unassigned", "--exclude-type=epic", "--json", "--sort", "oldest"}
+	if code := dispatchBdShimVerb(r, "ready", args, nil, &out, &errb); code != 0 {
+		t.Fatalf("ready exit = %d, stderr=%q", code, errb.String())
+	}
+	parsed, err := decodeHookClaimBeads(out.String())
+	if err != nil {
+		t.Fatalf("ready output %q not parseable: %v", out.String(), err)
+	}
+	got := make(map[string]bool, len(parsed))
+	for _, b := range parsed {
+		got[b.ID] = true
+	}
+	if !got[routed.ID] {
+		t.Errorf("routed step %s missing from results %v", routed.ID, got)
+	}
+	if got[other.ID] {
+		t.Errorf("step %s with a different gc.routed_to should be filtered out", other.ID)
+	}
+	if got[assigned.ID] {
+		t.Errorf("assigned step %s should be excluded by --unassigned", assigned.ID)
+	}
+	if got[epic.ID] {
+		t.Errorf("epic %s should be excluded by --exclude-type=epic", epic.ID)
 	}
 }
 

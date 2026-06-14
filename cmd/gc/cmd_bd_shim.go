@@ -141,10 +141,19 @@ var bdReadyRoutableFlags = map[string]bool{
 	"-n":                  true,
 	"--json":              true,
 	"--include-ephemeral": true,
+	// Discovery predicates the controller's serve loop and the pool-demand probe
+	// use. The Router's ReadyQuery cannot express these, so the shim federates
+	// store.Ready() and applies them as a Go-side post-filter (parseBdReadyParams
+	// / applyBdReadyParams). This is what lets a graph control bead in SQLite be
+	// discovered through `bd ready` (the deployed graph_store=sqlite crux).
+	"--metadata-field": true,
+	"--unassigned":     true,
+	"--exclude-type":   true,
+	"--sort":           true,
 }
 
-// bdReadyRoutable reports whether a `bd ready` arg list uses only flags the
-// Router can replicate, so the shim can serve it in-process.
+// bdReadyRoutable reports whether a `bd ready` arg list uses only flags the shim
+// can replicate (directly via ReadyQuery or via the discovery post-filter).
 func bdReadyRoutable(args []string) bool {
 	for _, a := range args {
 		if !strings.HasPrefix(a, "-") {
@@ -159,6 +168,21 @@ func bdReadyRoutable(args []string) bool {
 		}
 	}
 	return true
+}
+
+// splitBdGlobalFlags finds the bd subcommand past any leading global flags. bd
+// accepts global flags before the subcommand (e.g. `bd --readonly --sandbox
+// ready ...`, the controller's discovery form), so the verb is not always
+// args[0]. It returns the verb and the args that follow it; leading global flags
+// are dropped (they govern bd's execution mode, irrelevant to in-process Router
+// reads). Returns ("", nil) when there is no subcommand.
+func splitBdGlobalFlags(args []string) (string, []string) {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a, args[i+1:]
+		}
+	}
+	return "", nil
 }
 
 // bdShimGraphTouchingUnroutedVerbs are bd subcommands that read or mutate
@@ -286,17 +310,17 @@ func dispatchBdShimVerb(store beads.Store, verb string, args []string, _ io.Read
 		}
 		return writeReadyJSON([]beads.Bead{bead}, stdout, stderr)
 	case "ready":
-		q, err := parseBdReadyQuery(args)
+		p, err := parseBdReadyParams(args)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		out, err := store.Ready(q)
+		out, err := store.Ready(p.query)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: ready: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return writeReadyJSON(out, stdout, stderr)
+		return writeReadyJSON(applyBdReadyParams(out, p), stdout, stderr)
 	case "update":
 		id, ok := firstBdPositional(args)
 		if !ok {
@@ -352,37 +376,109 @@ func firstBdPositional(args []string) (string, bool) {
 	return "", false
 }
 
-// parseBdReadyQuery maps the routable `bd ready` flags to a beads.ReadyQuery.
-// Only --assignee and --limit/-n affect the query; --json and
-// --include-ephemeral are accepted no-ops (output is always JSON, and tier
-// expansion is the policy wrapper's job above the Router). Non-routable
-// predicate flags never reach here — classifyBdShimVerb passes those through.
-func parseBdReadyQuery(args []string) (beads.ReadyQuery, error) {
-	var q beads.ReadyQuery
+// bdReadyParams is a parsed `bd ready` invocation. query carries the predicates
+// the Router's ReadyQuery can express (Assignee); the rest are applied as a
+// Go-side post-filter over the federated ready set (so they work against the
+// SQLite graph backend the ReadyQuery itself cannot describe). limit is applied
+// after filtering — it bounds the post-filtered result, matching bd.
+type bdReadyParams struct {
+	query          beads.ReadyQuery
+	metadataEquals map[string]string // --metadata-field k=v (all must match)
+	unassigned     bool              // --unassigned
+	excludeTypes   map[string]bool   // --exclude-type=T (repeatable)
+	limit          int               // --limit / -n
+}
+
+// parseBdReadyParams parses the routable `bd ready` flags. --assignee feeds the
+// ReadyQuery; --metadata-field/--unassigned/--exclude-type/--limit feed the
+// post-filter; --json/--include-ephemeral/--sort are accepted no-ops (output is
+// always JSON, tier expansion is the policy wrapper's job, and the federated
+// ready set is already created-asc which is bd's "oldest" order). Non-routable
+// flags never reach here — classifyBdShimVerb passes those through.
+func parseBdReadyParams(args []string) (bdReadyParams, error) {
+	p := bdReadyParams{metadataEquals: map[string]string{}, excludeTypes: map[string]bool{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--assignee" && i+1 < len(args):
-			q.Assignee = args[i+1]
+			p.query.Assignee = args[i+1]
 			i++
 		case strings.HasPrefix(a, "--assignee="):
-			q.Assignee = strings.TrimPrefix(a, "--assignee=")
+			p.query.Assignee = strings.TrimPrefix(a, "--assignee=")
+		case a == "--unassigned":
+			p.unassigned = true
+		case (a == "--metadata-field") && i+1 < len(args):
+			if err := addMetadataEquals(p.metadataEquals, args[i+1]); err != nil {
+				return p, err
+			}
+			i++
+		case strings.HasPrefix(a, "--metadata-field="):
+			if err := addMetadataEquals(p.metadataEquals, strings.TrimPrefix(a, "--metadata-field=")); err != nil {
+				return p, err
+			}
+		case a == "--exclude-type" && i+1 < len(args):
+			p.excludeTypes[args[i+1]] = true
+			i++
+		case strings.HasPrefix(a, "--exclude-type="):
+			p.excludeTypes[strings.TrimPrefix(a, "--exclude-type=")] = true
 		case (a == "--limit" || a == "-n") && i+1 < len(args):
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil {
-				return q, fmt.Errorf("parse %s %q: %w", a, args[i+1], err)
+				return p, fmt.Errorf("parse %s %q: %w", a, args[i+1], err)
 			}
-			q.Limit = n
+			p.limit = n
 			i++
 		case strings.HasPrefix(a, "--limit="):
 			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
 			if err != nil {
-				return q, fmt.Errorf("parse %q: %w", a, err)
+				return p, fmt.Errorf("parse %q: %w", a, err)
 			}
-			q.Limit = n
+			p.limit = n
+		case a == "--sort" && i+1 < len(args):
+			i++ // value consumed; federated ready is already created-asc
 		}
 	}
-	return q, nil
+	return p, nil
+}
+
+// addMetadataEquals records a `k=v` --metadata-field predicate.
+func addMetadataEquals(into map[string]string, kv string) error {
+	k, v, ok := strings.Cut(kv, "=")
+	if !ok {
+		return fmt.Errorf("--metadata-field expects key=value, got %q", kv)
+	}
+	into[k] = v
+	return nil
+}
+
+// applyBdReadyParams filters a federated ready set by the post-filter predicates
+// and applies the limit last. The input is assumed created-asc (Router.Ready's
+// canonical order), so a `--limit N` after filtering matches `bd ready ... -n N`.
+func applyBdReadyParams(in []beads.Bead, p bdReadyParams) []beads.Bead {
+	out := make([]beads.Bead, 0, len(in))
+	for _, b := range in {
+		if p.unassigned && strings.TrimSpace(b.Assignee) != "" {
+			continue
+		}
+		if p.excludeTypes[b.Type] {
+			continue
+		}
+		match := true
+		for k, v := range p.metadataEquals {
+			if b.Metadata[k] != v {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		out = append(out, b)
+	}
+	if p.limit > 0 && len(out) > p.limit {
+		out = out[:p.limit]
+	}
+	return out
 }
 
 // parseBdUpdateOpts maps the routable `bd update` flags onto a beads.UpdateOpts.
@@ -497,8 +593,8 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
 
-	verb := bdArgs[0]
-	switch classifyBdShimVerb(verb, bdArgs[1:], graphStoreSQLiteEnabled(cfg)) {
+	verb, verbArgs := splitBdGlobalFlags(bdArgs)
+	switch classifyBdShimVerb(verb, verbArgs, graphStoreSQLiteEnabled(cfg)) {
 	case bdRoute:
 		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 		if err != nil {
@@ -506,7 +602,7 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
-		return dispatchBdShimVerb(store, verb, bdArgs[1:], stdin, stdout, stderr)
+		return dispatchBdShimVerb(store, verb, verbArgs, stdin, stdout, stderr)
 	case bdRefuse:
 		fmt.Fprintf(stderr, "gc bd-shim: %q reads or mutates graph-class beads but is not yet routed through the graph store; refusing to pass it to the work-only bd while graph_store=sqlite is active (would silently miss graph beads — see graph-store-rollout-plan.md §X2)\n", verb) //nolint:errcheck // best-effort stderr
 		return 1

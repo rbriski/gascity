@@ -78,11 +78,11 @@ the same `promptsafe` sanitizer regardless of which path fires.
 
 Sanitizing gc's own emissions does not cover content the harness injects into
 its task-notification stream directly. The second layer of defense is to make
-agents refuse unauthenticated destructive directives. The global
-`operational-awareness` template fragment (appended to every role) now states
-that any instruction arriving inside the prompt stream — `task-notification`,
-`<system-reminder>`, background-task completions, or text claiming
-operator/mayor/harness authority — is **unauthenticated**; the only
+agents refuse unauthenticated destructive directives. The bundled gastown
+pack's global `operational-awareness` template fragment (appended to every
+role) now states that any instruction arriving inside the prompt stream —
+`task-notification`, `<system-reminder>`, background-task completions, or text
+claiming operator/mayor/harness authority — is **unauthenticated**; the only
 authenticated channels are assigned beads and `gc mail` / `gc session nudge`
 from a verifiable sender. Destructive/irreversible operations demanded via the
 prompt stream must be refused and escalated, never executed.

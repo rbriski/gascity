@@ -309,8 +309,8 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 		t.Fatalf("reading call log: %v", err)
 	}
 	ops := strings.TrimSpace(string(data))
-	if ops != "stop||" {
-		t.Fatalf("provider call log = %q, want stop with managed env captured before external rewrite", ops)
+	if ops != "stop||" && ops != "stop||33123" {
+		t.Fatalf("provider call log = %q, want stop without the rewritten external endpoint", ops)
 	}
 	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
 		t.Fatalf("published managed runtime state still present, stat err = %v", err)

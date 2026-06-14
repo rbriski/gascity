@@ -57,6 +57,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc ready](#gc-ready) | List ready work as JSON, federated across the work and graph stores |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -2767,6 +2768,25 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
+## gc ready
+
+List ready (open, unblocked) work as a JSON array of beads.
+
+The store is opened through the per-class Router, so when a city sets
+[beads] graph_store the result federates ready work from both the Dolt-backed
+work store and the embedded graph store. The output is the bead JSON a work_query
+consumer unmarshals, so 'gc ready' can stand in for a 'bd ready --json' work_query
+to make a worker's demand probe graph-store aware.
+
+```
+gc ready [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--assignee` | string |  | filter to beads assigned to this actor |
+| `--limit` | int |  | maximum beads to return (0 = no limit) |
 
 ## gc register
 

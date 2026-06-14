@@ -1,5 +1,49 @@
 # M2 — deployed `gc start` city e2e (graph_store=sqlite) — grounded build plan
 
+> **UPDATE — M2 DONE.** The full deployed-city **convergence** is proven by a
+> green, non-flaky (3×) integration test:
+> `test/integration/graph_store_sqlite_convergence_test.go`
+> (`TestGraphStoreSQLiteDeployedCityConverges`, ~3.5s/run). A real `gc start`
+> city on disk (`[beads] provider="file"` + `graph_store="sqlite"`, no Dolt)
+> with the **gc bd-shim installed as the city's `bd`** and a **no-LLM scripted
+> worker** slings a minimal durable graph.v2 formula and the molecule
+> **FINISHES** — the control-dispatcher auto-closes the workflow root to
+> `gc.outcome=pass` with every graph bead (root + work step + workflow-finalize)
+> resident in the on-disk `<scope>/.gc/beads.sqlite`. Two fixes were required to
+> make a deployed graph_store=sqlite city converge (both landed with this work):
+>
+> 1. **gc-N id-namespace collision (the `ga-y5pwx3` slice convergence needs).**
+>    The file work store and the SQLite graph store both minted `gc-N`; their
+>    independent sequences overlap, and `Router.backendForID` (Get-first-hit,
+>    work first) misrouted a worker's `bd close gc-2` of a graph step to the
+>    work store's `gc-2`, leaving the graph step open forever. Fix: the graph
+>    SQLite store now mints a **distinct `gcg-` prefix**
+>    (`graphStoreIDPrefix` → `WithSQLiteStoreIDPrefix` in
+>    `cmd/gc/api_state.go:registerGraphStoreBackend`). Guarded by
+>    `TestRoutedGraphStoreByIDRoutingSurvivesNumericIDOverlap` in
+>    `cmd/gc/api_state_router_test.go`. Note the native Dolt store ALSO defaults
+>    to `"gc"`, so this is not a file-provider-only concern — it blocks
+>    convergence for any work backend sharing the prefix.
+> 2. **Durable-workflow declaration.** The minimal formula must declare
+>    `[requires] formula_compiler = ">=2.0.0"` (as `mol-scoped-work` does), NOT
+>    the legacy `contract = "graph.v2"`. The legacy form makes `gc sling --on`
+>    create an **ephemeral wisp-tier** molecule; with `bd_compatibility` at its
+>    `bd-1.0.4` default the controller's discovery does NOT pass
+>    `--include-ephemeral`, so it can never see the molecule's control beads.
+>    The `formula_compiler` form yields a **durable** workflow in the main
+>    (issues) tier where the worker's `bd ready` and the controller's discovery
+>    both read.
+>
+> The shim install (so BOTH the controller's `bd ready` discovery subprocess and
+> the spawned worker resolve `bd`→gc-shim) runs the supervisor+controller from a
+> per-test `gc` copy and swaps the package-global `gcBinary`, so
+> `prependGCBinDirToPATH` fronts the dir holding the `bd`→gc symlink (see
+> `newGraphStoreSQLiteShimEnv`); `GC_BD_REAL` points at the filebdshim for
+> passthrough. The worker performs ONLY routable mutations
+> (`bd update <id> --set-metadata gc.outcome=pass --status closed`) and never
+> `--claim`/`gc hook --claim`/`bd mol|gate` (all of which bypass or are refused
+> by the shim). The rest of this doc is the original build plan + findings.
+
 **Status:** the deployed-city **pour** is proven by a green, non-flaky (3×)
 integration test — `test/integration/graph_store_sqlite_dispatch_test.go`
 (`TestGraphStoreSQLiteDeployedCityPour`): a real `gc start` city on disk with

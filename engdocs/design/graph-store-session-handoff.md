@@ -147,10 +147,21 @@ WORKER gc process: policy( Router( bd-work        , sqlite-graph ) )
 > formula sling runs through the entire process with graph metadata in the
 > in-process store"* end to end, not link by link.
 >
-> What is still NOT done is **option 2**: a literal `gc start` daemon city with a
-> real/scripted external worker process. That runtime harness does not exist yet
-> (a live `gc start` needs an agent API). It is the remaining heavier item if a
-> deployed-city demo (vs. the hermetic engine-level proof) is required.
+> **UPDATE (2026-06-14): option 2 (the literal `gc start` daemon city) is DONE.**
+> `test/integration/graph_store_sqlite_convergence_test.go`
+> (`TestGraphStoreSQLiteDeployedCityConverges`) stands up a real `gc start` city
+> with `[beads] provider="file"` + `graph_store="sqlite"`, installs the gc
+> bd-shim as the city's `bd`, slings a minimal **durable** graph.v2 formula, and
+> a no-LLM scripted worker drives the molecule to terminal — the
+> control-dispatcher auto-closes the workflow root to `gc.outcome=pass` with all
+> graph beads in the on-disk SQLite store. Green, non-flaky over 3×.
+> Two fixes were required (see `engdocs/design/m2-deployed-city-plan.md`):
+> the graph SQLite store now mints a **distinct `gcg-` id prefix** (the
+> `ga-y5pwx3` slice convergence needs — both file and native work stores default
+> to `"gc"`, so by-id close routing would otherwise misfire), and the formula
+> must declare `[requires] formula_compiler = ">=2.0.0"` (durable workflow) not
+> the legacy `contract = "graph.v2"` (which makes an ephemeral wisp the
+> bd-1.0.4-default controller cannot discover).
 
 The store/engine layer and the full-chain lifecycle proof are done. The remaining
 work is the runtime shell (option 2) + making an **unmodified real worker** reach
@@ -256,12 +267,18 @@ helpers.** (This session left the two commands in place — `cmd/gc/cmd_ready.go
   commit — always verify `grep EXIT=` in the task output and that HEAD advanced.
 - **Never edit tracked files while a background commit hook is running.** Its
   `check-schema`/build can see your working-tree changes and mismatch the staged set.
-- **Id-namespace collision (`ga-y5pwx3`).** `MemStore`, `FileStore`, and `SQLiteStore`
-  all mint `gc-N` ids. In tests with a Router over a MemStore work backend + SQLite
-  graph backend, offset the MemStore: `beads.NewMemStoreFrom(1000, nil, nil)`.
-  Production work backends (bd `bd-`, native rig-prefix) differ from SQLite `gc`, so
-  this is mainly a test/file-provider concern — but `Router.backendForID` does
-  Get-first-hit, so overlapping namespaces are a real latent risk.
+- **Id-namespace collision (`ga-y5pwx3`).** `MemStore`, `FileStore`, and the native
+  Dolt store all mint `gc-N` ids — so does the SQLite graph store by default. Because
+  `Router.backendForID` resolves a by-id op via Get-first-hit (work backend first), an
+  overlapping `gc-N` between the work and graph stores misroutes a graph step's close
+  to the work store — this BLOCKS deployed convergence, not just file-provider tests
+  (the earlier "mainly a test concern" note was wrong: the native store defaults to
+  `gc` too). **Partly fixed:** the graph SQLite store registered by
+  `registerGraphStoreBackend` now mints a distinct `gcg-` prefix
+  (`graphStoreIDPrefix` + `WithSQLiteStoreIDPrefix`), so by-id routing is unambiguous;
+  the fuller `ga-y5pwx3` would route by-id via a declared prefix→backend map. In tests
+  that build a bare Router over a MemStore work backend + SQLite graph backend (default
+  `gc` prefix), still offset the MemStore: `beads.NewMemStoreFrom(1000, nil, nil)`.
 - **`bd`/`gc bd` bypass the Router.** `gc hook --claim` opens a raw `*beads.BdStore`;
   `gc bd` execs the external `bd` binary. Those are the worker write paths still to
   mediate (C6 hook rewire, C2 bd-shim).

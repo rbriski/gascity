@@ -894,6 +894,96 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	}, nil
 }
 
+// ReadyBeads fetches the city's ready work — the federated ready set across the
+// controller's bead stores — via GET /v0/city/{cityName}/beads/ready. The
+// endpoint applies no assignee/metadata predicates, so callers that need them
+// (e.g. the bd shim's discovery queries) post-filter the returned set
+// client-side.
+func (c *Client) ReadyBeads() (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameBeadsReadyParams{})
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CloseBead closes a bead via POST /v0/city/{cityName}/bead/{id}/close.
+func (c *Client) CloseBead(id string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdCloseWithResponse(context.Background(), c.cityName, id, nil)
+	return checkMutation(resp, err)
+}
+
+// ReopenBead reopens a closed bead via POST /v0/city/{cityName}/bead/{id}/reopen.
+func (c *Client) ReopenBead(id string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdReopenWithResponse(context.Background(), c.cityName, id, nil)
+	return checkMutation(resp, err)
+}
+
+// DeleteBead soft-deletes (closes) a bead via DELETE /v0/city/{cityName}/bead/{id}.
+func (c *Client) DeleteBead(id string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	resp, err := c.cw.DeleteV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id, nil)
+	return checkMutation(resp, err)
+}
+
+// UpdateBead applies a field update via POST /v0/city/{cityName}/bead/{id}/update,
+// mapping beads.UpdateOpts onto the wire body. nil/empty fields are omitted so the
+// server leaves them unchanged.
+func (c *Client) UpdateBead(id string, opts beads.UpdateOpts) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	body := genclient.BeadUpdateBody{
+		Status:      opts.Status,
+		Assignee:    opts.Assignee,
+		Title:       opts.Title,
+		Type:        opts.Type,
+		Description: opts.Description,
+		Parent:      opts.ParentID,
+	}
+	if opts.Priority != nil {
+		p := int64(*opts.Priority)
+		body.Priority = &p
+	}
+	if len(opts.Labels) > 0 {
+		labels := append([]string(nil), opts.Labels...)
+		body.Labels = &labels
+	}
+	if len(opts.RemoveLabels) > 0 {
+		rm := append([]string(nil), opts.RemoveLabels...)
+		body.RemoveLabels = &rm
+	}
+	if len(opts.Metadata) > 0 {
+		md := make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			md[k] = v
+		}
+		body.Metadata = &md
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdUpdateWithResponse(context.Background(), c.cityName, id, nil, body)
+	return checkMutation(resp, err)
+}
+
 // GetStatus fetches the city-wide status snapshot via
 // GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header

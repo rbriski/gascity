@@ -61,6 +61,67 @@ func TestBeadCloseHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	}
 }
 
+// TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend proves the atomic
+// compare-and-swap release endpoint operates on the SQLite graph backend via the
+// Router: a mismatched expected-assignee is skipped (assignment intact), a match
+// releases it — both reflected in the on-disk SQLite bead.
+func TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend(t *testing.T) {
+	work := beads.NewMemStore()
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+
+	router := coordrouter.New(work)
+	router.Register(coordclass.ClassGraph, graph)
+
+	gb, err := router.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	// ReleaseIfCurrent only releases an in_progress assignment, so claim it first.
+	assignee := "worker"
+	inProgress := "in_progress"
+	if err := router.Update(gb.ID, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress}); err != nil {
+		t.Fatalf("claim graph bead: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = router
+	state.stores = nil
+	s := New(state)
+
+	// Mismatched expected assignee -> skipped; the SQLite assignment stays.
+	skip := &BeadReleaseIfCurrentInput{ID: gb.ID}
+	skip.Body.ExpectedAssignee = "someone-else"
+	out, err := s.humaHandleBeadReleaseIfCurrent(context.Background(), skip)
+	if err != nil {
+		t.Fatalf("release-if-current (mismatch): %v", err)
+	}
+	if out.Body["status"] != "skipped" {
+		t.Fatalf("mismatch status = %q, want skipped", out.Body["status"])
+	}
+	if got, _ := graph.Get(gb.ID); got.Assignee != "worker" {
+		t.Fatalf("after skip, SQLite assignee = %q, want worker", got.Assignee)
+	}
+
+	// Matching expected assignee -> released; the SQLite assignment is cleared.
+	rel := &BeadReleaseIfCurrentInput{ID: gb.ID}
+	rel.Body.ExpectedAssignee = "worker"
+	out, err = s.humaHandleBeadReleaseIfCurrent(context.Background(), rel)
+	if err != nil {
+		t.Fatalf("release-if-current (match): %v", err)
+	}
+	if out.Body["status"] != "released" {
+		t.Fatalf("match status = %q, want released", out.Body["status"])
+	}
+	if got, _ := graph.Get(gb.ID); got.Assignee != "" {
+		t.Fatalf("after release, SQLite assignee = %q, want cleared", got.Assignee)
+	}
+}
+
 // TestBeadReadyFederatesCityStore proves GET /v0/beads/ready surfaces city-scope
 // ready work. The city store is not among the per-rig BeadStores(), so before the
 // fix a single-HQ city's ready work (e.g. a graph.v2 molecule's actionable step)
@@ -148,5 +209,15 @@ func TestClientBeadWriteMethodsIssueExpectedRequests(t *testing.T) {
 	}
 	if gotMethod != http.MethodGet || gotPath != "/v0/city/alpha/beads/ready" {
 		t.Fatalf("ReadyBeads -> %s %s, want GET /v0/city/alpha/beads/ready", gotMethod, gotPath)
+	}
+
+	if _, err := c.ReleaseBeadIfCurrent("gcg-2", "worker"); err != nil {
+		t.Fatalf("ReleaseBeadIfCurrent: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v0/city/alpha/bead/gcg-2/release-if-current" {
+		t.Fatalf("ReleaseBeadIfCurrent -> %s %s, want POST /v0/city/alpha/bead/gcg-2/release-if-current", gotMethod, gotPath)
+	}
+	if gotBody["expected_assignee"] != "worker" {
+		t.Fatalf("ReleaseBeadIfCurrent body expected_assignee = %v, want worker", gotBody["expected_assignee"])
 	}
 }

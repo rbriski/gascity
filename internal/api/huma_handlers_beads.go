@@ -671,6 +671,44 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	return nil, huma.Error404NotFound("bead " + id + " not found")
 }
 
+// humaHandleBeadReleaseIfCurrent is the Huma-typed handler for
+// POST /v0/bead/{id}/release-if-current: an atomic compare-and-swap that
+// releases the bead's assignment only if it is currently assigned to
+// expected_assignee. The body status is "released" or "skipped". It routes to
+// the owning store via beadStoresForID so a graph-class bead's release reaches
+// the SQLite backend through the Router.
+func (s *Server) humaHandleBeadReleaseIfCurrent(_ context.Context, input *BeadReleaseIfCurrentInput) (*IndexOutput[map[string]string], error) {
+	id := input.ID
+	for _, store := range s.beadStoresForID(id) {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		releaser, ok := store.(beads.ConditionalAssignmentReleaser)
+		if !ok {
+			return nil, huma.Error500InternalServerError(beads.ErrConditionalReleaseUnsupported.Error())
+		}
+		released, err := releaser.ReleaseIfCurrent(id, input.Body.ExpectedAssignee)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		status := "skipped"
+		if released {
+			status = "released"
+		}
+		return &IndexOutput[map[string]string]{
+			Index: s.latestIndex(),
+			Body:  map[string]string{"status": status},
+		}, nil
+	}
+	return nil, huma.Error404NotFound("bead " + id + " not found")
+}
+
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
 // It is implemented as a soft-delete (store.Close) — see the `"closed"`
 // status field for honest wire-contract semantics. Hard-delete is not

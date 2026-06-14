@@ -719,12 +719,30 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// release-if-current is a gc-only verb whose conditional release routes by id
-	// through the store's ConditionalAssignmentReleaser (the Router routes it to
-	// the owning backend). Reuse the gc bd implementation.
+	// release-if-current is a gc-only verb: an atomic compare-and-swap release of
+	// a bead's assignment. It routes through the controller's HTTP API by default
+	// (pure-HTTP), falling back to the in-process store only via the transitional
+	// escape hatch — like the routed verbs.
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if client := bdShimAPIClient(cityPath); client != nil {
+			released, err := client.ReleaseBeadIfCurrent(id, expectedAssignee)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd-shim: release-if-current %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if released {
+				fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
+			} else {
+				fmt.Fprintln(stdout, "skipped") //nolint:errcheck // best-effort stdout
+			}
+			return 0
+		}
+		if !bdShimAllowLocalFallback() {
+			fmt.Fprintf(stderr, "gc bd-shim: no controller API reachable for release-if-current %q; the shim routes bead ops through the controller (ga-2gap48 pure-HTTP). Set GC_BD_SHIM_ALLOW_LOCAL=1 for the transitional local-store fallback.\n", id) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)

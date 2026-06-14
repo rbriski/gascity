@@ -984,6 +984,34 @@ func (c *Client) UpdateBead(id string, opts beads.UpdateOpts) error {
 	return checkMutation(resp, err)
 }
 
+// ReleaseBeadIfCurrent atomically releases a bead's assignment only if it is
+// currently assigned to expectedAssignee (compare-and-swap), via
+// POST /v0/city/{cityName}/bead/{id}/release-if-current. It returns whether the
+// release happened (true = "released", false = "skipped").
+func (c *Client) ReleaseBeadIfCurrent(id, expectedAssignee string) (bool, error) {
+	if err := c.requireCityScope(); err != nil {
+		return false, err
+	}
+	body := genclient.BeadReleaseIfCurrentInputBody{}
+	if expectedAssignee != "" {
+		body.ExpectedAssignee = &expectedAssignee
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdReleaseIfCurrentWithResponse(context.Background(), c.cityName, id, nil, body)
+	if err != nil {
+		return false, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return false, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return false, err
+	}
+	if resp.JSON200 == nil {
+		return false, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return (*resp.JSON200)["status"] == "released", nil
+}
+
 // GetStatus fetches the city-wide status snapshot via
 // GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header

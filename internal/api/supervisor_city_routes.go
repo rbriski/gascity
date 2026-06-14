@@ -163,6 +163,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate)
 	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate)
 	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign)
+	cityPost(sm, "/bead/{id}/release-if-current", (*Server).humaHandleBeadReleaseIfCurrent)
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete)
 
 	// Mail.

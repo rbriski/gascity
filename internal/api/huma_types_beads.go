@@ -142,6 +142,17 @@ type BeadAssignInput struct {
 	}
 }
 
+// BeadReleaseIfCurrentInput is the Huma input for
+// POST /v0/city/{cityName}/bead/{id}/release-if-current — an atomic
+// compare-and-swap release of a bead's assignment.
+type BeadReleaseIfCurrentInput struct {
+	CityScope
+	ID   string `path:"id" doc:"Bead ID."`
+	Body struct {
+		ExpectedAssignee string `json:"expected_assignee,omitempty" doc:"Release the assignment only if the bead is currently assigned to this agent (compare-and-swap)."`
+	}
+}
+
 // BeadDeleteInput is the Huma input for DELETE /v0/city/{cityName}/bead/{id}.
 type BeadDeleteInput struct {
 	CityScope

@@ -4,18 +4,25 @@ description: Gas City is an SDK for orchestrating fleets of coding agents — wr
 ---
 
 A single coding agent is remarkable on its own — but it works alone. One session,
-one train of thought, and when it crashes the context is gone. Real engineering
-work is bigger than that: it spans many steps, runs longer than any one session,
-and shouldn't need you watching every move.
+one train of thought, and when it crashes, you have to recover the context. Real
+engineering work is bigger than that: it spans many steps, runs longer than any one
+session, and shouldn't need you watching every move.
 
-**Gas City orchestrates a fleet of agents.** You write down *how* a job gets done
-once — a **formula** — and an **orchestrator** runs it across as many agents as the
-work allows: it breaks the job into tracked units of work, runs the independent
-pieces in parallel, holds the rest until their dependencies finish, retries what
-fails, and drives the whole thing to completion *outside your session*. The work
-is durable, so a crash never loses progress — and because no role is hardwired
-into the binary, the same engine can run your orchestration, Gas Town's, or
-anyone else's.
+There are two ways to put coding agents to work. The first is the **interactive
+session** — you sit with one agent and steer it, watching every move. The second is
+to **automate the work itself**: turn a fleet of agents into a **software factory**
+that runs without you in the loop. An interactive session gives you a faster pair of
+hands; a software factory is what gets you **production quality at machine speed**.
+
+**Gas City is that software factory.** It orchestrates a fleet of agents: you write
+down *how* a job gets done once — a **formula** — and an **orchestrator** runs it
+across as many agents as the work allows, breaking the job into tracked units of
+work, running the independent pieces in parallel, holding the rest until their
+dependencies finish, retrying what fails, and driving the whole thing to completion
+*outside your session*. The work is durable, so a crash never loses progress — and
+because no role is hardwired into the binary, the same engine can run your local
+configuration, the one you share with your team, or the ones shared by the
+community.
 
 That orchestration is built from six primitives:
 

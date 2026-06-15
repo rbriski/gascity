@@ -122,7 +122,10 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 // default — a missing work-query runner is a caller error handled in doHookClaim.
 func (ops *hookClaimOps) applyDefaults() {
 	if ops.Claim == nil {
-		ops.Claim = hookClaimWithBdStore
+		// Route graph_store=sqlite claims through the controller HTTP API so a
+		// graph-class step's claim reaches the controller (fork: C6); falls back
+		// to the direct bd-store claim for non-sqlite stores.
+		ops.Claim = hookClaimDefault
 	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
@@ -322,6 +325,44 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		assigned = append(assigned, sibling.ID)
 	}
 	return assigned, nil
+}
+
+// hookClaimDefault claims a hooked bead, routing through the controller's HTTP
+// API when the city uses graph_store=sqlite so a graph-class step's claim reaches
+// the SQLite backend WITH the worker's explicit assignee (the C6 fix). For
+// non-graph cities it uses the in-process work-store claim (the env-actor BdStore
+// claim, correct for work beads); the work-only BdStore cannot honor a per-call
+// assignee, so routing those through the controller would claim for the
+// controller's actor instead of the worker's.
+func hookClaimDefault(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+	if cityPath := hookClaimCityPath(dir, env); cityPath != "" {
+		if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && graphStoreSQLiteEnabled(cfg) {
+			if client := bdShimAPIClient(cityPath); client != nil {
+				claimed, ok, err := client.ClaimBead(beadID, assignee)
+				if err != nil {
+					return beads.Bead{}, false, err
+				}
+				if !ok || !hookClaimHasIdentity(claimed.Assignee, []string{assignee}) {
+					return beads.Bead{}, false, nil
+				}
+				return claimed, true, nil
+			}
+		}
+	}
+	return hookClaimWithBdStore(ctx, dir, env, beadID, assignee)
+}
+
+// hookClaimCityPath resolves the city path for an agent hook claim from GC_CITY
+// in the agent env, falling back to the working dir.
+func hookClaimCityPath(dir string, env []string) string {
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "GC_CITY="); ok {
+			if v = strings.TrimSpace(v); v != "" {
+				return v
+			}
+		}
+	}
+	return dir
 }
 
 func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {

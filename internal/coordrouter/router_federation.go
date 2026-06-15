@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // This file federates the Router's read surface across its per-class backends.
@@ -122,6 +123,21 @@ func (r *Router) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return r.federateRead(beads.SortCreatedAsc, limit, func(s beads.Store) ([]beads.Bead, error) {
 		return s.Ready(query...)
 	})
+}
+
+// ReadyGraphOnly returns the ready set from the ClassGraph backend ALONE, never
+// the ClassWork primary. It is the worker/dispatcher execution-readiness surface
+// under graph_store=sqlite: a worker only ever executes graph nodes (molecule
+// steps/wisps), so the Dolt work-leg is kept out of the readiness hot loop. The
+// full federated Ready still serves the human/diagnostic backlog view. In the
+// identity phase — no distinct ClassGraph backend — it falls back to the full
+// Ready so a default Dolt-only city stays byte-identical.
+func (r *Router) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	graph := r.Backend(coordclass.ClassGraph)
+	if graph == nil || graph == r.Backend(coordclass.ClassWork) {
+		return r.Ready(query...)
+	}
+	return graph.Ready(query...)
 }
 
 // DepList federates dependency reads: an edge touching id may be recorded in any

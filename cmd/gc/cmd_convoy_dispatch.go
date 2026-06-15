@@ -426,7 +426,7 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 		return openStoreAtForCity(storePath, cityPath)
 	}
 	if samePath(scopeRoot, cityPath) {
-		return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+		return controlStoreWithGraphRouting(controlBdStoreForCity(scopeRoot, cityPath, cfg), cfg, scopeRoot), nil
 	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -435,13 +435,30 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
 			if samePath(rigPath, scopeRoot) {
-				return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+				return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, scopeRoot), nil
 			}
 		}
 	}
 	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
 	// still need write-capable bd commands with auto-export suppressed.
-	return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+	return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, scopeRoot), nil
+}
+
+// controlStoreWithGraphRouting inserts the per-class Router over a bd-backed
+// control store under graph_store=sqlite, so the control-dispatcher's
+// ProcessControl reads and routes a molecule's graph-class beads (gcg-*) to the
+// embedded SQLite backend while work ops stay on Dolt. Without it ProcessControl
+// reads the Dolt work store alone and never sees a sqlite-resident molecule's
+// control beads, so graph workflows never dispatch (the E0 mediation). Default
+// (non-sqlite) cities return the bare bd store unchanged — byte-identical, no
+// Router and no policy wrapper. Wrapping here (not inside controlBdStoreForRig)
+// keeps the blast radius to the dispatcher open path and preserves the bd store's
+// auto-export suppression, which the Router/policy wrappers delegate through.
+func controlStoreWithGraphRouting(store beads.Store, cfg *config.City, scopeRoot string) beads.Store {
+	if store == nil || !graphStoreSQLiteEnabled(cfg) {
+		return store
+	}
+	return routedPolicyStore(store, cfg, scopeRoot)
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,

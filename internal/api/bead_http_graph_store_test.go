@@ -243,6 +243,54 @@ func TestBeadReadyFederatesCityStore(t *testing.T) {
 	}
 }
 
+// TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite proves the worker/dispatcher
+// readiness contract: GET /v0/beads/ready served from a graph_store=sqlite Router
+// returns the ClassGraph backend's ready set ALONE and drops the Dolt ClassWork
+// leg, so a worker's `bd ready` and the control-dispatcher's ListReadyBeads stop
+// scanning the work backlog on every call. A plain MemStore city (no graph
+// backend) keeps the full federated ready set — covered by the test above.
+func TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite(t *testing.T) {
+	work := beads.NewMemStore()
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+
+	router := coordrouter.New(work)
+	router.Register(coordclass.ClassGraph, graph)
+
+	workBead, err := router.Create(beads.Bead{Title: "backlog item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	graphBead, err := router.Create(beads.Bead{Title: "molecule step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = router
+	state.stores = nil
+	s := New(state)
+
+	out, err := s.humaHandleBeadReady(context.Background(), &BeadReadyInput{})
+	if err != nil {
+		t.Fatalf("humaHandleBeadReady: %v", err)
+	}
+	ids := make(map[string]bool, len(out.Body.Items))
+	for _, item := range out.Body.Items {
+		ids[item.ID] = true
+	}
+	if !ids[graphBead.ID] {
+		t.Fatalf("ready did not surface the graph step %s (items=%d)", graphBead.ID, len(out.Body.Items))
+	}
+	if ids[workBead.ID] {
+		t.Fatalf("ready leaked the Dolt work bead %s into the worker readiness hot loop under graph_store=sqlite", workBead.ID)
+	}
+}
+
 // TestClientBeadWriteMethodsIssueExpectedRequests proves the new write-path client
 // methods (the bd shim will call these) issue the correct HTTP verb, path, and
 // body against the city-scoped endpoints.

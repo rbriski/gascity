@@ -929,8 +929,8 @@ func filterWorkflowServeControlReadyBeads(ready []beads.Bead, spec workflowServe
 			if strings.TrimSpace(b.Assignee) != "" {
 				return false
 			}
-			return b.Metadata["gc.run_target"] == route ||
-				b.Metadata["gc.routed_to"] == route ||
+			return b.Metadata[beadmeta.RunTargetMetadataKey] == route ||
+				b.Metadata[beadmeta.RoutedToMetadataKey] == route ||
 				b.Metadata[graphroute.GraphExecutionRouteMetaKey] == route
 		})
 	}

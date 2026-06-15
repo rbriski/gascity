@@ -68,17 +68,26 @@ shim now requires one.
   (`NewSupervisorMux` → `serveCityRequest` → per-city `State`); bring the State up
   for a registered-but-not-fully-started city so its beads API answers before the
   full controller, with partial-startup cleanup.
-- **`release-if-current` — DONE** (`1ce3c77c3`): added the atomic
-  POST `/v0/bead/{id}/release-if-current` endpoint + `api.Client.ReleaseBeadIfCurrent`,
-  and the shim routes it through the API by default (in-process store only via the
-  escape hatch). The handler reaches the SQLite graph backend via the Router
+- **`release-if-current` — DONE** (`1ce3c77c3`): atomic POST
+  `/v0/bead/{id}/release-if-current` + `api.Client.ReleaseBeadIfCurrent`; the shim
+  routes it through the API. Reaches SQLite via the Router
   (`TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend`).
-- **`create`** (passthrough) still execs the real bd — fine for the graph goal
-  (graph beads are poured via molecule instantiate/graph-apply, not `bd create`;
-  `bd create` is for work beads). Only needed for a literally-pure shim.
-- **C6 hook rewire** (`gc hook --claim`, separate from the shim) still opens a raw
-  work-only BdStore (cmd_hook_claim.go) — a claim endpoint (same pattern as
-  release-if-current) + routing would close it for graph-class claims.
+- **`create` — DONE** (`b604be74f`): `api.Client.CreateBead` + the shim routes
+  `bd create` through the controller's create endpoint (work-bead creation goes
+  through the single-owner controller). A create flag the API body cannot express
+  (`--ephemeral`/`--no-history`/`--from`/...) passes through to the real bd
+  (`bdCreateRoutable`). Graph beads still pour via graph-apply, not `bd create`.
+- **C6 — DONE** (`3319b3b12` endpoint + `6ccd23cfd` hook rewire): atomic POST
+  `/v0/bead/{id}/claim` + `api.Client.ClaimBead` (`beadPolicyStore.Claim` forwards
+  to the Router); `gc hook --claim` routes through it when graph_store=sqlite, so a
+  worker's graph-step claim reaches SQLite WITH its explicit assignee. Gated on
+  graph_store=sqlite because the work-only BdStore is an EnvActorClaimer (claims
+  for its baked actor, not a per-call assignee); non-graph cities keep the
+  in-process claim. Verified by `TestBeadClaimHandlerReachesSQLiteGraphBackend`.
+
+The shim's routed verbs are now ALL pure-HTTP. The only remaining local-store
+access anywhere in the shim/hook path is the non-graph `gc hook --claim` BdStore
+fallback (correct: the work BdStore must use the worker's baked actor).
 
 ## Files
 

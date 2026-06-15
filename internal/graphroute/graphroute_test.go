@@ -529,6 +529,54 @@ func TestResolveGraphStepBinding_AssigneeTemplateTargetRejected(t *testing.T) {
 	}
 }
 
+func TestResolveGraphStepBinding_AssigneeDirectResolverBeatsTemplateTarget(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "materialized-worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-frontend-worker",
+			"template":     "frontend/worker",
+			"state":        "active",
+		},
+	}}, nil)
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Assignee: "worker",
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+	called := false
+	direct := func(beads.Store, string, string, *config.City, string, string) (string, bool, error) {
+		called = true
+		return "materialized-worker", true, nil
+	}
+
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", store, cfg.Workspace.Name, cfg, Deps{
+		Resolver:              testAgentResolver{},
+		DirectSessionResolver: direct,
+	})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
+	}
+	if !called {
+		t.Fatal("DirectSessionResolver was not called for assignee target")
+	}
+	if binding.DirectSessionID != "materialized-worker" {
+		t.Fatalf("DirectSessionID = %q, want materialized-worker", binding.DirectSessionID)
+	}
+}
+
 func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -570,7 +618,7 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	}
 }
 
-func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *testing.T) {
+func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesMetadataOnlyRoute(t *testing.T) {
 	zero := 0
 	one := 1
 	cfg := &config.City{
@@ -596,15 +644,15 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *te
 	if binding.QualifiedName != "frontend/worker" {
 		t.Fatalf("QualifiedName = %q, want frontend/worker", binding.QualifiedName)
 	}
-	if binding.SessionName != "frontend--worker" {
-		t.Fatalf("SessionName = %q, want frontend--worker", binding.SessionName)
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for pool-routed canonical singleton", binding.SessionName)
 	}
-	if binding.MetadataOnly {
-		t.Fatal("MetadataOnly = true, want false for canonical singleton pool")
+	if !binding.MetadataOnly {
+		t.Fatal("MetadataOnly = false, want true for canonical singleton pool")
 	}
 }
 
-func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName(t *testing.T) {
+func TestResolveGraphStepBinding_CanonicalSingletonPoolIgnoresMissingSessionName(t *testing.T) {
 	zero := 0
 	one := 1
 	cfg := &config.City{
@@ -626,12 +674,15 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 
-	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
-	if err == nil {
-		t.Fatal("ResolveGraphStepBinding succeeded; want missing session-name error")
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
 	}
-	if !strings.Contains(err.Error(), `could not resolve session name for "frontend/worker"`) {
-		t.Fatalf("ResolveGraphStepBinding error = %q, want missing session-name guidance", err)
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for pool-routed canonical singleton", binding.SessionName)
+	}
+	if !binding.MetadataOnly {
+		t.Fatal("MetadataOnly = false, want true for canonical singleton pool")
 	}
 }
 

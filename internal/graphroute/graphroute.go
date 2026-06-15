@@ -409,7 +409,7 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
 	binding := GraphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
-	if agentutil.IsMultiSessionAgent(&agentCfg) {
+	if agentCfg.SupportsInstanceExpansion() {
 		binding.MetadataOnly = true
 		cache[stepID] = binding
 		return binding, nil
@@ -428,6 +428,13 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 	if store == nil || target == "" {
 		return GraphRouteBinding{}, false, nil
 	}
+	// Exact session bead IDs are unambiguous and must win even when they
+	// collide with a config target name.
+	if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+			return GraphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
+		}
+	}
 	if deps.DirectSessionResolver != nil {
 		id, ok, err := deps.DirectSessionResolver(store, cityName, deps.CityPath, cfg, target, rigContext)
 		if err != nil {
@@ -444,13 +451,6 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 				}
 			}
 			return binding, true, nil
-		}
-	}
-	// Exact session bead IDs are unambiguous and must win even when they
-	// collide with a config target name.
-	if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
-		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return GraphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 		}
 	}
 	if cfg != nil && deps.Resolver != nil {
@@ -607,7 +607,7 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 	}
 
 	var sessionName string
-	if !agentutil.IsMultiSessionAgent(a) {
+	if !a.SupportsInstanceExpansion() {
 		sessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 		if sessionName == "" {
 			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())

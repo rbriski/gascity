@@ -3630,7 +3630,7 @@ func TestReconcileSessionBeads_OnDemandNamedSessionDoesNotWakeFromDesiredStatePr
 	}
 }
 
-func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedIdentityDemand(t *testing.T) {
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromPoolDemandWithoutNamedDemand(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -3643,16 +3643,22 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedIdentityDemand
 	}
 	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
 
-	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1", woken)
+	woken, running, namedDemand, starts := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
+	if namedDemand["mayor"] {
+		t.Fatalf("NamedSessionDemand[mayor] = true for routed_to=mayor, want false because routed_to targets pools")
 	}
-	if !running {
-		t.Fatalf("on-demand named session %q was not started from routed identity demand", sessionName)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; starts=%v", woken, starts)
+	}
+	if running {
+		t.Fatalf("on-demand named session %q started from routed pool demand; starts=%v", sessionName, starts)
+	}
+	if len(starts) == 0 {
+		t.Fatal("pool demand did not start any session")
 	}
 }
 
-func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTemplateDemand(t *testing.T) {
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromSingletonPoolDemandWithoutNamedDemand(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -3664,16 +3670,22 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTempl
 		NamedSessions: []config.NamedSession{{Name: "primary", Template: "worker", Mode: "on_demand"}},
 	}
 
-	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1", woken)
+	woken, running, namedDemand, starts := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
+	if namedDemand["primary"] {
+		t.Fatalf("NamedSessionDemand[primary] = true for routed_to=worker, want false because routed_to targets pools")
 	}
-	if !running {
-		t.Fatal("on-demand named session primary was not started from routed singleton-template demand")
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; starts=%v", woken, starts)
+	}
+	if running {
+		t.Fatalf("on-demand named session primary started from routed pool demand; starts=%v", starts)
+	}
+	if len(starts) == 0 {
+		t.Fatal("pool demand did not start any session")
 	}
 }
 
-func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool) {
+func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool, map[string]bool, []string) {
 	t.Helper()
 
 	cityPath := t.TempDir()
@@ -3711,9 +3723,6 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 
 	var stdout, stderr bytes.Buffer
 	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
-	if !dsResult.NamedSessionDemand[identity] {
-		t.Fatalf("NamedSessionDemand[%s] = false for routed_to=%s; stderr:\n%s", identity, routedTo, stderr.String())
-	}
 	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
 	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
 	sessions, err := loadSessionBeads(store)
@@ -3732,7 +3741,13 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
-	return woken, sp.IsRunning(sessionName)
+	var starts []string
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Start" {
+			starts = append(starts, call.Name)
+		}
+	}
+	return woken, sp.IsRunning(sessionName), dsResult.NamedSessionDemand, starts
 }
 
 func TestReconcileSessionBeads_SyncsGCDirWithWorkDirOverride(t *testing.T) {

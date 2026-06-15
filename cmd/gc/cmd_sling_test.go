@@ -1694,6 +1694,10 @@ start_command = "true"
 default_sling_formula = "mol-do-work"
 min_active_sessions = 0
 max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+mode = "on_demand"
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
@@ -1747,10 +1751,28 @@ max_active_sessions = 1
 	if len(members) != 1 || members[0].Title != "ship feature" {
 		t.Fatalf("input convoy members = %#v, want the slung work bead", members)
 	}
+	foundRoutedWorkflowBead := false
+	for _, bead := range all {
+		if bead.ID != root.ID && bead.Metadata["gc.root_bead_id"] != root.ID {
+			continue
+		}
+		if bead.Assignee == "worker" {
+			t.Fatalf("workflow bead %s Assignee = %q, want template only in gc.routed_to; metadata=%v", bead.ID, bead.Assignee, bead.Metadata)
+		}
+		if bead.Metadata["gc.routed_to"] == "worker" {
+			foundRoutedWorkflowBead = true
+			if bead.Assignee != "" {
+				t.Fatalf("workflow bead %s Assignee = %q with gc.routed_to=worker, want unassigned pool work", bead.ID, bead.Assignee)
+			}
+		}
+	}
+	if !foundRoutedWorkflowBead {
+		t.Fatalf("workflow rooted at %s had no gc.routed_to=worker bead; all=%#v", root.ID, all)
+	}
 
-	// Demand surfaces through the assigned-work path: the routed graph step
-	// bead makes the reconciler desire a worker session even though sling
-	// itself materialized nothing.
+	// Demand surfaces through routed pool metadata: the graph workflow makes
+	// the reconciler desire a worker session even though sling itself
+	// materialized nothing.
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
@@ -4799,6 +4821,74 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 	want := filepath.Join(cityPath, "rigs", "alpha")
 	if got != want {
 		t.Fatalf("SlingFormulaRepoDir() = %q, want %q", got, want)
+	}
+}
+
+func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "claude",
+			Mode:     "on_demand",
+		}},
+	}
+
+	id, ok, err := cliDirectSessionResolver(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
+	if err != nil {
+		t.Fatalf("cliDirectSessionResolver: %v", err)
+	}
+	if !ok || id == "" {
+		t.Fatalf("cliDirectSessionResolver did not materialize named-session alias shadow: id=%q ok=%v", id, ok)
+	}
+	bead, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", id, err)
+	}
+	if got := bead.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+}
+
+func TestResolveGraphDirectSessionBindingMaterializesNamedSessionAliasShadow(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "claude",
+			Mode:     "on_demand",
+		}},
+	}
+
+	binding, ok, err := resolveGraphDirectSessionBinding(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
+	if err != nil {
+		t.Fatalf("resolveGraphDirectSessionBinding: %v", err)
+	}
+	if !ok || binding.DirectSessionID == "" {
+		t.Fatalf("resolveGraphDirectSessionBinding did not materialize named-session alias shadow: binding=%+v ok=%v", binding, ok)
+	}
+	bead, err := store.Get(binding.DirectSessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", binding.DirectSessionID, err)
+	}
+	if got := bead.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
 	}
 }
 

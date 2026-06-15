@@ -1421,7 +1421,7 @@ func TestDefaultScaleCheckCountsReadyErrorNamesAffectedTemplates(t *testing.T) {
 	}
 }
 
-func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
+func TestDefaultNamedSessionDemandRecordsPartialWithoutRoutedDemand(t *testing.T) {
 	store := &partialAssignedWorkStore{MemStore: beads.NewMemStore(), partialReady: true}
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued worker work",
@@ -1450,8 +1450,8 @@ func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
 		storeKey: "rig:gascity",
 		store:    store,
 	}}, cfg, "test-city")
-	if !demand["primary"] {
-		t.Fatalf("defaultNamedSessionDemand[primary] = false, want survivor row counted")
+	if len(demand) != 0 {
+		t.Fatalf("defaultNamedSessionDemand = %v, want no named demand from routed metadata", demand)
 	}
 	if len(errs) != 1 || !beads.IsPartialResult(errs[0]) {
 		t.Fatalf("defaultNamedSessionDemand errs = %v, want partial-result diagnostic", errs)
@@ -1467,7 +1467,7 @@ func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
 	}
 }
 
-func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+func TestDefaultNamedSessionDemandIgnoresNamedIdentityRunTargetOnlyWorkflow(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
 		Title:  "legacy workflow root",
@@ -1475,7 +1475,7 @@ func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *
 		Status: "open",
 		Metadata: map[string]string{
 			"gc.kind":       "workflow",
-			"gc.run_target": "reviewer",
+			"gc.run_target": "primary",
 		},
 	}); err != nil {
 		t.Fatalf("create routed bead: %v", err)
@@ -1500,8 +1500,8 @@ func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *
 	if len(errs) != 0 {
 		t.Fatalf("defaultNamedSessionDemand errs = %v", errs)
 	}
-	if !demand["primary"] {
-		t.Fatal("defaultNamedSessionDemand[primary] = false, want legacy run_target demand")
+	if len(demand) != 0 {
+		t.Fatalf("defaultNamedSessionDemand = %v, want no named demand from gc.run_target metadata", demand)
 	}
 }
 
@@ -5275,7 +5275,7 @@ func TestBuildDesiredState_PoolInFlightSessionsPreservePartialScaleDemand(t *tes
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNamedSession(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkUsesTemplatePoolDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5314,18 +5314,18 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNam
 			foundGeneric = true
 		}
 	}
-	if !foundNamed {
-		t.Fatal("default routed work should materialize the on-demand named session")
+	if foundNamed {
+		t.Fatal("template-routed work should not materialize the on-demand named session")
 	}
-	if foundGeneric {
-		t.Fatal("default routed work should not create a parallel generic session for the named template")
+	if !foundGeneric {
+		t.Fatal("template-routed work should create generic template demand")
 	}
-	if !dsResult.NamedSessionDemand["mayor"] {
-		t.Fatal("NamedSessionDemand should record default routed work for mayor")
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should not record template-routed work for mayor")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispMaterializesNamedSession(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispUsesTemplatePoolDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5355,20 +5355,28 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispMaterialize
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	foundNamed := false
+	foundGeneric := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" && tp.ConfiguredNamedIdentity == "mayor" {
 			foundNamed = true
+			continue
+		}
+		if tp.TemplateName == "mayor" {
+			foundGeneric = true
 		}
 	}
-	if !foundNamed {
-		t.Fatal("default routed task wisp should materialize the on-demand named session")
+	if foundNamed {
+		t.Fatal("template-routed task wisp should not materialize the on-demand named session")
 	}
-	if !dsResult.NamedSessionDemand["mayor"] {
-		t.Fatal("NamedSessionDemand should record default routed task wisp for mayor")
+	if !foundGeneric {
+		t.Fatal("template-routed task wisp should create generic template demand")
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should not record template-routed task wisp for mayor")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterializesSingletonIdentity(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateUsesGenericPoolDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5398,6 +5406,7 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterialize
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	foundNamed := false
+	foundGeneric := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName != "worker" {
 			continue
@@ -5406,13 +5415,16 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterialize
 			foundNamed = true
 			continue
 		}
-		t.Fatalf("routed singleton template created generic worker session: %+v", tp)
+		foundGeneric = true
 	}
-	if !foundNamed {
-		t.Fatal("default routed work should materialize the singleton named identity for worker")
+	if foundNamed {
+		t.Fatal("template-routed work should not materialize the singleton named identity for worker")
 	}
-	if !dsResult.NamedSessionDemand["primary"] {
-		t.Fatal("NamedSessionDemand should record singleton identity demand")
+	if !foundGeneric {
+		t.Fatal("template-routed work should create generic worker demand")
+	}
+	if dsResult.NamedSessionDemand["primary"] {
+		t.Fatal("NamedSessionDemand should not record singleton identity demand from template route")
 	}
 }
 
@@ -7091,7 +7103,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 	}
 }
 
-func TestBuildDesiredState_NamedScaleCheckPartialDoesNotRetainGenericPoolSession(t *testing.T) {
+func TestBuildDesiredState_NamedBackedPoolPartialRetainsGenericPoolSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 	poolSession := beads.Bead{
@@ -7144,14 +7156,14 @@ func TestBuildDesiredState_NamedScaleCheckPartialDoesNotRetainGenericPoolSession
 	if !result.ScaleCheckPartialTemplates["worker"] {
 		t.Fatalf("ScaleCheckPartialTemplates[worker] = false, want named-session partial recorded; templates=%v stderr=%s", result.ScaleCheckPartialTemplates, stderr.String())
 	}
-	if result.PoolScaleCheckPartialTemplates["worker"] {
-		t.Fatalf("PoolScaleCheckPartialTemplates[worker] = true, want false for named-session partial; templates=%v", result.PoolScaleCheckPartialTemplates)
+	if !result.PoolScaleCheckPartialTemplates["worker"] {
+		t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true for template pool partial; templates=%v", result.PoolScaleCheckPartialTemplates)
 	}
 	if !result.NamedScaleCheckPartialTemplates["worker"] {
 		t.Fatalf("NamedScaleCheckPartialTemplates[worker] = false, want true; templates=%v", result.NamedScaleCheckPartialTemplates)
 	}
-	if _, ok := result.State["worker-bd-123"]; ok {
-		t.Fatalf("generic pool session retained by named-session partial: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+	if _, ok := result.State["worker-bd-123"]; !ok {
+		t.Fatalf("generic pool session was not retained by template pool partial: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
 	}
 }
 

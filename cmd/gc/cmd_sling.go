@@ -571,6 +571,10 @@ func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg 
 	if cfg == nil {
 		return "", false, nil
 	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false, nil
+	}
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
 	}
@@ -1331,6 +1335,13 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 	if store == nil || target == "" {
 		return graphRouteBinding{}, false, nil
 	}
+	// Exact session bead IDs are unambiguous and must win even when they
+	// collide with a config target name.
+	if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+			return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
+		}
+	}
 	if cfg == nil {
 		id, err := session.ResolveSessionID(store, target)
 		if err != nil {
@@ -1349,13 +1360,6 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 		return graphRouteBinding{}, false, err
 	}
 	if !ok {
-		// Exact session bead IDs are unambiguous and must win even when they
-		// collide with a config target name.
-		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
-			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-				return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
-			}
-		}
 		if _, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
 			return graphRouteBinding{}, false, nil
 		}

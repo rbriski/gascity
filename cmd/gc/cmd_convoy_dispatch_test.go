@@ -5758,3 +5758,41 @@ func TestFollowSleepDurationHandlesPathologicalInputs(t *testing.T) {
 		t.Errorf("followSleepDuration(-1) = %v, want base 1s", got)
 	}
 }
+
+// TestControlStoreWithGraphRoutingRoutesGraphClassUnderSQLite proves Leg A of the
+// E0 dispatch mediation: under graph_store=sqlite the control-dispatcher's store
+// is wrapped in the per-class Router, so ProcessControl reads and routes a
+// molecule's graph-class beads (gcg-*) to the embedded SQLite backend instead of
+// the Dolt work store it would otherwise read alone (never seeing the molecule).
+// A default (non-sqlite) city returns the bare store, byte-identical.
+func TestControlStoreWithGraphRoutingRoutesGraphClassUnderSQLite(t *testing.T) {
+	scopeRoot := t.TempDir()
+	work := beads.NewMemStore()
+
+	cfg := &config.City{}
+	cfg.Beads.GraphStore = "sqlite"
+	wrapped := controlStoreWithGraphRouting(work, cfg, scopeRoot)
+
+	gb, err := wrapped.Create(beads.Bead{Title: "molecule step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	if !strings.HasPrefix(gb.ID, graphStoreIDPrefix+"-") {
+		t.Fatalf("graph bead id = %q, want %q- prefix (routed to the SQLite backend)", gb.ID, graphStoreIDPrefix)
+	}
+	if _, err := work.Get(gb.ID); err == nil {
+		t.Fatalf("graph bead %s leaked into the Dolt work store", gb.ID)
+	}
+
+	wb, err := wrapped.Create(beads.Bead{Title: "backlog", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if _, err := work.Get(wb.ID); err != nil {
+		t.Fatalf("work bead %s not on the work backend: %v", wb.ID, err)
+	}
+
+	if got := controlStoreWithGraphRouting(work, &config.City{}, scopeRoot); got != beads.Store(work) {
+		t.Fatalf("non-sqlite controlStoreWithGraphRouting must return the bare store (byte-identical)")
+	}
+}

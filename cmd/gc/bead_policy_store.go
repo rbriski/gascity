@@ -99,6 +99,28 @@ func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	return handles
 }
 
+// ReadyGraphOnlyHandle forwards the graph-only-ready capability to the backing
+// store (the Router under graph_store=sqlite). The embedded Store interface does
+// not promote optional capabilities, so the delegation is explicit. ok is false
+// when the backing has no distinct ClassGraph backend, so capability presence
+// gates the worker/dispatcher readiness path on graph_store=sqlite without a
+// config lookup. Policy read-tier expansion is preserved.
+func (s *beadPolicyStore) ReadyGraphOnlyHandle() (beads.GraphOnlyReadyStore, bool) {
+	inner, ok := beads.GraphOnlyReadyFor(s.Store)
+	if !ok {
+		return nil, false
+	}
+	return policyGraphOnlyReader{inner: inner}, true
+}
+
+type policyGraphOnlyReader struct {
+	inner beads.GraphOnlyReadyStore
+}
+
+func (r policyGraphOnlyReader) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return r.inner.ReadyGraphOnly(expandPolicyReadyQuery(query...))
+}
+
 type beadPolicyCachedReader struct {
 	beads.CachedReader
 }

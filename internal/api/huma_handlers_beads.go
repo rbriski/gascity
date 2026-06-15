@@ -287,7 +287,20 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		// Under graph_store=sqlite a worker only ever executes graph nodes, so the
+		// worker/dispatcher readiness hot loop reads the ClassGraph backend ALONE
+		// and skips the Dolt ClassWork leg. Capability presence gates this: only a
+		// graph_store=sqlite Router exposes ReadyGraphOnly; every other store falls
+		// through to the full live Ready (byte-identical for default cities). The
+		// human/diagnostic backlog view reads store.Ready() directly, not this
+		// endpoint, so it is unaffected.
+		var ready []beads.Bead
+		var err error
+		if g, ok := beads.GraphOnlyReadyFor(store); ok {
+			ready, err = g.ReadyGraphOnly()
+		} else {
+			ready, err = beads.HandlesFor(store).Live.Ready()
+		}
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)

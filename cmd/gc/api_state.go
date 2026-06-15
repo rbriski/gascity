@@ -286,15 +286,37 @@ func graphStoreSQLiteEnabled(cfg *config.City) bool {
 // gc processes open this same file, and N concurrent sweepers deleting terminal
 // records is both wasteful and a write-contention source. Controller-owned
 // retention for the graph store is a follow-up (the ga-2gap48 epic).
+// graphStoreHandleCache reuses one embedded SQLite graph-store handle per graph
+// dir across store rebuilds and openers. The controller rebuilds its store map on
+// every config reload / desired-state pass, and short-lived control/claim opens
+// hit the same file; without this each call opened a fresh SQLite handle and never
+// closed the old one, so handles piled up in the long-lived supervisor (the
+// "stampede") and serialized SQLite's single writer, hanging graph-step claims.
+// Keyed by the absolute graph dir so distinct (test) cities stay isolated; the
+// handle lives for the process — correct for the long-lived controller, and
+// short-lived CLI processes release it on exit.
+var graphStoreHandleCache sync.Map // dir(string) -> beads.Store
+
 func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, scopeRoot string) {
 	if !graphStoreSQLiteEnabled(cfg) {
 		return
 	}
 	dir := filepath.Join(scopeRoot, citylayout.RuntimeRoot)
+	if cached, ok := graphStoreHandleCache.Load(dir); ok {
+		r.Register(coordclass.ClassGraph, cached.(beads.Store))
+		return
+	}
 	store, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreRetention(0, 0), beads.WithSQLiteStoreIDPrefix(graphStoreIDPrefix))
 	if err != nil {
 		log.Printf("beads: graph_store=%q requested but opening the SQLite graph store at %s failed: %v; graph beads stay on the work backend", cfg.Beads.GraphStore, dir, err)
 		return
+	}
+	if actual, loaded := graphStoreHandleCache.LoadOrStore(dir, store); loaded {
+		// Lost the open race: close our duplicate handle and use the cached one.
+		if closer, ok := store.(interface{ CloseStore() error }); ok {
+			_ = closer.CloseStore() //nolint:errcheck // best-effort close of the losing duplicate
+		}
+		store = actual.(beads.Store)
 	}
 	r.Register(coordclass.ClassGraph, store)
 }

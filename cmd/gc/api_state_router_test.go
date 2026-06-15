@@ -276,3 +276,35 @@ func TestWrapWithCachingStorePeelsAndCachesIncomingRouter(t *testing.T) {
 		t.Fatal("graph backend was replaced; expected the single already-open SQLite handle to be reused")
 	}
 }
+
+// TestRegisterGraphStoreBackendReusesSQLiteHandlePerDir proves the stampede fix:
+// repeated registerGraphStoreBackend calls for the same graph dir reuse ONE
+// SQLite handle (the controller rebuilds its store map frequently; without reuse
+// each rebuild leaked a fresh handle, serializing SQLite's writer and hanging
+// graph-step claims). Distinct dirs still get distinct handles.
+func TestRegisterGraphStoreBackendReusesSQLiteHandlePerDir(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Beads.GraphStore = "sqlite"
+	scope := t.TempDir()
+
+	r1 := coordrouter.New(beads.NewMemStore())
+	registerGraphStoreBackend(r1, cfg, scope)
+	b1 := r1.Backend(coordclass.ClassGraph)
+
+	r2 := coordrouter.New(beads.NewMemStore())
+	registerGraphStoreBackend(r2, cfg, scope)
+	b2 := r2.Backend(coordclass.ClassGraph)
+
+	if b1 == nil || b2 == nil {
+		t.Fatal("graph backend was not registered")
+	}
+	if b1 != b2 {
+		t.Fatal("registerGraphStoreBackend opened a new SQLite handle for the same dir instead of reusing the cached one (the stampede leak)")
+	}
+
+	r3 := coordrouter.New(beads.NewMemStore())
+	registerGraphStoreBackend(r3, cfg, t.TempDir())
+	if r3.Backend(coordclass.ClassGraph) == b1 {
+		t.Fatal("distinct graph dirs must get distinct SQLite handles")
+	}
+}

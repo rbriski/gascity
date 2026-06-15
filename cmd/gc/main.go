@@ -1204,7 +1204,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: routedPolicyStore(store, cfg, scopeRoot), Diagnostic: beads.ExecStoreDiagnostic()}, err
+		return beads.StoreOpenResult{Store: routedPolicyStore(store, cfg, runtimeCityPath), Diagnostic: beads.ExecStoreDiagnostic()}, err
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:        scopeRoot,
@@ -1239,7 +1239,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	// cities; when [beads] graph_store = "sqlite" it additionally wraps a per-class
 	// Router that routes graph-class ops to an embedded SQLite store, so every gc
 	// process — controller and workers alike — reaches the graph store in-process.
-	result.Store = routedPolicyStore(result.Store, cfg, scopeRoot)
+	result.Store = routedPolicyStore(result.Store, cfg, runtimeCityPath)
 	return result, nil
 }
 

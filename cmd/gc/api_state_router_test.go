@@ -21,10 +21,66 @@ func graphSQLiteCfg() *config.City {
 	return cfg
 }
 
+// graphSQLiteBackend extracts the embedded *beads.SQLiteStore from a graph
+// backend, unwrapping the noCloseGraphStore the cache registers (the shared
+// handle is wrapped so a consumer's CloseStore is a no-op; see 7cfff89fa).
+func graphSQLiteBackend(b beads.Store) (*beads.SQLiteStore, bool) {
+	switch s := b.(type) {
+	case *beads.SQLiteStore:
+		return s, true
+	case noCloseGraphStore:
+		return s.SQLiteStore, true
+	}
+	return nil, false
+}
+
+// TestGraphStoreBackendIsSharedCityScopeAcrossScopes proves the city-scope
+// single graph store: two scopes (distinct work backends, e.g. two rigs) under
+// the SAME city share ONE embedded SQLite graph store, so graph-bead IDs mint
+// from one sequence and never collide across scopes. This is the structural fix
+// for the cross-scope gcg-N collision that deadlocked the claim path (a bare
+// gcg-4 resolved to the wrong store). A bead created via one scope's Router is
+// the SAME bead, same id, read back through the other.
+func TestGraphStoreBackendIsSharedCityScopeAcrossScopes(t *testing.T) {
+	cfg := graphSQLiteCfg()
+	cityPath := t.TempDir()
+
+	rigA := coordrouter.New(beads.NewMemStoreFrom(1000, nil, nil))
+	registerGraphStoreBackend(rigA, cfg, cityPath)
+	rigB := coordrouter.New(beads.NewMemStoreFrom(2000, nil, nil))
+	registerGraphStoreBackend(rigB, cfg, cityPath)
+
+	if n := countSQLiteBackends(rigA); n != 1 {
+		t.Fatalf("rigA SQLite backends = %d, want 1", n)
+	}
+	if n := countSQLiteBackends(rigB); n != 1 {
+		t.Fatalf("rigB SQLite backends = %d, want 1", n)
+	}
+
+	a, err := rigA.Create(beads.Bead{Title: "graph A", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("rigA create graph bead: %v", err)
+	}
+	b, err := rigB.Create(beads.Bead{Title: "graph B", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("rigB create graph bead: %v", err)
+	}
+	if a.ID == b.ID {
+		t.Fatalf("two scopes minted colliding graph id %q — the cross-scope gcg-N collision is back", a.ID)
+	}
+	got, err := rigB.Get(a.ID)
+	if err != nil {
+		t.Fatalf("rigB.Get(%s) (created via rigA) = %v — scopes are NOT sharing one city graph store", a.ID, err)
+	}
+	if got.Title != "graph A" {
+		t.Fatalf("rigB.Get(%s).Title = %q, want %q", a.ID, got.Title, "graph A")
+	}
+}
+
 func countSQLiteBackends(r *coordrouter.Router) int {
 	n := 0
 	for _, b := range r.Backends() {
-		if _, ok := b.(*beads.SQLiteStore); ok {
+		if _, ok := graphSQLiteBackend(b); ok {
 			n++
 		}
 	}
@@ -144,7 +200,7 @@ func TestOpenStoreResultAtForCityRoutesGraphToSQLiteWhenOptedIn(t *testing.T) {
 	}
 	sqliteBackend := func() *beads.SQLiteStore {
 		for _, b := range router.Backends() {
-			if s, ok := b.(*beads.SQLiteStore); ok {
+			if s, ok := graphSQLiteBackend(b); ok {
 				return s
 			}
 		}

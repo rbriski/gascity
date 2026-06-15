@@ -164,7 +164,7 @@ func newControllerState(
 // Suspended rigs pass false: they spawn no agents, so nothing writes locally and
 // a continuously refreshed cache buys nothing; reconciling every suspended rig
 // every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
-func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, scopeRoot string) beads.Store {
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, cityPath string) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -220,7 +220,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			existingRouter.Register(coordclass.ClassWork, cs)
 			return wrapStoreWithBeadPolicies(existingRouter, policyStore.cfg)
 		}
-		return routedPolicyStore(cs, policyStore.cfg, scopeRoot)
+		return routedPolicyStore(cs, policyStore.cfg, cityPath)
 	}
 	// No cancellable ctx, or caller opted out of background refresh (suspended
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
@@ -242,12 +242,12 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 // into workBackend so a relocated graph backend never lives under the cache (which
 // reconciles only the work backend via a bd subprocess, and would otherwise serve
 // stale graph reads across the processes that share the graph file).
-func routedPolicyStore(workBackend beads.Store, cfg *config.City, scopeRoot string) beads.Store {
+func routedPolicyStore(workBackend beads.Store, cfg *config.City, cityPath string) beads.Store {
 	if !graphStoreSQLiteEnabled(cfg) {
 		return wrapStoreWithBeadPolicies(workBackend, cfg)
 	}
 	router := coordrouter.New(workBackend)
-	registerGraphStoreBackend(router, cfg, scopeRoot)
+	registerGraphStoreBackend(router, cfg, cityPath)
 	return wrapStoreWithBeadPolicies(router, cfg)
 }
 
@@ -263,10 +263,13 @@ const graphStoreSQLite = "sqlite"
 // would overlap (work gc-2 and graph gc-2 are different beads), and a worker's
 // `bd close gc-2` on a graph step would land on the work store's gc-2 instead —
 // leaving the graph step open so the molecule never converges. Giving the graph
-// store a disjoint namespace makes backendForID unambiguous. This is the slice
-// of the Router id-namespace separation (ga-y5pwx3) that deployed
-// graph_store=sqlite convergence requires; a fuller fix would route by-id via a
-// declared prefix→backend map rather than Get-first-hit.
+// store a disjoint namespace makes backendForID unambiguous WITHIN a scope's
+// Router (graph "gcg" vs work "gc"/"ga"). The CROSS-scope collision — every
+// scope's graph store independently minting gcg-N from 1, so a bare gcg-4 claim
+// resolved to the wrong store's gcg-4 — is resolved structurally by the single
+// city-scope graph store (registerGraphStoreBackend keys on cityPath, not
+// scopeRoot): one store, one gcg-N sequence, globally unique graph ids. The
+// per-rig WORK store stays on Dolt; ownership rides the bead's routing metadata.
 const graphStoreIDPrefix = "gcg"
 
 // graphStoreSQLiteEnabled reports whether the city opted the graph class onto the
@@ -276,8 +279,13 @@ func graphStoreSQLiteEnabled(cfg *config.City) bool {
 }
 
 // registerGraphStoreBackend registers an embedded SQLite backend for the graph
-// class on r. The graph store lives at <scopeRoot>/.gc/beads.sqlite, isolating the
-// high-churn formula-v2 topology from the Dolt-backed work store. A failed open is
+// class on r. The graph store lives at <cityPath>/.gc/beads.sqlite — a SINGLE
+// city-scope store shared by the city HQ scope AND every rig scope, isolating the
+// high-churn formula-v2 topology from the Dolt-backed work store. One store means
+// one gcg-N id sequence across all scopes, so graph-bead IDs are globally unique
+// (no cross-scope collision); the per-rig work store stays on Dolt and ownership
+// is carried by the bead's fully-qualified routing metadata (gc.routed_to,
+// gc.root_store_ref), not by physical store partitioning. A failed open is
 // logged loudly and the graph class falls back to the work backend rather than
 // crashing the process — the loud log surfaces the misconfiguration. Callers gate
 // on graphStoreSQLiteEnabled; the guard here is defensive.
@@ -311,11 +319,11 @@ type noCloseGraphStore struct {
 // CloseStore is a no-op: the cache, not the caller, owns the shared handle.
 func (noCloseGraphStore) CloseStore() error { return nil }
 
-func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, scopeRoot string) {
+func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath string) {
 	if !graphStoreSQLiteEnabled(cfg) {
 		return
 	}
-	dir := filepath.Join(scopeRoot, citylayout.RuntimeRoot)
+	dir := filepath.Join(cityPath, citylayout.RuntimeRoot)
 	if cached, ok := graphStoreHandleCache.Load(dir); ok {
 		r.Register(coordclass.ClassGraph, cached.(beads.Store))
 		return
@@ -402,7 +410,11 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), scopeRoot)
+		// cs.cityPath (NOT scopeRoot): the graph backend is a single city-scope
+		// SQLite store shared by every rig, so gcg-N ids are globally unique and a
+		// rig worker's claim resolves to the one owning store. The rig's WORK
+		// backend stays scope-local (Dolt); routing metadata carries ownership.
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.cityPath)
 	}
 	return stores
 }

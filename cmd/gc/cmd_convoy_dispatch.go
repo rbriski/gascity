@@ -426,7 +426,7 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 		return openStoreAtForCity(storePath, cityPath)
 	}
 	if samePath(scopeRoot, cityPath) {
-		return controlStoreWithGraphRouting(controlBdStoreForCity(scopeRoot, cityPath, cfg), cfg, scopeRoot), nil
+		return controlStoreWithGraphRouting(controlBdStoreForCity(scopeRoot, cityPath, cfg), cfg, cityPath), nil
 	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -435,13 +435,13 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
 			if samePath(rigPath, scopeRoot) {
-				return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, scopeRoot), nil
+				return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, cityPath), nil
 			}
 		}
 	}
 	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
 	// still need write-capable bd commands with auto-export suppressed.
-	return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, scopeRoot), nil
+	return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, cityPath), nil
 }
 
 // controlStoreWithGraphRouting inserts the per-class Router over a bd-backed
@@ -454,11 +454,11 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 // Router and no policy wrapper. Wrapping here (not inside controlBdStoreForRig)
 // keeps the blast radius to the dispatcher open path and preserves the bd store's
 // auto-export suppression, which the Router/policy wrappers delegate through.
-func controlStoreWithGraphRouting(store beads.Store, cfg *config.City, scopeRoot string) beads.Store {
+func controlStoreWithGraphRouting(store beads.Store, cfg *config.City, cityPath string) beads.Store {
 	if store == nil || !graphStoreSQLiteEnabled(cfg) {
 		return store
 	}
-	return routedPolicyStore(store, cfg, scopeRoot)
+	return routedPolicyStore(store, cfg, cityPath)
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,

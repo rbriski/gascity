@@ -53,14 +53,40 @@ accepts "reorganizing startup a bit so the beads subsystem is up immediately."
   today are agents + the control-dispatcher (a controller is always up); `gc init`
   and standalone `bd`/`gc bd` use the real `bd`/filebdshim, not the shim.
 
-## Remaining (bootstrap, when the shim becomes the universal `bd`)
+## C4 — DONE (worker-session install); bootstrap is the only remainder
 
-The shim is now pure-HTTP. The only thing that would break IF the gc-as-`bd` shim
-became the universal `bd` (the future C4 install) is **bootstrap**: `gc init` and
-standalone `bd`/`gc bd` create beads before a per-city controller exists, and the
-shim now requires one.
+The gc-as-`bd` shim is now the `bd` that **managed worker sessions** invoke,
+installed UNGATED for every city (not just graph_store=sqlite).
 
-- To support that, init/standalone must route through a beads API: either
+- **Install** (`76aed4102`, `474e093fd`): the supervisor's
+  `prepareCityForSupervisor` calls `ensureCityBdShimbin` (fork-owned
+  `cmd/gc/bd_shimbin.go`) to create `<city>/.gc/shimbin/{gc,bd}` as symlinks to the
+  running gc binary. `resolveTemplate` sets each session's `GC_BIN` to the shimbin
+  `gc` symlink (so `prependGCBinDirToPATH` fronts the shim bin dir and a worker's
+  `bd` resolves to gc-invoked-as-bd) and `GC_BD_REAL` to the real bd. GC_BIN is
+  derived from cityPath, not `os.Executable()`, so a respawned controller keeps the
+  redirect without a gc copy; the real bd is resolved by a PATH scan that EXCLUDES
+  the shim bin dir, so it never recurses even when the controller's own PATH is
+  already fronted with the shim bin dir. The only upstream-owned edit is the 3-line
+  GC_BIN derivation in `template_resolve.go`.
+- **Ungated is safe** because the shim adapts per-city at runtime
+  (`classifyBdShimVerb`): by-id verbs route through the controller in ALL cities
+  (keeping its cache authoritative even in Dolt/file-only cities), `claim` /
+  `update --claim` pass through to the local env-actor bd, and graph verbs are only
+  refused under graph_store=sqlite.
+- **Proven**: `TestGraphStoreSQLiteDeployedCityConverges` (`907a0979b`) now
+  converges the deployed sqlite city THROUGH the production install (no test-only
+  shim); `TestBdShimInstalledForFileOnlyCityUngated` (`bf9f04d69`) proves the
+  install fires for a non-sqlite city.
+
+**Scope** is managed worker sessions only (the decided scope). `gc init` and
+standalone `bd`/`gc bd` stay on the real bd: they create beads before a per-city
+controller exists and the pure-HTTP shim requires one. That bootstrap is the only
+thing that would break if the shim became the TRULY universal `bd` — and it is the
+prerequisite for eventually retiring the controller-demand `Live` read
+(`build_desired_state.go:1570`, the system's last out-of-band-mutation hack).
+
+- To support it, init/standalone must route through a beads API: either
   `gc init` ensures the supervisor + city registration (then seeds via HTTP), or
   the supervisor serves a per-city beads API for any registered city on demand.
   The recon-grounded smallest reorg: the supervisor already serves per-city routes
@@ -98,5 +124,11 @@ fallback (correct: the work BdStore must use the worker's baked actor).
 - `cmd/gc/cmd_bd_shim.go` — `bdShimAPIClient`, `bdShimRequireAPI`,
   `dispatchBdShimVerbViaAPI`, the apiClient-first route in `runBdShim`.
 - `cmd/gc/cmd_bd_shim_api_test.go` — verb→endpoint mapping.
-- `test/integration/graph_store_sqlite_convergence_test.go` — sets
-  `GC_BD_SHIM_REQUIRE_API`, so convergence is the pure-HTTP proof.
+- `cmd/gc/bd_shimbin.go` — C4 install: `ensureCityBdShimbin`,
+  `sessionGCBinForCity`, recursion-safe real-bd resolution. `+_test.go`.
+- `cmd/gc/template_resolve.go` — the 3-line session GC_BIN/GC_BD_REAL derivation
+  (the only upstream-owned C4 edit); `cmd/gc/cmd_supervisor.go` — install call in
+  `prepareCityForSupervisor`.
+- `test/integration/graph_store_sqlite_convergence_test.go` — converges via the
+  production C4 install (no test-only shim); `bd_shim_install_test.go` — the
+  ungated file-only install proof.

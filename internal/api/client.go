@@ -1042,6 +1042,59 @@ func (c *Client) ClaimBead(id, assignee string) (beads.Bead, bool, error) {
 	return beadFromGenPtr(resp.JSON200.Bead), true, nil
 }
 
+// CreateBead creates a bead via POST /v0/city/{cityName}/beads, mapping the
+// supplied fields onto the wire body, and returns the persisted bead.
+func (c *Client) CreateBead(b beads.Bead) (beads.Bead, error) {
+	if err := c.requireCityScope(); err != nil {
+		return beads.Bead{}, err
+	}
+	body := genclient.BeadCreateInputBody{Title: b.Title}
+	if b.Type != "" {
+		body.Type = &b.Type
+	}
+	if b.Assignee != "" {
+		body.Assignee = &b.Assignee
+	}
+	if b.Description != "" {
+		body.Description = &b.Description
+	}
+	if b.ParentID != "" {
+		body.Parent = &b.ParentID
+	}
+	if b.Priority != nil {
+		p := int64(*b.Priority)
+		body.Priority = &p
+	}
+	if b.DeferUntil != nil {
+		body.DeferUntil = b.DeferUntil
+	}
+	if len(b.Labels) > 0 {
+		labels := append([]string(nil), b.Labels...)
+		body.Labels = &labels
+	}
+	if len(b.Metadata) > 0 {
+		md := make(map[string]string, len(b.Metadata))
+		for k, v := range b.Metadata {
+			md[k] = v
+		}
+		body.Metadata = &md
+	}
+	resp, err := c.cw.CreateBeadWithResponse(context.Background(), c.cityName, &genclient.CreateBeadParams{XGCRequest: "gc"}, body)
+	if err != nil {
+		return beads.Bead{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return beads.Bead{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return beads.Bead{}, err
+	}
+	if resp.JSON201 == nil {
+		return beads.Bead{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return beadFromGenPtr(resp.JSON201), nil
+}
+
 // GetStatus fetches the city-wide status snapshot via
 // GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header

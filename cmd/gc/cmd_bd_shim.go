@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -78,6 +79,42 @@ var bdShimRoutedVerbs = map[string]bool{
 	"update": true,
 	"reopen": true,
 	"delete": true,
+	"create": true,
+}
+
+// bdCreateRoutableFlags are the `bd create` flags that map cleanly onto the
+// create API body. A create carrying any OTHER flag (--ephemeral, --no-history,
+// --from, ...) passes through to the real bd rather than silently dropping the
+// unmapped effect.
+var bdCreateRoutableFlags = map[string]bool{
+	"--type":         true,
+	"--priority":     true,
+	"--assignee":     true,
+	"--label":        true,
+	"--description":  true,
+	"--parent":       true,
+	"--set-metadata": true,
+	"--metadata":     true,
+	"--defer-until":  true,
+	"--json":         true,
+}
+
+// bdCreateRoutable reports whether a `bd create` arg list uses only flags that
+// map onto the create API body, so the shim can serve it in-process.
+func bdCreateRoutable(args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue // the title positional or a space-separated flag value
+		}
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		if !bdCreateRoutableFlags[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // bdUpdateRoutableFlags are the `bd update` flags that map cleanly onto
@@ -213,6 +250,10 @@ func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDispo
 			}
 		case "update":
 			if !bdUpdateRoutable(args) {
+				return bdPassthrough
+			}
+		case "create":
+			if !bdCreateRoutable(args) {
 				return bdPassthrough
 			}
 		}
@@ -384,10 +425,101 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
 		return writeReadyJSON(applyBdReadyParams(read.Body, p), stdout, stderr)
+	case "create":
+		b, jsonOut, err := parseBdCreateBead(args)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: create: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		created, err := client.CreateBead(b)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: create via API: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if jsonOut {
+			enc, err := json.Marshal(created)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd-shim: create: marshal: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			fmt.Fprintln(stdout, string(enc)) //nolint:errcheck // best-effort stdout
+			return 0
+		}
+		fmt.Fprintf(stdout, "Created bead: %s\n", created.ID) //nolint:errcheck // best-effort stdout
+		return 0
 	default:
 		fmt.Fprintf(stderr, "gc bd-shim: no routed API handler for %q\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+// parseBdCreateBead parses the routable `bd create` args (title positional plus
+// the create flags in bdCreateRoutableFlags) into a beads.Bead and whether
+// --json output was requested. Non-routable flags never reach here
+// (classifyBdShimVerb passes those through).
+func parseBdCreateBead(args []string) (beads.Bead, bool, error) {
+	var b beads.Bead
+	jsonOut := false
+	gotTitle := false
+	needsValue := map[string]bool{
+		"--type": true, "--priority": true, "--assignee": true, "--label": true,
+		"--description": true, "--parent": true, "--set-metadata": true,
+		"--metadata": true, "--defer-until": true,
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			if !gotTitle {
+				b.Title = a
+				gotTitle = true
+			}
+			continue
+		}
+		name := a
+		val := ""
+		hasVal := false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name, val, hasVal = a[:eq], a[eq+1:], true
+		}
+		if !hasVal && needsValue[name] && i+1 < len(args) {
+			val = args[i+1]
+			hasVal = true
+			i++
+		}
+		switch name {
+		case "--type":
+			b.Type = val
+		case "--assignee":
+			b.Assignee = val
+		case "--description":
+			b.Description = val
+		case "--parent":
+			b.ParentID = val
+		case "--priority":
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return b, jsonOut, fmt.Errorf("parse --priority %q: %w", val, err)
+			}
+			b.Priority = &n
+		case "--label":
+			b.Labels = append(b.Labels, val)
+		case "--set-metadata", "--metadata":
+			k, mv, ok := strings.Cut(val, "=")
+			if !ok {
+				return b, jsonOut, fmt.Errorf("%s expects key=value, got %q", name, val)
+			}
+			if b.Metadata == nil {
+				b.Metadata = map[string]string{}
+			}
+			b.Metadata[k] = mv
+		case "--json":
+			jsonOut = true
+		}
+	}
+	if !gotTitle {
+		return b, jsonOut, fmt.Errorf("create requires a title")
+	}
+	return b, jsonOut, nil
 }
 
 // isBdShimAPINotFound reports whether an API client error is a not-found, so

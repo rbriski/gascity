@@ -5,7 +5,6 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,21 +163,17 @@ title = "Work"
 // spawn + controller serve latency without flaking.
 func graphStoreSQLiteConvergeTimeout() time.Duration { return 90 * time.Second }
 
-// newGraphStoreSQLiteShimEnv returns an isolated, no-Dolt command env whose `bd`
-// resolves to the gc bd-shim (gc invoked as `bd`) for BOTH the controller's
-// `bd ready` discovery subprocess AND spawned worker sessions, with the
-// integration filebdshim as GC_BD_REAL for passthrough/work-only ops.
+// newGraphStoreSQLiteShimEnv returns an isolated, no-Dolt command env for a city
+// whose managed sessions route `bd` through the gc bd-shim via the PRODUCTION C4
+// install: the supervisor's prepareCityForSupervisor installs
+// <city>/.gc/shimbin/{gc,bd} (ensureCityBdShimbin), and resolveTemplate fronts
+// that dir on each session's PATH and sets GC_BD_REAL. So the control-dispatcher's
+// `bd ready` discovery AND spawned worker sessions reach the embedded SQLite
+// store through the controller — no test-built shim, gc copy, or gcBinary swap.
 //
-// The decisive mechanism: every managed session's PATH is re-fronted by
-// prependGCBinDirToPATH(env, env["GC_BIN"]) where GC_BIN is the controller's
-// os.Executable(). So a separate bdshim dir merely prepended to PATH is shadowed
-// by whatever `bd` lives in the GC_BIN dir. We therefore run the supervisor (and
-// hence every city controller it spawns via os.Executable()) from a per-test bin
-// dir that holds a real `gc` copy AND a `bd` -> gc symlink: GC_BIN becomes that
-// dir, prependGCBinDirToPATH fronts it, and `bd` resolves to gc-as-shim. This
-// touches no shared global binary on disk; it only swaps the package-global
-// gcBinary for the test (restored in cleanup), mirroring the existing
-// binary-swap pattern in TestIntegrationEnvForUsesIsolatedHome.
+// The only env setup here is the systemctl/launchctl no-op shims; the real `bd`
+// (the integration filebdshim) is already on PATH from integrationEnvFor, which
+// the install resolves as GC_BD_REAL.
 func newGraphStoreSQLiteShimEnv(t *testing.T) []string {
 	t.Helper()
 
@@ -196,63 +191,21 @@ func newGraphStoreSQLiteShimEnv(t *testing.T) []string {
 		}
 	}
 
-	// Per-test bin dir: a real gc copy (so os.Executable() resolves here, not a
-	// symlink target) + `bd` -> gc so the shim wins wherever GC_BIN's dir lands
-	// on PATH.
-	gcBinDir := filepath.Join(root, "gcbin")
-	if err := os.MkdirAll(gcBinDir, 0o755); err != nil {
-		t.Fatalf("creating gc bin dir: %v", err)
-	}
-	gcCopy := filepath.Join(gcBinDir, "gc")
-	if err := copyExecutable(gcBinary, gcCopy); err != nil {
-		t.Fatalf("copying gc binary: %v", err)
-	}
-	if err := os.Symlink(gcCopy, filepath.Join(gcBinDir, "bd")); err != nil {
-		t.Fatalf("symlinking bd -> gc: %v", err)
-	}
-
-	// Swap the package-global gcBinary so the supervisor (and the controllers it
-	// spawns via os.Executable()) run from gcCopy -> GC_BIN = gcCopy ->
-	// prependGCBinDirToPATH fronts gcBinDir -> `bd` resolves to gc-as-shim.
-	prevGCBinary := gcBinary
-	gcBinary = gcCopy
-	t.Cleanup(func() { gcBinary = prevGCBinary })
-
-	// Front gcBinDir + shimDir on the foreground env PATH too (so direct
-	// supervisor/controller bd reads resolve the shim before the supervisor's
-	// own prepend), and set GC_BD_REAL (a GC_-prefixed var, forwarded to sessions
-	// by passthroughEnv) to the absolute filebdshim for passthrough/work ops.
+	// The real `bd` (the integration filebdshim) is already fronted on PATH by
+	// integrationEnvFor, so the supervisor's per-city C4 install
+	// (ensureCityBdShimbin in prepareCityForSupervisor) resolves it and installs
+	// <city>/.gc/shimbin/{gc,bd}. resolveTemplate then fronts the shim bin dir on
+	// every managed session's PATH and sets GC_BD_REAL, so the control-dispatcher's
+	// `bd ready` discovery AND the scripted worker both route shim -> HTTP ->
+	// controller -> Router -> SQLite. No test-built bd->gc shim or gc copy is
+	// needed (session GC_BIN is derived from cityPath, not os.Executable()), and
+	// no GC_BD_SHIM_ALLOW_LOCAL, so convergence here PROVES the pure-HTTP path via
+	// the production install.
 	envMap := parseEnvList(env)
-	env = replaceEnv(env, "PATH", prependPath(gcBinDir, shimDir, envMap["PATH"]))
-	env = replaceEnv(env, "GC_BD_REAL", bdBinary)
-	// The shim routes through the controller HTTP API by default (pure-HTTP) and
-	// this env does NOT set GC_BD_SHIM_ALLOW_LOCAL, so convergence here PROVES the
-	// pure-HTTP path: the worker's completion and the controller's discovery both
-	// go shim -> HTTP -> controller -> Router -> SQLite, with no local-store
-	// fallback available to mask a broken HTTP path.
+	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
 
 	startIsolatedSupervisor(t, env, gcHome)
 	return env
-}
-
-// copyExecutable copies src to dst with 0o755 perms. dst must be a real file
-// (not a symlink) so os.Executable() on a process started from it resolves to
-// dst rather than src.
-func copyExecutable(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close() //nolint:errcheck // read-only close
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close() //nolint:errcheck // best-effort on error path
-		return err
-	}
-	return out.Close()
 }
 
 // waitForGraphRootConverged polls the on-disk SQLite graph store until the

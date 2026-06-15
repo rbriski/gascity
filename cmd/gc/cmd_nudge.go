@@ -2065,9 +2065,10 @@ func nudgePollerPIDPath(cityPath, sessionName, agentName string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".pid")
 }
 
-// reapStaleNudgePollers removes orphaned nudge poller PID files (and their
-// sibling .pid.lock files) left behind by pollers that were killed, crashed,
-// or os.Exit'd without running their release closure. A *.pid file is stale
+// reapStaleNudgePollers removes orphaned nudge poller PID files left behind by
+// pollers that were killed, crashed, or os.Exit'd without running their release
+// closure. The sibling .pid.lock files are intentionally left in place (they are
+// the stable per-key mutex inode). A *.pid file is stale
 // when its contents are unparseable or its PID is no longer alive. The work is
 // done under the same per-file lock the lease path uses so a concurrently
 // starting poller is never raced. It is best-effort: a missing pollers
@@ -2095,9 +2096,16 @@ func reapStaleNudgePollers(cityPath string) error {
 	return errors.Join(errs...)
 }
 
-// reapStaleNudgePoller removes pidPath and its orphan .pid.lock when the PID it
-// names is unparseable or no longer alive. It takes the per-file lock so the
-// liveness check and removal cannot race a poller acquiring the same lease.
+// reapStaleNudgePoller removes pidPath when the PID it names is unparseable or
+// no longer alive. It takes the per-file lock so the liveness check and removal
+// cannot race a poller acquiring the same lease.
+//
+// The sibling .pid.lock inode is deliberately NOT removed: it is the stable
+// per-key mutex inode. Unlinking it while holding LOCK_EX on it would let a
+// concurrent acquirer create a fresh lock inode and enter its critical section
+// alongside a blocked acquirer holding the now-orphaned inode, breaking per-key
+// mutual exclusion and allowing a double-spawn. Only the stale .pid is reaped,
+// matching the safe release-closure semantics.
 func reapStaleNudgePoller(pidPath string) error {
 	return withNudgePollerPIDLock(pidPath, func() error {
 		data, err := os.ReadFile(pidPath)
@@ -2112,15 +2120,10 @@ func reapStaleNudgePoller(pidPath string) error {
 		if n, parseErr := fmt.Sscanf(pidText, "%d", &pid); parseErr == nil && n == 1 && pidutil.Alive(pid) {
 			return nil
 		}
-		var errs []error
 		if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("remove stale nudge poller pid %q: %w", pidPath, err))
+			return fmt.Errorf("remove stale nudge poller pid %q: %w", pidPath, err)
 		}
-		lockPath := pidPath + ".lock"
-		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("remove stale nudge poller lock %q: %w", lockPath, err))
-		}
-		return errors.Join(errs...)
+		return nil
 	})
 }
 

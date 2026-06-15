@@ -3592,7 +3592,7 @@ func TestReapStaleNudgePollersKeepsLivePID(t *testing.T) {
 	}
 }
 
-func TestReapStaleNudgePollersRemovesOrphanLock(t *testing.T) {
+func TestReapStaleNudgePollersKeepsLockInode(t *testing.T) {
 	cityPath := t.TempDir()
 	pidPath := nudgePollerPIDPath(cityPath, "sess-worker", "session-id")
 	lockPath := pidPath + ".lock"
@@ -3613,8 +3613,10 @@ func TestReapStaleNudgePollersRemovesOrphanLock(t *testing.T) {
 	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dead pid file still exists after reap: %v", err)
 	}
-	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("orphan lock file still exists after reap: %v", err)
+	// The .pid.lock is the stable per-key mutex inode and must survive
+	// reaping; removing it would race concurrent acquirers (double-spawn).
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock inode was removed by reap (breaks per-key mutex): %v", err)
 	}
 }
 

@@ -34,6 +34,25 @@ type BeadReadyInput struct {
 	BlockingParam
 }
 
+// BeadEphemeralInput is the Huma input for GET
+// /v0/city/{cityName}/beads/ephemeral — the wisp/ephemeral discovery tier that
+// `bd query 'ephemeral=true AND <clauses>'` reads. Only the ephemeral tier is
+// returned (the issues tier is excluded); the bare predicate clauses map to
+// these filters. Under graph_store=sqlite the wisp tier lives in the SQLite
+// graph backend, so this route reaches it through the controller's Router (the
+// work-only bd cannot see SQLite wisps, which is why the shim refuses bare
+// `bd query` in the split phase and routes it here instead).
+type BeadEphemeralInput struct {
+	CityScope
+	Status   string `query:"status" required:"false" doc:"Filter by status."`
+	Type     string `query:"type" required:"false" doc:"Filter by bead type."`
+	Label    string `query:"label" required:"false" doc:"Filter by label."`
+	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
+	Parent   string `query:"parent" required:"false" doc:"Filter by parent bead id."`
+	All      bool   `query:"all" required:"false" doc:"Include closed ephemeral beads."`
+	Limit    int    `query:"limit" required:"false" doc:"Max rows (0 = unbounded)."`
+}
+
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.
 type BeadGraphInput struct {
 	CityScope

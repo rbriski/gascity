@@ -894,6 +894,65 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	}, nil
 }
 
+// EphemeralBeadsOpts are the filters for the ephemeral/wisp discovery tier.
+type EphemeralBeadsOpts struct {
+	Status   string
+	Type     string
+	Label    string
+	Assignee string
+	Parent   string
+	All      bool
+	Limit    int
+}
+
+// EphemeralBeads reads the ephemeral/wisp tier via GET
+// /v0/city/{cityName}/beads/ephemeral — the routed form of
+// `bd query 'ephemeral=true AND ...'`. Under graph_store=sqlite this reaches
+// wisps resident in the SQLite graph backend through the controller's Router.
+func (c *Client) EphemeralBeads(opts EphemeralBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameBeadsEphemeralParams{}
+	if opts.Status != "" {
+		params.Status = &opts.Status
+	}
+	if opts.Type != "" {
+		params.Type = &opts.Type
+	}
+	if opts.Label != "" {
+		params.Label = &opts.Label
+	}
+	if opts.Assignee != "" {
+		params.Assignee = &opts.Assignee
+	}
+	if opts.Parent != "" {
+		params.Parent = &opts.Parent
+	}
+	if opts.Limit > 0 {
+		lim := int64(opts.Limit)
+		params.Limit = &lim
+	}
+	if opts.All {
+		t := true
+		params.All = &t
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsEphemeralWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // ReadyBeads fetches the city's ready work — the federated ready set across the
 // controller's bead stores — via GET /v0/city/{cityName}/beads/ready. The
 // endpoint applies no assignee/metadata predicates, so callers that need them

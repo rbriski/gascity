@@ -233,15 +233,29 @@ func splitBdGlobalFlags(args []string) (string, []string) {
 // graph_store=sqlite is on — so in the split phase the shim refuses them loudly
 // rather than dropping graph data (graph-store-rollout-plan.md §X2).
 var bdShimGraphTouchingUnroutedVerbs = map[string]bool{
-	"mol":   true, // bd mol current|progress — molecule topology lives in the graph store
-	"gate":  true, // bd gate check --escalate — a mutation on gate beads
-	"query": true, // bd query 'ephemeral=...' — the wisp/ephemeral discovery tier
+	"mol":  true, // bd mol current|progress — molecule topology lives in the graph store
+	"gate": true, // bd gate check --escalate — a mutation on gate beads
+	// "query" is now routed (see classifyBdShimVerb): the ephemeral discovery
+	// shape maps to GET /beads/ephemeral, reaching SQLite wisps via the Router.
 }
 
 // classifyBdShimVerb decides how the shim handles a bd subcommand given whether
 // the city is in the split phase (graph_store=sqlite active, so a distinct
 // graph backend exists). See the bdShimDisposition docs above.
 func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDisposition {
+	// `bd query` (ephemeral discovery) routes when it is the mappable ephemeral
+	// shape (`--json 'ephemeral=true AND <bare clauses>'`). An unmappable query
+	// under the split phase must REFUSE rather than passthrough: passing it to the
+	// work-only bd would silently miss SQLite-resident wisps (the §X2 hazard).
+	if verb == "query" {
+		if bdQueryRoutable(args) {
+			return bdRoute
+		}
+		if splitPhase {
+			return bdRefuse
+		}
+		return bdPassthrough
+	}
 	if bdShimRoutedVerbs[verb] {
 		switch verb {
 		case "ready":
@@ -425,6 +439,20 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
 		return writeReadyJSON(applyBdReadyParams(read.Body, p), stdout, stderr)
+	case "query":
+		opts, ok := parseBdQueryEphemeral(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: query: unroutable ephemeral predicate") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		read, err := client.EphemeralBeads(opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: query via API: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// `bd query --json` emits a JSON array of beads; the work_query shell
+		// pipeline applies any jq readiness/route post-filter itself.
+		return writeReadyJSON(read.Body, stdout, stderr)
 	case "create":
 		b, jsonOut, err := parseBdCreateBead(args)
 		if err != nil {
@@ -451,6 +479,125 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 		fmt.Fprintf(stderr, "gc bd-shim: no routed API handler for %q\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+// bdQueryRoutable reports whether a `bd query` arg list is the ephemeral
+// discovery shape the shim can faithfully route: a --json query whose predicate
+// is `ephemeral=true` optionally AND-joined with bare status/label/type/
+// assignee/parent clauses. Anything else (non-ephemeral predicate, non-bare
+// value, unknown flag, missing --json) is not routable.
+func bdQueryRoutable(args []string) bool {
+	_, ok := parseBdQueryEphemeral(args)
+	return ok
+}
+
+// parseBdQueryEphemeral maps the two in-repo `bd query` ephemeral shapes —
+// listEphemeral's multi-clause argv (bdstore.go) and the work_query literal
+// `bd query --json 'ephemeral=true AND status=<s>' --limit=N` (config.go) — onto
+// EphemeralBeadsOpts. It returns ok=false for any shape it cannot map cleanly,
+// so the caller refuses/passes through rather than silently dropping clauses.
+func parseBdQueryEphemeral(args []string) (api.EphemeralBeadsOpts, bool) {
+	var opts api.EphemeralBeadsOpts
+	var predicate string
+	var sawJSON, sawPredicate bool
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "query":
+			continue
+		case a == "--json":
+			sawJSON = true
+		case a == "--all":
+			opts.All = true
+		case a == "--limit" || a == "-n":
+			if i+1 >= len(args) {
+				return opts, false
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return opts, false
+			}
+			opts.Limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return opts, false
+			}
+			opts.Limit = n
+		case strings.HasPrefix(a, "-"):
+			return opts, false // unknown flag — not faithfully routable
+		default:
+			if sawPredicate {
+				return opts, false // a second positional we can't account for
+			}
+			predicate = a
+			sawPredicate = true
+		}
+	}
+	if !sawJSON || !sawPredicate {
+		return opts, false
+	}
+	if !parseEphemeralPredicate(predicate, &opts) {
+		return opts, false
+	}
+	return opts, true
+}
+
+// parseEphemeralPredicate parses an `ephemeral=true [AND key=value]...` predicate
+// into opts. The predicate MUST contain ephemeral=true; every other clause must
+// be a bare key=value with key in {status,label,type,assignee,parent}.
+func parseEphemeralPredicate(predicate string, opts *api.EphemeralBeadsOpts) bool {
+	sawEphemeral := false
+	for _, clause := range strings.Split(predicate, " AND ") {
+		k, v, ok := strings.Cut(strings.TrimSpace(clause), "=")
+		if !ok {
+			return false
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "ephemeral" {
+			if v != "true" {
+				return false
+			}
+			sawEphemeral = true
+			continue
+		}
+		if !isBareBdQueryValue(v) {
+			return false
+		}
+		switch k {
+		case "status":
+			opts.Status = v
+		case "label":
+			opts.Label = v
+		case "type":
+			opts.Type = v
+		case "assignee":
+			opts.Assignee = v
+		case "parent":
+			opts.Parent = v
+		default:
+			return false
+		}
+	}
+	return sawEphemeral
+}
+
+// isBareBdQueryValue reports whether v is a server-routable bare value
+// (alphanumerics plus _-:.), mirroring the bd store's isBareBdQueryValue.
+func isBareBdQueryValue(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == ':' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parseBdCreateBead parses the routable `bd create` args (title positional plus

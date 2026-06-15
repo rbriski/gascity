@@ -334,6 +334,83 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}, nil
 }
 
+// humaHandleBeadEphemeral is the Huma-typed handler for GET
+// /v0/beads/ephemeral. It returns ONLY the ephemeral/wisp tier (the issues tier
+// is excluded), federating the city store and every rig store with TierWisps so
+// that — under graph_store=sqlite — wisps resident in the SQLite graph backend
+// are surfaced through the controller's Router. This is the routed form of
+// `bd query 'ephemeral=true AND ...'`; the work-only bd cannot see SQLite wisps.
+// Live forces backing reads (the active cache is the issues tier, not wisps).
+func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeralInput) (*ListOutput[beads.Bead], error) {
+	query := beads.ListQuery{
+		Status:        input.Status,
+		Type:          input.Type,
+		Label:         input.Label,
+		Assignee:      input.Assignee,
+		ParentID:      input.Parent,
+		IncludeClosed: input.All,
+		Limit:         input.Limit,
+		TierMode:      beads.TierWisps,
+		Live:          true,
+		Sort:          beads.SortCreatedDesc,
+	}
+	if !query.HasFilter() {
+		query.AllowScan = true
+	}
+
+	stores := s.state.BeadStores()
+	rigNames := sortedRigNames(stores)
+	var all []beads.Bead
+	var pa partialAggregator
+	seen := make(map[string]bool)
+	federate := func(label string, store beads.Store) {
+		if store == nil {
+			return
+		}
+		pa.attempt()
+		list, err := store.List(query)
+		if err != nil {
+			if beads.IsPartialResult(err) && len(list) > 0 {
+				pa.record(label, err)
+				pa.success()
+			} else {
+				pa.record(label, err)
+				return
+			}
+		} else {
+			pa.success()
+		}
+		for _, b := range list {
+			if seen[b.ID] {
+				continue // legacy file mode can alias the city and rig stores
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
+	}
+	// The city store is NOT among the per-rig BeadStores(); graph-class wisps in
+	// a single-HQ city live there, so federate it first.
+	federate("city", s.state.CityBeadStore())
+	for _, rigName := range rigNames {
+		federate("rig "+rigName, stores[rigName])
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
+	}
+	if all == nil {
+		all = []beads.Bead{}
+	}
+	return &ListOutput[beads.Bead]{
+		Index: s.latestIndex(),
+		Body: ListBody[beads.Bead]{
+			Items:         all,
+			Total:         len(all),
+			Partial:       pa.partial(),
+			PartialErrors: pa.messages(),
+		},
+	}, nil
+}
+
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
 	rootID := input.RootID

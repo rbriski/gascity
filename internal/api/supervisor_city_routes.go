@@ -149,6 +149,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/beads", (*Server).humaHandleBeadList)
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph)
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady)
+	cityGet(sm, "/beads/ephemeral", (*Server).humaHandleBeadEphemeral)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,

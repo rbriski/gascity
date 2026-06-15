@@ -12,6 +12,53 @@ import (
 	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
+// TestBeadEphemeralHandlerReachesSQLiteGraphBackend proves GET /beads/ephemeral
+// surfaces a wisp resident in the SQLite graph backend (the routed form of
+// `bd query 'ephemeral=true ...'`): with the city store a Router{work, graph},
+// an ephemeral graph-class bead created into SQLite's wisp tier is returned by
+// humaHandleBeadEphemeral via the TierWisps federation — which the work-only bd
+// cannot see.
+func TestBeadEphemeralHandlerReachesSQLiteGraphBackend(t *testing.T) {
+	work := beads.NewMemStore()
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+
+	router := coordrouter.New(work)
+	router.Register(coordclass.ClassGraph, graph)
+
+	// An ephemeral graph-class wisp routes to SQLite's wisp tier.
+	wisp, err := router.Create(beads.Bead{Title: "heartbeat", Type: "task", Labels: []string{"gc:wisp"}, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("create wisp: %v", err)
+	}
+	if _, err := graph.Get(wisp.ID); err != nil {
+		t.Fatalf("wisp %s not in SQLite: %v", wisp.ID, err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = router
+	state.stores = nil // no rigs: federate the city Router only
+	s := New(state)
+
+	out, err := s.humaHandleBeadEphemeral(context.Background(), &BeadEphemeralInput{})
+	if err != nil {
+		t.Fatalf("humaHandleBeadEphemeral: %v", err)
+	}
+	found := false
+	for _, b := range out.Body.Items {
+		if b.ID == wisp.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ephemeral handler did not return the SQLite wisp %s (got %d beads) — the TierWisps read did not reach SQLite", wisp.ID, len(out.Body.Items))
+	}
+}
+
 // TestBeadCloseHandlerReachesSQLiteGraphBackend is the viability guarantee for
 // routing the bd shim through the HTTP API under graph_store=sqlite: with the
 // controller's city store a Router{work: MemStore, graph: SQLite}, a bead close

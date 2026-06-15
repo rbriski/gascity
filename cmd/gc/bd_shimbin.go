@@ -75,6 +75,37 @@ func ensureCityBdShimbin(cityPath string, stderr io.Writer) error {
 	return nil
 }
 
+// sessionGCBinForCity returns the GC_BIN value for a managed session in cityPath
+// and, when the bd redirect is installed, sets GC_BD_REAL in agentEnv.
+//
+// When the city's shim bin dir is installed (the gc symlink exists), GC_BIN is
+// the shimbin gc symlink: prependGCBinDirToPATH fronts its directory, so the
+// sibling `bd` symlink wins and a worker's `bd` routes through the controller.
+// The value is derived from cityPath, never from os.Executable(), so a respawned
+// controller recomputes the same redirect for its grandchild sessions without a
+// gc copy. When the bd symlink is present, GC_BD_REAL is resolved to the real bd
+// (excluding the shim bin dir) so the shim's passthrough never recurses, even in
+// a controller whose own PATH is already fronted with the shim bin dir.
+//
+// When no shim bin dir is installed it returns the running gc binary
+// (os.Executable), preserving the pre-install behavior, and sets nothing.
+func sessionGCBinForCity(cityPath string, agentEnv map[string]string) string {
+	gcLink := cityBdShimbinGCPath(cityPath)
+	if !isSymlink(gcLink) {
+		if exe, err := os.Executable(); err == nil && exe != "" {
+			return exe
+		}
+		return ""
+	}
+	dir := cityBdShimbinDir(cityPath)
+	if isSymlink(filepath.Join(dir, "bd")) {
+		if realBd, err := resolveRealBdExcludingDir(dir); err == nil {
+			agentEnv[realBdEnvVar] = realBd
+		}
+	}
+	return gcLink
+}
+
 // resolveRealBdExcludingDir finds the absolute path of the real bd binary to use
 // as the shim's GC_BD_REAL passthrough target by scanning PATH and skipping
 // excludeDir (the shim bin dir). Skipping that dir makes resolution recursion-

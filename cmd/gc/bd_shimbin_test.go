@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -115,6 +116,85 @@ func TestEnsureCityBdShimbinNoBdOnPATHSkipsBdSymlink(t *testing.T) {
 	bdLink := filepath.Join(cityBdShimbinDir(cityPath), "bd")
 	if _, err := os.Lstat(bdLink); !os.IsNotExist(err) {
 		t.Fatalf("bd symlink should be skipped when no real bd on PATH (lstat err=%v)", err)
+	}
+}
+
+func TestSessionGCBinPointsIntoShimbinWhenInstalled(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	gcBin := sessionGCBinForCity(cityPath, map[string]string{})
+	if gcBin != cityBdShimbinGCPath(cityPath) {
+		t.Fatalf("GC_BIN = %q, want shimbin gc %q", gcBin, cityBdShimbinGCPath(cityPath))
+	}
+	// The dir prependGCBinDirToPATH fronts must be the shim bin dir, so the
+	// sibling `bd` symlink wins on a session PATH.
+	if filepath.Dir(gcBin) != cityBdShimbinDir(cityPath) {
+		t.Fatalf("GC_BIN dir = %q, want shim bin dir %q", filepath.Dir(gcBin), cityBdShimbinDir(cityPath))
+	}
+}
+
+func TestSessionGCBinFallsBackWhenNotInstalled(t *testing.T) {
+	cityPath := t.TempDir() // no shim bin dir installed
+	env := map[string]string{}
+	gcBin := sessionGCBinForCity(cityPath, env)
+	exe, _ := os.Executable()
+	if gcBin != exe {
+		t.Fatalf("GC_BIN = %q, want os.Executable fallback %q", gcBin, exe)
+	}
+	if _, set := env[realBdEnvVar]; set {
+		t.Fatalf("GC_BD_REAL must not be set when the shim is not installed")
+	}
+}
+
+// TestGCBINDerivationFromCityPathNotOsExecutable locks the copy-free recursion
+// fix: GC_BIN is the cityPath-derived shimbin path, not os.Executable() (the
+// symlink target), so a respawned controller cannot lose the redirect.
+func TestGCBINDerivationFromCityPathNotOsExecutable(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	gcBin := sessionGCBinForCity(cityPath, map[string]string{})
+	if exe, _ := os.Executable(); gcBin == exe {
+		t.Fatalf("GC_BIN resolved to os.Executable() %q; must be the cityPath-derived shimbin path", exe)
+	}
+	if gcBin != cityBdShimbinGCPath(cityPath) {
+		t.Fatalf("GC_BIN = %q, want %q", gcBin, cityBdShimbinGCPath(cityPath))
+	}
+}
+
+// TestSessionEnvSetsGCBDRealToRealBdNotShim proves GC_BD_REAL resolves the real
+// bd even when the resolving process's own PATH is fronted with the shim bin dir
+// (the controller case), so the shim's passthrough never recurses.
+func TestSessionEnvSetsGCBDRealToRealBdNotShim(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	realBd := writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	// Simulate a controller whose PATH is fronted with the shim bin dir.
+	t.Setenv("PATH", cityBdShimbinDir(cityPath)+string(os.PathListSeparator)+realBdDir)
+	env := map[string]string{}
+	_ = sessionGCBinForCity(cityPath, env)
+
+	if env[realBdEnvVar] != realBd {
+		t.Fatalf("GC_BD_REAL = %q, want real bd %q", env[realBdEnvVar], realBd)
+	}
+	if strings.HasPrefix(env[realBdEnvVar], cityBdShimbinDir(cityPath)) {
+		t.Fatalf("GC_BD_REAL %q points into the shim bin dir (recursion)", env[realBdEnvVar])
 	}
 }
 

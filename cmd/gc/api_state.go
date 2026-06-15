@@ -297,6 +297,20 @@ func graphStoreSQLiteEnabled(cfg *config.City) bool {
 // short-lived CLI processes release it on exit.
 var graphStoreHandleCache sync.Map // dir(string) -> beads.Store
 
+// noCloseGraphStore wraps the shared cached SQLite graph store so a consumer's
+// closeBeadStoreHandle CloseStore() is a no-op. The handle is shared per dir
+// across many short-lived store opens (gc ready, order dispatch, sweeps — each
+// defers closeBeadStoreHandle); the first one to close it would leave the shared
+// DB closed for every other consumer (reconciler, order dispatch, convergence:
+// "sql: database is closed"). The cache owns the lifetime — process exit is the
+// real release.
+type noCloseGraphStore struct {
+	*beads.SQLiteStore
+}
+
+// CloseStore is a no-op: the cache, not the caller, owns the shared handle.
+func (noCloseGraphStore) CloseStore() error { return nil }
+
 func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, scopeRoot string) {
 	if !graphStoreSQLiteEnabled(cfg) {
 		return
@@ -311,14 +325,20 @@ func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, scopeRoo
 		log.Printf("beads: graph_store=%q requested but opening the SQLite graph store at %s failed: %v; graph beads stay on the work backend", cfg.Beads.GraphStore, dir, err)
 		return
 	}
-	if actual, loaded := graphStoreHandleCache.LoadOrStore(dir, store); loaded {
-		// Lost the open race: close our duplicate handle and use the cached one.
+	// Cache a never-closed wrapper so a consumer's closeBeadStoreHandle cannot
+	// close the handle out from under the other consumers of the cached store.
+	var shared beads.Store = store
+	if sq, ok := store.(*beads.SQLiteStore); ok {
+		shared = noCloseGraphStore{sq}
+	}
+	if actual, loaded := graphStoreHandleCache.LoadOrStore(dir, shared); loaded {
+		// Lost the open race: close OUR real handle, use the cached shared one.
 		if closer, ok := store.(interface{ CloseStore() error }); ok {
 			_ = closer.CloseStore() //nolint:errcheck // best-effort close of the losing duplicate
 		}
-		store = actual.(beads.Store)
+		shared = actual.(beads.Store)
 	}
-	r.Register(coordclass.ClassGraph, store)
+	r.Register(coordclass.ClassGraph, shared)
 }
 
 // primeThenStartReconciler runs the async full prime and then arms the

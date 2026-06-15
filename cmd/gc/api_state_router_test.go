@@ -308,3 +308,35 @@ func TestRegisterGraphStoreBackendReusesSQLiteHandlePerDir(t *testing.T) {
 		t.Fatal("distinct graph dirs must get distinct SQLite handles")
 	}
 }
+
+// TestRegisterGraphStoreBackendCachedHandleSurvivesConsumerClose proves the
+// use-after-close fix: a consumer's closeBeadStoreHandle (CloseStore) on the
+// shared cached graph store must NOT close the underlying DB, or every other
+// consumer (reconciler, order dispatch, convergence) fails with "sql: database is
+// closed". After a CloseStore, the cached store must still be usable.
+func TestRegisterGraphStoreBackendCachedHandleSurvivesConsumerClose(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Beads.GraphStore = "sqlite"
+	scope := t.TempDir()
+
+	r := coordrouter.New(beads.NewMemStore())
+	registerGraphStoreBackend(r, cfg, scope)
+	g := r.Backend(coordclass.ClassGraph)
+	if g == nil {
+		t.Fatal("graph backend not registered")
+	}
+
+	// Simulate a short-lived consumer closing the store it opened.
+	if c, ok := g.(interface{ CloseStore() error }); ok {
+		if err := c.CloseStore(); err != nil {
+			t.Fatalf("CloseStore returned error: %v", err)
+		}
+	} else {
+		t.Fatal("cached graph store does not expose CloseStore")
+	}
+
+	// The shared handle must still be usable — not "sql: database is closed".
+	if _, err := g.Create(beads.Bead{Title: "after consumer close", Type: "task", Labels: []string{"gc:wisp"}}); err != nil {
+		t.Fatalf("cached graph store unusable after a consumer CloseStore (use-after-close regression): %v", err)
+	}
+}

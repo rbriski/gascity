@@ -171,6 +171,8 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
+      - name: go.mod replace guard
+        run: make check-gomod-replace
       - name: Native dependency surface guard
         run: make check-native-dependency-surface
       - name: Native DoltLite beads tests

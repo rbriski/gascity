@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,7 +86,7 @@ func TestRoutedPolicyStoreBuildsRouterOnlyWhenOptedIn(t *testing.T) {
 func TestWrapWithCachingStoreRegistersGraphSQLiteWhenOptedIn(t *testing.T) {
 	dir := t.TempDir()
 	policy := wrapStoreWithBeadPolicies(beads.NewMemStore(), graphSQLiteCfg()) // policy(mem)
-	wrapped := wrapWithCachingStore(nil, policy, nil, false, dir)              // policy(Router(caching(mem)) + sqlite)
+	wrapped := wrapWithCachingStore(context.TODO(), policy, nil, false, dir)   // policy(Router(caching(mem)) + sqlite)
 	t.Cleanup(func() { _ = closeBeadStoreHandle(wrapped) })
 
 	base, _, ok := unwrapBeadPolicyStore(wrapped)
@@ -252,7 +253,7 @@ func TestWrapWithCachingStorePeelsAndCachesIncomingRouter(t *testing.T) {
 	incomingRouter := base.(*coordrouter.Router)
 	graphBefore := incomingRouter.Backend(coordclass.ClassGraph)
 
-	wrapped := wrapWithCachingStore(nil, incoming, nil, false, dir)
+	wrapped := wrapWithCachingStore(context.TODO(), incoming, nil, false, dir)
 	t.Cleanup(func() { _ = closeBeadStoreHandle(wrapped) })
 
 	base, _, ok := unwrapBeadPolicyStore(wrapped)

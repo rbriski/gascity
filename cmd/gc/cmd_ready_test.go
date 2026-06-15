@@ -4,11 +4,58 @@ import (
 	"bytes"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/coordrouter"
 )
+
+// TestApplyReadyPredicateMatchesBdReadyWorkQuery proves gc ready renders the same
+// routed/unassigned/non-epic/oldest predicate as the canonical bd ready work
+// query (config.bdReadyPoolDemandShell), so swapping the work-query binary from
+// `bd ready` to `gc ready` returns the same shape.
+func TestApplyReadyPredicateMatchesBdReadyWorkQuery(t *testing.T) {
+	at := func(sec int64) time.Time { return time.Unix(sec, 0).UTC() }
+	in := []beads.Bead{
+		{ID: "gcg-1", Type: "task", CreatedAt: at(300), Metadata: map[string]string{"gc.routed_to": "gascity/gc.run-operator"}},
+		{ID: "gcg-2", Type: "task", CreatedAt: at(100), Metadata: map[string]string{"gc.routed_to": "gascity/gc.run-operator"}},
+		{ID: "gcg-3", Type: "task", Assignee: "someone", CreatedAt: at(50), Metadata: map[string]string{"gc.routed_to": "gascity/gc.run-operator"}},
+		{ID: "gcg-4", Type: "epic", CreatedAt: at(10), Metadata: map[string]string{"gc.routed_to": "gascity/gc.run-operator"}},
+		{ID: "gcg-5", Type: "task", CreatedAt: at(20), Metadata: map[string]string{"gc.routed_to": "gascity/gc.other"}},
+		{ID: "gcg-6", Type: "task", CreatedAt: at(5)}, // no routing
+	}
+	pred, err := readyPredicateFromFlags(
+		[]string{"gc.routed_to=gascity/gc.run-operator"},
+		[]string{"epic"},
+		true,  // unassigned
+		false, // includeEphemeral
+		"oldest",
+		1, // limit
+	)
+	if err != nil {
+		t.Fatalf("readyPredicateFromFlags: %v", err)
+	}
+	got := applyReadyPredicate(in, pred)
+	// Only gcg-1 and gcg-2 are unassigned, non-epic, routed-to the target; oldest
+	// (gcg-2, created earlier) wins under limit=1.
+	if len(got) != 1 || got[0].ID != "gcg-2" {
+		ids := make([]string, len(got))
+		for i, b := range got {
+			ids[i] = b.ID
+		}
+		t.Fatalf("applyReadyPredicate = %v, want [gcg-2]", ids)
+	}
+}
+
+func TestReadyPredicateFromFlagsRejectsMalformedMetadataField(t *testing.T) {
+	if _, err := readyPredicateFromFlags([]string{"no-equals-sign"}, nil, false, false, "", 0); err == nil {
+		t.Fatal("readyPredicateFromFlags accepted a --metadata-field without key=value, want error")
+	}
+	if _, err := readyPredicateFromFlags(nil, nil, false, false, "newest", 0); err == nil {
+		t.Fatal("readyPredicateFromFlags accepted --sort newest, want error")
+	}
+}
 
 // TestGcReadyFederatesAndRoundTrips proves the gc ready contract end to end: ready
 // work federated across a Router{work, graph: SQLite} renders to JSON that the

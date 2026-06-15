@@ -291,6 +291,45 @@ provider = "file"
 	}
 }
 
+func TestControllerWorkQueryEnvFrontsShimbinPATHUnderGraphStore(t *testing.T) {
+	cityPath, rigDir, cfg := newControllerProbeFixture(t)
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeScopePassword(t, rigDir, "rig-secret")
+
+	shimDir := cityBdShimbinDir(cityPath)
+	sep := string(os.PathListSeparator)
+
+	// Without graph_store=sqlite the work-query PATH is not fronted with the
+	// city shim bin dir — default cities stay byte-identical.
+	cfg.Beads.GraphStore = ""
+	env, err := controllerWorkQueryEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerWorkQueryEnv() error = %v, want nil", err)
+	}
+	for _, p := range strings.Split(env["PATH"], sep) {
+		if p == shimDir {
+			t.Fatalf("PATH fronted with shim dir %q without graph_store=sqlite: %q", shimDir, env["PATH"])
+		}
+	}
+
+	// With graph_store=sqlite the shim bin dir is the first PATH entry, so a bare
+	// `bd` resolves to the argv0 shim (-> controller HTTP API -> Router ->
+	// SQLite) even when the agent session PATH lost the shim dir at the sudo
+	// launch boundary (sudoers env_reset/secure_path); see scripts/bwrap-agent.
+	cfg.Beads.GraphStore = "sqlite"
+	env, err = controllerWorkQueryEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerWorkQueryEnv() error = %v, want nil", err)
+	}
+	if first := strings.Split(env["PATH"], sep)[0]; first != shimDir {
+		t.Fatalf("PATH first entry = %q, want shim bin dir %q (full PATH %q)", first, shimDir, env["PATH"])
+	}
+}
+
 func newControllerProbeFixture(t *testing.T) (string, string, *config.City) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "bd")

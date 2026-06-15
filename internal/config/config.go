@@ -3605,9 +3605,50 @@ func (a *Agent) EffectiveWorkQuery() string {
 }
 
 // EffectiveWorkQueryForBeads returns the default work query using the bd
-// compatibility semantics configured for the city.
+// compatibility semantics configured for the city. Under [beads]
+// graph_store = "sqlite" the generated routed predicate reads the graph store
+// via gc ready (see readyOracleCmd); a custom WorkQuery is returned verbatim.
 func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
+	q := a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
+	if a.WorkQuery != "" {
+		return q
+	}
+	return rewriteReadyOracle(q, readyOracleCmd(beads))
+}
+
+const (
+	// bdReadyOracleCommand is the default ready oracle: `bd ready` against the
+	// Dolt work store, the semantics existing prompts and tooling expect.
+	bdReadyOracleCommand = "bd ready"
+	// gcReadyOracleCommand reads the graph-class ready slice via the in-process
+	// per-class Router (cmd/gc cmd_ready.go), so a worker discovers ready
+	// formula-step beads in the embedded graph store that `bd ready` (Dolt)
+	// cannot see. Used only under [beads] graph_store = "sqlite".
+	gcReadyOracleCommand = "gc ready"
+)
+
+// readyOracleCmd selects the ready-oracle binary for the generated work/demand
+// query. Under [beads] graph_store = "sqlite" the routed predicate reads the
+// graph store via gc ready; default cities keep bd ready and stay byte-identical.
+func readyOracleCmd(beads BeadsConfig) string {
+	if strings.EqualFold(strings.TrimSpace(beads.GraphStore), "sqlite") {
+		return gcReadyOracleCommand
+	}
+	return bdReadyOracleCommand
+}
+
+// rewriteReadyOracle swaps the ready-oracle binary in a GENERATED work/demand
+// query. Only `bd ready` predicate tokens are rewritten; `bd list`
+// (assigned/in-progress) and the ephemeral-status probe keep their Dolt
+// work-store semantics. The routed target is always a positional shell argument,
+// never interpolated, so the literal `bd ready` appears only as the predicate
+// command — making the token swap exact. Custom WorkQuery/ScaleCheck commands are
+// never passed here.
+func rewriteReadyOracle(query, oracle string) string {
+	if oracle == bdReadyOracleCommand {
+		return query
+	}
+	return strings.ReplaceAll(query, bdReadyOracleCommand, oracle)
 }
 
 func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
@@ -3787,9 +3828,16 @@ func (a *Agent) EffectivePoolDemandQuery() string {
 }
 
 // EffectivePoolDemandQueryForBeads returns the count-form demand query using
-// the bd compatibility semantics configured for the city.
+// the bd compatibility semantics configured for the city. It flips to gc ready
+// in lockstep with EffectiveWorkQueryForBeads under graph_store = "sqlite" so the
+// reconciler's spawn decision and the worker's claim decision read the same
+// demand shape; a custom ScaleCheck is returned verbatim.
 func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
-	return a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
+	q := a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
+	if a.ScaleCheck != "" {
+		return q
+	}
+	return rewriteReadyOracle(q, readyOracleCmd(beads))
 }
 
 func (a *Agent) effectivePoolDemandQuery(includeEphemeralReady bool) string {

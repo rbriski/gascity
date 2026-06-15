@@ -7887,3 +7887,44 @@ func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestEffectiveWorkQueryForBeadsFlipsReadyOracleUnderGraphStore proves the work
+// and pool-demand queries swap `bd ready` -> `gc ready` (graph-store-aware
+// readiness via the in-process Router) only under [beads] graph_store="sqlite",
+// keep `bd ready` for default cities, leave the `bd list` assigned check on the
+// Dolt work store, flip both forms in lockstep, and never rewrite a custom command.
+func TestEffectiveWorkQueryForBeadsFlipsReadyOracleUnderGraphStore(t *testing.T) {
+	a := Agent{Name: "run-operator"}
+	graphBeads := BeadsConfig{GraphStore: "sqlite"}
+	defaultBeads := BeadsConfig{}
+
+	def := a.EffectiveWorkQueryForBeads(defaultBeads)
+	if !strings.Contains(def, "bd ready") || strings.Contains(def, "gc ready") {
+		t.Fatalf("default work query should use bd ready, got %q", def)
+	}
+	graph := a.EffectiveWorkQueryForBeads(graphBeads)
+	if !strings.Contains(graph, "gc ready") {
+		t.Fatalf("graph_store work query should use gc ready, got %q", graph)
+	}
+	if strings.Contains(graph, "bd ready") {
+		t.Fatalf("graph_store work query should not retain bd ready, got %q", graph)
+	}
+	// The assigned/in-progress check stays on the Dolt work store (bd list).
+	if strings.Contains(def, "bd list") && !strings.Contains(graph, "bd list") {
+		t.Fatalf("graph_store work query dropped the bd list assigned check: %q", graph)
+	}
+	// The reconciler count-form flips in lockstep with the worker form.
+	pdGraph := a.EffectivePoolDemandQueryForBeads(graphBeads)
+	if !strings.Contains(pdGraph, "gc ready") || strings.Contains(pdGraph, "bd ready") {
+		t.Fatalf("pool-demand query should flip to gc ready under graph_store, got %q", pdGraph)
+	}
+	pdDefault := a.EffectivePoolDemandQueryForBeads(defaultBeads)
+	if !strings.Contains(pdDefault, "bd ready") || strings.Contains(pdDefault, "gc ready") {
+		t.Fatalf("default pool-demand query should use bd ready, got %q", pdDefault)
+	}
+	// Custom commands are returned verbatim, never rewritten.
+	custom := Agent{Name: "x", WorkQuery: "bd ready --label custom"}
+	if got := custom.EffectiveWorkQueryForBeads(graphBeads); got != "bd ready --label custom" {
+		t.Fatalf("custom WorkQuery must not be rewritten, got %q", got)
+	}
+}

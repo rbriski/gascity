@@ -78,6 +78,17 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 	for key, value := range queryEnv {
 		env[key] = value
 	}
+	// Under graph_store=sqlite the routed work query runs `gc ready` (the
+	// graph-store-aware ready oracle; see config.readyOracleCmd). Front the city
+	// shim bin dir — which holds the gc symlink — on the work-query PATH so bare
+	// `gc` resolves for BOTH the worker `gc hook` subprocess and the supervisor's
+	// reconciler demand probe, even when the agent session's PATH lost the shim
+	// dir at the sudo launch boundary (sudoers env_reset/secure_path). The
+	// bwrap-agent launch wrapper fronts the same dir for the agent's interactive
+	// shell; this covers the controller-spawned probe environment.
+	if graphStoreSQLiteEnabled(cfg) {
+		prependGCBinDirToPATH(env, cityBdShimbinGCPath(cityPath))
+	}
 	return env, nil
 }
 

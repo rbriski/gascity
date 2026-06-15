@@ -84,10 +84,12 @@ func TestClassifyBdShimVerb(t *testing.T) {
 		{"show", []string{"x", "--json"}, true, bdRoute},
 		{"version", nil, false, bdPassthrough},
 		{"version", nil, true, bdPassthrough},
-		{"mol", []string{"current", "m"}, false, bdPassthrough}, // identity phase: one backend, byte-identical
-		{"mol", []string{"current", "m"}, true, bdRefuse},       // split phase: would silently miss graph beads
+		{"mol", []string{"current", "m"}, false, bdRoute},  // current|progress + id routes (graph-aware) in both phases
+		{"mol", []string{"current", "m"}, true, bdRoute},   // split phase: routes to GET /beads/graph/{root}
+		{"mol", []string{"pour", "proto"}, true, bdRefuse}, // non-read mol subcommand: refuse under split
+		{"mol", []string{"current"}, true, bdRefuse},       // id-omitted (bd infers it): not routable, refuse under split
 		{"gate", []string{"check"}, true, bdRefuse},
-		{"query", []string{"ephemeral=true"}, true, bdRefuse},
+		{"query", []string{"ephemeral=true"}, true, bdRefuse}, // no --json: not routable, refuse under split
 		// ready: the simple assigned form routes (graph-aware), but predicate
 		// flags the Router cannot yet replicate (pool-demand; C3/ga-2gap48.11)
 		// passthrough to the work-only bd — byte-identical in the identity phase.

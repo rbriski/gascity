@@ -233,10 +233,10 @@ func splitBdGlobalFlags(args []string) (string, []string) {
 // graph_store=sqlite is on — so in the split phase the shim refuses them loudly
 // rather than dropping graph data (graph-store-rollout-plan.md §X2).
 var bdShimGraphTouchingUnroutedVerbs = map[string]bool{
-	"mol":  true, // bd mol current|progress — molecule topology lives in the graph store
 	"gate": true, // bd gate check --escalate — a mutation on gate beads
-	// "query" is now routed (see classifyBdShimVerb): the ephemeral discovery
-	// shape maps to GET /beads/ephemeral, reaching SQLite wisps via the Router.
+	// "query" and "mol" are now handled in classifyBdShimVerb: the ephemeral
+	// discovery shape maps to GET /beads/ephemeral and mol current|progress to
+	// GET /beads/graph/{root}, both reaching the SQLite graph store via the Router.
 }
 
 // classifyBdShimVerb decides how the shim handles a bd subcommand given whether
@@ -249,6 +249,19 @@ func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDispo
 	// work-only bd would silently miss SQLite-resident wisps (the §X2 hazard).
 	if verb == "query" {
 		if bdQueryRoutable(args) {
+			return bdRoute
+		}
+		if splitPhase {
+			return bdRefuse
+		}
+		return bdPassthrough
+	}
+	// `bd mol current|progress <id>` routes to the graph endpoint; other mol
+	// subcommands (pour/wisp/bond/...) and id-omitted/flag-heavy forms are not
+	// faithfully routable and must refuse under the split phase (they would miss
+	// SQLite-resident molecule topology), passthrough otherwise.
+	if verb == "mol" {
+		if bdMolRoutableArgs(args) {
 			return bdRoute
 		}
 		if splitPhase {
@@ -453,6 +466,18 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 		// `bd query --json` emits a JSON array of beads; the work_query shell
 		// pipeline applies any jq readiness/route post-filter itself.
 		return writeReadyJSON(read.Body, stdout, stderr)
+	case "mol":
+		sub, id, jsonOut, ok := bdMolRoutable(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: mol: routable only as `current|progress <id>`") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		g, err := client.GetBeadGraph(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: mol %s %q via API: %v\n", sub, id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return renderBdMol(sub, g, jsonOut, stdout, stderr)
 	case "create":
 		b, jsonOut, err := parseBdCreateBead(args)
 		if err != nil {
@@ -598,6 +623,102 @@ func isBareBdQueryValue(v string) bool {
 		}
 	}
 	return true
+}
+
+// bdMolRoutable reports whether a `bd mol` arg list is a routable read —
+// `current` or `progress` with an explicit molecule id and at most --json — and
+// returns the parsed subcommand/id/json. Other subcommands (pour/wisp/bond/...),
+// an omitted id (bd infers it from in_progress issues, which the rooted graph
+// endpoint cannot express), or view flags (--for/--limit/--range) are not
+// faithfully routable.
+func bdMolRoutable(args []string) (sub, id string, jsonOut, ok bool) {
+	if len(args) < 2 {
+		return "", "", false, false
+	}
+	sub = args[0]
+	if sub != "current" && sub != "progress" {
+		return "", "", false, false
+	}
+	for _, a := range args[1:] {
+		switch {
+		case a == "--json":
+			jsonOut = true
+		case strings.HasPrefix(a, "-"):
+			return "", "", false, false // --for/--limit/--range: not routable
+		default:
+			if id != "" {
+				return "", "", false, false
+			}
+			id = a
+		}
+	}
+	if id == "" {
+		return "", "", false, false
+	}
+	return sub, id, jsonOut, true
+}
+
+func bdMolRoutableArgs(args []string) bool {
+	_, _, _, ok := bdMolRoutable(args)
+	return ok
+}
+
+// renderBdMol renders `bd mol current|progress` from a fetched bead graph. Step
+// indicators derive from each bead's status (done=closed, current=in_progress,
+// pending=open). The graph endpoint returns parent-child topology but not
+// blocking-dep edges, so open steps render as [pending] rather than asserting
+// [ready]/[blocked] — exact ready/blocked discrimination is C2a's byte-identity
+// work. Routing here (X2) reaches SQLite-resident topology the work-only bd
+// cannot see; the text is LLM-facing situational awareness, not a parsed wire.
+func renderBdMol(sub string, g api.BeadGraph, jsonOut bool, stdout, stderr io.Writer) int {
+	steps := molSteps(g)
+	if jsonOut {
+		return writeReadyJSON(steps, stdout, stderr)
+	}
+	done := 0
+	for _, b := range steps {
+		if b.Status == "closed" {
+			done++
+		}
+	}
+	switch sub {
+	case "progress":
+		pct := 0
+		if len(steps) > 0 {
+			pct = done * 100 / len(steps)
+		}
+		fmt.Fprintf(stdout, "%s: %d/%d steps complete (%d%%)\n", g.Root.ID, done, len(steps), pct) //nolint:errcheck // best-effort stdout
+	default: // current
+		fmt.Fprintf(stdout, "Molecule %s — %s (%d/%d done)\n", g.Root.ID, g.Root.Title, done, len(steps)) //nolint:errcheck // best-effort stdout
+		for _, b := range steps {
+			fmt.Fprintf(stdout, "  [%s] %s %s\n", molStepIndicator(b), b.ID, b.Title) //nolint:errcheck // best-effort stdout
+		}
+	}
+	return 0
+}
+
+// molSteps returns the molecule's step beads (every graph bead except the root),
+// preserving the endpoint's order.
+func molSteps(g api.BeadGraph) []beads.Bead {
+	steps := make([]beads.Bead, 0, len(g.Beads))
+	for _, b := range g.Beads {
+		if b.ID == g.Root.ID {
+			continue
+		}
+		steps = append(steps, b)
+	}
+	return steps
+}
+
+func molStepIndicator(b beads.Bead) string {
+	switch b.Status {
+	case "closed":
+		return "done"
+	case "in_progress":
+		return "current"
+	default:
+		return "pending"
+	}
 }
 
 // parseBdCreateBead parses the routable `bd create` args (title positional plus

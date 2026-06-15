@@ -953,6 +953,60 @@ func (c *Client) EphemeralBeads(opts EphemeralBeadsOpts) (CachedRead[[]beads.Bea
 	}, nil
 }
 
+// BeadGraphDep is a topology edge (parent-child) in a bead/molecule graph.
+type BeadGraphDep struct {
+	From string
+	To   string
+	Kind string
+}
+
+// BeadGraph is a molecule/bead topology — the root, its member/step beads, and
+// their parent-child edges — as returned by GET /beads/graph/{rootID}.
+type BeadGraph struct {
+	Root  beads.Bead
+	Beads []beads.Bead
+	Deps  []BeadGraphDep
+}
+
+// GetBeadGraph fetches the molecule/bead graph rooted at rootID — the routed data
+// source for `bd mol current`/`progress`. Under graph_store=sqlite this reaches
+// molecule topology resident in the SQLite graph backend through the controller's
+// Router (the work-only bd cannot see those steps).
+func (c *Client) GetBeadGraph(rootID string) (BeadGraph, error) {
+	if err := c.requireCityScope(); err != nil {
+		return BeadGraph{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsGraphByRootIdWithResponse(context.Background(), c.cityName, rootID)
+	if err != nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return BeadGraph{}, err
+	}
+	if resp.JSON200 == nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("empty graph response for %q", rootID)}
+	}
+	g := BeadGraph{Root: beadFromGen(resp.JSON200.Root)}
+	if resp.JSON200.Beads != nil {
+		for _, b := range *resp.JSON200.Beads {
+			g.Beads = append(g.Beads, beadFromGen(b))
+		}
+	}
+	if resp.JSON200.Deps != nil {
+		for _, d := range *resp.JSON200.Deps {
+			kind := ""
+			if d.Kind != nil {
+				kind = *d.Kind
+			}
+			g.Deps = append(g.Deps, BeadGraphDep{From: d.From, To: d.To, Kind: kind})
+		}
+	}
+	return g, nil
+}
+
 // ReadyBeads fetches the city's ready work — the federated ready set across the
 // controller's bead stores — via GET /v0/city/{cityName}/beads/ready. The
 // endpoint applies no assignee/metadata predicates, so callers that need them

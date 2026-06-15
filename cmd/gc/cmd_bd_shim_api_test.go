@@ -43,6 +43,87 @@ func TestDispatchBdShimVerbViaAPICreate(t *testing.T) {
 	}
 }
 
+// TestDispatchBdShimVerbViaAPIMol proves `bd mol current|progress <id>` routes
+// to GET /beads/graph/{id} and renders step status indicators / progress from
+// the returned topology (the routed source reaches SQLite-resident steps).
+func TestDispatchBdShimVerbViaAPIMol(t *testing.T) {
+	graphJSON := map[string]any{
+		"root": map[string]any{"id": "gcg-1", "title": "workflow", "status": "open"},
+		"beads": []map[string]any{
+			{"id": "gcg-1", "title": "workflow", "status": "open"},
+			{"id": "gcg-2", "title": "step one", "status": "closed"},
+			{"id": "gcg-3", "title": "step two", "status": "in_progress"},
+		},
+		"deps": []map[string]any{},
+	}
+	newServer := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(graphJSON) //nolint:errcheck
+		}))
+	}
+
+	t.Run("current", func(t *testing.T) {
+		var gotMethod, gotPath string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(graphJSON) //nolint:errcheck
+		}))
+		defer ts.Close()
+		client := api.NewCityScopedClient(ts.URL, "alpha")
+		var out, errb bytes.Buffer
+		if code := dispatchBdShimVerbViaAPI(client, "mol", []string{"current", "gcg-1"}, &out, &errb); code != 0 {
+			t.Fatalf("mol current: code=%d err=%s", code, errb.String())
+		}
+		if gotMethod != http.MethodGet || gotPath != "/v0/city/alpha/beads/graph/gcg-1" {
+			t.Fatalf("mol -> %s %s, want GET /v0/city/alpha/beads/graph/gcg-1", gotMethod, gotPath)
+		}
+		o := out.String()
+		if !strings.Contains(o, "[done] gcg-2") || !strings.Contains(o, "[current] gcg-3") {
+			t.Fatalf("mol current render = %q, want [done] gcg-2 + [current] gcg-3 (root excluded)", o)
+		}
+		if strings.Contains(o, "gcg-1 workflow\n") && strings.Contains(o, "[") && strings.Contains(o, "] gcg-1") {
+			t.Fatalf("mol current rendered the root as a step: %q", o)
+		}
+	})
+
+	t.Run("progress", func(t *testing.T) {
+		ts := newServer()
+		defer ts.Close()
+		client := api.NewCityScopedClient(ts.URL, "alpha")
+		var out, errb bytes.Buffer
+		if code := dispatchBdShimVerbViaAPI(client, "mol", []string{"progress", "gcg-1"}, &out, &errb); code != 0 {
+			t.Fatalf("mol progress: code=%d err=%s", code, errb.String())
+		}
+		if !strings.Contains(out.String(), "1/2 steps complete (50%)") {
+			t.Fatalf("mol progress render = %q, want 1/2 steps complete (50%%)", out.String())
+		}
+	})
+}
+
+// TestBdMolRoutable covers the routable read shapes and the forms that must not
+// route (other subcommands, omitted id, view flags).
+func TestBdMolRoutable(t *testing.T) {
+	cases := []struct {
+		args []string
+		ok   bool
+	}{
+		{[]string{"current", "gcg-1"}, true},
+		{[]string{"progress", "gcg-1"}, true},
+		{[]string{"current", "gcg-1", "--json"}, true},
+		{[]string{"current"}, false},                            // id omitted (bd infers it)
+		{[]string{"pour", "proto"}, false},                      // not a read subcommand
+		{[]string{"current", "--for", "agent", "gcg-1"}, false}, // view flag: not routable
+		{nil, false},
+	}
+	for _, tc := range cases {
+		if got := bdMolRoutableArgs(tc.args); got != tc.ok {
+			t.Errorf("bdMolRoutableArgs(%v) = %v, want %v", tc.args, got, tc.ok)
+		}
+	}
+}
+
 // TestDispatchBdShimVerbViaAPIQueryEphemeral proves `bd query --json
 // 'ephemeral=true AND ...'` routes to GET /beads/ephemeral with the parsed
 // filters and renders the wisp rows as a JSON array (like raw `bd query`).

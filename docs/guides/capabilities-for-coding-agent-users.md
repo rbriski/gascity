@@ -98,11 +98,11 @@ restarts.
   `worker_nux`, …). See them with `gc session list`.
 - Role (the kind), identity (the running instance), and pool (the set) are all
   facets of the single **Agent** primitive — see
-  [the six primitives](/concepts/primitives).
+  [the six primitives](/getting-started/how-gas-city-works).
 
 ## See also
 
-- [The six primitives](/concepts/primitives) — the canonical model; start here.
+- [The six primitives](/getting-started/how-gas-city-works) — the canonical model; start here.
 - [Coming from Gas Town](/getting-started/coming-from-gastown)
 - [Tutorial 04: Communication](/tutorials/04-communication) — mail and nudge.
 - [Config Reference](/reference/config)

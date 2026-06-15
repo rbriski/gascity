@@ -12,9 +12,9 @@ A formula is a TOML file that records _how_ a piece of work should be done — a
 collection of steps with dependencies, variables, and optional control flow. It
 isn't the work itself (that's a bead); it's the reusable method. Running a
 formula produces a **workflow**: a graph of step beads that Gas City's
-controller routes to agents, gates on dependencies, retries on failure, and
+orchestrator routes to agents, gates on dependencies, retries on failure, and
 drives to completion in the background. You write down the method once; the
-controller coordinates the doing — fanning ready steps out to as many agents as
+orchestrator coordinates the doing — fanning ready steps out to as many agents as
 you have.
 
 ## A simple formula
@@ -118,7 +118,7 @@ Steps (6):
 `gc formula show` compiles the formula — arranging steps and dependencies — and
 displays the result. You wrote five steps, but the recipe shows six: the
 compiler appends a `workflow-finalize` **control step** that depends on the last
-steps in your graph. Agents never work on it; the controller completes it once
+steps in your graph. Agents never work on it; the orchestrator completes it once
 everything upstream is done, recording the workflow's outcome and closing it.
 
 For the next few examples, keep the `mayor` from earlier tutorials and add a
@@ -602,12 +602,12 @@ max_attempts = 3
 on_exhausted = "soft_fail"
 ```
 
-No script: when an attempt fails transiently, the controller dispatches another,
+No script: when an attempt fails transiently, the orchestrator dispatches another,
 up to `max_attempts`. `on_exhausted` decides what happens when the budget runs
 out — `"hard_fail"` (the default) fails the step, `"soft_fail"` records the
 failure but lets the workflow continue.
 
-The controller owns these runtime loops, deciding when to re-dispatch, fan out,
+The orchestrator owns these runtime loops, deciding when to re-dispatch, fan out,
 or finalize without you in the session. More constructs exist: `drain` scatters
 a convoy of work items into per-item runs, and `on_complete`/`tally` fan out
 follow-up work over a step's output and aggregate the results. The v2 spec's
@@ -616,7 +616,7 @@ set.
 
 ## What's next
 
-- **[The six primitives](/concepts/primitives)** — the canonical model formulas
+- **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model formulas
   and the work they produce build on
 - **[Formula spec (v2)](/reference/specs/formula-spec-v2)** — the complete surface: every
   top-level key, every step field, and the v2 runtime constructs

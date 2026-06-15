@@ -240,7 +240,7 @@ store when executable `.beads/hooks/on_create`, `.beads/hooks/on_update`, or
 bead events for external `bd` writes; the native in-process store does not run
 shell hooks.
 
-For controller-managed Gas City deployments, confirm that the controller is
+For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
@@ -556,8 +556,8 @@ the escalation marker.
 ### Maintenance escalation and completion routing
 
 Core maintenance scripts route alerts through a generic escalation hook
-instead of mailing a hardcoded role. Orders inherit the controller's
-environment, so set these at controller start to customize routing:
+instead of mailing a hardcoded role. Orders inherit the orchestrator's
+environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
   `human`, the reserved human mailbox).
@@ -590,7 +590,7 @@ Common root causes, in rough order of frequency:
 
 If the underlying problem cannot be fixed immediately (e.g., the remote
 host is down for scheduled maintenance), set
-`GC_JSONL_MAX_PUSH_FAILURES=99` in the controller's environment and
+`GC_JSONL_MAX_PUSH_FAILURES=99` in the orchestrator's environment and
 restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.
@@ -641,7 +641,7 @@ and an end-to-end recovery recipe.
 ## Still Stuck?
 
 If a symptom only makes sense once you know how the pieces fit together, see
-[The six primitives](/concepts/primitives) for the underlying model.
+[The six primitives](/getting-started/how-gas-city-works) for the underlying model.
 
 Open an issue at
 [gastownhall/gascity/issues](https://github.com/gastownhall/gascity/issues)

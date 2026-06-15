@@ -66,6 +66,18 @@
   },
   "redirects": [
     {
+      "source": "/concepts/primitives",
+      "destination": "/getting-started/how-gas-city-works"
+    },
+    {
+      "source": "/concepts/architecture-overview",
+      "destination": "/getting-started/how-gas-city-works"
+    },
+    {
+      "source": "/getting-started/repository-map",
+      "destination": "/getting-started/how-gas-city-works"
+    },
+    {
       "source": "/packv2/migration",
       "destination": "/guides/shareable-packs"
     },
@@ -133,21 +145,14 @@
   "navigation": {
     "groups": [
       {
-        "group": "Start Here",
+        "group": "Getting Started",
         "pages": [
           "index",
           "getting-started/installation",
           "getting-started/quickstart",
+          "getting-started/how-gas-city-works",
           "getting-started/coming-from-gastown",
-          "getting-started/troubleshooting",
-          "getting-started/repository-map"
-        ]
-      },
-      {
-        "group": "Concepts",
-        "pages": [
-          "concepts/architecture-overview",
-          "concepts/primitives"
+          "getting-started/troubleshooting"
         ]
       },
       {
@@ -180,6 +185,7 @@
       {
         "group": "Troubleshooting",
         "pages": [
+          "troubleshooting/index",
           "troubleshooting/gc-start-walkthrough",
           "troubleshooting/dolt-bloat-recovery",
           "troubleshooting/bd-backup-cleanup",

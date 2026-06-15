@@ -249,7 +249,7 @@ You've created sessions on demand, kept the mayor alive with an always-on
 `[[named_session]]`, and used peek, attach, nudge, and logs to watch and talk to
 agents. From here:
 
-- **[The six primitives](/concepts/primitives)** — the canonical model the
+- **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model the
   session and these mechanisms build on
 - **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
   coordinate through mail, slung work, and hooks

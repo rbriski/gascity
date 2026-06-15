@@ -167,7 +167,7 @@ directly, you need a session — see [the next tutorial](/tutorials/03-sessions)
 You've defined an agent with a custom prompt, pointed it at a different
 provider, and slung work to it directly. From here:
 
-- **[The six primitives](/concepts/primitives)** — the canonical model agents,
+- **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model agents,
   sessions, and work all build on
 - **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
   suspension, named sessions

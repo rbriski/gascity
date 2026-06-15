@@ -9,7 +9,7 @@ description: Authoritative specification for the formulas v1 contract.
 | Last verified | 2026-06-12 |
 | Contract | `formula_compiler 1.0` (default — no declaration required) |
 | Primary implementation | `internal/formula`, `internal/molecule` |
-| Concept model | [Six Primitives](/concepts/primitives) (authoritative — where Formula fits in the taxonomy) |
+| Concept model | [Six Primitives](/getting-started/how-gas-city-works) (authoritative — where Formula fits in the taxonomy) |
 | User-facing guide | [Understanding Formulas](/guides/understanding-formulas) |
 | Tutorial | [Formulas tutorial](/tutorials/05-formulas) |
 
@@ -69,10 +69,10 @@ writes were expensive; it remains specified for compatibility, but new
 formulas should use the v2 contract rather than reasoning in phases.
 
 v1 has **no runtime engine**. Conditions and loops resolve at cook time;
-after instantiation the molecule is inert data. No controller component
+after instantiation the molecule is inert data. No orchestrator component
 advances it — agents work the molecule through their hooks, inside their
 own sessions, and the bead store's dependency edges sequence the steps.
-The controller's control dispatcher executes only control beads, which v1
+The orchestrator's control dispatcher executes only control beads, which v1
 compilation never emits.
 
 The execution model is the structural difference from v2:
@@ -80,8 +80,8 @@ The execution model is the structural difference from v2:
 | | v1 | Formulas v2 |
 |---|---|---|
 | Compiled shape | Parent-child molecule tree under a `molecule` container root | Flat graph: `task` root plus step beads linked only by blocking dependency edges |
-| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The controller's control dispatcher executes every control bead — check and retry evaluation, fan-out, tally, drain, scope checks, workflow-finalize |
-| Who advances work | Agents working hooked beads, inside their own sessions | The controller drives orchestration outside any agent session; agents only run plain work beads |
+| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, tally, drain, scope checks, workflow-finalize |
+| Who advances work | Agents working hooked beads, inside their own sessions | The orchestrator drives orchestration outside any agent session; agents only run plain work beads |
 | Agent fan-out | The molecule is typically worked by the one agent it is slung to; spreading steps across agents is manual routing | Step beads are independently routable; per-step routing intent resolves at dispatch, and `drain` / `on_complete` fan out across agents or pools at runtime |
 | Root visibility | The container root is the molecule's handle; default-typed steps are stamped type `step` and excluded from `Ready()` (section 2) | Step beads are independently Ready-visible and routable; the root surfaces only when the workflow completes |
 | Dependency semantics | A dependency on a parent gates on the parent and its children (container dependencies, section 1.3) | No parent-child edges; a dependency on a parent gates only on the parent step bead |
@@ -414,7 +414,7 @@ Steps (1):
 Two caveats. First, the re-run never happens: the `until` label is written
 but nothing consumes it — neither the v1 cook path nor the v2 control
 dispatcher — so an `until` loop runs exactly one iteration (section 4).
-v1 has no runtime re-execution mechanism at all; controller-driven
+v1 has no runtime re-execution mechanism at all; orchestrator-driven
 re-execution requires the v2 `check` construct
 ([v2 specification, section 3.1](/reference/specs/formula-spec-v2#31-check)).
 Second, `until` does not use the `{{var}} == value` step-condition syntax:
@@ -637,9 +637,9 @@ patrol -> mc-lbd
 
 ## 3. Runtime
 
-v1 has no runtime engine. The controller's control dispatcher executes
+v1 has no runtime engine. The orchestrator's control dispatcher executes
 control beads only, and v1 compilation emits none — after instantiation no
-controller component advances the molecule.
+orchestrator component advances the molecule.
 
 - **Agents advance work.** The molecule is worked by the agent it is
   slung or hooked to; the bead store's blocking edges sequence the steps.

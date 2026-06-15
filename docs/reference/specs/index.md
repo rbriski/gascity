@@ -15,10 +15,10 @@ code wins and the spec has a bug.
 |---|---|
 | [Gas City 1.0 Pack System (PackV2)](/reference/specs/pack-spec) | Pack format and loading semantics: directory layout, `pack.toml`, imports, patches, layers |
 | [Formula Specification — v1](/reference/specs/formula-spec-v1) | The formulas v1 contract: file format and container semantics — the default when a formula declares nothing; molecule/wisp are the v1 materialization mechanism it compiles a formula into |
-| [Formula Specification — v2](/reference/specs/formula-spec-v2) | The formulas v2 contract: file format, graph compilation, and the controller-executed runtime constructs |
+| [Formula Specification — v2](/reference/specs/formula-spec-v2) | The formulas v2 contract: file format, graph compilation, and the orchestrator-executed runtime constructs |
 
 New specifications land in this section. For the reasoning register — how to
 think about packs and formulas rather than what is normative — see the
 [guides](/guides/index). For the canonical model these specs are normative
 over — the six primitives (Agent, Bead, Formula, Rig, Pack, Event) — start
-with [Primitives](/concepts/primitives).
+with [How Gas City Works](/getting-started/how-gas-city-works).

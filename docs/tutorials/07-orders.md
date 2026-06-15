@@ -1,16 +1,16 @@
 ---
 title: Tutorial 07 - Orders
 sidebarTitle: 07 - Orders
-description: Trigger v2 formulas — and the controller-driven orchestration they unleash — on a schedule, a condition, or an event, with no human in the loop.
+description: Trigger v2 formulas — and the orchestration the orchestrator drives — on a schedule, a condition, or an event, with no human in the loop.
 ---
 
 Formulas describe _what_ work looks like. Orders describe _when_ it should
 happen. An order pairs a trigger with an action — a formula or a shell script.
-The _controller_ (`gc start` launches it) wakes every 30 seconds — a _tick_ —
+The _orchestrator_ (`gc start` launches it) wakes every 30 seconds — a _tick_ —
 and evaluates each order's trigger. When a trigger opens, the order fires, no
 human dispatch needed.
 
-For a v2 formula, firing hands the whole job to the controller: it decomposes
+For a v2 formula, firing hands the whole job to the orchestrator: it decomposes
 the formula into a graph of beads, fans the ready steps out across the pool's
 agents, gates each step on its dependencies, retries failures, and drives the
 graph to completion outside any session — now on a schedule or in response to
@@ -24,7 +24,7 @@ built up through [Tutorial 06](/tutorials/06-beads)).
 Orders live in an `orders/` directory at the top level of your city, alongside
 `formulas/` and `agents/` — the local (root) pack's own contents, the same
 structure an imported pack provides. An order imported from a shared pack reads
-exactly like a local one. See [primitives](/concepts/primitives) for how packs,
+exactly like a local one. See [primitives](/getting-started/how-gas-city-works) for how packs,
 formulas, agents, and orders relate.
 
 ```
@@ -48,11 +48,11 @@ interval = "5m"
 pool = "worker"
 ```
 
-The `pool` field tells the controller where to send the work. A _pool_ is a
+The `pool` field tells the orchestrator where to send the work. A _pool_ is a
 named group of agents that share a work queue (you saw the bundled `dolt.dog`
 pool in Tutorial 01); a single agent's name works as a pool target too, so the
 examples here route to the `worker` agent from Tutorial 05. When the order
-fires, the controller runs the formula and writes `gc.routed_to=worker` on the
+fires, the orchestrator runs the formula and writes `gc.routed_to=worker` on the
 resulting work beads — the marker that the pool's `bd ready` query and the
 supervisor's `scale_check` both read. Any agent in the pool can then pick the
 work up.
@@ -78,12 +78,12 @@ again from a scale-from-zero pool.
 </Accordion>
 
 Drop a new order file into `orders/` and it shows up within a minute — the
-controller rescans the order set as it ticks, at most once per minute. No
+orchestrator rescans the order set as it ticks, at most once per minute. No
 restart needed.
 
 ## Inspecting orders
 
-Three commands show you what the controller sees: which orders exist, what
+Three commands show you what the orchestrator sees: which orders exist, what
 their triggers look like, and whether any are due.
 
 `gc order list` shows every enabled order, whether or not it has ever fired:
@@ -176,7 +176,7 @@ Notes per trigger:
   day-of-week) supporting `*`, integers, comma lists (`1,15`), and `*/N` steps.
   Unlike cooldown it hits the same wall-clock times every day. Fires at most
   once per minute.
-- **`condition`** — the controller runs `sh -c "<check>"` with a 10-second
+- **`condition`** — the orchestrator runs `sh -c "<check>"` with a 10-second
   timeout each tick. Use it for external state: check a file, ping an endpoint,
   query a database. The check runs synchronously, so a slow one delays the rest
   of the tick — keep it fast.
@@ -189,7 +189,7 @@ Notes per trigger:
 ![Cooldown vs cron timing on two timelines: cooldown fires a fixed interval after each run ends, so its wall-clock times drift later as runs take longer; cron fires at fixed clock times no matter how long runs take.](/diagrams/excalidraw-rendered/cooldown-vs-cron.svg)
 
 <Accordion title="Cron catch-up after a missed minute">
-If no controller tick landed during a scheduled minute (the controller was busy
+If no orchestrator tick landed during a scheduled minute (the orchestrator was busy
 or down), the next tick fires the missed occurrence once — `gc order check`
 shows the reason `cron: caught up missed occurrence`. Orders that have never run
 don't backfill; they fire only on an exact match.
@@ -198,7 +198,7 @@ don't backfill; they fire only on an exact match.
 ## Formula orders vs. exec orders
 
 An order's action is either a formula or a shell script. An exec order runs the
-script on the controller — no agent, no LLM, no work beads — which is the right
+script on the orchestrator — no agent, no LLM, no work beads — which is the right
 choice for purely mechanical work: pruning branches, running linters, checking
 disk usage.
 
@@ -207,7 +207,7 @@ disk usage.
 description = "Delete branches already merged to main"
 trigger = "cooldown"
 interval = "5m"
-exec = "scripts/prune-merged.sh"   # no pool — runs on the controller
+exec = "scripts/prune-merged.sh"   # no pool — runs on the orchestrator
 ```
 
 The rules:
@@ -236,7 +236,7 @@ timeout = "60s"
 
 For formula orders, the timeout covers only the initial dispatch — compiling
 the formula, materializing its work beads, and routing them to the pool. Once
-dispatched, the controller drives a v2 formula's steps to completion at each
+dispatched, the orchestrator drives a v2 formula's steps to completion at each
 agent's own pace; the order timeout never kills work mid-flight. For exec
 orders, the timeout covers the full script execution — overrun, and the process
 is killed. A global cap in `city.toml`:
@@ -376,7 +376,7 @@ order is due.
 
 ## Duplicate prevention
 
-Before dispatching, the controller checks whether the order already has open
+Before dispatching, the orchestrator checks whether the order already has open
 (non-closed) work. If it does, the order is skipped even when the trigger says
 it's due — so a still-running pancakes batch doesn't get a second one piled on
 top.
@@ -534,16 +534,16 @@ release-notes        cron         no    cron: schedule not matched
 ```
 
 The lint check fires immediately (never run + cooldown = due), then every 30
-seconds. The release notes fire Monday at 9 AM: the controller compiles the
+seconds. The release notes fire Monday at 9 AM: the orchestrator compiles the
 three-step formula into a graph, makes `gather` Ready, and routes step beads to
 the `worker` pool; `summarize` unblocks only when `gather` closes, `post` only
-after `summarize`. The controller drives the sequence to completion — no one
+after `summarize`. The orchestrator drives the sequence to completion — no one
 types `gc sling`, no single session babysits the run.
 
 That's the whole idea. An order binds a trigger to an action. For a v2 formula,
-the action is the full orchestration the controller drives outside any session —
+the action is the full orchestration the orchestrator drives outside any session —
 now gated by time, schedule, condition, or event. For an exec script, it's a
-mechanical task on the same tick. Either way the controller evaluates the
+mechanical task on the same tick. Either way the orchestrator evaluates the
 trigger every tick and does the work for you.
 
 ## What's next

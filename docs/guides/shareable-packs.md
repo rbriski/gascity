@@ -111,7 +111,7 @@ repository root, prefer the same `/tree/<ref>/<path>` URL a browser can open:
 ```toml
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 ```
 
 Do not write registry handles such as `main:gastown` into `pack.toml`. Registry
@@ -125,51 +125,26 @@ duplicate-agent error only when two source directories produce the same
 qualified name on the same surface — for example, two unbound legacy includes
 that both define `polecat` — and there is no fallback-agent resolution.
 
-The `[imports.<name>]` key is the local binding chosen by the importing pack.
-An imported pack's own name, or the name displayed in a registry, is display
-metadata and a suggested binding only. It does not override the import
-binding.
-
 ## Registry Discovery
 
 Registries help you find packs, but they do not change the authored import
-shape. The registry commands available in this release cover discovery, cache
-management, authentication, and publish submission:
+shape. The registry commands available in this release are discovery and cache
+management commands:
 
 ```text
-gc pack registry add example https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml
+gc pack registry add main https://github.com/gastownhall/gascity-packs.git
 gc pack registry refresh main
 gc pack registry search gastown
-gc pack registry show main:gastown
-gc pack registry login
-gc pack registry publish .
-gc pack registry whoami
+gc pack registry show gastown
 gc pack registry list
-gc pack registry remove example
+gc pack registry remove main
 ```
 
 When a registry entry is used to add or migrate a pack, the durable
 `pack.toml` entry stores the entry's resolved `source` and optional `version`,
-not the registry handle.
-
-The first public registry is the `gascity-packs` catalog, configured by default
-as the built-in `main` registry, so there is nothing to add:
-
-```text
-gc pack registry refresh main
-gc pack registry search gascity
-gc pack registry show main:gascity
-```
-
-Registry caches are local. Search and show warn when a registry cache is older
-than the freshness window. The default window is 24 hours. Set
-`GC_REGISTRY_FRESHNESS` to a positive Go duration string, such as `1h` or
-`30m`, to change that warning window. Invalid, zero, or negative values warn.
-Pass `--refresh` to `gc pack registry search` or `gc pack registry show` when
-you want that command to fetch the latest catalog before reading it.
-
-See [Public Registry Packs](/guides/registry-showcase) for the first-party
-packs currently advertised through the public registry.
+not the registry handle. Publishing registry content is still a registry-repo
+workflow in this wave: edit the registry catalog, review it, and refresh the
+local registry cache before searching or showing new entries.
 
 ## City Usage
 
@@ -184,7 +159,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [imports.review]
 source = "./assets/code-review"
@@ -202,7 +177,7 @@ default_sling_target = "backend/gastown.polecat"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 ```
 
 Machine-local rig paths are site bindings managed by `gc`:
@@ -222,7 +197,7 @@ name = "backend"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [rigs.imports.review]
 source = "./assets/code-review"
@@ -232,10 +207,9 @@ Rig-level imports create rig-scoped identities such as
 `backend/gastown.polecat` and `backend/review.reviewer`.
 
 Gas City's built-in packs are not implicit. `gc init` writes explicit
-pinned imports into `pack.toml` (`core`, plus `bd` for bd-provider
-cities), and `gc doctor --fix` repairs
-missing or stale entries. The former `maintenance` pack no longer exists; its
-housekeeping orders ship in the bundled `core` pack. See
+workspace includes into `city.toml` (`.gc/system/packs/core`, plus
+`.gc/system/packs/bd` for bd-provider cities), and `gc doctor --fix` repairs
+missing or stale entries. Housekeeping orders ship in the bundled `core` pack. See
 [System Packs](/reference/system-packs) for details.
 
 ## Named Sessions

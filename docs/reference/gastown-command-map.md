@@ -9,7 +9,7 @@ Two rules help a lot to find the closest home (`gc` or `bd`) for a command equiv
 - the closest home is `gc` if the `gt` command is about _orchestration, sessions, routing, hooks, or runtime behavior_ 
 - the closest home is `bd` if the `gt` command is really about _bead CRUD or bead content_.
 
-See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://gastownhall.github.io/beads/cli-reference) for the full CLI surfaces, and [The six primitives](/concepts/primitives) for the canonical model these commands map onto.
+See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://gastownhall.github.io/beads/cli-reference) for the full CLI surfaces, and [The six primitives](/getting-started/how-gas-city-works) for the canonical model these commands map onto.
 
 ## Workspace And Runtime
 
@@ -43,7 +43,7 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 |---|---|---|
 | `gt git-init` | `git init` plus `gc rig add` | Git repo setup and city registration are separate concerns in Gas City. |
 | `gt hooks` | config-driven hook install plus `gc doctor` | Gas City does not have Town's hook-management namespace; hook install is primarily config and lifecycle driven. |
-| `gt plugin` | `gc order` | Plugin-like controller automation usually becomes an exec order or formula order. |
+| `gt plugin` | `gc order` | Plugin-like orchestrator automation usually becomes an exec order or formula order. |
 | `gt issue` | no direct equivalent | Usually replaced by bead metadata or session context, depending intent. |
 | `gt account` | no direct equivalent | Provider account management is outside Gas City's core CLI. |
 | `gt shell` | no direct equivalent | Gas City does not ship a Town-style shell integration namespace. |
@@ -81,7 +81,7 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 | `gt witness` | Gastown pack `witness` agent plus `gc session` / `gc status` | No dedicated top-level SDK namespace. |
 | `gt refinery` | Gastown pack `refinery` agent plus `gc session` / `gc status` | No dedicated top-level SDK namespace. |
 | `gt mayor` | Gastown pack `mayor` agent plus `gc session attach mayor` / `gc status` | Managed as a configured agent, not a baked-in command family. |
-| `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, controller behavior | In Gas City, much of what deacon does lives in the controller/supervisor. |
+| `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, orchestrator behavior | In Gas City, much of what deacon does lives in the orchestrator/supervisor. |
 | `gt boot` | Gastown pack `boot` agent | Same pattern as other role agents. |
 | `gt dog` | usually `gc order`, sometimes a pack-owned `dog` pool | Dog-like helpers are exec orders shipped by the builtin core pack, or a pack-owned dog pool (e.g. the Gastown pack's `dog`). |
 | `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class SDK concept. |
@@ -131,4 +131,4 @@ If you are unsure where a `gt` command went, ask this in order:
 
 1. Is it now just `gc` with nearly the same name?
 2. Is it really a bead operation that should stay in `bd`?
-3. Is it no longer a special command because Gas City moved that behavior into config, orders, waits, formulas, or controller logic?
+3. Is it no longer a special command because Gas City moved that behavior into config, orders, waits, formulas, or orchestrator logic?

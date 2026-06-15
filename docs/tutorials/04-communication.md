@@ -153,7 +153,7 @@ them you'd run `gc mail check` and `gc prime` by hand on every agent.
 You've seen the two coordination mechanisms — mail for messages and slung beads
 for work — and the hook infrastructure that wires it all together. From here:
 
-- **[The six primitives](/concepts/primitives)** — the canonical model mail,
+- **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model mail,
   slung work, and hooks build on
 - **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
   done: steps, dependencies, and variables

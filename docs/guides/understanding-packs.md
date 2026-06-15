@@ -7,7 +7,7 @@ Every reusable capability in Gas City comes from a pack. A pack tells Gas City
 what can be loaded: agents, formulas, and orders, along with skills, commands,
 MCP configuration, defaults, the per-agent named-session config that keeps an
 agent persistent, and the files those definitions need while running. Pack is
-the [primitive](/concepts/primitives) that CONFIGURES; the City is the local
+the [primitive](/getting-started/how-gas-city-works) that CONFIGURES; the City is the local
 (root) pack, and it imports shared packs.
 
 This guide covers the pack model — what a pack is, where its definitions live,

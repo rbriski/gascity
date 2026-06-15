@@ -9,7 +9,7 @@ Sessions, mail, and convoys are beads; a formula (a reusable method) isn't a
 bead, but running one materializes its steps *as* beads. You've been creating
 beads all along: starting a session, sending mail, cooking a formula, slinging
 work. This tutorial shows what's underneath. See
-[the six primitives](/concepts/primitives) for how Bead relates to Agent,
+[the six primitives](/getting-started/how-gas-city-works) for how Bead relates to Agent,
 Formula, Rig, Pack, and Event.
 
 This page continues from a `my-city` with `my-project` rigged, the `pancakes`

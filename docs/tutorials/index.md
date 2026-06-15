@@ -1,31 +1,26 @@
 ---
-title: Tutorials
-description: Hands-on guides for learning Gas City's core concepts.
+title: Overview
+description: The guided, sequential path that teaches the Gas City model by building one city up.
 ---
 
-These hands-on guides build step by step toward what Gas City is for:
-orchestration. You'll write a formula — a method for how a job gets done — and
-watch the controller run it as a graph: decomposing the job into beads, fanning
-ready ones out to many agents at once, gating each step on its dependencies, and
-driving the whole thing to completion outside your session. The early tutorials
-(cities, agents, sessions) get you to a working agent; the later ones (formulas,
-orders) hand the wheel to the controller.
+The Tutorials are the guided, end-to-end path through Gas City: numbered,
+sequential, every command runnable. Each one builds on the last, taking a
+single city from empty workspace to orchestrator-driven coordination so you
+learn the model by doing — cities, agents, and sessions get you to a working
+agent; formulas and orders hand the wheel to the orchestrator.
 
 For the conceptual model underneath, start with the [six
-primitives](/concepts/primitives).
+primitives](/getting-started/how-gas-city-works).
 
-## Tutorials
+Follow them in order:
 
-| Tutorial                     | Description                         |
-| ---------------------------- | ----------------------------------- |
-| [Cities and Rigs](/tutorials/01-cities-and-rigs) | Creating and managing a workspace   |
-| [Agents](/tutorials/02-agents)          | Configuring agent templates         |
-| [Sessions](/tutorials/03-sessions)      | Running and interacting with agents |
-| [Communication](/tutorials/04-communication) | Agent-to-agent coordination    |
-| [Formulas](/tutorials/05-formulas)      | A method for a job; the controller runs it as a graph, fanning ready steps out in parallel |
-| [Beads](/tutorials/06-beads)            | The universal work primitive        |
-| [Orders](/tutorials/07-orders)          | Scheduled and event-driven dispatch |
+1. [Cities and Rigs](/tutorials/01-cities-and-rigs) — create a city, add a project as a rig, and sling your first work to an agent.
+2. [Agents](/tutorials/02-agents) — define a custom agent with its own role and prompt, then sling work to it.
+3. [Sessions](/tutorials/03-sessions) — watch agent output, talk to agents directly, and tell on-demand from always-on sessions.
+4. [Communication](/tutorials/04-communication) — how agents coordinate through mail, slung work, and hooks, without direct connections.
+5. [Formulas](/tutorials/05-formulas) — capture a multi-step job as a reusable method, then dispatch it as an orchestrator-routed workflow graph.
+6. [Beads](/tutorials/06-beads) — the universal work primitive that sessions, mail, and convoys are made of and that formulas materialize into.
+7. [Orders](/tutorials/07-orders) — trigger formulas on a schedule, a condition, or an event, with no human in the loop.
 
-Follow them in order — each builds on the last. By the end you'll dispatch a
-formula and watch the controller drive the whole graph to completion across your
-fleet, on its own.
+By the end you'll dispatch a formula and watch the orchestrator drive the whole
+graph to completion across your fleet, on its own.

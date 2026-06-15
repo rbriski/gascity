@@ -5,13 +5,13 @@ description: Recap what Gas Town gives you, see how Gas City works, then map Gas
 
 If you have run Gas Town, you already know its roles, its `~/gt/...` layout, and its `gt` commands. This page carries that knowledge across to Gas City.
 
-Gas City is the SDK that machinery was extracted into. Two things changed. First, the controller hardcodes **zero roles** — every role you knew is now configuration, and you express Gas Town (or any orchestration) on top of a few primitives. Second, and bigger: the controller can now run a formula as a **graph across many agents, out of your session** — decomposing a job into beads, fanning the ready ones out in parallel, gating each step on its dependencies, and retrying failures to completion. Your single-agent, in-session formulas still run (v1); this fleet orchestration (v2) is what's new. Because it is an SDK, a feature added to Gas City lifts *every* orchestrator built on it — Gas Town included.
+Gas City is the SDK that machinery was extracted into. Two things changed. First, the orchestrator hardcodes **zero roles** — every role you knew is now configuration, and you express Gas Town (or any orchestration) on top of a few primitives. Second, and bigger: the orchestrator can now run a formula as a **graph across many agents, out of your session** — decomposing a job into beads, fanning the ready ones out in parallel, gating each step on its dependencies, and retrying failures to completion. Your single-agent, in-session formulas still run (v1); this fleet orchestration (v2) is what's new. Because it is an SDK, a feature added to Gas City lifts *every* orchestrator built on it — Gas Town included.
 
-For the system-level mental model first, read the [Architecture Overview](/concepts/architecture-overview) and [Primitives Reference](/concepts/primitives).
+For the system-level mental model first, read [How Gas City Works](/getting-started/how-gas-city-works).
 
 ## How Gas City works
 
-Gas City's job is the same as Gas Town's: **orchestrate a fleet of agents** to get work done. What changed is that the orchestration is no longer baked into the binary — the controller hardcodes **zero roles** (no built-in mayor, deacon, or polecat), and every role you knew is now configuration. Gas Town's single-agent, in-session formulas still run (that's v1); Gas City's reason to exist is **v2** — the controller running a formula graph across many agents, out of your session.
+Gas City's job is the same as Gas Town's: **orchestrate a fleet of agents** to get work done. What changed is that the orchestration is no longer baked into the binary — the orchestrator hardcodes **zero roles** (no built-in mayor, deacon, or polecat), and every role you knew is now configuration. Gas Town's single-agent, in-session formulas still run (that's v1); Gas City's reason to exist is **v2** — the orchestrator running a formula graph across many agents, out of your session.
 
 Six primitives carry the model:
 
@@ -26,7 +26,7 @@ Six primitives carry the model:
 
 The backbone: packs declare agents, formulas, and orders → the local pack is the City → a Formula operates over a convoy of Beads, fanning to Agents that execute in a Rig → an Order automates *when* a formula runs → Events fire for observation. Run, sling, and order are derived under Formula; Health Patrol is one kind of order. A formula run materializes as beads at runtime (the v1 container is a *molecule*; ephemeral ones are *wisps*).
 
-The **controller** is the engine that keeps these in sync. It owns SDK infrastructure operations — reconciliation, scaling, order evaluation, health patrol — so no SDK feature depends on a user-configured role existing.
+The **orchestrator** is the engine that keeps these in sync. It owns SDK infrastructure operations — reconciliation, scaling, order evaluation, health patrol — so no SDK feature depends on a user-configured role existing.
 
 The default mental model after the move:
 
@@ -45,7 +45,7 @@ The five tables map Gas Town onto Gas City one domain at a time. Every entry on 
 | Gas Town role | What it did | Gas City equivalent |
 |---|---|---|
 | **Mayor** | Planner/coordinator; the human's point of contact | Configured agent + coordinating prompt (e.g. the Gastown pack's `mayor`). Reach it with `gc session attach mayor`. |
-| **Deacon** | Watchdog: stall detection, restart, SLA enforcement | Controller health patrol + config thresholds; optionally a configured agent. You tune thresholds, not run a role. |
+| **Deacon** | Watchdog: stall detection, restart, SLA enforcement | Orchestrator health patrol + config thresholds; optionally a configured agent. You tune thresholds, not run a role. |
 | **Witness** | Lifecycle observer; publishes health/transition events | Events + waits, formulas, session scale config. Modeling a "witness" on top is optional pack behavior. |
 | **Refinery** | Post-processor; reshapes raw agent output | Configured agent + a formula or order post-processing step. A workflow step, not a standing role. |
 | **Polecat** | Ephemeral on-demand worker, often in a worktree | Scalable/transient agent config (a pool — `min`/`max_active_sessions`). An operating *style*. |
@@ -58,11 +58,11 @@ The five tables map Gas Town onto Gas City one domain at a time. Every entry on 
 
 | Gas Town behavior | Gas City equivalent | Notes |
 |---|---|---|
-| Deacon watchdog logic | Controller health patrol + reconciliation | Stall detection, restart-with-backoff, reconcile-to-desired-state are controller concerns, not a role agent. |
-| Witness lifecycle tracking | Waits, formulas, session scale config, controller wake/sleep, events | Mechanisms are first-class; modeling a "witness" on them is optional. |
-| Plugin (scheduled/event/conditional automation) | Order — exec order or formula order | **Exec order** for shell or controller-side logic; **formula order** to instantiate agent-driven work. |
+| Deacon watchdog logic | Orchestrator health patrol + reconciliation | Stall detection, restart-with-backoff, reconcile-to-desired-state are orchestrator concerns, not a role agent. |
+| Witness lifecycle tracking | Waits, formulas, session scale config, orchestrator wake/sleep, events | Mechanisms are first-class; modeling a "witness" on them is optional. |
+| Plugin (scheduled/event/conditional automation) | Order — exec order or formula order | **Exec order** for shell or orchestrator-side logic; **formula order** to instantiate agent-driven work. |
 | Convoy as orchestration runtime | Convoy beads + `gc sling` + formulas | Convoys stay bead-backed grouping and lineage; no special convoy runtime to use. |
-| Formula runner inside Town workflows | In-process formula compiler + controller execution | Gas City compiles and runs formulas over the convoy's beads itself. For v2 formulas (host-enabled by default), the controller executes control beads; agents execute work beads. See [Choosing a Compiler Contract](/guides/understanding-formulas#choosing-a-compiler-contract). |
+| Formula runner inside Town workflows | In-process formula compiler + orchestrator execution | Gas City compiles and runs formulas over the convoy's beads itself. For v2 formulas (host-enabled by default), the orchestrator executes control beads; agents execute work beads. See [Choosing a Compiler Contract](/guides/understanding-formulas#choosing-a-compiler-contract). |
 | Path-derived identity | Explicit agent identity, rig scope, env, bead metadata | Do not port code or prompts that assume directory path implies who the agent is. |
 
 ### Filesystem and state
@@ -138,15 +138,15 @@ edit local city.toml  →  include a pack that already solves most of it
 # .gc/           — site bindings such as local rig paths
 ```
 
-**Plugins become orders** — the most important practical translation. "Run something automatically on a schedule, on an event, or when a condition holds" is an order: **exec order** for shell/controller-side logic, **formula order** for agent-driven work. Exec orders matter most — they run non-agent commands with no prompt, no session, no extra role agent.
+**Plugins become orders** — the most important practical translation. "Run something automatically on a schedule, on an event, or when a condition holds" is an order: **exec order** for shell/orchestrator-side logic, **formula order** for agent-driven work. Exec orders matter most — they run non-agent commands with no prompt, no session, no extra role agent.
 
-**Convoys stay bead-shaped.** Keep the convoy mental model for tracking work; the implementation boundary moved. Convoys are bead-backed grouping and lineage, `gc sling` creates convoy structure while routing, and formulas/orders/waits compose around that bead graph. The orchestration that runs over it is the controller's control dispatcher — it executes the control beads (check, retry, fan-out, tally, drain) that drive a convoy's work to completion across many agents.
+**Convoys stay bead-shaped.** Keep the convoy mental model for tracking work; the implementation boundary moved. Convoys are bead-backed grouping and lineage, `gc sling` creates convoy structure while routing, and formulas/orders/waits compose around that bead graph. The orchestration that runs over it is the orchestrator's control dispatcher — it executes the control beads (check, retry, fan-out, tally, drain) that drive a convoy's work to completion across many agents.
 
 **Crew and polecats are operating modes, not types.** *Crew* = persistent named agents; *polecats* = scalable or transient agents, often with worktrees. The SDK does not force the distinction — a pack can adopt, relax, or replace it.
 
 ## Where Gas City deliberately differs
 
-**The controller owns infrastructure behavior.** It is the canonical owner of reconciling desired→running sessions, session scaling, order evaluation, health patrol, and garbage-collecting ephemeral run beads (the v1 *wisp* container). If something is fundamentally SDK infrastructure, put it on the controller path rather than inventing another deacon-like role.
+**The orchestrator owns infrastructure behavior.** It is the canonical owner of reconciling desired→running sessions, session scaling, order evaluation, health patrol, and garbage-collecting ephemeral run beads (the v1 *wisp* container). If something is fundamentally SDK infrastructure, put it on the orchestrator path rather than inventing another deacon-like role.
 
 **Filesystem layout is not the architecture.** Use `dir` (in `agent.toml`, or patched per-rig in `city.toml`) for scope and identity; `work_dir` only when the session must run elsewhere; bead metadata for durable handoff state.
 
@@ -162,8 +162,8 @@ edit local city.toml  →  include a pack that already solves most of it
 
 | Old Town instinct | Ask first | Default answer |
 |---|---|---|
-| "I need a new dog" | Can this be an exec order? | Prefer the order — trigger logic, history, controller ownership, no agent slot. Reach for a scalable agent only if it needs a long-lived session, rich interactive context, or repeated agent judgment. |
-| "I need a witness-like lifecycle manager" | Which parts are controller infra vs. bead transitions vs. formula logic vs. prompt guidance? | Only controller infrastructure belongs in Go SDK code; the rest lives in the pack. |
+| "I need a new dog" | Can this be an exec order? | Prefer the order — trigger logic, history, orchestrator ownership, no agent slot. Reach for a scalable agent only if it needs a long-lived session, rich interactive context, or repeated agent judgment. |
+| "I need a witness-like lifecycle manager" | Which parts are orchestrator infra vs. bead transitions vs. formula logic vs. prompt guidance? | Only orchestrator infrastructure belongs in Go SDK code; the rest lives in the pack. |
 | "I need another special directory tree" | Do I really? | Canonical repo root from the rig; isolated `work_dir` only for roles that mutate repos or need provider-file isolation; explicit env and metadata, never path inference. |
 | "I need to run something without an agent" | Could an exec order do it? | Use an exec order before inventing a plugin, helper role, or hidden session. |
 
@@ -173,7 +173,7 @@ edit local city.toml  →  include a pack that already solves most of it
 gc session attach mayor
 ```
 
-The Mayor session is the familiar Gas Town entry point — an interactive session with full city context that you coordinate from. It is one window onto the city; the controller is still running the fleet and driving formula graphs to completion behind it. The CLI is plumbing for reaching that session. City-scoped Gastown agents (`mayor`, `deacon`, `boot`) attach the same way; `gc session list` shows what is running. This replaces `gt session at mayor/` or `tmux attach -t gt-mayor`.
+The Mayor session is the familiar Gas Town entry point — an interactive session with full city context that you coordinate from. It is one window onto the city; the orchestrator is still running the fleet and driving formula graphs to completion behind it. The CLI is plumbing for reaching that session. City-scoped Gastown agents (`mayor`, `deacon`, `boot`) attach the same way; `gc session list` shows what is running. This replaces `gt session at mayor/` or `tmux attach -t gt-mayor`.
 
 ## What not to port literally
 
@@ -196,9 +196,9 @@ The common edits — registering rigs, scaling pools, swapping providers, patchi
 
 The shortest path to effective:
 
-1. Read the [Architecture Overview](/concepts/architecture-overview), then the [Primitives Reference](/concepts/primitives) for the six primitives in user terms.
+1. Read [How Gas City Works](/getting-started/how-gas-city-works) for the six primitives in user terms.
 2. Skim the [CLI reference](/reference/cli) alongside the [Command Map](/reference/gastown-command-map) so `gt` → `gc` muscle memory transfers.
 3. Read [Tutorial 07 — Orders](/tutorials/07-orders) and remap "plugins" → "orders".
-4. Read [Tutorial 05 — Formulas](/tutorials/05-formulas): Gas City compiles and instantiates formulas itself; for v2 formulas the controller drives control beads while agents execute work beads.
+4. Read [Tutorial 05 — Formulas](/tutorials/05-formulas): Gas City compiles and instantiates formulas itself; for v2 formulas the orchestrator drives control beads while agents execute work beads.
 5. Work through [Tutorial 02 — Agents](/tutorials/02-agents) and [Shareable Packs](/guides/shareable-packs) for the `agents/<name>/` layout end to end.
 6. Read [A Complete Gastown Example](/guides/gastown-config-recipes#a-complete-gastown-example) — city, root pack, and nested pack assembled into one runnable topology.

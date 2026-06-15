@@ -7,7 +7,7 @@ The `gc` supervisor exposes a single, typed HTTP control plane
 described by an OpenAPI 3.1 document. Everything the CLI does, any
 third-party client can do too — there is no hidden surface.
 
-See also: [The six primitives](/concepts/primitives) — the canonical model this
+See also: [The six primitives](/getting-started/how-gas-city-works) — the canonical model this
 API projects over.
 
 ## Get the spec
@@ -187,10 +187,10 @@ event multiplexer finds the new city on the very next
 
 `POST /v0/city/{cityName}/unregister` removes a city from the
 supervisor's registry and signals the supervisor to stop the city's
-controller. Like `POST /v0/city`, it is asynchronous: the response
+orchestrator. Like `POST /v0/city`, it is asynchronous: the response
 is `202 Accepted` returned as soon as the registry entry is gone
 and the supervisor is notified. The supervisor reconciler stops the
-controller on its next tick and emits the completion event.
+orchestrator on its next tick and emits the completion event.
 
 The city directory on disk is **not** touched. This operation only
 detaches the city from the supervisor; reattaching it later is a
@@ -217,9 +217,9 @@ On `/v0/events/stream` the client will see (in order):
   before the registry write so subscribers see the teardown start.
 - `request.result.city.unregister`
   (`CityUnregisterSucceededPayload`) — emitted by the reconciler once
-  the city's controller has stopped.
+  the city's orchestrator has stopped.
 - `request.failed` (`RequestFailedPayload`) — emitted by the
-  reconciler if the controller did not stop cleanly. Match
+  reconciler if the orchestrator did not stop cleanly. Match
   `payload.request_id`.
 
 Exactly one terminal event lands per successful unregister. Clients

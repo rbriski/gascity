@@ -27,7 +27,7 @@ cd ~/bright-lights
 ```
 
 `gc init` bootstraps the city directory, registers it with the supervisor, and
-starts the controller. The city is running as soon as init completes.
+starts the orchestrator. The city is running as soon as init completes.
 
 ## 2. Add a Rig
 
@@ -51,7 +51,7 @@ starts a session, delivers the task, and the agent executes it.
 
 This is the smallest possible job: one bead, one agent. Gas City's real power
 is orchestration -- you write a **formula** (the method for getting a job done)
-and the **controller** runs it as a graph: decomposing the work into beads,
+and the **orchestrator** runs it as a graph: decomposing the work into beads,
 fanning the ready ones out to many agents at once, gating each step on its
 dependencies, retrying failures, and driving the whole thing to completion
 outside your session. See [Formulas](/tutorials/05-formulas) and
@@ -65,6 +65,6 @@ bd show <bead-id> --watch
 
 For a fuller walkthrough of cities and rigs, continue to
 [Tutorial 01](/tutorials/01-cities-and-rigs). To see Gas City do the thing it
-exists for -- the controller running a formula as a graph across many agents --
+exists for -- the orchestrator running a formula as a graph across many agents --
 jump to [Formulas](/tutorials/05-formulas) and then
 [Orders](/tutorials/07-orders), which trigger formulas on a schedule or event.

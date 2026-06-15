@@ -7,7 +7,7 @@ This page collects the common config edits for the Gastown pack — the changes
 you reach for *while editing files*. The conceptual migration story, including
 how Gas Town roles and mechanisms map onto Gas City primitives, lives in
 [Coming from Gas Town](/getting-started/coming-from-gastown); for the primitives
-themselves, see [The six primitives](/concepts/primitives).
+themselves, see [The six primitives](/getting-started/how-gas-city-works).
 
 ## Common Gastown Overrides
 

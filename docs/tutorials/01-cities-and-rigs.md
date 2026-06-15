@@ -31,7 +31,7 @@ $ gc version
 > repo](https://github.com/gastownhall/gascity) to get the latest and greatest
 > bits before running these tutorials.
 
-New to the vocabulary? Read [Primitives](/concepts/primitives) first — the
+New to the vocabulary? Read [How Gas City Works](/getting-started/how-gas-city-works) first — the
 canonical model for the six primitives (Agent, Bead, Formula, Rig, Pack, Event)
 this tutorial puts into practice. The city is the local (root) pack; it imports
 shared packs.
@@ -39,7 +39,7 @@ shared packs.
 ## Creating a city
 
 A **city** is the directory holding the agents, formulas, rigs, orders, and
-local settings the controller needs to run multi-agent workflows on this
+local settings the orchestrator needs to run multi-agent workflows on this
 machine. Inside it, a **pack** is the portable part — the definitions worth
 sharing with other cities. A city is a pack plus deployment details.
 
@@ -177,7 +177,7 @@ Named sessions:
   control-dispatcher      reserved-unmaterialized (on_demand)
 ```
 
-A named session shows `reserved-unmaterialized` until the controller
+A named session shows `reserved-unmaterialized` until the orchestrator
 materializes it; once the mayor session is up, its state reads `awake` (or
 `active` — the two are equivalent).
 
@@ -185,7 +185,7 @@ The `dolt.dog` pool is a background utility agent from the bundled `dolt` pack
 (pulled in through the `bd` include you saw in `city.toml` — the `dolt.`
 prefix is the import binding it arrived through). It handles Dolt database
 housekeeping for the beads backend. `control-dispatcher` is SDK
-infrastructure: the controller uses it to advance formula workflows. You don't
+infrastructure: the orchestrator uses it to advance formula workflows. You don't
 need to interact with either — ignore them for now.
 
 ## Adding a rig
@@ -261,9 +261,9 @@ Attached workflow mp-6yh (formula "mol-do-work") to mp-ff9
 
 One command set the whole loop in motion: sling created a work bead, attached
 a workflow from the agent's default formula (`mol-do-work` — read the bead, do
-the work, close it), and the controller spawned a session to run it.
+the work, close it), and the orchestrator spawned a session to run it.
 
-![Work lifecycle after a sling: you run gc sling, the beads store creates a work bead and route, the controller's reconcile tick spawns a session, the agent receives a primed prompt and finds its hooked work, edits the rig and runs commands, then updates the bead's progress and closes it when done — while the event bus records every step and gc bd show --watch streams live status back to you.](/diagrams/excalidraw-rendered/work-lifecycle.svg)
+![Work lifecycle after a sling: you run gc sling, the beads store creates a work bead and route, the orchestrator's reconcile tick spawns a session, the agent receives a primed prompt and finds its hooked work, edits the rig and runs commands, then updates the bead's progress and closes it when done — while the event bus records every step and gc bd show --watch streams live status back to you.](/diagrams/excalidraw-rendered/work-lifecycle.svg)
 
 Watch the bead progress with `--watch`:
 
@@ -294,7 +294,7 @@ Success! You dispatched work to an AI agent and got results back.
 
 That was the simplest possible job: one agent, one task. The reason Gas City
 exists is what happens when the job is bigger — you write a formula and the
-controller runs it as a graph, fanning ready steps out to many agents at once
+orchestrator runs it as a graph, fanning ready steps out to many agents at once
 and driving them to completion without you babysitting a session. You'll build
 one of those in the Formulas tutorial.
 
@@ -308,6 +308,6 @@ that rig. From here:
 - **[Sessions](/tutorials/03-sessions)** — interactive conversations with
   agents, on-demand workers and persistent worker pools
 - **[Formulas](/tutorials/05-formulas)** — write a method for how a job gets
-  done and let the controller run it as a graph: fan steps out across many
+  done and let the orchestrator run it as a graph: fan steps out across many
   agents, gate them on dependencies, retry failures, and drive the job to
   completion outside your session

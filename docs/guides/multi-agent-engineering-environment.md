@@ -12,8 +12,8 @@ operational truth, another driving the bits into existence.
 Gas City does not ask you to invent a new kind of work. It takes the
 coordination you do by hand — deciding what is ready, fanning tasks out to
 several agents at once, waiting on dependencies, retrying failures — and
-lets a controller run it for you. You write the method down once as a
-formula; the controller drives it to completion across many agents,
+lets an orchestrator run it for you. You write the method down once as a
+formula; the orchestrator drives it to completion across many agents,
 outside any single session.
 
 ## The hand-rolled system has predictable friction
@@ -32,17 +32,17 @@ chat. It works — and it leaks:
 | Operational truth in tutorials, notes, and heads | Drifts from what the tooling knows |
 
 Gas City makes those moving parts first-class pack and city content, and
-puts a controller behind them that dispatches ready work to many agents at
+puts an orchestrator behind them that dispatches ready work to many agents at
 once, waits on dependencies, and retries failures — so coordination no
 longer lives in one person's head and chat window.
 
-## The primitives let a controller run your team's work
+## The primitives let an orchestrator run your team's work
 
-New to the core vocabulary? Read [the six primitives](/concepts/primitives)
+New to the core vocabulary? Read [the six primitives](/getting-started/how-gas-city-works)
 first — Agent, Bead, Formula, Rig, Pack, and Event are the model everything
 below configures.
 
-- **Formulas** (HOW the work gets done) become methods the controller
+- **Formulas** (HOW the work gets done) become methods the orchestrator
   compiles into a graph of beads and drives to completion — decomposing a
   job, fanning ready steps out to many agents at once, gating each step on
   its dependencies, retrying failures. **Orders** (WHEN) trigger those
@@ -55,7 +55,7 @@ below configures.
 Around the primitives, the supporting config gets a home too: **commands**,
 **doctor checks**, and **template fragments** stop being loose files, and
 `.gc/` becomes the machine-local site-binding and runtime layer. The
-working style becomes controller-driven instead of hand-driven — ready work
+working style becomes orchestrator-driven instead of hand-driven — ready work
 fans out in parallel, dependencies gate, failures retry — and the method
 itself becomes reproducible, legible, shareable, and version-controlled.
 
@@ -69,10 +69,10 @@ workflow belongs to exactly one of three layers:
 | --- | --- | --- |
 | **1. Portable team definition** (a pack) | Pack identity, agent defaults, imported packs, prompts, overlays, helper scripts, commands, doctor checks, formulas, and orders | `pack.toml` and pack-owned dirs: `agents/`, `commands/`, `doctor/`, `formulas/`, `orders/`, `template-fragments/`, `overlay/`, `assets/` |
 | **2. City deployment choices** (the local pack) | Which rigs exist, which shared packs import into the city or specific rigs, runtime and substrate choices, deployment policy | `city.toml` |
-| **3. Machine-local site binding and runtime state** | Local rig bindings, controller state, caches, worktrees, sockets, logs, generated state | `.gc/` and other runtime directories |
+| **3. Machine-local site binding and runtime state** | Local rig bindings, orchestrator state, caches, worktrees, sockets, logs, generated state | `.gc/` and other runtime directories |
 
 Formulas and orders live in layer 1 because they are portable method: a
-formula compiles to a graph the controller runs across many agents; an
+formula compiles to a graph the orchestrator runs across many agents; an
 order triggers it on a schedule or event. Layer 3 is the stuff that must
 never be mistaken for portable definition.
 
@@ -107,7 +107,7 @@ The point is not to freeze your team shape forever. It is to stop
 pretending a real multi-agent workflow is just "some prompts somewhere"
 plus shell history. The method that coordinates the agents — what runs in
 parallel, what waits on what, what retries — becomes a formula the
-controller executes for you, not a routine you perform by hand every time.
+orchestrator executes for you, not a routine you perform by hand every time.
 
 ## Move the parts you already repeat
 
@@ -125,7 +125,7 @@ Start with the parts you are already repeating.
 ## Turn repeated operations into pack commands
 
 A pack command is a directory under `commands/` holding a `command.toml`
-(its description and help) plus a script the controller runs. The command
+(its description and help) plus a script the orchestrator runs. The command
 surfaces as a top-level `gc` subcommand named after the directory:
 
 ```toml

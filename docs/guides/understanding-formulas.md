@@ -7,7 +7,7 @@ A formula is *how* a job gets done — written down once as a method instead of
 steered live in a prompt. You write the steps, the dependencies between them,
 the variables that parameterize them, and the control flow around them into a
 TOML file, then apply it whenever that kind of work comes up. Under the v2
-contract that method becomes a graph the controller runs for you: it decomposes
+contract that method becomes a graph the orchestrator runs for you: it decomposes
 the job into beads, fans the ready ones out to as many agents as you have,
 gates each step on its dependencies, retries transient failures, and drives the
 whole thing to completion outside any single session.
@@ -19,7 +19,7 @@ file into a *recipe* (an in-memory plan of steps and dependency edges) and
 materializes that recipe as beads. From that moment the work is independent of
 both the formula file and any agent session: sessions crash, restart, and get
 recycled; the work persists, and whoever picks it up next finds the same
-state. That durability is what lets the controller drive the graph across many
+state. That durability is what lets the orchestrator drive the graph across many
 sessions without losing its place.
 
 ![Applying a formula in three stages: the formula.toml on disk is compiled
@@ -29,7 +29,7 @@ the file and any agent session.](/diagrams/excalidraw-rendered/formula-apply-pip
 
 This guide is about judgment: which compiler contract to declare, which
 instantiation verb to use, and how the major patterns fit together. The
-canonical model is [the primitives](/concepts/primitives); the hands-on
+canonical model is [the primitives](/getting-started/how-gas-city-works); the hands-on
 walkthrough is the [formulas tutorial](/tutorials/05-formulas); the exact
 format rules live in the
 [v1](/reference/specs/formula-spec-v1) and
@@ -42,7 +42,7 @@ each makes a different thing the engine.
 
 | | **v1** (default) | **v2** (`[requires]`) |
 |---|---|---|
-| Engine | the agent you sling to | the controller |
+| Engine | the agent you sling to | the orchestrator |
 | Steps | resolved at apply, then inert | independently routable units |
 | Control flow | none after apply | check/retry/drain/tally, scope checks, finalize |
 | Routing | one agent, one session | many agents and pools (`gc.run_target` per step) |
@@ -105,7 +105,7 @@ Three verbs create formula instances:
   starts a single-bead run (a *wisp*), both routed to the target. The
   one-shot dispatch verb.
 - **Orders are scheduled dispatch.** An order names a formula (or a shell
-  command — never both) and a trigger; the controller instantiates and
+  command — never both) and a trigger; the orchestrator instantiates and
   routes the formula to the order's pool each time the trigger fires. The
   schedule runs the verb for you.
 
@@ -176,7 +176,7 @@ that loop until the verdict passes; runs a **gap analysis** and fills the gaps;
 and gates a final **check** before shipping. The division of labor is
 three-sided: the **work** is the items themselves (independent beads that
 survive sessions), the **formula** is the method that declares them and their
-order, and the **controller** is the engine that runs the method as a live
+order, and the **orchestrator** is the engine that runs the method as a live
 graph — all outside any single agent's session.
 
 The sections below are the individual moves in that pipeline —
@@ -415,7 +415,7 @@ A drain step forces a targeted invocation — sling a bead or convoy at it
 (`gc sling gc.run-operator <convoy-id> --on build-from-convoy`); an untargeted
 run fails with `requires a target convoy`. Core injects the convoy as the
 reserved `convoy_id` target, so the formula never declares it. At runtime the
-controller scatters the input convoy into one-member unit convoys and runs the
+orchestrator scatters the input convoy into one-member unit convoys and runs the
 item formula (itself a v2 formula) once per unit; `member_access = "exclusive"`
 reserves each member so no second drain can claim it.
 
@@ -522,7 +522,7 @@ host expands the template, `{target}` is rewritten to the host step's id. `gc
 formula show code-review` compiles it into an `iteration.1` scope: the three
 review children run in parallel (no `needs` between them), each on a different
 reviewer role, fan in to `synthesize-review`, then `apply-review-findings`
-makes the smallest fixes and records a verdict in bead metadata. The controller
+makes the smallest fixes and records a verdict in bead metadata. The orchestrator
 — never an agent — then runs `implementation-review-approved.sh`; while the
 verdict is `iterate` and budget remains (`max_attempts = 6`), it re-spawns the
 *entire* lanes-synthesize-fix subtree as the next iteration. The verdict
@@ -597,13 +597,13 @@ path = ".gc/scripts/checks/build-artifact-valid.sh"
 timeout = "5m"
 ```
 
-After each `re-review` closes, the controller runs the script: pass closes the
+After each `re-review` closes, the orchestrator runs the script: pass closes the
 step; fail with budget left spawns the next iteration; exhaustion closes the
 step failed and blocks downstream work. The validator resolves the artifact
 from the keys named in `gc.build.artifact_path_keys` and checks it against the
 `gc.build.artifact_schema`, so "done" means the schema validator agrees, not
 the reviewer. Note the layering: this `[steps.check]` is the bounded,
-controller-driven inner loop (`max_attempts`); the `{{max_iterations}}` var
+orchestrator-driven inner loop (`max_attempts`); the `{{max_iterations}}` var
 bounds an *outer* loop that callers drive by re-dispatching the whole formula
 on a still-failing verdict — judgment in the prompt, iteration in the config.
 
@@ -625,7 +625,7 @@ max_attempts = 3
 on_exhausted = "soft_fail"
 ```
 
-The controller re-runs only attempts it classifies as transient failures.
+The orchestrator re-runs only attempts it classifies as transient failures.
 When the budget runs out, `hard_fail` (the default) closes the step as
 failed; `soft_fail` closes it as passed with
 `gc.final_disposition=soft_fail` so downstream work continues with degraded
@@ -760,7 +760,7 @@ pool = "worker"
 An order names a formula *or* an `exec` shell command, never both —
 deterministic maintenance belongs in `exec`, judgment work in a formula.
 Triggers are `cooldown`, `cron`, `condition`, `event`, or `manual`. When the
-trigger fires, the controller instantiates the formula and routes it to the
+trigger fires, the orchestrator instantiates the formula and routes it to the
 pool. As with sling, a pool wakes only for Ready-visible roots, so order
 formulas routed to pools should be v2 (the dispatcher warns otherwise). Test
 any order with `gc order run <name>`, which bypasses the trigger.
@@ -781,7 +781,7 @@ The two frameworks above compose. Find your situation, read across:
 | One run per convoy member | v2 | `gc sling --on` (targeted) | workflow with drain units |
 | Verified or hardened steps | v2 | any | workflow with check or retry controls |
 | Recurring work on a trigger | either; v2 for pools | order | one instance per firing |
-| Bounded iterative refinement | v2 | `[steps.check]` loop (or v1 `gc converge create`) | controller re-runs until the check passes |
+| Bounded iterative refinement | v2 | `[steps.check]` loop (or v1 `gc converge create`) | orchestrator re-runs until the check passes |
 | Reuse a base, change one detail | either | `extends` + same-id override | child graph with the overridden step spliced in |
 | Iterating multi-lane review | v2 | expansion with `[template.check]` | lanes → synthesize → fix subtree, re-run until the verdict passes |
 
@@ -791,7 +791,7 @@ Some work is not a pipeline but a loop: draft, evaluate, refine, repeat until
 good enough. Express it as a v2 **check loop** — `[steps.check]` re-runs the
 work until a verification script passes (see
 [Self-Checking Work](#self-checking-work-and-transient-hardening)) — which
-keeps the loop inside the formula where the controller drives it.
+keeps the loop inside the formula where the orchestrator drives it.
 
 The dedicated `gc converge` command predates the v2 runtime and accepts only v1
 formulas, with no convergence-specific formula keys:
@@ -820,7 +820,7 @@ in the v1 spec.
 
 ## Where Next
 
-- [The primitives](/concepts/primitives) — the canonical model that places
+- [The primitives](/getting-started/how-gas-city-works) — the canonical model that places
   Formula alongside Agent, Bead, Rig, Pack, and Event.
 - [Tutorial 05: Formulas](/tutorials/05-formulas) — write, inspect, and
   dispatch your first formulas hands-on.

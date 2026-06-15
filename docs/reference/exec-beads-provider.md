@@ -5,7 +5,7 @@ title: "Exec Beads Provider"
 The Bead is the WHAT primitive — a unit of work — and the bead store is the
 machinery that persists beads (tasks, messages, convoy members, and the
 ephemeral beads a formula run materializes). See
-[Primitives](/concepts/primitives) for where the Bead sits among the six.
+[How Gas City Works](/getting-started/how-gas-city-works) for where the Bead sits among the six.
 Today the store has two providers: `bd` (shells out to the `bd` CLI backed by
 Dolt) and `file` (JSON persistence for tutorials). This document designs a
 third: `exec`, which delegates each store operation to a user-supplied
@@ -169,7 +169,7 @@ provider pattern exactly.
 | `list-by-label` | `script list-by-label <label> <limit>` | — | Bead JSON array |
 
 `script ready` returns actionable durable beads by default. When Gas City needs
-ephemeral-aware ready queries, including controller-demand scans, it calls
+ephemeral-aware ready queries, including orchestrator-demand scans, it calls
 `script ready --include-ephemeral` and expects the script to include both
 durable and ephemeral rows in its JSON result. Gas City applies final
 tier-specific filtering after reading the rows, so providers should not reject
@@ -177,7 +177,7 @@ ephemeral rows when the flag is present.
 
 The `--include-ephemeral` flag is part of the `ready` operation contract. Gas
 City does not retry ephemeral-aware ready queries without it, because silently
-downgrading would hide runnable ephemeral beads from the controller. Legacy
+downgrading would hide runnable ephemeral beads from the orchestrator. Legacy
 scripts that cannot support the flag should fail the
 `ready --include-ephemeral` invocation with exit code 1 and an explanatory
 stderr message; exit code 2 remains reserved for unknown operation names, not

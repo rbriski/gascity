@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Per-domain Huma input/output types for the beads handler
@@ -151,6 +153,22 @@ type BeadReleaseIfCurrentInput struct {
 	Body struct {
 		ExpectedAssignee string `json:"expected_assignee,omitempty" doc:"Release the assignment only if the bead is currently assigned to this agent (compare-and-swap)."`
 	}
+}
+
+// BeadClaimInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/claim —
+// an atomic claim of a bead's assignment for the given agent.
+type BeadClaimInput struct {
+	CityScope
+	ID   string `path:"id" doc:"Bead ID."`
+	Body struct {
+		Assignee string `json:"assignee,omitempty" doc:"Agent to claim the bead for. The claim is atomic (rejected if the bead is already assigned to a different agent)."`
+	}
+}
+
+// BeadClaimResult is the body of a claim response.
+type BeadClaimResult struct {
+	Claimed bool        `json:"claimed" doc:"Whether the claim succeeded (false if the bead was not claimable, e.g. already assigned)."`
+	Bead    *beads.Bead `json:"bead,omitempty" doc:"The claimed bead, populated when claimed=true."`
 }
 
 // BeadDeleteInput is the Huma input for DELETE /v0/city/{cityName}/bead/{id}.

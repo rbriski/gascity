@@ -179,6 +179,20 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
 }
 
+// Claim forwards an atomic claim to the wrapped store's claim capability, so the
+// policy wrapper (the controller's city store = policy(Router(...))) is itself a
+// Claimer. For graph_store=sqlite the inner store is the Router, which routes a
+// graph-class claim to the SQLite backend with the explicit assignee.
+func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	if c, ok := s.Store.(beads.Claimer); ok {
+		return c.Claim(id, assignee)
+	}
+	if c, ok := s.Store.(beads.EnvActorClaimer); ok {
+		return c.Claim(id)
+	}
+	return beads.Bead{}, false, beads.ErrClaimUnsupported
+}
+
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
 		root, err := s.Get(rootID)

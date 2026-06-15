@@ -122,6 +122,49 @@ func TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	}
 }
 
+// TestBeadClaimHandlerReachesSQLiteGraphBackend proves the atomic claim endpoint
+// operates on the SQLite graph backend via the Router: a graph-class bead is
+// claimed for the explicit assignee in the on-disk SQLite store (the C6 fix so a
+// worker's graph-step claim reaches SQLite rather than a work-only store).
+func TestBeadClaimHandlerReachesSQLiteGraphBackend(t *testing.T) {
+	work := beads.NewMemStore()
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+
+	router := coordrouter.New(work)
+	router.Register(coordclass.ClassGraph, graph)
+	gb, err := router.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = router
+	state.stores = nil
+	s := New(state)
+
+	in := &BeadClaimInput{ID: gb.ID}
+	in.Body.Assignee = "worker"
+	out, err := s.humaHandleBeadClaim(context.Background(), in)
+	if err != nil {
+		t.Fatalf("humaHandleBeadClaim: %v", err)
+	}
+	if !out.Body.Claimed || out.Body.Bead == nil || out.Body.Bead.Assignee != "worker" {
+		t.Fatalf("claim result = %+v, want claimed for worker", out.Body)
+	}
+	got, err := graph.Get(gb.ID)
+	if err != nil {
+		t.Fatalf("re-get graph bead from SQLite: %v", err)
+	}
+	if got.Assignee != "worker" {
+		t.Fatalf("SQLite assignee = %q, want worker (claim did not reach SQLite)", got.Assignee)
+	}
+}
+
 // TestBeadReadyFederatesCityStore proves GET /v0/beads/ready surfaces city-scope
 // ready work. The city store is not among the per-rig BeadStores(), so before the
 // fix a single-HQ city's ready work (e.g. a graph.v2 molecule's actionable step)
@@ -219,5 +262,15 @@ func TestClientBeadWriteMethodsIssueExpectedRequests(t *testing.T) {
 	}
 	if gotBody["expected_assignee"] != "worker" {
 		t.Fatalf("ReleaseBeadIfCurrent body expected_assignee = %v, want worker", gotBody["expected_assignee"])
+	}
+
+	if _, _, err := c.ClaimBead("gcg-2", "worker"); err != nil {
+		t.Fatalf("ClaimBead: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v0/city/alpha/bead/gcg-2/claim" {
+		t.Fatalf("ClaimBead -> %s %s, want POST /v0/city/alpha/bead/gcg-2/claim", gotMethod, gotPath)
+	}
+	if gotBody["assignee"] != "worker" {
+		t.Fatalf("ClaimBead body assignee = %v, want worker", gotBody["assignee"])
 	}
 }

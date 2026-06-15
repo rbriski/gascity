@@ -1012,6 +1012,36 @@ func (c *Client) ReleaseBeadIfCurrent(id, expectedAssignee string) (bool, error)
 	return (*resp.JSON200)["status"] == "released", nil
 }
 
+// ClaimBead atomically claims a bead's assignment for assignee via
+// POST /v0/city/{cityName}/bead/{id}/claim. It returns the claimed bead and
+// whether the claim succeeded (false = not claimable, e.g. already assigned).
+func (c *Client) ClaimBead(id, assignee string) (beads.Bead, bool, error) {
+	if err := c.requireCityScope(); err != nil {
+		return beads.Bead{}, false, err
+	}
+	body := genclient.BeadClaimInputBody{}
+	if assignee != "" {
+		body.Assignee = &assignee
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdClaimWithResponse(context.Background(), c.cityName, id, nil, body)
+	if err != nil {
+		return beads.Bead{}, false, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return beads.Bead{}, false, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return beads.Bead{}, false, err
+	}
+	if resp.JSON200 == nil {
+		return beads.Bead{}, false, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	if !resp.JSON200.Claimed || resp.JSON200.Bead == nil {
+		return beads.Bead{}, false, nil
+	}
+	return beadFromGenPtr(resp.JSON200.Bead), true, nil
+}
+
 // GetStatus fetches the city-wide status snapshot via
 // GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header

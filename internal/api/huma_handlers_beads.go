@@ -709,6 +709,41 @@ func (s *Server) humaHandleBeadReleaseIfCurrent(_ context.Context, input *BeadRe
 	return nil, huma.Error404NotFound("bead " + id + " not found")
 }
 
+// humaHandleBeadClaim is the Huma-typed handler for POST /v0/bead/{id}/claim:
+// an atomic claim of a bead's assignment for input.Body.Assignee. It routes via
+// beadStoresForID, so a graph-class bead's claim reaches the SQLite backend
+// through the Router with the explicit assignee. The body reports whether the
+// claim succeeded and the claimed bead.
+func (s *Server) humaHandleBeadClaim(_ context.Context, input *BeadClaimInput) (*IndexOutput[BeadClaimResult], error) {
+	id := input.ID
+	for _, store := range s.beadStoresForID(id) {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		claimer, ok := store.(beads.Claimer)
+		if !ok {
+			return nil, huma.Error500InternalServerError(beads.ErrClaimUnsupported.Error())
+		}
+		claimed, didClaim, err := claimer.Claim(id, input.Body.Assignee)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		result := BeadClaimResult{Claimed: didClaim}
+		if didClaim {
+			b := claimed
+			result.Bead = &b
+		}
+		return &IndexOutput[BeadClaimResult]{Index: s.latestIndex(), Body: result}, nil
+	}
+	return nil, huma.Error404NotFound("bead " + id + " not found")
+}
+
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
 // It is implemented as a soft-delete (store.Close) — see the `"closed"`
 // status field for honest wire-contract semantics. Hard-delete is not

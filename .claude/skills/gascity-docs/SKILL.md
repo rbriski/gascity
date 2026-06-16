@@ -139,6 +139,13 @@ city/rig/feature names; `mayor` is a fine recurring name), but never depend on
 reading order — give each page a one-line self-contained setup, and dedup the
 six-primitive model by *linking* to `how-gas-city-works`, not by re-explaining it.
 
+When you're running a deliberate **simplification pass** over a page or a whole
+section — not just applying these moves ad hoc — follow
+[references/simplification.md](references/simplification.md): the per-page loop
+(measure → convert/delete → verify), and the two guardrails that keep a trim
+honest — a **loss-check** (don't drop a fact that lives nowhere else) and a
+**fact-check** (don't let trimmed or rewritten prose drift from the code).
+
 ## 6. Emphasis and formatting
 
 - **Bold** *names a term*, on first mention only — the thing the reader should

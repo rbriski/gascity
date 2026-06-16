@@ -9,7 +9,7 @@ the rest are task-oriented.
 
 ## Understand
 
-- [Capabilities for Coding Agent Users](/guides/capabilities-for-coding-agent-users) — maps context, state, skills, history, messaging, roles, and identity from single-agent coding tools onto Gas City's shared infrastructure.
+- [Coming from a Coding Agent](/guides/capabilities-for-coding-agent-users) — maps context, state, skills, history, messaging, roles, and identity from single-agent coding tools onto Gas City's shared infrastructure.
 - [Understanding Packs](/guides/understanding-packs) — what a pack is, where its definitions live, and how imports become city behavior.
 - [Understanding Formulas](/guides/understanding-formulas) — how to think about formulas, choose a contract, and apply the major patterns.
 

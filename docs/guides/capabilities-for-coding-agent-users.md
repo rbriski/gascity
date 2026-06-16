@@ -1,5 +1,5 @@
 ---
-title: Capabilities for Coding Agent Users
+title: Coming from a Coding Agent
 description: How context, state, skills, history, messaging, roles, and identity work in Gas City — mapped to what you already know from coding agents.
 ---
 

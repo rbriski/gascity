@@ -32,9 +32,8 @@ chat. It works — and it leaks:
 | Operational truth in tutorials, notes, and heads | Drifts from what the tooling knows |
 
 Gas City makes those moving parts first-class pack and city content, and
-puts an orchestrator behind them that dispatches ready work to many agents at
-once, waits on dependencies, and retries failures — so coordination no
-longer lives in one person's head and chat window.
+puts an orchestrator behind them — so coordination no longer lives in one
+person's head and chat window.
 
 ## The primitives let an orchestrator run your team's work
 
@@ -54,10 +53,9 @@ below configures.
 
 Around the primitives, the supporting config gets a home too: **commands**,
 **doctor checks**, and **template fragments** stop being loose files, and
-`.gc/` becomes the machine-local site-binding and runtime layer. The
-working style becomes orchestrator-driven instead of hand-driven — ready work
-fans out in parallel, dependencies gate, failures retry — and the method
-itself becomes reproducible, legible, shareable, and version-controlled.
+`.gc/` becomes the machine-local site-binding and runtime layer. The working
+style becomes orchestrator-driven instead of hand-driven, and the method itself
+becomes reproducible, legible, shareable, and version-controlled.
 
 ## Everything sorts into three layers
 
@@ -105,8 +103,7 @@ alignment, and targeted implementation workers.
 
 The point is not to freeze your team shape forever. It is to stop
 pretending a real multi-agent workflow is just "some prompts somewhere"
-plus shell history. The method that coordinates the agents — what runs in
-parallel, what waits on what, what retries — becomes a formula the
+plus shell history. The method that coordinates the agents becomes a formula the
 orchestrator executes for you, not a routine you perform by hand every time.
 
 ## Move the parts you already repeat

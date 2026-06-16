@@ -2,9 +2,11 @@ package formula
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -2242,5 +2244,52 @@ type = "task"
 	want := ContentHash([]byte(content))
 	if recipe.ContentHash != want {
 		t.Errorf("ContentHash = %q, want %q", recipe.ContentHash, want)
+	}
+}
+
+func TestCompile_PropagatesRootMetadata(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+formula = "mol-metadata"
+description = "Metadata propagation test"
+
+[metadata.gc.methodology]
+interaction_modes = ["headless", "autonomous"]
+review_modes = ["report"]
+
+[[steps]]
+id = "work"
+title = "Do work"
+type = "task"
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-metadata.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-metadata", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	var got struct {
+		GC struct {
+			Methodology struct {
+				InteractionModes []string `json:"interaction_modes"`
+				ReviewModes      []string `json:"review_modes"`
+			} `json:"methodology"`
+		} `json:"gc"`
+	}
+	data, err := json.Marshal(recipe.Metadata)
+	if err != nil {
+		t.Fatalf("marshal recipe metadata: %v", err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("metadata has unexpected shape: %v\n%s", err, string(data))
+	}
+	if want := []string{"headless", "autonomous"}; !reflect.DeepEqual(got.GC.Methodology.InteractionModes, want) {
+		t.Fatalf("metadata.gc.methodology.interaction_modes = %+v, want %+v", got.GC.Methodology.InteractionModes, want)
+	}
+	if want := []string{"report"}; !reflect.DeepEqual(got.GC.Methodology.ReviewModes, want) {
+		t.Fatalf("metadata.gc.methodology.review_modes = %+v, want %+v", got.GC.Methodology.ReviewModes, want)
 	}
 }

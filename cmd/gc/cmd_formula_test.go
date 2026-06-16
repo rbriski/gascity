@@ -262,6 +262,13 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 		Name:        "mol-build",
 		Description: "Build {{branch}}",
 		Phase:       "liquid",
+		Metadata: map[string]any{
+			"gc": map[string]any{
+				"methodology": map[string]any{
+					"interaction_modes": []string{"headless", "autonomous"},
+				},
+			},
+		},
 		Vars: map[string]*formula.VarDef{
 			"branch": {
 				Description: "branch to build",
@@ -296,7 +303,14 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 		SchemaVersion string `json:"schema_version"`
 		Name          string `json:"name"`
 		Description   string `json:"description"`
-		Vars          []struct {
+		Metadata      struct {
+			GC struct {
+				Methodology struct {
+					InteractionModes []string `json:"interaction_modes"`
+				} `json:"methodology"`
+			} `json:"gc"`
+		} `json:"metadata"`
+		Vars []struct {
 			Name       string  `json:"name"`
 			RigDefault *string `json:"rig_default"`
 		} `json:"vars"`
@@ -310,6 +324,9 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 	}
 	if got.SchemaVersion != "1" || got.Name != "mol-build" || got.Description != "Build main" {
 		t.Fatalf("payload = %+v", got)
+	}
+	if want := []string{"headless", "autonomous"}; !reflect.DeepEqual(got.Metadata.GC.Methodology.InteractionModes, want) {
+		t.Fatalf("metadata.gc.methodology.interaction_modes = %+v, want %+v", got.Metadata.GC.Methodology.InteractionModes, want)
 	}
 	if len(got.Vars) != 2 || got.Vars[1].Name != "target" || got.Vars[1].RigDefault == nil || *got.Vars[1].RigDefault != "fast" {
 		t.Fatalf("vars = %+v", got.Vars)

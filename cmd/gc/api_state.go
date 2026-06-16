@@ -335,7 +335,7 @@ func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath
 	}
 	// Cache a never-closed wrapper so a consumer's closeBeadStoreHandle cannot
 	// close the handle out from under the other consumers of the cached store.
-	var shared beads.Store = store
+	shared := store
 	if sq, ok := store.(*beads.SQLiteStore); ok {
 		shared = noCloseGraphStore{sq}
 	}

@@ -788,12 +788,21 @@ func buildDesiredStateWithSessionBeads(
 	// demand here. The controller only uses assignment/readiness state; routed
 	// metadata is consumed by the agent-side gc hook path.
 	for identity, spec := range namedSpecs {
+		directAssignees := map[string]struct{}{identity: {}}
+		if runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); runtimeName != "" {
+			directAssignees[runtimeName] = struct{}{}
+		}
+		if effectiveCityName := cfg.EffectiveCityName(); effectiveCityName != cityName {
+			if runtimeName := config.NamedSessionRuntimeName(effectiveCityName, cfg.Workspace, identity); runtimeName != "" {
+				directAssignees[runtimeName] = struct{}{}
+			}
+		}
 		for i, wb := range assignedWorkBeads {
 			if wb.Status != "open" && wb.Status != "in_progress" {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee != identity {
+			if _, ok := directAssignees[assignee]; !ok {
 				continue
 			}
 			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
@@ -1245,7 +1254,9 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
 			}
-			add(cfg.NamedSessions[i].QualifiedName())
+			identity := cfg.NamedSessions[i].QualifiedName()
+			add(identity)
+			add(config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity))
 		}
 	}
 	return result

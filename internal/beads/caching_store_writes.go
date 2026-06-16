@@ -179,6 +179,57 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return true, nil
 }
 
+// Claim atomically claims a bead through the backing store and refreshes the
+// cache when the claim succeeds. For graph_store=sqlite the backing is the
+// bead-policy store wrapping the Router, which routes a graph bead to the
+// SQLite Claimer; the outer CachingStore MUST forward Claim so the API claim
+// handler's store.(beads.Claimer) assertion succeeds for the city store —
+// otherwise `bd update <gcg-id> --claim` (routed to POST /bead/{id}/claim) is
+// rejected as ErrClaimUnsupported and graph-bead self-claims never converge.
+// Prefers the explicit-assignee Claimer; falls back to EnvActorClaimer when the
+// backend bakes its actor (the assignee argument is then advisory).
+func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
+	var (
+		claimed  Bead
+		didClaim bool
+		err      error
+	)
+	switch backend := c.backing.(type) {
+	case Claimer:
+		claimed, didClaim, err = backend.Claim(id, assignee)
+	case EnvActorClaimer:
+		claimed, didClaim, err = backend.Claim(id)
+	default:
+		return Bead{}, false, ErrClaimUnsupported
+	}
+	if err != nil || !didClaim {
+		return claimed, didClaim, err
+	}
+
+	// Re-fetch from backing to get the authoritative claimed state (assignee +
+	// in_progress), mirroring ReleaseIfCurrent's post-write refresh.
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after claim")
+	c.mu.Lock()
+	c.noteLocalMutationLocked(id)
+	if refreshed {
+		c.beads[id] = cloneBead(fresh)
+		c.deps[id] = depsFromBeadFields(fresh)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		claimed = cloneBead(fresh)
+	} else {
+		c.beads[id] = cloneBead(claimed)
+		c.dirty[id] = struct{}{}
+		delete(c.deletedSeq, id)
+	}
+	c.clearDependentReadyProjectionsLocked(id)
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	c.notifyChange("bead.updated", claimed)
+	return claimed, true, nil
+}
+
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	// Idempotence: if the cached bead status is already "closed" AND the

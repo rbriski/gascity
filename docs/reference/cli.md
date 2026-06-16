@@ -57,7 +57,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
-| [gc ready](#gc-ready) | List ready work as JSON, federated across the work and graph stores |
+| [gc ready](#gc-ready) | List ready work as JSON, graph-store aware through the per-class Router |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -2767,10 +2767,11 @@ gc prompt synth [flags]
 List ready (open, unblocked) work as a JSON array of beads.
 
 The store is opened through the per-class Router, so when a city sets
-[beads] graph_store the result federates ready work from both the Dolt-backed
-work store and the embedded graph store. The output is the bead JSON a work_query
-consumer unmarshals, so 'gc ready' can stand in for a 'bd ready --json' work_query
-to make a worker's demand probe graph-store aware.
+[beads] graph_store the ready set comes from the embedded graph store (the
+graph-class slice), reached in-process without a controller round-trip. The
+output is the bead JSON a work_query consumer unmarshals, so 'gc ready' can
+stand in for a 'bd ready --json' work_query to make a worker's demand probe
+graph-store aware while 'bd ready' keeps its Dolt work-store semantics.
 
 ```
 gc ready [flags]
@@ -2779,7 +2780,13 @@ gc ready [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--assignee` | string |  | filter to beads assigned to this actor |
+| `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
+| `--include-ephemeral` | bool |  | include ephemeral (wisp-tier) beads |
+| `--json` | bool |  | emit JSON (always on; accepted for bd compatibility) |
 | `--limit` | int |  | maximum beads to return (0 = no limit) |
+| `--metadata-field` | stringArray |  | filter to beads whose metadata key=value (repeatable, AND) |
+| `--sort` | string |  | sort order (oldest = by creation time ascending) |
+| `--unassigned` | bool |  | filter to beads with no assignee |
 
 ## gc register
 

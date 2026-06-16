@@ -1613,6 +1613,36 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}
 }
 
+func TestCollectAssignedWorkBeads_ExcludesUnassignedInProgressWorkflowRoot(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow",
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("mark workflow root in_progress: %v", err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "worker",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(2),
+	}}}
+
+	got, _ := collectAssignedWorkBeads(cfg, store)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want unassigned workflow root ignored", got)
+	}
+}
+
 // TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork pins the
 // fix for issue #2793: an open step bead carrying both gc.routed_to and a
 // stale (dead-session) assignee must enter assignedWorkBeads so the

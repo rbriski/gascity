@@ -14,16 +14,13 @@ whole thing to completion outside any single session.
 
 A [bead](/tutorials/06-beads) is one unit of work; a
 [convoy](/tutorials/06-beads) is a graph of related work; a formula is the
-reusable method that produces and orders it. Applying a formula compiles the
-file into a *recipe* (an in-memory plan of steps and dependency edges) and
-materializes that recipe as beads. From that moment the work is independent of
-both the formula file and any agent session: sessions crash, restart, and get
-recycled; the work persists, and whoever picks it up next finds the same
-state. That durability is what lets the orchestrator drive the graph across many
-sessions without losing its place. Because a run is detached from its file, the
-file can change underneath it — `gc formula version-check <bead-id>` compares
-the formula hash recorded on a run's bead against the current on-disk file, so
-you can spot that drift.
+reusable method that produces and orders it. Applying a formula materializes its
+steps as beads, and from that moment the work is independent of both the formula
+file and any agent session: sessions crash and recycle, but the work persists,
+so whoever picks it up next finds the same state. Because a run is detached from
+its file, the file can change underneath it — `gc formula version-check
+<bead-id>` compares the hash recorded on a run's bead against the on-disk file,
+so you can spot that drift.
 
 ![Applying a formula in three stages: the formula.toml on disk is compiled
 into an in-memory recipe (flattened steps plus dependency edges), then
@@ -121,8 +118,7 @@ The outcome follows from the contract, not from a separate choice:
 | v1 run with steps | v1 with steps (a *molecule*: container root + step children) | Yes, as children | No — the root is a container |
 | v2 workflow | v2 | Yes, independently routable | No — the root blocks on finalize |
 
-The tradeoffs:
-
+<Accordion title="Visibility, routing, and cleanup tradeoffs">
 - **Visibility.** Materialized steps are real beads you can list, show, and
   watch move through statuses — a per-step audit trail. A single-bead run
   keeps the store lean but gives one bead and no step-level record.
@@ -135,6 +131,7 @@ The tradeoffs:
   per-step record. The core pack's cleanup order tidies all three: it reaps
   stale ephemeral runs and purges closed step records, with cleanup edges
   covering v2 workflows too.
+</Accordion>
 
 One rule cuts across all of it: **cook and sling in the store the worker
 reads.** Each rig has its own bead store; the city has one too. Cook
@@ -152,14 +149,14 @@ and points at the formula in the
 [gascity pack](https://github.com/gastownhall/gascity-packs/tree/main/gascity/formulas)
 that uses the pattern in production.
 
-<Note>
-**The shipped pack predates the current canon.** Every pack formula opts into
-v2 with the deprecated top-level `contract = "graph.v2"` key (not the
-`[requires]` table) and is named `<name>.formula.toml` (not `<name>.toml`).
-Both spellings still parse — `gc doctor` warns about the contract key — and
-every fence below is adapted to today's canon. Migrating the pack is tracked
-in [#3462](https://github.com/gastownhall/gascity/issues/3462).
-</Note>
+<Accordion title="Note: the shipped pack predates the current canon">
+Every pack formula opts into v2 with the deprecated top-level
+`contract = "graph.v2"` key (not the `[requires]` table) and is named
+`<name>.formula.toml` (not `<name>.toml`). Both spellings still parse —
+`gc doctor` warns about the contract key — and every fence below is adapted to
+today's canon. Migrating the pack is tracked in
+[#3462](https://github.com/gastownhall/gascity/issues/3462).
+</Accordion>
 
 ### The Whole Job, End To End
 
@@ -173,15 +170,14 @@ gaps, check, ship — with a convoy of implementation beads hanging beneath the
 drain stage. The stages are the method (the formula); the beads are the work
 (the items).](/diagrams/excalidraw-rendered/formula-whole-job.svg)
 
-A typical build **decomposes** an approved plan into a convoy of
-implementation items; **drains** the convoy so every ready member is worked at
-once, in dependency-ordered waves; **reviews** the result across several lanes
-that loop until the verdict passes; runs a **gap analysis** and fills the gaps;
-and gates a final **check** before shipping. The division of labor is
-three-sided: the **work** is the items themselves (independent beads that
-survive sessions), the **formula** is the method that declares them and their
-order, and the **orchestrator** is the engine that runs the method as a live
-graph — all outside any single agent's session.
+A typical build decomposes an approved plan into a convoy, drains it so every
+ready member is worked at once in dependency-ordered waves, reviews the result
+across lanes that loop until the verdict passes, runs a gap analysis, and gates
+a final check before shipping. The division of labor is three-sided: the
+**work** is the items themselves (independent beads that survive sessions), the
+**formula** is the method that declares them and their order, and the
+**orchestrator** is the engine that runs the method as a live graph — all
+outside any single agent's session.
 
 The sections below are the individual moves in that pipeline —
 [decomposition](#planning-reviews-and-decomposition),
@@ -797,6 +793,7 @@ work until a verification script passes (see
 [Self-Checking Work](#self-checking-work-and-transient-hardening)) — which
 keeps the loop inside the formula where the orchestrator drives it.
 
+<Accordion title="If you need `gc converge` (v1 only)">
 The dedicated `gc converge` command predates the v2 runtime and accepts only v1
 formulas, with no convergence-specific formula keys:
 
@@ -821,22 +818,20 @@ gate-and-evaluate machinery; otherwise prefer the v2 check loop above.
 
 See [conformance and compatibility](/reference/specs/formula-spec-v1#5-conformance-and-compatibility)
 in the v1 spec.
+</Accordion>
 
 ## Where Next
 
-- [The primitives](/getting-started/how-gas-city-works) — the canonical model that places
-  Formula alongside Agent, Bead, Rig, Pack, and Event.
-- [Tutorial 05: Formulas](/tutorials/05-formulas) — write, inspect, and
-  dispatch your first formulas hands-on.
-- [Formula spec (v2)](/reference/specs/formula-spec-v2) — the normative format,
-  compilation, and runtime rules for formulas v2.
-- [Formula spec (v1)](/reference/specs/formula-spec-v1) — the normative rules for the
-  v1 contract.
-- [Tutorial 07: Orders](/tutorials/07-orders) — scheduled dispatch in
-  depth.
+- [The primitives](/getting-started/how-gas-city-works) — Formula alongside
+  Agent, Bead, Rig, Pack, and Event.
+- [Tutorial 05: Formulas](/tutorials/05-formulas) — write, inspect, and dispatch
+  your first formulas hands-on.
+- [Formula spec — v2](/reference/specs/formula-spec-v2) and
+  [v1](/reference/specs/formula-spec-v1) — the normative format, compilation,
+  and runtime rules.
+- [Tutorial 07: Orders](/tutorials/07-orders) — scheduled dispatch in depth.
 - [The gascity pack](https://github.com/gastownhall/gascity-packs/tree/main/gascity/formulas)
-  — real formulas to read. The `build-*` chain shows `extends` composition
-  end to end, `do-work` / `do-work-item` show the drain item contract,
-  `fix-loop-base` and `build-basic-review` show check loops, and
-  `planning-base` / `decomposition-base` show review and decomposition (in the
-  older spelling noted above).
+  — real formulas to read: the `build-*` chain (`extends` composition),
+  `do-work` (the drain item contract), `fix-loop-base` and `build-basic-review`
+  (check loops), and `planning-base` / `decomposition-base` (review and
+  decomposition).

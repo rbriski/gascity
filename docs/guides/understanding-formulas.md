@@ -12,15 +12,18 @@ the job into beads, fans the ready ones out to as many agents as you have,
 gates each step on its dependencies, retries transient failures, and drives the
 whole thing to completion outside any single session.
 
+Because the method is written down rather than improvised in a prompt, you get
+leverage: preview what a formula will produce before you create anything (`gc
+formula show`), apply one method across many runs with different inputs
+(`--var`), and catch when a run has drifted from the formula it came from (`gc
+formula version-check`).
+
 A [bead](/tutorials/06-beads) is one unit of work; a
 [convoy](/tutorials/06-beads) is a graph of related work; a formula is the
 reusable method that produces and orders it. Applying a formula materializes its
 steps as beads, and from that moment the work is independent of both the formula
 file and any agent session: sessions crash and recycle, but the work persists,
-so whoever picks it up next finds the same state. Because a run is detached from
-its file, the file can change underneath it — `gc formula version-check
-<bead-id>` compares the hash recorded on a run's bead against the on-disk file,
-so you can spot that drift.
+so whoever picks it up next finds the same state.
 
 ![Applying a formula in three stages: the formula.toml on disk is compiled
 into an in-memory recipe (flattened steps plus dependency edges), then

@@ -63,6 +63,8 @@ The City is the local root pack; it imports shared packs. A pack and a city
 are the same kind of container at different scopes. Each piece of your
 workflow belongs to exactly one of three layers:
 
+![From hand-rolled to a city: work that lives by hand — context in chat, prompts as loose files, branch setup repeated, truth in notes and heads — moves into three layers: a portable pack definition (pack.toml and pack dirs), city deployment choices (city.toml), and machine-local site binding and runtime state (.gc/).](/diagrams/excalidraw-rendered/hand-rolled-to-city.svg)
+
 | Layer | What it holds | Where it lives |
 | --- | --- | --- |
 | **1. Portable team definition** (a pack) | Pack identity, agent defaults, imported packs, prompts, overlays, helper scripts, commands, doctor checks, formulas, and orders | `pack.toml` and pack-owned dirs: `agents/`, `commands/`, `doctor/`, `formulas/`, `orders/`, `template-fragments/`, `overlay/`, `assets/` |

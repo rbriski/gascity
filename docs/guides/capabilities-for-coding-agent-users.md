@@ -21,6 +21,8 @@ the most basic to the most multi-agent.
 The rest of this page is one delta per capability — what changes when the
 single-agent feature becomes shared infrastructure.
 
+![Agents coordinate only through the store: mayor, reviewer, and worker each read and write the shared bead store (slinging work, claiming ready work, mailing a bead) — no arrow connects two agents directly. A nudge can wake a live session, but the work itself only ever moves through beads.](/diagrams/excalidraw-rendered/coordination-through-store.svg)
+
 ## Context
 
 The window is seeded automatically, per agent, from durable sources — you never

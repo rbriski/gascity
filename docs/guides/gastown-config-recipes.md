@@ -9,6 +9,8 @@ how Gas Town roles and mechanisms map onto Gas City primitives, lives in
 [Coming from Gas Town](/getting-started/coming-from-gastown); for the primitives
 themselves, see [The six primitives](/getting-started/how-gas-city-works).
 
+![Gastown agents by scope: city-scoped agents (mayor, deacon, boot, dog) load from [imports.gastown]; rig-scoped agents (witness, refinery, polecat) load from a rig import; crew are individually named directory agents plus a named session that you add yourself.](/diagrams/excalidraw-rendered/gastown-agents-by-scope.svg)
+
 ## Common Gastown Overrides
 
 If you are using the Gastown pack, these are the most common local changes.

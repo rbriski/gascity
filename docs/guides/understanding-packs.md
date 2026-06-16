@@ -150,6 +150,8 @@ checkout-service/gascity.planner
 The rig `name` becomes the identity prefix. The rig `path` is the filesystem
 location of the project. These are different pieces of information.
 
+![Import binding to runtime name: the [imports.review] binding resolves to review.reviewer when the pack is imported at the city level, and to checkout-service/review.reviewer when it is imported for a rig — the binding qualifies the name and the rig adds its own prefix.](/diagrams/excalidraw-rendered/import-binding-namespace.svg)
+
 ## Agent Scope
 
 An agent in a pack can say where it is allowed to load.

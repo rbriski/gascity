@@ -197,12 +197,6 @@ You do not need to start from scratch:
 
 This beats trying to design the perfect multi-agent city in one shot.
 
-## What this guide is not
-
-This is not the schema reference (it says what fields mean) and not the
-tutorials (they teach the product). This guide is about turning an existing
-multi-agent engineering style into something more coherent and teachable.
-
 ## See also
 
 - [Shareable Packs](/guides/shareable-packs)

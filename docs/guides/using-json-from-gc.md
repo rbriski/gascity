@@ -9,7 +9,7 @@ support it, so callers read JSON fields instead of parsing tables, status text,
 or progress messages. Human-readable output stays the default for interactive
 use.
 
-![Driving gc from software: gc <command> with --json prints a JSON result on stdout, and with --json-schema=result prints the command's JSON Schema; a caller validates the result against the schema at the command boundary.](/diagrams/excalidraw-rendered/json-discover-validate.svg)
+![Driving gc from software: a gc command with --json prints a JSON result on stdout, and with --json-schema=result prints the command's JSON Schema; a caller validates the result against the schema at the command boundary.](/diagrams/excalidraw-rendered/json-discover-validate.svg)
 
 ## Quick Start
 

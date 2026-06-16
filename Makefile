@@ -349,6 +349,7 @@ test-cmd-gc-process:
 
 CMD_GC_PROCESS_SHARD ?= 1
 CMD_GC_PROCESS_TOTAL ?= 6
+CMD_GC_COVER_TOTAL ?= 6
 test-cmd-gc-process-shard:
 	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
 
@@ -544,13 +545,23 @@ check-docs:
 # Packages for coverage — exclude noise:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
-UNIT_COVER_PKGS = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
+# cmd/gc excluded: it runs sharded below in test-cover to stay under per-package timeout
+UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
 
-## test-cover: run fast unit-test coverage without the integration-tagged package sweep
+## test-cover: run fast unit-test coverage without the integration-tagged package sweep.
+## cmd/gc is sharded CMD_GC_COVER_TOTAL (default 6) ways via test-go-test-shard so each
+## shard lands well under the per-package timeout; profiles are merged via merge-coverprofiles.
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
 test-cover: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 20m -coverprofile=coverage.txt $(UNIT_COVER_PKGS)
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	@rm -f coverage.cmdgc.*.txt
+	@for s in $$(seq 1 $(CMD_GC_COVER_TOTAL)); do \
+		$(TEST_ENV) GO_TEST_COVERPROFILE="coverage.cmdgc.$$s.txt" \
+		GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=10m \
+		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_COVER_TOTAL) || exit 1; \
+	done
+	./scripts/merge-coverprofiles coverage.txt coverage.noncmdgc.txt coverage.cmdgc.*.txt
 
 ## cover: run tests and show coverage report
 cover: test-cover

@@ -2,6 +2,8 @@
 CLAUDE.local.md
 coverage.txt
 coverage.integration-*.txt
+coverage.noncmdgc.txt
+coverage.cmdgc.*.txt
 cmd/gc/.runtime/
 /bin/
 /gc

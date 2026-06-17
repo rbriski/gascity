@@ -472,10 +472,17 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	// execution lane restored manually. Prefer each step's explicit target when
 	// available, and only inherit the parent execution lane as a fallback.
 	executionRoute := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
+	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] == "spec" {
 			continue
+		}
+		if executionRigContext != "" && strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey]) == "" {
+			if recipe.Steps[i].Metadata == nil {
+				recipe.Steps[i].Metadata = make(map[string]string)
+			}
+			recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey] = executionRigContext
 		}
 		target := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.RunTargetMetadataKey])
 		if target == "" {
@@ -993,6 +1000,7 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 		step.Metadata = make(map[string]string)
 	}
 	resolvedExecutionTarget := strings.TrimSpace(executionTarget)
+	rigContext := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		switch {
 		case binding.qualifiedName != "":
@@ -1012,7 +1020,7 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget, cfg)
+	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget, rigContext, cfg)
 	if controlTarget != "" {
 		step.Metadata[beadmeta.RoutedToMetadataKey] = controlTarget
 	} else {
@@ -1021,11 +1029,13 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	step.Assignee = ""
 }
 
-func controlDispatcherTargetForExecutionTarget(executionTarget string, cfg *config.City) string {
+func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext string, cfg *config.City) string {
 	executionTarget = strings.TrimSpace(executionTarget)
-	rigContext := ""
-	if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
-		rigContext = executionTarget[:slash]
+	rigContext = strings.TrimSpace(rigContext)
+	if rigContext == "" {
+		if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
+			rigContext = executionTarget[:slash]
+		}
 	}
 	if cfg != nil {
 		for _, agentCfg := range cfg.Agents {
@@ -1072,9 +1082,6 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
 					}
-				}
-				if spec.SessionName != "" {
-					return attemptRouteBinding{sessionName: spec.SessionName}, true
 				}
 			}
 			return attemptRouteBinding{

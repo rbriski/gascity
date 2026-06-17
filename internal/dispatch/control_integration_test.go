@@ -1002,7 +1002,7 @@ func (s *countingAttemptRouteStore) List(query beads.ListQuery) ([]beads.Bead, e
 	return s.MemStore.List(query)
 }
 
-func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSessionName(t *testing.T) {
+func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMetadataRoute(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -1026,11 +1026,11 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSe
 	if binding.directSessionID != "" {
 		t.Fatalf("directSessionID = %q, want empty without canonical bead", binding.directSessionID)
 	}
-	if binding.sessionName != "worker" {
-		t.Fatalf("sessionName = %q, want worker", binding.sessionName)
+	if binding.sessionName != "" {
+		t.Fatalf("sessionName = %q, want empty so future runtime names are not assigned", binding.sessionName)
 	}
-	if binding.qualifiedName != "" || binding.metadataOnly {
-		t.Fatalf("binding = %+v, want concrete session-name route", binding)
+	if binding.qualifiedName != "worker" || !binding.metadataOnly {
+		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
 	}
 }
 
@@ -1072,6 +1072,58 @@ func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherUsesMetadataRou
 	}
 	if got := step.Metadata["gc.execution_routed_to"]; got != "gascity/claude" {
 		t.Fatalf("gc.execution_routed_to = %q, want gascity/claude", got)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_UsesExecutionRigContextForDirectSessionTarget(t *testing.T) {
+	t.Parallel()
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: t.TempDir(),
+		}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			Dir:               "frontend",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			ProcessNames:      []string{"gc"},
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "frontend reviewer",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "reviewer-1",
+			"template":     "frontend/reviewer",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.execution_rig_context": "frontend",
+			"gc.routed_to":             "stale-route",
+		},
+	}
+
+	applyAttemptControlStepRoute(step, sessionBead.ID, cfg, store)
+
+	if step.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want frontend/control-dispatcher", got)
+	}
+	if got := step.Metadata["gc.execution_routed_to"]; got != sessionBead.ID {
+		t.Fatalf("gc.execution_routed_to = %q, want direct session id %q", got, sessionBead.ID)
 	}
 }
 

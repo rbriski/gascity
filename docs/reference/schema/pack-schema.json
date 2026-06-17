@@ -31,7 +31,7 @@
             "city",
             "rig"
           ],
-          "description": "Scope defines where this agent is instantiated: \"city\" (one per city),\n\"rig\" (one per rig), or empty (unscoped: instantiate in both city and\nrig expansion contexts). Only meaningful for pack-defined agents; inline\nagents in city.toml use Dir directly."
+          "description": "Scope defines where this agent is instantiated: \"city\" (one per city) or\n\"rig\" (one per rig). Omit the field for an unscoped agent instantiated in\nboth city and rig expansion contexts. Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
         },
         "suspended": {
           "type": "boolean",
@@ -693,7 +693,7 @@
             "city",
             "rig"
           ],
-          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city), \"rig\" (one per rig), or empty\n(unscoped: instantiate in both city and rig expansion contexts)."
+          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig). Omit the\nfield for an unscoped session instantiated in both city and rig\nexpansion contexts."
         },
         "dir": {
           "type": "string",
@@ -1157,7 +1157,7 @@
         },
         "session_id_flag": {
           "type": "string",
-          "description": "SessionIDFlag is the CLI flag for creating a session with a specific ID.\nEnables the Generate \u0026 Pass strategy for session key management.\nExample: \"--session-id\" (claude)"
+          "description": "SessionIDFlag is the CLI flag for providers that support creating a\nfresh session with a caller-supplied ID. Empty means fresh starts cannot\nreceive a preselected provider session ID; resume metadata must come from\nthe provider after startup."
         },
         "permission_modes": {
           "additionalProperties": {

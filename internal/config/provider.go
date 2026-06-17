@@ -113,9 +113,10 @@ type ProviderSpec struct {
 	// Schema-managed defaults missing from a subcommand-style resume command
 	// are inserted before {{.SessionKey}} during provider resolution.
 	ResumeCommand string `toml:"resume_command,omitempty"`
-	// SessionIDFlag is the CLI flag for creating a session with a specific ID.
-	// Enables the Generate & Pass strategy for session key management.
-	// Example: "--session-id" (claude)
+	// SessionIDFlag is the CLI flag for providers that support creating a
+	// fresh session with a caller-supplied ID. Empty means fresh starts cannot
+	// receive a preselected provider session ID; resume metadata must come from
+	// the provider after startup.
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}

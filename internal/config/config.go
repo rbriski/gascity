@@ -388,8 +388,9 @@ type NamedSession struct {
 	// target imported agents via "binding.agent".
 	Template string `toml:"template" jsonschema:"required"`
 	// Scope defines where this named session is instantiated in pack
-	// expansion: "city" (one per city), "rig" (one per rig), or empty
-	// (unscoped: instantiate in both city and rig expansion contexts).
+	// expansion: "city" (one per city) or "rig" (one per rig). Omit the
+	// field for an unscoped session instantiated in both city and rig
+	// expansion contexts.
 	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
 	// Dir is the identity prefix for rig-scoped named sessions after pack
 	// expansion. Empty means city-scoped.
@@ -2911,10 +2912,10 @@ type Agent struct {
 	// tmux_alias. When no --alias is supplied, work_dir templates that use
 	// {{.Agent}} see the resolved tmux_alias as the concrete session identity.
 	TmuxAlias string `toml:"tmux_alias,omitempty"`
-	// Scope defines where this agent is instantiated: "city" (one per city),
-	// "rig" (one per rig), or empty (unscoped: instantiate in both city and
-	// rig expansion contexts). Only meaningful for pack-defined agents; inline
-	// agents in city.toml use Dir directly.
+	// Scope defines where this agent is instantiated: "city" (one per city) or
+	// "rig" (one per rig). Omit the field for an unscoped agent instantiated in
+	// both city and rig expansion contexts. Only meaningful for pack-defined
+	// agents; inline agents in city.toml use Dir directly.
 	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
 	// Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume.
 	Suspended bool `toml:"suspended,omitempty"`

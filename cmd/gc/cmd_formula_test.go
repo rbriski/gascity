@@ -298,6 +298,7 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 	if err := writeCLIJSONLine(&stdout, payload); err != nil {
 		t.Fatalf("writeCLIJSONLine: %v", err)
 	}
+	validateJSONAgainstResultSchema(t, []string{"formula", "show"}, stdout.Bytes())
 
 	var got struct {
 		SchemaVersion string `json:"schema_version"`

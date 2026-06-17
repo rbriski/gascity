@@ -403,6 +403,55 @@ max_active_sessions = 1
 	}
 }
 
+func TestImport_CityImportRigExpansionRequalifiesDependsOn(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "core")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.core]
+source = "../core"
+
+[[rigs]]
+name = "fixture"
+path = "/tmp/fixture"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "core"
+schema = 2
+`)
+	writeTestFile(t, filepath.Join(importDir, "agents", "worker"), "agent.toml", `
+depends_on = ["db"]
+start_command = "true"
+`)
+	writeTestFile(t, filepath.Join(importDir, "agents", "db"), "agent.toml", `
+start_command = "true"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]Agent{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = a
+	}
+	rigWorker, ok := found["fixture/core.worker"]
+	if !ok {
+		t.Fatalf("missing rig worker; agents=%v", found)
+	}
+	if got, want := rigWorker.DependsOn, []string{"fixture/core.db"}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("rig worker DependsOn = %v, want %v", got, want)
+	}
+}
+
 func TestImport_BindingNameStamped(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")

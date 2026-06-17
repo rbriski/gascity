@@ -2437,10 +2437,35 @@ func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName str
 				continue
 			}
 			a.Dir = rigName
+			qualifyAgentDependsOnInPlace(&a)
 			expanded = append(expanded, a)
 		}
 	}
 	return expanded
+}
+
+func qualifyAgentDependsOnInPlace(a *Agent) {
+	if a == nil || len(a.DependsOn) == 0 {
+		return
+	}
+	for i, dep := range a.DependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep == "" || strings.Contains(dep, "/") {
+			continue
+		}
+		binding := strings.TrimSpace(a.BindingName)
+		if !strings.Contains(dep, ".") {
+			if binding != "" {
+				dep = binding + "." + dep
+			}
+		} else if binding != "" && !strings.HasPrefix(dep, binding+".") {
+			continue
+		}
+		if a.Dir != "" {
+			dep = a.Dir + "/" + dep
+		}
+		a.DependsOn[i] = dep
+	}
 }
 
 func expandCityImportedNamedSessionsForRigs(sessions []NamedSession, rigs []Rig, bindingName string) []NamedSession {

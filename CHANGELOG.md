@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gastown`/`maintenance` import sources, superseded bundled pins, and stale
   locks are migrated to explicit pinned imports in `pack.toml` plus
   `packs.lock`.
+- **Fresh cities include a `control-dispatcher` named-session alias; upgraded
+  cities do not need one.** Existing cities repaired by `gc doctor --fix`
+  route controller work through `gc.routed_to = "core.control-dispatcher"` and
+  the normal control-dispatcher pool demand path. The doctor does not add the
+  fresh-init `[[named_session]]` alias because it is an operator convenience,
+  not required runtime state.
+- **The built-in Claude provider no longer declares a fresh-start
+  `session_id_flag`.** Claude remains resume-capable, but Gas City now records
+  the provider-created session key after startup instead of passing a
+  preselected fresh-session ID.
 - **The `gastown` pack is now consumed from
   `github.com/gastownhall/gascity-packs`.** The old checked-in
   `examples/gastown/packs/gastown` tree is gone. Move local customizations

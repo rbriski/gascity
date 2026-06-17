@@ -14,6 +14,7 @@ REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
 ASSIGNEE="${GC_SESSION_NAME:-${GC_AGENT:-}}"
 HARNESS_STATE_DIR="$GC_CITY/.gc/test-harness"
+HOOK_TIMEOUT="${GC_GRAPH_HOOK_TIMEOUT:-35}"
 
 # Keep each worker/pool slot distinct at the beads actor layer.
 # `bd update --claim` claims "to you", so sharing one actor across sessions
@@ -260,10 +261,21 @@ fetch_ready_queue() {
     if [ -z "$ASSIGNEE" ]; then
         return 1
     fi
-    # gc hook resolves the current session via GC_ALIAS/GC_AGENT and uses the
-    # session model work query tiers, so it can see both directly assigned work
-    # and generic routed work for controller-materialized sessions.
-    timeout 10 gc hook 2>/dev/null
+    # Graph workflow attempts are preassigned by the deterministic control
+    # dispatcher. Read that assigned queue directly so empty polls do not spend
+    # their budget in gc hook/native-store preflight. Keep the full hook path
+    # available for tests that explicitly need generic routed work.
+    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+        if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
+            printf '%s\n' "$ready"
+            return 0
+        fi
+    fi
+    if [ "${GC_GRAPH_HOOK_FALLBACK:-0}" = "1" ]; then
+        timeout "$HOOK_TIMEOUT" gc hook 2>/dev/null
+        return $?
+    fi
+    return 1
 }
 
 fetch_in_progress_queue() {

@@ -34,6 +34,8 @@ const initMailRetentionExample = `# [mail]
 # retention_ttl = "0"
 `
 
+const initCoreImportName = "core"
+
 type initPackMeta struct {
 	Name        string                   `toml:"name"`
 	Version     string                   `toml:"version,omitempty"`
@@ -1023,6 +1025,27 @@ func addBuiltinImportsToInitPack(packCfg *initPackConfig, cityProvider string) {
 		}
 		packCfg.Imports[name] = imports[name]
 	}
+	if _, ok := packCfg.Imports[initCoreImportName]; ok {
+		addDefaultControlDispatcherNamedSession(packCfg)
+	}
+}
+
+func addDefaultControlDispatcherNamedSession(packCfg *initPackConfig) {
+	if packCfg == nil {
+		return
+	}
+	const dispatcher = config.ControlDispatcherAgentName
+	for i := range packCfg.NamedSessions {
+		ns := packCfg.NamedSessions[i]
+		if ns.QualifiedName() == dispatcher || ns.TemplateQualifiedName() == initCoreImportName+"."+dispatcher {
+			return
+		}
+	}
+	packCfg.NamedSessions = append(packCfg.NamedSessions, config.NamedSession{
+		Name:     dispatcher,
+		Template: initCoreImportName + "." + dispatcher,
+		Mode:     "on_demand",
+	})
 }
 
 func appendUniqueStrings(dst []string, items ...string) []string {

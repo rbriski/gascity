@@ -155,6 +155,7 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		var got struct {
 			Config struct {
 				NamedSessions []struct {
+					Name     string
 					Template string
 					Mode     string
 				}
@@ -164,7 +165,10 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 			t.Fatalf("gc config show --json output is not a config envelope: %v\n%s", err, out)
 		}
 		for _, sess := range got.Config.NamedSessions {
-			if sess.Template == config.ControlDispatcherAgentName {
+			if sess.Name == config.ControlDispatcherAgentName {
+				if sess.Template != "core."+config.ControlDispatcherAgentName {
+					t.Fatalf("default control-dispatcher template = %q, want core.control-dispatcher\n%s", sess.Template, out)
+				}
 				if sess.Mode != "on_demand" {
 					t.Fatalf("default control-dispatcher mode = %q, want on_demand\n%s", sess.Mode, out)
 				}

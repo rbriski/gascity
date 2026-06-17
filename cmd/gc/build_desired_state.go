@@ -682,6 +682,7 @@ func buildDesiredStateWithSessionBeads(
 		// the cold pool never wakes for it.
 		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
@@ -705,6 +706,16 @@ func buildDesiredStateWithSessionBeads(
 				}
 				if count > scaleCheckCounts[template] {
 					scaleCheckCounts[template] = count
+				}
+			}
+		}
+		if len(controlDispatcherOpenDemand) > 0 {
+			if scaleCheckCounts == nil {
+				scaleCheckCounts = make(map[string]int)
+			}
+			for template, hasDemand := range controlDispatcherOpenDemand {
+				if hasDemand && scaleCheckCounts[template] < 1 {
+					scaleCheckCounts[template] = 1
 				}
 			}
 		}
@@ -1425,6 +1436,35 @@ func controllerDemandRouteTarget(b beads.Bead, templates map[string]struct{}) st
 // stamped before root routing switched to gc.routed_to.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
 	return routedToAndLegacyWorkflowCandidates(b)
+}
+
+func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {
+	demand := make(map[string]bool)
+	if cfg == nil || len(workBeads) == 0 {
+		return demand
+	}
+	controlDispatchers := make(map[string]struct{})
+	for i := range cfg.Agents {
+		if !config.IsDeterministicControlDispatcher(&cfg.Agents[i]) {
+			continue
+		}
+		controlDispatchers[cfg.Agents[i].QualifiedName()] = struct{}{}
+	}
+	if len(controlDispatchers) == 0 {
+		return demand
+	}
+	for _, wb := range workBeads {
+		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+			continue
+		}
+		for _, candidate := range controllerDemandRouteCandidates(wb) {
+			if _, ok := controlDispatchers[candidate]; ok {
+				demand[candidate] = true
+				break
+			}
+		}
+	}
+	return demand
 }
 
 func markScaleCheckPartialTemplate(partials map[string]bool, template string) map[string]bool {

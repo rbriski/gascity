@@ -2798,7 +2798,9 @@ formula_v2 = true
 
 	// pack.toml keeps the portable pack metadata, the pinned builtin pack
 	// imports (core + bd for the default bd provider), and the named
-	// session; the fresh mayor scaffold comes from agents/<name>/ discovery.
+	// sessions; the fresh mayor scaffold comes from agents/<name>/ discovery,
+	// while the control dispatcher is an explicit city-owned alias for the
+	// core import's deterministic dispatcher template.
 	packGot := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
 	packWant := `[pack]
 name = "bright-lights"
@@ -2818,6 +2820,11 @@ version = "` + config.PublicGascityPackVersion + `"
 [[named_session]]
 template = "mayor"
 mode = "always"
+
+[[named_session]]
+name = "control-dispatcher"
+template = "core.control-dispatcher"
+mode = "on_demand"
 `
 	if packGot != packWant {
 		t.Errorf("pack.toml content:\ngot:\n%s\nwant:\n%s", packGot, packWant)

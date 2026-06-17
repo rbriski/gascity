@@ -10360,3 +10360,66 @@ func TestBuildDesiredState_NamedSessionWorkQueryDoesNotDriveControllerDemand(t *
 		t.Fatal("NamedSessionDemand[alpha/dog] came from controller-side work_query")
 	}
 }
+
+func TestBuildDesiredState_OpenBlockedControlDispatcherWorkRetainsDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocking worker attempt",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title:  "Finalize cleanup",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": "core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city",
+		cityPath,
+		time.Now().UTC(),
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		newSessionBeadSnapshot(nil),
+		nil,
+		io.Discard,
+	)
+
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[core.control-dispatcher] = %d, want 1", got)
+	}
+	if len(result.State) != 1 {
+		t.Fatalf("desired state count = %d, want 1; state=%v", len(result.State), mapKeys(result.State))
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName != "core.control-dispatcher" {
+			t.Fatalf("desired TemplateName = %q, want core.control-dispatcher", desired.TemplateName)
+		}
+	}
+}

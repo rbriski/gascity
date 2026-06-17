@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -152,9 +153,22 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	t.Helper()
 
-	workflowTrace := readOptionalFile(filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log"))
-	if !strings.Contains(workflowTrace, "serve process bead=") {
-		t.Fatalf("control-dispatcher trace missing processed control bead evidence:\n%s", workflowTrace)
+	tracePaths := []string{
+		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
+		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+	}
+	var traces []string
+	foundControlTrace := false
+	for _, path := range tracePaths {
+		trace := readOptionalFile(path)
+		if strings.Contains(trace, "serve process bead=") {
+			foundControlTrace = true
+			break
+		}
+		traces = append(traces, fmt.Sprintf("%s:\n%s", path, trace))
+	}
+	if !foundControlTrace {
+		t.Fatalf("control-dispatcher trace missing processed control bead evidence:\n%s", strings.Join(traces, "\n\n"))
 	}
 
 	workerTrace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))

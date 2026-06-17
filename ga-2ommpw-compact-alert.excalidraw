@@ -1,0 +1,447 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "designer",
+  "elements": [
+    {
+      "type": "cameraUpdate",
+      "width": 800,
+      "height": 600,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "x": 155,
+      "y": 10,
+      "text": "Compact-Duration Alert - Signal Flow",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e"
+    },
+    {
+      "type": "text",
+      "id": "subtitle",
+      "x": 185,
+      "y": 38,
+      "text": "ga-2ommpw.1  |  GC_DOLT_COMPACT_WARN_SECS default 300s",
+      "fontSize": 14,
+      "strokeColor": "#757575"
+    },
+    {
+      "type": "rectangle",
+      "id": "zone_order",
+      "x": 20,
+      "y": 65,
+      "width": 760,
+      "height": 80,
+      "backgroundColor": "#dbe4ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 1,
+      "opacity": 40
+    },
+    {
+      "type": "text",
+      "id": "zone_order_lbl",
+      "x": 30,
+      "y": 72,
+      "text": "Order Layer  (mol-dog-compactor.toml  exec=gc dolt compact)",
+      "fontSize": 14,
+      "strokeColor": "#2563eb"
+    },
+    {
+      "type": "rectangle",
+      "id": "order_trigger",
+      "x": 50,
+      "y": 85,
+      "width": 200,
+      "height": 50,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "label": {
+        "text": "cooldown trigger fires",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a_trigger",
+      "x": 250,
+      "y": 110,
+      "width": 120,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          120,
+          0
+        ]
+      ],
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "gc dolt compact",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "compact_entry",
+      "x": 370,
+      "y": 85,
+      "width": 180,
+      "height": 50,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "label": {
+        "text": "run.sh  main()",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "zone_script",
+      "x": 20,
+      "y": 155,
+      "width": 760,
+      "height": 340,
+      "backgroundColor": "#e5dbff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 1,
+      "opacity": 30
+    },
+    {
+      "type": "text",
+      "id": "zone_script_lbl",
+      "x": 30,
+      "y": 162,
+      "text": "examples/bd/dolt/commands/compact/run.sh",
+      "fontSize": 14,
+      "strokeColor": "#6d28d9"
+    },
+    {
+      "type": "rectangle",
+      "id": "db_loop",
+      "x": 50,
+      "y": 185,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "label": {
+        "text": "for each db: db_start=1781672410",
+        "fontSize": 15
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a_db",
+      "x": 250,
+      "y": 212,
+      "width": 100,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          100,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "rectangle",
+      "id": "flatten",
+      "x": 350,
+      "y": 185,
+      "width": 175,
+      "height": 55,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "label": {
+        "text": "flatten_database(db) or bare_gc_database(db)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a_done",
+      "x": 525,
+      "y": 212,
+      "width": 100,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          100,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "rectangle",
+      "id": "measure",
+      "x": 625,
+      "y": 185,
+      "width": 130,
+      "height": 55,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "label": {
+        "text": "elapsed=-start",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "diamond",
+      "id": "threshold_check",
+      "x": 280,
+      "y": 270,
+      "width": 200,
+      "height": 90,
+      "backgroundColor": "#fff3bf",
+      "fillStyle": "solid",
+      "strokeColor": "#f59e0b",
+      "strokeWidth": 2,
+      "label": {
+        "text": "elapsed >= WARN_SECS? (default 300s)",
+        "fontSize": 15
+      }
+    },
+    {
+      "type": "text",
+      "id": "lbl_yes",
+      "x": 491,
+      "y": 287,
+      "text": "YES",
+      "fontSize": 16,
+      "strokeColor": "#ef4444"
+    },
+    {
+      "type": "arrow",
+      "id": "a_yes",
+      "x": 480,
+      "y": 315,
+      "width": 90,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          90,
+          0
+        ]
+      ],
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "rectangle",
+      "id": "escalate",
+      "x": 570,
+      "y": 283,
+      "width": 175,
+      "height": 65,
+      "backgroundColor": "#ffc9c9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "label": {
+        "text": "dolt_escalate() [MEDIUM] alert",
+        "fontSize": 15
+      }
+    },
+    {
+      "type": "text",
+      "id": "lbl_no",
+      "x": 257,
+      "y": 375,
+      "text": "NO",
+      "fontSize": 16,
+      "strokeColor": "#22c55e"
+    },
+    {
+      "type": "arrow",
+      "id": "a_no",
+      "x": 380,
+      "y": 360,
+      "width": 0,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "rectangle",
+      "id": "silent",
+      "x": 280,
+      "y": 410,
+      "width": 200,
+      "height": 50,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "label": {
+        "text": "silent compact OK",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "zone_surface",
+      "x": 20,
+      "y": 510,
+      "width": 760,
+      "height": 105,
+      "backgroundColor": "#d3f9d8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 1,
+      "opacity": 40
+    },
+    {
+      "type": "text",
+      "id": "zone_surface_lbl",
+      "x": 30,
+      "y": 518,
+      "text": "Operator-visible surface  (via dolt_escalate -> GC_ESCALATE_SCRIPT)",
+      "fontSize": 14,
+      "strokeColor": "#15803d"
+    },
+    {
+      "type": "rectangle",
+      "id": "subject_box",
+      "x": 50,
+      "y": 535,
+      "width": 340,
+      "height": 65,
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#06b6d4",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Subject: Dolt compact duration alert [MEDIUM] db=name Body: took Xs (warn=Ys). May hold write lock. city=path",
+        "fontSize": 13
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "routing_box",
+      "x": 420,
+      "y": 535,
+      "width": 330,
+      "height": 65,
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#06b6d4",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Routes to: configured escalate.sh same channel as doctor [MEDIUM] advisory",
+        "fontSize": 13
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a_esc",
+      "x": 657,
+      "y": 348,
+      "width": 0,
+      "height": 160,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          160
+        ]
+      ],
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "strokeStyle": "dashed"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

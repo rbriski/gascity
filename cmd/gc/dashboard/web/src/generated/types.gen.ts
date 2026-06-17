@@ -809,7 +809,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1718,87 +1718,6 @@ export type MailSendInputBody = {
      * Recipient name.
      */
     to: string;
-};
-
-export type MaintenanceRunBody = {
-    /**
-     * Store size in bytes after the run (0 when not measured).
-     */
-    after_bytes: number;
-    /**
-     * Store size in bytes before the run (0 when not measured).
-     */
-    before_bytes: number;
-    /**
-     * Elapsed wall-clock seconds between started_at and finished_at.
-     */
-    duration_s: number;
-    /**
-     * Error message when Stage names a failing phase; empty on success.
-     */
-    err?: string;
-    /**
-     * RFC3339 timestamp when the run completed.
-     */
-    finished_at: string;
-    /**
-     * Absolute path to the snapshot directory created for this run.
-     */
-    snapshot_path?: string;
-    /**
-     * Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.
-     */
-    stage: string;
-    /**
-     * RFC3339 timestamp when the run began.
-     */
-    started_at: string;
-};
-
-export type MaintenanceStatusBody = {
-    /**
-     * Whether [maintenance.dolt] enabled=true in city.toml.
-     */
-    enabled: boolean;
-    /**
-     * Bounded ring of recent run outcomes (oldest first).
-     */
-    history: Array<MaintenanceRunBody> | null;
-    /**
-     * True when a maintenance cycle is currently running.
-     */
-    in_flight: boolean;
-    /**
-     * RFC3339 start time of the in-flight run.
-     */
-    in_flight_start?: string;
-    /**
-     * Configured scheduling interval in seconds (0 when disabled).
-     */
-    interval_seconds: number;
-    /**
-     * Most recent completed run, or null when none.
-     */
-    last_run?: MaintenanceRunBody;
-    /**
-     * RFC3339 approximate next scheduled run time.
-     */
-    next_scheduled?: string;
-};
-
-export type MaintenanceTriggerBody = {
-    /**
-     * True when the supervisor accepted the trigger (202) or completed it (200).
-     */
-    accepted: boolean;
-    /**
-     * Full run summary, populated when the caller set ?wait=true.
-     */
-    run?: MaintenanceRunBody;
-    /**
-     * RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
-     */
-    started_at?: string;
 };
 
 export type Message = {
@@ -3196,14 +3115,6 @@ export type StatusSessionCountsDetail = {
 
 export type StatusStoreHealth = {
     /**
-     * RFC3339 timestamp of last maintenance run.
-     */
-    last_gc_at?: string;
-    /**
-     * Status of last maintenance run ('success' or 'failed').
-     */
-    last_gc_status?: string;
-    /**
      * Live bead row count.
      */
     live_rows: number;
@@ -3224,7 +3135,7 @@ export type StatusStoreHealth = {
      */
     threshold_mb_per_row: number;
     /**
-     * True when maintenance is overdue.
+     * True when the size-to-row ratio exceeds the threshold.
      */
     warning: boolean;
 };
@@ -3242,33 +3153,6 @@ export type StatusWorkCounts = {
      * Number of ready work items.
      */
     ready: number;
-};
-
-export type StoreDiskCriticalPayload = {
-    data_dir: string;
-    floor_bytes: number;
-    free_bytes: number;
-};
-
-export type StoreDiskWarnPayload = {
-    data_dir: string;
-    floor_bytes: number;
-    free_bytes: number;
-    warn_bytes: number;
-};
-
-export type StoreMaintenanceDonePayload = {
-    after_bytes: number;
-    before_bytes: number;
-    duration_s: number;
-    snapshot_path: string;
-};
-
-export type StoreMaintenanceFailedPayload = {
-    duration_s: number;
-    error_msg: string;
-    snapshot_path?: string;
-    stage: string;
 };
 
 export type SubmissionCapabilities = {
@@ -3519,14 +3403,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
-    type: 'gc.store.disk_critical';
-} & TypedEventStreamEnvelopeGcStoreDiskCritical) | ({
-    type: 'gc.store.disk_warn';
-} & TypedEventStreamEnvelopeGcStoreDiskWarn) | ({
-    type: 'gc.store.maintenance.done';
-} & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
-    type: 'gc.store.maintenance.failed';
-} & TypedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
     type: 'mail.archived';
 } & TypedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -3983,62 +3859,6 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope gc.store.disk_critical
- */
-export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
-    actor: string;
-    message?: string;
-    payload: StoreDiskCriticalPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_critical';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope gc.store.disk_warn
- */
-export type TypedEventStreamEnvelopeGcStoreDiskWarn = {
-    actor: string;
-    message?: string;
-    payload: StoreDiskWarnPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_warn';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope gc.store.maintenance.done
- */
-export type TypedEventStreamEnvelopeGcStoreMaintenanceDone = {
-    actor: string;
-    message?: string;
-    payload: StoreMaintenanceDonePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.maintenance.done';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope gc.store.maintenance.failed
- */
-export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
-    actor: string;
-    message?: string;
-    payload: StoreMaintenanceFailedPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.maintenance.failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4646,14 +4466,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
-    type: 'gc.store.disk_critical';
-} & TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) | ({
-    type: 'gc.store.disk_warn';
-} & TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) | ({
-    type: 'gc.store.maintenance.done';
-} & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
-    type: 'gc.store.maintenance.failed';
-} & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
     type: 'mail.archived';
 } & TypedTaggedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -5137,66 +4949,6 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.disk_critical
- */
-export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: StoreDiskCriticalPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_critical';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.disk_warn
- */
-export type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: StoreDiskWarnPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_warn';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.maintenance.done
- */
-export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: StoreMaintenanceDonePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.maintenance.done';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.maintenance.failed
- */
-export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: StoreMaintenanceFailedPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.maintenance.failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -9157,77 +8909,6 @@ export type ReplyMailResponses = {
 };
 
 export type ReplyMailResponse = ReplyMailResponses[keyof ReplyMailResponses];
-
-export type TriggerMaintenanceDoltGcData = {
-    body?: never;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.
-         */
-        wait?: boolean;
-    };
-    url: '/v0/city/{cityName}/maintenance/dolt-gc';
-};
-
-export type TriggerMaintenanceDoltGcErrors = {
-    /**
-     * Error
-     */
-    default: ErrorModel;
-};
-
-export type TriggerMaintenanceDoltGcError = TriggerMaintenanceDoltGcErrors[keyof TriggerMaintenanceDoltGcErrors];
-
-export type TriggerMaintenanceDoltGcResponses = {
-    /**
-     * Accepted
-     */
-    202: MaintenanceTriggerBody;
-};
-
-export type TriggerMaintenanceDoltGcResponse = TriggerMaintenanceDoltGcResponses[keyof TriggerMaintenanceDoltGcResponses];
-
-export type GetV0CityByCityNameMaintenanceStatusData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/maintenance/status';
-};
-
-export type GetV0CityByCityNameMaintenanceStatusErrors = {
-    /**
-     * Error
-     */
-    default: ErrorModel;
-};
-
-export type GetV0CityByCityNameMaintenanceStatusError = GetV0CityByCityNameMaintenanceStatusErrors[keyof GetV0CityByCityNameMaintenanceStatusErrors];
-
-export type GetV0CityByCityNameMaintenanceStatusResponses = {
-    /**
-     * OK
-     */
-    200: MaintenanceStatusBody;
-};
-
-export type GetV0CityByCityNameMaintenanceStatusResponse = GetV0CityByCityNameMaintenanceStatusResponses[keyof GetV0CityByCityNameMaintenanceStatusResponses];
 
 export type GetV0CityByCityNameOrderHistoryByBeadIdData = {
     body?: never;

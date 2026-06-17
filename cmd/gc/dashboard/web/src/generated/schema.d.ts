@@ -1054,43 +1054,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v0/city/{cityName}/maintenance/dolt-gc": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Trigger a Dolt store maintenance run
-         * @description Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.
-         */
-        post: operations["trigger-maintenance-dolt-gc"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v0/city/{cityName}/maintenance/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get v0 city by city name maintenance status */
-        get: operations["get-v0-city-by-city-name-maintenance-status"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v0/city/{cityName}/order/history/{bead_id}": {
         parameters: {
             query?: never;
@@ -2668,7 +2631,7 @@ export interface components {
             /** @description Event type. */
             type: string;
         };
-        EventPayload: components["schemas"]["AdapterEventPayload"] | components["schemas"]["BeadClaimRejectedPayload"] | components["schemas"]["BeadEventPayload"] | components["schemas"]["BeadWorktreeReapSkippedPayload"] | components["schemas"]["BeadWorktreeReapedPayload"] | components["schemas"]["BoundEventPayload"] | components["schemas"]["CityCreateSucceededPayload"] | components["schemas"]["CityLifecyclePayload"] | components["schemas"]["CityUnregisterSucceededPayload"] | components["schemas"]["GroupCreatedEventPayload"] | components["schemas"]["InboundEventPayload"] | components["schemas"]["MailEventPayload"] | components["schemas"]["NoPayload"] | components["schemas"]["OutboundChannelMismatchPayload"] | components["schemas"]["OutboundEventPayload"] | components["schemas"]["PostgresCredentialResolvedPayload"] | components["schemas"]["ProjectIdentityStampedPayload"] | components["schemas"]["Record"] | components["schemas"]["RequestFailedPayload"] | components["schemas"]["RotatedPayload"] | components["schemas"]["SessionCreateSucceededPayload"] | components["schemas"]["SessionDrainAckedWithAssignedWorkPayload"] | components["schemas"]["SessionLifecyclePayload"] | components["schemas"]["SessionMessageSucceededPayload"] | components["schemas"]["SessionResetStalledPayload"] | components["schemas"]["SessionStrandedPayload"] | components["schemas"]["SessionSubmitSucceededPayload"] | components["schemas"]["StoreDiskCriticalPayload"] | components["schemas"]["StoreDiskWarnPayload"] | components["schemas"]["StoreMaintenanceDonePayload"] | components["schemas"]["StoreMaintenanceFailedPayload"] | components["schemas"]["SupervisorFSPressureSkippedTickPayload"] | components["schemas"]["SupervisorRequestPayload"] | components["schemas"]["SupervisorShutdownPayload"] | components["schemas"]["SupervisorStartedPayload"] | components["schemas"]["UnboundEventPayload"] | components["schemas"]["WorkerOperationEventPayload"];
+        EventPayload: components["schemas"]["AdapterEventPayload"] | components["schemas"]["BeadClaimRejectedPayload"] | components["schemas"]["BeadEventPayload"] | components["schemas"]["BeadWorktreeReapSkippedPayload"] | components["schemas"]["BeadWorktreeReapedPayload"] | components["schemas"]["BoundEventPayload"] | components["schemas"]["CityCreateSucceededPayload"] | components["schemas"]["CityLifecyclePayload"] | components["schemas"]["CityUnregisterSucceededPayload"] | components["schemas"]["GroupCreatedEventPayload"] | components["schemas"]["InboundEventPayload"] | components["schemas"]["MailEventPayload"] | components["schemas"]["NoPayload"] | components["schemas"]["OutboundChannelMismatchPayload"] | components["schemas"]["OutboundEventPayload"] | components["schemas"]["PostgresCredentialResolvedPayload"] | components["schemas"]["ProjectIdentityStampedPayload"] | components["schemas"]["Record"] | components["schemas"]["RequestFailedPayload"] | components["schemas"]["RotatedPayload"] | components["schemas"]["SessionCreateSucceededPayload"] | components["schemas"]["SessionDrainAckedWithAssignedWorkPayload"] | components["schemas"]["SessionLifecyclePayload"] | components["schemas"]["SessionMessageSucceededPayload"] | components["schemas"]["SessionResetStalledPayload"] | components["schemas"]["SessionStrandedPayload"] | components["schemas"]["SessionSubmitSucceededPayload"] | components["schemas"]["SupervisorFSPressureSkippedTickPayload"] | components["schemas"]["SupervisorRequestPayload"] | components["schemas"]["SupervisorShutdownPayload"] | components["schemas"]["SupervisorStartedPayload"] | components["schemas"]["UnboundEventPayload"] | components["schemas"]["WorkerOperationEventPayload"];
         EventRotateAnchor: {
             /**
              * Format: int64
@@ -3299,60 +3262,6 @@ export interface components {
             subject: string;
             /** @description Recipient name. */
             to: string;
-        };
-        MaintenanceRunBody: {
-            /**
-             * Format: int64
-             * @description Store size in bytes after the run (0 when not measured).
-             */
-            after_bytes: number;
-            /**
-             * Format: int64
-             * @description Store size in bytes before the run (0 when not measured).
-             */
-            before_bytes: number;
-            /**
-             * Format: double
-             * @description Elapsed wall-clock seconds between started_at and finished_at.
-             */
-            duration_s: number;
-            /** @description Error message when Stage names a failing phase; empty on success. */
-            err?: string;
-            /** @description RFC3339 timestamp when the run completed. */
-            finished_at: string;
-            /** @description Absolute path to the snapshot directory created for this run. */
-            snapshot_path?: string;
-            /** @description Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure. */
-            stage: string;
-            /** @description RFC3339 timestamp when the run began. */
-            started_at: string;
-        };
-        MaintenanceStatusBody: {
-            /** @description Whether [maintenance.dolt] enabled=true in city.toml. */
-            enabled: boolean;
-            /** @description Bounded ring of recent run outcomes (oldest first). */
-            history: components["schemas"]["MaintenanceRunBody"][] | null;
-            /** @description True when a maintenance cycle is currently running. */
-            in_flight: boolean;
-            /** @description RFC3339 start time of the in-flight run. */
-            in_flight_start?: string;
-            /**
-             * Format: int64
-             * @description Configured scheduling interval in seconds (0 when disabled).
-             */
-            interval_seconds: number;
-            /** @description Most recent completed run, or null when none. */
-            last_run?: components["schemas"]["MaintenanceRunBody"];
-            /** @description RFC3339 approximate next scheduled run time. */
-            next_scheduled?: string;
-        };
-        MaintenanceTriggerBody: {
-            /** @description True when the supervisor accepted the trigger (202) or completed it (200). */
-            accepted: boolean;
-            /** @description Full run summary, populated when the caller set ?wait=true. */
-            run?: components["schemas"]["MaintenanceRunBody"];
-            /** @description RFC3339 start time of the triggered run; doubles as a run identifier for async callers. */
-            started_at?: string;
         };
         Message: {
             body: string;
@@ -4389,10 +4298,6 @@ export interface components {
             suspended: number;
         };
         StatusStoreHealth: {
-            /** @description RFC3339 timestamp of last maintenance run. */
-            last_gc_at?: string;
-            /** @description Status of last maintenance run ('success' or 'failed'). */
-            last_gc_status?: string;
             /**
              * Format: int64
              * @description Live bead row count.
@@ -4415,7 +4320,7 @@ export interface components {
              * @description Ratio threshold; a ratio above this trips warning.
              */
             threshold_mb_per_row: number;
-            /** @description True when maintenance is overdue. */
+            /** @description True when the size-to-row ratio exceeds the threshold. */
             warning: boolean;
         };
         StatusWorkCounts: {
@@ -4434,38 +4339,6 @@ export interface components {
              * @description Number of ready work items.
              */
             ready: number;
-        };
-        StoreDiskCriticalPayload: {
-            data_dir: string;
-            /** Format: int64 */
-            floor_bytes: number;
-            /** Format: int64 */
-            free_bytes: number;
-        };
-        StoreDiskWarnPayload: {
-            data_dir: string;
-            /** Format: int64 */
-            floor_bytes: number;
-            /** Format: int64 */
-            free_bytes: number;
-            /** Format: int64 */
-            warn_bytes: number;
-        };
-        StoreMaintenanceDonePayload: {
-            /** Format: int64 */
-            after_bytes: number;
-            /** Format: int64 */
-            before_bytes: number;
-            /** Format: double */
-            duration_s: number;
-            snapshot_path: string;
-        };
-        StoreMaintenanceFailedPayload: {
-            /** Format: double */
-            duration_s: number;
-            error_msg: string;
-            snapshot_path?: string;
-            stage: string;
         };
         SubmissionCapabilities: {
             supports_follow_up: boolean;
@@ -4633,7 +4506,7 @@ export interface components {
          * Typed city event stream envelope
          * @description Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
          */
-        TypedEventStreamEnvelope: components["schemas"]["TypedEventStreamEnvelopeBeadClaimRejected"] | components["schemas"]["TypedEventStreamEnvelopeBeadClosed"] | components["schemas"]["TypedEventStreamEnvelopeBeadCreated"] | components["schemas"]["TypedEventStreamEnvelopeBeadDeleted"] | components["schemas"]["TypedEventStreamEnvelopeBeadUpdated"] | components["schemas"]["TypedEventStreamEnvelopeBeadWorktreeReapSkipped"] | components["schemas"]["TypedEventStreamEnvelopeBeadWorktreeReaped"] | components["schemas"]["TypedEventStreamEnvelopeCityCreated"] | components["schemas"]["TypedEventStreamEnvelopeCityResumed"] | components["schemas"]["TypedEventStreamEnvelopeCitySuspended"] | components["schemas"]["TypedEventStreamEnvelopeCityUnregisterRequested"] | components["schemas"]["TypedEventStreamEnvelopeControllerStarted"] | components["schemas"]["TypedEventStreamEnvelopeControllerStopped"] | components["schemas"]["TypedEventStreamEnvelopeConvoyClosed"] | components["schemas"]["TypedEventStreamEnvelopeConvoyCreated"] | components["schemas"]["TypedEventStreamEnvelopeEmergencyAcked"] | components["schemas"]["TypedEventStreamEnvelopeEmergencySignaled"] | components["schemas"]["TypedEventStreamEnvelopeEventsRotated"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgAdapterAdded"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgAdapterRemoved"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgBound"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgGroupCreated"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgInbound"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgOutbound"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgUnbound"] | components["schemas"]["TypedEventStreamEnvelopeGcStoreDiskCritical"] | components["schemas"]["TypedEventStreamEnvelopeGcStoreDiskWarn"] | components["schemas"]["TypedEventStreamEnvelopeGcStoreMaintenanceDone"] | components["schemas"]["TypedEventStreamEnvelopeGcStoreMaintenanceFailed"] | components["schemas"]["TypedEventStreamEnvelopeMailArchived"] | components["schemas"]["TypedEventStreamEnvelopeMailDeleted"] | components["schemas"]["TypedEventStreamEnvelopeMailMarkedRead"] | components["schemas"]["TypedEventStreamEnvelopeMailMarkedUnread"] | components["schemas"]["TypedEventStreamEnvelopeMailRead"] | components["schemas"]["TypedEventStreamEnvelopeMailReplied"] | components["schemas"]["TypedEventStreamEnvelopeMailSent"] | components["schemas"]["TypedEventStreamEnvelopeOrderCompleted"] | components["schemas"]["TypedEventStreamEnvelopeOrderFailed"] | components["schemas"]["TypedEventStreamEnvelopeOrderFired"] | components["schemas"]["TypedEventStreamEnvelopePgCredentialResolved"] | components["schemas"]["TypedEventStreamEnvelopeProjectIdentityStamped"] | components["schemas"]["TypedEventStreamEnvelopeProviderSwapped"] | components["schemas"]["TypedEventStreamEnvelopeRequestFailed"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultCityCreate"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultCityUnregister"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultSessionCreate"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultSessionMessage"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultSessionSubmit"] | components["schemas"]["TypedEventStreamEnvelopeSessionColdStartTimeout"] | components["schemas"]["TypedEventStreamEnvelopeSessionCrashed"] | components["schemas"]["TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"] | components["schemas"]["TypedEventStreamEnvelopeSessionDraining"] | components["schemas"]["TypedEventStreamEnvelopeSessionIdleKilled"] | components["schemas"]["TypedEventStreamEnvelopeSessionMaxAgeKilled"] | components["schemas"]["TypedEventStreamEnvelopeSessionQuarantined"] | components["schemas"]["TypedEventStreamEnvelopeSessionResetStalled"] | components["schemas"]["TypedEventStreamEnvelopeSessionStopped"] | components["schemas"]["TypedEventStreamEnvelopeSessionStranded"] | components["schemas"]["TypedEventStreamEnvelopeSessionSuspended"] | components["schemas"]["TypedEventStreamEnvelopeSessionUndrained"] | components["schemas"]["TypedEventStreamEnvelopeSessionUpdated"] | components["schemas"]["TypedEventStreamEnvelopeSessionWoke"] | components["schemas"]["TypedEventStreamEnvelopeSessionWorkQueryFailed"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorRequest"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorShutdownRequested"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorStarted"] | components["schemas"]["TypedEventStreamEnvelopeWorkerOperation"] | components["schemas"]["TypedEventStreamEnvelopeCustom"];
+        TypedEventStreamEnvelope: components["schemas"]["TypedEventStreamEnvelopeBeadClaimRejected"] | components["schemas"]["TypedEventStreamEnvelopeBeadClosed"] | components["schemas"]["TypedEventStreamEnvelopeBeadCreated"] | components["schemas"]["TypedEventStreamEnvelopeBeadDeleted"] | components["schemas"]["TypedEventStreamEnvelopeBeadUpdated"] | components["schemas"]["TypedEventStreamEnvelopeBeadWorktreeReapSkipped"] | components["schemas"]["TypedEventStreamEnvelopeBeadWorktreeReaped"] | components["schemas"]["TypedEventStreamEnvelopeCityCreated"] | components["schemas"]["TypedEventStreamEnvelopeCityResumed"] | components["schemas"]["TypedEventStreamEnvelopeCitySuspended"] | components["schemas"]["TypedEventStreamEnvelopeCityUnregisterRequested"] | components["schemas"]["TypedEventStreamEnvelopeControllerStarted"] | components["schemas"]["TypedEventStreamEnvelopeControllerStopped"] | components["schemas"]["TypedEventStreamEnvelopeConvoyClosed"] | components["schemas"]["TypedEventStreamEnvelopeConvoyCreated"] | components["schemas"]["TypedEventStreamEnvelopeEmergencyAcked"] | components["schemas"]["TypedEventStreamEnvelopeEmergencySignaled"] | components["schemas"]["TypedEventStreamEnvelopeEventsRotated"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgAdapterAdded"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgAdapterRemoved"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgBound"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgGroupCreated"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgInbound"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgOutbound"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"] | components["schemas"]["TypedEventStreamEnvelopeExtmsgUnbound"] | components["schemas"]["TypedEventStreamEnvelopeMailArchived"] | components["schemas"]["TypedEventStreamEnvelopeMailDeleted"] | components["schemas"]["TypedEventStreamEnvelopeMailMarkedRead"] | components["schemas"]["TypedEventStreamEnvelopeMailMarkedUnread"] | components["schemas"]["TypedEventStreamEnvelopeMailRead"] | components["schemas"]["TypedEventStreamEnvelopeMailReplied"] | components["schemas"]["TypedEventStreamEnvelopeMailSent"] | components["schemas"]["TypedEventStreamEnvelopeOrderCompleted"] | components["schemas"]["TypedEventStreamEnvelopeOrderFailed"] | components["schemas"]["TypedEventStreamEnvelopeOrderFired"] | components["schemas"]["TypedEventStreamEnvelopePgCredentialResolved"] | components["schemas"]["TypedEventStreamEnvelopeProjectIdentityStamped"] | components["schemas"]["TypedEventStreamEnvelopeProviderSwapped"] | components["schemas"]["TypedEventStreamEnvelopeRequestFailed"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultCityCreate"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultCityUnregister"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultSessionCreate"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultSessionMessage"] | components["schemas"]["TypedEventStreamEnvelopeRequestResultSessionSubmit"] | components["schemas"]["TypedEventStreamEnvelopeSessionColdStartTimeout"] | components["schemas"]["TypedEventStreamEnvelopeSessionCrashed"] | components["schemas"]["TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"] | components["schemas"]["TypedEventStreamEnvelopeSessionDraining"] | components["schemas"]["TypedEventStreamEnvelopeSessionIdleKilled"] | components["schemas"]["TypedEventStreamEnvelopeSessionMaxAgeKilled"] | components["schemas"]["TypedEventStreamEnvelopeSessionQuarantined"] | components["schemas"]["TypedEventStreamEnvelopeSessionResetStalled"] | components["schemas"]["TypedEventStreamEnvelopeSessionStopped"] | components["schemas"]["TypedEventStreamEnvelopeSessionStranded"] | components["schemas"]["TypedEventStreamEnvelopeSessionSuspended"] | components["schemas"]["TypedEventStreamEnvelopeSessionUndrained"] | components["schemas"]["TypedEventStreamEnvelopeSessionUpdated"] | components["schemas"]["TypedEventStreamEnvelopeSessionWoke"] | components["schemas"]["TypedEventStreamEnvelopeSessionWorkQueryFailed"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorRequest"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorShutdownRequested"] | components["schemas"]["TypedEventStreamEnvelopeSupervisorStarted"] | components["schemas"]["TypedEventStreamEnvelopeWorkerOperation"] | components["schemas"]["TypedEventStreamEnvelopeCustom"];
         /** TypedEventStreamEnvelope bead.claim_rejected */
         TypedEventStreamEnvelopeBeadClaimRejected: {
             actor: string;
@@ -5091,74 +4964,6 @@ export interface components {
              * @enum {string}
              */
             type: "extmsg.unbound";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedEventStreamEnvelope gc.store.disk_critical */
-        TypedEventStreamEnvelopeGcStoreDiskCritical: {
-            actor: string;
-            message?: string;
-            payload: components["schemas"]["StoreDiskCriticalPayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.disk_critical";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedEventStreamEnvelope gc.store.disk_warn */
-        TypedEventStreamEnvelopeGcStoreDiskWarn: {
-            actor: string;
-            message?: string;
-            payload: components["schemas"]["StoreDiskWarnPayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.disk_warn";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedEventStreamEnvelope gc.store.maintenance.done */
-        TypedEventStreamEnvelopeGcStoreMaintenanceDone: {
-            actor: string;
-            message?: string;
-            payload: components["schemas"]["StoreMaintenanceDonePayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.maintenance.done";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedEventStreamEnvelope gc.store.maintenance.failed */
-        TypedEventStreamEnvelopeGcStoreMaintenanceFailed: {
-            actor: string;
-            message?: string;
-            payload: components["schemas"]["StoreMaintenanceFailedPayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.maintenance.failed";
             workflow?: components["schemas"]["WorkflowEventProjection"];
         };
         /** TypedEventStreamEnvelope mail.archived */
@@ -5828,7 +5633,7 @@ export interface components {
          * Typed supervisor event stream envelope
          * @description Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
          */
-        TypedTaggedEventStreamEnvelope: components["schemas"]["TypedTaggedEventStreamEnvelopeBeadClaimRejected"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadClosed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadDeleted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadUpdated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCityCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCityResumed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCitySuspended"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCityUnregisterRequested"] | components["schemas"]["TypedTaggedEventStreamEnvelopeControllerStarted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeControllerStopped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeConvoyClosed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeConvoyCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeEmergencyAcked"] | components["schemas"]["TypedTaggedEventStreamEnvelopeEmergencySignaled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeEventsRotated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgBound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgGroupCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgInbound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgOutbound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgUnbound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeGcStoreDiskCritical"] | components["schemas"]["TypedTaggedEventStreamEnvelopeGcStoreDiskWarn"] | components["schemas"]["TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone"] | components["schemas"]["TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailArchived"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailDeleted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailMarkedRead"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailMarkedUnread"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailRead"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailReplied"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailSent"] | components["schemas"]["TypedTaggedEventStreamEnvelopeOrderCompleted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeOrderFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeOrderFired"] | components["schemas"]["TypedTaggedEventStreamEnvelopePgCredentialResolved"] | components["schemas"]["TypedTaggedEventStreamEnvelopeProjectIdentityStamped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeProviderSwapped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultCityCreate"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultCityUnregister"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultSessionCreate"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultSessionMessage"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionCrashed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionDraining"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionIdleKilled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionQuarantined"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionResetStalled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionStopped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionStranded"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionSuspended"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionUndrained"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionUpdated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionWoke"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorRequest"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorStarted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeWorkerOperation"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCustom"];
+        TypedTaggedEventStreamEnvelope: components["schemas"]["TypedTaggedEventStreamEnvelopeBeadClaimRejected"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadClosed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadDeleted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadUpdated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCityCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCityResumed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCitySuspended"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCityUnregisterRequested"] | components["schemas"]["TypedTaggedEventStreamEnvelopeControllerStarted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeControllerStopped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeConvoyClosed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeConvoyCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeEmergencyAcked"] | components["schemas"]["TypedTaggedEventStreamEnvelopeEmergencySignaled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeEventsRotated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgBound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgGroupCreated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgInbound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgOutbound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"] | components["schemas"]["TypedTaggedEventStreamEnvelopeExtmsgUnbound"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailArchived"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailDeleted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailMarkedRead"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailMarkedUnread"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailRead"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailReplied"] | components["schemas"]["TypedTaggedEventStreamEnvelopeMailSent"] | components["schemas"]["TypedTaggedEventStreamEnvelopeOrderCompleted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeOrderFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeOrderFired"] | components["schemas"]["TypedTaggedEventStreamEnvelopePgCredentialResolved"] | components["schemas"]["TypedTaggedEventStreamEnvelopeProjectIdentityStamped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeProviderSwapped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultCityCreate"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultCityUnregister"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultSessionCreate"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultSessionMessage"] | components["schemas"]["TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionCrashed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionDraining"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionIdleKilled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionQuarantined"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionResetStalled"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionStopped"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionStranded"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionSuspended"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionUndrained"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionUpdated"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionWoke"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorRequest"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested"] | components["schemas"]["TypedTaggedEventStreamEnvelopeSupervisorStarted"] | components["schemas"]["TypedTaggedEventStreamEnvelopeWorkerOperation"] | components["schemas"]["TypedTaggedEventStreamEnvelopeCustom"];
         /** TypedTaggedEventStreamEnvelope bead.claim_rejected */
         TypedTaggedEventStreamEnvelopeBeadClaimRejected: {
             actor: string;
@@ -6313,78 +6118,6 @@ export interface components {
              * @enum {string}
              */
             type: "extmsg.unbound";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedTaggedEventStreamEnvelope gc.store.disk_critical */
-        TypedTaggedEventStreamEnvelopeGcStoreDiskCritical: {
-            actor: string;
-            city: string;
-            message?: string;
-            payload: components["schemas"]["StoreDiskCriticalPayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.disk_critical";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedTaggedEventStreamEnvelope gc.store.disk_warn */
-        TypedTaggedEventStreamEnvelopeGcStoreDiskWarn: {
-            actor: string;
-            city: string;
-            message?: string;
-            payload: components["schemas"]["StoreDiskWarnPayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.disk_warn";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedTaggedEventStreamEnvelope gc.store.maintenance.done */
-        TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone: {
-            actor: string;
-            city: string;
-            message?: string;
-            payload: components["schemas"]["StoreMaintenanceDonePayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.maintenance.done";
-            workflow?: components["schemas"]["WorkflowEventProjection"];
-        };
-        /** TypedTaggedEventStreamEnvelope gc.store.maintenance.failed */
-        TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed: {
-            actor: string;
-            city: string;
-            message?: string;
-            payload: components["schemas"]["StoreMaintenanceFailedPayload"];
-            /** Format: int64 */
-            seq: number;
-            subject?: string;
-            /** Format: date-time */
-            ts: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "gc.store.maintenance.failed";
             workflow?: components["schemas"]["WorkflowEventProjection"];
         };
         /** TypedTaggedEventStreamEnvelope mail.archived */
@@ -10528,81 +10261,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Message"];
-                };
-            };
-            /** @description Error */
-            default: {
-                headers: {
-                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["ErrorModel"];
-                };
-            };
-        };
-    };
-    "trigger-maintenance-dolt-gc": {
-        parameters: {
-            query?: {
-                /** @description When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately. */
-                wait?: boolean;
-            };
-            header: {
-                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
-                "X-GC-Request": string;
-            };
-            path: {
-                /** @description City name. */
-                cityName: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Accepted */
-            202: {
-                headers: {
-                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MaintenanceTriggerBody"];
-                };
-            };
-            /** @description Error */
-            default: {
-                headers: {
-                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["ErrorModel"];
-                };
-            };
-        };
-    };
-    "get-v0-city-by-city-name-maintenance-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description City name. */
-                cityName: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    "X-GC-Cache-Age-S"?: number;
-                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MaintenanceStatusBody"];
                 };
             };
             /** @description Error */

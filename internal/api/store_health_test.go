@@ -2,14 +2,11 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
 func TestCachedStoreHealthServesMemoized(t *testing.T) {
@@ -85,37 +82,6 @@ func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
 	}
 }
 
-func TestStatusStoreHealthFromDomainOmitsEmptyLastGC(t *testing.T) {
-	h := storehealth.Health{Path: "/c/.beads/dolt"}
-	out := statusStoreHealthFromDomain(h)
-	if out.LastGCAt != "" || out.LastGCStatus != "" {
-		t.Fatalf("LastGC fields = (%q,%q), want empty", out.LastGCAt, out.LastGCStatus)
-	}
-	data, err := json.Marshal(out)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if strings.Contains(string(data), "last_gc_at") {
-		t.Errorf("JSON contains last_gc_at when zero: %s", data)
-	}
-}
-
-func TestStatusStoreHealthFromDomainFormatsLastGC(t *testing.T) {
-	ts := time.Date(2026, 4, 1, 3, 15, 30, 0, time.UTC)
-	h := storehealth.Health{
-		Path:         "/c/.beads/dolt",
-		LastGCAt:     ts,
-		LastGCStatus: "failed",
-	}
-	out := statusStoreHealthFromDomain(h)
-	if out.LastGCAt != "2026-04-01T03:15:30Z" {
-		t.Errorf("LastGCAt = %q, want 2026-04-01T03:15:30Z", out.LastGCAt)
-	}
-	if out.LastGCStatus != "failed" {
-		t.Errorf("LastGCStatus = %q, want failed", out.LastGCStatus)
-	}
-}
-
 func TestComputeStoreHealthServerIntegration(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -124,14 +90,8 @@ func TestComputeStoreHealthServerIntegration(t *testing.T) {
 			t.Fatalf("Create: %v", err)
 		}
 	}
-	ep := events.NewFake()
-	ts := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
-	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
-	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
-
 	state := &fakeState{
 		cityPath:      cityPath,
-		eventProv:     ep,
 		cityBeadStore: store,
 	}
 	s := &Server{state: state}
@@ -144,9 +104,6 @@ func TestComputeStoreHealthServerIntegration(t *testing.T) {
 	}
 	if got.ThresholdMB != 1.0 {
 		t.Errorf("ThresholdMB = %v, want 1.0", got.ThresholdMB)
-	}
-	if got.LastGCAt != "2026-04-08T00:00:00Z" {
-		t.Errorf("LastGCAt = %q, want 2026-04-08T00:00:00Z", got.LastGCAt)
 	}
 }
 

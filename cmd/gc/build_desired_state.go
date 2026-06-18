@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	agentname "github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -812,7 +813,7 @@ func buildDesiredStateWithSessionBeads(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee != identity {
+			if !assigneeMatchesNamedIdentity(assignee, identity) {
 				continue
 			}
 			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
@@ -1265,6 +1266,22 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
+// assigneeMatchesNamedIdentity reports whether a work bead's stored assignee
+// refers to the given named-session identity. It accepts both the qualified
+// ("rig/agent") form and the sanitized session-name ("rig--agent") form that
+// routed control/work beads are written with (agent.SanitizeQualifiedNameForSession).
+// Without the sanitized form, an on_demand named session whose routed work is
+// assigned in session-name form never registers as direct demand, so a session
+// that has lost its canonical bead can never be re-materialized.
+func assigneeMatchesNamedIdentity(assignee, identity string) bool {
+	assignee = strings.TrimSpace(assignee)
+	identity = strings.TrimSpace(identity)
+	if assignee == "" || identity == "" {
+		return false
+	}
+	return assignee == identity || assignee == agentname.SanitizeQualifiedNameForSession(identity)
+}
+
 func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
 	seen := make(map[string]struct{})
 	var result []string
@@ -1297,7 +1314,15 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
 			}
-			add(cfg.NamedSessions[i].QualifiedName())
+			// Add both the qualified ("rig/agent") form and the sanitized
+			// session-name ("rig--agent") form. Routed control/work beads are
+			// assigned in the sanitized form (agent.SanitizeQualifiedNameForSession),
+			// so without it the readiness probe misses an on_demand session that
+			// has no live session bead to contribute the sanitized identity —
+			// leaving the session unrecoverable once its bead is gone.
+			qn := cfg.NamedSessions[i].QualifiedName()
+			add(qn)
+			add(agentname.SanitizeQualifiedNameForSession(qn))
 		}
 	}
 	return result

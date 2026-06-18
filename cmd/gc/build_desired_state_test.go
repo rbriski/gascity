@@ -2081,6 +2081,52 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	}
 }
 
+func TestReadyAssignedWorkAssigneesIncludesSanitizedSessionNameForm(t *testing.T) {
+	// Routed control/work beads are assigned in sanitized session-name form
+	// ("repo--named-worker"), so the readiness probe must enumerate that form
+	// even when no live session bead contributes it. Regression for the gastown
+	// control-dispatcher freeze: the graph store held 273 beads assigned
+	// "gastown--control-dispatcher" and 0 assigned "gastown/control-dispatcher",
+	// so the slash-only probe found no demand and the dispatcher never respawned.
+	got := readyAssignedWorkAssignees(&config.City{
+		NamedSessions: []config.NamedSession{
+			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
+		},
+	}, nil, nil)
+
+	want := map[string]bool{"repo/named-worker": false, "repo--named-worker": false}
+	for _, value := range got {
+		if _, ok := want[value]; ok {
+			want[value] = true
+		}
+	}
+	for form, found := range want {
+		if !found {
+			t.Fatalf("ready assignees = %#v, want it to include %q", got, form)
+		}
+	}
+}
+
+func TestAssigneeMatchesNamedIdentityAcceptsSanitizedForm(t *testing.T) {
+	cases := []struct {
+		assignee string
+		identity string
+		want     bool
+	}{
+		{"gastown/control-dispatcher", "gastown/control-dispatcher", true},
+		{"gastown--control-dispatcher", "gastown/control-dispatcher", true},
+		{" gastown--control-dispatcher ", "gastown/control-dispatcher", true},
+		{"other--thing", "gastown/control-dispatcher", false},
+		{"", "gastown/control-dispatcher", false},
+		{"gastown--control-dispatcher", "", false},
+	}
+	for _, tc := range cases {
+		if got := assigneeMatchesNamedIdentity(tc.assignee, tc.identity); got != tc.want {
+			t.Errorf("assigneeMatchesNamedIdentity(%q, %q) = %v, want %v", tc.assignee, tc.identity, got, tc.want)
+		}
+	}
+}
+
 func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

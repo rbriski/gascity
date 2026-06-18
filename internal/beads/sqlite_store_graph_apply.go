@@ -87,23 +87,71 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 	// Pass 3: one transaction — create every node, then wire every edge. The
 	// parent relationship rides the bead's parent_id column (matching Create and
 	// the Children query); plan.Edges become deps rows (matching DepAdd).
+	//
+	// Pass 1 minted IDs OUTSIDE the tx against a possibly-stale sequence floor,
+	// so a concurrent process may have already claimed those suffixes. Before
+	// creating anything, re-mint any colliding auto id in-tx and fix up every
+	// reference (result.IDs, parent ids, metadata refs) so edges, parents, and
+	// metadata still resolve. The shared seen map keeps two nodes in this plan
+	// from minting the same fresh id while neither is committed yet.
+	//
+	// retryOnBusy may invoke the closure more than once, so each attempt rebuilds
+	// its working state from the immutable Pass-1/Pass-2 snapshots (origStaged,
+	// origKeyToID) rather than mutating shared state across attempts.
+	origStaged := staged
+	origKeyToID := result.IDs
 	err = retryOnBusy(func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite graph apply: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		for _, b := range staged {
-			if err := s.ensureCreateDoesNotExist(ctx, tx, b.ID); err != nil {
+
+		// Fresh working copies for this attempt.
+		working := make([]Bead, len(origStaged))
+		for i := range origStaged {
+			working[i] = cloneBead(origStaged[i])
+		}
+		keyToID := maps.Clone(origKeyToID)
+
+		seen := make(map[string]bool, len(working))
+		remap := make(map[string]string)
+		for i := range working {
+			fresh, err := s.mintUniqueIDTx(ctx, tx, working[i].ID, seen)
+			if err != nil {
 				return err
 			}
+			if fresh != working[i].ID {
+				remap[working[i].ID] = fresh
+				working[i].ID = fresh
+			}
+		}
+		if len(remap) > 0 {
+			for k, v := range keyToID {
+				if nv, ok := remap[v]; ok {
+					keyToID[k] = nv
+				}
+			}
+			for i := range working {
+				if nv, ok := remap[working[i].ParentID]; ok {
+					working[i].ParentID = nv
+				}
+				for mk, mv := range working[i].Metadata {
+					if nv, ok := remap[mv]; ok {
+						working[i].Metadata[mk] = nv
+					}
+				}
+			}
+		}
+
+		for _, b := range working {
 			if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 				return err
 			}
 		}
 		for i, edge := range plan.Edges {
-			from := graphApplyResolveRef(edge.FromKey, edge.FromID, result.IDs)
-			to := graphApplyResolveRef(edge.ToKey, edge.ToID, result.IDs)
+			from := graphApplyResolveRef(edge.FromKey, edge.FromID, keyToID)
+			to := graphApplyResolveRef(edge.ToKey, edge.ToID, keyToID)
 			if from == "" || to == "" {
 				return fmt.Errorf("sqlite graph apply: edge %d has an unresolved endpoint (from=%q to=%q)", i, from, to)
 			}
@@ -111,7 +159,12 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 				return err
 			}
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		// Publish this attempt's final key->ID mapping only after a clean commit.
+		result.IDs = keyToID
+		return nil
 	})
 	if err != nil {
 		return nil, err

@@ -303,6 +303,7 @@ func (s *SQLiteStore) CloseStore() error {
 // Create persists a new bead.
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	var stored Bead
+	autoID := b.ID == ""
 	err := retryOnBusy(func() error {
 		ctx := context.Background()
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -311,7 +312,16 @@ func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		stored = s.normalizeCreate(b)
-		if err := s.ensureCreateDoesNotExist(ctx, tx, stored.ID); err != nil {
+		if autoID {
+			// Store-generated id: self-heal a stale sequence floor so a suffix
+			// already minted by another process is never reissued.
+			id, err := s.mintUniqueIDTx(ctx, tx, stored.ID, nil)
+			if err != nil {
+				return err
+			}
+			stored.ID = id
+		} else if err := s.ensureCreateDoesNotExist(ctx, tx, stored.ID); err != nil {
+			// Caller-pinned id keeps the hard duplicate-id contract intact.
 			return err
 		}
 		if err := s.upsertBeadTx(ctx, tx, stored); err != nil {
@@ -371,16 +381,99 @@ func (s *SQLiteStore) ensureSequenceAtLeast(n int64) {
 	}
 }
 
-func (s *SQLiteStore) ensureCreateDoesNotExist(ctx context.Context, tx *sql.Tx, id string) error {
+// idExistsTx reports whether a bead with the given id is already persisted
+// within the open transaction.
+func (s *SQLiteStore) idExistsTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
 	var found int
 	err := tx.QueryRowContext(ctx, `SELECT 1 FROM beads WHERE id=?`, id).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("checking duplicate sqlite bead %q: %w", id, err)
+		return false, fmt.Errorf("checking duplicate sqlite bead %q: %w", id, err)
 	}
-	return fmt.Errorf("creating bead %q: duplicate id", id)
+	return true, nil
+}
+
+// ensureCreateDoesNotExist is the hard-fail uniqueness check for caller-pinned
+// IDs: a pinned id that already exists is a duplicate-id error, preserving
+// resume and crash-adoption semantics. Auto-generated ids self-heal via
+// mintUniqueIDTx instead.
+func (s *SQLiteStore) ensureCreateDoesNotExist(ctx context.Context, tx *sql.Tx, id string) error {
+	exists, err := s.idExistsTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("creating bead %q: duplicate id", id)
+	}
+	return nil
+}
+
+// reseedSeqFromTx lifts the in-memory sequence floor to the on-disk max suffix
+// observed within the open transaction. It mirrors recoverSequence's MAX-suffix
+// scan but reads through tx so it sees IDs minted by other processes since this
+// store opened — the stale-seq self-heal in one step.
+func (s *SQLiteStore) reseedSeqFromTx(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM beads WHERE id LIKE ?`, s.prefix+"-%")
+	if err != nil {
+		return fmt.Errorf("reseeding sqlite sequence: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var maxSeq int64
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		if n := int64(numericIDSuffix(id)); n > maxSeq {
+			maxSeq = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	s.ensureSequenceAtLeast(maxSeq)
+	return nil
+}
+
+// mintUniqueIDMaxAttempts bounds the collision-retry loop in mintUniqueIDTx so
+// a pathological store can never spin forever.
+const mintUniqueIDMaxAttempts = 100000
+
+// mintUniqueIDTx returns a store-generated bead ID that is free within the open
+// transaction and unclaimed by seen. It starts from candidate (an
+// already-normalized auto id); on the first collision it reseeds the sequence
+// floor once (lifting a stale floor past concurrently-minted IDs in one step),
+// then mints fresh ids until one is free. seen lets a single batch avoid
+// minting the same fresh id twice; callers may pass nil for a standalone mint.
+func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate string, seen map[string]bool) (string, error) {
+	id := candidate
+	reseeded := false
+	for attempt := 0; attempt < mintUniqueIDMaxAttempts; attempt++ {
+		taken := seen[id]
+		if !taken {
+			exists, err := s.idExistsTx(ctx, tx, id)
+			if err != nil {
+				return "", err
+			}
+			taken = exists
+		}
+		if !taken {
+			if seen != nil {
+				seen[id] = true
+			}
+			return id, nil
+		}
+		if !reseeded {
+			if err := s.reseedSeqFromTx(ctx, tx); err != nil {
+				return "", err
+			}
+			reseeded = true
+		}
+		id = s.nextID()
+	}
+	return "", fmt.Errorf("minting unique sqlite bead id: exhausted %d attempts from candidate %q", mintUniqueIDMaxAttempts, candidate)
 }
 
 func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) error {

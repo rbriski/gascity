@@ -52,7 +52,27 @@ type ScaleCheckRunner func(command, dir string, env map[string]string) (string, 
 // bdProbeTimeout is the timeout for bd subprocess probes (scale_check,
 // work_query). Generous to accommodate bd calls that serialize through
 // a shared dolt sql-server when many pool probes run in parallel.
-const bdProbeTimeout = 180 * time.Second
+// Override via GC_BD_PROBE_TIMEOUT (e.g. "30s"); floor is 5s.
+var bdProbeTimeout = parseBdProbeTimeout(os.Getenv("GC_BD_PROBE_TIMEOUT"))
+
+// parseBdProbeTimeout parses a duration string for bdProbeTimeout.
+// Empty string or invalid input returns the default (180s). Values below
+// the 5s floor are raised to the floor.
+func parseBdProbeTimeout(s string) time.Duration {
+	const defaultTimeout = 180 * time.Second
+	const minTimeout = 5 * time.Second
+	if s == "" {
+		return defaultTimeout
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultTimeout
+	}
+	if d < minTimeout {
+		return minTimeout
+	}
+	return d
+}
 
 // hookTimeout is the timeout for lifecycle hook commands (on_death,
 // on_boot). Kept shorter than probe timeout because hooks run
@@ -80,7 +100,7 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 }
 
 // shellScaleCheck runs a scale_check command via sh -c and returns stdout.
-// dir sets the command's working directory. Uses bdProbeTimeout (180s).
+// dir sets the command's working directory. Uses bdProbeTimeout.
 func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
 	return shellCommand(command, dir, bdProbeTimeout, env)
 }

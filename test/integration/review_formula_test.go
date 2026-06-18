@@ -348,6 +348,7 @@ on_exhausted = "hard_fail"
 func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, true)
+	env = append(env, "GC_BD_PROBE_TIMEOUT=30s")
 
 	var cityName string
 	if usingSubprocess() {

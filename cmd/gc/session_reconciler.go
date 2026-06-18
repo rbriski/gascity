@@ -3694,7 +3694,8 @@ func selectIdleProbeTargets(
 		// case) OR awake solely for assigned work. The latter must be probed so
 		// an idle assigned-work session can sleep-and-respawn (resume-on-ready)
 		// instead of staying pinned awake-but-idle.
-		if !((len(eval.Reasons) == 0 && eval.ConfigSuppressed) || idleAssignedWorkOnly(eval)) {
+		idleNoWakeDemand := len(eval.Reasons) == 0 && eval.ConfigSuppressed
+		if !idleNoWakeDemand && !idleAssignedWorkOnly(eval) {
 			continue
 		}
 		if eval.Policy.Class == config.SessionSleepNonInteractive {

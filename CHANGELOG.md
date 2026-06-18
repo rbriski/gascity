@@ -148,6 +148,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Early access: the public `gascity-packs` collection.** v1.3.0 ships the
+  first early-access release of
+  [`gascity-packs`](https://github.com/gastownhall/gascity-packs) — an opt-in
+  collection of Gas City packs composed via `pack.toml` `[imports]`. Add one
+  with e.g.
+  `gc import add --name gc https://github.com/gastownhall/gascity-packs.git//gascity`.
+  Featured packs:
+  - **`gascity`** — planning & implementation workflow pack; bundled in the
+    release and the default `gc init` template (also `--template gascity`).
+  - **`gastown`** — multi-agent orchestration / default coding workflow pack;
+    bundled and offered by `gc init` (`--template gastown`).
+  - **`compound-engineering`** (`compound-build`) — Every Inc.'s Compound
+    Engineering methodology as a build factory: brainstorm/plan → persona-panel
+    plan review → implement → wide reviewer-persona fanout → resolution.
+  - **`gstack`** (`gstack-build`) — garrytan/gstack founder-style sprint:
+    office-hours intake → multi-perspective plan review → staff review → QA →
+    security → release readiness.
+  - **`superpowers`** (`superpowers-build`) — Jesse Vincent's Superpowers skill
+    library as a build factory: brainstorm → written-spec approval → per-task
+    TDD → spec-compliance then code-quality review.
+  `gascity` and `gastown` are in the supported registry; the three
+  build-methodology packs (`compound-engineering`, `gstack`, `superpowers`) are
+  early access and each import `gascity` as `gc`. See the gascity-packs README
+  for the full list and import instructions.
+
 - **Formulas v2 and `drain` are the supported path for new graph
   workflows.** The v2 compiler emits flat workflow graphs with
   controller-owned control/finalize beads, and `drain` is now the canonical
@@ -243,6 +268,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the agent template path (`cfgAgent.MouseModeOn()`), which is unchanged and has
   neither the `manual`/`named` interactive marker. Replaces the portharbour
   po-vtg2 city-local `set-hook` stopgap with the in-source fix. Refs: ga-c4w.
+
+### Troubleshooting (packs, imports, registry)
+
+v1.3.0 changed pack composition: built-in/gastown packs are now consumed via
+explicit pinned `[imports]` in `pack.toml` + `packs.lock`, served from a
+content-hashed cache under `~/.gc/cache/repos/` (nothing is materialized into
+`.gc/system/packs` anymore). Most upgrade issues are fixed by one command — run
+it once per existing city after upgrading:
+
+```
+gc doctor --fix
+```
+
+It owns the mechanical migrations (`provider-catalog`, `builtin-pack-imports`,
+`packv2-import-state`): it adds missing pinned imports, strips legacy
+`workspace.includes` / `[packs]` surfaces, re-pins superseded canonical
+versions, refreshes `packs.lock` + cache, and prunes leftover `.gc/system/packs`.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `does not import required builtin pack(s) core; run "gc doctor --fix"` | City predates explicit `[imports]`. | `gc doctor --fix` |
+| `workspace.includes is deprecated in v2; use [imports]` / `[packs] is deprecated` / `unsupported PackV1` | Legacy v1 composition surfaces. | `gc doctor --fix` (a fragment-authored `[packs]` may need a manual edit) |
+| `remote import <src> is not installed (missing packs.lock); run "gc import install"` | Declared import lacks a lock pin, or its cache checkout is absent. | `gc import install` (diagnose with `gc import check` / `gc import status`) |
+| `synthetic cache is invalid at <dir>: missing bundled pack cache marker` | Bundled synthetic cache present but invalid (an *absent* cache self-heals offline). | `gc import install` |
+| `N bundled import(s) pinned at a superseded canonical version` | Stale `packs.lock` from an older `gc`. | `gc doctor --fix` (offline re-pin) |
+| `durable import(s) use command-time registry selectors` | A `registry:` selector was written into `pack.toml`. | Manual edit — replace with the concrete source (`gc pack registry show <pack>`) |
+| `gc start` prints `FATAL: pack schema 2 not supported` | A stale supervisor still on the old binary. | let `gc start` auto-restart, or `systemctl --user restart gascity-supervisor` |
+
+**See also:** `docs/getting-started/troubleshooting.md`,
+`docs/reference/system-packs.md`, `docs/guides/understanding-packs.md`,
+`docs/guides/shareable-packs.md`, `docs/guides/registry-showcase.md`,
+`docs/troubleshooting/gc-start-walkthrough.mdx`, and the `gc doctor` /
+`gc import` / `gc pack registry` references in `docs/reference/cli.md`.
 
 ## [1.2.1] - 2026-05-31
 

@@ -2411,6 +2411,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		if shouldWake && target.alive {
+			if strings.Contains(target.session.Metadata["session_name"], "run-operator") {
+				dprobe, dhas := dt.idleProbe(target.session.ID)
+				log.Printf("IDLE-RESPAWN-DIAG branch session=%s reason=%q reasons=%v hasAssignedWork=%v idleOnly=%v class=%v hasProbe=%v probeReady=%v probeSuccess=%v",
+					target.session.Metadata["session_name"], eval.Reason, eval.Reasons, eval.HasAssignedWork,
+					idleAssignedWorkOnly(eval), eval.Policy.Class, dhas, dprobe.ready, dprobe.success)
+			}
 			if beginIdleRespawnDrainIfIdle(target.session, eval, dt, sp, clk) {
 				// Idle session awake only for assigned work: drained to asleep
 				// (open bead) so resume-on-ready re-spawns it fresh to run its
@@ -3694,6 +3700,11 @@ func selectIdleProbeTargets(
 		// case) OR awake solely for assigned work. The latter must be probed so
 		// an idle assigned-work session can sleep-and-respawn (resume-on-ready)
 		// instead of staying pinned awake-but-idle.
+		if strings.Contains(target.session.Metadata["session_name"], "run-operator") {
+			log.Printf("IDLE-PROBE-DIAG session=%s reasons=%v cfgSuppressed=%v idleOnly=%v class=%v activeProbes=%d limit=%d eligible=%v",
+				target.session.Metadata["session_name"], eval.Reasons, eval.ConfigSuppressed, idleAssignedWorkOnly(eval), eval.Policy.Class, activeProbes, limit,
+				((len(eval.Reasons) == 0 && eval.ConfigSuppressed) || idleAssignedWorkOnly(eval)) && eval.Policy.Class != config.SessionSleepNonInteractive)
+		}
 		if !((len(eval.Reasons) == 0 && eval.ConfigSuppressed) || idleAssignedWorkOnly(eval)) {
 			continue
 		}

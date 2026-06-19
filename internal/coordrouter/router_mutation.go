@@ -22,6 +22,18 @@ func (r *Router) backendForID(id string) beads.Store {
 	if b, ok := r.soleBackend(); ok {
 		return b
 	}
+	// Static prefix routing first: if a backend owns id's prefix and actually
+	// holds the bead, route there without probing the other backends' Get. This
+	// skips the wasted Get probe on the non-owning store — for the bd-fork Dolt
+	// backend a ~1s `bd` exec on every Update/Close/SetMetadata of a graph-class
+	// (gcg-) bead. The owner Get is on its own store (SQLite for graph), so it is
+	// cheap; on miss (stray id / partial migration) we fall back to the full
+	// federated probe below, preserving the original ownership semantics.
+	if owner := r.prefixBackendForID(id); owner != nil {
+		if _, err := owner.Get(id); err == nil {
+			return owner
+		}
+	}
 	for _, backend := range r.Backends() {
 		if _, err := backend.Get(id); err == nil {
 			return backend

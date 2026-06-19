@@ -2,6 +2,7 @@ package coordrouter
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -27,11 +28,42 @@ func (r *Router) soleBackend() (beads.Store, bool) {
 	return nil, false
 }
 
+// prefixBackendForID returns the distinct backend that owns id's prefix (via the
+// optional IDPrefix() accessor), or nil when no backend claims the prefix or the
+// Router has a single backend. By-id reads use it to skip backends that provably
+// cannot hold the bead — eliminating the wasted miss on the non-owning store,
+// which for the bd-fork Dolt backend costs a ~1s `bd` exec per call. Bead ids are
+// prefix-disjoint across backends, so the owning backend is the sole residence.
+//
+// It is intentionally distinct from the mutation path's backendForID (which
+// resolves ownership by probing each backend's Get): this one routes purely on
+// the static id prefix, so a read never forks the non-owning store at all.
+func (r *Router) prefixBackendForID(id string) beads.Store {
+	if _, ok := r.soleBackend(); ok {
+		return nil
+	}
+	for _, b := range r.Backends() {
+		if p, ok := b.(interface{ IDPrefix() string }); ok {
+			if pfx := p.IDPrefix(); pfx != "" && strings.HasPrefix(id, pfx+"-") {
+				return b
+			}
+		}
+	}
+	return nil
+}
+
 // Get federates a point read: a bead lives in exactly one backend, so it queries
 // each in turn and returns the first hit, ErrNotFound when none has it.
 func (r *Router) Get(id string) (beads.Bead, error) {
 	if b, ok := r.soleBackend(); ok {
 		return b.Get(id)
+	}
+	if owner := r.prefixBackendForID(id); owner != nil {
+		if got, err := owner.Get(id); err == nil {
+			return got, nil
+		}
+		// Owner miss (unknown prefix / partial migration): fall through to the
+		// full federation below so correctness is never reduced.
 	}
 	var lastErr error
 	for _, backend := range r.Backends() {
@@ -146,6 +178,15 @@ func (r *Router) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error)
 func (r *Router) DepList(id, direction string) ([]beads.Dep, error) {
 	if b, ok := r.soleBackend(); ok {
 		return b.DepList(id, direction)
+	}
+	if owner := r.prefixBackendForID(id); owner != nil {
+		if deps, err := owner.DepList(id, direction); err == nil && len(deps) > 0 {
+			return deps, nil
+		}
+		// Empty or error from the owner: fall through to full federation so a
+		// cross-store edge (a work bead blocked-by a graph root, recorded in the
+		// Work store) is still found. Graph molecules are self-contained in
+		// practice, so this fast-path returns on the first hit without the fork.
 	}
 	seen := make(map[beads.Dep]bool)
 	var out []beads.Dep

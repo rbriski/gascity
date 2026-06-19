@@ -537,6 +537,14 @@ func sqliteUnixNanoOrZero(t time.Time) int64 {
 	return t.UnixNano()
 }
 
+// IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
+func (s *SQLiteStore) IDPrefix() string {
+	if s == nil {
+		return ""
+	}
+	return s.prefix
+}
+
 // Get retrieves a bead by ID.
 func (s *SQLiteStore) Get(id string) (Bead, error) {
 	row := s.readDB.QueryRowContext(context.Background(), `SELECT bead_json FROM beads WHERE id=?`, id)

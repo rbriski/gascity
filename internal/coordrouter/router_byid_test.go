@@ -9,13 +9,14 @@ import (
 )
 
 // prefixSpyStore wraps a MemStore, advertises a fixed IDPrefix, and counts the
-// by-id read calls (Get/DepList) it receives. It lets a test prove that a by-id
-// read is routed to the owning backend and never forked into the non-owning one.
+// read calls (Get/DepList/List) it receives. It lets a test prove that a read is
+// routed to the owning backend and never forked into the non-owning one.
 type prefixSpyStore struct {
 	*beads.MemStore
 	prefix       string
 	getCalls     int
 	depListCalls int
+	listCalls    int
 }
 
 func newPrefixSpyStore(prefix string, beadsIn []beads.Bead, deps []beads.Dep) *prefixSpyStore {
@@ -37,6 +38,11 @@ func (s *prefixSpyStore) Get(id string) (beads.Bead, error) {
 func (s *prefixSpyStore) DepList(id, direction string) ([]beads.Dep, error) {
 	s.depListCalls++
 	return s.MemStore.DepList(id, direction)
+}
+
+func (s *prefixSpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
 }
 
 // twoBackendRouter builds a Router with a "mc"-prefixed work store and a

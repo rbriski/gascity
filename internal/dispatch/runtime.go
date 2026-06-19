@@ -432,8 +432,22 @@ func loadScopeSnapshotWithBody(store beads.Store, rootID, scopeRef string, body 
 	return snapshot, nil
 }
 
+// liveListForRoot runs a root-scoped List, routing a graph-rooted (gcg-) query to
+// the store's graph-only List (SQLite, no bd fork) when the capability is present,
+// and federating otherwise. Semantics-preserving: a graph molecule's members are
+// all graph-resident so graph-only returns the identical set; a work-rooted (mc-)
+// molecule has no graph-prefix match and federates exactly as before.
+func liveListForRoot(store beads.Store, rootID string, query beads.ListQuery) ([]beads.Bead, error) {
+	if gol, ok := beads.GraphOnlyListFor(store); ok {
+		if pfx := gol.GraphIDPrefix(); pfx != "" && strings.HasPrefix(rootID, pfx+"-") {
+			return gol.ListGraphOnly(query)
+		}
+	}
+	return beads.HandlesFor(store).Live.List(query)
+}
+
 func listByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
-	return beads.HandlesFor(store).Live.List(beads.ListQuery{
+	return liveListForRoot(store, rootID, beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey: rootID,
 			beadmeta.ScopeRefMetadataKey:   scopeRef,
@@ -443,7 +457,7 @@ func listByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]b
 }
 
 func listActiveByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
-	return beads.HandlesFor(store).Live.List(beads.ListQuery{
+	return liveListForRoot(store, rootID, beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey: rootID,
 			beadmeta.ScopeRefMetadataKey:   scopeRef,
@@ -1251,7 +1265,7 @@ func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bea
 }
 
 func resolveScopeBodyByRole(store beads.Store, rootID, scopeRef string, includeClosed bool) (beads.Bead, bool, error) {
-	matches, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	matches, err := liveListForRoot(store, rootID, beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey: rootID,
 			beadmeta.KindMetadataKey:       "scope",
@@ -1348,7 +1362,7 @@ func sortedPendingIDs(pending map[string]beads.Bead) []string {
 }
 
 func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	all, err := liveListForRoot(store, rootID, beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 	})

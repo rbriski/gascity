@@ -758,6 +758,10 @@ func TestDocDirCoverage(t *testing.T) {
 		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || strings.HasPrefix(name, "ga-") {
 			continue
 		}
+		// ga-* directories are agent scratch workspaces named after bead IDs.
+		if strings.HasPrefix(name, "ga-") {
+			continue
+		}
 		if known[name] {
 			continue
 		}

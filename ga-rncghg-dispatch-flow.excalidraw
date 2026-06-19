@@ -1,0 +1,593 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "type": "text",
+      "id": "ttl",
+      "x": 160,
+      "y": 8,
+      "text": "Track A+B: Nudge-on-Work-Ready Dispatch + gc hook --wait",
+      "fontSize": 24,
+      "strokeColor": "#1e1e1e"
+    },
+    {
+      "type": "text",
+      "id": "sub",
+      "x": 300,
+      "y": 38,
+      "text": "graph.v2 dispatch speedup \u2014 event-driven step transitions (ga-rncghg)",
+      "fontSize": 16,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "rectangle",
+      "id": "bg_left",
+      "x": 10,
+      "y": 50,
+      "width": 360,
+      "height": 680,
+      "backgroundColor": "#e5dbff",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "strokeWidth": 0,
+      "opacity": 25,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "bg_right",
+      "x": 770,
+      "y": 50,
+      "width": 210,
+      "height": 680,
+      "backgroundColor": "#d3f9d8",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "strokeWidth": 0,
+      "opacity": 25,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hc",
+      "x": 20,
+      "y": 55,
+      "width": 150,
+      "height": 60,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Controller\n(patrol 100ms)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hbd",
+      "x": 210,
+      "y": 55,
+      "width": 150,
+      "height": 60,
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Beads Store",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hnq",
+      "x": 400,
+      "y": 55,
+      "width": 150,
+      "height": 60,
+      "backgroundColor": "#ffd8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#f59e0b",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Nudge Queue",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hws",
+      "x": 590,
+      "y": 55,
+      "width": 150,
+      "height": 60,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Wake Socket\n(unix, 0600)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hw",
+      "x": 780,
+      "y": 55,
+      "width": 190,
+      "height": 60,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Worker\n(gc hook --wait)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "lc",
+      "x": 95,
+      "y": 115,
+      "width": 0,
+      "height": 620,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          620
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "lbd",
+      "x": 285,
+      "y": 115,
+      "width": 0,
+      "height": 620,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          620
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "lnq",
+      "x": 475,
+      "y": 115,
+      "width": 0,
+      "height": 620,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          620
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "lws",
+      "x": 665,
+      "y": 115,
+      "width": 0,
+      "height": 620,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          620
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "lw",
+      "x": 875,
+      "y": 115,
+      "width": 0,
+      "height": 620,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          620
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "rectangle",
+      "id": "s1_act",
+      "x": 81,
+      "y": 128,
+      "width": 28,
+      "height": 38,
+      "backgroundColor": "#8b5cf6",
+      "fillStyle": "solid",
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 0
+    },
+    {
+      "type": "text",
+      "id": "s1_lbl",
+      "x": 116,
+      "y": 138,
+      "text": "Step N closes \u2014 patrol tick fires",
+      "fontSize": 15,
+      "strokeColor": "#8b5cf6"
+    },
+    {
+      "type": "arrow",
+      "id": "a2",
+      "x": 95,
+      "y": 185,
+      "width": 190,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          190,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "dispatchReadyWorkNudges()",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a3",
+      "x": 285,
+      "y": 233,
+      "width": -190,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -190,
+          0
+        ]
+      ],
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "[step-N+1, assigned=worker-session]",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a4",
+      "x": 95,
+      "y": 280,
+      "width": 380,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          380,
+          0
+        ]
+      ],
+      "strokeColor": "#f59e0b",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "nudgequeue.WithState(): enqueue nudge",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a5",
+      "x": 95,
+      "y": 327,
+      "width": 570,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          570,
+          0
+        ]
+      ],
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "pingNudgeWakeSocket()",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a6",
+      "x": 665,
+      "y": 377,
+      "width": 210,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          210,
+          0
+        ]
+      ],
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "WAKE signal  (<10ms)",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a7",
+      "x": 875,
+      "y": 430,
+      "width": -590,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -590,
+          0
+        ]
+      ],
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "gc hook work query  (2.5s \u2014 binary startup + bd forks)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a8",
+      "x": 285,
+      "y": 480,
+      "width": 590,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          590,
+          0
+        ]
+      ],
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "step-N+1 bead  (status=open)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a9",
+      "x": 875,
+      "y": 527,
+      "width": -590,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -590,
+          0
+        ]
+      ],
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "bd update step-N+1 --claim  (CAS \u2014 atomic)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "s10_act",
+      "x": 780,
+      "y": 550,
+      "width": 190,
+      "height": 45,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "label": {
+        "text": "execute step N+1  (~0.4s)",
+        "fontSize": 15
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "a11",
+      "x": 875,
+      "y": 613,
+      "width": -590,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -590,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "bd close step-N+1  (outcome=pass,  ~0.3s)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "rep",
+      "x": 10,
+      "y": 638,
+      "width": 965,
+      "height": 38,
+      "backgroundColor": "#e5dbff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 1,
+      "label": {
+        "text": "next patrol tick (100ms) fires \u2014 repeat for step N+2  ...  16 steps \u00d7 ~3.2s = ~52s total (down from ~89s)",
+        "fontSize": 15
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "leg",
+      "x": 10,
+      "y": 692,
+      "width": 965,
+      "height": 85,
+      "backgroundColor": "#fff3bf",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#f59e0b",
+      "strokeWidth": 1
+    },
+    {
+      "type": "text",
+      "id": "leg_h",
+      "x": 24,
+      "y": 702,
+      "text": "Key timing per step (after fix)",
+      "fontSize": 17,
+      "strokeColor": "#1e1e1e"
+    },
+    {
+      "type": "text",
+      "id": "leg_1",
+      "x": 24,
+      "y": 726,
+      "text": "Wake signal: <10ms   |   gc hook binary startup + bd forks: 2.5s   |   Execute: ~0.4s   |   Close: ~0.3s   |   Total: ~3.2s/step",
+      "fontSize": 15,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "leg_2",
+      "x": 24,
+      "y": 748,
+      "text": "Patrol fallback: always active \u2014 if wake signal dropped, next 100ms tick delivers ready bead via dispatchReadyWorkNudges()",
+      "fontSize": 14,
+      "strokeColor": "#777"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  }
+}

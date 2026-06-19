@@ -1,0 +1,671 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "type": "text",
+      "id": "ttl",
+      "x": 230,
+      "y": 8,
+      "text": "Track C: gc init Managed-Dolt Pre-flight Wait",
+      "fontSize": 24,
+      "strokeColor": "#1e1e1e"
+    },
+    {
+      "type": "text",
+      "id": "sub",
+      "x": 280,
+      "y": 38,
+      "text": "eliminate transient 'dolt server exited during startup' failure (~25s+ penalty)  (ga-o1exvf)",
+      "fontSize": 16,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "rectangle",
+      "id": "bg_test",
+      "x": 10,
+      "y": 50,
+      "width": 170,
+      "height": 680,
+      "backgroundColor": "#dbe4ff",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "strokeWidth": 0,
+      "opacity": 30,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "bg_gc",
+      "x": 200,
+      "y": 50,
+      "width": 180,
+      "height": 680,
+      "backgroundColor": "#e5dbff",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "strokeWidth": 0,
+      "opacity": 30,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "bg_dolt",
+      "x": 400,
+      "y": 50,
+      "width": 180,
+      "height": 680,
+      "backgroundColor": "#d3f9d8",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "strokeWidth": 0,
+      "opacity": 30,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "htest",
+      "x": 20,
+      "y": 55,
+      "width": 150,
+      "height": 60,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Test / gc init\ncaller",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hgc",
+      "x": 210,
+      "y": 55,
+      "width": 160,
+      "height": 60,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "label": {
+        "text": "gc init\n(managed Dolt mode)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "hdolt",
+      "x": 410,
+      "y": 55,
+      "width": 160,
+      "height": 60,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "label": {
+        "text": "Dolt Server\nprocess",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "lt",
+      "x": 95,
+      "y": 115,
+      "width": 0,
+      "height": 630,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          630
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "lgc",
+      "x": 290,
+      "y": 115,
+      "width": 0,
+      "height": 630,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          630
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "ld",
+      "x": 490,
+      "y": 115,
+      "width": 0,
+      "height": 630,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          630
+        ]
+      ],
+      "strokeColor": "#b0b0b0",
+      "strokeWidth": 1,
+      "strokeStyle": "dashed",
+      "endArrowhead": null
+    },
+    {
+      "type": "arrow",
+      "id": "b1",
+      "x": 95,
+      "y": 155,
+      "width": 195,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          195,
+          0
+        ]
+      ],
+      "strokeColor": "#4a9eed",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "gc init --file config.toml cityDir",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "b2",
+      "x": 290,
+      "y": 200,
+      "width": 200,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          200,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "start Dolt server process",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "s3_loop",
+      "x": 275,
+      "y": 225,
+      "width": 330,
+      "height": 200,
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#f59e0b",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed"
+    },
+    {
+      "type": "text",
+      "id": "s3_hdr",
+      "x": 286,
+      "y": 232,
+      "text": "poll loop (new: pre-flight wait)",
+      "fontSize": 15,
+      "strokeColor": "#f59e0b"
+    },
+    {
+      "type": "arrow",
+      "id": "b3a",
+      "x": 290,
+      "y": 270,
+      "width": 200,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          200,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "TCP connect to port (50ms)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "b3b",
+      "x": 490,
+      "y": 310,
+      "width": -200,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -200,
+          0
+        ]
+      ],
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "refused \u2014 not ready yet",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "text",
+      "id": "s3_back",
+      "x": 295,
+      "y": 335,
+      "text": "backoff: 50ms, 100ms, 200ms, 400ms...",
+      "fontSize": 14,
+      "strokeColor": "#777"
+    },
+    {
+      "type": "arrow",
+      "id": "b3c",
+      "x": 290,
+      "y": 363,
+      "width": 200,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          200,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "TCP connect (retry)",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "b3d",
+      "x": 490,
+      "y": 400,
+      "width": -200,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -200,
+          0
+        ]
+      ],
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "ACCEPTED \u2014 Dolt ready",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "diamond",
+      "id": "timeout_d",
+      "x": 640,
+      "y": 280,
+      "width": 180,
+      "height": 100,
+      "backgroundColor": "#ffc9c9",
+      "fillStyle": "solid",
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "label": {
+        "text": "10s\ntimeout?",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "timeout_yes",
+      "x": 640,
+      "y": 330,
+      "width": -110,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -50,
+          0
+        ],
+        [
+          0,
+          60
+        ],
+        [
+          -60,
+          60
+        ]
+      ],
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "rectangle",
+      "id": "fail_box",
+      "x": 510,
+      "y": 440,
+      "width": 200,
+      "height": 50,
+      "backgroundColor": "#ffc9c9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#ef4444",
+      "strokeWidth": 2,
+      "label": {
+        "text": "exit 1 \u2014 no partial state",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "text",
+      "id": "timeout_lbl",
+      "x": 654,
+      "y": 258,
+      "text": "loop\ncheck",
+      "fontSize": 13,
+      "strokeColor": "#ef4444"
+    },
+    {
+      "type": "arrow",
+      "id": "b4",
+      "x": 290,
+      "y": 462,
+      "width": 200,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          200,
+          0
+        ]
+      ],
+      "strokeColor": "#8b5cf6",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "initialize city tables + config",
+        "fontSize": 14
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "b5",
+      "x": 95,
+      "y": 506,
+      "width": 195,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          195,
+          0
+        ]
+      ],
+      "strokeColor": "#22c55e",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "exit 0 (success)",
+        "fontSize": 16
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "compare",
+      "x": 10,
+      "y": 538,
+      "width": 960,
+      "height": 190,
+      "backgroundColor": "#fff3bf",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#f59e0b",
+      "strokeWidth": 1
+    },
+    {
+      "type": "text",
+      "id": "cmp_h",
+      "x": 24,
+      "y": 548,
+      "text": "Before vs After",
+      "fontSize": 18,
+      "strokeColor": "#1e1e1e"
+    },
+    {
+      "type": "rectangle",
+      "id": "before_box",
+      "x": 25,
+      "y": 572,
+      "width": 450,
+      "height": 140,
+      "backgroundColor": "#ffc9c9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#ef4444",
+      "strokeWidth": 1
+    },
+    {
+      "type": "text",
+      "id": "before_h",
+      "x": 40,
+      "y": 582,
+      "text": "BEFORE (initCityWithManagedDoltRecovery)",
+      "fontSize": 15,
+      "strokeColor": "#ef4444"
+    },
+    {
+      "type": "text",
+      "id": "before_1",
+      "x": 40,
+      "y": 604,
+      "text": "gc init -> Dolt not ready -> connection refused",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "before_2",
+      "x": 40,
+      "y": 622,
+      "text": "retry 1 (attempt 2) -> may fail again",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "before_3",
+      "x": 40,
+      "y": 640,
+      "text": "gc start fallback -> another full startup",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "before_4",
+      "x": 40,
+      "y": 660,
+      "text": "waitForManagedDoltCityReady polls separately",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "before_5",
+      "x": 40,
+      "y": 678,
+      "text": "Total: 25-30s when race triggers (~20% of test runs)",
+      "fontSize": 14,
+      "strokeColor": "#ef4444"
+    },
+    {
+      "type": "rectangle",
+      "id": "after_box",
+      "x": 490,
+      "y": 572,
+      "width": 465,
+      "height": 140,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "strokeColor": "#22c55e",
+      "strokeWidth": 1
+    },
+    {
+      "type": "text",
+      "id": "after_h",
+      "x": 505,
+      "y": 582,
+      "text": "AFTER (pre-flight poll in gc init)",
+      "fontSize": 15,
+      "strokeColor": "#22c55e"
+    },
+    {
+      "type": "text",
+      "id": "after_1",
+      "x": 505,
+      "y": 604,
+      "text": "gc init -> starts Dolt -> polls TCP port",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "after_2",
+      "x": 505,
+      "y": 622,
+      "text": "exponential backoff: 50/100/200/400ms...",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "after_3",
+      "x": 505,
+      "y": 640,
+      "text": "Dolt ready -> proceed with city init",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "after_4",
+      "x": 505,
+      "y": 658,
+      "text": "initCityWithManagedDoltRecovery simplifies to single gc init",
+      "fontSize": 14,
+      "strokeColor": "#555"
+    },
+    {
+      "type": "text",
+      "id": "after_5",
+      "x": 505,
+      "y": 678,
+      "text": "Total: ~0.5s typical (Dolt usually ready in 50-100ms)",
+      "fontSize": 14,
+      "strokeColor": "#22c55e"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  }
+}

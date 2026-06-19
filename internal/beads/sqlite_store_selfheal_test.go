@@ -17,20 +17,20 @@ func liveMaxSuffix(t *testing.T, s *SQLiteStore) int {
 		t.Fatalf("liveMaxSuffix query: %v", err)
 	}
 	defer rows.Close() //nolint:errcheck
-	max := 0
+	maxSuffix := 0
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			t.Fatalf("liveMaxSuffix scan: %v", err)
 		}
-		if n := numericIDSuffix(id); n > max {
-			max = n
+		if n := numericIDSuffix(id); n > maxSuffix {
+			maxSuffix = n
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("liveMaxSuffix rows: %v", err)
 	}
-	return max
+	return maxSuffix
 }
 
 // TestSQLiteCreateSelfHealsStaleSeq reproduces the production race: another

@@ -795,6 +795,15 @@ func sqliteListSQL(q ListQuery) (string, []any) {
 		where = append(where, "parent_id=?")
 		args = append(args, q.ParentID)
 	}
+	if len(q.ParentIDs) > 0 {
+		placeholders := make([]string, len(q.ParentIDs))
+		for i, pid := range q.ParentIDs {
+			placeholders[i] = "?"
+			args = append(args, pid)
+		}
+		// parent_id IN (...) drives off idx_beads_parent — O(matches) per id.
+		where = append(where, "parent_id IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if !q.CreatedBefore.IsZero() {
 		where = append(where, "created_at < ?")
 		args = append(args, q.CreatedBefore.UnixNano())
@@ -808,7 +817,12 @@ func sqliteListSQL(q ListQuery) (string, []any) {
 		args = append(args, q.Label)
 	}
 	for k, v := range q.Metadata {
-		where = append(where, "EXISTS (SELECT 1 FROM metadata m WHERE m.bead_id=beads.id AND m.meta_key=? AND m.meta_value=?)")
+		// `id IN (SELECT bead_id ...)` lets SQLite drive the lookup off
+		// idx_metadata_key_value(meta_key, meta_value) -> bead ids, then probe the
+		// beads primary key — O(matches). The equivalent EXISTS-correlated form
+		// instead SCANs every bead row (O(total beads)), which dominated graph-read
+		// cost as the store grew.
+		where = append(where, "beads.id IN (SELECT m.bead_id FROM metadata m WHERE m.meta_key=? AND m.meta_value=?)")
 		args = append(args, k, v)
 	}
 	sqlText := "SELECT bead_json FROM beads"

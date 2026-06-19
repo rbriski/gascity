@@ -172,6 +172,33 @@ func (r *Router) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error)
 	return graph.Ready(query...)
 }
 
+// ListGraphOnly returns List from the ClassGraph backend ALONE, never the
+// ClassWork primary (mirrors ReadyGraphOnly). It is the dispatcher's root-scoped
+// scope-check surface for a graph-resident molecule: every member carries a
+// graph (gcg-) root, so the Dolt work-leg is kept out of the List and no `bd`
+// fork happens. In the identity phase — no distinct ClassGraph backend — it falls
+// back to the full federated List so a default Dolt-only city stays byte-identical.
+func (r *Router) ListGraphOnly(query beads.ListQuery) ([]beads.Bead, error) {
+	graph := r.Backend(coordclass.ClassGraph)
+	if graph == nil || graph == r.Backend(coordclass.ClassWork) {
+		return r.List(query)
+	}
+	return beads.HandlesFor(graph).Live.List(query)
+}
+
+// GraphIDPrefix reports the ClassGraph backend's id prefix, or "" when there is no
+// distinct graph backend, so callers gate graph-only List to graph-rooted queries.
+func (r *Router) GraphIDPrefix() string {
+	graph := r.Backend(coordclass.ClassGraph)
+	if graph == nil || graph == r.Backend(coordclass.ClassWork) {
+		return ""
+	}
+	if p, ok := graph.(interface{ IDPrefix() string }); ok {
+		return p.IDPrefix()
+	}
+	return ""
+}
+
 // DepList federates dependency reads: an edge touching id may be recorded in any
 // backend (a cross-class blocks edge lives in the Work store), so it unions and
 // dedups across backends.

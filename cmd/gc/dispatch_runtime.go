@@ -60,7 +60,7 @@ var (
 	workflowServeIdlePollInterval  = 100 * time.Millisecond
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
-	workflowServeMaxIdleSleep      = 30 * time.Second
+	workflowServeMaxIdleSleep      = 3 * time.Second
 	workflowServeWaitForWake       = waitForRelevantWorkflowWakeWithTrace
 	workflowTraceNow               = time.Now
 	// The trace helper is intentionally process-global because workflowTracef

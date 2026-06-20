@@ -2222,6 +2222,20 @@
             white-space: nowrap;
         }
 
+        button.scope-stat-value {
+            appearance: none;
+            background: transparent;
+            border: 0;
+            color: var(--cyan);
+            cursor: pointer;
+            font-family: inherit;
+            padding: 0;
+        }
+
+        button.scope-stat-value:hover {
+            text-decoration: underline;
+        }
+
         .scope-stat-value.active {
             color: var(--green);
         }
@@ -3995,6 +4009,7 @@
 
         .log-msg-header {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
             gap: 8px;
             margin-bottom: 4px;
@@ -4017,6 +4032,17 @@
             color: var(--text-muted);
         }
 
+        .log-msg-provider,
+        .log-msg-model,
+        .log-msg-status,
+        .log-msg-stop {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 1px 5px;
+        }
+
         .log-msg-body {
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -4029,6 +4055,7 @@
             font-size: 0.75rem;
             color: var(--cyan);
             font-weight: 600;
+            margin-bottom: 6px;
         }
 
         .log-msg-tool-result {
@@ -4042,6 +4069,48 @@
             color: var(--text-secondary);
             white-space: pre-wrap;
             word-wrap: break-word;
+            margin-bottom: 6px;
+        }
+
+        .log-msg-thinking-block {
+            color: var(--purple);
+            margin-bottom: 6px;
+        }
+
+        .log-msg-text-block {
+            margin-bottom: 6px;
+        }
+
+        .log-msg-tool-title {
+            color: var(--cyan);
+            margin-bottom: 4px;
+        }
+
+        .log-msg-tool-kind {
+            color: var(--orange);
+            text-transform: uppercase;
+        }
+
+        .log-msg-tool-pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-weight: 400;
+        }
+
+        .log-msg-tool-use .log-msg-tool-pre {
+            color: var(--text-secondary);
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 6px 8px;
+        }
+
+        .log-msg-tool-result.is-error {
+            border-color: var(--red);
+            color: var(--red);
         }
 
         .log-compact-divider {

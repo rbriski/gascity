@@ -159,7 +159,7 @@ function attachButton(template: string): HTMLElement {
 function logButton(sessionID: string, label: string): HTMLElement {
   const btn = el("button", { class: "agent-log-link", type: "button", "data-session-id": sessionID }, [label]);
   btn.addEventListener("click", () => {
-    void openLogDrawer(sessionID, label);
+    void openSessionLogDrawer(sessionID, label);
   });
   return btn;
 }
@@ -227,7 +227,7 @@ function renderPooledAgents(sessions: SessionRecord[]): void {
   const tbody = el("tbody");
   rows.forEach((session) => {
     tbody.append(el("tr", {}, [
-      el("td", {}, [session.template]),
+      el("td", {}, [logButton(session.id, session.template)]),
       el("td", {}, [el("span", { class: `badge ${session.active_bead ? "badge-yellow" : "badge-green"}` }, [session.active_bead ? "Working" : "Idle"])]),
       el("td", { class: "status-hint" }, [truncate(session.last_output, 80) || "—"]),
       el("td", {}, [formatTimestamp(session.last_active)]),
@@ -263,7 +263,7 @@ export function installCrewInteractions(): void {
   });
 }
 
-async function openLogDrawer(sessionID: string, label: string): Promise<void> {
+export async function openSessionLogDrawer(sessionID: string, label: string): Promise<void> {
   const drawer = byId("agent-log-drawer");
   const nameEl = byId("log-drawer-agent-name");
   const messagesEl = byId("log-drawer-messages");
@@ -432,8 +432,11 @@ function renderStructuredMessage(message: SessionStructuredMessage): HTMLElement
   return el("div", { class: "log-msg log-msg-structured" }, [
     el("div", { class: "log-msg-header" }, [
       el("span", { class: `log-msg-type log-msg-type-${roleClass(role)}` }, [role]),
+      message.provider ? el("span", { class: "log-msg-provider" }, [message.provider]) : null,
       el("span", { class: "log-msg-time" }, [formatTimestamp(message.timestamp)]),
       message.model ? el("span", { class: "log-msg-model" }, [message.model]) : null,
+      message.status ? el("span", { class: "log-msg-status" }, [message.status]) : null,
+      message.stop_reason ? el("span", { class: "log-msg-stop" }, [message.stop_reason]) : null,
     ]),
     body,
   ]);
@@ -446,13 +449,17 @@ function renderStructuredBlock(block: SessionStructuredBlock): HTMLElement | nul
     case "thinking":
       return el("div", { class: "log-msg-thinking-block" }, [block.thinking ? "[thinking] " + block.thinking : "[thinking]"]);
     case "tool_use":
-      return el("div", { class: "log-msg-tool" }, [
-        block.name ? `${block.name}` : "tool",
-        block.input !== undefined ? ` ${formatInlineValue(block.input)}` : "",
+      return el("div", { class: "log-msg-tool log-msg-tool-use" }, [
+        el("div", { class: "log-msg-tool-title" }, [
+          el("span", { class: "log-msg-tool-kind" }, ["tool"]),
+          " ",
+          block.name ? `${block.name}` : "tool",
+        ]),
+        renderToolInput(block),
       ]);
     case "tool_result":
       return el("div", { class: `log-msg-tool-result${block.is_error ? " is-error" : ""}` }, [
-        formatToolResult(block),
+        ...renderToolResult(block),
       ]);
     case "interaction":
       return el("div", { class: "log-msg-tool" }, [formatInteraction(block)]);
@@ -461,40 +468,123 @@ function renderStructuredBlock(block: SessionStructuredBlock): HTMLElement | nul
   }
 }
 
-function formatToolResult(block: SessionStructuredBlock): string {
+function renderToolInput(block: SessionStructuredBlock): HTMLElement {
+  const input = recordOf(block.input);
+  if (!input) {
+    return el("pre", { class: "log-msg-tool-pre" }, [block.input !== undefined ? formatInlineValue(block.input) : ""]);
+  }
+  const rows: string[] = [];
+  appendField(rows, "kind", input.kind);
+  appendField(rows, "file", input.file_path);
+  appendField(rows, "command", input.command);
+  appendField(rows, "code", input.code);
+  appendField(rows, "patch", input.patch);
+  appendField(rows, "query", input.query);
+  appendField(rows, "pattern", input.pattern);
+  appendField(rows, "text", input.text);
+  if (Array.isArray(input.arguments) && input.arguments.length > 0) {
+    rows.push(...input.arguments.map((arg) => formatArgument(arg)));
+  }
+  if (rows.length === 0) rows.push(formatInlineValue(input));
+  return el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]);
+}
+
+function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
   const structured = recordOf(block.structured);
   if (structured) {
     const kind = typeof structured.kind === "string" ? structured.kind : "result";
+    const lines: string[] = [];
+    appendField(lines, "kind", kind);
+    appendField(lines, "file", structured.file_path);
     if (kind === "bash") {
-      return [
-        typeof structured.stdout === "string" ? structured.stdout : "",
-        typeof structured.stderr === "string" ? structured.stderr : "",
-        structured.exit_code !== undefined ? `exit ${String(structured.exit_code)}` : "",
-      ].filter(Boolean).join("\n");
+      appendField(lines, "stdout", structured.stdout);
+      appendField(lines, "stderr", structured.stderr);
+      appendExit(lines, structured.exit_code);
+      appendFlags(lines, structured);
+      return toolResultNodes(kind, lines);
+    }
+    if (kind === "python") {
+      appendField(lines, "code", structured.code);
+      appendField(lines, "stdout", structured.stdout);
+      appendField(lines, "stderr", structured.stderr);
+      appendExit(lines, structured.exit_code);
+      appendFlags(lines, structured);
+      return toolResultNodes(kind, lines);
     }
     if (kind === "edit") {
-      return [
-        typeof structured.file_path === "string" ? structured.file_path : "",
-        typeof structured.patch === "string" ? structured.patch : formatInlineValue(structured),
-      ].filter(Boolean).join("\n");
+      appendField(lines, "patch", structured.patch);
+      appendField(lines, "content", structured.content);
+      return toolResultNodes(kind, lines);
     }
     if (kind === "read") {
-      return [
-        typeof structured.file_path === "string" ? structured.file_path : "",
-        typeof structured.content === "string" ? structured.content : "",
-      ].filter(Boolean).join("\n");
+      appendField(lines, "content", structured.content);
+      appendNumber(lines, "start", structured.start_line);
+      appendNumber(lines, "lines", structured.num_lines);
+      appendNumber(lines, "total", structured.total_lines);
+      appendFlags(lines, structured);
+      return toolResultNodes(kind, lines);
     }
-    if (kind === "grep") {
-      return [
-        Array.isArray(structured.filenames) ? structured.filenames.join(", ") : "",
-        typeof structured.content === "string" ? structured.content : "",
-      ].filter(Boolean).join("\n");
+    if (kind === "grep" || kind === "search") {
+      if (Array.isArray(structured.filenames) && structured.filenames.length > 0) {
+        appendField(lines, "files", structured.filenames.join(", "));
+      }
+      appendField(lines, "mode", structured.mode);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      appendNumber(lines, "files", structured.num_files);
+      appendNumber(lines, "lines", structured.num_lines);
+      appendFlags(lines, structured);
+      return toolResultNodes(kind, lines);
     }
-    return formatInlineValue(structured);
+    appendField(lines, "content", structured.content);
+    appendField(lines, "text", structured.text);
+    appendField(lines, "stdout", structured.stdout);
+    appendField(lines, "stderr", structured.stderr);
+    appendExit(lines, structured.exit_code);
+    if (lines.length === 1) lines.push(formatInlineValue(structured));
+    return toolResultNodes(kind, lines);
   }
-  if (typeof block.content === "string") return block.content;
-  if (block.content !== undefined) return formatInlineValue(block.content);
-  return "";
+  if (typeof block.content === "string") return toolResultNodes("result", [block.content]);
+  if (block.content !== undefined) return toolResultNodes("result", [formatInlineValue(block.content)]);
+  return toolResultNodes("result", [""]);
+}
+
+function toolResultNodes(kind: string, lines: string[]): HTMLElement[] {
+  return [
+    el("div", { class: "log-msg-tool-title" }, [
+      el("span", { class: "log-msg-tool-kind" }, [kind]),
+      " result",
+    ]),
+    el("pre", { class: "log-msg-tool-pre" }, [lines.filter(Boolean).join("\n")]),
+  ];
+}
+
+function appendField(rows: string[], label: string, value: unknown): void {
+  if (typeof value !== "string" || value === "") return;
+  rows.push(`${label}: ${value}`);
+}
+
+function appendNumber(rows: string[], label: string, value: unknown): void {
+  if (typeof value !== "number") return;
+  rows.push(`${label}: ${String(value)}`);
+}
+
+function appendExit(rows: string[], value: unknown): void {
+  if (typeof value !== "number") return;
+  rows.push(`exit ${String(value)}`);
+}
+
+function appendFlags(rows: string[], structured: Record<string, unknown>): void {
+  if (structured.truncated === true) rows.push("truncated");
+  if (structured.interrupted === true) rows.push("interrupted");
+}
+
+function formatArgument(value: unknown): string {
+  const argument = recordOf(value);
+  if (!argument) return formatInlineValue(value);
+  const name = typeof argument.name === "string" ? argument.name : "argument";
+  const argValue = typeof argument.value === "string" ? argument.value : formatInlineValue(argument.value);
+  return `${name}: ${argValue}`;
 }
 
 function formatInteraction(block: SessionStructuredBlock): string {

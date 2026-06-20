@@ -3,6 +3,7 @@ import { logWarn } from "../logger";
 import { currentCityStatus, isKnownUnavailableCity } from "../state";
 import { byId, clear, el } from "../util/dom";
 import { ACTIVE_WINDOW_MS, beadPriority, formatTimestamp } from "../util/legacy";
+import { openSessionLogDrawer } from "./crew";
 
 type APIResult<T> = {
   data?: T;
@@ -271,7 +272,7 @@ function renderCityScopeBanner(city: string, sessions: SessionSummary[]): void {
     : false;
   status.append(
     scopeStat("City", city),
-    scopeStat("Session", overseer.template),
+    scopeStat("Session", overseer.template, "", overseer.id ? () => void openSessionLogDrawer(overseer.id, overseer.template) : undefined),
     scopeStat("Activity", overseer.last_active ? formatTimestamp(overseer.last_active) : "Unknown", active ? "active" : "idle"),
     scopeStat("Terminal", overseer.attached ? "Attached" : "Detached"),
     scopeStat("State", overseer.running ? "Running" : "Stopped"),
@@ -308,10 +309,17 @@ function renderCityScopeBannerFleet(): void {
   );
 }
 
-function scopeStat(label: string, value: string, variant = ""): HTMLElement {
+function scopeStat(label: string, value: string, variant = "", onClick?: () => void): HTMLElement {
+  const valueNode = onClick
+    ? (() => {
+      const button = el("button", { class: `scope-stat-value scope-session-log-link${variant ? ` ${variant}` : ""}`, type: "button" }, [value]);
+      button.addEventListener("click", onClick);
+      return button;
+    })()
+    : el("span", { class: `scope-stat-value${variant ? ` ${variant}` : ""}` }, [value]);
   return el("div", { class: "scope-stat" }, [
     el("span", { class: "scope-stat-label" }, [label]),
-    el("span", { class: `scope-stat-value${variant ? ` ${variant}` : ""}` }, [value]),
+    valueNode,
   ]);
 }
 

@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiGet = vi.fn();
+const openSessionLogDrawer = vi.hoisted(() => vi.fn());
 
 vi.mock("../api", () => ({
   api: { GET: apiGet },
   cityScope: () => (new URLSearchParams(window.location.search).get("city") ?? "").trim(),
+}));
+
+vi.mock("./crew", () => ({
+  openSessionLogDrawer,
 }));
 
 function installStatusDOM(): void {
@@ -61,6 +66,7 @@ describe("status panel scope rendering", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    openSessionLogDrawer.mockReset();
   });
 
   it("does not let a stale city status response overwrite supervisor scope", async () => {
@@ -250,6 +256,44 @@ describe("status panel scope rendering", () => {
       Terminal: "Detached",
       State: "Running",
     });
+  });
+
+  it("opens the structured session log from the city scope banner", async () => {
+    window.history.pushState({}, "", "/dashboard?city=alpha");
+    const now = new Date().toISOString();
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes("/status")) {
+        return Promise.resolve(ok({
+          agents: { running: 1 },
+          mail: { unread: 0 },
+          work: { in_progress: 0, open: 0 },
+        }));
+      }
+      if (path.includes("/sessions")) {
+        return Promise.resolve(ok({
+          items: [{
+            attached: true,
+            configured_named_session: true,
+            id: "s-control",
+            last_active: now,
+            running: true,
+            template: "control-dispatcher",
+          }],
+        }));
+      }
+      if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
+      if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));
+      return Promise.resolve(ok({}));
+    });
+
+    const { renderStatus } = await import("./status");
+    await renderStatus();
+
+    const sessionButton = document.querySelector<HTMLButtonElement>(".scope-session-log-link");
+    expect(sessionButton?.textContent).toBe("control-dispatcher");
+    sessionButton?.click();
+
+    expect(openSessionLogDrawer).toHaveBeenCalledWith("s-control", "control-dispatcher");
   });
 
   it("renders all five scope stats when no overseer session exists", async () => {

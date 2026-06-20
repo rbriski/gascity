@@ -397,11 +397,14 @@ func inferStructuredToolResult(block worker.HistoryBlock, context structuredTool
 		}
 	}
 	if isSearchTool(name, context.Input) {
+		filenames := searchResultFilenames(content)
 		return &SessionStructuredToolResult{
-			Kind:     "grep",
-			Mode:     searchMode(context.Input),
-			Content:  content,
-			NumLines: countLines(content),
+			Kind:      "grep",
+			Mode:      searchMode(context.Input),
+			Filenames: filenames,
+			NumFiles:  len(filenames),
+			Content:   content,
+			NumLines:  countLines(content),
 		}
 	}
 	return &SessionStructuredToolResult{
@@ -628,6 +631,34 @@ func searchMode(input *SessionStructuredToolInput) string {
 	return ""
 }
 
+func searchResultFilenames(content string) []string {
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		filename, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		filename = strings.TrimSpace(filename)
+		if filename == "" || strings.Contains(filename, " ") {
+			continue
+		}
+		seen[filename] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	filenames := make([]string, 0, len(seen))
+	for filename := range seen {
+		filenames = append(filenames, filename)
+	}
+	sort.Strings(filenames)
+	return filenames
+}
+
 func commandResultFields(raw json.RawMessage, content string) (stdout string, stderr string, exitCode *int, interrupted bool, truncated bool, isImage bool) {
 	var object struct {
 		Output        string `json:"output"`
@@ -667,6 +698,7 @@ func structuredJSONBool(raw json.RawMessage, field string) bool {
 }
 
 func countLines(content string) int {
+	content = strings.TrimRight(content, "\r\n")
 	if content == "" {
 		return 0
 	}

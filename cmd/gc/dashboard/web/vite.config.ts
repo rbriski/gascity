@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 // Single-bundle build: one JS, one CSS, one HTML. The Go static server
 // embeds dist/ via go:embed and ships it verbatim, so predictable asset
@@ -19,5 +19,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+  },
+  test: {
+    exclude: ["tests/e2e/**", "node_modules/**", "dist/**"],
   },
 });

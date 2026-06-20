@@ -177,13 +177,23 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				// Dedupe across the per-store queries when more than one runs (the
 				// type=molecule + gc.kind=workflow augment), even when the global
 				// dedupe is off, so a bead matching both is appended once.
-				dedupeQueries := dedupe || len(queries) > 1
+				// The gc.kind=workflow augment (qi>0) is served by EVERY federated
+				// rig store, so the same graph.v2 root recurs once per store. Dedupe
+				// it globally by id (not per (rig, query)) so the roots are not
+				// multiplied across stores and do not crowd the page. The primary
+				// query keeps its existing per-rig dedupe (only active for the
+				// multi-assignee case).
 				for _, b := range list {
 					dedupeKey := rigName + "\x00" + b.ID
-					if dedupeQueries && seen[dedupeKey] {
+					mustDedupe := dedupe
+					if !isPrimary {
+						dedupeKey = "\x00workflow\x00" + b.ID
+						mustDedupe = true
+					}
+					if mustDedupe && seen[dedupeKey] {
 						continue
 					}
-					if dedupeQueries {
+					if mustDedupe {
 						seen[dedupeKey] = true
 					}
 					all = append(all, b)

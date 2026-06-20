@@ -382,13 +382,16 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 // items as arbitrary JSON (any) — clients interpret shapes based on the
 // session's provider.
 type sessionTranscriptGetResponse struct {
-	ID         string                     `json:"id"`
-	Template   string                     `json:"template"`
-	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
-	Format     string                     `json:"format" doc:"conversation, text, or raw."`
-	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages   []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	ID                 string                     `json:"id"`
+	Template           string                     `json:"template"`
+	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format             string                     `json:"format" doc:"conversation, text, raw, or structured."`
+	SchemaVersion      string                     `json:"schema_version,omitempty" doc:"Structured session transcript schema version when format is structured."`
+	History            *SessionStructuredHistory  `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
+	Turns              []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
+	Messages           []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	StructuredMessages []SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
+	Pagination         *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.

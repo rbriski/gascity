@@ -11,6 +11,7 @@
     "gen": "openapi-ts && openapi-typescript ../../../../internal/api/openapi.json -o src/generated/schema.d.ts",
     "pretest": "npm run gen --silent",
     "test": "vitest run --environment jsdom",
+    "test:e2e": "npm run build && playwright test",
     "pretypecheck": "npm run gen --silent",
     "typecheck": "tsc --noEmit",
     "prebuild": "npm run gen --silent",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@hey-api/openapi-ts": "^0.96.0",
+    "@playwright/test": "^1.61.0",
     "jsdom": "^26.0.0",
     "openapi-typescript": "^7.5.0",
     "typescript": "^5.6.3",

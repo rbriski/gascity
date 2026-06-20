@@ -7091,6 +7091,107 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	}
 }
 
+func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionTranscriptGetResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Format != "structured" {
+		t.Fatalf("Format = %q, want structured; body: %s", resp.Format, w.Body.String())
+	}
+	if resp.SchemaVersion == "" {
+		t.Fatalf("structured transcript missing schema_version: %+v", resp)
+	}
+	if resp.History == nil || resp.History.TranscriptStreamID == "" {
+		t.Fatalf("structured transcript missing history envelope: %+v", resp.History)
+	}
+	if len(resp.StructuredMessages) != 2 {
+		t.Fatalf("got %d structured messages, want 2; body: %s", len(resp.StructuredMessages), w.Body.String())
+	}
+	first := resp.StructuredMessages[0]
+	if len(first.Blocks) != 1 || first.Blocks[0].Type != "tool_use" || first.Blocks[0].Name != "apply_patch" {
+		t.Fatalf("first structured message blocks = %+v, want apply_patch tool_use", first.Blocks)
+	}
+	if first.Blocks[0].Input == nil || first.Blocks[0].Input.Kind != "patch" {
+		t.Fatalf("tool input = %+v, want provider-neutral patch input", first.Blocks[0].Input)
+	}
+	if first.Blocks[0].Input.FilePath != "city.toml" {
+		t.Fatalf("tool input file_path = %q, want city.toml", first.Blocks[0].Input.FilePath)
+	}
+	if !strings.Contains(first.Blocks[0].Input.Patch, "Created by Chris Sells") {
+		t.Fatalf("tool input lost patch payload: %+v", first.Blocks[0].Input)
+	}
+	second := resp.StructuredMessages[1]
+	if len(second.Blocks) != 1 || second.Blocks[0].Type != "tool_result" {
+		t.Fatalf("second structured message blocks = %+v, want tool_result", second.Blocks)
+	}
+	if !strings.Contains(second.Blocks[0].Content, "Success. Updated the following files") {
+		t.Fatalf("tool result lost output payload: %+v", second.Blocks[0].Content)
+	}
+	if second.Blocks[0].ToolCallID != "call-edit" {
+		t.Fatalf("tool result tool_call_id = %q, want call-edit", second.Blocks[0].ToolCallID)
+	}
+	if second.Blocks[0].Structured == nil || second.Blocks[0].Structured.Kind != "edit" {
+		t.Fatalf("tool result structured = %+v, want provider-neutral edit result", second.Blocks[0].Structured)
+	}
+	if second.Blocks[0].Structured.FilePath != "city.toml" {
+		t.Fatalf("tool result structured file_path = %q, want city.toml", second.Blocks[0].Structured.FilePath)
+	}
+	if !strings.Contains(second.Blocks[0].Structured.Content, "Success. Updated the following files") {
+		t.Fatalf("tool result structured content lost output payload: %+v", second.Blocks[0].Structured)
+	}
+	wire, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal structured response: %v", err)
+	}
+	if strings.Contains(string(wire), "tool_use_id") {
+		t.Fatalf("structured response leaked provider-specific tool_use_id key: %s", wire)
+	}
+	if !strings.Contains(string(wire), "tool_call_id") {
+		t.Fatalf("structured response missing provider-neutral tool_call_id key: %s", wire)
+	}
+}
+
 func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()

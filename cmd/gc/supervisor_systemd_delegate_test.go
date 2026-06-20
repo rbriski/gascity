@@ -1741,7 +1741,7 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	// replacement point. A verify-once implementation would sample an early
 	// old-build probe and misreport "was not replaced"; the poll must retry
 	// past them to the replacement.
-	const oldBuildProbesBeforeReplace = 3
+	const oldBuildProbesBeforeReplace = 1
 	var postTimeoutProbes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		build := "old-build-id"

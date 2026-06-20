@@ -12,11 +12,12 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":      SessionStreamMessageEvent{},
-		"message":   SessionStreamRawMessageEvent{},
-		"activity":  SessionActivityEvent{},
-		"pending":   runtime.PendingInteraction{},
-		"heartbeat": HeartbeatEvent{},
+		"turn":       SessionStreamMessageEvent{},
+		"message":    SessionStreamRawMessageEvent{},
+		"structured": SessionStreamStructuredMessageEvent{},
+		"activity":   SessionActivityEvent{},
+		"pending":    runtime.PendingInteraction{},
+		"heartbeat":  HeartbeatEvent{},
 	}
 }
 
@@ -316,7 +317,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:        cityScopePrefix + "/session/{id}/stream",
 		Summary:     "Stream session output in real time",
 		Description: "Server-Sent Events stream of session transcript updates. " +
-			"Streams turns (conversation format) or raw messages (JSONL format) " +
+			"Streams turns (conversation format), raw messages (JSONL format), or structured messages " +
 			"based on the format query parameter. Emits activity and pending events " +
 			"for tool approval prompts.",
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),

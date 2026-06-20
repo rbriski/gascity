@@ -321,6 +321,7 @@ export function connectAgentOutput(
       const { stream } = await streamSession({
         client,
         path: { cityName: city, id: sessionID },
+        query: { format: "structured" },
         signal: controller.signal,
         onSseEvent: (frame) => {
           // Session frames carry heterogeneous typed payloads per

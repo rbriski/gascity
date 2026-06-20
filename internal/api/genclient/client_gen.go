@@ -357,6 +357,48 @@ func (e GetV0CityByCityNameExtmsgTranscriptParamsOrder) Valid() bool {
 	}
 }
 
+// Defines values for StreamSessionParamsFormat.
+const (
+	StreamSessionParamsFormatConversation StreamSessionParamsFormat = "conversation"
+	StreamSessionParamsFormatRaw          StreamSessionParamsFormat = "raw"
+	StreamSessionParamsFormatStructured   StreamSessionParamsFormat = "structured"
+)
+
+// Valid indicates whether the value is a known member of the StreamSessionParamsFormat enum.
+func (e StreamSessionParamsFormat) Valid() bool {
+	switch e {
+	case StreamSessionParamsFormatConversation:
+		return true
+	case StreamSessionParamsFormatRaw:
+		return true
+	case StreamSessionParamsFormatStructured:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetV0CityByCityNameSessionByIdTranscriptParamsFormat.
+const (
+	GetV0CityByCityNameSessionByIdTranscriptParamsFormatConversation GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "conversation"
+	GetV0CityByCityNameSessionByIdTranscriptParamsFormatRaw          GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "raw"
+	GetV0CityByCityNameSessionByIdTranscriptParamsFormatStructured   GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "structured"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameSessionByIdTranscriptParamsFormat enum.
+func (e GetV0CityByCityNameSessionByIdTranscriptParamsFormat) Valid() bool {
+	switch e {
+	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatConversation:
+		return true
+	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatRaw:
+		return true
+	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatStructured:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdapterCapabilities defines model for AdapterCapabilities.
 type AdapterCapabilities struct {
 	MaxMessageLength           int64 `json:"MaxMessageLength"`
@@ -2809,6 +2851,157 @@ type SessionStreamRawMessageEvent struct {
 	Template string `json:"template"`
 }
 
+// SessionStreamStructuredMessageEvent defines model for SessionStreamStructuredMessageEvent.
+type SessionStreamStructuredMessageEvent struct {
+	// Format Always structured for this event.
+	Format     string                    `json:"format"`
+	History    *SessionStructuredHistory `json:"history,omitempty"`
+	Id         string                    `json:"id"`
+	Pagination *PaginationInfo           `json:"pagination,omitempty"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.).
+	Provider string `json:"provider"`
+
+	// SchemaVersion Structured session transcript schema version.
+	SchemaVersion string `json:"schema_version"`
+
+	// StructuredMessages Provider-normalized structured messages.
+	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages"`
+	Template           string                      `json:"template"`
+}
+
+// SessionStructuredArgument defines model for SessionStructuredArgument.
+type SessionStructuredArgument struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// SessionStructuredBlock defines model for SessionStructuredBlock.
+type SessionStructuredBlock struct {
+	Content     *string                       `json:"content,omitempty"`
+	Id          *string                       `json:"id,omitempty"`
+	Input       *SessionStructuredToolInput   `json:"input,omitempty"`
+	Interaction *SessionStructuredInteraction `json:"interaction,omitempty"`
+	IsError     *bool                         `json:"is_error,omitempty"`
+	Name        *string                       `json:"name,omitempty"`
+	Signature   *string                       `json:"signature,omitempty"`
+	Structured  *SessionStructuredToolResult  `json:"structured,omitempty"`
+	Text        *string                       `json:"text,omitempty"`
+	Thinking    *string                       `json:"thinking,omitempty"`
+	ToolCallId  *string                       `json:"tool_call_id,omitempty"`
+	Type        string                        `json:"type"`
+}
+
+// SessionStructuredContinuity defines model for SessionStructuredContinuity.
+type SessionStructuredContinuity struct {
+	CompactionCount *int64  `json:"compaction_count,omitempty"`
+	HasBranches     *bool   `json:"has_branches,omitempty"`
+	Note            *string `json:"note,omitempty"`
+	Status          string  `json:"status"`
+}
+
+// SessionStructuredCursor defines model for SessionStructuredCursor.
+type SessionStructuredCursor struct {
+	AfterEntryId *string `json:"after_entry_id,omitempty"`
+}
+
+// SessionStructuredDiagnostic defines model for SessionStructuredDiagnostic.
+type SessionStructuredDiagnostic struct {
+	Code    string  `json:"code"`
+	Count   *int64  `json:"count,omitempty"`
+	Message *string `json:"message,omitempty"`
+}
+
+// SessionStructuredGeneration defines model for SessionStructuredGeneration.
+type SessionStructuredGeneration struct {
+	Id         string  `json:"id"`
+	ObservedAt *string `json:"observed_at,omitempty"`
+}
+
+// SessionStructuredHistory defines model for SessionStructuredHistory.
+type SessionStructuredHistory struct {
+	Continuity            SessionStructuredContinuity    `json:"continuity"`
+	Cursor                SessionStructuredCursor        `json:"cursor"`
+	Diagnostics           *[]SessionStructuredDiagnostic `json:"diagnostics,omitempty"`
+	GcSessionId           *string                        `json:"gc_session_id,omitempty"`
+	Generation            SessionStructuredGeneration    `json:"generation"`
+	LogicalConversationId *string                        `json:"logical_conversation_id,omitempty"`
+	ProviderSessionId     *string                        `json:"provider_session_id,omitempty"`
+	TailState             SessionStructuredTailState     `json:"tail_state"`
+	TranscriptStreamId    string                         `json:"transcript_stream_id"`
+}
+
+// SessionStructuredInteraction defines model for SessionStructuredInteraction.
+type SessionStructuredInteraction struct {
+	Action    *string   `json:"action,omitempty"`
+	Kind      *string   `json:"kind,omitempty"`
+	Options   *[]string `json:"options,omitempty"`
+	Prompt    *string   `json:"prompt,omitempty"`
+	RequestId *string   `json:"request_id,omitempty"`
+	State     string    `json:"state"`
+}
+
+// SessionStructuredMessage defines model for SessionStructuredMessage.
+type SessionStructuredMessage struct {
+	Blocks           *[]SessionStructuredBlock `json:"blocks"`
+	Id               string                    `json:"id"`
+	IsSubagent       *bool                     `json:"is_subagent,omitempty"`
+	Model            *string                   `json:"model,omitempty"`
+	ParentToolCallId *string                   `json:"parent_tool_call_id,omitempty"`
+	Provider         *string                   `json:"provider,omitempty"`
+	Role             string                    `json:"role"`
+	Status           string                    `json:"status"`
+	StopReason       *string                   `json:"stop_reason,omitempty"`
+	Timestamp        *string                   `json:"timestamp,omitempty"`
+}
+
+// SessionStructuredTailState defines model for SessionStructuredTailState.
+type SessionStructuredTailState struct {
+	Activity              string    `json:"activity"`
+	Degraded              *bool     `json:"degraded,omitempty"`
+	DegradedReason        *string   `json:"degraded_reason,omitempty"`
+	LastEntryId           *string   `json:"last_entry_id,omitempty"`
+	OpenToolCallIds       *[]string `json:"open_tool_call_ids,omitempty"`
+	PendingInteractionIds *[]string `json:"pending_interaction_ids,omitempty"`
+}
+
+// SessionStructuredToolInput defines model for SessionStructuredToolInput.
+type SessionStructuredToolInput struct {
+	Arguments *[]SessionStructuredArgument `json:"arguments,omitempty"`
+	Code      *string                      `json:"code,omitempty"`
+	Command   *string                      `json:"command,omitempty"`
+	FilePath  *string                      `json:"file_path,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, search, file, arguments, or text.
+	Kind    *string `json:"kind,omitempty"`
+	Patch   *string `json:"patch,omitempty"`
+	Pattern *string `json:"pattern,omitempty"`
+	Query   *string `json:"query,omitempty"`
+	Text    *string `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResult defines model for SessionStructuredToolResult.
+type SessionStructuredToolResult struct {
+	Code        *string   `json:"code,omitempty"`
+	Content     *string   `json:"content,omitempty"`
+	ExitCode    *int64    `json:"exit_code,omitempty"`
+	FilePath    *string   `json:"file_path,omitempty"`
+	Filenames   *[]string `json:"filenames,omitempty"`
+	Interrupted *bool     `json:"interrupted,omitempty"`
+	IsImage     *bool     `json:"is_image,omitempty"`
+	Kind        string    `json:"kind"`
+	Mode        *string   `json:"mode,omitempty"`
+	NumFiles    *int64    `json:"num_files,omitempty"`
+	NumLines    *int64    `json:"num_lines,omitempty"`
+	Patch       *string   `json:"patch,omitempty"`
+	StartLine   *int64    `json:"start_line,omitempty"`
+	Stderr      *string   `json:"stderr,omitempty"`
+	Stdout      *string   `json:"stdout,omitempty"`
+	Text        *string   `json:"text,omitempty"`
+	TotalLines  *int64    `json:"total_lines,omitempty"`
+	Truncated   *bool     `json:"truncated,omitempty"`
+}
+
 // SessionSubmitInputBody defines model for SessionSubmitInputBody.
 type SessionSubmitInputBody struct {
 	// Intent Semantic delivery choice for a user message on a session submit request.
@@ -2835,9 +3028,10 @@ type SessionSubmitSucceededPayload struct {
 
 // SessionTranscriptGetResponse defines model for SessionTranscriptGetResponse.
 type SessionTranscriptGetResponse struct {
-	// Format conversation, text, or raw.
-	Format string `json:"format"`
-	Id     string `json:"id"`
+	// Format conversation, text, raw, or structured.
+	Format  string                    `json:"format"`
+	History *SessionStructuredHistory `json:"history,omitempty"`
+	Id      string                    `json:"id"`
 
 	// Messages Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.
 	Messages   *[]SessionRawMessageFrame `json:"messages,omitempty"`
@@ -2845,7 +3039,13 @@ type SessionTranscriptGetResponse struct {
 
 	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
 	Provider string `json:"provider"`
-	Template string `json:"template"`
+
+	// SchemaVersion Structured session transcript schema version when format is structured.
+	SchemaVersion *string `json:"schema_version,omitempty"`
+
+	// StructuredMessages Populated for structured format; provider-normalized structured messages.
+	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty"`
+	Template           string                      `json:"template"`
 
 	// Turns Populated for conversation/text formats.
 	Turns *[]OutputTurn `json:"turns,omitempty"`
@@ -6025,9 +6225,15 @@ type PostV0CityByCityNameSessionByIdStopParams struct {
 
 // StreamSessionParams defines parameters for StreamSession.
 type StreamSessionParams struct {
-	// Format Transcript format: conversation (default) or raw.
-	Format *string `form:"format,omitempty" json:"format,omitempty"`
+	// Format Transcript format: conversation (default), raw, or structured.
+	Format *StreamSessionParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeThinking Include thinking block text in structured stream frames. Defaults to false.
+	IncludeThinking *bool `form:"include_thinking,omitempty" json:"include_thinking,omitempty"`
 }
+
+// StreamSessionParamsFormat defines parameters for StreamSession.
+type StreamSessionParamsFormat string
 
 // SubmitSessionParams defines parameters for SubmitSession.
 type SubmitSessionParams struct {
@@ -6046,8 +6252,11 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
-	// Format Transcript format: conversation (default) or raw.
-	Format *string `form:"format,omitempty" json:"format,omitempty"`
+	// Format Transcript format: conversation (default), raw, or structured.
+	Format *GetV0CityByCityNameSessionByIdTranscriptParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeThinking Include thinking block text in structured responses. Defaults to false.
+	IncludeThinking *bool `form:"include_thinking,omitempty" json:"include_thinking,omitempty"`
 
 	// Before Pagination cursor: return entries before this UUID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -6055,6 +6264,9 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 	// After Pagination cursor: return entries after this UUID.
 	After *string `form:"after,omitempty" json:"after,omitempty"`
 }
+
+// GetV0CityByCityNameSessionByIdTranscriptParamsFormat defines parameters for GetV0CityByCityNameSessionByIdTranscript.
+type GetV0CityByCityNameSessionByIdTranscriptParamsFormat string
 
 // PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
 type PostV0CityByCityNameSessionByIdWakeParams struct {
@@ -22833,6 +23045,22 @@ func NewStreamSessionRequest(server string, cityName string, id string, params *
 
 		}
 
+		if params.IncludeThinking != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_thinking", *params.IncludeThinking, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -23020,6 +23248,22 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 		if params.Format != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeThinking != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_thinking", *params.IncludeThinking, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

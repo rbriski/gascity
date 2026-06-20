@@ -930,6 +930,131 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	}
 }
 
+func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, send sse.Sender, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot, includeThinking bool) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	logPath := sessionStreamTranscriptPath(ctx, handle)
+	poll := time.NewTicker(outputStreamPollInterval)
+	keepalive := time.NewTicker(sseKeepalive)
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+	if logPath == "" {
+		defer poll.Stop()
+		defer keepalive.Stop()
+	}
+
+	var lastSentID string
+	var seq int
+	var lastActivity string
+	sentIDs := make(map[string]struct{})
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
+		emitted := false
+		if snapshot == nil {
+			return false
+		}
+		messages, ids := historySnapshotStructuredMessages(snapshot, includeThinking)
+		if len(messages) > 0 {
+			var toSend []SessionStructuredMessage
+			if lastSentID == "" {
+				toSend = messages
+			} else {
+				found := false
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = messages[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream structured: cursor %s lost, emitting only new messages", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, messages[i])
+						}
+					}
+				}
+			}
+
+			if len(toSend) > 0 {
+				seq++
+				_ = send(sse.Message{ID: seq, Data: SessionStreamStructuredMessageEvent{
+					ID:                 info.ID,
+					Template:           info.Template,
+					Provider:           info.Provider,
+					Format:             "structured",
+					SchemaVersion:      sessionStructuredSchemaVersion,
+					History:            structuredHistoryFromSnapshot(snapshot),
+					StructuredMessages: toSend,
+				}})
+				emitted = true
+			}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
+			}
+		}
+
+		activity := historySnapshotActivity(snapshot)
+		if activity != "" && activity != lastActivity {
+			lastActivity = activity
+			seq++
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+			emitted = true
+		}
+		return emitted
+	}
+
+	var lw *logFileWatcher
+	reloadSnapshot := func() bool {
+		emitted := false
+		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
+		switch {
+		case err == nil:
+			emitted = emitSnapshot(snapshot)
+		case errors.Is(err, worker.ErrHistoryUnavailable):
+		default:
+			log.Printf("session stream structured: history reload failed for %s: %v", info.ID, err)
+		}
+		if lw != nil {
+			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
+		}
+		return emitted
+	}
+
+	if logPath != "" {
+		poll.Stop()
+		keepalive.Stop()
+		lw = newLogFileWatcher(logPath)
+		defer lw.Close()
+		_ = emitSnapshot(initial)
+		lw.Run(ctx, reloadSnapshot, func() {
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}, RunOpts{Wake: workerOps})
+		return
+	}
+
+	_ = emitSnapshot(initial)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			reloadSnapshot()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			reloadSnapshot()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}
+	}
+}
+
 func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, info session.Info) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

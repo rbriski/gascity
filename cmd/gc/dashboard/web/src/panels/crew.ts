@@ -1,5 +1,6 @@
 import type { SessionRecord } from "../api";
 import { api, cityScope } from "../api";
+import type { SessionStructuredBlock, SessionStructuredMessage } from "../generated";
 import { byId, clear, el } from "../util/dom";
 import { calculateActivity, formatTimestamp, statusBadgeClass, truncate } from "../util/legacy";
 import { connectAgentOutput, type AgentOutputMessage, type SSEHandle } from "../sse";
@@ -325,7 +326,11 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
   const res = await api.GET("/v0/city/{cityName}/session/{id}/transcript", {
     params: {
       path: { cityName: city, id: sessionID },
-      query: { tail: String(prepend ? 50 : 25), before: prepend ? logBeforeCursor : undefined },
+      query: {
+        tail: String(prepend ? 50 : 25),
+        before: prepend ? logBeforeCursor : undefined,
+        format: "structured",
+      },
     },
   });
   loadingEl.style.display = "none";
@@ -335,9 +340,17 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
   }
 
   const fragment = document.createDocumentFragment();
-  for (const turn of res.data.turns ?? []) {
-    fragment.append(renderTurn(turn.role, turn.text, turn.timestamp));
-    logCount += 1;
+  const structuredMessages = structuredMessagesFromEnvelope(res.data);
+  if (structuredMessages.length > 0) {
+    for (const message of structuredMessages) {
+      fragment.append(renderStructuredMessage(message));
+      logCount += 1;
+    }
+  } else {
+    for (const turn of res.data.turns ?? []) {
+      fragment.append(renderTurn(turn.role, turn.text, turn.timestamp));
+      logCount += 1;
+    }
   }
   if (prepend) {
     messagesEl.prepend(fragment);
@@ -363,6 +376,17 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
 function appendStreamEvent(msg: AgentOutputMessage): void {
   const messagesEl = byId("log-drawer-messages");
   if (!messagesEl) return;
+  const structuredMessages = structuredMessagesFromEnvelope(msg.data);
+  if (msg.type === "structured" && structuredMessages.length > 0) {
+    for (const message of structuredMessages) {
+      messagesEl.append(renderStructuredMessage(message));
+      logCount += 1;
+    }
+    byId("log-drawer-count")!.textContent = String(logCount);
+    const body = byId("log-drawer-body");
+    if (body) body.scrollTop = body.scrollHeight;
+    return;
+  }
   const payload = msg.data as { data?: { message?: { role?: string; text?: string; timestamp?: string } }; event?: string } | null;
   if (msg.type !== "message" || !payload?.data?.message) return;
   messagesEl.append(renderTurn(payload.data.message.role ?? "agent", payload.data.message.text ?? "", payload.data.message.timestamp));
@@ -370,6 +394,19 @@ function appendStreamEvent(msg: AgentOutputMessage): void {
   byId("log-drawer-count")!.textContent = String(logCount);
   const body = byId("log-drawer-body");
   if (body) body.scrollTop = body.scrollHeight;
+}
+
+function structuredMessagesFromEnvelope(value: unknown): SessionStructuredMessage[] {
+  if (!isRecord(value)) return [];
+  const structured = value.structured_messages;
+  if (Array.isArray(structured)) return structured.filter(isStructuredMessage);
+
+  // Accept the final spec shape too: a structured envelope may use
+  // `messages` for normalized messages. Raw frames also use `messages`,
+  // so only treat objects with block arrays as structured messages.
+  const messages = value.messages;
+  if (Array.isArray(messages)) return messages.filter(isStructuredMessage);
+  return [];
 }
 
 function renderTurn(role: string, text: string, timestamp: string | undefined): HTMLElement {
@@ -380,6 +417,116 @@ function renderTurn(role: string, text: string, timestamp: string | undefined): 
     ]),
     el("div", { class: "log-msg-body" }, [text]),
   ]);
+}
+
+function renderStructuredMessage(message: SessionStructuredMessage): HTMLElement {
+  const role = message.role || "agent";
+  const body = el("div", { class: "log-msg-body log-msg-body-structured" });
+  for (const block of message.blocks ?? []) {
+    const rendered = renderStructuredBlock(block);
+    if (rendered) body.append(rendered);
+  }
+  if (!body.hasChildNodes()) {
+    body.append(document.createTextNode(""));
+  }
+  return el("div", { class: "log-msg log-msg-structured" }, [
+    el("div", { class: "log-msg-header" }, [
+      el("span", { class: `log-msg-type log-msg-type-${roleClass(role)}` }, [role]),
+      el("span", { class: "log-msg-time" }, [formatTimestamp(message.timestamp)]),
+      message.model ? el("span", { class: "log-msg-model" }, [message.model]) : null,
+    ]),
+    body,
+  ]);
+}
+
+function renderStructuredBlock(block: SessionStructuredBlock): HTMLElement | null {
+  switch (block.type) {
+    case "text":
+      return el("div", { class: "log-msg-text-block" }, [block.text ?? ""]);
+    case "thinking":
+      return el("div", { class: "log-msg-thinking-block" }, [block.thinking ? "[thinking] " + block.thinking : "[thinking]"]);
+    case "tool_use":
+      return el("div", { class: "log-msg-tool" }, [
+        block.name ? `${block.name}` : "tool",
+        block.input !== undefined ? ` ${formatInlineValue(block.input)}` : "",
+      ]);
+    case "tool_result":
+      return el("div", { class: `log-msg-tool-result${block.is_error ? " is-error" : ""}` }, [
+        formatToolResult(block),
+      ]);
+    case "interaction":
+      return el("div", { class: "log-msg-tool" }, [formatInteraction(block)]);
+    default:
+      return el("div", { class: "log-msg-tool-result" }, [formatInlineValue(block)]);
+  }
+}
+
+function formatToolResult(block: SessionStructuredBlock): string {
+  const structured = recordOf(block.structured);
+  if (structured) {
+    const kind = typeof structured.kind === "string" ? structured.kind : "result";
+    if (kind === "bash") {
+      return [
+        typeof structured.stdout === "string" ? structured.stdout : "",
+        typeof structured.stderr === "string" ? structured.stderr : "",
+        structured.exit_code !== undefined ? `exit ${String(structured.exit_code)}` : "",
+      ].filter(Boolean).join("\n");
+    }
+    if (kind === "edit") {
+      return [
+        typeof structured.file_path === "string" ? structured.file_path : "",
+        typeof structured.patch === "string" ? structured.patch : formatInlineValue(structured),
+      ].filter(Boolean).join("\n");
+    }
+    if (kind === "read") {
+      return [
+        typeof structured.file_path === "string" ? structured.file_path : "",
+        typeof structured.content === "string" ? structured.content : "",
+      ].filter(Boolean).join("\n");
+    }
+    if (kind === "grep") {
+      return [
+        Array.isArray(structured.filenames) ? structured.filenames.join(", ") : "",
+        typeof structured.content === "string" ? structured.content : "",
+      ].filter(Boolean).join("\n");
+    }
+    return formatInlineValue(structured);
+  }
+  if (typeof block.content === "string") return block.content;
+  if (block.content !== undefined) return formatInlineValue(block.content);
+  return "";
+}
+
+function formatInteraction(block: SessionStructuredBlock): string {
+  const fallback: unknown = block;
+  const interaction = recordOf(block.interaction) ?? recordOf(fallback) ?? {};
+  const kind = typeof interaction.kind === "string" ? interaction.kind : "interaction";
+  const state = typeof interaction.state === "string" ? interaction.state : "";
+  const prompt = typeof interaction.prompt === "string" ? interaction.prompt : "";
+  return [kind, state, prompt].filter(Boolean).join(" ");
+}
+
+function formatInlineValue(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function isStructuredMessage(value: unknown): value is SessionStructuredMessage {
+  return isRecord(value) && Array.isArray(value.blocks);
 }
 
 function roleClass(role: string): string {

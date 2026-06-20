@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const streamEvents = vi.fn();
+const streamSession = vi.fn();
 const streamSupervisorEvents = vi.fn();
 
 vi.mock("./generated/client.gen", () => ({
@@ -9,7 +10,7 @@ vi.mock("./generated/client.gen", () => ({
 
 vi.mock("./generated/sdk.gen", () => ({
   streamEvents,
-  streamSession: vi.fn(),
+  streamSession,
   streamSupervisorEvents,
 }));
 
@@ -25,6 +26,7 @@ describe("dashboard SSE status", () => {
   beforeEach(() => {
     vi.resetModules();
     streamEvents.mockReset();
+    streamSession.mockReset();
     streamSupervisorEvents.mockReset();
   });
 
@@ -58,5 +60,20 @@ describe("dashboard SSE status", () => {
     handle.close();
     expect(statuses).toContain("connecting");
     expect(statuses).toContain("live");
+  });
+
+  it("requests structured session output for live session streams", async () => {
+    streamSession.mockResolvedValue({ stream: quietStream() });
+
+    const { connectAgentOutput } = await import("./sse");
+    const handle = connectAgentOutput("mc-city", "session-1", () => undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    handle.close();
+    expect(streamSession).toHaveBeenCalledWith(expect.objectContaining({
+      path: { cityName: "mc-city", id: "session-1" },
+      query: { format: "structured" },
+    }));
   });
 });

@@ -136,7 +136,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 
 // humaHandleSessionCreate is the Huma-typed handler for POST /v0/sessions.
 
-func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
+func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -159,6 +159,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 	}
 
 	wantRaw := input.Format == "raw"
+	wantStructured := input.Format == "structured"
 
 	if path != "" {
 		// Compactions() returns (n, provided). When the client omitted
@@ -171,6 +172,32 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 
 		if before != "" && after != "" {
 			return nil, huma.Error422UnprocessableEntity("before and after are mutually exclusive")
+		}
+
+		if wantStructured {
+			handle, handleErr := s.workerHandleForSession(store, id)
+			if handleErr != nil {
+				return nil, humaSessionManagerError(handleErr)
+			}
+			history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{
+				TailCompactions: tail,
+			})
+			if historyErr != nil {
+				return nil, huma.Error500InternalServerError("reading session history: " + historyErr.Error())
+			}
+			messages, _ := historySnapshotStructuredMessages(history, input.IncludeThinking)
+			return &IndexOutput[sessionTranscriptGetResponse]{
+				Index: s.latestIndex(),
+				Body: sessionTranscriptGetResponse{
+					ID:                 info.ID,
+					Template:           info.Template,
+					Provider:           info.Provider,
+					Format:             "structured",
+					SchemaVersion:      sessionStructuredSchemaVersion,
+					History:            structuredHistoryFromSnapshot(history),
+					StructuredMessages: messages,
+				},
+			}, nil
 		}
 
 		if wantRaw {

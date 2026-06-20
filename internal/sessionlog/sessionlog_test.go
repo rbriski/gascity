@@ -129,9 +129,36 @@ func TestProviderFamilyPiAliasAnchoring(t *testing.T) {
 		{provider: "my-pi", want: "pi"},
 		{provider: "my-pi/tmux", want: "pi"},
 		{provider: "wrapped/pi", want: "pi"},
+		{provider: "omp", want: "pi"},
+		{provider: "omp/tmux-cli", want: "pi"},
+		{provider: "wrapped/omp", want: "pi"},
+		{provider: "oh-my-pi", want: "pi"},
 		{provider: "happy-pirate", want: "happy-pirate"},
 		{provider: "claude-pirep", want: "claude-pirep"},
 		{provider: "user-pid", want: "user-pid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := ProviderFamily(tt.provider); got != tt.want {
+				t.Fatalf("ProviderFamily(%q) = %q, want %q", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderFamilyOpenCodeBackedAliases(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{provider: "groq", want: "opencode"},
+		{provider: "groq/tmux-cli", want: "opencode"},
+		{provider: "wrapped/groq", want: "opencode"},
+		{provider: "cerebras", want: "opencode"},
+		{provider: "cerebras/tmux-cli", want: "opencode"},
+		{provider: "wrapped/cerebras", want: "opencode"},
+		{provider: "grocery", want: "grocery"},
+		{provider: "cerebral", want: "cerebral"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {

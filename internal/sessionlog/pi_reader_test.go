@@ -70,6 +70,46 @@ func TestReadPiFileNormalizesTools(t *testing.T) {
 	}
 }
 
+func TestReadPiFileNormalizesOMPExecutionMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	body := `{"type":"session","version":3,"id":"ses_omp","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/tmp/gascity/omp"}
+{"type":"message","id":"msg_bash","parentId":null,"timestamp":"2026-02-02T00:00:01.000Z","message":{"role":"bashExecution","command":"go test ./...","output":"ok ./internal/api","exitCode":0,"canceled":false,"truncated":true,"timestamp":1770000001000}}
+{"type":"message","id":"msg_python","parentId":"msg_bash","timestamp":"2026-02-02T00:00:02.000Z","message":{"role":"pythonExecution","code":"print('hello')","output":"hello\n","exitCode":0,"canceled":false,"timestamp":1770000002000}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write pi fixture: %v", err)
+	}
+
+	sess, err := ReadProviderFile("omp", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile(omp): %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(sess.Messages))
+	}
+
+	bashBlocks := sess.Messages[0].ContentBlocks()
+	if len(bashBlocks) != 1 || bashBlocks[0].Type != "tool_result" || bashBlocks[0].Name != "bash" {
+		t.Fatalf("bash blocks = %#v", bashBlocks)
+	}
+	assertRawMetadata(t, bashBlocks[0].Content, map[string]any{
+		"command":   "go test ./...",
+		"output":    "ok ./internal/api",
+		"exitCode":  float64(0),
+		"truncated": true,
+	})
+
+	pythonBlocks := sess.Messages[1].ContentBlocks()
+	if len(pythonBlocks) != 1 || pythonBlocks[0].Type != "tool_result" || pythonBlocks[0].Name != "python" {
+		t.Fatalf("python blocks = %#v", pythonBlocks)
+	}
+	assertRawMetadata(t, pythonBlocks[0].Content, map[string]any{
+		"code":     "print('hello')",
+		"output":   "hello",
+		"exitCode": float64(0),
+	})
+}
+
 func TestReadPiFileReportsBranchesAndUsesAllEntriesForToolResults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	body := `{"type":"session","version":3,"id":"ses_branch","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/tmp/gascity/phase2/pi"}

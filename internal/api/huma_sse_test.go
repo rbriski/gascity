@@ -135,6 +135,38 @@ func TestEventStreamsUseTypedEnvelopeUnions(t *testing.T) {
 	}
 }
 
+func TestSessionStreamStructuredEventInSpec(t *testing.T) {
+	for _, source := range eventStreamSpecCases(t) {
+		t.Run(source.name, func(t *testing.T) {
+			gotRef := sseEventDataRef(t, source.spec, "/v0/city/{cityName}/session/{id}/stream", "structured")
+			if gotRef != "#/components/schemas/SessionStreamStructuredMessageEvent" {
+				t.Fatalf("session structured event data ref = %q, want SessionStreamStructuredMessageEvent", gotRef)
+			}
+
+			schemas := componentSchemas(t, source.spec)
+			blockSchema := schemaByRef(t, schemas, "#/components/schemas/SessionStructuredBlock")
+			properties, ok := blockSchema["properties"].(map[string]any)
+			if !ok {
+				t.Fatal("SessionStructuredBlock properties missing")
+			}
+			inputProperty, ok := properties["input"].(map[string]any)
+			if !ok {
+				t.Fatal("SessionStructuredBlock.input property missing")
+			}
+			if gotRef, _ := inputProperty["$ref"].(string); gotRef != "#/components/schemas/SessionStructuredToolInput" {
+				t.Fatalf("SessionStructuredBlock.input ref = %q, want SessionStructuredToolInput", gotRef)
+			}
+			contentProperty, ok := properties["content"].(map[string]any)
+			if !ok {
+				t.Fatal("SessionStructuredBlock.content property missing")
+			}
+			if gotType, _ := contentProperty["type"].(string); gotType != "string" {
+				t.Fatalf("SessionStructuredBlock.content type = %q, want string", gotType)
+			}
+		})
+	}
+}
+
 func TestTypedEventEnvelopeUnionsCoverKnownEventTypes(t *testing.T) {
 	for _, source := range eventStreamSpecCases(t) {
 		t.Run(source.name, func(t *testing.T) {

@@ -2839,6 +2839,153 @@ export type SessionStreamRawMessageEvent = {
     template: string;
 };
 
+export type SessionStreamStructuredMessageEvent = {
+    /**
+     * Always structured for this event.
+     */
+    format: string;
+    /**
+     * Normalized worker-history envelope for this snapshot or stream batch.
+     */
+    history?: SessionStructuredHistory;
+    id: string;
+    pagination?: PaginationInfo;
+    /**
+     * Producing provider identifier (claude, codex, gemini, open-code, etc.).
+     */
+    provider: string;
+    /**
+     * Structured session transcript schema version.
+     */
+    schema_version: string;
+    /**
+     * Provider-normalized structured messages.
+     */
+    structured_messages: Array<SessionStructuredMessage> | null;
+    template: string;
+};
+
+export type SessionStructuredArgument = {
+    name: string;
+    value: string;
+};
+
+export type SessionStructuredBlock = {
+    content?: string;
+    id?: string;
+    input?: SessionStructuredToolInput;
+    interaction?: SessionStructuredInteraction;
+    is_error?: boolean;
+    name?: string;
+    signature?: string;
+    structured?: SessionStructuredToolResult;
+    text?: string;
+    thinking?: string;
+    tool_call_id?: string;
+    type: string;
+};
+
+export type SessionStructuredContinuity = {
+    compaction_count?: number;
+    has_branches?: boolean;
+    note?: string;
+    status: string;
+};
+
+export type SessionStructuredCursor = {
+    after_entry_id?: string;
+};
+
+export type SessionStructuredDiagnostic = {
+    code: string;
+    count?: number;
+    message?: string;
+};
+
+export type SessionStructuredGeneration = {
+    id: string;
+    observed_at?: string;
+};
+
+export type SessionStructuredHistory = {
+    continuity: SessionStructuredContinuity;
+    cursor: SessionStructuredCursor;
+    diagnostics?: Array<SessionStructuredDiagnostic> | null;
+    gc_session_id?: string;
+    generation: SessionStructuredGeneration;
+    logical_conversation_id?: string;
+    provider_session_id?: string;
+    tail_state: SessionStructuredTailState;
+    transcript_stream_id: string;
+};
+
+export type SessionStructuredInteraction = {
+    action?: string;
+    kind?: string;
+    options?: Array<string> | null;
+    prompt?: string;
+    request_id?: string;
+    state: string;
+};
+
+export type SessionStructuredMessage = {
+    blocks: Array<SessionStructuredBlock> | null;
+    id: string;
+    is_subagent?: boolean;
+    model?: string;
+    parent_tool_call_id?: string;
+    provider?: string;
+    role: string;
+    status: string;
+    stop_reason?: string;
+    timestamp?: string;
+};
+
+export type SessionStructuredTailState = {
+    activity: string;
+    degraded?: boolean;
+    degraded_reason?: string;
+    last_entry_id?: string;
+    open_tool_call_ids?: Array<string> | null;
+    pending_interaction_ids?: Array<string> | null;
+};
+
+export type SessionStructuredToolInput = {
+    arguments?: Array<SessionStructuredArgument> | null;
+    code?: string;
+    command?: string;
+    file_path?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, search, file, arguments, or text.
+     */
+    kind?: string;
+    patch?: string;
+    pattern?: string;
+    query?: string;
+    text?: string;
+};
+
+export type SessionStructuredToolResult = {
+    code?: string;
+    content?: string;
+    exit_code?: number;
+    file_path?: string;
+    filenames?: Array<string> | null;
+    interrupted?: boolean;
+    is_image?: boolean;
+    kind: string;
+    mode?: string;
+    num_files?: number;
+    num_lines?: number;
+    patch?: string;
+    start_line?: number;
+    stderr?: string;
+    stdout?: string;
+    text?: string;
+    total_lines?: number;
+    truncated?: boolean;
+};
+
 export type SessionSubmitInputBody = {
     /**
      * Submit intent; empty defaults to "default".
@@ -2871,9 +3018,13 @@ export type SessionSubmitSucceededPayload = {
 
 export type SessionTranscriptGetResponse = {
     /**
-     * conversation, text, or raw.
+     * conversation, text, raw, or structured.
      */
     format: string;
+    /**
+     * Normalized worker-history envelope when format is structured.
+     */
+    history?: SessionStructuredHistory;
     id: string;
     /**
      * Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.
@@ -2884,6 +3035,14 @@ export type SessionTranscriptGetResponse = {
      * Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
      */
     provider: string;
+    /**
+     * Structured session transcript schema version when format is structured.
+     */
+    schema_version?: string;
+    /**
+     * Populated for structured format; provider-normalized structured messages.
+     */
+    structured_messages?: Array<SessionStructuredMessage> | null;
     template: string;
     /**
      * Populated for conversation/text formats.
@@ -11197,9 +11356,13 @@ export type StreamSessionData = {
     };
     query?: {
         /**
-         * Transcript format: conversation (default) or raw.
+         * Transcript format: conversation (default), raw, or structured.
          */
-        format?: string;
+        format?: 'conversation' | 'raw' | 'structured';
+        /**
+         * Include thinking block text in structured stream frames. Defaults to false.
+         */
+        include_thinking?: boolean;
     };
     url: '/v0/city/{cityName}/session/{id}/stream';
 };
@@ -11267,6 +11430,20 @@ export type StreamSessionResponses = {
          * The event name.
          */
         event: 'pending';
+        /**
+         * The event ID.
+         */
+        id?: number;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SessionStreamStructuredMessageEvent;
+        /**
+         * The event name.
+         */
+        event: 'structured';
         /**
          * The event ID.
          */
@@ -11392,9 +11569,13 @@ export type GetV0CityByCityNameSessionByIdTranscriptData = {
          */
         tail?: string;
         /**
-         * Transcript format: conversation (default) or raw.
+         * Transcript format: conversation (default), raw, or structured.
          */
-        format?: string;
+        format?: 'conversation' | 'raw' | 'structured';
+        /**
+         * Include thinking block text in structured responses. Defaults to false.
+         */
+        include_thinking?: boolean;
         /**
          * Pagination cursor: return entries before this UUID.
          */

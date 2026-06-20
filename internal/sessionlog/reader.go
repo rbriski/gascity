@@ -1291,15 +1291,33 @@ func ProviderFamily(provider string) string {
 		return "kimi"
 	case strings.Contains(p, "mimocode"):
 		return "mimocode"
-	case strings.Contains(p, "opencode"):
+	case strings.Contains(p, "opencode") || providerComponent(p, "groq") || providerComponent(p, "cerebras"):
 		return "opencode"
 	case strings.Contains(p, "antigravity"):
 		return "antigravity"
-	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/"):
+	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/") ||
+		p == "omp" || strings.HasPrefix(p, "omp/") || strings.HasSuffix(p, "/omp") || strings.Contains(p, "oh-my-pi"):
 		return "pi"
 	default:
 		return p
 	}
+}
+
+func providerComponent(provider, component string) bool {
+	provider = strings.ReplaceAll(strings.TrimSpace(provider), "_", "-")
+	component = strings.TrimSpace(component)
+	if provider == "" || component == "" {
+		return false
+	}
+	parts := strings.FieldsFunc(provider, func(r rune) bool {
+		return r == '/' || r == ':' || r == '@'
+	})
+	for _, part := range parts {
+		if part == component {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeProjectSlugCandidates(workDir string) []string {

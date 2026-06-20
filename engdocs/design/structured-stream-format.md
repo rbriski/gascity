@@ -50,13 +50,15 @@ per-provider knowledge stays in **one tested place near the source**
 the dashboard, an external client — gets a rich, provider-agnostic event model
 without duplicating provider parsers.
 
-The headline finding from the cross-codebase audit behind this spec: Gas
-City **already parses** provider frames into typed blocks for 8 of the
-relevant families. The dominant gap is not whole-reader creation — it is that
-Gas City's block/entry model cannot *carry* several rich fields, the API
-*flattens* what it does carry, and a few provider-specific gaps remain. One
-cross-cutting carrier change therefore unlocks most of the fidelity at once;
-Codex and Gemini need targeted gap work, not brand-new reader families.
+The headline finding from the cross-codebase and provider-format audit behind
+this spec: Gas City already parses provider frames into typed blocks for 8
+transcript families, covering 11 of the 17 built-in provider profiles once
+OpenCode-backed and Pi-family aliases are routed correctly. The dominant gap
+is not a lack of a structured wire shape — it is that Gas City's API flattens
+the structure it already has, and several providers need either modernized
+readers or managed capture because their public persisted transcript is not a
+rich complete trace. One cross-cutting carrier/schema change therefore unlocks
+most fidelity immediately; targeted provider adapters close the remainder.
 This is **transcript-schema parity**, not end-to-end provider parity: provider
 resume, hooks, MCP projection, skills, and runtime behavior remain governed by
 their own provider-specific designs.
@@ -116,18 +118,42 @@ What the typed model **cannot** carry today:
   transcript metadata, not Gas City formula/drain fanout; drain correlation
   stays in beads, convoys, formulas, and events.
 
-### Coverage today
+### Provider coverage contract
 
-| Tier | Providers | GC reader | Notes |
-|---|---|---|---|
-| Frontier dedicated | claude, codex, gemini | dedicated | Dedicated readers exist; remaining fidelity gaps are listed below |
-| **GC already structured** | kimi, opencode, mimocode, pi, antigravity | dedicated | Emit tool_use / tool_result blocks today, and thinking / interaction blocks where the provider records them; the carrier/API projection hides common block structure, while model/usage/stop metadata still needs provider-specific work where available |
-| Thin | grok, kiro, cursor, copilot, amp, groq, cerebras, auggie, omp | Claude-fallback | Structured only if the provider writes Claude-shaped JSONL |
+`format=structured` is a provider-neutral projection over all 17 built-in
+provider profiles. The source adapter may read a native transcript, an official
+export, a live NDJSON stream, an ACP event log, or a Gas City managed capture
+file; the structured wire shape is the same either way. If a provider's native
+local transcript omits tool output or file changes, Gas City must capture those
+facts through that provider's hook/stream/ACP surface before claiming rich
+structured coverage. It must not forward native provider JSON as a shortcut.
 
-Builtin list: `internal/worker/builtin/profiles.go:83-87`. The practical
-consequence: a carrier + stop-flatten change immediately lights up **8
-families** (claude + codex + gemini + the 5 "already structured" long-tail
-families), while the provider-specific work below closes remaining gaps.
+Builtin provider profiles live in `internal/worker/builtin/profiles.go`.
+The current adapter/capture target is:
+
+| Profile | Structured source | Expected v1 fidelity |
+|---|---|---|
+| claude | Claude JSONL under `~/.claude/projects/...` | rich messages, tool calls/results, thinking placeholder/text when allowed, raw only for native frames |
+| codex | Codex rollout JSONL / `--json` event stream | rich tool calls/results; command and patch events normalize to Bash/Edit where derivable |
+| gemini | Gemini session records | rich tool calls/results, thoughts, token usage; reader must support current JSONL session format |
+| kimi | Kimi Code `agents/main/wire.jsonl` (and legacy context logs while supported) | rich main-agent and subagent messages, tool calls/results |
+| opencode | OpenCode export/mirror JSON | rich tool calls/results and interactions from message parts |
+| mimocode | MiMo Code export/session database mirror using the OpenCode-compatible shape | rich tool calls/results through the MiMo/OpenCode adapter |
+| groq | OpenCode-backed Gas City profile | same as OpenCode; no Groq-specific transcript dialect |
+| cerebras | OpenCode-backed Gas City profile | same as OpenCode; no Cerebras-specific transcript dialect |
+| pi | Pi JSONL under `~/.pi/agent/sessions` | rich messages, tool calls/results, Bash/Python execution where present |
+| omp | Oh My Pi JSONL under `~/.omp/agent/sessions` | same Pi-family adapter, including Bash/Python execution records |
+| antigravity | Antigravity transcript JSONL / brain artifacts | rich messages, tool calls/results, interactions, artifacts where exposed |
+| copilot | Copilot CLI session-state event log | rich once a dedicated reader maps `tool.execution_*`, terminal output, and write diffs |
+| kiro | Kiro ACP JSONL event log or chat DB export | rich through ACP events (`ToolCall`, `ToolCallUpdate`, `TurnEnd`); DB-only chat export needs sampling |
+| cursor | Cursor transcript plus Gas City hook capture | native JSONL has messages and tool-call inputs only; tool outputs require hook capture |
+| amp | `amp --execute --stream-json` live capture | rich for execute/headless flows; retrospective local thread discovery is not a public stable source |
+| grok | Grok `--output-format streaming-json` or ACP capture | rich for headless/ACP capture; persisted `~/.grok/sessions` schema is not public enough to rely on alone |
+| auggie | Auggie saved session JSON or SDK/stream capture | rich through saved session `chatHistory` / node graph once a dedicated reader is added |
+
+Practical consequence: the carrier + stop-flatten change immediately lights up
+the 8 existing transcript families and 11 built-in profiles. The remaining 6
+native profiles require reader/capture work, not client-side provider parsers.
 
 ## The streaming ceiling (read before scoping "streaming")
 
@@ -172,13 +198,17 @@ Phase 1 hardening task for Gemini specifically.
 
 - A third session-stream/transcript format, `format=structured`, emitting a
   typed, versioned, provider-agnostic message + block schema.
-- Highest available fidelity for the three frontier providers (claude, codex,
-  gemini): tool inputs, **structured tool results**, thinking + signature,
+- Highest available fidelity for all 17 built-in provider profiles: tool
+  inputs, **structured tool results**, file edits/diffs, thinking + signature,
   usage, model, stop-reason, and provider subagent relationships where those
   fields are present or derivable.
 - Zero client-side per-provider enrichment required to render a rich UI.
-- The 5 "already structured" long-tail families gain useful structured output
-  without new reader families.
+- Provider-specific parsing/capture remains inside Gas City adapter code. A
+  client asking for `format=structured` must never need to know a provider's
+  native transcript dialect.
+- Existing long-tail families and aliases (`kimi`, `opencode`, `mimocode`,
+  `groq`, `cerebras`, `pi`, `omp`, `antigravity`) gain useful structured
+  output without inventing new wire contracts.
 - A golden-fixture regression guard so server-side translation is safe
   across provider/version drift.
 
@@ -186,8 +216,9 @@ Phase 1 hardening task for Gemini specifically.
 
 - Removing or changing `conversation` / `raw` (both remain; back-compat).
 - Sub-frame/token streaming (Phase 2, documented but not built here).
-- Dedicated readers for the 9 "thin" providers (deferred pending a fixture
-  capture that reveals whether they are Claude-shaped).
+- Passing provider-native JSON, provider-native metadata maps, or
+  provider-specific field names through `format=structured`. That remains the
+  purpose of `format=raw`.
 - Presentation concerns — markdown→HTML, syntax highlighting, diff
   rendering, visual tool_use/result pairing. These stay in the consumer;
   `format=structured` ships *data*, not HTML.
@@ -227,19 +258,31 @@ Scoped to respect Gas City's load-bearing invariants (AGENTS.md):
 Typed wire only — no bare `map[string]any` / `json.RawMessage` on the API or
 SSE wire path. The concrete Huma-registered Go wire structs are the source for
 the generated OpenAPI; the pseudocode below is a design sketch for those
-structs, and `TestOpenAPISpecInSync` must pass. Arbitrary tool input,
-tool-result content, interaction metadata, and `opaque.raw` are the only
-pressure points. They need one of two treatments before implementation:
+structs, and `TestOpenAPISpecInSync` must pass.
 
-- model the shapes as concrete discriminated unions where GC owns the shape
-  (preferred for Bash/Grep/Read and known interaction metadata); or
-- introduce a named `StructuredJSONValue` / `StructuredOpaqueJSON` wire type
-  with Huma schema support and document it as a narrow API control-plane
-  exception, analogous in spirit to `SessionRawMessageFrame` but scoped to
-  structured payload leaf values.
+`format=structured` has an additional provider-neutrality contract:
+**it must not send provider-native transcript frames, provider-native JSON
+leaves, or provider-specific dialect shapes over the wire.** The point of the
+format is that clients can render rich session output without knowing that
+Codex calls a field `call_id`, Claude calls it `tool_use_id`, or Gemini stores
+tool arguments under a different object shape. Exact provider frames remain
+available only through `format=raw`.
 
-Do not use anonymous maps, raw JSON fields, or unregistered unions directly on
-the structured API types.
+Every tool input, tool result, interaction, usage record, and diagnostic exposed
+by `format=structured` must therefore be one of:
+
+- a provider-neutral typed shape Gas City owns (preferred for known tool
+  families such as Bash/Grep/Read/Edit/Search and known interaction fields);
+  or
+- a provider-neutral fallback shape made from typed fields such as
+  `{ kind: "text", text }` or `{ kind: "arguments", arguments: [{ name, value }] }`.
+
+Fallbacks preserve useful display data, but they do not preserve arbitrary
+provider-native JSON. Consumers that need byte-level provider evidence must ask
+for `format=raw`.
+
+Do not use anonymous maps, raw JSON fields, unregistered unions, or "any JSON"
+carriers directly on the structured API types.
 
 ```
 StructuredHistory
@@ -250,7 +293,7 @@ StructuredHistory
   generation            { id, observedAt? }
   cursor                { afterEntryId? }
   continuity            { status, compactionCount?, hasBranches?, note? }
-  tailState             { activity, lastEntryId?, openToolUseIds?, pendingInteractionIds?, degraded?, degradedReason? }
+  tailState             { activity, lastEntryId?, openToolCallIds?, pendingInteractionIds?, degraded?, degradedReason? }
   diagnostics           []StructuredDiagnostic?
 
 StructuredMessage
@@ -262,7 +305,7 @@ StructuredMessage
   stopReason  string?
   usage       StructuredUsage?
   isSubagent  bool?
-  parentToolUseId string?
+  parentToolCallId string?
   status      string                 // final | partial | superseded | unknown
   blocks      []StructuredBlock
 
@@ -278,22 +321,36 @@ StructuredUsage
 StructuredBlock  (discriminated on `type`)
   type "text"        => { text }
   type "thinking"    => { thinking, signature? }     // gated, see policy
-  type "tool_use"    => { id, name, input, caller? } // input = typed union or named opaque JSON value
-  type "tool_result" => { toolUseId, content, isError, structured? }
-  type "interaction" => { requestId, kind, state, prompt, options, action, metadata }
+  type "tool_use"    => { id, name, input, caller? } // input = provider-neutral typed shape
+  type "tool_result" => { toolCallId, content, isError, structured? }
+  type "interaction" => { requestId, kind, state, prompt, options, action }
   type "image"       => { ... }
 
+StructuredToolInput  (the `input` on tool_use; discriminated on `kind`)
+  kind "command"   => { command, args? }
+  kind "code"      => { code }
+  kind "patch"     => { patch, filePath? }
+  kind "search"    => { query?, pattern? }
+  kind "file"      => { filePath }
+  kind "arguments" => { arguments: [{ name, value }] } // provider-neutral strings
+  kind "text"      => { text }
+
 StructuredToolResult  (the `structured?` on tool_result; discriminated on `kind`)
-  kind "bash"   => { stdout, stderr, exitCode?, interrupted, isImage? }
+  kind "bash"   => { stdout, stderr, exitCode?, interrupted, truncated?, isImage? }
+  kind "python" => { code?, stdout, stderr, exitCode?, interrupted, truncated? }
   kind "grep"   => { mode, filenames[], numFiles, content, numLines }
   kind "read"   => { filePath, content, numLines, startLine?, totalLines? }
-  kind "opaque" => { raw }                            // leaf fallback; full raw mode remains separate
+  kind "edit"   => { filePath?, patch?, content? }
+  kind "search" => { query?, content, numResults? }
+  kind "text"   => { text, content? }                 // provider-neutral fallback
 ```
 
 The concrete Go wire structs should use Gas City's normal JSON spelling
-(`schema_version`, `stop_reason`, `is_subagent`, `parent_tool_use_id`,
-`tool_use_id`, `is_error`, etc.). The camel-case pseudocode above names the
-concepts, not the literal tags.
+(`schema_version`, `stop_reason`, `is_subagent`, `parent_tool_call_id`,
+`tool_call_id`, `is_error`, etc.). The camel-case pseudocode above names the
+concepts, not the literal tags. Use `tool_call_id` even when the native
+provider calls the value `tool_use_id`, `call_id`, or something else; native
+spelling belongs only in `format=raw`.
 
 The structured transcript response and the structured stream must preserve the
 worker history envelope, not only individual messages. Transcript snapshots can
@@ -348,7 +405,8 @@ decision flagged for sign-off, not just a code toggle.
 
 ### Phase 1 — Structured, frame-granular format
 
-**1A. Carrier + schema + stop-flatten (cross-cutting; unlocks 8 families).**
+**1A. Carrier + schema + stop-flatten (cross-cutting; unlocks 8 transcript
+families and 11 profiles).**
 
 - `internal/sessionlog/entry.go:60-77` — add `Thinking`, `Signature`, and a
   structured `ToolResult` field to `ContentBlock`; map Anthropic `thinking`
@@ -374,10 +432,10 @@ decision flagged for sign-off, not just a code toggle.
 - Live delivery reuses the existing tail/cursor stream machinery — frames
   are emitted structured as they commit (frame-granular streaming).
 
-Outcome: claude + kimi + opencode + mimocode + pi + antigravity emit useful
-structured blocks immediately, with fidelity bounded by the carrier fields they
-can populate. gemini and codex emit structured blocks too, minus their specific
-gaps (closed below).
+Outcome: claude + codex + gemini + kimi + opencode + mimocode + groq +
+cerebras + pi + omp + antigravity emit useful structured blocks immediately,
+with fidelity bounded by the carrier fields they can populate and by targeted
+reader gaps closed below.
 
 **1B. Codex structured tool results** (`internal/sessionlog/codex_reader.go`).
 
@@ -404,23 +462,52 @@ exactly why Codex results are opaque today. Then:
   read-path change — reasoning items read only `summary` today
   (`codex_reader.go:220-234`) — not a new field.
 
-**1C. Gemini gaps** (`internal/sessionlog/gemini_reader.go`).
+**1C. Gemini and Kimi current-format gaps.**
 
-- add `tokens` → usage (absent today);
-- set `tool_result.is_error` from `toolCall.status`;
-- handle `type:"error"` messages (silently dropped today);
-- preserve any provider-native model/stop metadata that appears in messages;
-- add an **incremental parser** so live frame-granular streaming works
-  (today it is whole-file `os.ReadFile`).
+- Gemini: support the current JSONL session format, add `tokens` → usage,
+  set `tool_result.is_error` from `toolCall.status`, handle `type:"error"`
+  messages, preserve model/stop metadata, and add an **incremental parser** so
+  live frame-granular streaming works (the legacy reader is whole-file).
+- Kimi: prefer current `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`
+  and subagent `wire.jsonl` files, while retaining legacy context-log support
+  until it is no longer useful.
 
-**1D. Long-tail polish (optional, cheap).**
+**1D. Alias and Pi-family hardening.**
 
-- add `is_error` to kimi/antigravity tool_results;
-- note: per-invocation usage is absent for long-tail readers today. Pi exposes
-  compaction `PreTokens`, but that is context-boundary evidence, not response
-  usage.
+- Route `groq` and `cerebras` through the OpenCode adapter. They are Gas City
+  OpenCode-backed profiles, not distinct transcript dialects.
+- Route `omp` through the Pi-family adapter and normalize OMP `bashExecution`
+  / `pythonExecution` messages to provider-neutral Bash/Python tool-result
+  shapes with output, exit code, cancellation/interruption, and truncation.
+- Add `is_error` where omitted today for kimi/antigravity tool results.
+- Note: per-invocation usage is absent for some long-tail readers today. Pi
+  exposes compaction `PreTokens`, but that is context-boundary evidence, not
+  response usage.
 
-**1E. Golden-fixture test corpus (cross-cutting; do alongside 1A–1C).**
+**1E. Native reader/capture work for the remaining 6 profiles.**
+
+- Copilot: add a reader for `~/.copilot/session-state/<sessionId>/events.jsonl`
+  that maps assistant/user events, `tool.execution_start`,
+  `tool.execution_complete`, terminal output blocks, and write diffs to the
+  neutral block/result schema.
+- Kiro: prefer ACP JSONL event logs under `~/.kiro/sessions/cli/` because ACP
+  explicitly exposes `ToolCall`, `ToolCallUpdate`, and `TurnEnd`; sample and
+  document the chat database/export path before using it.
+- Cursor: native local transcripts intentionally omit tool outputs, so rich
+  structured support requires Gas City-managed hook capture (for example
+  `postToolUse`) or sidecar output reconstruction. The native JSONL alone may
+  provide tool-call intent but is insufficient for rich results/diffs.
+- Amp: capture `amp --execute --stream-json` / `--stream-json-input` stdout for
+  structured non-interactive sessions. Do not claim retrospective rich local
+  thread discovery unless Amp publishes a stable local transcript source.
+- Grok: capture `--output-format streaming-json` or ACP `session/update`
+  events for headless/ACP sessions. The documented `~/.grok/sessions` path is
+  not enough by itself without a stable persisted schema.
+- Auggie: add a saved-session reader for `chatHistory` / node graph data, or
+  use SDK/stream capture, mapping `tool_use`, `tool_result_node`, command
+  output, edit metrics, and diffs into neutral tool-result shapes.
+
+**1F. Golden-fixture test corpus (cross-cutting; do alongside 1A–1E).**
 
 Capture real `format=raw` transcripts per provider/version into a fixture
 corpus and snapshot-test the structured producer. A provider CLI bump
@@ -481,21 +568,19 @@ authorization/redaction layer.
 
 - **Thinking exposure** — `include_thinking` default and whether the gated
   default omits text or the whole block. Needs sign-off (policy, not code).
-- **Schema churn** — `StructuredToolResult` kinds (bash/grep/read/opaque)
-  are Codex-derived; confirm they generalize before freezing the wire.
-  `opaque` prevents losing an unclassified tool-result payload, but it does
-  not replace `format=raw` unless the structured envelope also carries the
-  whole provider-native frame.
+- **Schema churn** — `StructuredToolInput` and `StructuredToolResult` kinds
+  (bash/grep/read/edit/search/text/etc.) need fixture pressure before freezing
+  the wire. The fallback must stay provider-neutral (`kind:"text"` or
+  normalized argument strings), not raw provider JSON.
 - **Sensitive payload exposure** — full tool inputs, tool results,
-  interaction metadata, and thinking can contain secrets. Any remote or
-  multi-tenant deployment needs the same auth, redaction, log-scrubbing, and
-  file-permission discipline used for projected MCP files and other
-  secret-bearing runtime surfaces.
-- **Typed-wire opacity boundary** — `input`, `content`, metadata, and
-  `opaque.raw` need either concrete typed variants or a named, documented
-  "any JSON value" carrier with an explicit API control-plane exception. Do
-  not put bare `json.RawMessage`, `map[string]any`, or unregistered unions
-  directly on API structs.
+  interaction prompts/options, code/diffs, and thinking can contain secrets.
+  Any remote or multi-tenant deployment needs the same auth, redaction,
+  log-scrubbing, and file-permission discipline used for projected MCP files
+  and other secret-bearing runtime surfaces.
+- **Provider-neutrality boundary** — `format=structured` must normalize
+  provider-specific fields into typed provider-neutral shapes. Do not put bare
+  `json.RawMessage`, `map[string]any`, unregistered unions, "any JSON" carriers,
+  or provider-native field objects directly on structured API structs.
 - **SSE event-name compatibility** — preserving the current default SSE
   `message` event semantics for raw frames while adding structured frames
   requires either a new event name or an intentional SSE helper refactor, as
@@ -506,8 +591,11 @@ authorization/redaction layer.
 - **`worker-conformance.md` alignment** — the carrier change extends the
   canonical normalized model that doc designates as core; the new fields
   should land as conformance assertions, not incidental observability.
-- **Thin providers (9)** — deferred; a fixture-capture pass decides whether
-  they need dedicated readers or already ride the Claude shape.
+- **Provider capture completeness** — Cursor, Amp, Grok, and some Kiro paths
+  are not safely solved by generic local transcript discovery. Their rich
+  structured coverage depends on managed hook/stream/ACP capture, and tests
+  must distinguish "message/tool-call intent available" from "full rich
+  result/diff trace available."
 
 ## Appendix: source facts
 
@@ -536,3 +624,49 @@ authorization/redaction layer.
 - Raw-frame "honest opacity" rationale: `engdocs/architecture/api-control-plane.md`
   §3.6. Normalized-history alignment: `engdocs/design/worker-conformance.md`
   §4.1–4.2.
+- Provider-format research:
+  - Claude documents continuous local JSONL transcript storage under
+    `~/.claude/projects/<project>/<session-id>.jsonl`, with each line a JSON
+    object for message, tool use, or metadata:
+    <https://code.claude.com/docs/en/sessions>.
+  - Codex documents `--json` as newline-delimited JSON events and
+    `--ephemeral` as disabling persisted rollout files:
+    <https://developers.openai.com/codex/cli/reference>.
+  - Gemini CLI session management records prompts/responses, tool execution
+    inputs/outputs, token usage, and assistant thoughts:
+    <https://developers.googleblog.com/pick-up-exactly-where-you-left-off-with-session-management-in-gemini-cli/>.
+  - Kimi Code stores sessions under `~/.kimi-code/sessions/...`, with
+    `agents/main/wire.jsonl` as the main agent communication record:
+    <https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/data-locations.html>.
+  - OpenCode exports session data as JSON and exposes session/database
+    commands, including `opencode export [sessionID]`:
+    <https://opencode.ai/docs/cli/>.
+  - MiMo Code persists session data in `MIMOCODE_HOME` and supports JSON
+    export/import:
+    <https://mimo.xiaomi.com/mimocode/sessions>.
+  - Oh My Pi documents JSONL session storage under
+    `~/.omp/agent/sessions/...` and hook events for tool calls/results:
+    <https://github.com/can1357/oh-my-pi/blob/main/docs/session.md>,
+    <https://github.com/can1357/oh-my-pi/blob/main/docs/hooks.md>.
+  - Copilot CLI documents local session data and full-history resume behavior:
+    <https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/chronicle>.
+  - Kiro documents local database-backed chat sessions and ACP JSONL session
+    logs with `ToolCall`, `ToolCallUpdate`, and `TurnEnd` updates:
+    <https://kiro.dev/docs/cli/chat/session-management/>,
+    <https://kiro.dev/docs/cli/acp/>.
+  - Cursor staff state that local JSONL transcripts include messages,
+    assistant text, and tool-call inputs but intentionally omit tool-call
+    outputs; they recommend hooks for full output capture:
+    <https://forum.cursor.com/t/accessing-the-full-agent-transcript-in-cursor/157311>.
+  - Amp documents `--execute --stream-json` as line-delimited structured
+    output, plus `--stream-json-input` for programmatic conversations:
+    <https://ampcode.com/manual>.
+  - Grok documents headless sessions under `~/.grok/sessions`,
+    `--output-format streaming-json`, and ACP `session/update` chunks:
+    <https://docs.x.ai/build/cli/headless-scripting>.
+  - Auggie documents saved session resume/list commands and cache relocation;
+    package inspection confirms saved session `chatHistory`/node graph shape:
+    <https://docs.augmentcode.com/cli/reference>.
+  - Google documents Antigravity CLI as the Gemini CLI successor with hooks,
+    subagents, and extensions:
+    <https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>.

@@ -6832,6 +6832,461 @@
         ],
         "type": "object"
       },
+      "SessionStreamStructuredMessageEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "Always structured for this event.",
+            "type": "string"
+          },
+          "history": {
+            "$ref": "#/components/schemas/SessionStructuredHistory",
+            "description": "Normalized worker-history envelope for this snapshot or stream batch."
+          },
+          "id": {
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.).",
+            "type": "string"
+          },
+          "schema_version": {
+            "description": "Structured session transcript schema version.",
+            "type": "string"
+          },
+          "structured_messages": {
+            "description": "Provider-normalized structured messages.",
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredMessage"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "provider",
+          "format",
+          "schema_version",
+          "structured_messages"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredArgument": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/SessionStructuredToolInput"
+          },
+          "interaction": {
+            "$ref": "#/components/schemas/SessionStructuredInteraction"
+          },
+          "is_error": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "structured": {
+            "$ref": "#/components/schemas/SessionStructuredToolResult"
+          },
+          "text": {
+            "type": "string"
+          },
+          "thinking": {
+            "type": "string"
+          },
+          "tool_call_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredContinuity": {
+        "additionalProperties": false,
+        "properties": {
+          "compaction_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "has_branches": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "after_entry_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredGeneration": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "continuity": {
+            "$ref": "#/components/schemas/SessionStructuredContinuity"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/SessionStructuredCursor"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredDiagnostic"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "gc_session_id": {
+            "type": "string"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/SessionStructuredGeneration"
+          },
+          "logical_conversation_id": {
+            "type": "string"
+          },
+          "provider_session_id": {
+            "type": "string"
+          },
+          "tail_state": {
+            "$ref": "#/components/schemas/SessionStructuredTailState"
+          },
+          "transcript_stream_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "transcript_stream_id",
+          "generation",
+          "cursor",
+          "continuity",
+          "tail_state"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredInteraction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_subagent": {
+            "type": "boolean"
+          },
+          "model": {
+            "type": "string"
+          },
+          "parent_tool_call_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "status",
+          "blocks"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredTailState": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "type": "string"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "degraded_reason": {
+            "type": "string"
+          },
+          "last_entry_id": {
+            "type": "string"
+          },
+          "open_tool_call_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pending_interaction_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "activity"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredToolInput": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Provider-neutral input kind such as command, code, patch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "patch": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredToolResult": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "exit_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "filenames": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "interrupted": {
+            "type": "boolean"
+          },
+          "is_image": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "num_files": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "patch": {
+            "type": "string"
+          },
+          "start_line": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "total_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
       "SessionSubmitInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6888,8 +7343,12 @@
         "additionalProperties": false,
         "properties": {
           "format": {
-            "description": "conversation, text, or raw.",
+            "description": "conversation, text, raw, or structured.",
             "type": "string"
+          },
+          "history": {
+            "$ref": "#/components/schemas/SessionStructuredHistory",
+            "description": "Normalized worker-history envelope when format is structured."
           },
           "id": {
             "type": "string"
@@ -6910,6 +7369,20 @@
           "provider": {
             "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.",
             "type": "string"
+          },
+          "schema_version": {
+            "description": "Structured session transcript schema version when format is structured.",
+            "type": "string"
+          },
+          "structured_messages": {
+            "description": "Populated for structured format; provider-normalized structured messages.",
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredMessage"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "template": {
             "type": "string"
@@ -26069,7 +26542,7 @@
     },
     "/v0/city/{cityName}/session/{id}/stream": {
       "get": {
-        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format) or raw messages (JSONL format) based on the format query parameter. Emits activity and pending events for tool approval prompts.",
+        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.",
         "operationId": "stream-session",
         "parameters": [
           {
@@ -26095,13 +26568,28 @@
             }
           },
           {
-            "description": "Transcript format: conversation (default) or raw.",
+            "description": "Transcript format: conversation (default), raw, or structured.",
             "explode": false,
             "in": "query",
             "name": "format",
             "schema": {
-              "description": "Transcript format: conversation (default) or raw.",
+              "description": "Transcript format: conversation (default), raw, or structured.",
+              "enum": [
+                "conversation",
+                "raw",
+                "structured"
+              ],
               "type": "string"
+            }
+          },
+          {
+            "description": "Include thinking block text in structured stream frames. Defaults to false.",
+            "explode": false,
+            "in": "query",
+            "name": "include_thinking",
+            "schema": {
+              "description": "Include thinking block text in structured stream frames. Defaults to false.",
+              "type": "boolean"
             }
           }
         ],
@@ -26214,6 +26702,32 @@
                           "event"
                         ],
                         "title": "Event pending",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionStreamStructuredMessageEvent"
+                          },
+                          "event": {
+                            "const": "structured",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event structured",
                         "type": "object"
                       },
                       {
@@ -26482,13 +26996,28 @@
             }
           },
           {
-            "description": "Transcript format: conversation (default) or raw.",
+            "description": "Transcript format: conversation (default), raw, or structured.",
             "explode": false,
             "in": "query",
             "name": "format",
             "schema": {
-              "description": "Transcript format: conversation (default) or raw.",
+              "description": "Transcript format: conversation (default), raw, or structured.",
+              "enum": [
+                "conversation",
+                "raw",
+                "structured"
+              ],
               "type": "string"
+            }
+          },
+          {
+            "description": "Include thinking block text in structured responses. Defaults to false.",
+            "explode": false,
+            "in": "query",
+            "name": "include_thinking",
+            "schema": {
+              "description": "Include thinking block text in structured responses. Defaults to false.",
+              "type": "boolean"
             }
           },
           {

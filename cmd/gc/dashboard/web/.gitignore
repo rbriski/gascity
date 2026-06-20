@@ -2,6 +2,8 @@ node_modules/
 src/generated/
 *.log
 .vite/
+playwright-report/
+test-results/
 
 # dist/ IS committed. The Go static server embeds it at compile time
 # via go:embed, so fresh checkouts must be able to `go build` without

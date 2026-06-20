@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../api";
 import { syncCityScopeFromLocation } from "../state";
+import { connectAgentOutput } from "../sse";
 import { installCrewInteractions, renderCrew } from "./crew";
 
 vi.mock("../sse", () => ({
@@ -261,6 +262,119 @@ describe("crew empty states", () => {
 
     expect(transcriptQueries.map((query) => query.before)).toEqual([undefined, "cursor-1"]);
     expect(document.getElementById("log-drawer-loading")).not.toBeNull();
+  });
+
+  it("requests structured transcripts and renders rich tool/diff blocks", async () => {
+    document.body.innerHTML = `
+      <div id="crew-loading">Loading crew...</div>
+      <table id="crew-table" style="display:none"><tbody id="crew-tbody"></tbody></table>
+      <div id="crew-empty" style="display:none"><p>No crew configured</p></div>
+      <div id="rigged-body"></div>
+      <div id="pooled-body"></div>
+      <span id="crew-count"></span>
+      <span id="rigged-count"></span>
+      <span id="pooled-count"></span>
+      <div id="agent-log-drawer" style="display:none">
+        <span id="log-drawer-agent-name"></span>
+        <span id="log-drawer-count"></span>
+        <button id="log-drawer-older-btn" style="display:none">Load older</button>
+        <button id="log-drawer-close-btn">Close</button>
+        <div id="log-drawer-body">
+          <div id="log-drawer-messages">
+            <div id="log-drawer-loading">Loading logs...</div>
+          </div>
+        </div>
+      </div>
+    `;
+    const transcriptQueries: Array<Record<string, string | undefined>> = [];
+    let streamHandler: ((msg: unknown) => void) | undefined;
+    vi.mocked(connectAgentOutput).mockImplementation((_city, _sessionID, onEvent) => {
+      streamHandler = onEvent as (msg: unknown) => void;
+      return { close: vi.fn() };
+    });
+    vi.spyOn(api, "GET").mockImplementation(async (path: string, options?: unknown) => {
+      if (path === "/v0/city/{cityName}/sessions") {
+        return {
+          data: {
+            items: [{
+              active_bead: "",
+              agent_kind: "crew",
+              attached: true,
+              id: "s-codex",
+              last_active: "2026-04-18T20:00:00Z",
+              last_output: "",
+              rig: "rig-a/crew",
+              running: true,
+              template: "codex-worker",
+            }],
+          },
+        } as never;
+      }
+      if (path === "/v0/city/{cityName}/session/{id}/pending") {
+        return { data: { pending: false } } as never;
+      }
+      if (path === "/v0/city/{cityName}/session/{id}/transcript") {
+        const query = (options as { params?: { query?: Record<string, string | undefined> } } | undefined)?.params?.query ?? {};
+        transcriptQueries.push(query);
+        return {
+          data: {
+            format: "structured",
+            structured_messages: [{
+              id: "m-1",
+              role: "assistant",
+              timestamp: "2026-04-18T20:00:00Z",
+              blocks: [
+                { type: "text", text: "Applying the patch now." },
+                { type: "tool_use", id: "tool-1", name: "apply_patch", input: { kind: "patch", file_path: "src/app.ts" } },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-1",
+                  structured: {
+                    kind: "edit",
+                    file_path: "src/app.ts",
+                    patch: "@@\\n- old line\\n+ new line",
+                  },
+                },
+              ],
+            }],
+            pagination: {
+              has_older_messages: false,
+              returned_message_count: 1,
+              total_compactions: 0,
+              total_message_count: 1,
+            },
+          },
+        } as never;
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    installCrewInteractions();
+    await renderCrew();
+    document.querySelector<HTMLButtonElement>(".agent-log-link")?.click();
+
+    await waitFor(() => {
+      expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Applying the patch now.");
+    });
+    expect(transcriptQueries[0]).toMatchObject({ format: "structured" });
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("apply_patch");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("src/app.ts");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("+ new line");
+
+    streamHandler?.({
+      type: "structured",
+      data: {
+        format: "structured",
+        structured_messages: [{
+          id: "m-2",
+          role: "assistant",
+          timestamp: "2026-04-18T20:00:01Z",
+          blocks: [{ type: "tool_result", structured: { kind: "bash", stdout: "tests passed", exit_code: 0 } }],
+        }],
+      },
+    });
+
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("tests passed");
   });
 });
 

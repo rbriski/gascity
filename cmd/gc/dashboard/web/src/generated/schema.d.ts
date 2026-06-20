@@ -1777,7 +1777,7 @@ export interface paths {
         };
         /**
          * Stream session output in real time
-         * @description Server-Sent Events stream of session transcript updates. Streams turns (conversation format) or raw messages (JSONL format) based on the format query parameter. Emits activity and pending events for tool approval prompts.
+         * @description Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.
          */
         get: operations["stream-session"];
         put?: never;
@@ -4141,6 +4141,135 @@ export interface components {
             provider: string;
             template: string;
         };
+        SessionStreamStructuredMessageEvent: {
+            /** @description Always structured for this event. */
+            format: string;
+            /** @description Normalized worker-history envelope for this snapshot or stream batch. */
+            history?: components["schemas"]["SessionStructuredHistory"];
+            id: string;
+            pagination?: components["schemas"]["PaginationInfo"];
+            /** @description Producing provider identifier (claude, codex, gemini, open-code, etc.). */
+            provider: string;
+            /** @description Structured session transcript schema version. */
+            schema_version: string;
+            /** @description Provider-normalized structured messages. */
+            structured_messages: components["schemas"]["SessionStructuredMessage"][] | null;
+            template: string;
+        };
+        SessionStructuredArgument: {
+            name: string;
+            value: string;
+        };
+        SessionStructuredBlock: {
+            content?: string;
+            id?: string;
+            input?: components["schemas"]["SessionStructuredToolInput"];
+            interaction?: components["schemas"]["SessionStructuredInteraction"];
+            is_error?: boolean;
+            name?: string;
+            signature?: string;
+            structured?: components["schemas"]["SessionStructuredToolResult"];
+            text?: string;
+            thinking?: string;
+            tool_call_id?: string;
+            type: string;
+        };
+        SessionStructuredContinuity: {
+            /** Format: int64 */
+            compaction_count?: number;
+            has_branches?: boolean;
+            note?: string;
+            status: string;
+        };
+        SessionStructuredCursor: {
+            after_entry_id?: string;
+        };
+        SessionStructuredDiagnostic: {
+            code: string;
+            /** Format: int64 */
+            count?: number;
+            message?: string;
+        };
+        SessionStructuredGeneration: {
+            id: string;
+            observed_at?: string;
+        };
+        SessionStructuredHistory: {
+            continuity: components["schemas"]["SessionStructuredContinuity"];
+            cursor: components["schemas"]["SessionStructuredCursor"];
+            diagnostics?: components["schemas"]["SessionStructuredDiagnostic"][] | null;
+            gc_session_id?: string;
+            generation: components["schemas"]["SessionStructuredGeneration"];
+            logical_conversation_id?: string;
+            provider_session_id?: string;
+            tail_state: components["schemas"]["SessionStructuredTailState"];
+            transcript_stream_id: string;
+        };
+        SessionStructuredInteraction: {
+            action?: string;
+            kind?: string;
+            options?: string[] | null;
+            prompt?: string;
+            request_id?: string;
+            state: string;
+        };
+        SessionStructuredMessage: {
+            blocks: components["schemas"]["SessionStructuredBlock"][] | null;
+            id: string;
+            is_subagent?: boolean;
+            model?: string;
+            parent_tool_call_id?: string;
+            provider?: string;
+            role: string;
+            status: string;
+            stop_reason?: string;
+            timestamp?: string;
+        };
+        SessionStructuredTailState: {
+            activity: string;
+            degraded?: boolean;
+            degraded_reason?: string;
+            last_entry_id?: string;
+            open_tool_call_ids?: string[] | null;
+            pending_interaction_ids?: string[] | null;
+        };
+        SessionStructuredToolInput: {
+            arguments?: components["schemas"]["SessionStructuredArgument"][] | null;
+            code?: string;
+            command?: string;
+            file_path?: string;
+            /** @description Provider-neutral input kind such as command, code, patch, search, file, arguments, or text. */
+            kind?: string;
+            patch?: string;
+            pattern?: string;
+            query?: string;
+            text?: string;
+        };
+        SessionStructuredToolResult: {
+            code?: string;
+            content?: string;
+            /** Format: int64 */
+            exit_code?: number;
+            file_path?: string;
+            filenames?: string[] | null;
+            interrupted?: boolean;
+            is_image?: boolean;
+            kind: string;
+            mode?: string;
+            /** Format: int64 */
+            num_files?: number;
+            /** Format: int64 */
+            num_lines?: number;
+            patch?: string;
+            /** Format: int64 */
+            start_line?: number;
+            stderr?: string;
+            stdout?: string;
+            text?: string;
+            /** Format: int64 */
+            total_lines?: number;
+            truncated?: boolean;
+        };
         SessionSubmitInputBody: {
             /**
              * @description Submit intent; empty defaults to "default".
@@ -4161,14 +4290,20 @@ export interface components {
             session_id: string;
         };
         SessionTranscriptGetResponse: {
-            /** @description conversation, text, or raw. */
+            /** @description conversation, text, raw, or structured. */
             format: string;
+            /** @description Normalized worker-history envelope when format is structured. */
+            history?: components["schemas"]["SessionStructuredHistory"];
             id: string;
             /** @description Populated for raw format; provider-native frames emitted verbatim as the provider wrote them. */
             messages?: components["schemas"]["SessionRawMessageFrame"][] | null;
             pagination?: components["schemas"]["PaginationInfo"];
             /** @description Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing. */
             provider: string;
+            /** @description Structured session transcript schema version when format is structured. */
+            schema_version?: string;
+            /** @description Populated for structured format; provider-normalized structured messages. */
+            structured_messages?: components["schemas"]["SessionStructuredMessage"][] | null;
             template: string;
             /** @description Populated for conversation/text formats. */
             turns?: components["schemas"]["OutputTurn"][] | null;
@@ -12699,8 +12834,10 @@ export interface operations {
     "stream-session": {
         parameters: {
             query?: {
-                /** @description Transcript format: conversation (default) or raw. */
-                format?: string;
+                /** @description Transcript format: conversation (default), raw, or structured. */
+                format?: "conversation" | "raw" | "structured";
+                /** @description Include thinking block text in structured stream frames. Defaults to false. */
+                include_thinking?: boolean;
             };
             header?: never;
             path: {
@@ -12764,6 +12901,17 @@ export interface operations {
                          * @constant
                          */
                         event: "pending";
+                        /** @description The event ID. */
+                        id?: number;
+                        /** @description The retry time in milliseconds. */
+                        retry?: number;
+                    } | {
+                        data: components["schemas"]["SessionStreamStructuredMessageEvent"];
+                        /**
+                         * @description The event name.
+                         * @constant
+                         */
+                        event: "structured";
                         /** @description The event ID. */
                         id?: number;
                         /** @description The retry time in milliseconds. */
@@ -12881,8 +13029,10 @@ export interface operations {
             query?: {
                 /** @description Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N. */
                 tail?: string;
-                /** @description Transcript format: conversation (default) or raw. */
-                format?: string;
+                /** @description Transcript format: conversation (default), raw, or structured. */
+                format?: "conversation" | "raw" | "structured";
+                /** @description Include thinking block text in structured responses. Defaults to false. */
+                include_thinking?: boolean;
                 /** @description Pagination cursor: return entries before this UUID. */
                 before?: string;
                 /** @description Pagination cursor: return entries after this UUID. */

@@ -2178,18 +2178,29 @@ func TestBeadListMoleculeSurfacesGraphV2WorkflowRoots(t *testing.T) {
 		t.Fatalf("create step: %v", err)
 	}
 	fs.stores["myrig"] = mem
+	// Register the same store under a second rig name to simulate the graph
+	// store being federated across rig stores (the live shape that returned a
+	// root once per store before global dedupe).
+	fs.stores["myrig2"] = mem
 
 	body := fetchBoundedBeads(t, fs, "?type=molecule&all=true&limit=50")
 
 	titles := make(map[string]bool, len(body.Items))
+	wfRootCount := 0
 	for _, b := range body.Items {
 		titles[b.Title] = true
+		if b.Title == "mol-adopt-pr-v2" {
+			wfRootCount++
+		}
 	}
 	if !titles["dolt molecule"] {
 		t.Errorf("type=molecule dropped the issue_type=molecule bead; items=%v", titles)
 	}
 	if !titles["mol-adopt-pr-v2"] {
 		t.Errorf("type=molecule did not surface the gc.kind=workflow graph.v2 root; items=%v", titles)
+	}
+	if wfRootCount != 1 {
+		t.Errorf("graph.v2 root appeared %d times across federated stores, want 1 (global dedupe)", wfRootCount)
 	}
 	if titles["review-loop step"] {
 		t.Errorf("type=molecule wrongly surfaced a plain task step; items=%v", titles)

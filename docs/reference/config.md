@@ -34,6 +34,7 @@ City is the top-level configuration for a Gas City instance.
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
+| `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external messaging subsystem. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
@@ -282,6 +283,16 @@ ChatSessionsConfig configures chat session behavior.
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
 | `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
 
+## ConnectedClientsConfig
+
+ConnectedClientsConfig configures the connected-client SSE subscribe path.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `allow_no_credential` | boolean |  |  | AllowNoCredential permits client registration without a credential when true. Defaults to false (credential required). |
+| `heartbeat_interval` | string |  |  | HeartbeatInterval is the SSE keepalive interval for connected-client streams. Duration string (e.g., "30s"). Defaults to "30s". |
+| `subscriber_buffer_size` | integer |  |  | SubscriberBufferSize is the channel buffer depth per SSE subscriber. Defaults to 64. |
+
 ## ConvergenceConfig
 
 ConvergenceConfig holds convergence loop limits.
@@ -379,6 +390,14 @@ EventsRotationConfig holds file-backed events rotation settings.
 | `check_interval_records` | integer |  | `1024` | CheckIntervalRecords is the number of records between size checks. Defaults to DefaultEventsRotationCheckIntervalRecords. |
 | `check_interval_seconds` | integer |  | `60` | CheckIntervalSeconds is the time backstop between size checks. Defaults to DefaultEventsRotationCheckIntervalSeconds. |
 | `archive_retain_age` | string |  |  | ArchiveRetainAge is an optional Go duration. Empty keeps all archives. |
+
+## ExtMsgConfig
+
+ExtMsgConfig configures the external messaging subsystem.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `connected_clients` | ConnectedClientsConfig |  |  | ConnectedClients configures the connected-client SSE token and subscription subsystem. |
 
 ## FormulasConfig
 

@@ -1189,6 +1189,30 @@ type ExtMsgBindInputBody struct {
 	SessionId *string `json:"session_id,omitempty"`
 }
 
+// ExtMsgClientRegisterInputBody defines model for ExtMsgClientRegisterInputBody.
+type ExtMsgClientRegisterInputBody struct {
+	// AllowedSessions Session names this client is permitted to subscribe to.
+	AllowedSessions *[]string `json:"allowed_sessions,omitempty"`
+
+	// Credential Opaque credential string (required unless allow_no_credential=true in city.toml).
+	Credential *string `json:"credential,omitempty"`
+}
+
+// ExtMsgClientRegisterOutputBody defines model for ExtMsgClientRegisterOutputBody.
+type ExtMsgClientRegisterOutputBody struct {
+	// ClientId Stable client identifier (bead ID). Use as account_id in the subscribe URL.
+	ClientId string `json:"client_id"`
+
+	// Created True when a new token was issued; false when re-issued for the same credential.
+	Created bool `json:"created"`
+
+	// Note One-time advisory message. Only present when created=true.
+	Note *string `json:"note,omitempty"`
+
+	// Token Raw base64url token. Only present when created=true; store it securely.
+	Token *string `json:"token,omitempty"`
+}
+
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
 type ExtMsgGroupEnsureInputBody struct {
 	// DefaultHandle Default handle for the group.
@@ -5539,6 +5563,12 @@ type GetV0CityByCityNameExtmsgBindingsParams struct {
 	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
 }
 
+// RegisterExtmsgClientParams defines parameters for RegisterExtmsgClient.
+type RegisterExtmsgClientParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameExtmsgGroupsParams defines parameters for GetV0CityByCityNameExtmsgGroups.
 type GetV0CityByCityNameExtmsgGroupsParams struct {
 	// ScopeId Scope ID.
@@ -6237,6 +6267,9 @@ type RegisterExtmsgAdapterJSONRequestBody = ExtMsgAdapterRegisterInputBody
 
 // PostV0CityByCityNameExtmsgBindJSONRequestBody defines body for PostV0CityByCityNameExtmsgBind for application/json ContentType.
 type PostV0CityByCityNameExtmsgBindJSONRequestBody = ExtMsgBindInputBody
+
+// RegisterExtmsgClientJSONRequestBody defines body for RegisterExtmsgClient for application/json ContentType.
+type RegisterExtmsgClientJSONRequestBody = ExtMsgClientRegisterInputBody
 
 // EnsureExtmsgGroupJSONRequestBody defines body for EnsureExtmsgGroup for application/json ContentType.
 type EnsureExtmsgGroupJSONRequestBody = ExtMsgGroupEnsureInputBody
@@ -11892,6 +11925,11 @@ type ClientInterface interface {
 	// GetV0CityByCityNameExtmsgBindings request
 	GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RegisterExtmsgClientWithBody request with any body
+	RegisterExtmsgClientWithBody(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RegisterExtmsgClient(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, body RegisterExtmsgClientJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameExtmsgGroups request
 	GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13040,6 +13078,30 @@ func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName st
 
 func (c *Client) GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameExtmsgBindingsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterExtmsgClientWithBody(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgClientRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterExtmsgClient(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, body RegisterExtmsgClientJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgClientRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -17709,6 +17771,66 @@ func NewGetV0CityByCityNameExtmsgBindingsRequest(server string, cityName string,
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRegisterExtmsgClientRequest calls the generic RegisterExtmsgClient builder with application/json body
+func NewRegisterExtmsgClientRequest(server string, cityName string, params *RegisterExtmsgClientParams, body RegisterExtmsgClientJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRegisterExtmsgClientRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewRegisterExtmsgClientRequestWithBody generates requests for RegisterExtmsgClient with any type of body
+func NewRegisterExtmsgClientRequestWithBody(server string, cityName string, params *RegisterExtmsgClientParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/clients", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -24228,6 +24350,11 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameExtmsgBindingsWithResponse request
 	GetV0CityByCityNameExtmsgBindingsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgBindingsResponse, error)
 
+	// RegisterExtmsgClientWithBodyWithResponse request with any body
+	RegisterExtmsgClientWithBodyWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgClientResponse, error)
+
+	RegisterExtmsgClientWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, body RegisterExtmsgClientJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgClientResponse, error)
+
 	// GetV0CityByCityNameExtmsgGroupsWithResponse request
 	GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error)
 
@@ -25757,6 +25884,29 @@ func (r GetV0CityByCityNameExtmsgBindingsResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameExtmsgBindingsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RegisterExtmsgClientResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ExtMsgClientRegisterOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterExtmsgClientResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterExtmsgClientResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -28588,6 +28738,23 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgBindingsWithResponse(ctx 
 	return ParseGetV0CityByCityNameExtmsgBindingsResponse(rsp)
 }
 
+// RegisterExtmsgClientWithBodyWithResponse request with arbitrary body returning *RegisterExtmsgClientResponse
+func (c *ClientWithResponses) RegisterExtmsgClientWithBodyWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgClientResponse, error) {
+	rsp, err := c.RegisterExtmsgClientWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterExtmsgClientResponse(rsp)
+}
+
+func (c *ClientWithResponses) RegisterExtmsgClientWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgClientParams, body RegisterExtmsgClientJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgClientResponse, error) {
+	rsp, err := c.RegisterExtmsgClient(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterExtmsgClientResponse(rsp)
+}
+
 // GetV0CityByCityNameExtmsgGroupsWithResponse request returning *GetV0CityByCityNameExtmsgGroupsResponse
 func (c *ClientWithResponses) GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error) {
 	rsp, err := c.GetV0CityByCityNameExtmsgGroups(ctx, cityName, params, reqEditors...)
@@ -31339,6 +31506,39 @@ func ParseGetV0CityByCityNameExtmsgBindingsResponse(rsp *http.Response) (*GetV0C
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ListBodySessionBindingRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRegisterExtmsgClientResponse parses an HTTP response from a RegisterExtmsgClientWithResponse call
+func ParseRegisterExtmsgClientResponse(rsp *http.Response) (*RegisterExtmsgClientResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterExtmsgClientResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ExtMsgClientRegisterOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -13,6 +13,44 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
+// --- Client token registration ---
+
+const extmsgClientTokenNote = "Store this token securely. It cannot be retrieved again. Re-register with a new credential to obtain a new token."
+
+// humaHandleExtMsgClientRegister is the Huma-typed handler for POST /v0/extmsg/clients.
+func (s *Server) humaHandleExtMsgClientRegister(ctx context.Context, input *ExtMsgClientRegisterInput) (*ExtMsgClientRegisterOutput, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, huma.Error503ServiceUnavailable("bead store not available")
+	}
+	cfg := s.state.Config()
+	connCfg := cfg.ExtMsg.ConnectedClients
+
+	result, err := extmsg.RegisterClient(ctx, store, extmsg.RegisterClientInput{
+		Credential:        input.Body.Credential,
+		AllowedSessions:   input.Body.AllowedSessions,
+		AllowNoCredential: connCfg.AllowNoCredential,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, extmsg.ErrInvalidInput):
+			return nil, huma.Error400BadRequest(err.Error())
+		default:
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+	}
+
+	body := ExtMsgClientRegisterOutputBody{
+		ClientID: result.ClientID,
+		Token:    result.Token,
+		Created:  result.Created,
+	}
+	if result.Created {
+		body.Note = extmsgClientTokenNote
+	}
+	return &ExtMsgClientRegisterOutput{Body: body}, nil
+}
+
 // --- Huma helpers for extmsg ---
 
 // humaExtmsgServices returns the extmsg services from state, returning an error

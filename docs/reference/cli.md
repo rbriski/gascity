@@ -40,6 +40,7 @@ gc [flags]
 | [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
+| [gc extmsg](#gc-extmsg) | External messaging operations |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc github](#gc-github) | GitHub integration commands |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
@@ -1351,6 +1352,46 @@ gc --city /path/to/city events rotate --api http://127.0.0.1:8080
 |------|------|---------|-------------|
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--wait` | bool |  | Wait for archive compression to complete before returning |
+
+## gc extmsg
+
+External messaging operations
+
+```
+gc extmsg
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc extmsg reply](#gc-extmsg-reply) | Reply to an external client over the outbound SSE channel |
+
+## gc extmsg reply
+
+Reply to an external client over the outbound SSE channel.
+
+When no --ref is given, the ConversationRef is read from GC_EXTERNAL_ORIGIN,
+which the controller sets when nudging a session for an externally-originated
+message. If GC_EXTERNAL_ORIGIN is not set, the command exits non-zero.
+
+```
+gc extmsg reply [flags] [text]
+```
+
+**Example:**
+
+```
+gc extmsg reply "one-liner response"
+gc extmsg reply --stdin <<'EOF'
+multi-line response
+EOF
+gc extmsg reply --ref '{"provider":"llm-client","account_id":"c1","conversation_id":"cv1","kind":"direct"}' "hello"
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output delivery status as JSON |
+| `--ref` | string |  | Explicit ConversationRef JSON; overrides session context |
+| `--stdin` | bool |  | Read reply text from stdin instead of text argument |
 
 ## gc formula
 

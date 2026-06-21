@@ -376,4 +376,17 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleExtMsgAdapterRegister)
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister)
+
+	// Connected-client SSE subscribe stream.
+	registerSSEStringID(sm.humaAPI, huma.Operation{
+		OperationID: "subscribe-extmsg-client",
+		Method:      http.MethodGet,
+		Path:        cityScopePrefix + "/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe",
+		Summary:     "Subscribe to external messaging events via SSE",
+		Description: "Opens a Server-Sent Events stream delivering replies for the given conversation. " +
+			"The stream emits message events when a session replies, heartbeat events on idle, " +
+			"and error events on terminal failures. Reconnect with Last-Event-ID to replay missed messages.",
+	}, extmsgSubscribeEventMap(),
+		sseCityPrecheck(sm, (*Server).checkExtmsgSubscribe),
+		sseCityStringIDStream(sm, (*Server).streamExtmsgSubscribe))
 }

@@ -401,6 +401,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		sseCityStream(sm, (*Server).streamEvents))
 
 	// ExtMsg.
+	cityRegister(sm, huma.Operation{
+		OperationID:   "register-extmsg-client",
+		Method:        http.MethodPost,
+		Path:          "/extmsg/clients",
+		Summary:       "Register an external messaging client and issue a token",
+		DefaultStatus: http.StatusOK,
+		Errors:        []int{http.StatusBadRequest, http.StatusServiceUnavailable},
+	}, (*Server).humaHandleExtMsgClientRegister)
 	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))

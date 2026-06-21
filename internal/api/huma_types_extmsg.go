@@ -10,6 +10,28 @@ import (
 
 // --- ExtMsg types ---
 
+// ExtMsgClientRegisterInput is the Huma input for POST /v0/extmsg/clients.
+type ExtMsgClientRegisterInput struct {
+	CityScope
+	Body struct {
+		Credential      string   `json:"credential,omitempty" doc:"Opaque credential string (required unless allow_no_credential=true in city.toml)."`
+		AllowedSessions []string `json:"allowed_sessions,omitempty" doc:"Session names this client is permitted to subscribe to."`
+	}
+}
+
+// ExtMsgClientRegisterOutputBody is the response body for POST /v0/extmsg/clients.
+type ExtMsgClientRegisterOutputBody struct {
+	ClientID string `json:"client_id" doc:"Stable client identifier (bead ID). Use as account_id in the subscribe URL."`
+	Token    string `json:"token,omitempty" doc:"Raw base64url token. Only present when created=true; store it securely."`
+	Created  bool   `json:"created" doc:"True when a new token was issued; false when re-issued for the same credential."`
+	Note     string `json:"note,omitempty" doc:"One-time advisory message. Only present when created=true."`
+}
+
+// ExtMsgClientRegisterOutput is the Huma output for POST /v0/extmsg/clients.
+type ExtMsgClientRegisterOutput struct {
+	Body ExtMsgClientRegisterOutputBody
+}
+
 // ExtMsgInboundInput is the Huma input for POST /v0/city/{cityName}/extmsg/inbound.
 //
 // Provider and AccountID are runtime-state-dependent: required only

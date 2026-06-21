@@ -183,6 +183,9 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 				TailCompactions: tail,
 			})
 			if historyErr != nil {
+				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+					return s.structuredTranscriptFallback(info)
+				}
 				return nil, huma.Error500InternalServerError("reading session history: " + historyErr.Error())
 			}
 			messages, _ := historySnapshotStructuredMessages(history, input.IncludeThinking)
@@ -260,6 +263,10 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		}, nil
 	}
 
+	if wantStructured {
+		return s.structuredTranscriptFallback(info)
+	}
+
 	if wantRaw {
 		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),
@@ -302,6 +309,31 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 			Provider: info.Provider,
 			Format:   "conversation",
 			Turns:    []outputTurn{},
+		},
+	}, nil
+}
+
+func (s *Server) structuredTranscriptFallback(info session.Info) (*IndexOutput[sessionTranscriptGetResponse], error) {
+	activity := string(worker.TailActivityIdle)
+	output := ""
+	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
+		activity = string(worker.TailActivityInTurn)
+		peekOutput, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
+		if peekErr != nil {
+			return nil, huma.Error500InternalServerError(peekErr.Error())
+		}
+		output = peekOutput
+	}
+	return &IndexOutput[sessionTranscriptGetResponse]{
+		Index: s.latestIndex(),
+		Body: sessionTranscriptGetResponse{
+			ID:                 info.ID,
+			Template:           info.Template,
+			Provider:           info.Provider,
+			Format:             "structured",
+			SchemaVersion:      sessionStructuredSchemaVersion,
+			History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		},
 	}, nil
 }

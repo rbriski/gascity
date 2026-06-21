@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -102,6 +104,30 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultContent: "Edited README.md",
 		},
 		{
+			name:          "groq opencode alias edit",
+			provider:      "groq",
+			writeFixture:  writeStructuredOpenCodeEditFixture,
+			toolCallID:    "call-opencode-edit",
+			toolName:      "Edit",
+			inputKind:     "file",
+			inputFilePath: "README.md",
+			resultKind:    "edit",
+			resultFile:    "README.md",
+			resultContent: "Edited README.md",
+		},
+		{
+			name:          "cerebras opencode alias edit",
+			provider:      "cerebras",
+			writeFixture:  writeStructuredOpenCodeEditFixture,
+			toolCallID:    "call-opencode-edit",
+			toolName:      "Edit",
+			inputKind:     "file",
+			inputFilePath: "README.md",
+			resultKind:    "edit",
+			resultFile:    "README.md",
+			resultContent: "Edited README.md",
+		},
+		{
 			name:         "mimocode bash",
 			provider:     "mimocode",
 			writeFixture: writeStructuredMimoCodeBashFixture,
@@ -112,6 +138,30 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:   "bash",
 			resultStdout: "ok ./...",
 			resultExit:   intPtr(0),
+		},
+		{
+			name:          "pi read",
+			provider:      "pi",
+			writeFixture:  writeStructuredPiReadFixture,
+			toolCallID:    "call-pi-read",
+			toolName:      "read",
+			inputKind:     "file",
+			inputFilePath: "README.md",
+			resultKind:    "read",
+			resultFile:    "README.md",
+			resultContent: "Pi file data",
+		},
+		{
+			name:          "omp pi alias read",
+			provider:      "omp",
+			writeFixture:  writeStructuredPiReadFixture,
+			toolCallID:    "call-pi-read",
+			toolName:      "read",
+			inputKind:     "file",
+			inputFilePath: "README.md",
+			resultKind:    "read",
+			resultFile:    "README.md",
+			resultContent: "Pi file data",
 		},
 		{
 			name:          "antigravity write",
@@ -192,6 +242,168 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			}
 		})
 	}
+}
+
+func TestHandleSessionTranscriptStructuredGracefullyDowngradesAllBuiltinProviders(t *testing.T) {
+	for _, provider := range config.BuiltinProviderOrder() {
+		t.Run(provider, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+
+			mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+			info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", provider, t.TempDir(), provider, nil, session.ProviderResume{}, runtime.Config{})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			fs.sp.SetPeekOutput(info.SessionName, provider+" pane output")
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+			}
+
+			var resp sessionTranscriptGetResponse
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Format != "structured" {
+				t.Fatalf("Format = %q, want structured; body: %s", resp.Format, w.Body.String())
+			}
+			if resp.SchemaVersion != sessionStructuredSchemaVersion {
+				t.Fatalf("SchemaVersion = %q, want %q", resp.SchemaVersion, sessionStructuredSchemaVersion)
+			}
+			if resp.History == nil {
+				t.Fatal("History is nil, want degraded structured history")
+			}
+			if resp.History.Continuity.Status != "degraded" {
+				t.Fatalf("History continuity = %q, want degraded", resp.History.Continuity.Status)
+			}
+			if len(resp.History.Diagnostics) == 0 || resp.History.Diagnostics[0].Code != structuredTranscriptUnavailableCode {
+				t.Fatalf("Diagnostics = %+v, want transcript_unavailable", resp.History.Diagnostics)
+			}
+			if len(resp.StructuredMessages) != 1 {
+				t.Fatalf("StructuredMessages len = %d, want 1: %+v", len(resp.StructuredMessages), resp.StructuredMessages)
+			}
+			msg := resp.StructuredMessages[0]
+			if msg.Provider != provider {
+				t.Fatalf("message provider = %q, want %q", msg.Provider, provider)
+			}
+			if len(msg.Blocks) != 1 || msg.Blocks[0].Type != "text" || !strings.Contains(msg.Blocks[0].Text, provider+" pane output") {
+				t.Fatalf("message blocks = %+v, want provider-neutral text fallback", msg.Blocks)
+			}
+		})
+	}
+}
+
+func TestHandleSessionStreamStructuredGracefullyDowngradesWithoutTranscript(t *testing.T) {
+	for _, provider := range config.BuiltinProviderOrder() {
+		t.Run(provider, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+
+			mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+			info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", provider, t.TempDir(), provider, nil, session.ProviderResume{}, runtime.Config{})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			fs.sp.SetPeekOutput(info.SessionName, provider+" pane output")
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			rec := newSyncResponseRecorder()
+			req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream?format=structured", nil).WithContext(ctx)
+			done := make(chan struct{})
+			go func() {
+				h.ServeHTTP(rec, req)
+				close(done)
+			}()
+
+			body := waitForRecorderSubstring(t, rec, `"format":"structured"`, 500*time.Millisecond)
+			if !strings.Contains(body, `"format":"structured"`) {
+				t.Fatalf("stream body missing structured fallback event: %s", body)
+			}
+			if !strings.Contains(body, structuredTranscriptUnavailableCode) {
+				t.Fatalf("stream body missing degraded diagnostic: %s", body)
+			}
+			if !strings.Contains(body, provider+" pane output") {
+				t.Fatalf("stream body missing text fallback: %s", body)
+			}
+			cancel()
+			<-done
+		})
+	}
+}
+
+func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "cursor", t.TempDir(), "cursor", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs.sp.SetPeekOutput(info.SessionName, "cursor pane output")
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?format=structured&tail=0", nil)
+	srv.legacySessionHandler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionTranscriptGetResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Format != "structured" {
+		t.Fatalf("Format = %q, want structured; body: %s", resp.Format, w.Body.String())
+	}
+	if resp.History == nil || resp.History.Continuity.Status != "degraded" {
+		t.Fatalf("History = %+v, want degraded structured fallback", resp.History)
+	}
+	if len(resp.StructuredMessages) != 1 || !strings.Contains(resp.StructuredMessages[0].Blocks[0].Text, "cursor pane output") {
+		t.Fatalf("StructuredMessages = %+v, want cursor pane output text fallback", resp.StructuredMessages)
+	}
+}
+
+func TestLegacySessionStreamStructuredGracefullyDowngrades(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "cursor", t.TempDir(), "cursor", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs.sp.SetPeekOutput(info.SessionName, "cursor pane output")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=structured", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		srv.legacySessionHandler().ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, `"format":"structured"`, 500*time.Millisecond)
+	if !strings.Contains(body, "event: structured") {
+		t.Fatalf("stream body missing structured event name: %s", body)
+	}
+	if !strings.Contains(body, structuredTranscriptUnavailableCode) {
+		t.Fatalf("stream body missing degraded diagnostic: %s", body)
+	}
+	if !strings.Contains(body, "cursor pane output") {
+		t.Fatalf("stream body missing text fallback: %s", body)
+	}
+	cancel()
+	<-done
 }
 
 func findStructuredToolPair(messages []SessionStructuredMessage, toolCallID string) (*SessionStructuredBlock, *SessionStructuredBlock) {
@@ -345,6 +557,22 @@ func writeStructuredMimoCodeBashFixture(t *testing.T, root, workDir, _ string) {
   ]
 }`, workDir)
 	writeStructuredOpenCodeExport(t, filepath.Join(root, "mimocode", "session-structured.json"), body)
+}
+
+func writeStructuredPiReadFixture(t *testing.T, root, workDir, sessionKey string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"type":"session","version":3,"id":%q,"timestamp":"2026-06-01T00:00:00.000Z","cwd":%q}
+{"type":"message","id":"pi-user-1","parentId":null,"timestamp":"2026-06-01T00:00:00.000Z","message":{"role":"user","content":"read the file","timestamp":1780272000000}}
+{"type":"message","id":"pi-assistant-1","parentId":"pi-user-1","timestamp":"2026-06-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-pi-read","name":"read","arguments":{"path":"README.md"}}],"timestamp":1780272001000}}
+{"type":"message","id":"pi-tool-1","parentId":"pi-assistant-1","timestamp":"2026-06-01T00:00:02.000Z","message":{"role":"toolResult","toolCallId":"call-pi-read","toolName":"read","content":[{"type":"text","text":"Pi file data"}],"isError":false,"timestamp":1780272002000}}
+`, sessionKey, workDir)
+	path := filepath.Join(root, "pi", sessionKey+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir pi fixture dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write pi fixture: %v", err)
+	}
 }
 
 func writeStructuredOpenCodeExport(t *testing.T, path, body string) {

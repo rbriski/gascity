@@ -4,7 +4,7 @@ title: "Structured Session Stream and Transcript Format (`format=structured`)"
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Accepted / Phase 1 partially implemented |
 | Date | 2026-06-20 |
 | Author(s) | Claude, Codex |
 | Issue | N/A |
@@ -362,32 +362,27 @@ wire, matching `worker-conformance.md` §4.3 rather than silently replaying or
 dropping history.
 
 The stream keeps the existing lifecycle event kinds (`activity`, `pending`,
-`heartbeat`) and adds a versioned structured message payload. Current Huma SSE
+`heartbeat`) and adds a versioned structured message payload. Huma SSE
 registration maps **one concrete Go payload type to one SSE event name**
-(`internal/api/sse.go:257-283,366-369`), and the session stream already maps
-`turn` to `SessionStreamMessageEvent` and `message` to
-`SessionStreamRawMessageEvent` (`internal/api/supervisor_city_routes.go:13-21`).
-Implementation must therefore choose one of two explicit paths:
-
-- add a distinct event name for structured frames (for example,
-  `event: structured`) and register `StructuredMessageEvent` in
-  `sessionStreamEventMap`; or
-- refactor the SSE helper/event map to support multiple schema variants under
-  the same semantic/default SSE `message` event key without emitting an
-  unregistered concrete type. This path must also preserve generated-client
-  narrowing by adding a schema-supported discriminator inside `data` or proving
-  the TS/Go generated clients handle the resulting union.
-
-Either way, add `schema_version` to the structured payload itself. Today's
-`conversation` and `raw` payloads remain unversioned for back-compat.
+(`internal/api/sse.go`; `internal/api/supervisor_city_routes.go`), so Phase 1
+uses a distinct `event: structured` frame for
+`SessionStreamStructuredMessageEvent`. The existing `turn` event remains the
+conversation payload, `message` remains the raw provider-frame payload, and the
+structured payload carries `schema_version` inside `data`. `conversation` and
+`raw` payloads remain unversioned for back-compat.
 
 When the transcript path has no structured history yet, `format=structured`
-must not pretend pane text is structured data. Reuse the existing transcript
-fallback behavior by returning `format: "text"` for peek-only responses, or
-emit only lifecycle frames (`pending` / `activity` / heartbeat) on the live
-stream until provider history exists. The implementation choice must be
-documented in tests because this is the first edge most clients will hit when
-they attach to a brand-new session.
+still honors the requested structured wire contract. The response or stream
+frame must use `format: "structured"`, include `schema_version`, and include a
+degraded `history` envelope with `continuity.status = "degraded"` plus a
+`transcript_unavailable` diagnostic. If live pane text is the only observable
+source, it may appear only as a provider-neutral `text` block in
+`structured_messages`; the server must not return `format: "text"` to a
+structured request and must not forward provider-native frames through the
+structured format. This graceful downgrade is mandatory for every built-in
+provider, including providers whose rich transcript parser has not landed yet,
+so clients can render one provider-neutral shape without learning provider
+file formats.
 
 ### Thinking-exposure policy
 
@@ -599,15 +594,20 @@ authorization/redaction layer.
 
 ## Appendix: source facts
 
-- Formats accepted today: only `raw` is branched on; anything else is the
-  `conversation` default (`huma_handlers_sessions_stream.go:40,123-140`;
-  `huma_handlers_sessions_query.go:161-230`). No `format` enum exists
-  (`huma_types_sessions.go:101,110`), and the generated OpenAPI currently
-  documents it only as free-form prose.
-- `text` fallback: transcript and live peek can return `format: "text"` when
-  there is no provider transcript yet and pane output is the only available
-  source (`huma_handlers_sessions_query.go:264`;
-  `streamSessionPeekHuma` in `handler_session_stream.go:1051`, def at `:1014`).
+- Formats accepted today: the Huma transcript and stream inputs declare
+  `format` as `conversation,raw,structured`
+  (`huma_types_sessions.go`). `conversation` remains the default when the
+  query parameter is omitted; `raw` emits provider-native frames through the
+  typed raw-frame wrapper; `structured` emits the provider-neutral structured
+  envelope. The legacy unscoped `/v0/session/...` routes preserve the same
+  `format=structured` semantics for compatibility, but the city-scoped Huma
+  routes are the canonical OpenAPI surface.
+- `text` fallback: the default conversation transcript and live peek can
+  return `format: "text"` when there is no provider transcript yet and pane
+  output is the only available source. A client that explicitly asks for
+  `format=structured` receives the degraded structured fallback instead
+  (`huma_handlers_sessions_query.go`; `streamSessionPeekStructuredHuma` in
+  `handler_session_stream.go`).
 - Worker-boundary caveat: the migration governs session creation/lifecycle;
   AGENTS.md explicitly says stream and transcript readers in `internal/api/`
   still read session logs directly (`AGENTS.md:248-265`;

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -60,7 +62,9 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	wantRaw := r.URL.Query().Get("format") == "raw"
+	format := r.URL.Query().Get("format")
+	wantRaw := format == "raw"
+	wantStructured := format == "structured"
 
 	if path != "" {
 		tail := 0
@@ -74,6 +78,31 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 
 		if before != "" && after != "" {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_params", "before and after are mutually exclusive")
+			return
+		}
+
+		if wantStructured {
+			history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), worker.HistoryRequest{
+				TailCompactions: tail,
+			})
+			if historyErr != nil {
+				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+					writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle))
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
+				return
+			}
+			messages, _ := historySnapshotStructuredMessages(history, queryBoolParam(r, "include_thinking"))
+			writeJSON(w, http.StatusOK, sessionTranscriptGetResponse{
+				ID:                 info.ID,
+				Template:           info.Template,
+				Provider:           info.Provider,
+				Format:             "structured",
+				SchemaVersion:      sessionStructuredSchemaVersion,
+				History:            structuredHistoryFromSnapshot(history),
+				StructuredMessages: messages,
+			})
 			return
 		}
 
@@ -137,6 +166,11 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if wantStructured {
+		writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle))
+		return
+	}
+
 	output, peekErr := handle.Peek(r.Context(), 100)
 	if peekErr != nil && !errors.Is(peekErr, session.ErrSessionInactive) {
 		writeError(w, http.StatusInternalServerError, "internal", peekErr.Error())
@@ -162,4 +196,28 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		Format:   "conversation",
 		Turns:    []outputTurn{},
 	})
+}
+
+func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info session.Info, handle worker.PeekHandle) sessionTranscriptGetResponse {
+	activity := string(worker.TailActivityIdle)
+	output := ""
+	peekOutput, peekErr := handle.Peek(ctx, 100)
+	if peekErr == nil {
+		activity = string(worker.TailActivityInTurn)
+		output = peekOutput
+	}
+	return sessionTranscriptGetResponse{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+	}
+}
+
+func queryBoolParam(r *http.Request, name string) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }

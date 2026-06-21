@@ -88,6 +88,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	format := r.URL.Query().Get("format")
+	includeThinking := queryBoolParam(r, "include_thinking")
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
@@ -141,20 +142,29 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, "message", 0, data)
 	}
 	if info.Closed {
-		if format == "raw" {
+		switch format {
+		case "raw":
 			s.emitClosedSessionSnapshotRaw(w, info, history)
-		} else {
+		case "structured":
+			s.emitClosedSessionSnapshotStructured(w, info, history, includeThinking)
+		default:
 			s.emitClosedSessionSnapshot(w, info, history)
 		}
 		return
 	}
 	switch {
 	case hasHistory:
-		if format == "raw" {
+		switch format {
+		case "raw":
 			s.streamSessionTranscriptHistoryRaw(ctx, w, info, handle, history, historyReq)
-		} else {
+		case "structured":
+			s.streamSessionTranscriptHistoryStructured(ctx, w, info, handle, history, includeThinking)
+		default:
 			s.streamSessionTranscriptHistory(ctx, w, info, handle, history)
 		}
+	case format == "structured":
+		s.streamSessionPeekStructured(ctx, w, info, handle)
+		return
 	case format == "raw":
 		// No log file yet. If the session is running, poll tmux pane content
 		// and wrap it as a fake raw JSONL assistant message so a real-world app's existing
@@ -219,6 +229,32 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 		return
 	}
 	writeSSE(w, "message", 1, data)
+	actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: "idle"})
+	writeSSE(w, "activity", 2, actData)
+}
+
+func (s *Server) emitClosedSessionSnapshotStructured(w http.ResponseWriter, info session.Info, history *worker.HistorySnapshot, includeThinking bool) {
+	if history == nil {
+		return
+	}
+	messages, _ := historySnapshotStructuredMessages(history, includeThinking)
+	if len(messages) == 0 {
+		return
+	}
+
+	data, err := json.Marshal(SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredHistoryFromSnapshot(history),
+		StructuredMessages: messages,
+	})
+	if err != nil {
+		return
+	}
+	writeSSE(w, "structured", 1, data)
 	actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: "idle"})
 	writeSSE(w, "activity", 2, actData)
 }
@@ -505,6 +541,127 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	}
 }
 
+func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot, includeThinking bool) {
+	logPath := sessionStreamTranscriptPath(ctx, handle)
+	poll := time.NewTicker(outputStreamPollInterval)
+	keepalive := time.NewTicker(sseKeepalive)
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+	if logPath == "" {
+		defer poll.Stop()
+		defer keepalive.Stop()
+	}
+
+	var lastSentID string
+	var seq uint64
+	var lastActivity string
+	sentIDs := make(map[string]struct{})
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
+		emitted := false
+		if snapshot == nil {
+			return false
+		}
+		messages, ids := historySnapshotStructuredMessages(snapshot, includeThinking)
+		if len(messages) > 0 {
+			var toSend []SessionStructuredMessage
+			if lastSentID == "" {
+				toSend = messages
+			} else {
+				found := false
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = messages[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream structured: cursor %s lost, emitting only new messages", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, messages[i])
+						}
+					}
+				}
+			}
+			if len(toSend) > 0 {
+				seq++
+				data, err := json.Marshal(SessionStreamStructuredMessageEvent{
+					ID:                 info.ID,
+					Template:           info.Template,
+					Provider:           info.Provider,
+					Format:             "structured",
+					SchemaVersion:      sessionStructuredSchemaVersion,
+					History:            structuredHistoryFromSnapshot(snapshot),
+					StructuredMessages: toSend,
+				})
+				if err == nil {
+					writeSSE(w, "structured", seq, data)
+					emitted = true
+				}
+			}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
+			}
+		}
+		activity := historySnapshotActivity(snapshot)
+		if activity != "" && activity != lastActivity {
+			lastActivity = activity
+			seq++
+			actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: activity})
+			writeSSE(w, "activity", seq, actData)
+			emitted = true
+		}
+		return emitted
+	}
+
+	var lw *logFileWatcher
+	reloadSnapshot := func() bool {
+		emitted := false
+		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
+		switch {
+		case err == nil:
+			emitted = emitSnapshot(snapshot)
+		case errors.Is(err, worker.ErrHistoryUnavailable):
+		default:
+			log.Printf("session stream structured: history reload failed for %s: %v", info.ID, err)
+		}
+		if lw != nil {
+			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
+		}
+		return emitted
+	}
+
+	if logPath != "" {
+		poll.Stop()
+		keepalive.Stop()
+		lw = newLogFileWatcher(logPath)
+		defer lw.Close()
+		_ = emitSnapshot(initial)
+		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{Wake: workerOps})
+		return
+	}
+
+	_ = emitSnapshot(initial)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			reloadSnapshot()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			reloadSnapshot()
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
+
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
 // messages so a real-world app's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
@@ -562,6 +719,81 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 					writeSSE(w, "message", seq, data)
 				}
 			}
+		}
+		emitPending()
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			emitPeek()
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
+
+func (s *Server) streamSessionPeekStructured(ctx context.Context, w http.ResponseWriter, info session.Info, handle interface {
+	worker.PeekHandle
+	worker.InteractionHandle
+},
+) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+
+	var lastOutput string
+	var emitted bool
+	var seq uint64
+	var lastPendingID string
+
+	emitPending := func() {
+		pending, err := handle.Pending(ctx)
+		if err == nil && pending != nil && pending.RequestID != lastPendingID {
+			lastPendingID = pending.RequestID
+			seq++
+			pendingData, _ := json.Marshal(runtimePendingInteraction(pending))
+			writeSSE(w, "pending", seq, pendingData)
+		} else if pending == nil && lastPendingID != "" {
+			lastPendingID = ""
+		}
+	}
+
+	emitPeek := func() {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil || (emitted && output == lastOutput) {
+			emitPending()
+			return
+		}
+		lastOutput = output
+		emitted = true
+		seq++
+		data, err := json.Marshal(SessionStreamStructuredMessageEvent{
+			ID:                 info.ID,
+			Template:           info.Template,
+			Provider:           info.Provider,
+			Format:             "structured",
+			SchemaVersion:      sessionStructuredSchemaVersion,
+			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+		})
+		if err == nil {
+			writeSSE(w, "structured", seq, data)
 		}
 		emitPending()
 	}
@@ -1112,6 +1344,83 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 				}})
 			}
 		}
+
+		emitPending()
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			emitPeek()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}
+	}
+}
+
+func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	if err != nil {
+		return
+	}
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+
+	var lastOutput string
+	var emitted bool
+	var seq int
+	var lastPendingID string
+
+	emitPending := func() {
+		pending, err := handle.Pending(ctx)
+		if err == nil && pending != nil && pending.RequestID != lastPendingID {
+			lastPendingID = pending.RequestID
+			seq++
+			_ = send(sse.Message{ID: seq, Data: runtimePendingInteraction(pending)})
+		} else if pending == nil && lastPendingID != "" {
+			lastPendingID = ""
+		}
+	}
+
+	emitPeek := func() {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil || (emitted && output == lastOutput) {
+			emitPending()
+			return
+		}
+		lastOutput = output
+		emitted = true
+
+		seq++
+		_ = send(sse.Message{ID: seq, Data: SessionStreamStructuredMessageEvent{
+			ID:                 info.ID,
+			Template:           info.Template,
+			Provider:           info.Provider,
+			Format:             "structured",
+			SchemaVersion:      sessionStructuredSchemaVersion,
+			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+		}})
 
 		emitPending()
 	}

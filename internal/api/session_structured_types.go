@@ -13,6 +13,11 @@ import (
 
 const sessionStructuredSchemaVersion = "session.structured.v1"
 
+const (
+	structuredTranscriptUnavailableCode    = "transcript_unavailable"
+	structuredTranscriptUnavailableMessage = "provider transcript is unavailable; using provider-neutral text fallback"
+)
+
 // SessionStreamStructuredMessageEvent carries provider-normalized structured
 // transcript messages on the session SSE stream.
 type SessionStreamStructuredMessageEvent struct {
@@ -205,6 +210,63 @@ func structuredHistoryFromSnapshot(snapshot *worker.HistorySnapshot) *SessionStr
 		},
 		Diagnostics: diagnostics,
 	}
+}
+
+func structuredFallbackHistory(sessionID, providerSessionID, activity string) *SessionStructuredHistory {
+	now := time.Now().UTC()
+	if sessionID == "" {
+		sessionID = "unknown"
+	}
+	if providerSessionID == "" {
+		providerSessionID = sessionID
+	}
+	if activity == "" {
+		activity = string(worker.TailActivityUnknown)
+	}
+	streamID := "fallback:" + sessionID
+	return &SessionStructuredHistory{
+		GCSessionID:           sessionID,
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     providerSessionID,
+		TranscriptStreamID:    streamID,
+		Generation: SessionStructuredGeneration{
+			ID:         streamID,
+			ObservedAt: now.Format(time.RFC3339Nano),
+		},
+		Continuity: SessionStructuredContinuity{
+			Status: string(worker.ContinuityStatusDegraded),
+			Note:   structuredTranscriptUnavailableMessage,
+		},
+		TailState: SessionStructuredTailState{
+			Activity:       activity,
+			Degraded:       true,
+			DegradedReason: structuredTranscriptUnavailableMessage,
+		},
+		Diagnostics: []SessionStructuredDiagnostic{{
+			Code:    structuredTranscriptUnavailableCode,
+			Message: structuredTranscriptUnavailableMessage,
+			Count:   1,
+		}},
+	}
+}
+
+func structuredFallbackMessages(sessionID, provider, text string) []SessionStructuredMessage {
+	if strings.TrimSpace(text) == "" {
+		return []SessionStructuredMessage{}
+	}
+	if sessionID == "" {
+		sessionID = "unknown"
+	}
+	return []SessionStructuredMessage{{
+		ID:       "fallback:" + sessionID + ":1",
+		Role:     "output",
+		Provider: provider,
+		Status:   string(worker.ContinuityStatusDegraded),
+		Blocks: []SessionStructuredBlock{{
+			Type: string(worker.BlockKindText),
+			Text: text,
+		}},
+	}}
 }
 
 func historySnapshotStructuredMessages(snapshot *worker.HistorySnapshot, includeThinking bool) ([]SessionStructuredMessage, []string) {

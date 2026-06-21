@@ -142,6 +142,8 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 		default:
 			s.streamSessionTranscriptLogHuma(reqCtx, send, info, handle, history)
 		}
+	case format == "structured":
+		s.streamSessionPeekStructuredHuma(reqCtx, send, info)
 	case format == "raw":
 		s.streamSessionPeekRawHuma(reqCtx, send, info)
 	default:

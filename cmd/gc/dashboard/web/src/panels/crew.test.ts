@@ -33,8 +33,10 @@ describe("crew empty states", () => {
   });
 
   it("shows no crew configured when the city has zero crew sessions", async () => {
-    vi.spyOn(api, "GET").mockImplementation(async (path: string) => {
+    const sessionQueries: Array<Record<string, unknown>> = [];
+    vi.spyOn(api, "GET").mockImplementation(async (path: string, options?: unknown) => {
       if (path === "/v0/city/{cityName}/sessions") {
+        sessionQueries.push((options as { params?: { query?: Record<string, unknown> } } | undefined)?.params?.query ?? {});
         return { data: { items: [] } } as never;
       }
       throw new Error(`unexpected GET ${path}`);
@@ -42,6 +44,7 @@ describe("crew empty states", () => {
 
     await renderCrew();
 
+    expect(sessionQueries[0]).toEqual({ peek: true });
     expect((document.getElementById("crew-empty") as HTMLElement).style.display).toBe("block");
     expect(document.getElementById("crew-empty")?.textContent).toContain("No crew configured");
     expect(document.getElementById("crew-empty")?.textContent).not.toContain("Select a city");
@@ -335,7 +338,7 @@ describe("crew empty states", () => {
                   structured: {
                     kind: "edit",
                     file_path: "src/app.ts",
-                    patch: "@@\\n- old line\\n+ new line",
+                    patch: "@@\n- old line\n+ new line",
                   },
                 },
               ],
@@ -363,6 +366,10 @@ describe("crew empty states", () => {
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("apply_patch");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("src/app.ts");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("+ new line");
+    expect(document.querySelector(".log-msg-diff")).not.toBeNull();
+    expect(document.querySelector(".log-msg-diff-hunk")?.textContent).toBe("@@");
+    expect(document.querySelector(".log-msg-diff-del")?.textContent).toBe("- old line");
+    expect(document.querySelector(".log-msg-diff-add")?.textContent).toBe("+ new line");
 
     streamHandler?.({
       type: "structured",

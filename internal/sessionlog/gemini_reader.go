@@ -1,6 +1,7 @@
 package sessionlog
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,17 +9,24 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
-// ReadGeminiFile reads a Gemini session JSON file and converts it to the
+// ReadGeminiFile reads a Gemini session JSON/JSONL file and converts it to the
 // standard Session format used by GC session transcripts.
 //
-// Gemini stores sessions at ~/.gemini/tmp/<project>/chats/session-*.json as a
-// single JSON object with a linear messages[] array.
+// Gemini stores sessions at ~/.gemini/tmp/<project>/chats/session-*.json or
+// session-*.jsonl. Older files are single JSON objects with a linear messages[]
+// array. Current CLI files are JSONL mutation streams with an initial session
+// header, top-level message objects, and "$set.messages" snapshots.
 func ReadGeminiFile(path string, _ int) (*Session, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if strings.EqualFold(filepath.Ext(path), ".jsonl") {
+		return readGeminiJSONLFile(path, data)
 	}
 
 	var raw struct {
@@ -43,6 +51,81 @@ func ReadGeminiFile(path string, _ int) (*Session, error) {
 		messages = append(messages, entry)
 	}
 
+	return &Session{
+		ID:       sessionID,
+		Messages: messages,
+	}, nil
+}
+
+func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
+	type setPayload struct {
+		Messages *[]json.RawMessage `json:"messages"`
+	}
+	type linePayload struct {
+		SessionID string            `json:"sessionId"`
+		Type      string            `json:"type"`
+		Set       *setPayload       `json:"$set"`
+		RawSet    *setPayload       `json:"set"`
+		Messages  []json.RawMessage `json:"messages"`
+	}
+
+	sessionID := ""
+	messages := make([]*Entry, 0)
+	messageIndex := make(map[string]int)
+	nextIndex := 0
+
+	appendEntry := func(rawMessage json.RawMessage) {
+		entry := parseGeminiMessage(rawMessage, nextIndex)
+		nextIndex++
+		if entry == nil {
+			return
+		}
+		if idx, ok := messageIndex[entry.UUID]; ok {
+			messages[idx] = entry
+			return
+		}
+		messageIndex[entry.UUID] = len(messages)
+		messages = append(messages, entry)
+	}
+	resetMessages := func(rawMessages []json.RawMessage) {
+		messages = messages[:0]
+		clear(messageIndex)
+		for _, rawMessage := range rawMessages {
+			appendEntry(rawMessage)
+		}
+	}
+
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var payload linePayload
+		if err := json.Unmarshal(line, &payload); err != nil {
+			return nil, fmt.Errorf("parsing Gemini JSONL %s: %w", path, err)
+		}
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(payload.SessionID)
+		}
+		if payload.Set != nil && payload.Set.Messages != nil {
+			resetMessages(*payload.Set.Messages)
+			continue
+		}
+		if payload.RawSet != nil && payload.RawSet.Messages != nil {
+			resetMessages(*payload.RawSet.Messages)
+			continue
+		}
+		if len(payload.Messages) > 0 {
+			resetMessages(payload.Messages)
+			continue
+		}
+		if strings.TrimSpace(payload.Type) != "" {
+			appendEntry(append(json.RawMessage(nil), line...))
+		}
+	}
+	if sessionID == "" {
+		sessionID = geminiSessionID(path)
+	}
 	return &Session{
 		ID:       sessionID,
 		Messages: messages,
@@ -215,7 +298,7 @@ func geminiContentText(raw json.RawMessage) string {
 }
 
 // FindGeminiSessionFile searches Gemini's tmp sessions directory
-// (~/.gemini/tmp/<project>/chats/session-*.json) for the most recently
+// (~/.gemini/tmp/<project>/chats/session-*.json*) for the most recently
 // modified session matching workDir.
 func FindGeminiSessionFile(searchPaths []string, workDir string) string {
 	if workDir == "" {
@@ -243,10 +326,58 @@ func FindGeminiSessionFile(searchPaths []string, workDir string) string {
 	return bestPath
 }
 
+// FindGeminiSessionFileByID searches Gemini's tmp sessions directory for a
+// transcript whose stored sessionId exactly matches sessionID.
+func FindGeminiSessionFileByID(searchPaths []string, workDir, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if workDir == "" || sessionID == "" || strings.ContainsAny(sessionID, `/\`) {
+		return ""
+	}
+
+	var (
+		bestPath string
+		bestTime time.Time
+	)
+	for _, root := range mergeGeminiSearchPaths(searchPaths) {
+		for _, path := range geminiSessionCandidatesIn(root, workDir) {
+			if geminiSessionIDFromFile(path) != sessionID {
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			if bestPath == "" || info.ModTime().After(bestTime) {
+				bestPath = path
+				bestTime = info.ModTime()
+			}
+		}
+	}
+	return bestPath
+}
+
 func findGeminiSessionFileIn(root, workDir string) string {
+	var (
+		bestPath string
+		bestTime time.Time
+	)
+	for _, path := range geminiSessionCandidatesIn(root, workDir) {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if bestPath == "" || info.ModTime().After(bestTime) {
+			bestPath = path
+			bestTime = info.ModTime()
+		}
+	}
+	return bestPath
+}
+
+func geminiSessionCandidatesIn(root, workDir string) []string {
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() {
-		return ""
+		return nil
 	}
 
 	var candidates []string
@@ -254,7 +385,7 @@ func findGeminiSessionFileIn(root, workDir string) string {
 		candidates = append(candidates, candidate)
 	}
 
-	if geminiProjectRoot(root) == workDir {
+	if geminiProjectRootMatches(root, workDir) {
 		candidates = append(candidates, root)
 	}
 
@@ -265,7 +396,7 @@ func findGeminiSessionFileIn(root, workDir string) string {
 				continue
 			}
 			dir := filepath.Join(root, entry.Name())
-			if geminiProjectRoot(dir) == workDir {
+			if geminiProjectRootMatches(dir, workDir) {
 				candidates = append(candidates, dir)
 			}
 		}
@@ -273,26 +404,12 @@ func findGeminiSessionFileIn(root, workDir string) string {
 
 	candidates = uniqueStrings(candidates)
 
-	var (
-		bestPath string
-		bestTime time.Time
-	)
+	var paths []string
 	for _, candidate := range candidates {
-		path := newestGeminiSessionInChats(filepath.Join(candidate, "chats"))
-		if path == "" {
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if bestPath == "" || info.ModTime().After(bestTime) {
-			bestPath = path
-			bestTime = info.ModTime()
-		}
+		paths = append(paths, geminiSessionsInChats(filepath.Join(candidate, "chats"))...)
 	}
 
-	return bestPath
+	return paths
 }
 
 func geminiProjectDir(root, workDir string) string {
@@ -311,6 +428,14 @@ func geminiProjectDir(root, workDir string) string {
 
 	dirName := strings.TrimSpace(projects.Projects[workDir])
 	if dirName == "" {
+		for projectRoot, mappedDirName := range projects.Projects {
+			if pathutil.SamePath(projectRoot, workDir) {
+				dirName = strings.TrimSpace(mappedDirName)
+				break
+			}
+		}
+	}
+	if dirName == "" {
 		return ""
 	}
 	return filepath.Join(root, dirName)
@@ -324,10 +449,18 @@ func geminiProjectRoot(dir string) string {
 	return strings.TrimSpace(string(data))
 }
 
-func newestGeminiSessionInChats(chatsDir string) string {
+func geminiProjectRootMatches(dir, workDir string) bool {
+	projectRoot := geminiProjectRoot(dir)
+	if projectRoot == "" || workDir == "" {
+		return false
+	}
+	return pathutil.SamePath(projectRoot, workDir)
+}
+
+func geminiSessionsInChats(chatsDir string) []string {
 	entries, err := os.ReadDir(chatsDir)
 	if err != nil {
-		return ""
+		return nil
 	}
 
 	type candidate struct {
@@ -339,10 +472,11 @@ func newestGeminiSessionInChats(chatsDir string) string {
 		if entry.IsDir() {
 			continue
 		}
-		if !strings.HasPrefix(entry.Name(), "session-") || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "session-") || (!strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".jsonl")) {
 			continue
 		}
-		path := filepath.Join(chatsDir, entry.Name())
+		path := filepath.Join(chatsDir, name)
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -354,9 +488,43 @@ func newestGeminiSessionInChats(chatsDir string) string {
 		return files[i].modTime.After(files[j].modTime)
 	})
 	if len(files) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		paths = append(paths, file.path)
+	}
+	return paths
+}
+
+func geminiSessionIDFromFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return ""
 	}
-	return files[0].path
+	if strings.EqualFold(filepath.Ext(path), ".jsonl") {
+		for _, line := range bytes.Split(data, []byte{'\n'}) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+			var header struct {
+				SessionID string `json:"sessionId"`
+			}
+			if err := json.Unmarshal(line, &header); err != nil {
+				return ""
+			}
+			return strings.TrimSpace(header.SessionID)
+		}
+		return ""
+	}
+	var header struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(header.SessionID)
 }
 
 func geminiSessionID(path string) string {

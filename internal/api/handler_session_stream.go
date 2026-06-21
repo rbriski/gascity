@@ -541,7 +541,11 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	}
 }
 
-func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot, includeThinking bool) {
+func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w http.ResponseWriter, info session.Info, handle interface {
+	worker.HistoryHandle
+	worker.PeekHandle
+}, initial *worker.HistorySnapshot, includeThinking bool,
+) {
 	logPath := sessionStreamTranscriptPath(ctx, handle)
 	poll := time.NewTicker(outputStreamPollInterval)
 	keepalive := time.NewTicker(sseKeepalive)
@@ -555,6 +559,35 @@ func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w
 	var seq uint64
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
+	var emittedStructured bool
+
+	emitStructuredFallback := func() {
+		if emittedStructured {
+			return
+		}
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil {
+			log.Printf("session stream structured: fallback peek failed for %s: %v", info.ID, err)
+			output = ""
+		}
+		seq++
+		data, err := json.Marshal(SessionStreamStructuredMessageEvent{
+			ID:                 info.ID,
+			Template:           info.Template,
+			Provider:           info.Provider,
+			Format:             "structured",
+			SchemaVersion:      sessionStructuredSchemaVersion,
+			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+		})
+		if err == nil {
+			writeSSE(w, "structured", seq, data)
+			emittedStructured = true
+		}
+	}
 
 	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
 		emitted := false
@@ -598,6 +631,7 @@ func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w
 				if err == nil {
 					writeSSE(w, "structured", seq, data)
 					emitted = true
+					emittedStructured = true
 				}
 			}
 			lastSentID = ids[len(ids)-1]
@@ -639,11 +673,13 @@ func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
+		emitStructuredFallback()
 		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{Wake: workerOps})
 		return
 	}
 
 	_ = emitSnapshot(initial)
+	emitStructuredFallback()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1162,7 +1198,11 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	}
 }
 
-func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, send sse.Sender, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot, includeThinking bool) {
+func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, send sse.Sender, info session.Info, handle interface {
+	worker.HistoryHandle
+	worker.PeekHandle
+}, initial *worker.HistorySnapshot, includeThinking bool,
+) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
@@ -1180,6 +1220,32 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 	var seq int
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
+	var emittedStructured bool
+
+	emitStructuredFallback := func() {
+		if emittedStructured {
+			return
+		}
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil {
+			log.Printf("session stream structured: fallback peek failed for %s: %v", info.ID, err)
+			output = ""
+		}
+		seq++
+		_ = send(sse.Message{ID: seq, Data: SessionStreamStructuredMessageEvent{
+			ID:                 info.ID,
+			Template:           info.Template,
+			Provider:           info.Provider,
+			Format:             "structured",
+			SchemaVersion:      sessionStructuredSchemaVersion,
+			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+		}})
+		emittedStructured = true
+	}
 
 	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
 		emitted := false
@@ -1222,6 +1288,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 					StructuredMessages: toSend,
 				}})
 				emitted = true
+				emittedStructured = true
 			}
 			lastSentID = ids[len(ids)-1]
 			for _, id := range ids {
@@ -1262,6 +1329,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
+		emitStructuredFallback()
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}, RunOpts{Wake: workerOps})
@@ -1269,6 +1337,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 	}
 
 	_ = emitSnapshot(initial)
+	emitStructuredFallback()
 	for {
 		select {
 		case <-ctx.Done():

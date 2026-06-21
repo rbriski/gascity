@@ -1737,6 +1737,29 @@ func TestFindCodexSessionFileUsesObservedRoots(t *testing.T) {
 	}
 }
 
+func TestFindCodexSessionFileMatchesEquivalentResolvedWorkDir(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS /private/tmp path aliases only apply on darwin")
+	}
+	sessDir := t.TempDir()
+	workDir := filepath.Join(os.TempDir(), "gascity-codex-live")
+	aliasedWorkDir := "/private" + workDir
+	dayDir := filepath.Join(sessDir, "2026", "06", "21")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	matchFile := filepath.Join(dayDir, "rollout-current.jsonl")
+	meta := fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, aliasedWorkDir)
+	if err := os.WriteFile(matchFile, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindCodexSessionFile([]string{sessDir}, workDir)
+	if got != matchFile {
+		t.Errorf("got %q, want %q", got, matchFile)
+	}
+}
+
 func TestCodexSessionCWD(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "test.jsonl")
@@ -1827,6 +1850,96 @@ func TestFindGeminiSessionFileUsesObservedRoots(t *testing.T) {
 	}
 }
 
+func TestFindGeminiSessionFileUsesJSONL(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "tmp")
+	workDir := "/data/projects/myproject"
+	projectDir := filepath.Join(root, "myproject")
+	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldJSON := filepath.Join(projectDir, "chats", "session-2026-03-27T09-00-old.json")
+	if err := os.WriteFile(oldJSON, []byte(`{"sessionId":"old","messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(oldJSON, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(projectDir, "chats", "session-2026-03-27T09-01-new.jsonl")
+	if err := os.WriteFile(want, []byte(`{"sessionId":"new","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindGeminiSessionFile([]string{root}, workDir)
+	if got != want {
+		t.Fatalf("FindGeminiSessionFile() = %q, want %q", got, want)
+	}
+}
+
+func TestFindGeminiSessionFileMatchesEquivalentResolvedWorkDir(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only /tmp <-> /private/tmp Gemini project path alias")
+	}
+
+	base := t.TempDir()
+	root := filepath.Join(base, "tmp")
+	storedWorkDir := "/tmp/gc-live-structured.test/city"
+	providerWorkDir := "/private/tmp/gc-live-structured.test/city"
+	projectDir := filepath.Join(root, "city")
+	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(providerWorkDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(projectDir, "chats", "session-2026-06-21T17-08-f0323691.jsonl")
+	if err := os.WriteFile(want, []byte(`{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindGeminiSessionFile([]string{root}, storedWorkDir)
+	if got != want {
+		t.Fatalf("FindGeminiSessionFile() = %q, want %q", got, want)
+	}
+}
+
+func TestFindGeminiSessionFileByIDUsesJSONLSessionHeader(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "tmp")
+	workDir := "/data/projects/myproject"
+	projectDir := filepath.Join(root, "myproject")
+	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := filepath.Join(projectDir, "chats", "session-2026-03-27T09-00-old.jsonl")
+	if err := os.WriteFile(oldPath, []byte(`{"sessionId":"other-session","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(projectDir, "chats", "session-2026-03-27T09-01-f0323691.jsonl")
+	if err := os.WriteFile(want, []byte(`{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindGeminiSessionFileByID([]string{root}, workDir, "f0323691-2967-4d1e-a6f4-6266077f42c6")
+	if got != want {
+		t.Fatalf("FindGeminiSessionFileByID() = %q, want %q", got, want)
+	}
+	if got := FindGeminiSessionFileByID([]string{root}, workDir, "../escape"); got != "" {
+		t.Fatalf("FindGeminiSessionFileByID traversal = %q, want empty", got)
+	}
+}
+
 func skipUnlessDarwinClaudePathAliases(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
@@ -1879,6 +1992,40 @@ func TestReadGeminiFileConvertsMessages(t *testing.T) {
 	}
 	if got := sess.Messages[2].Type; got != "system" {
 		t.Fatalf("third type = %q, want system", got)
+	}
+}
+
+func TestReadGeminiJSONLFileConvertsMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := strings.Join([]string{
+		`{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","projectHash":"project","startTime":"2026-06-21T17:08:00.693Z","kind":"main"}`,
+		`{"$set":{"messages":[{"id":"u1","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":[{"text":"Initial context"}]}],"lastUpdated":"2026-06-21T17:08:00.694Z"}}`,
+		`{"id":"a1","timestamp":"2026-06-21T17:08:10Z","type":"gemini","content":"Done","thoughts":[{"subject":"Plan","description":"Use shell"}],"toolCalls":[{"id":"tool-1","name":"run_shell_command","args":{"command":"git diff -- src/app.ts"},"result":[{"functionResponse":{"id":"tool-1","response":{"output":"diff --git a/src/app.ts b/src/app.ts\n-old\n+new"}}}]}]}`,
+		`{"$set":{"lastUpdated":"2026-06-21T17:08:10Z"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadGeminiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadGeminiFile: %v", err)
+	}
+	if sess.ID != "f0323691-2967-4d1e-a6f4-6266077f42c6" {
+		t.Fatalf("session ID = %q", sess.ID)
+	}
+	if got := len(sess.Messages); got != 2 {
+		t.Fatalf("messages = %d, want 2", got)
+	}
+	blocks := sess.Messages[1].ContentBlocks()
+	if got := len(blocks); got != 4 {
+		t.Fatalf("blocks = %d, want 4", got)
+	}
+	if blocks[2].Type != "tool_use" || blocks[2].Name != "run_shell_command" {
+		t.Fatalf("tool use block = %#v", blocks[2])
+	}
+	if got := strings.TrimSpace(string(blocks[3].Content)); got != `"diff --git a/src/app.ts b/src/app.ts\n-old\n+new"` {
+		t.Fatalf("tool result content = %s, want diff output", got)
 	}
 }
 

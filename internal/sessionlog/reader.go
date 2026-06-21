@@ -869,7 +869,7 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 				continue
 			}
 			path := filepath.Join(dayDir, e.Name())
-			if codexSessionCWD(path) == workDir {
+			if codexSessionCWDMatches(path, workDir) {
 				appendCodexRolloutMatch(path, seen, matches)
 				if len(*matches) > 1 {
 					return
@@ -946,7 +946,7 @@ func FindCodexSessionFileByID(searchPaths []string, workDir, sessionID string, n
 	if len(matches) != 1 {
 		return ""
 	}
-	if codexSessionCWD(matches[0]) != workDir {
+	if !codexSessionCWDMatches(matches[0], workDir) {
 		return ""
 	}
 	return matches[0]
@@ -1129,7 +1129,7 @@ func findCodexSessionInDir(dir, workDir string) string {
 	})
 
 	for _, f := range files {
-		if codexSessionCWD(f.path) == workDir {
+		if codexSessionCWDMatches(f.path, workDir) {
 			return f.path
 		}
 	}
@@ -1164,6 +1164,14 @@ func codexSessionCWD(path string) string {
 		return ""
 	}
 	return meta.Payload.CWD
+}
+
+func codexSessionCWDMatches(path, workDir string) bool {
+	cwd := codexSessionCWD(path)
+	if cwd == "" || workDir == "" {
+		return false
+	}
+	return pathutil.SamePath(cwd, workDir)
 }
 
 // listDirsReverse returns directory names sorted in reverse lexicographic

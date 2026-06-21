@@ -40,7 +40,7 @@ export async function renderCrew(): Promise<void> {
   clear(crewBody);
 
   const { data, error } = await api.GET("/v0/city/{cityName}/sessions", {
-    params: { path: { cityName: city }, query: { state: "active", peek: true } },
+    params: { path: { cityName: city }, query: { peek: true } },
   });
   if (error || !data?.items) {
     crewLoading.textContent = "Failed to load crew";
@@ -553,19 +553,26 @@ function renderToolInput(block: SessionStructuredBlock): HTMLElement {
     return el("pre", { class: "log-msg-tool-pre" }, [block.input !== undefined ? formatInlineValue(block.input) : ""]);
   }
   const rows: string[] = [];
+  const patch = stringValue(input.patch);
   appendField(rows, "kind", input.kind);
   appendField(rows, "file", input.file_path);
   appendField(rows, "command", input.command);
   appendField(rows, "code", input.code);
-  appendField(rows, "patch", input.patch);
   appendField(rows, "query", input.query);
   appendField(rows, "pattern", input.pattern);
   appendField(rows, "text", input.text);
   if (Array.isArray(input.arguments) && input.arguments.length > 0) {
     rows.push(...input.arguments.map((arg) => formatArgument(arg)));
   }
-  if (rows.length === 0) rows.push(formatInlineValue(input));
-  return el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]);
+  if (patch === "") {
+    if (rows.length === 0) rows.push(formatInlineValue(input));
+    return el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]);
+  }
+
+  return el("div", { class: "log-msg-tool-input" }, [
+    rows.length > 0 ? el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]) : null,
+    renderDiffPre(patch),
+  ]);
 }
 
 function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
@@ -591,9 +598,9 @@ function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
       return toolResultNodes(kind, lines);
     }
     if (kind === "edit") {
-      appendField(lines, "patch", structured.patch);
+      const patch = stringValue(structured.patch);
       appendField(lines, "content", structured.content);
-      return toolResultNodes(kind, lines);
+      return toolResultNodes(kind, lines, patch);
     }
     if (kind === "read") {
       appendField(lines, "content", structured.content);
@@ -628,14 +635,42 @@ function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
   return toolResultNodes("result", [""]);
 }
 
-function toolResultNodes(kind: string, lines: string[]): HTMLElement[] {
-  return [
+function toolResultNodes(kind: string, lines: string[], diffText = ""): HTMLElement[] {
+  const nodes: HTMLElement[] = [
     el("div", { class: "log-msg-tool-title" }, [
       el("span", { class: "log-msg-tool-kind" }, [kind]),
       " result",
     ]),
-    el("pre", { class: "log-msg-tool-pre" }, [lines.filter(Boolean).join("\n")]),
   ];
+  const body = lines.filter(Boolean).join("\n");
+  if (body !== "") nodes.push(el("pre", { class: "log-msg-tool-pre" }, [body]));
+  if (diffText !== "") nodes.push(renderDiffPre(diffText));
+  if (body === "" && diffText === "") nodes.push(el("pre", { class: "log-msg-tool-pre" }, [""]));
+  return nodes;
+}
+
+function renderDiffPre(diffText: string): HTMLElement {
+  const lines = diffText.replace(/\r\n/g, "\n").split("\n");
+  const children: Array<HTMLElement | string> = [];
+  lines.forEach((line, index) => {
+    children.push(el("span", { class: diffLineClass(line) }, [line]));
+    if (index < lines.length - 1) children.push("\n");
+  });
+  return el("pre", { class: "log-msg-tool-pre log-msg-diff" }, children);
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "log-msg-diff-line log-msg-diff-hunk";
+  if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
+    return "log-msg-diff-line log-msg-diff-file";
+  }
+  if (line.startsWith("+")) return "log-msg-diff-line log-msg-diff-add";
+  if (line.startsWith("-")) return "log-msg-diff-line log-msg-diff-del";
+  return "log-msg-diff-line";
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function appendField(rows: string[], label: string, value: unknown): void {

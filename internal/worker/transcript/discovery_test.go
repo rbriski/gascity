@@ -132,6 +132,37 @@ func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathGeminiPrefersProviderSessionID(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "tmp")
+	workDir := filepath.Join(t.TempDir(), "city")
+	projectDir := filepath.Join(root, "city")
+	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := filepath.Join(projectDir, "chats", "session-2026-06-21T17-00-other.jsonl")
+	if err := os.WriteFile(oldPath, []byte(`{"sessionId":"other-session","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newerButWrong := filepath.Join(projectDir, "chats", "session-2026-06-21T17-10-wrong.jsonl")
+	if err := os.WriteFile(newerButWrong, []byte(`{"sessionId":"wrong-session","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(projectDir, "chats", "session-2026-06-21T17-08-f0323691.jsonl")
+	if err := os.WriteFile(want, []byte(`{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{root}, "gemini/tmux-cli", workDir, "f0323691-2967-4d1e-a6f4-6266077f42c6")
+	if got != want {
+		t.Fatalf("DiscoverPath() = %q, want keyed Gemini path %q", got, want)
+	}
+}
+
 func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 	base := t.TempDir()
 	workDir := "/tmp/gascity/phase1/kimi"
@@ -328,7 +359,7 @@ func TestSupportsIDLookup(t *testing.T) {
 	}{
 		{provider: "claude/tmux-cli", want: true},
 		{provider: "codex/tmux-cli", want: false},
-		{provider: "gemini/tmux-cli", want: false},
+		{provider: "gemini/tmux-cli", want: true},
 		{provider: "kimi/tmux-cli", want: true},
 		{provider: "opencode/tmux-cli", want: false},
 		{provider: "mimocode/tmux-cli", want: false},

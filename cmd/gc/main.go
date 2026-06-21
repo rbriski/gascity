@@ -288,6 +288,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newWorkflowCmd(stdout, stderr),
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
+		newExtmsgCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
 		newBdStoreBridgeCmd(stdout, stderr),
 		newDoltCleanupCmd(stdout, stderr),

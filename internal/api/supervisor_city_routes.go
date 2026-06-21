@@ -332,6 +332,13 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		sseCityStream(sm, (*Server).streamEvents))
 
 	// ExtMsg.
+	cityRegister(sm, huma.Operation{
+		OperationID:   "register-extmsg-client",
+		Method:        http.MethodPost,
+		Path:          "/extmsg/clients",
+		Summary:       "Register an external messaging client and issue a token",
+		DefaultStatus: http.StatusOK,
+	}, (*Server).humaHandleExtMsgClientRegister)
 	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound)
 	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound)
 	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList)

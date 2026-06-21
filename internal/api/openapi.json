@@ -2517,6 +2517,52 @@
         },
         "type": "object"
       },
+      "ExtMsgClientRegisterInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_sessions": {
+            "description": "Session names this client is permitted to subscribe to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "credential": {
+            "description": "Opaque credential string (required unless allow_no_credential=true in city.toml).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ExtMsgClientRegisterOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "description": "Stable client identifier (bead ID). Use as account_id in the subscribe URL.",
+            "type": "string"
+          },
+          "created": {
+            "description": "True when a new token was issued; false when re-issued for the same credential.",
+            "type": "boolean"
+          },
+          "note": {
+            "description": "One-time advisory message. Only present when created=true.",
+            "type": "string"
+          },
+          "token": {
+            "description": "Raw base64url token. Only present when created=true; store it securely.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "created"
+        ],
+        "type": "object"
+      },
       "ExtMsgGroupEnsureInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -19034,6 +19080,79 @@
           }
         },
         "summary": "Get v0 city by city name extmsg bindings"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/clients": {
+      "post": {
+        "operationId": "register-extmsg-client",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgClientRegisterInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtMsgClientRegisterOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Register an external messaging client and issue a token"
       }
     },
     "/v0/city/{cityName}/extmsg/groups": {

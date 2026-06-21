@@ -218,6 +218,8 @@ type City struct {
 	Orders OrdersConfig `toml:"orders,omitempty"`
 	// API configures the optional HTTP API server.
 	API APIConfig `toml:"api,omitempty"`
+	// ExtMsg configures the external messaging subsystem.
+	ExtMsg ExtMsgConfig `toml:"extmsg,omitempty"`
 	// ChatSessions configures chat session behavior (auto-suspend).
 	ChatSessions ChatSessionsConfig `toml:"chat_sessions,omitempty"`
 	// SessionSleep configures idle sleep policy defaults for managed sessions.
@@ -1985,6 +1987,43 @@ func (c APIConfig) BindOrDefault() string {
 		return "127.0.0.1"
 	}
 	return c.Bind
+}
+
+// ExtMsgConfig configures the external messaging subsystem.
+type ExtMsgConfig struct {
+	// ConnectedClients configures the connected-client SSE token and subscription subsystem.
+	ConnectedClients ConnectedClientsConfig `toml:"connected_clients,omitempty"`
+}
+
+// ConnectedClientsConfig configures the connected-client SSE subscribe path.
+type ConnectedClientsConfig struct {
+	// AllowNoCredential permits client registration without a credential when
+	// true. Defaults to false (credential required).
+	AllowNoCredential bool `toml:"allow_no_credential,omitempty"`
+	// HeartbeatInterval is the SSE keepalive interval for connected-client streams.
+	// Duration string (e.g., "30s"). Defaults to "30s".
+	HeartbeatInterval string `toml:"heartbeat_interval,omitempty"`
+	// SubscriberBufferSize is the channel buffer depth per SSE subscriber.
+	// Defaults to 64.
+	SubscriberBufferSize int `toml:"subscriber_buffer_size,omitempty"`
+}
+
+// HeartbeatIntervalOrDefault returns the configured heartbeat interval, or
+// 30s when unset.
+func (c ConnectedClientsConfig) HeartbeatIntervalOrDefault() string {
+	if c.HeartbeatInterval == "" {
+		return "30s"
+	}
+	return c.HeartbeatInterval
+}
+
+// SubscriberBufferSizeOrDefault returns the configured buffer size, or 64
+// when unset.
+func (c ConnectedClientsConfig) SubscriberBufferSizeOrDefault() int {
+	if c.SubscriberBufferSize <= 0 {
+		return 64
+	}
+	return c.SubscriberBufferSize
 }
 
 // ChatSessionsConfig configures chat session behavior.

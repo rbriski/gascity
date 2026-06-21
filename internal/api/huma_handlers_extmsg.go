@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -563,3 +564,166 @@ func (s *Server) humaHandleExtMsgAdapterUnregister(_ context.Context, input *Ext
 	out.Body.Status = "unregistered"
 	return out, nil
 }
+
+// --- Connected-client SSE subscribe ---
+
+// checkExtmsgSubscribe is the precheck for
+// GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe.
+// Runs before response headers are committed so errors produce standard HTTP error responses.
+func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscribeInput) error {
+	if _, err := s.humaExtmsgServices(); err != nil {
+		return err
+	}
+	if _, err := s.humaExtmsgAdapterRegistry(); err != nil {
+		return err
+	}
+
+	if input.XGCClientToken == "" {
+		return huma.Error401Unauthorized("unauthorized")
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return huma.Error503ServiceUnavailable("bead store not available")
+	}
+	clientID, allowedSessions, err := extmsg.ResolveClientToken(ctx, store, input.XGCClientToken)
+	if err != nil {
+		if errors.Is(err, extmsg.ErrClientTokenNotFound) || errors.Is(err, extmsg.ErrInvalidInput) {
+			return huma.Error401Unauthorized("unauthorized")
+		}
+		return huma.Error503ServiceUnavailable("token resolution failed: " + err.Error())
+	}
+
+	if input.ClientID != clientID {
+		return huma.Error403Forbidden("account_mismatch: client_id does not match token")
+	}
+
+	cfg := s.state.Config()
+	heartbeat, err := time.ParseDuration(cfg.ExtMsg.ConnectedClients.HeartbeatIntervalOrDefault())
+	if err != nil || heartbeat <= 0 {
+		heartbeat = 30 * time.Second
+	}
+
+	input.resolved = &extmsgSubscribeState{
+		clientID:        clientID,
+		allowedSessions: allowedSessions,
+		convRef: extmsg.ConversationRef{
+			Provider:       extmsg.ProviderLLMClient,
+			AccountID:      clientID,
+			ConversationID: input.ConversationID,
+		},
+		heartbeat:  heartbeat,
+		bufferSize: cfg.ExtMsg.ConnectedClients.SubscriberBufferSizeOrDefault(),
+	}
+	return nil
+}
+
+// extmsgSubscribeEventMap returns the SSE event-type map for the subscribe stream.
+func extmsgSubscribeEventMap() map[string]any {
+	return map[string]any{
+		extmsg.SSEEventTypeMessage:   extmsg.SSEMessageEvent{},
+		extmsg.SSEEventTypeHeartbeat: extmsg.SSEHeartbeatEvent{},
+		extmsg.SSEEventTypeError:     extmsg.SSEErrorEvent{},
+	}
+}
+
+// streamExtmsgSubscribe is the SSE streaming body for
+// GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe.
+func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribeInput, send StringIDSender) {
+	reqCtx := hctx.Context()
+	state := input.resolved
+	if state == nil {
+		return
+	}
+
+	reg, err := s.humaExtmsgAdapterRegistry()
+	if err != nil {
+		return
+	}
+	svc, err := s.humaExtmsgServices()
+	if err != nil {
+		return
+	}
+
+	// Step a: Register an LLMClientAdapter keyed by ("llm-client", client_id).
+	// A dedicated SubscriberRegistry bridges this adapter to the event channel below.
+	registry := extmsg.NewSubscriberRegistry()
+	adapter := extmsg.NewLLMClientAdapter(state.clientID, registry)
+	adapterKey := extmsg.AdapterKey{Provider: extmsg.ProviderLLMClient, AccountID: state.clientID}
+	reg.Register(adapterKey, adapter)
+	defer reg.Unregister(adapterKey)
+
+	// Step b: Subscribe to the per-connection registry for this ConversationRef.
+	eventChan, cancelSub := registry.Subscribe(state.convRef, state.bufferSize)
+	defer cancelSub()
+
+	// Steps c + d (conditional on binding existence): EnsureMembership + backfill replay.
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api-subscribe"}
+	if binding, lookupErr := svc.Bindings.ResolveByConversation(reqCtx, state.convRef); lookupErr == nil && binding != nil {
+		svc.Transcript.EnsureMembership(reqCtx, extmsg.EnsureMembershipInput{ //nolint:errcheck
+			Caller:         caller,
+			Conversation:   state.convRef,
+			SessionID:      binding.SessionID,
+			BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		})
+
+		if input.LastEventID != "" {
+			if afterSeq, parseErr := strconv.ParseInt(input.LastEventID, 10, 64); parseErr == nil {
+				records, _ := svc.Transcript.List(reqCtx, extmsg.ListTranscriptInput{
+					Caller:        caller,
+					Conversation:  state.convRef,
+					AfterSequence: afterSeq,
+				})
+				for _, r := range records {
+					ev := extmsg.NewSSEMessageEvent(r.Text, binding.SessionID, state.convRef, r.Sequence, r.CreatedAt)
+					if sendErr := send(StringIDMessage{ID: strconv.FormatInt(r.Sequence, 10), Data: ev}); sendErr != nil {
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Step e: Drain any events buffered during backfill replay.
+	// Step f: Enter the goroutine select loop.
+	flushSSEHeaders(hctx)
+
+	ctx, cancel := context.WithCancel(reqCtx)
+	defer cancel()
+	safeSend := func(msg StringIDMessage) error {
+		if err := send(msg); err != nil {
+			cancel()
+			return err
+		}
+		return nil
+	}
+	_ = safeSend // used in select below
+
+	heartbeatTicker := time.NewTicker(state.heartbeat)
+	defer heartbeatTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeatTicker.C:
+			hb := extmsg.NewSSEHeartbeatEvent(time.Now())
+			if err := safeSend(StringIDMessage{Data: hb}); err != nil {
+				return
+			}
+		case event, ok := <-eventChan:
+			if !ok {
+				return
+			}
+			switch e := event.(type) {
+			case extmsg.SSEMessageEvent:
+				if err := safeSend(StringIDMessage{ID: strconv.FormatInt(e.Sequence, 10), Data: e}); err != nil {
+					return
+				}
+			case extmsg.SSEErrorEvent:
+				_ = send(StringIDMessage{ID: "error", Data: e})
+				return
+			}
+		}
+	}
+}
+

@@ -8,7 +8,7 @@
 | Issue | ga-31gfwg, ga-lyikvt |
 | Supersedes | — |
 
-This document specifies the wire contract for the `GET /v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe` endpoint: pre-stream HTTP error responses, post-stream SSE event schema, replay semantics, and cursor advancement rules. It is the normative reference for both the Go implementation in `internal/api` and consuming clients (e.g., tincan-iris).
+This document specifies the wire contract for the `GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe` endpoint: pre-stream HTTP error responses, post-stream SSE event schema, replay semantics, and cursor advancement rules. It is the normative reference for both the Go implementation in `internal/api` and consuming clients (e.g., tincan-iris).
 
 For the full feature architecture — token issuance model, subscriber registry design, `gc extmsg reply` command, and trade-off analysis — see bead `ga-31gfwg`.
 
@@ -26,15 +26,15 @@ This document specifies the receive leg. The send leg (`POST /v0/extmsg/inbound`
 ## Endpoint
 
 ```
-GET /v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe
+GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe
 ```
 
 **Path parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
-| `account_id` | The controller-issued `client_id`. Must match the `client_id` derived from the token presented in the `X-GC-Client-Token` header. |
-| `conversation_id` | Client-chosen opaque conversation identifier (UUID recommended). Combined with `account_id` to form a `ConversationRef` with `Provider: "llm-client"`. |
+| `client_id` | The controller-issued `client_id` from `POST /v0/extmsg/clients`. Must match the `client_id` derived from the token in `X-GC-Client-Token`. |
+| `conversation_id` | Client-chosen opaque conversation identifier (UUID recommended). Combined with `client_id` to form a `ConversationRef` with `Provider: "llm-client"`. |
 
 **Required headers:**
 
@@ -64,10 +64,14 @@ These errors are returned as standard HTTP responses before the server commits `
 | HTTP Status | Code | Condition |
 |-------------|------|-----------|
 | `401 Unauthorized` | `unauthorized` | `X-GC-Client-Token` header missing or token unrecognized. |
-| `403 Forbidden` | `session_forbidden` | Token valid, but the per-token `allowed_sessions` list does not include the session the conversation is bound to. |
-| `404 Not Found` | `session_not_found` | The requested session does not exist in the city's active config at subscribe time. |
-| `404 Not Found` | `binding_not_found` | No binding exists for this `ConversationRef`. The client must send at least one inbound turn (`POST /v0/extmsg/inbound`) to create the binding before subscribing. |
+| `403 Forbidden` | `account_mismatch` | Token valid, but the `client_id` in the URL path does not match the `client_id` derived from the token. |
+| `403 Forbidden` | `session_forbidden` | Token valid, but the per-token `allowed_sessions` list does not include the session the conversation is bound to (only applies when a binding exists and `allowed_sessions` is non-empty). |
+| `404 Not Found` | `session_not_found` | The requested session does not exist in the city's active config at subscribe time (only applies when a binding exists). |
 | `503 Service Unavailable` | `extmsg_unavailable` | External messaging is not enabled in the city config, or the controller is not ready. |
+
+> **Note (ga-gfuna2):** A missing binding is not a pre-stream error. The server opens the SSE stream and waits; a binding is created on the first `gc extmsg reply`. Clients subscribing before any reply has been sent will receive heartbeats until a binding is established and a reply arrives.
+
+> **Browser EventSource note:** The `event: error` frame MUST carry `id: error` on the wire. Browser `EventSource` clients treat any `id:` value as the new `Last-Event-ID`. Because `error` is non-numeric, a subsequent reconnect will send `Last-Event-ID: error`, which the server treats as absent (triggering no backfill). This prevents an automatic reconnect loop after a terminal error. Programmatic clients (non-browser) should close the connection on any `event: error` frame regardless of the `id:` value.
 
 ## SSE response headers (on success)
 

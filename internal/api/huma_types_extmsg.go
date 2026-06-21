@@ -5,6 +5,8 @@ package api
 // for navigability.
 
 import (
+	"time"
+
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -236,4 +238,30 @@ type ExtMsgAdapterUnregisterInput struct {
 		Provider  string `json:"provider" minLength:"1" doc:"Provider name."`
 		AccountID string `json:"account_id" minLength:"1" doc:"Account ID."`
 	}
+}
+
+// ExtMsgSubscribeInput is the Huma input for
+// GET /v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe.
+type ExtMsgSubscribeInput struct {
+	CityScope
+	ClientID       string `path:"client_id" doc:"Client identifier from POST /v0/extmsg/clients."`
+	ConversationID string `path:"conversation_id" doc:"Opaque conversation identifier."`
+	// XGCClientToken carries the bearer token issued by POST /v0/extmsg/clients.
+	// Left optional so the handler can return 401 (not 422) on missing token.
+	XGCClientToken string `header:"X-GC-Client-Token" required:"false" doc:"Bearer token from client registration."`
+	// LastEventID is the sequence number of the last successfully received message event.
+	// When present, the server replays transcript entries after that sequence before resuming live delivery.
+	LastEventID string `header:"Last-Event-ID" required:"false" doc:"Decimal sequence number for reconnect replay."`
+
+	// resolved carries state from checkExtmsgSubscribe into streamExtmsgSubscribe.
+	resolved *extmsgSubscribeState
+}
+
+// extmsgSubscribeState holds pre-validated subscribe context.
+type extmsgSubscribeState struct {
+	clientID        string
+	allowedSessions []string
+	convRef         extmsg.ConversationRef
+	heartbeat       time.Duration
+	bufferSize      int
 }

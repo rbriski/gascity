@@ -123,7 +123,7 @@ describe("crew empty states", () => {
     expect(document.getElementById("rigged-count")?.textContent).toBe("1");
   });
 
-  it("falls back to the empty state when only role/pool sessions exist", async () => {
+  it("falls back to the crew empty state while still listing non-crew role sessions", async () => {
     vi.spyOn(api, "GET").mockImplementation(async (path: string) => {
       if (path === "/v0/city/{cityName}/sessions") {
         return {
@@ -169,6 +169,9 @@ describe("crew empty states", () => {
     expect((document.getElementById("crew-empty") as HTMLElement).style.display).toBe("block");
     expect(document.getElementById("crew-empty")?.textContent).toContain("No crew configured");
     expect(document.getElementById("crew-count")?.textContent).toBe("0");
+    expect(document.getElementById("pooled-count")?.textContent).toBe("2");
+    expect(document.getElementById("pooled-body")?.textContent).toContain("rig-a/singleton");
+    expect(document.getElementById("pooled-body")?.textContent).toContain("rig-a/another-singleton");
   });
 
   it("loads older transcript pages without losing the drawer loading sentinel", async () => {
@@ -506,6 +509,149 @@ describe("crew empty states", () => {
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("gemini stderr");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("gemini-model");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("stop");
+  });
+
+  it("renders structured history metadata, interactions, subagent lineage, and stream lifecycle frames", async () => {
+    document.body.innerHTML = `
+      <div id="crew-loading">Loading crew...</div>
+      <table id="crew-table" style="display:none"><tbody id="crew-tbody"></tbody></table>
+      <div id="crew-empty" style="display:none"><p>No crew configured</p></div>
+      <div id="rigged-body"></div>
+      <div id="pooled-body"></div>
+      <span id="crew-count"></span>
+      <span id="rigged-count"></span>
+      <span id="pooled-count"></span>
+      <div id="agent-log-drawer" style="display:none">
+        <span id="log-drawer-agent-name"></span>
+        <span id="log-drawer-count"></span>
+        <span id="log-drawer-status"></span>
+        <button id="log-drawer-older-btn" style="display:none">Load older</button>
+        <button id="log-drawer-close-btn">Close</button>
+        <div id="log-drawer-body">
+          <div id="log-drawer-messages">
+            <div id="log-drawer-loading">Loading logs...</div>
+          </div>
+        </div>
+      </div>
+    `;
+    let streamHandler: ((msg: unknown) => void) | undefined;
+    vi.mocked(connectAgentOutput).mockImplementation((_city, _sessionID, onEvent) => {
+      streamHandler = onEvent as (msg: unknown) => void;
+      return { close: vi.fn() };
+    });
+    vi.spyOn(api, "GET").mockImplementation(async (path: string) => {
+      if (path === "/v0/city/{cityName}/sessions") {
+        return {
+          data: {
+            items: [{
+              active_bead: "",
+              agent_kind: "crew",
+              attached: true,
+              id: "s-open-code",
+              last_active: "2026-04-18T20:00:00Z",
+              last_output: "",
+              rig: "rig-a/crew",
+              running: true,
+              template: "opencode-worker",
+            }],
+          },
+        } as never;
+      }
+      if (path === "/v0/city/{cityName}/session/{id}/pending") {
+        return { data: { pending: false } } as never;
+      }
+      if (path === "/v0/city/{cityName}/session/{id}/transcript") {
+        return {
+          data: {
+            format: "structured",
+            history: {
+              continuity: {
+                has_branches: true,
+                note: "compacted transcript",
+                status: "compacted",
+              },
+              cursor: { after_entry_id: "entry-42" },
+              diagnostics: [{ code: "partial_history", count: 2, message: "older entries compacted" }],
+              generation: { id: "generation-1", observed_at: "2026-04-18T20:00:00Z" },
+              provider_session_id: "provider-session-99",
+              tail_state: {
+                activity: "in-turn",
+                degraded: true,
+                degraded_reason: "reader recovering",
+                last_entry_id: "entry-42",
+                open_tool_call_ids: ["tool-open"],
+                pending_interaction_ids: ["approval-1"],
+              },
+              transcript_stream_id: "stream-open-code-1",
+            },
+            provider: "opencode",
+            schema_version: "session.structured.v1",
+            structured_messages: [{
+              blocks: [
+                { text: "OpenCode delegated the edit.", type: "text" },
+                {
+                  interaction: {
+                    action: "awaiting_user",
+                    kind: "approval",
+                    options: ["Approve", "Deny"],
+                    prompt: "Allow Edit to modify src/app.ts?",
+                    request_id: "approval-1",
+                    state: "pending",
+                  },
+                  type: "interaction",
+                },
+              ],
+              id: "m-open-code",
+              is_subagent: true,
+              parent_tool_call_id: "parent-tool",
+              provider: "opencode",
+              role: "assistant",
+              status: "partial",
+              timestamp: "2026-04-18T20:00:00Z",
+            }],
+          },
+        } as never;
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    installCrewInteractions();
+    await renderCrew();
+    document.querySelector<HTMLButtonElement>(".agent-log-link")?.click();
+
+    await waitFor(() => {
+      expect(document.getElementById("log-drawer-messages")?.textContent).toContain("OpenCode delegated the edit.");
+    });
+    const text = document.getElementById("log-drawer-messages")?.textContent ?? "";
+    expect(text).toContain("stream-open-code-1");
+    expect(text).toContain("compacted");
+    expect(text).toContain("reader recovering");
+    expect(text).toContain("partial_history");
+    expect(text).toContain("tool-open");
+    expect(text).toContain("approval-1");
+    expect(text).toContain("subagent");
+    expect(text).toContain("parent-tool");
+    expect(text).toContain("awaiting_user");
+    expect(text).toContain("Approve");
+    expect(text).toContain("Deny");
+
+    streamHandler?.({ type: "activity", data: { activity: "idle" } });
+    expect(document.getElementById("log-drawer-status")?.textContent).toContain("idle");
+
+    streamHandler?.({
+      type: "pending",
+      data: {
+        kind: "approval",
+        options: ["Accept", "Reject"],
+        prompt: "Approve streamed write?",
+        request_id: "approval-stream",
+      },
+    });
+    await waitFor(() => {
+      expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Approve streamed write?");
+    });
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("approval-stream");
+    expect(document.getElementById("log-drawer-status")?.textContent).toContain("pending");
   });
 });
 

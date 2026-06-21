@@ -1,6 +1,12 @@
 import type { SessionRecord } from "../api";
 import { api, cityScope } from "../api";
-import type { SessionStructuredBlock, SessionStructuredMessage } from "../generated";
+import type {
+  PendingInteraction,
+  SessionActivityEvent,
+  SessionStructuredBlock,
+  SessionStructuredHistory,
+  SessionStructuredMessage,
+} from "../generated";
 import { byId, clear, el } from "../util/dom";
 import { calculateActivity, formatTimestamp, statusBadgeClass, truncate } from "../util/legacy";
 import { connectAgentOutput, type AgentOutputMessage, type SSEHandle } from "../sse";
@@ -39,7 +45,7 @@ export async function renderCrew(): Promise<void> {
   if (error || !data?.items) {
     crewLoading.textContent = "Failed to load crew";
     renderSimpleEmpty(riggedBody, "No rigged agents");
-    renderSimpleEmpty(pooledBody, "No pooled agents");
+    renderSimpleEmpty(pooledBody, "No other sessions");
     return;
   }
 
@@ -210,25 +216,27 @@ function renderRiggedAgents(sessions: SessionRecord[], beadTitles: Map<string, s
   ]));
 }
 
-// renderPooledAgents lists sessions that belong to a pool but are not
-// bound to a specific rig (floating workers). Grouping is by API fields
-// only — no role names hardcoded.
+// renderPooledAgents lists non-crew sessions that are not already shown in
+// the rig-bound pool panel. Grouping is by API fields only — no role names
+// hardcoded.
 function renderPooledAgents(sessions: SessionRecord[]): void {
   const body = byId("pooled-body");
   const count = byId("pooled-count");
   if (!body || !count) return;
-  const rows = sessions.filter((session) => !session.rig && session.pool);
+  const rows = sessions.filter((session) => session.agent_kind !== "crew" && !(session.rig && session.pool));
   count.textContent = String(rows.length);
   if (rows.length === 0) {
-    renderSimpleEmpty(body, "No pooled agents");
+    renderSimpleEmpty(body, "No other sessions");
     return;
   }
 
   const tbody = el("tbody");
   rows.forEach((session) => {
+    const kind = session.pool || session.agent_kind || "session";
     tbody.append(el("tr", {}, [
       el("td", {}, [logButton(session.id, session.template)]),
       el("td", {}, [el("span", { class: `badge ${session.active_bead ? "badge-yellow" : "badge-green"}` }, [session.active_bead ? "Working" : "Idle"])]),
+      el("td", {}, [el("span", { class: "badge badge-muted" }, [kind])]),
       el("td", { class: "status-hint" }, [truncate(session.last_output, 80) || "—"]),
       el("td", {}, [formatTimestamp(session.last_active)]),
     ]));
@@ -239,6 +247,7 @@ function renderPooledAgents(sessions: SessionRecord[]): void {
     el("thead", {}, [el("tr", {}, [
       el("th", {}, ["Agent"]),
       el("th", {}, ["State"]),
+      el("th", {}, ["Kind"]),
       el("th", {}, ["Work"]),
       el("th", {}, ["Activity"]),
     ])]),
@@ -340,6 +349,10 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
   }
 
   const fragment = document.createDocumentFragment();
+  const history = structuredHistoryFromEnvelope(res.data);
+  if (!prepend && history) {
+    fragment.append(renderStructuredHistory(history));
+  }
   const structuredMessages = structuredMessagesFromEnvelope(res.data);
   if (structuredMessages.length > 0) {
     for (const message of structuredMessages) {
@@ -376,8 +389,26 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
 function appendStreamEvent(msg: AgentOutputMessage): void {
   const messagesEl = byId("log-drawer-messages");
   if (!messagesEl) return;
+  if (msg.type === "activity") {
+    const activity = activityFromFrame(msg.data);
+    if (activity) setLogDrawerStatus(activity);
+    return;
+  }
+  if (msg.type === "pending") {
+    const pending = pendingInteractionFromFrame(msg.data);
+    if (!pending) return;
+    setLogDrawerStatus(`pending ${pending.kind}`);
+    messagesEl.append(renderPendingInteraction(pending));
+    logCount += 1;
+    byId("log-drawer-count")!.textContent = String(logCount);
+    const body = byId("log-drawer-body");
+    if (body) body.scrollTop = body.scrollHeight;
+    return;
+  }
   const structuredMessages = structuredMessagesFromEnvelope(msg.data);
   if (msg.type === "structured" && structuredMessages.length > 0) {
+    const history = structuredHistoryFromEnvelope(msg.data);
+    if (history) messagesEl.append(renderStructuredHistory(history));
     for (const message of structuredMessages) {
       messagesEl.append(renderStructuredMessage(message));
       logCount += 1;
@@ -409,6 +440,11 @@ function structuredMessagesFromEnvelope(value: unknown): SessionStructuredMessag
   return [];
 }
 
+function structuredHistoryFromEnvelope(value: unknown): SessionStructuredHistory | null {
+  if (!isRecord(value)) return null;
+  return isSessionStructuredHistory(value.history) ? value.history : null;
+}
+
 function renderTurn(role: string, text: string, timestamp: string | undefined): HTMLElement {
   return el("div", { class: "log-msg" }, [
     el("div", { class: "log-msg-header" }, [
@@ -437,8 +473,51 @@ function renderStructuredMessage(message: SessionStructuredMessage): HTMLElement
       message.model ? el("span", { class: "log-msg-model" }, [message.model]) : null,
       message.status ? el("span", { class: "log-msg-status" }, [message.status]) : null,
       message.stop_reason ? el("span", { class: "log-msg-stop" }, [message.stop_reason]) : null,
+      message.is_subagent ? el("span", { class: "log-msg-status" }, ["subagent"]) : null,
+      message.parent_tool_call_id ? el("span", { class: "log-msg-status" }, [`parent ${message.parent_tool_call_id}`]) : null,
     ]),
     body,
+  ]);
+}
+
+function renderStructuredHistory(history: SessionStructuredHistory): HTMLElement {
+  const rows: string[] = [];
+  appendField(rows, "stream", history.transcript_stream_id);
+  appendField(rows, "provider session", history.provider_session_id);
+  appendField(rows, "conversation", history.logical_conversation_id);
+  appendField(rows, "gc session", history.gc_session_id);
+
+  appendField(rows, "generation", history.generation.id);
+  appendField(rows, "observed", history.generation.observed_at);
+
+  appendField(rows, "cursor", history.cursor.after_entry_id);
+
+  appendField(rows, "continuity", history.continuity.status);
+  appendNumber(rows, "compactions", history.continuity.compaction_count);
+  if (history.continuity.has_branches === true) rows.push("branches: yes");
+  appendField(rows, "note", history.continuity.note);
+
+  appendField(rows, "activity", history.tail_state.activity);
+  appendField(rows, "last entry", history.tail_state.last_entry_id);
+  appendStringList(rows, "open tools", history.tail_state.open_tool_call_ids);
+  appendStringList(rows, "pending", history.tail_state.pending_interaction_ids);
+  if (history.tail_state.degraded === true) rows.push("degraded: yes");
+  appendField(rows, "degraded reason", history.tail_state.degraded_reason);
+
+  for (const diagnostic of history.diagnostics ?? []) {
+    const parts: string[] = [];
+    appendField(parts, "code", diagnostic.code);
+    appendNumber(parts, "count", diagnostic.count);
+    appendField(parts, "message", diagnostic.message);
+    if (parts.length > 0) rows.push(`diagnostic: ${parts.join(", ")}`);
+  }
+
+  return el("div", { class: "log-msg-history" }, [
+    el("div", { class: "log-msg-tool-title" }, [
+      el("span", { class: "log-msg-tool-kind" }, ["history"]),
+      " structured session",
+    ]),
+    el("pre", { class: "log-msg-tool-pre" }, [rows.length > 0 ? rows.join("\n") : "structured history"]),
   ]);
 }
 
@@ -579,6 +658,13 @@ function appendFlags(rows: string[], structured: Record<string, unknown>): void 
   if (structured.interrupted === true) rows.push("interrupted");
 }
 
+function appendStringList(rows: string[], label: string, value: string[] | null | undefined): void {
+  if (!value || value.length === 0) return;
+  const parts = value.filter((item) => item !== "");
+  if (parts.length === 0) return;
+  rows.push(`${label}: ${parts.join(", ")}`);
+}
+
 function formatArgument(value: unknown): string {
   const argument = recordOf(value);
   if (!argument) return formatInlineValue(value);
@@ -588,12 +674,50 @@ function formatArgument(value: unknown): string {
 }
 
 function formatInteraction(block: SessionStructuredBlock): string {
-  const fallback: unknown = block;
-  const interaction = recordOf(block.interaction) ?? recordOf(fallback) ?? {};
-  const kind = typeof interaction.kind === "string" ? interaction.kind : "interaction";
-  const state = typeof interaction.state === "string" ? interaction.state : "";
-  const prompt = typeof interaction.prompt === "string" ? interaction.prompt : "";
-  return [kind, state, prompt].filter(Boolean).join(" ");
+  const interaction = block.interaction;
+  const kind = interaction?.kind ?? "interaction";
+  const state = interaction?.state ?? "";
+  const prompt = interaction?.prompt ?? "";
+  const requestID = interaction?.request_id ?? "";
+  const action = interaction?.action ?? "";
+  const options = interaction?.options?.join(", ") ?? "";
+  return [kind, state, requestID, action, prompt, options].filter(Boolean).join(" ");
+}
+
+function renderPendingInteraction(pending: PendingInteraction): HTMLElement {
+  const rows: string[] = [];
+  appendField(rows, "kind", pending.kind);
+  appendField(rows, "request", pending.request_id);
+  appendField(rows, "prompt", pending.prompt);
+  appendStringList(rows, "options", pending.options);
+  return el("div", { class: "log-msg log-msg-structured log-msg-pending" }, [
+    el("div", { class: "log-msg-header" }, [
+      el("span", { class: "log-msg-type log-msg-type-system" }, ["pending"]),
+    ]),
+    el("div", { class: "log-msg-body log-msg-body-structured" }, [
+      el("div", { class: "log-msg-tool" }, [
+        el("div", { class: "log-msg-tool-title" }, [
+          el("span", { class: "log-msg-tool-kind" }, ["interaction"]),
+          " pending",
+        ]),
+        el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]),
+      ]),
+    ]),
+  ]);
+}
+
+function activityFromFrame(value: unknown): string {
+  return isSessionActivityEvent(value) ? value.activity : "";
+}
+
+function pendingInteractionFromFrame(value: unknown): PendingInteraction | null {
+  return isPendingInteraction(value) ? value : null;
+}
+
+function setLogDrawerStatus(status: string): void {
+  const statusEl = byId("log-drawer-status");
+  if (!statusEl) return;
+  statusEl.replaceChildren(document.createTextNode(status));
 }
 
 function formatInlineValue(value: unknown): string {
@@ -613,6 +737,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function recordOf(value: unknown): Record<string, unknown> | null {
   return isRecord(value) ? value : null;
+}
+
+function isSessionStructuredHistory(value: unknown): value is SessionStructuredHistory {
+  if (!isRecord(value)) return false;
+  if (typeof value.transcript_stream_id !== "string") return false;
+  if (!isRecord(value.generation) || typeof value.generation.id !== "string") return false;
+  if (!isRecord(value.cursor)) return false;
+  if (!isRecord(value.continuity) || typeof value.continuity.status !== "string") return false;
+  if (!isRecord(value.tail_state) || typeof value.tail_state.activity !== "string") return false;
+  return true;
+}
+
+function isSessionActivityEvent(value: unknown): value is SessionActivityEvent {
+  return isRecord(value) && typeof value.activity === "string";
+}
+
+function isPendingInteraction(value: unknown): value is PendingInteraction {
+  return isRecord(value) && typeof value.kind === "string" && typeof value.request_id === "string";
 }
 
 function isStructuredMessage(value: unknown): value is SessionStructuredMessage {

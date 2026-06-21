@@ -4072,6 +4072,17 @@
             margin-bottom: 6px;
         }
 
+        .log-msg-history {
+            background: color-mix(in srgb, var(--cyan) 8%, var(--bg-dark));
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--cyan);
+            border-radius: 3px;
+            margin-bottom: 8px;
+            padding: 6px 8px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
         .log-msg-thinking-block {
             color: var(--purple);
             margin-bottom: 6px;

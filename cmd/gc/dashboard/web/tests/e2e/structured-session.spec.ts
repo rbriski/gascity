@@ -3,7 +3,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-type ProviderID = "claude" | "codex" | "gemini";
+type ProviderID = "claude" | "codex" | "gemini" | "kimi" | "opencode" | "mimocode" | "antigravity";
 
 type RequestLog = {
   streamFormats: Map<string, string[]>;
@@ -43,6 +43,36 @@ const sessions: SessionFixture[] = [
     pool: "floaters",
     provider: "gemini",
     template: "gemini-pooled",
+  },
+  {
+    agentKind: "crew",
+    id: "s-kimi",
+    provider: "kimi",
+    rig: "rig-a/crew",
+    template: "kimi-crew",
+  },
+  {
+    agentKind: "role",
+    id: "s-opencode",
+    provider: "opencode",
+    rig: "rig-a",
+    template: "opencode-singleton",
+  },
+  {
+    agentKind: "pool",
+    id: "s-mimocode",
+    pool: "floaters",
+    provider: "mimocode",
+    template: "mimocode-pooled",
+  },
+  {
+    activeBead: "ga-structured",
+    agentKind: "pool",
+    id: "s-antigravity",
+    pool: "builders",
+    provider: "antigravity",
+    rig: "rig-a",
+    template: "antigravity-rigged",
   },
 ];
 
@@ -86,7 +116,7 @@ test.beforeEach(() => {
   requestLog.transcriptFormats.clear();
 });
 
-test("renders structured transcripts and streams across crew, rigged, and pooled provider sessions", async ({ page }, testInfo) => {
+test("renders structured transcripts and streams across all session panels and first-class providers", async ({ page }, testInfo) => {
   await page.goto(`${baseURL}/?city=test-city`);
 
   await openSessionLog(page, "claude-crew");
@@ -94,6 +124,8 @@ test("renders structured transcripts and streams across crew, rigged, and pooled
   await expect(drawer).toBeVisible();
   await expect(drawer).toContainText("claude");
   await expect(drawer).toContainText("claude-sonnet");
+  await expect(drawer).toContainText("stream-s-claude");
+  await expect(drawer).toContainText("continuity");
   await expect(drawer).toContainText("[thinking]");
   await expect(drawer).toContainText("Read");
   await expect(drawer).toContainText("AGENTS.md");
@@ -118,13 +150,44 @@ test("renders structured transcripts and streams across crew, rigged, and pooled
   await expect(drawer).toContainText("src/gemini.ts");
   await expect(drawer).toContainText("streamed Gemini summary");
 
+  await openSessionLog(page, "kimi-crew");
+  await expect(drawer).toContainText("kimi");
+  await expect(drawer).toContainText("kimi-k2");
+  await expect(drawer).toContainText("Kimi read nested agent output.");
+  await expect(drawer).toContainText("subagent");
+  await expect(drawer).toContainText("parent kimi-parent-tool");
+  await expect(drawer).toContainText("agents/main/wire.jsonl");
+  await expect(drawer).toContainText("Kimi streamed subagent summary");
+
+  await openSessionLog(page, "opencode-singleton");
+  await expect(drawer).toContainText("opencode");
+  await expect(drawer).toContainText("opencode-gemini");
+  await expect(drawer).toContainText("Edit");
+  await expect(drawer).toContainText("approval-opencode");
+  await expect(drawer).toContainText("Allow Edit to modify src/opencode.ts?");
+  await expect(drawer).toContainText("src/opencode.ts");
+  await expect(drawer).toContainText("+ opencode stream edit");
+
+  await openSessionLog(page, "mimocode-pooled");
+  await expect(drawer).toContainText("mimocode");
+  await expect(drawer).toContainText("mimo-coder");
+  await expect(drawer).toContainText("go test ./cmd/gc/dashboard/...");
+  await expect(drawer).toContainText("mimocode tests passed");
+
+  await openSessionLog(page, "antigravity-rigged");
+  await expect(drawer).toContainText("antigravity");
+  await expect(drawer).toContainText("antigravity-gemini");
+  await expect(drawer).toContainText("notes.txt");
+  await expect(drawer).toContainText("hello structured world");
+  await expect(drawer).toContainText("+ antigravity write");
+
   for (const session of sessions) {
     expect(requestLog.transcriptFormats.get(session.id)).toContain("structured");
     expect(requestLog.streamFormats.get(session.id)).toContain("structured");
   }
 
-  const screenshot = await drawer.screenshot({ path: "test-results/structured-session-gemini-drawer.png" });
-  await testInfo.attach("structured-session-gemini-drawer", {
+  const screenshot = await drawer.screenshot({ path: "test-results/structured-session-final-drawer.png" });
+  await testInfo.attach("structured-session-final-drawer", {
     body: screenshot,
     contentType: "image/png",
   });
@@ -228,13 +291,16 @@ function structuredTranscript(sessionID: string): unknown {
   const fixture = fixtureForSession(sessionID);
   return {
     format: "structured",
+    history: structuredHistory(sessionID, fixture.provider),
     id: sessionID,
     provider: fixture.provider,
     schema_version: "session.structured.v1",
     structured_messages: [{
       blocks: transcriptBlocks(fixture.provider),
       id: `${sessionID}-m-1`,
+      is_subagent: fixture.provider === "kimi" ? true : undefined,
       model: providerModel(fixture.provider),
+      parent_tool_call_id: fixture.provider === "kimi" ? "kimi-parent-tool" : undefined,
       provider: fixture.provider,
       role: "assistant",
       status: "final",
@@ -242,6 +308,27 @@ function structuredTranscript(sessionID: string): unknown {
       timestamp: "2026-04-18T20:00:00Z",
     }],
     template: fixture.template,
+  };
+}
+
+function structuredHistory(sessionID: string, provider: ProviderID): unknown {
+  return {
+    continuity: {
+      has_branches: provider === "opencode",
+      note: `${provider} continuity`,
+      status: "continuous",
+    },
+    cursor: { after_entry_id: `${sessionID}-entry-1` },
+    diagnostics: [{ code: "fixture_history", count: 1, message: `${provider} normalized fixture` }],
+    generation: { id: `${sessionID}-generation`, observed_at: "2026-04-18T20:00:00Z" },
+    provider_session_id: `${provider}-provider-session`,
+    tail_state: {
+      activity: "in-turn",
+      last_entry_id: `${sessionID}-entry-1`,
+      open_tool_call_ids: [`${provider}-tool-open`],
+      pending_interaction_ids: provider === "opencode" ? ["approval-opencode"] : [],
+    },
+    transcript_stream_id: `stream-${sessionID}`,
   };
 }
 
@@ -281,6 +368,57 @@ function transcriptBlocks(provider: ProviderID): unknown[] {
         {
           structured: { code: "print('hello from gemini')", exit_code: 0, kind: "python", stdout: "hello from gemini" },
           tool_call_id: "gemini-tool-1",
+          type: "tool_result",
+        },
+      ];
+    case "kimi":
+      return [
+        { text: "Kimi read nested agent output.", type: "text" },
+        { id: "kimi-tool-1", input: { file_path: "agents/main/wire.jsonl", kind: "file" }, name: "Read", type: "tool_use" },
+        {
+          structured: { content: "Kimi file data", file_path: "agents/main/wire.jsonl", kind: "read", num_lines: 3 },
+          tool_call_id: "kimi-tool-1",
+          type: "tool_result",
+        },
+      ];
+    case "opencode":
+      return [
+        { text: "OpenCode prepared an edit.", type: "text" },
+        { id: "opencode-tool-1", input: { file_path: "src/opencode.ts", kind: "file", text: "replace function body" }, name: "Edit", type: "tool_use" },
+        {
+          interaction: {
+            action: "awaiting_user",
+            kind: "approval",
+            options: ["Approve", "Deny"],
+            prompt: "Allow Edit to modify src/opencode.ts?",
+            request_id: "approval-opencode",
+            state: "pending",
+          },
+          type: "interaction",
+        },
+        {
+          structured: { content: "Edited README.md", file_path: "src/opencode.ts", kind: "edit" },
+          tool_call_id: "opencode-tool-1",
+          type: "tool_result",
+        },
+      ];
+    case "mimocode":
+      return [
+        { text: "MiMoCode is running dashboard checks.", type: "text" },
+        { id: "mimocode-tool-1", input: { command: "go test ./cmd/gc/dashboard/...", kind: "command" }, name: "Bash", type: "tool_use" },
+        {
+          structured: { exit_code: 0, kind: "bash", stdout: "ok ./cmd/gc/dashboard/..." },
+          tool_call_id: "mimocode-tool-1",
+          type: "tool_result",
+        },
+      ];
+    case "antigravity":
+      return [
+        { text: "Antigravity wrote provider-neutral content.", type: "text" },
+        { id: "antigravity-tool-1", input: { file_path: "notes.txt", kind: "file", text: "hello structured world" }, name: "Write", type: "tool_use" },
+        {
+          structured: { content: "wrote notes.txt", file_path: "notes.txt", kind: "edit" },
+          tool_call_id: "antigravity-tool-1",
           type: "tool_result",
         },
       ];
@@ -328,6 +466,23 @@ function streamBlocks(provider: ProviderID): unknown[] {
         { text: "streamed Gemini summary", type: "text" },
         { structured: { filenames: ["src/gemini.ts"], kind: "grep", mode: "ripgrep", text: "src/gemini.ts: hello" }, type: "tool_result" },
       ];
+    case "kimi":
+      return [
+        { text: "Kimi streamed subagent summary", type: "text" },
+        { structured: { content: "agents/main/wire.jsonl: streamed", file_path: "agents/main/wire.jsonl", kind: "read" }, type: "tool_result" },
+      ];
+    case "opencode":
+      return [
+        { structured: { file_path: "src/opencode.ts", kind: "edit", patch: "@@\n- opencode old\n+ opencode stream edit" }, type: "tool_result" },
+      ];
+    case "mimocode":
+      return [
+        { structured: { exit_code: 0, kind: "bash", stdout: "mimocode tests passed" }, type: "tool_result" },
+      ];
+    case "antigravity":
+      return [
+        { structured: { file_path: "notes.txt", kind: "edit", patch: "@@\n- old note\n+ antigravity write" }, type: "tool_result" },
+      ];
   }
 }
 
@@ -360,6 +515,14 @@ function providerModel(provider: ProviderID): string {
       return "codex-gpt";
     case "gemini":
       return "gemini-2.5";
+    case "kimi":
+      return "kimi-k2";
+    case "opencode":
+      return "opencode-gemini";
+    case "mimocode":
+      return "mimo-coder";
+    case "antigravity":
+      return "antigravity-gemini";
   }
 }
 

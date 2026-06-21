@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -714,6 +715,15 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 	// Steps c + d (conditional on binding existence): EnsureMembership + backfill replay.
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api-subscribe"}
 	if binding, lookupErr := svc.Bindings.ResolveByConversation(reqCtx, state.convRef); lookupErr == nil && binding != nil {
+		if len(state.allowedSessions) > 0 && !slices.Contains(state.allowedSessions, binding.SessionID) {
+			_ = send(StringIDMessage{ID: "error", Data: extmsg.NewSSEErrorEvent(
+				"session_forbidden",
+				"session is not permitted by this client token",
+				false,
+				nil,
+			)})
+			return
+		}
 		svc.Transcript.EnsureMembership(reqCtx, extmsg.EnsureMembershipInput{ //nolint:errcheck
 			Caller:         caller,
 			Conversation:   state.convRef,
@@ -751,8 +761,6 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 		}
 		return nil
 	}
-	_ = safeSend // used in select below
-
 	heartbeatTicker := time.NewTicker(state.heartbeat)
 	defer heartbeatTicker.Stop()
 

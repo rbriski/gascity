@@ -2029,6 +2029,45 @@ func TestReadGeminiJSONLFileConvertsMessages(t *testing.T) {
 	}
 }
 
+func TestReadGeminiJSONLFilePreservesToolResultDisplayDiff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := strings.Join([]string{
+		`{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","projectHash":"project","startTime":"2026-06-21T17:08:00.693Z","kind":"main"}`,
+		`{"id":"a1","timestamp":"2026-06-21T17:08:10Z","type":"gemini","content":"Done","toolCalls":[{"id":"tool-1","name":"write_file","args":{"file_path":"notes.txt","content":"hello"},"result":[{"functionResponse":{"id":"tool-1","response":{"output":"Successfully wrote notes.txt"}}}],"resultDisplay":{"fileDiff":"Index: notes.txt\n@@\n+hello","filePath":"notes.txt","originalContent":"","newContent":"hello"}}]}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadGeminiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadGeminiFile: %v", err)
+	}
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("messages = %d, want 1", got)
+	}
+	blocks := sess.Messages[0].ContentBlocks()
+	if got := len(blocks); got != 3 {
+		t.Fatalf("blocks = %d, want 3", got)
+	}
+	var parsed struct {
+		Output        string `json:"output"`
+		ResultDisplay struct {
+			FileDiff string `json:"fileDiff"`
+			FilePath string `json:"filePath"`
+		} `json:"resultDisplay"`
+	}
+	if err := json.Unmarshal(blocks[2].Content, &parsed); err != nil {
+		t.Fatalf("unmarshal tool result content: %v", err)
+	}
+	if parsed.Output != "Successfully wrote notes.txt" {
+		t.Fatalf("output = %q, want success message", parsed.Output)
+	}
+	if !strings.Contains(parsed.ResultDisplay.FileDiff, "+hello") || parsed.ResultDisplay.FilePath != "notes.txt" {
+		t.Fatalf("resultDisplay = %+v, want fileDiff for notes.txt", parsed.ResultDisplay)
+	}
+}
+
 func TestReadGeminiFileConvertsInteractions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	content := `{

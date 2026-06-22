@@ -43,6 +43,7 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 		resultStdout  string
 		resultExit    *int
 		resultFiles   []string
+		resultPatch   []string
 	}{
 		{
 			name:          "claude read",
@@ -57,6 +58,19 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultContent: "Gas City README",
 		},
 		{
+			name:          "claude edit",
+			provider:      "claude",
+			writeFixture:  writeStructuredClaudeEditFixture,
+			toolCallID:    "call-claude-edit",
+			toolName:      "Edit",
+			inputKind:     "patch",
+			inputFilePath: "README.md",
+			resultKind:    "edit",
+			resultFile:    "README.md",
+			resultContent: "updated successfully",
+			resultPatch:   []string{"--- README.md", "+++ README.md", "-old line", "+new line"},
+		},
+		{
 			name:          "codex patch",
 			provider:      "codex",
 			writeFixture:  writeStructuredCodexPatchFixture,
@@ -67,6 +81,7 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "city.toml",
 			resultContent: "Updated the following files",
+			resultPatch:   []string{"*** Update File: city.toml", "+[workspace]"},
 		},
 		{
 			name:         "gemini grep",
@@ -78,6 +93,19 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			inputPattern: "needle",
 			resultKind:   "grep",
 			resultFiles:  []string{"README.md", "main.go"},
+		},
+		{
+			name:          "gemini write fileDiff",
+			provider:      "gemini",
+			writeFixture:  writeStructuredGeminiWriteFixture,
+			toolCallID:    "call-gemini-write",
+			toolName:      "write_file",
+			inputKind:     "patch",
+			inputFilePath: "notes.txt",
+			resultKind:    "edit",
+			resultFile:    "notes.txt",
+			resultContent: "Successfully created",
+			resultPatch:   []string{"Index: notes.txt", "+hello gemini"},
 		},
 		{
 			name:          "kimi read",
@@ -97,11 +125,12 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			writeFixture:  writeStructuredOpenCodeEditFixture,
 			toolCallID:    "call-opencode-edit",
 			toolName:      "Edit",
-			inputKind:     "file",
+			inputKind:     "patch",
 			inputFilePath: "README.md",
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "Edited README.md",
+			resultPatch:   []string{"--- README.md", "+++ README.md", "-old", "+new"},
 		},
 		{
 			name:          "groq opencode alias edit",
@@ -109,11 +138,12 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			writeFixture:  writeStructuredOpenCodeEditFixture,
 			toolCallID:    "call-opencode-edit",
 			toolName:      "Edit",
-			inputKind:     "file",
+			inputKind:     "patch",
 			inputFilePath: "README.md",
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "Edited README.md",
+			resultPatch:   []string{"--- README.md", "+++ README.md", "-old", "+new"},
 		},
 		{
 			name:          "cerebras opencode alias edit",
@@ -121,11 +151,12 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			writeFixture:  writeStructuredOpenCodeEditFixture,
 			toolCallID:    "call-opencode-edit",
 			toolName:      "Edit",
-			inputKind:     "file",
+			inputKind:     "patch",
 			inputFilePath: "README.md",
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "Edited README.md",
+			resultPatch:   []string{"--- README.md", "+++ README.md", "-old", "+new"},
 		},
 		{
 			name:         "mimocode bash",
@@ -138,6 +169,17 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:   "bash",
 			resultStdout: "ok ./...",
 			resultExit:   intPtr(0),
+		},
+		{
+			name:         "mimocode bash git diff stays command",
+			provider:     "mimocode",
+			writeFixture: writeStructuredMimoCodeBashDiffFixture,
+			toolCallID:   "call-mimocode-diff",
+			toolName:     "Bash",
+			inputKind:    "command",
+			inputCommand: "git diff -- src/app.ts",
+			resultKind:   "bash",
+			resultStdout: "diff --git a/src/app.ts b/src/app.ts\n@@\n-old\n+new",
 		},
 		{
 			name:          "pi read",
@@ -169,12 +211,13 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			writeFixture:  writeStructuredAntigravityWriteFixture,
 			toolCallID:    "call-antigravity-write",
 			toolName:      "Write",
-			inputKind:     "file",
+			inputKind:     "patch",
 			inputFilePath: "notes.txt",
 			inputText:     "hello structured world",
 			resultKind:    "edit",
 			resultFile:    "notes.txt",
 			resultContent: "wrote notes.txt",
+			resultPatch:   []string{"+hello structured world"},
 		},
 	}
 
@@ -229,7 +272,7 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 				t.Fatalf("tool input is nil")
 			}
 			assertStructuredInput(t, toolUse.Input, tt.inputKind, tt.inputFilePath, tt.inputCommand, tt.inputPattern, tt.inputText)
-			assertStructuredResult(t, toolResult.Structured, tt.resultKind, tt.resultFile, tt.resultContent, tt.resultStdout, tt.resultExit, tt.resultFiles)
+			assertStructuredResult(t, toolResult.Structured, tt.resultKind, tt.resultFile, tt.resultContent, tt.resultStdout, tt.resultExit, tt.resultFiles, tt.resultPatch)
 
 			wire, err := json.Marshal(resp)
 			if err != nil {
@@ -446,7 +489,7 @@ func assertStructuredInput(t *testing.T, input *SessionStructuredToolInput, kind
 	}
 }
 
-func assertStructuredResult(t *testing.T, result *SessionStructuredToolResult, kind, filePath, content, stdout string, exitCode *int, filenames []string) {
+func assertStructuredResult(t *testing.T, result *SessionStructuredToolResult, kind, filePath, content, stdout string, exitCode *int, filenames []string, patchSubstrings []string) {
 	t.Helper()
 	if result == nil {
 		t.Fatal("structured result is nil")
@@ -473,6 +516,14 @@ func assertStructuredResult(t *testing.T, result *SessionStructuredToolResult, k
 			t.Fatalf("result filenames = %#v, missing %q; result = %+v", result.Filenames, want, result)
 		}
 	}
+	for _, want := range patchSubstrings {
+		if !strings.Contains(result.Patch, want) {
+			t.Fatalf("result patch = %q, missing %q; result = %+v", result.Patch, want, result)
+		}
+	}
+	if kind != "edit" && result.Patch != "" {
+		t.Fatalf("non-edit result unexpectedly has patch %q; result = %+v", result.Patch, result)
+	}
 }
 
 func writeStructuredClaudeReadFixture(t *testing.T, root, workDir, sessionKey string) {
@@ -480,6 +531,14 @@ func writeStructuredClaudeReadFixture(t *testing.T, root, workDir, sessionKey st
 	writeNamedSessionJSONL(t, root, workDir, sessionKey+".jsonl",
 		`{"uuid":"claude-1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call-claude-read","name":"Read","input":{"file_path":"README.md"}}]},"timestamp":"2026-06-01T00:00:00Z"}`,
 		`{"uuid":"claude-2","parentUuid":"claude-1","type":"tool_result","toolUseID":"call-claude-read","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-claude-read","content":"Gas City README\n"}]},"timestamp":"2026-06-01T00:00:01Z"}`,
+	)
+}
+
+func writeStructuredClaudeEditFixture(t *testing.T, root, workDir, sessionKey string) {
+	t.Helper()
+	writeNamedSessionJSONL(t, root, workDir, sessionKey+".jsonl",
+		`{"uuid":"claude-edit-1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call-claude-edit","name":"Edit","input":{"file_path":"README.md","old_string":"old line","new_string":"new line"}}]},"timestamp":"2026-06-01T00:00:00Z"}`,
+		`{"uuid":"claude-edit-2","parentUuid":"claude-edit-1","type":"tool_result","toolUseID":"call-claude-edit","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-claude-edit","content":"The file README.md has been updated successfully."}]},"timestamp":"2026-06-01T00:00:01Z"}`,
 	)
 }
 
@@ -513,6 +572,27 @@ func writeStructuredGeminiGrepFixture(t *testing.T, root, workDir, _ string) {
   "sessionId": "gemini-structured",
   "messages": [
     {"id":"gemini-1","timestamp":"2026-06-01T00:00:00Z","type":"gemini","content":"searching","toolCalls":[{"id":"call-gemini-grep","name":"grep_search","args":{"pattern":"needle"},"result":[{"functionResponse":{"id":"call-gemini-grep","response":{"output":"main.go:7:needle\nREADME.md:1:needle\n"}}}]}]}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(chatsDir, "session-structured.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write gemini fixture: %v", err)
+	}
+}
+
+func writeStructuredGeminiWriteFixture(t *testing.T, root, workDir, _ string) {
+	t.Helper()
+	projectDir := filepath.Join(root, "gemini-project")
+	chatsDir := filepath.Join(projectDir, "chats")
+	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
+		t.Fatalf("mkdir gemini chats: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write gemini project root: %v", err)
+	}
+	body := `{
+  "sessionId": "gemini-structured",
+  "messages": [
+    {"id":"gemini-1","timestamp":"2026-06-01T00:00:00Z","type":"gemini","content":"writing","toolCalls":[{"id":"call-gemini-write","name":"write_file","args":{"file_path":"notes.txt","content":"hello gemini"},"result":[{"functionResponse":{"id":"call-gemini-write","response":{"output":"Successfully created and wrote to new file: notes.txt"}}}],"resultDisplay":{"fileDiff":"Index: notes.txt\n===================================================================\n--- notes.txt\tOriginal\n+++ notes.txt\tWritten\n@@ -0,0 +1 @@\n+hello gemini","filePath":"notes.txt","originalContent":"","newContent":"hello gemini"}}]}
   ]
 }`
 	if err := os.WriteFile(filepath.Join(chatsDir, "session-structured.json"), []byte(body), 0o644); err != nil {
@@ -554,6 +634,17 @@ func writeStructuredMimoCodeBashFixture(t *testing.T, root, workDir, _ string) {
   "info": {"id":"mimocode-structured","directory":%q},
   "messages": [
     {"info":{"id":"mimocode-1","sessionID":"mimocode-structured","role":"assistant","time":{"created":1780272000000}},"parts":[{"id":"part-tool","type":"tool","callID":"call-mimocode-bash","tool":"Bash","state":{"status":"completed","input":{"command":"go test ./..."},"output":{"stdout":"ok ./...","exitCode":0}}}]}
+  ]
+}`, workDir)
+	writeStructuredOpenCodeExport(t, filepath.Join(root, "mimocode", "session-structured.json"), body)
+}
+
+func writeStructuredMimoCodeBashDiffFixture(t *testing.T, root, workDir, _ string) {
+	t.Helper()
+	body := fmt.Sprintf(`{
+  "info": {"id":"mimocode-structured","directory":%q},
+  "messages": [
+    {"info":{"id":"mimocode-1","sessionID":"mimocode-structured","role":"assistant","time":{"created":1780272000000}},"parts":[{"id":"part-tool","type":"tool","callID":"call-mimocode-diff","tool":"Bash","state":{"status":"completed","input":{"command":"git diff -- src/app.ts"},"output":{"stdout":"diff --git a/src/app.ts b/src/app.ts\n@@\n-old\n+new","exitCode":0}}}]}
   ]
 }`, workDir)
 	writeStructuredOpenCodeExport(t, filepath.Join(root, "mimocode", "session-structured.json"), body)

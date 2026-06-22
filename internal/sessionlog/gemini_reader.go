@@ -227,7 +227,7 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 				content = append(content, ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: firstNonEmpty(result.FunctionResponse.ID, toolCall.ID),
-					Content:   mustMarshal(output),
+					Content:   geminiToolResultContent(output, toolCall.ResultDisplay),
 				})
 			}
 		}
@@ -570,10 +570,11 @@ type geminiThought struct {
 }
 
 type geminiToolCall struct {
-	ID     string          `json:"id"`
-	Name   string          `json:"name"`
-	Args   json.RawMessage `json:"args"`
-	Result []struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Args          json.RawMessage `json:"args"`
+	ResultDisplay json.RawMessage `json:"resultDisplay"`
+	Result        []struct {
 		FunctionResponse struct {
 			ID       string `json:"id"`
 			Response struct {
@@ -581,6 +582,16 @@ type geminiToolCall struct {
 			} `json:"response"`
 		} `json:"functionResponse"`
 	} `json:"result"`
+}
+
+func geminiToolResultContent(output string, resultDisplay json.RawMessage) json.RawMessage {
+	if len(resultDisplay) == 0 {
+		return mustMarshal(output)
+	}
+	return mustMarshal(map[string]json.RawMessage{
+		"output":        mustMarshal(output),
+		"resultDisplay": cloneRawJSON(resultDisplay),
+	})
 }
 
 type geminiInteraction struct {

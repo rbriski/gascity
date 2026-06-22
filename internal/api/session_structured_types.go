@@ -363,7 +363,18 @@ func normalizeStructuredToolInput(name string, raw json.RawMessage) *SessionStru
 	text := structuredJSONText(raw)
 	out := &SessionStructuredToolInput{}
 	lowerName := strings.ToLower(strings.TrimSpace(name))
-	if lowerName == "apply_patch" || looksLikePatch(text) {
+	if lowerName == "apply_patch" {
+		patch, filePath := editPatchFromRawInput(raw)
+		if patch == "" {
+			patch = text
+			filePath = patchFilePath(text)
+		}
+		out.Kind = "patch"
+		out.Patch = patch
+		out.FilePath = filePath
+		return out
+	}
+	if looksLikePatch(text) {
 		out.Kind = "patch"
 		out.Patch = text
 		out.FilePath = patchFilePath(text)
@@ -376,6 +387,8 @@ func normalizeStructuredToolInput(name string, raw json.RawMessage) *SessionStru
 			out.Command = firstNonEmptyString(out.Command, field.Value)
 		case "code":
 			out.Code = firstNonEmptyString(out.Code, field.Value)
+		case "patch":
+			out.Patch = firstNonEmptyString(out.Patch, field.Value)
 		case "file_path":
 			out.FilePath = firstNonEmptyString(out.FilePath, field.Value)
 		case "query":
@@ -387,6 +400,13 @@ func normalizeStructuredToolInput(name string, raw json.RawMessage) *SessionStru
 		default:
 			out.Arguments = append(out.Arguments, field)
 		}
+	}
+
+	if patch, filePath := editPatchFromRawInput(raw); patch != "" && isEditTool(lowerName, out) {
+		out.Kind = "patch"
+		out.Patch = patch
+		out.FilePath = firstNonEmptyString(out.FilePath, filePath)
+		return out
 	}
 
 	switch {
@@ -419,14 +439,6 @@ func inferStructuredToolResult(block worker.HistoryBlock, context structuredTool
 		return nil
 	}
 	name := strings.ToLower(strings.TrimSpace(firstNonEmptyString(block.Name, context.Name)))
-	if looksLikePatch(content) || name == "apply_patch" || (context.Input != nil && context.Input.Kind == "patch") {
-		return &SessionStructuredToolResult{
-			Kind:     "edit",
-			FilePath: firstNonEmptyString(patchFilePath(content), inputFilePath(context.Input)),
-			Patch:    patchContent(content),
-			Content:  content,
-		}
-	}
 	if isPythonTool(name, context.Input) {
 		stdout, stderr, exitCode, interrupted, truncated, isImage := commandResultFields(block.Content, content)
 		return &SessionStructuredToolResult{
@@ -454,10 +466,13 @@ func inferStructuredToolResult(block worker.HistoryBlock, context structuredTool
 			IsImage:     isImage,
 		}
 	}
-	if isEditTool(name, context.Input) {
+	if name == "apply_patch" || isEditTool(name, context.Input) || (context.Input != nil && context.Input.Kind == "patch") || looksLikePatch(content) {
+		resultPatch, resultFile := editPatchFromRawResult(block.Content)
+		patch := firstNonEmptyString(resultPatch, patchContent(content), inputPatch(context.Input))
 		return &SessionStructuredToolResult{
 			Kind:     "edit",
-			FilePath: inputFilePath(context.Input),
+			FilePath: firstNonEmptyString(resultFile, patchFilePath(patch), patchFilePath(content), inputFilePath(context.Input)),
+			Patch:    patch,
 			Content:  content,
 		}
 	}
@@ -587,6 +602,8 @@ func normalizeStructuredFieldName(name string) string {
 		return "command"
 	case "code", "python", "script":
 		return "code"
+	case "patch", "diff", "file_diff", "filediff":
+		return "patch"
 	case "file", "file_path", "filepath", "path":
 		return "file_path"
 	case "q", "query", "search_query":
@@ -623,6 +640,161 @@ func patchContent(content string) string {
 	return ""
 }
 
+func editPatchFromRawInput(raw json.RawMessage) (string, string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	text := structuredJSONText(raw)
+	if looksLikePatch(text) {
+		return text, patchFilePath(text)
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) == 0 {
+		return "", ""
+	}
+	if patch := jsonStringField(object, "patch", "diff", "file_diff", "fileDiff"); patch != "" {
+		return patch, firstNonEmptyString(jsonStringField(object, "file_path", "filePath", "path", "file"), patchFilePath(patch))
+	}
+	filePath := jsonStringField(object, "file_path", "filePath", "path", "file")
+	if patch := editPatchFromEditArray(object, filePath); patch != "" {
+		return patch, filePath
+	}
+	oldText := jsonStringField(object, "old_string", "oldString", "old_str", "oldStr", "old")
+	newText := jsonStringField(object, "new_string", "newString", "new_str", "newStr", "replacement", "new")
+	if oldText != "" || newText != "" {
+		return buildUnifiedPatch(filePath, []editPatchHunk{{OldText: oldText, NewText: newText}}), filePath
+	}
+	content := jsonStringField(object, "content", "file_text", "fileText", "new_content", "newContent")
+	if content != "" {
+		return buildUnifiedPatch(filePath, []editPatchHunk{{NewText: content}}), filePath
+	}
+	return "", ""
+}
+
+func editPatchFromRawResult(raw json.RawMessage) (string, string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) == 0 {
+		return "", ""
+	}
+	if displayRaw, ok := object["resultDisplay"]; ok {
+		if patch, filePath := editPatchFromResultDisplay(displayRaw); patch != "" {
+			return patch, filePath
+		}
+	}
+	if patch, filePath := editPatchFromResultDisplay(raw); patch != "" {
+		return patch, filePath
+	}
+	if patch := jsonStringField(object, "patch", "diff", "file_diff", "fileDiff"); patch != "" {
+		return patch, firstNonEmptyString(jsonStringField(object, "file_path", "filePath", "path", "file"), patchFilePath(patch))
+	}
+	return "", ""
+}
+
+func editPatchFromResultDisplay(raw json.RawMessage) (string, string) {
+	var display map[string]json.RawMessage
+	if json.Unmarshal(raw, &display) != nil || len(display) == 0 {
+		return "", ""
+	}
+	filePath := jsonStringField(display, "file_path", "filePath", "fileName", "file")
+	if patch := jsonStringField(display, "file_diff", "fileDiff", "patch", "diff"); patch != "" {
+		return patch, firstNonEmptyString(filePath, patchFilePath(patch))
+	}
+	oldText := jsonStringField(display, "original_content", "originalContent", "old_content", "oldContent")
+	newText := jsonStringField(display, "new_content", "newContent", "content")
+	if oldText != "" || newText != "" {
+		return buildUnifiedPatch(filePath, []editPatchHunk{{OldText: oldText, NewText: newText}}), filePath
+	}
+	return "", ""
+}
+
+func editPatchFromEditArray(object map[string]json.RawMessage, filePath string) string {
+	rawEdits, ok := object["edits"]
+	if !ok {
+		return ""
+	}
+	var edits []map[string]json.RawMessage
+	if json.Unmarshal(rawEdits, &edits) != nil || len(edits) == 0 {
+		return ""
+	}
+	hunks := make([]editPatchHunk, 0, len(edits))
+	for _, edit := range edits {
+		oldText := jsonStringField(edit, "old_string", "oldString", "old_str", "oldStr", "old")
+		newText := jsonStringField(edit, "new_string", "newString", "new_str", "newStr", "replacement", "new")
+		if oldText == "" && newText == "" {
+			continue
+		}
+		hunks = append(hunks, editPatchHunk{OldText: oldText, NewText: newText})
+	}
+	if len(hunks) == 0 {
+		return ""
+	}
+	return buildUnifiedPatch(filePath, hunks)
+}
+
+type editPatchHunk struct {
+	OldText string
+	NewText string
+}
+
+func buildUnifiedPatch(filePath string, hunks []editPatchHunk) string {
+	if len(hunks) == 0 {
+		return ""
+	}
+	from := firstNonEmptyString(filePath, "file")
+	to := from
+	if len(hunks) == 1 {
+		if hunks[0].OldText == "" && hunks[0].NewText != "" {
+			from = "/dev/null"
+		}
+		if hunks[0].OldText != "" && hunks[0].NewText == "" {
+			to = "/dev/null"
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("--- ")
+	b.WriteString(from)
+	b.WriteString("\n+++ ")
+	b.WriteString(to)
+	for _, hunk := range hunks {
+		b.WriteString("\n@@\n")
+		appendPatchLines(&b, "-", hunk.OldText)
+		appendPatchLines(&b, "+", hunk.NewText)
+	}
+	return b.String()
+}
+
+func appendPatchLines(b *strings.Builder, prefix, text string) {
+	if text == "" {
+		return
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		if i == len(lines)-1 && line == "" {
+			continue
+		}
+		b.WriteString(prefix)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+}
+
+func jsonStringField(object map[string]json.RawMessage, names ...string) string {
+	for _, name := range names {
+		raw, ok := object[name]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		if text := structuredJSONText(raw); strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 func inputFilePath(input *SessionStructuredToolInput) string {
 	if input == nil {
 		return ""
@@ -635,6 +807,13 @@ func inputCode(input *SessionStructuredToolInput) string {
 		return ""
 	}
 	return input.Code
+}
+
+func inputPatch(input *SessionStructuredToolInput) string {
+	if input == nil {
+		return ""
+	}
+	return input.Patch
 }
 
 func resultCode(raw json.RawMessage) string {

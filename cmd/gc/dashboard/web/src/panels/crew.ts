@@ -562,18 +562,12 @@ function renderToolInput(block: SessionStructuredBlock): HTMLElement {
   appendField(rows, "query", input.query);
   appendField(rows, "pattern", input.pattern);
   appendField(rows, "text", input.text);
+  appendField(rows, "patch", patch);
   if (Array.isArray(input.arguments) && input.arguments.length > 0) {
     rows.push(...input.arguments.map((arg) => formatArgument(arg)));
   }
-  if (patch === "") {
-    if (rows.length === 0) rows.push(formatInlineValue(input));
-    return el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]);
-  }
-
-  return el("div", { class: "log-msg-tool-input" }, [
-    rows.length > 0 ? el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]) : null,
-    renderDiffPre(patch),
-  ]);
+  if (rows.length === 0) rows.push(formatInlineValue(input));
+  return el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]);
 }
 
 function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {

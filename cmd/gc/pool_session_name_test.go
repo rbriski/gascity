@@ -286,6 +286,54 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_SkipsUnassignedWorkflowRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow",
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create workflow root: %v", err)
+	}
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set workflow root status: %v", err)
+	}
+	root, err = store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Reload workflow root: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{root},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want workflow root preserved", released)
+	}
+
+	got, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get workflow root: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_ReopensEphemeralPoolAssignee(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{

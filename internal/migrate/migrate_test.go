@@ -11,6 +11,42 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+// TestDropRedundantControlDispatcherNamedSession pins the stale-city cleanup:
+// gc doctor --fix (via migrate.Apply) drops the auto-created control-dispatcher
+// named session (bare or core-qualified backing template) that older gc init
+// versions injected, leaves user-defined named sessions untouched, and is
+// idempotent.
+func TestDropRedundantControlDispatcherNamedSession(t *testing.T) {
+	t.Parallel()
+	in := []config.NamedSession{
+		{Name: "control-dispatcher", Template: "control-dispatcher", Mode: "on_demand"},      // pre-1.3 bare (the stale case)
+		{Name: "mayor", Template: "mayor", Mode: "always"},                                   // user-defined: keep
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "on_demand"}, // rc1/rc2 qualified
+	}
+	out, removed := dropRedundantControlDispatcherNamedSession(in)
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if len(out) != 1 || out[0].Name != "mayor" {
+		t.Fatalf("remaining = %+v, want only the user-defined mayor session", out)
+	}
+	// Idempotent: a second pass removes nothing.
+	if out2, removed2 := dropRedundantControlDispatcherNamedSession(out); removed2 != 0 || len(out2) != 1 {
+		t.Fatalf("second pass removed=%d len=%d, want 0 removed / 1 remaining", removed2, len(out2))
+	}
+	// User-authored control-dispatcher sessions express intent and must be
+	// left alone: a non-core template, an always mode, or an explicit
+	// scope/dir all disqualify the auto-created match.
+	keep := []config.NamedSession{
+		{Name: "control-dispatcher", Template: "myrig/custom-dispatcher", Mode: "always"},                  // custom template
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "always"},                  // always mode
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "on_demand", Scope: "rig"}, // explicit scope
+	}
+	if out, n := dropRedundantControlDispatcherNamedSession(keep); n != 0 || len(out) != len(keep) {
+		t.Fatalf("dropped a user-authored control-dispatcher session (removed=%d); all must be kept", n)
+	}
+}
+
 func TestMigrateCityCommonCase(t *testing.T) {
 	t.Parallel()
 

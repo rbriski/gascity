@@ -27,7 +27,7 @@ func TestTmuxConformance(t *testing.T) {
 	p := NewProviderWithConfig(cfg)
 	var counter int64
 
-	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
+	runtimetest.RunProviderTestsWithOptions(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		id := atomic.AddInt64(&counter, 1)
 		name := fmt.Sprintf("gc-test-conform-%d", id)
 		// Safety cleanup for orphan prevention.
@@ -36,6 +36,13 @@ func TestTmuxConformance(t *testing.T) {
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),
 		}, name
+	}, runtimetest.Options{
+		SkipStartError: func(err error) (string, bool) {
+			if errors.Is(err, ErrServerDegraded) {
+				return fmt.Sprintf("tmux test socket degraded before Start could run: %v", err), true
+			}
+			return "", false
+		},
 	})
 }
 

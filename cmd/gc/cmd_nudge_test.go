@@ -47,6 +47,18 @@ type providerMissNudgeProvider struct {
 	*runtime.Fake
 }
 
+type activitylessTimedOnlyNudgeProvider struct {
+	*runtime.Fake
+}
+
+func (p *activitylessTimedOnlyNudgeProvider) Capabilities() runtime.ProviderCapabilities {
+	return runtime.ProviderCapabilities{}
+}
+
+func (p *activitylessTimedOnlyNudgeProvider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityTimedOnly
+}
+
 func (p *providerMissNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
 	_ = p.Fake.Nudge(name, content)
 	return fmt.Errorf("%w: provider does not own %q", runtime.ErrSessionNotFound, name)
@@ -1146,6 +1158,23 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
 	if pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
+	}
+}
+
+func TestPollerSessionIdleEnoughAllowsActivitylessTimedOnlySession(t *testing.T) {
+	fake := &activitylessTimedOnlyNudgeProvider{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = errors.New("idle wait should not be required")
+	target := nudgeTarget{sessionName: "sess-worker"}
+	obs := worker.LiveObservation{}
+
+	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+		t.Fatal("pollerSessionIdleEnough = false, want activityless timed-only sessions to allow queued delivery")
+	}
+	if calls := fake.CountCalls("WaitForIdle", "sess-worker"); calls != 0 {
+		t.Fatalf("WaitForIdle calls = %d, want 0 for activityless timed-only session", calls)
 	}
 }
 
@@ -2396,6 +2425,68 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+}
+
+func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review queued work", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := &activitylessTimedOnlyNudgeProvider{Fake: runtime.NewFake()}
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = errors.New("idle wait should not be required")
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true")
+	}
+	if calls := fake.CountCalls("WaitForIdle", info.SessionName); calls != 0 {
+		t.Fatalf("WaitForIdle calls = %d, want 0 for activityless timed-only session", calls)
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 1 {
+		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+	}
+	if !strings.Contains(nudgeCalls[0].Message, "review queued work") {
+		t.Fatalf("nudge message = %q, want original reminder", nudgeCalls[0].Message)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/0", len(pending), len(inFlight), len(dead))
 	}
 }
 

@@ -104,7 +104,6 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:       "CLAUDE.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
-		SessionIDFlag:          "--session-id",
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		PermissionModes: map[string]string{

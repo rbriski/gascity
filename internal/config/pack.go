@@ -534,7 +534,9 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	}
 
 	var allAgents []Agent
+	var allRigAgentsFromCityImports []Agent
 	var allNamedSessions []NamedSession
+	var allRigNamedSessionsFromCityImports []NamedSession
 	var formulaDirs []string
 	var allPackDirs []string
 	var packGraphOnlyDirs []string
@@ -601,6 +603,10 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		packGraphOnlyDirs = appendUniqueLastWins(packGraphOnlyDirs, topoDirs...)
 
 		// Keep only city-scoped and unscoped agents for city expansion.
+		allRigAgentsFromCityImports = append(allRigAgentsFromCityImports,
+			expandCityImportedAgentsForRigs(agents, cfg.Rigs, "")...)
+		allRigNamedSessionsFromCityImports = append(allRigNamedSessionsFromCityImports,
+			expandCityImportedNamedSessionsForRigs(namedSessions, cfg.Rigs, "")...)
 		agents = filterAgentsByScope(agents, true)
 		namedSessions = filterNamedSessionsByScope(namedSessions, true)
 
@@ -767,6 +773,11 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				}
 			}
 
+			allRigAgentsFromCityImports = append(allRigAgentsFromCityImports,
+				expandCityImportedAgentsForRigs(agents, cfg.Rigs, bindingName)...)
+			allRigNamedSessionsFromCityImports = append(allRigNamedSessionsFromCityImports,
+				expandCityImportedNamedSessionsForRigs(namedSessions, cfg.Rigs, bindingName)...)
+
 			allRequires = append(allRequires, reqs...)
 			allGlobals = append(allGlobals, globals...)
 			cfg.Services = append(cfg.Services, services...)
@@ -820,6 +831,9 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			}
 		}
 	}
+
+	allAgents = append(allAgents, allRigAgentsFromCityImports...)
+	allNamedSessions = append(allNamedSessions, allRigNamedSessionsFromCityImports...)
 
 	// Store city pack dirs.
 	cfg.PackDirs = appendUnique(cfg.PackDirs, allPackDirs...)
@@ -2406,6 +2420,87 @@ func filterNamedSessionsByScope(sessions []NamedSession, cityExpansion bool) []N
 		}
 	}
 	return result
+}
+
+func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName string) []Agent {
+	if len(agents) == 0 || len(rigs) == 0 {
+		return nil
+	}
+	var expanded []Agent
+	for _, rig := range rigs {
+		rigName := strings.TrimSpace(rig.Name)
+		if rigName == "" || rigDeclaresImportBinding(rig, bindingName) {
+			continue
+		}
+		for _, a := range agents {
+			if a.Scope == "city" {
+				continue
+			}
+			a.Dir = rigName
+			// Clone DependsOn before qualifying in place: the range copy shares
+			// the original slice's backing array, so an in-place rewrite would
+			// poison the city-scoped copies filtered afterward and lock the
+			// first rig's prefix onto every later rig.
+			a.DependsOn = append([]string(nil), a.DependsOn...)
+			qualifyAgentDependsOnInPlace(&a)
+			expanded = append(expanded, a)
+		}
+	}
+	return expanded
+}
+
+func qualifyAgentDependsOnInPlace(a *Agent) {
+	if a == nil || len(a.DependsOn) == 0 {
+		return
+	}
+	for i, dep := range a.DependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep == "" || strings.Contains(dep, "/") {
+			continue
+		}
+		binding := strings.TrimSpace(a.BindingName)
+		if !strings.Contains(dep, ".") {
+			if binding != "" {
+				dep = binding + "." + dep
+			}
+		} else if binding != "" && !strings.HasPrefix(dep, binding+".") {
+			continue
+		}
+		if a.Dir != "" {
+			dep = a.Dir + "/" + dep
+		}
+		a.DependsOn[i] = dep
+	}
+}
+
+func expandCityImportedNamedSessionsForRigs(sessions []NamedSession, rigs []Rig, bindingName string) []NamedSession {
+	if len(sessions) == 0 || len(rigs) == 0 {
+		return nil
+	}
+	var expanded []NamedSession
+	for _, rig := range rigs {
+		rigName := strings.TrimSpace(rig.Name)
+		if rigName == "" || rigDeclaresImportBinding(rig, bindingName) {
+			continue
+		}
+		for _, s := range sessions {
+			if s.Scope == "city" {
+				continue
+			}
+			s.Dir = rigName
+			expanded = append(expanded, s)
+		}
+	}
+	return expanded
+}
+
+func rigDeclaresImportBinding(rig Rig, bindingName string) bool {
+	bindingName = strings.TrimSpace(bindingName)
+	if bindingName == "" || len(rig.Imports) == 0 {
+		return false
+	}
+	_, ok := rig.Imports[bindingName]
+	return ok
 }
 
 // hoistCityScopedAgents returns copies of the city-scoped agents in the

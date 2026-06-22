@@ -226,6 +226,23 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		packChanged = true
 	}
 
+	// Drop the redundant control-dispatcher named session that gc init versions
+	// prior to v1.3.0-rc3 injected. The control dispatcher serves via
+	// demand-scaling of the core-pack agent template (openControlDispatcherDemand),
+	// so the named session is dead weight; on upgraded cities its bare backing
+	// template no longer resolves and it emits a confusing "backing template not
+	// found ... disabled" warning on every command. Removing it here lets
+	// `gc doctor --fix` clean up existing cities. Idempotent.
+	if updated, removed := dropRedundantControlDispatcherNamedSession(packCfg.NamedSessions); removed > 0 {
+		packCfg.NamedSessions = updated
+		packChanged = true
+		report.Changes = append(report.Changes, "drop redundant control-dispatcher named session from pack.toml")
+	}
+	if updated, removed := dropRedundantControlDispatcherNamedSession(cityCfg.NamedSessions); removed > 0 {
+		cityCfg.NamedSessions = updated
+		report.Changes = append(report.Changes, "drop redundant control-dispatcher named session from city.toml")
+	}
+
 	removeMigratedPackSources(cityCfg, migratedPacks)
 
 	cityContent, err := cityCfg.Marshal()
@@ -996,6 +1013,38 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+// dropRedundantControlDispatcherNamedSession removes the on_demand
+// control-dispatcher named session that gc init versions prior to v1.3.0-rc3
+// injected. It matches only the auto-created shape (name=control-dispatcher,
+// template bare "control-dispatcher" or core-qualified "core.control-dispatcher")
+// so any user-defined named session is left untouched. Returns the filtered
+// slice and the number removed.
+func dropRedundantControlDispatcherNamedSession(sessions []config.NamedSession) ([]config.NamedSession, int) {
+	const dispatcher = config.ControlDispatcherAgentName
+	removed := 0
+	out := make([]config.NamedSession, 0, len(sessions))
+	for _, ns := range sessions {
+		// Match ONLY the auto-created shape: name=control-dispatcher, a bare or
+		// core-qualified backing template, on_demand (or unset) mode, and no
+		// explicit scope/dir. A user who hand-authored a control-dispatcher
+		// session with a custom template, always mode, or an explicit scope/dir
+		// expressed intent and must be left untouched.
+		autoCreated := ns.Name == dispatcher &&
+			(ns.Template == dispatcher || ns.Template == "core."+dispatcher) &&
+			(ns.Mode == "" || ns.Mode == "on_demand") &&
+			ns.Dir == "" && ns.Scope == ""
+		if autoCreated {
+			removed++
+			continue
+		}
+		out = append(out, ns)
+	}
+	if removed == 0 {
+		return sessions, 0
+	}
+	return out, removed
 }
 
 func relativeOrSame(path string) string {

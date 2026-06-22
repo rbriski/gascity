@@ -1148,6 +1148,9 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	if obs.LastActivity != nil && !obs.LastActivity.IsZero() {
 		return time.Since(*obs.LastActivity) >= quiescence
 	}
+	if pollerCanDeliverWithoutActivitySignal(target, sp) {
+		return true
+	}
 	if target.sessionName == "" {
 		return false
 	}
@@ -1160,6 +1163,20 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	ctx, cancel := context.WithTimeout(context.Background(), quiescence)
 	defer cancel()
 	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
+}
+
+func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {
+	if sp == nil || target.sessionName == "" {
+		return false
+	}
+	if sp.Capabilities().CanReportActivity {
+		return false
+	}
+	sleeper, ok := sp.(runtime.SleepCapabilityProvider)
+	if !ok {
+		return false
+	}
+	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
 func maybeStartNudgePoller(target nudgeTarget) {

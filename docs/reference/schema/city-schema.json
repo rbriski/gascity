@@ -72,7 +72,7 @@
             "city",
             "rig"
           ],
-          "description": "Scope defines where this agent is instantiated: \"city\" (one per city)\nor \"rig\" (one per rig, the default). Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
+          "description": "Scope defines where this agent is instantiated: \"city\" (one per city) or\n\"rig\" (one per rig). Omit the field for an unscoped agent instantiated in\nboth city and rig expansion contexts. Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
         },
         "suspended": {
           "type": "boolean",
@@ -1186,7 +1186,7 @@
       "properties": {
         "formula_v2": {
           "type": "boolean",
-          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure: the\ncontrol-dispatcher implicit agent and on-demand named session,\ncompiler-v2 workflow compilation, and batch graph-apply bead creation.\nThe implicit dispatcher follows normal session idle-sleep policy.\nRequires bd with --graph support. Default: true. Set false only for cities\npinned to formula compiler v1.",
+          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure:\ncompiler-v2 workflow compilation, batch graph-apply bead creation, and\nrouting to the core pack's control-dispatcher worker.\nRequires bd with --graph support. Default: ENABLED. A nil pointer means\nthe default-on behavior and is OMITTED from generated configs (so\nauto-generated city.toml files never pin the default and never\naccidentally write formula_v2=false); an explicit formula_v2=false (or\nthe deprecated graph_workflows=false alias) is preserved as a non-nil\nfalse. Read the effective value via FormulaV2Enabled(), never the field.",
           "default": true
         },
         "graph_workflows": {
@@ -1786,7 +1786,7 @@
             "city",
             "rig"
           ],
-          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig)."
+          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig). Omit the\nfield for an unscoped session instantiated in both city and rig\nexpansion contexts."
         },
         "dir": {
           "type": "string",
@@ -2298,7 +2298,7 @@
         },
         "session_id_flag": {
           "type": "string",
-          "description": "SessionIDFlag is the CLI flag for creating a session with a specific ID.\nEnables the Generate \u0026 Pass strategy for session key management.\nExample: \"--session-id\" (claude)"
+          "description": "SessionIDFlag is the CLI flag for providers that support creating a\nfresh session with a caller-supplied ID. Empty means fresh starts cannot\nreceive a preselected provider session ID; resume metadata must come from\nthe provider after startup."
         },
         "permission_modes": {
           "additionalProperties": {

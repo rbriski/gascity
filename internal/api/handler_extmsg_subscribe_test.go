@@ -31,9 +31,11 @@ func newExtMsgSubscribeFixture(t *testing.T) (*fakeState, *Server, string, strin
 
 	convID := "test-conv-1"
 	convRef := extmsg.ConversationRef{
+		ScopeID:        result.ClientID,
 		Provider:       extmsg.ProviderLLMClient,
 		AccountID:      result.ClientID,
 		ConversationID: convID,
+		Kind:           extmsg.ConversationDM,
 	}
 	return fs, srv, result.ClientID, result.Token, convRef
 }
@@ -183,6 +185,53 @@ func TestSubscribeHandler_ValidTokenStreamsMessages(t *testing.T) {
 	}
 	if !strings.Contains(body, "hello from session") {
 		t.Errorf("stream missing message text; body: %s", body)
+	}
+}
+
+func TestSubscribeHandler_ForbiddenSessionEmitsSSEError(t *testing.T) {
+	fs, srv, _, _, _ := newExtMsgSubscribeFixture(t)
+
+	// Register a distinct client with AllowedSessions=["session-A"]. A
+	// non-empty credential prevents idempotent dedup with the anonymous
+	// client already registered by the fixture.
+	result, err := extmsg.RegisterClient(context.Background(), fs.cityBeadStore, extmsg.RegisterClientInput{
+		Credential:      "test-cred-forbidden",
+		AllowedSessions: []string{"session-A"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+
+	convRef := extmsg.ConversationRef{
+		ScopeID:        result.ClientID,
+		Provider:       extmsg.ProviderLLMClient,
+		AccountID:      result.ClientID,
+		ConversationID: "test-conv-forbidden",
+		Kind:           extmsg.ConversationDM,
+	}
+
+	// Bind the conversation to "session-B", which is NOT in AllowedSessions.
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := fs.extmsgSvc.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: convRef,
+		SessionID:    "session-B",
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	h := newTestCityHandlerWith(t, fs, srv)
+	req := httptest.NewRequest("GET", subscribeURL(fs, result.ClientID, "test-conv-forbidden"), nil)
+	req.Header.Set("X-GC-Client-Token", result.Token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: error") {
+		t.Errorf("stream missing SSE error event type; body: %s", body)
+	}
+	if !strings.Contains(body, `"code":"session_forbidden"`) {
+		t.Errorf("stream missing session_forbidden code; body: %s", body)
 	}
 }
 

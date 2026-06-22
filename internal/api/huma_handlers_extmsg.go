@@ -663,9 +663,11 @@ func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscrib
 		clientID:        clientID,
 		allowedSessions: allowedSessions,
 		convRef: extmsg.ConversationRef{
+			ScopeID:        clientID,
 			Provider:       extmsg.ProviderLLMClient,
 			AccountID:      clientID,
 			ConversationID: input.ConversationID,
+			Kind:           extmsg.ConversationDM,
 		},
 		heartbeat:  heartbeat,
 		bufferSize: cfg.ExtMsg.ConnectedClients.SubscriberBufferSizeOrDefault(),

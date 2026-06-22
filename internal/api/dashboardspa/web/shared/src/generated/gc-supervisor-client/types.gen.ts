@@ -59,7 +59,6 @@ export type AgentOutputResponse = {
 
 export type AgentPatch = {
     AppendFragments: Array<string> | null;
-    Args: Array<string> | null;
     Attach: boolean | null;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
@@ -109,7 +108,6 @@ export type AgentPatch = {
     StartCommand: string | null;
     Suspended: boolean | null;
     TmuxAlias: string | null;
-    Upstream: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
 };
@@ -130,10 +128,6 @@ export type AgentPatchSetInputBody = {
      */
     name?: string;
     /**
-     * Override the agent's provider.
-     */
-    provider?: string;
-    /**
      * Override agent scope.
      */
     scope?: string;
@@ -151,6 +145,21 @@ export type AgentPatchSetInputBody = {
     work_dir?: string;
 };
 
+export type AgentPrimeBody = {
+    /**
+     * Resolved agent identity.
+     */
+    agent: string;
+    /**
+     * Prompt byte length.
+     */
+    bytes: number;
+    /**
+     * Composed behavioural prompt.
+     */
+    prompt: string;
+};
+
 export type AgentResponse = {
     active_bead?: string;
     activity?: string;
@@ -162,8 +171,6 @@ export type AgentResponse = {
     last_output?: string;
     model?: string;
     name: string;
-    pack?: string;
-    pack_derived: boolean;
     pool?: string;
     provider?: string;
     rig?: string;
@@ -264,22 +271,19 @@ export type AsyncAcceptedResponse = {
 export type Bead = {
     assignee?: string;
     created_at: string;
-    defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
     ephemeral?: boolean;
     from?: string;
     id: string;
-    is_blocked?: boolean;
     issue_type: string;
     labels?: Array<string> | null;
     metadata?: {
         [key: string]: string;
     };
     needs?: Array<string> | null;
-    no_history?: boolean;
     parent?: string;
-    priority?: number;
+    priority?: number | null;
     ref?: string;
     status: string;
     title: string;
@@ -293,10 +297,11 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
-export type BeadClaimRejectedPayload = {
-    attempted_claimant: string;
-    bead_id: string;
-    existing_claimant: string;
+export type BeadCloseBody = {
+    /**
+     * Operator-readable reason to persist as metadata.close_reason.
+     */
+    reason?: string;
 };
 
 export type BeadCreateInputBody = {
@@ -304,10 +309,6 @@ export type BeadCreateInputBody = {
      * Assigned agent.
      */
     assignee?: string;
-    /**
-     * Hide the bead from ready views until this time.
-     */
-    defer_until?: string;
     /**
      * Bead description.
      */
@@ -342,21 +343,6 @@ export type BeadCreateInputBody = {
      * Bead type.
      */
     type?: string;
-};
-
-export type BeadDeadAssigneeReopenedPayload = {
-    /**
-     * ID of the reopened work bead (also the envelope Subject).
-     */
-    bead_id: string;
-    /**
-     * The assignee identity that resolved to no open session bead, cleared by the reopen.
-     */
-    dead_assignee?: string;
-    /**
-     * The gc.routed_to target the bead stays routed to after the reopen, when set.
-     */
-    routed_to?: string;
 };
 
 export type BeadDepsResponse = {
@@ -418,34 +404,12 @@ export type BeadUpdateBody = {
     type?: string;
 };
 
-export type BeadWorktreeReapSkippedPayload = {
-    bead_id: string;
-    path: string;
-    reason: string;
-    rig: string;
-};
-
-export type BeadWorktreeReapedPayload = {
-    bead_id: string;
-    branch: string;
-    path: string;
-    rig: string;
-};
-
-export type BeadsDiagnostic = {
-    beads_store: string;
-    native_store_eligible: boolean;
-    preflight_gate?: string;
-    preflight_reason?: string;
-};
-
 /**
  * Lifecycle state of a session binding.
  */
 export type BindingStatus = 'active' | 'ended';
 
 export type BoundEventPayload = {
-    agent_name?: string;
     conversation_id: string;
     provider: string;
     session_id: string;
@@ -518,21 +482,6 @@ export type CityPatchInputBody = {
     suspended?: boolean;
 };
 
-export type CityPendingEntry = {
-    /**
-     * Pending interaction kind (e.g. tool-approval, prompt-for-input).
-     */
-    kind: string;
-    /**
-     * Pending interaction request ID.
-     */
-    request_id: string;
-    /**
-     * Session ID awaiting a human decision.
-     */
-    session_id: string;
-};
-
 export type CityUnregisterSucceededPayload = {
     /**
      * City name that was unregistered.
@@ -579,7 +528,6 @@ export type ConfigPatchesResponse = {
 
 export type ConfigResponse = {
     agents: Array<ConfigAgentResponse> | null;
-    effective_api_url?: string;
     patches?: ConfigPatchesResponse;
     providers?: {
         [key: string]: ProviderSpecJson;
@@ -619,7 +567,6 @@ export type ConversationGroupParticipant = {
     };
     Public: boolean;
     SessionID: string;
-    SessionName: string;
 };
 
 export type ConversationGroupRecord = {
@@ -780,10 +727,6 @@ export type ErrorDetail = {
 
 export type ErrorModel = {
     /**
-     * Stable machine-readable error code (the final segment of the type URN).
-     */
-    code?: string;
-    /**
      * A human-readable explanation specific to this occurrence of the problem.
      */
     detail?: string;
@@ -835,7 +778,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -894,10 +837,7 @@ export type EventStreamEnvelope = {
     actor: string;
     message?: string;
     payload?: EventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: string;
@@ -959,10 +899,6 @@ export type ExtMsgAdapterUnregisterInputBody = {
 
 export type ExtMsgBindInputBody = {
     /**
-     * Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).
-     */
-    agent_name?: string;
-    /**
      * Conversation to bind.
      */
     conversation?: ConversationRef;
@@ -973,13 +909,39 @@ export type ExtMsgBindInputBody = {
         [key: string]: string;
     };
     /**
-     * Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict.
+     * Session ID to bind.
      */
-    replace?: boolean;
+    session_id: string;
+};
+
+export type ExtMsgClientRegisterInputBody = {
     /**
-     * Session ID to bind (mutually exclusive with agent_name).
+     * Session names this client is permitted to subscribe to.
      */
-    session_id?: string;
+    allowed_sessions?: Array<string> | null;
+    /**
+     * Opaque credential string (required unless allow_no_credential=true in city.toml).
+     */
+    credential?: string;
+};
+
+export type ExtMsgClientRegisterOutputBody = {
+    /**
+     * Stable client identifier (bead ID). Use as account_id in the subscribe URL.
+     */
+    client_id: string;
+    /**
+     * True when a new token was issued; false when re-issued for the same credential.
+     */
+    created: boolean;
+    /**
+     * One-time advisory message. Only present when created=true.
+     */
+    note?: string;
+    /**
+     * Raw base64url token. Only present when created=true; store it securely.
+     */
+    token?: string;
 };
 
 export type ExtMsgGroupEnsureInputBody = {
@@ -1105,17 +1067,13 @@ export type ExtMsgUnbindBody = {
 
 export type ExtMsgUnbindInputBody = {
     /**
-     * Configured agent identity to unbind.
-     */
-    agent_name?: string;
-    /**
-     * Conversation to unbind (nil = filter by session_id/agent_name).
+     * Conversation to unbind (nil = all).
      */
     conversation?: ConversationRef;
     /**
      * Session ID to unbind.
      */
-    session_id?: string;
+    session_id: string;
 };
 
 export type ExternalActor = {
@@ -1171,6 +1129,7 @@ export type FormulaDetailResponse = {
     preview: FormulaPreviewResponse;
     steps: Array<FormulaStepResponse> | null;
     var_defs: Array<FormulaVarDefResponse> | null;
+    version: string;
 };
 
 export type FormulaFeedBody = {
@@ -1204,7 +1163,7 @@ export type FormulaPreviewBody = {
      */
     scope_ref?: string;
     /**
-     * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
+     * Target agent for preview compilation.
      */
     target: string;
     /**
@@ -1249,17 +1208,6 @@ export type FormulaRunsResponse = {
     run_count: number;
 };
 
-export type FormulaSourceOutputBody = {
-    /**
-     * Formula name.
-     */
-    name: string;
-    /**
-     * Raw formula TOML source.
-     */
-    source: string;
-};
-
 export type FormulaStepResponse = {
     assignee?: string;
     id: string;
@@ -1278,17 +1226,7 @@ export type FormulaSummaryResponse = {
     recent_runs: Array<FormulaRecentRunResponse> | null;
     run_count: number;
     var_defs: Array<FormulaVarDefResponse> | null;
-};
-
-export type FormulaValidateOutputBody = {
-    /**
-     * Validation errors, if any.
-     */
-    errors?: Array<string> | null;
-    /**
-     * Whether the formula source is valid.
-     */
-    valid: boolean;
+    version: string;
 };
 
 export type FormulaVarDefResponse = {
@@ -1351,7 +1289,6 @@ export type InboundEventPayload = {
     actor: string;
     conversation_id: string;
     provider: string;
-    target_agent?: string;
     target_session: string;
 };
 
@@ -1359,7 +1296,6 @@ export type InboundResult = {
     Binding: SessionBindingRecord;
     GroupRoute: GroupRouteDecision;
     Message: ExternalInboundMessage;
-    TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry: ConversationTranscriptRecord;
 };
@@ -1415,29 +1351,6 @@ export type ListBodyBead = {
      * The list of items.
      */
     items: Array<Bead> | null;
-    /**
-     * Cursor for the next page of results.
-     */
-    next_cursor?: string;
-    /**
-     * True when one or more backends failed and the list is incomplete.
-     */
-    partial?: boolean;
-    /**
-     * Human-readable errors from backends that failed during aggregation.
-     */
-    partial_errors?: Array<string> | null;
-    /**
-     * Total number of items matching the query.
-     */
-    total: number;
-};
-
-export type ListBodyCityPendingEntry = {
-    /**
-     * The list of items.
-     */
-    items: Array<CityPendingEntry> | null;
     /**
      * Cursor for the next page of results.
      */
@@ -1775,87 +1688,6 @@ export type MailSendInputBody = {
     to: string;
 };
 
-export type MaintenanceRunBody = {
-    /**
-     * Store size in bytes after the run (0 when not measured).
-     */
-    after_bytes: number;
-    /**
-     * Store size in bytes before the run (0 when not measured).
-     */
-    before_bytes: number;
-    /**
-     * Elapsed wall-clock seconds between started_at and finished_at.
-     */
-    duration_s: number;
-    /**
-     * Error message when Stage names a failing phase; empty on success.
-     */
-    err?: string;
-    /**
-     * RFC3339 timestamp when the run completed.
-     */
-    finished_at: string;
-    /**
-     * Absolute path to the snapshot directory created for this run.
-     */
-    snapshot_path?: string;
-    /**
-     * Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.
-     */
-    stage: string;
-    /**
-     * RFC3339 timestamp when the run began.
-     */
-    started_at: string;
-};
-
-export type MaintenanceStatusBody = {
-    /**
-     * Whether [maintenance.dolt] enabled=true in city.toml.
-     */
-    enabled: boolean;
-    /**
-     * Bounded ring of recent run outcomes (oldest first).
-     */
-    history: Array<MaintenanceRunBody> | null;
-    /**
-     * True when a maintenance cycle is currently running.
-     */
-    in_flight: boolean;
-    /**
-     * RFC3339 start time of the in-flight run.
-     */
-    in_flight_start?: string;
-    /**
-     * Configured scheduling interval in seconds (0 when disabled).
-     */
-    interval_seconds: number;
-    /**
-     * Most recent completed run, or null when none.
-     */
-    last_run?: MaintenanceRunBody;
-    /**
-     * RFC3339 approximate next scheduled run time.
-     */
-    next_scheduled?: string;
-};
-
-export type MaintenanceTriggerBody = {
-    /**
-     * True when the supervisor accepted the trigger (202) or completed it (200).
-     */
-    accepted: boolean;
-    /**
-     * Full run summary, populated when the caller set ?wait=true.
-     */
-    run?: MaintenanceRunBody;
-    /**
-     * RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
-     */
-    started_at?: string;
-};
-
 export type Message = {
     body: string;
     cc?: Array<string> | null;
@@ -1869,45 +1701,6 @@ export type Message = {
     subject: string;
     thread_id?: string;
     to: string;
-};
-
-export type MoleculeResolvedPayload = {
-    /**
-     * Identity that triggered the close (eventActor).
-     */
-    actor: string;
-    /**
-     * close_reason stamped on the root.
-     */
-    close_reason?: string;
-    /**
-     * Root status captured before the close mutated it.
-     */
-    from_status: string;
-    /**
-     * Molecule root bead ID that resolved.
-     */
-    issue_id: string;
-    /**
-     * Resolving session ID from gc.session_id. Empty if unstamped.
-     */
-    session_id?: string;
-    /**
-     * Resolving session name from gc.session_name. Empty if unstamped.
-     */
-    session_name?: string;
-    /**
-     * Terminal status after resolution. Always "closed".
-     */
-    to_status: string;
-    /**
-     * Resolution timestamp (UTC).
-     */
-    ts: string;
-    /**
-     * Resolving session work dir from gc.work_dir. Empty if unstamped.
-     */
-    work_dir?: string;
 };
 
 export type MonitorFeedItemResponse = {
@@ -2019,9 +1812,6 @@ export type OrderResponse = {
     check?: string;
     description?: string;
     enabled: boolean;
-    env?: {
-        [key: string]: string;
-    };
     exec?: string;
     formula?: string;
     /**
@@ -2041,41 +1831,10 @@ export type OrderResponse = {
     type: string;
 };
 
-export type OrderRunInputBody = {
-    /**
-     * Declared [order.params] as key/value dispatch args (parity with 'gc order run --var'). Namespaced into the exec env under GC_WEBHOOK_ARG_ before overlay (R4).
-     */
-    vars?: {
-        [key: string]: string;
-    };
-};
-
-export type OrderRunOutputBody = {
-    /**
-     * Rig-qualified name of the fired order.
-     */
-    scoped_name?: string;
-    /**
-     * "dispatched" when the order fired.
-     */
-    status: string;
-    /**
-     * Tracking bead id for the dispatch.
-     */
-    tracking_id?: string;
-};
-
 export type OrdersFeedBody = {
     items: Array<MonitorFeedItemResponse> | null;
     partial: boolean;
     partial_errors?: Array<string> | null;
-};
-
-export type OutboundChannelMismatchPayload = {
-    conversation_id: string;
-    owner_session: string;
-    posting_session: string;
-    provider: string;
 };
 
 export type OutboundEventPayload = {
@@ -2097,40 +1856,6 @@ export type OutputTurn = {
     timestamp?: string;
 };
 
-export type PackAddInputBody = {
-    /**
-     * Optional local binding name override; derived from the source when omitted.
-     */
-    name?: string;
-    /**
-     * Pack source: a remote git URL or registry ref (a sub-path of a repo is allowed).
-     */
-    source: string;
-    /**
-     * Optional semver constraint for a git-backed pack.
-     */
-    version?: string;
-};
-
-export type PackAddedOutputBody = {
-    /**
-     * Whether the resolved source is git-backed (has a lock entry).
-     */
-    git_backed: boolean;
-    /**
-     * The local binding name written to [imports.<name>].
-     */
-    name: string;
-    /**
-     * The canonical source string written to the manifest.
-     */
-    source: string;
-    /**
-     * The version constraint written, if any.
-     */
-    version?: string;
-};
-
 export type PackListBody = {
     /**
      * Registered packs.
@@ -2138,17 +1863,11 @@ export type PackListBody = {
     packs: Array<PackResponse> | null;
 };
 
-export type PackRemovedOutputBody = {
-    /**
-     * The binding name removed.
-     */
-    name: string;
-};
-
 export type PackResponse = {
     name: string;
+    path?: string;
+    ref?: string;
     source?: string;
-    version?: string;
 };
 
 export type PaginationInfo = {
@@ -2272,12 +1991,6 @@ export type ProviderCreateInputBody = {
      * Provider name.
      */
     name: string;
-    /**
-     * Provider option defaults (e.g. model). Keys are merged on update.
-     */
-    option_defaults?: {
-        [key: string]: string;
-    };
     /**
      * Options schema merge mode across inheritance chain.
      */
@@ -2485,12 +2198,6 @@ export type ProviderUpdateInputBody = {
         [key: string]: string;
     };
     /**
-     * Provider option defaults (e.g. model). Keys are merged on update.
-     */
-    option_defaults?: {
-        [key: string]: string;
-    };
-    /**
      * Options schema merge mode across inheritance chain.
      */
     options_schema_merge?: string;
@@ -2531,21 +2238,6 @@ export type ReadinessResponse = {
     items: {
         [key: string]: ReadinessItem;
     };
-};
-
-export type Record = {
-    actor: string;
-    created_at: string;
-    hostname?: string;
-    id: string;
-    message: string;
-    metadata?: {
-        [key: string]: string;
-    };
-    ref_bead?: string;
-    severity: string;
-    source_path?: string;
-    source_pid?: number;
 };
 
 export type RequestFailedPayload = {
@@ -2629,7 +2321,6 @@ export type RigPatch = {
     Path: string | null;
     Prefix: string | null;
     Suspended: boolean | null;
-    SuspendedOnStart: boolean | null;
 };
 
 export type RigPatchSetInputBody = {
@@ -2692,154 +2383,29 @@ export type RotatedPayload = {
     prior_last_seq: number;
 };
 
-export type Run = {
-    /**
-     * Formula name driving the run, when known.
-     */
-    formula?: string;
-    /**
-     * Structured failure reason for a terminal run.
-     */
-    last_error?: RunLastError;
-    /**
-     * Stable run identifier (the run root bead id).
-     */
-    run_id: string;
-    /**
-     * Resolved run scope.
-     */
-    scope: RunScope;
-    /**
-     * RFC3339 run start time (root creation).
-     */
-    started_at?: string;
-    /**
-     * Closed lifecycle status.
-     */
-    status: RunStatus;
-    /**
-     * Where the run is routed (rig/target), when known.
-     */
-    target?: string;
-    /**
-     * Human-readable run title.
-     */
-    title: string;
-    /**
-     * RFC3339 time of the run's most recent activity.
-     */
-    updated_at?: string;
-};
-
-export type RunCancelOutputBody = {
-    /**
-     * Count of the run's beads closed by the cancel.
-     */
-    closed: number;
-    /**
-     * The canceled run.
-     */
-    run_id: string;
-    /**
-     * Run status after the cancel wind-down.
-     */
-    status: RunStatus;
-};
-
-export type RunLastError = {
-    /**
-     * Machine-readable outcome code (e.g. fail, skipped, canceled).
-     */
+export type SseErrorEvent = {
     code: string;
-    /**
-     * Human-readable failure detail, when available.
-     */
-    message?: string;
+    event: string;
+    message: string;
+    retry_after_ms?: number;
+    retryable: boolean;
+    version: string;
 };
 
-export type RunRef = {
-    /**
-     * Launch mechanism that produced the run.
-     */
-    kind: 'sling' | 'order';
-    /**
-     * Run identifier; GET /v0/city/{cityName}/runs/{run_id} for detail.
-     */
-    run_id: string;
-    /**
-     * Closed lifecycle status at response time (a just-launched run is pending).
-     */
-    status: RunStatus;
+export type SseHeartbeatEvent = {
+    event: string;
+    ts: string;
+    version: string;
 };
 
-export type RunScope = {
-    /**
-     * Scope kind (city or rig), when resolved.
-     */
-    kind?: string;
-    /**
-     * Scope reference within the kind, when resolved.
-     */
-    ref?: string;
-};
-
-/**
- * Closed lifecycle state of a run.
- */
-export type RunStatus = 'pending' | 'active' | 'waiting' | 'canceling' | 'completed' | 'failed' | 'canceled' | 'skipped';
-
-export type RunStep = {
-    /**
-     * Current assignee, when set.
-     */
-    assignee?: string;
-    /**
-     * Step (child bead) identifier.
-     */
-    id: string;
-    /**
-     * Step kind (bead type).
-     */
-    kind?: string;
-    /**
-     * Closed step lifecycle status.
-     */
-    status: RunStepStatus;
-    /**
-     * Step title.
-     */
-    title: string;
-};
-
-/**
- * Closed lifecycle state of a run step.
- */
-export type RunStepStatus = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled';
-
-export type RunStepsOutputBody = {
-    /**
-     * Run identifier the steps belong to.
-     */
-    run_id: string;
-    /**
-     * Steps of the run.
-     */
-    steps: Array<RunStep> | null;
-};
-
-export type RunsListOutputBody = {
-    /**
-     * True when some runs could not be fully projected.
-     */
-    partial?: boolean;
-    /**
-     * Reasons the projection was partial.
-     */
-    partial_errors?: Array<string> | null;
-    /**
-     * Runs in the city, newest activity first.
-     */
-    runs: Array<Run> | null;
+export type SseMessageEvent = {
+    conversation: ConversationRef;
+    created_at: string;
+    event: string;
+    sequence: number;
+    session_id: string;
+    text: string;
+    version: string;
 };
 
 export type ScopeGroup = {
@@ -2878,7 +2444,6 @@ export type SessionAgentListResponse = {
 };
 
 export type SessionBindingRecord = {
-    AgentName: string;
     BindingGeneration: number;
     BoundAt: string;
     Conversation: ConversationRef;
@@ -2889,7 +2454,6 @@ export type SessionBindingRecord = {
     };
     SchemaVersion: number;
     SessionID: string;
-    SessionName: string;
     Status: BindingStatus;
 };
 
@@ -3044,13 +2608,6 @@ export type SessionRenameInputBody = {
     title: string;
 };
 
-export type SessionResetStalledPayload = {
-    elapsed_s: number;
-    reset_committed_at: string;
-    session_name: string;
-    template: string;
-};
-
 export type SessionRespondInputBody = {
     /**
      * Response action (e.g. allow, deny).
@@ -3116,26 +2673,6 @@ export type SessionResponse = {
     submission_capabilities?: SubmissionCapabilities;
     template: string;
     title: string;
-    work_dir?: string;
-};
-
-export type SessionStrandedPayload = {
-    /**
-     * Canonical session bead ID for the stranded pool session (also the envelope Subject).
-     */
-    session_id: string;
-    /**
-     * Runtime session name from the session bead metadata, when set.
-     */
-    session_name?: string;
-    /**
-     * Pool template name when known at the emission site.
-     */
-    template?: string;
-    /**
-     * IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.
-     */
-    work_bead_ids?: Array<string> | null;
 };
 
 /**
@@ -3224,29 +2761,6 @@ export type SessionTranscriptGetResponse = {
     turns?: Array<OutputTurn> | null;
 };
 
-export type SessionUnknownStatePayload = {
-    /**
-     * False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold.
-     */
-    escalated: boolean;
-    /**
-     * RFC3339 timestamp the reconciler first observed this unrecognized state; the escalation clock counts from here.
-     */
-    first_seen?: string;
-    /**
-     * Canonical session bead ID for the unrecognized-state session (also the envelope Subject).
-     */
-    session_id: string;
-    /**
-     * Runtime session name from the session bead metadata, when set.
-     */
-    session_name?: string;
-    /**
-     * The raw, unrecognized metadata state value the reconciler skipped.
-     */
-    state: string;
-};
-
 export type SlingInputBody = {
     /**
      * Bead ID to attach a formula to.
@@ -3295,17 +2809,9 @@ export type SlingInputBody = {
 export type SlingResponse = {
     attached_bead_id?: string;
     bead?: string;
-    /**
-     * Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it.
-     */
-    dashboard_url?: string;
     formula?: string;
     mode?: string;
     root_bead_id?: string;
-    /**
-     * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
-     */
-    run?: RunRef;
     status: string;
     target: string;
     warnings?: Array<string> | null;
@@ -3405,18 +2911,6 @@ export type StatusBody = {
      * Agent state counts.
      */
     agents: StatusAgentCounts;
-    /**
-     * Bead store selection diagnostic. Omitted when unavailable.
-     */
-    beads?: BeadsDiagnostic;
-    /**
-     * Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
-     */
-    beads_version?: string;
-    /**
-     * Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
-     */
-    dolt_version?: string;
     /**
      * Mail counts.
      */
@@ -3596,19 +3090,6 @@ export type StatusWorkCounts = {
     ready: number;
 };
 
-export type StoreDiskCriticalPayload = {
-    data_dir: string;
-    floor_bytes: number;
-    free_bytes: number;
-};
-
-export type StoreDiskWarnPayload = {
-    data_dir: string;
-    floor_bytes: number;
-    free_bytes: number;
-    warn_bytes: number;
-};
-
 export type StoreMaintenanceDonePayload = {
     after_bytes: number;
     before_bytes: number;
@@ -3694,10 +3175,6 @@ export type SupervisorHealthOutputBody = {
      */
     cities_total: number;
     /**
-     * SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile.
-     */
-    packs_lock_sha256?: string;
-    /**
      * First-city startup info for single-city deployments.
      */
     startup?: SupervisorStartup;
@@ -3713,41 +3190,6 @@ export type SupervisorHealthOutputBody = {
      * Supervisor version.
      */
     version: string;
-};
-
-export type SupervisorRequestPayload = {
-    /**
-     * Handler duration in milliseconds.
-     */
-    duration_ms: number;
-    /**
-     * Canonical Host header without port.
-     */
-    host?: string;
-    /**
-     * HTTP method.
-     */
-    method: string;
-    /**
-     * Whether the Origin header, if present, matched CORS policy.
-     */
-    origin_allowed: boolean;
-    /**
-     * Request path with query string omitted and length bounded.
-     */
-    path: string;
-    /**
-     * Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only.
-     */
-    phase: 'start' | 'complete';
-    /**
-     * Network class of the remote address, not the raw address.
-     */
-    remote_addr_class: 'loopback' | 'private' | 'public' | 'unknown';
-    /**
-     * HTTP response status code. Start-phase records use 0 before the final response status is known.
-     */
-    status: number;
 };
 
 export type SupervisorShutdownPayload = {
@@ -3767,13 +3209,6 @@ export type SupervisorShutdownPayload = {
      * Which path triggered the shutdown.
      */
     source: 'signal' | 'socket_stop';
-};
-
-export type SupervisorStartedPayload = {
-    /**
-     * How the previous supervisor instance exited: clean (it completed its STOPPING path and left the shutdown handoff token), crash (a prior instance ran but left no token), or unknown (no evidence of a prior instance).
-     */
-    previous_exit: 'clean' | 'crash' | 'unknown';
 };
 
 export type SupervisorStartup = {
@@ -3796,10 +3231,7 @@ export type TaggedEventStreamEnvelope = {
     city: string;
     message?: string;
     payload?: EventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: string;
@@ -3822,22 +3254,12 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
-    type: 'bead.claim_rejected';
-} & TypedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
 } & TypedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
 } & TypedEventStreamEnvelopeBeadCreated) | ({
-    type: 'bead.dead_assignee_reopened';
-} & TypedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
-    type: 'bead.deleted';
-} & TypedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
-    type: 'bead.worktree.reap_skipped';
-} & TypedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
-    type: 'bead.worktree.reaped';
-} & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -3854,10 +3276,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
-    type: 'emergency.acked';
-} & TypedEventStreamEnvelopeEmergencyAcked) | ({
-    type: 'emergency.signaled';
-} & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
@@ -3872,14 +3290,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgInbound) | ({
     type: 'extmsg.outbound';
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
-    type: 'extmsg.outbound_channel_mismatch';
-} & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
-    type: 'gc.store.disk_critical';
-} & TypedEventStreamEnvelopeGcStoreDiskCritical) | ({
-    type: 'gc.store.disk_warn';
-} & TypedEventStreamEnvelopeGcStoreDiskWarn) | ({
     type: 'gc.store.maintenance.done';
 } & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -3898,8 +3310,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailReplied) | ({
     type: 'mail.sent';
 } & TypedEventStreamEnvelopeMailSent) | ({
-    type: 'molecule.resolved';
-} & TypedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
 } & TypedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -3924,8 +3334,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
-    type: 'session.cold_start_timeout';
-} & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -3938,8 +3346,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
-    type: 'session.reset_stalled';
-} & TypedEventStreamEnvelopeSessionResetStalled) | ({
     type: 'session.stopped';
 } & TypedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
@@ -3948,8 +3354,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
 } & TypedEventStreamEnvelopeSessionUndrained) | ({
-    type: 'session.unknown_state';
-} & TypedEventStreamEnvelopeSessionUnknownState) | ({
     type: 'session.updated';
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
@@ -3958,37 +3362,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionWorkQueryFailed) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
-    type: 'supervisor.request';
-} & TypedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedEventStreamEnvelopeSupervisorShutdownRequested) | ({
-    type: 'supervisor.started';
-} & TypedEventStreamEnvelopeSupervisorStarted) | ({
-    type: 'webhook.received';
-} & TypedEventStreamEnvelopeWebhookReceived) | ({
-    type: 'webhook.rejected';
-} & TypedEventStreamEnvelopeWebhookRejected) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
-
-/**
- * TypedEventStreamEnvelope bead.claim_rejected
- */
-export type TypedEventStreamEnvelopeBeadClaimRejected = {
-    actor: string;
-    message?: string;
-    payload: BeadClaimRejectedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.claim_rejected';
-    workflow?: WorkflowEventProjection;
-};
 
 /**
  * TypedEventStreamEnvelope bead.closed
@@ -3997,10 +3376,7 @@ export type TypedEventStreamEnvelopeBeadClosed = {
     actor: string;
     message?: string;
     payload: BeadEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'bead.closed';
@@ -4014,47 +3390,10 @@ export type TypedEventStreamEnvelopeBeadCreated = {
     actor: string;
     message?: string;
     payload: BeadEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'bead.created';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope bead.dead_assignee_reopened
- */
-export type TypedEventStreamEnvelopeBeadDeadAssigneeReopened = {
-    actor: string;
-    message?: string;
-    payload: BeadDeadAssigneeReopenedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.dead_assignee_reopened';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope bead.deleted
- */
-export type TypedEventStreamEnvelopeBeadDeleted = {
-    actor: string;
-    message?: string;
-    payload: BeadEventPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.deleted';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4065,47 +3404,10 @@ export type TypedEventStreamEnvelopeBeadUpdated = {
     actor: string;
     message?: string;
     payload: BeadEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'bead.updated';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope bead.worktree.reap_skipped
- */
-export type TypedEventStreamEnvelopeBeadWorktreeReapSkipped = {
-    actor: string;
-    message?: string;
-    payload: BeadWorktreeReapSkippedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.worktree.reap_skipped';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope bead.worktree.reaped
- */
-export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
-    actor: string;
-    message?: string;
-    payload: BeadWorktreeReapedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.worktree.reaped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4116,10 +3418,7 @@ export type TypedEventStreamEnvelopeCityCreated = {
     actor: string;
     message?: string;
     payload: CityLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.created';
@@ -4133,10 +3432,7 @@ export type TypedEventStreamEnvelopeCityResumed = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.resumed';
@@ -4150,10 +3446,7 @@ export type TypedEventStreamEnvelopeCitySuspended = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.suspended';
@@ -4167,10 +3460,7 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     actor: string;
     message?: string;
     payload: CityLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
@@ -4184,10 +3474,7 @@ export type TypedEventStreamEnvelopeControllerStarted = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'controller.started';
@@ -4201,10 +3488,7 @@ export type TypedEventStreamEnvelopeControllerStopped = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'controller.stopped';
@@ -4218,10 +3502,7 @@ export type TypedEventStreamEnvelopeConvoyClosed = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'convoy.closed';
@@ -4235,10 +3516,7 @@ export type TypedEventStreamEnvelopeConvoyCreated = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'convoy.created';
@@ -4252,47 +3530,10 @@ export type TypedEventStreamEnvelopeCustom = {
     actor: string;
     message?: string;
     payload: unknown;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: string;
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope emergency.acked
- */
-export type TypedEventStreamEnvelopeEmergencyAcked = {
-    actor: string;
-    message?: string;
-    payload: Record;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'emergency.acked';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope emergency.signaled
- */
-export type TypedEventStreamEnvelopeEmergencySignaled = {
-    actor: string;
-    message?: string;
-    payload: Record;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'emergency.signaled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4303,10 +3544,7 @@ export type TypedEventStreamEnvelopeEventsRotated = {
     actor: string;
     message?: string;
     payload: RotatedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'events.rotated';
@@ -4320,10 +3558,7 @@ export type TypedEventStreamEnvelopeExtmsgAdapterAdded = {
     actor: string;
     message?: string;
     payload: AdapterEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.adapter_added';
@@ -4337,10 +3572,7 @@ export type TypedEventStreamEnvelopeExtmsgAdapterRemoved = {
     actor: string;
     message?: string;
     payload: AdapterEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.adapter_removed';
@@ -4354,10 +3586,7 @@ export type TypedEventStreamEnvelopeExtmsgBound = {
     actor: string;
     message?: string;
     payload: BoundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.bound';
@@ -4371,10 +3600,7 @@ export type TypedEventStreamEnvelopeExtmsgGroupCreated = {
     actor: string;
     message?: string;
     payload: GroupCreatedEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.group_created';
@@ -4388,10 +3614,7 @@ export type TypedEventStreamEnvelopeExtmsgInbound = {
     actor: string;
     message?: string;
     payload: InboundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.inbound';
@@ -4405,30 +3628,10 @@ export type TypedEventStreamEnvelopeExtmsgOutbound = {
     actor: string;
     message?: string;
     payload: OutboundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.outbound';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope extmsg.outbound_channel_mismatch
- */
-export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
-    actor: string;
-    message?: string;
-    payload: OutboundChannelMismatchPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'extmsg.outbound_channel_mismatch';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4439,47 +3642,10 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     actor: string;
     message?: string;
     payload: UnboundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope gc.store.disk_critical
- */
-export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
-    actor: string;
-    message?: string;
-    payload: StoreDiskCriticalPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_critical';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope gc.store.disk_warn
- */
-export type TypedEventStreamEnvelopeGcStoreDiskWarn = {
-    actor: string;
-    message?: string;
-    payload: StoreDiskWarnPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_warn';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4490,10 +3656,7 @@ export type TypedEventStreamEnvelopeGcStoreMaintenanceDone = {
     actor: string;
     message?: string;
     payload: StoreMaintenanceDonePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'gc.store.maintenance.done';
@@ -4507,10 +3670,7 @@ export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
     actor: string;
     message?: string;
     payload: StoreMaintenanceFailedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'gc.store.maintenance.failed';
@@ -4524,10 +3684,7 @@ export type TypedEventStreamEnvelopeMailArchived = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.archived';
@@ -4541,10 +3698,7 @@ export type TypedEventStreamEnvelopeMailDeleted = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.deleted';
@@ -4558,10 +3712,7 @@ export type TypedEventStreamEnvelopeMailMarkedRead = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.marked_read';
@@ -4575,10 +3726,7 @@ export type TypedEventStreamEnvelopeMailMarkedUnread = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.marked_unread';
@@ -4592,10 +3740,7 @@ export type TypedEventStreamEnvelopeMailRead = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.read';
@@ -4609,10 +3754,7 @@ export type TypedEventStreamEnvelopeMailReplied = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.replied';
@@ -4626,30 +3768,10 @@ export type TypedEventStreamEnvelopeMailSent = {
     actor: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.sent';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope molecule.resolved
- */
-export type TypedEventStreamEnvelopeMoleculeResolved = {
-    actor: string;
-    message?: string;
-    payload: MoleculeResolvedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'molecule.resolved';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4660,10 +3782,7 @@ export type TypedEventStreamEnvelopeOrderCompleted = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'order.completed';
@@ -4677,10 +3796,7 @@ export type TypedEventStreamEnvelopeOrderFailed = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'order.failed';
@@ -4694,10 +3810,7 @@ export type TypedEventStreamEnvelopeOrderFired = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'order.fired';
@@ -4711,10 +3824,7 @@ export type TypedEventStreamEnvelopePgCredentialResolved = {
     actor: string;
     message?: string;
     payload: PostgresCredentialResolvedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'pg.credential_resolved';
@@ -4728,10 +3838,7 @@ export type TypedEventStreamEnvelopeProjectIdentityStamped = {
     actor: string;
     message?: string;
     payload: ProjectIdentityStampedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'project.identity.stamped';
@@ -4745,10 +3852,7 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'provider.swapped';
@@ -4762,10 +3866,7 @@ export type TypedEventStreamEnvelopeRequestFailed = {
     actor: string;
     message?: string;
     payload: RequestFailedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.failed';
@@ -4779,10 +3880,7 @@ export type TypedEventStreamEnvelopeRequestResultCityCreate = {
     actor: string;
     message?: string;
     payload: CityCreateSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.city.create';
@@ -4796,10 +3894,7 @@ export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
     actor: string;
     message?: string;
     payload: CityUnregisterSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.city.unregister';
@@ -4813,10 +3908,7 @@ export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
     actor: string;
     message?: string;
     payload: SessionCreateSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.session.create';
@@ -4830,10 +3922,7 @@ export type TypedEventStreamEnvelopeRequestResultSessionMessage = {
     actor: string;
     message?: string;
     payload: SessionMessageSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.session.message';
@@ -4847,30 +3936,10 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
     actor: string;
     message?: string;
     payload: SessionSubmitSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope session.cold_start_timeout
- */
-export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
-    actor: string;
-    message?: string;
-    payload: NoPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.cold_start_timeout';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4881,10 +3950,7 @@ export type TypedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     message?: string;
     payload: SessionLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.crashed';
@@ -4898,10 +3964,7 @@ export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
     actor: string;
     message?: string;
     payload: SessionDrainAckedWithAssignedWorkPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.drain_acked_with_assigned_work';
@@ -4915,10 +3978,7 @@ export type TypedEventStreamEnvelopeSessionDraining = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.draining';
@@ -4932,10 +3992,7 @@ export type TypedEventStreamEnvelopeSessionIdleKilled = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.idle_killed';
@@ -4949,10 +4006,7 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
@@ -4966,30 +4020,10 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.quarantined';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope session.reset_stalled
- */
-export type TypedEventStreamEnvelopeSessionResetStalled = {
-    actor: string;
-    message?: string;
-    payload: SessionResetStalledPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.reset_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5000,10 +4034,7 @@ export type TypedEventStreamEnvelopeSessionStopped = {
     actor: string;
     message?: string;
     payload: SessionLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.stopped';
@@ -5016,11 +4047,8 @@ export type TypedEventStreamEnvelopeSessionStopped = {
 export type TypedEventStreamEnvelopeSessionStranded = {
     actor: string;
     message?: string;
-    payload: SessionStrandedPayload;
-    run_id?: string;
+    payload: NoPayload;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.stranded';
@@ -5034,10 +4062,7 @@ export type TypedEventStreamEnvelopeSessionSuspended = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.suspended';
@@ -5051,30 +4076,10 @@ export type TypedEventStreamEnvelopeSessionUndrained = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.undrained';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope session.unknown_state
- */
-export type TypedEventStreamEnvelopeSessionUnknownState = {
-    actor: string;
-    message?: string;
-    payload: SessionUnknownStatePayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.unknown_state';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5085,10 +4090,7 @@ export type TypedEventStreamEnvelopeSessionUpdated = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.updated';
@@ -5102,10 +4104,7 @@ export type TypedEventStreamEnvelopeSessionWoke = {
     actor: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.woke';
@@ -5119,10 +4118,7 @@ export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
     actor: string;
     message?: string;
     payload: SessionLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.work_query_failed';
@@ -5136,30 +4132,10 @@ export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
     actor: string;
     message?: string;
     payload: SupervisorFsPressureSkippedTickPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'supervisor.fs_pressure.skipped_tick';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope supervisor.request
- */
-export type TypedEventStreamEnvelopeSupervisorRequest = {
-    actor: string;
-    message?: string;
-    payload: SupervisorRequestPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'supervisor.request';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5170,64 +4146,10 @@ export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
     actor: string;
     message?: string;
     payload: SupervisorShutdownPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'supervisor.shutdown_requested';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope supervisor.started
- */
-export type TypedEventStreamEnvelopeSupervisorStarted = {
-    actor: string;
-    message?: string;
-    payload: SupervisorStartedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'supervisor.started';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope webhook.received
- */
-export type TypedEventStreamEnvelopeWebhookReceived = {
-    actor: string;
-    message?: string;
-    payload: WebhookReceivedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'webhook.received';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope webhook.rejected
- */
-export type TypedEventStreamEnvelopeWebhookRejected = {
-    actor: string;
-    message?: string;
-    payload: WebhookRejectedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'webhook.rejected';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5238,10 +4160,7 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
     actor: string;
     message?: string;
     payload: WorkerOperationEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'worker.operation';
@@ -5254,22 +4173,12 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
-    type: 'bead.claim_rejected';
-} & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
 } & TypedTaggedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
 } & TypedTaggedEventStreamEnvelopeBeadCreated) | ({
-    type: 'bead.dead_assignee_reopened';
-} & TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
-    type: 'bead.deleted';
-} & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
-    type: 'bead.worktree.reap_skipped';
-} & TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
-    type: 'bead.worktree.reaped';
-} & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -5286,10 +4195,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
-    type: 'emergency.acked';
-} & TypedTaggedEventStreamEnvelopeEmergencyAcked) | ({
-    type: 'emergency.signaled';
-} & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
@@ -5304,14 +4209,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgInbound) | ({
     type: 'extmsg.outbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
-    type: 'extmsg.outbound_channel_mismatch';
-} & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
-    type: 'gc.store.disk_critical';
-} & TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) | ({
-    type: 'gc.store.disk_warn';
-} & TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) | ({
     type: 'gc.store.maintenance.done';
 } & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -5330,8 +4229,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailReplied) | ({
     type: 'mail.sent';
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
-    type: 'molecule.resolved';
-} & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
 } & TypedTaggedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -5356,8 +4253,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
-    type: 'session.cold_start_timeout';
-} & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -5370,8 +4265,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
-    type: 'session.reset_stalled';
-} & TypedTaggedEventStreamEnvelopeSessionResetStalled) | ({
     type: 'session.stopped';
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
@@ -5380,8 +4273,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
 } & TypedTaggedEventStreamEnvelopeSessionUndrained) | ({
-    type: 'session.unknown_state';
-} & TypedTaggedEventStreamEnvelopeSessionUnknownState) | ({
     type: 'session.updated';
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
@@ -5390,38 +4281,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
-    type: 'supervisor.request';
-} & TypedTaggedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) | ({
-    type: 'supervisor.started';
-} & TypedTaggedEventStreamEnvelopeSupervisorStarted) | ({
-    type: 'webhook.received';
-} & TypedTaggedEventStreamEnvelopeWebhookReceived) | ({
-    type: 'webhook.rejected';
-} & TypedTaggedEventStreamEnvelopeWebhookRejected) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
-
-/**
- * TypedTaggedEventStreamEnvelope bead.claim_rejected
- */
-export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: BeadClaimRejectedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.claim_rejected';
-    workflow?: WorkflowEventProjection;
-};
 
 /**
  * TypedTaggedEventStreamEnvelope bead.closed
@@ -5431,10 +4296,7 @@ export type TypedTaggedEventStreamEnvelopeBeadClosed = {
     city: string;
     message?: string;
     payload: BeadEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'bead.closed';
@@ -5449,49 +4311,10 @@ export type TypedTaggedEventStreamEnvelopeBeadCreated = {
     city: string;
     message?: string;
     payload: BeadEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'bead.created';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope bead.dead_assignee_reopened
- */
-export type TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: BeadDeadAssigneeReopenedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.dead_assignee_reopened';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope bead.deleted
- */
-export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: BeadEventPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.deleted';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5503,49 +4326,10 @@ export type TypedTaggedEventStreamEnvelopeBeadUpdated = {
     city: string;
     message?: string;
     payload: BeadEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'bead.updated';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope bead.worktree.reap_skipped
- */
-export type TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: BeadWorktreeReapSkippedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.worktree.reap_skipped';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope bead.worktree.reaped
- */
-export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: BeadWorktreeReapedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.worktree.reaped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5557,10 +4341,7 @@ export type TypedTaggedEventStreamEnvelopeCityCreated = {
     city: string;
     message?: string;
     payload: CityLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.created';
@@ -5575,10 +4356,7 @@ export type TypedTaggedEventStreamEnvelopeCityResumed = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.resumed';
@@ -5593,10 +4371,7 @@ export type TypedTaggedEventStreamEnvelopeCitySuspended = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.suspended';
@@ -5611,10 +4386,7 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     city: string;
     message?: string;
     payload: CityLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
@@ -5629,10 +4401,7 @@ export type TypedTaggedEventStreamEnvelopeControllerStarted = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'controller.started';
@@ -5647,10 +4416,7 @@ export type TypedTaggedEventStreamEnvelopeControllerStopped = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'controller.stopped';
@@ -5665,10 +4431,7 @@ export type TypedTaggedEventStreamEnvelopeConvoyClosed = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'convoy.closed';
@@ -5683,10 +4446,7 @@ export type TypedTaggedEventStreamEnvelopeConvoyCreated = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'convoy.created';
@@ -5701,49 +4461,10 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
     city: string;
     message?: string;
     payload: unknown;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: string;
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope emergency.acked
- */
-export type TypedTaggedEventStreamEnvelopeEmergencyAcked = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: Record;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'emergency.acked';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope emergency.signaled
- */
-export type TypedTaggedEventStreamEnvelopeEmergencySignaled = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: Record;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'emergency.signaled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5755,10 +4476,7 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
     city: string;
     message?: string;
     payload: RotatedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'events.rotated';
@@ -5773,10 +4491,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded = {
     city: string;
     message?: string;
     payload: AdapterEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.adapter_added';
@@ -5791,10 +4506,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved = {
     city: string;
     message?: string;
     payload: AdapterEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.adapter_removed';
@@ -5809,10 +4521,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgBound = {
     city: string;
     message?: string;
     payload: BoundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.bound';
@@ -5827,10 +4536,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgGroupCreated = {
     city: string;
     message?: string;
     payload: GroupCreatedEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.group_created';
@@ -5845,10 +4551,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgInbound = {
     city: string;
     message?: string;
     payload: InboundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.inbound';
@@ -5863,31 +4566,10 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutbound = {
     city: string;
     message?: string;
     payload: OutboundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.outbound';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch
- */
-export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: OutboundChannelMismatchPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'extmsg.outbound_channel_mismatch';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5899,49 +4581,10 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     city: string;
     message?: string;
     payload: UnboundEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.disk_critical
- */
-export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: StoreDiskCriticalPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_critical';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.disk_warn
- */
-export type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: StoreDiskWarnPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'gc.store.disk_warn';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5953,10 +4596,7 @@ export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = {
     city: string;
     message?: string;
     payload: StoreMaintenanceDonePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'gc.store.maintenance.done';
@@ -5971,10 +4611,7 @@ export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
     city: string;
     message?: string;
     payload: StoreMaintenanceFailedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'gc.store.maintenance.failed';
@@ -5989,10 +4626,7 @@ export type TypedTaggedEventStreamEnvelopeMailArchived = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.archived';
@@ -6007,10 +4641,7 @@ export type TypedTaggedEventStreamEnvelopeMailDeleted = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.deleted';
@@ -6025,10 +4656,7 @@ export type TypedTaggedEventStreamEnvelopeMailMarkedRead = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.marked_read';
@@ -6043,10 +4671,7 @@ export type TypedTaggedEventStreamEnvelopeMailMarkedUnread = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.marked_unread';
@@ -6061,10 +4686,7 @@ export type TypedTaggedEventStreamEnvelopeMailRead = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.read';
@@ -6079,10 +4701,7 @@ export type TypedTaggedEventStreamEnvelopeMailReplied = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.replied';
@@ -6097,31 +4716,10 @@ export type TypedTaggedEventStreamEnvelopeMailSent = {
     city: string;
     message?: string;
     payload: MailEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'mail.sent';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope molecule.resolved
- */
-export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: MoleculeResolvedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'molecule.resolved';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6133,10 +4731,7 @@ export type TypedTaggedEventStreamEnvelopeOrderCompleted = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'order.completed';
@@ -6151,10 +4746,7 @@ export type TypedTaggedEventStreamEnvelopeOrderFailed = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'order.failed';
@@ -6169,10 +4761,7 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'order.fired';
@@ -6187,10 +4776,7 @@ export type TypedTaggedEventStreamEnvelopePgCredentialResolved = {
     city: string;
     message?: string;
     payload: PostgresCredentialResolvedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'pg.credential_resolved';
@@ -6205,10 +4791,7 @@ export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
     city: string;
     message?: string;
     payload: ProjectIdentityStampedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'project.identity.stamped';
@@ -6223,10 +4806,7 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'provider.swapped';
@@ -6241,10 +4821,7 @@ export type TypedTaggedEventStreamEnvelopeRequestFailed = {
     city: string;
     message?: string;
     payload: RequestFailedPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.failed';
@@ -6259,10 +4836,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultCityCreate = {
     city: string;
     message?: string;
     payload: CityCreateSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.city.create';
@@ -6277,10 +4851,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
     city: string;
     message?: string;
     payload: CityUnregisterSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.city.unregister';
@@ -6295,10 +4866,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
     city: string;
     message?: string;
     payload: SessionCreateSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.session.create';
@@ -6313,10 +4881,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage = {
     city: string;
     message?: string;
     payload: SessionMessageSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.session.message';
@@ -6331,31 +4896,10 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
     city: string;
     message?: string;
     payload: SessionSubmitSucceededPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope session.cold_start_timeout
- */
-export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: NoPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.cold_start_timeout';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6367,10 +4911,7 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     city: string;
     message?: string;
     payload: SessionLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.crashed';
@@ -6385,10 +4926,7 @@ export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
     city: string;
     message?: string;
     payload: SessionDrainAckedWithAssignedWorkPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.drain_acked_with_assigned_work';
@@ -6403,10 +4941,7 @@ export type TypedTaggedEventStreamEnvelopeSessionDraining = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.draining';
@@ -6421,10 +4956,7 @@ export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.idle_killed';
@@ -6439,10 +4971,7 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
@@ -6457,31 +4986,10 @@ export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.quarantined';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope session.reset_stalled
- */
-export type TypedTaggedEventStreamEnvelopeSessionResetStalled = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: SessionResetStalledPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.reset_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6493,10 +5001,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStopped = {
     city: string;
     message?: string;
     payload: SessionLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.stopped';
@@ -6510,11 +5015,8 @@ export type TypedTaggedEventStreamEnvelopeSessionStranded = {
     actor: string;
     city: string;
     message?: string;
-    payload: SessionStrandedPayload;
-    run_id?: string;
+    payload: NoPayload;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.stranded';
@@ -6529,10 +5031,7 @@ export type TypedTaggedEventStreamEnvelopeSessionSuspended = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.suspended';
@@ -6547,31 +5046,10 @@ export type TypedTaggedEventStreamEnvelopeSessionUndrained = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.undrained';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope session.unknown_state
- */
-export type TypedTaggedEventStreamEnvelopeSessionUnknownState = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: SessionUnknownStatePayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.unknown_state';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6583,10 +5061,7 @@ export type TypedTaggedEventStreamEnvelopeSessionUpdated = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.updated';
@@ -6601,10 +5076,7 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     city: string;
     message?: string;
     payload: NoPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.woke';
@@ -6619,10 +5091,7 @@ export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
     city: string;
     message?: string;
     payload: SessionLifecyclePayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'session.work_query_failed';
@@ -6637,31 +5106,10 @@ export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
     city: string;
     message?: string;
     payload: SupervisorFsPressureSkippedTickPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'supervisor.fs_pressure.skipped_tick';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope supervisor.request
- */
-export type TypedTaggedEventStreamEnvelopeSupervisorRequest = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: SupervisorRequestPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'supervisor.request';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6673,67 +5121,10 @@ export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
     city: string;
     message?: string;
     payload: SupervisorShutdownPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'supervisor.shutdown_requested';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope supervisor.started
- */
-export type TypedTaggedEventStreamEnvelopeSupervisorStarted = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: SupervisorStartedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'supervisor.started';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope webhook.received
- */
-export type TypedTaggedEventStreamEnvelopeWebhookReceived = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: WebhookReceivedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'webhook.received';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope webhook.rejected
- */
-export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: WebhookRejectedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'webhook.rejected';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6745,10 +5136,7 @@ export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
     city: string;
     message?: string;
     payload: WorkerOperationEventPayload;
-    run_id?: string;
     seq: number;
-    session_id?: string;
-    step_id?: string;
     subject?: string;
     ts: string;
     type: 'worker.operation';
@@ -6758,174 +5146,6 @@ export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
 export type UnboundEventPayload = {
     count: number;
     session_id: string;
-};
-
-export type WaitListBody = {
-    /**
-     * True when the lookup hit the per-scope cap and the list is partial.
-     */
-    capped: boolean;
-    /**
-     * True when a backing store returned a partial result and the list may be incomplete.
-     */
-    partial?: boolean;
-    /**
-     * Human-readable errors from the degraded wait lookup when partial is true.
-     */
-    partial_errors?: Array<string> | null;
-    /**
-     * Durable session waits, newest first.
-     */
-    waits: Array<WaitView> | null;
-};
-
-export type WaitView = {
-    /**
-     * Bead creation time (RFC3339, UTC).
-     */
-    created_at?: string;
-    /**
-     * Current delivery attempt counter.
-     */
-    delivery_attempt?: string;
-    /**
-     * Dependency bead IDs the wait watches.
-     */
-    dep_ids?: Array<string> | null;
-    /**
-     * all or any.
-     */
-    dep_mode?: string;
-    /**
-     * Raw RFC3339 expiry string, kept verbatim.
-     */
-    expires_at?: string;
-    /**
-     * Wait bead ID.
-     */
-    id: string;
-    /**
-     * Wait kind, e.g. deps.
-     */
-    kind: string;
-    /**
-     * Bead labels.
-     */
-    labels?: Array<string> | null;
-    /**
-     * Reminder text delivered when the wait is satisfied.
-     */
-    note?: string;
-    /**
-     * Shadow wait-nudge ID once dispatched.
-     */
-    nudge_id?: string;
-    /**
-     * Session continuation epoch at registration.
-     */
-    registered_epoch?: string;
-    /**
-     * Session bead ID the wait is registered against.
-     */
-    session_id: string;
-    /**
-     * Runtime session name recorded at registration.
-     */
-    session_name?: string;
-    /**
-     * Wait lifecycle state (pending/ready/closed/...).
-     */
-    state: string;
-    /**
-     * Persisted bead status (open/closed).
-     */
-    status: string;
-};
-
-export type WebhookReceivedPayload = {
-    /**
-     * Raw request body size in bytes (never the body itself).
-     */
-    body_size: number;
-    /**
-     * Provider delivery id used for dedup (or a body hash when the scheme carries none).
-     */
-    dedup_id?: string;
-    /**
-     * True when this delivery was a duplicate and was NOT dispatched.
-     */
-    deduped: boolean;
-    /**
-     * True when an order was launched for this delivery.
-     */
-    dispatched: boolean;
-    /**
-     * Provider event type surfaced by the scheme (e.g. pull_request).
-     */
-    event_type?: string;
-    /**
-     * True when a [[webhook.rule]] matched the delivery.
-     */
-    matched: boolean;
-    /**
-     * Target order name when a rule matched.
-     */
-    order?: string;
-    /**
-     * Target rig when the matched rule scoped one.
-     */
-    rig?: string;
-    /**
-     * Matched rule index, or -1 when no rule matched.
-     */
-    rule_index: number;
-    /**
-     * Verifier scheme (github-hmac-sha256, slack-v0, …).
-     */
-    scheme?: string;
-    /**
-     * Rig-qualified name of the fired order.
-     */
-    scoped_name?: string;
-    /**
-     * Tracking bead id for the dispatch, when fired.
-     */
-    tracking_id?: string;
-    /**
-     * Configured webhook name that received the delivery.
-     */
-    webhook: string;
-};
-
-export type WebhookRejectedPayload = {
-    /**
-     * Raw request body size in bytes, when the body was read.
-     */
-    body_size?: number;
-    /**
-     * Provider delivery id, when known.
-     */
-    dedup_id?: string;
-    /**
-     * Provider event type, when known at the rejection point.
-     */
-    event_type?: string;
-    /**
-     * Rejection reason enum (perimeter_denied, read_only, rate_limited, operator_fault, verify_failed, bad_payload, dispatch_refused, …).
-     */
-    reason: string;
-    /**
-     * Verifier scheme, when the webhook resolved.
-     */
-    scheme?: string;
-    /**
-     * HTTP status returned to the sender.
-     */
-    status?: number;
-    /**
-     * Configured webhook name (empty only for unresolved routes, which are not evented).
-     */
-    webhook: string;
 };
 
 export type WorkerOperationEventPayload = {
@@ -6982,19 +5202,11 @@ export type WorkerOperationEventPayload = {
     provider?: string;
     queued?: boolean;
     result: string;
-    /**
-     * Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).
-     */
-    run_id?: string;
     session_id?: string;
     session_name?: string;
     started_at: string;
     template?: string;
     transport?: string;
-    /**
-     * True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).
-     */
-    unpriced?: boolean;
 };
 
 export type WorkflowAttemptSummary = {
@@ -7087,7 +5299,6 @@ export type WorkflowSnapshotResponse = {
 export type WorkspaceResponse = {
     declared_name?: string;
     declared_prefix?: string;
-    max_active_sessions?: number;
     name: string;
     prefix?: string;
     provider?: string;
@@ -7190,17 +5401,9 @@ export type GetV0CityByCityNameData = {
 
 export type GetV0CityByCityNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameError = GetV0CityByCityNameErrors[keyof GetV0CityByCityNameErrors];
@@ -7234,33 +5437,9 @@ export type PatchV0CityByCityNameData = {
 
 export type PatchV0CityByCityNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameError = PatchV0CityByCityNameErrors[keyof PatchV0CityByCityNameErrors];
@@ -7298,37 +5477,9 @@ export type DeleteV0CityByCityNameAgentByBaseData = {
 
 export type DeleteV0CityByCityNameAgentByBaseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameAgentByBaseError = DeleteV0CityByCityNameAgentByBaseErrors[keyof DeleteV0CityByCityNameAgentByBaseErrors];
@@ -7360,17 +5511,9 @@ export type GetV0CityByCityNameAgentByBaseData = {
 
 export type GetV0CityByCityNameAgentByBaseErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameAgentByBaseError = GetV0CityByCityNameAgentByBaseErrors[keyof GetV0CityByCityNameAgentByBaseErrors];
@@ -7408,37 +5551,9 @@ export type PatchV0CityByCityNameAgentByBaseData = {
 
 export type PatchV0CityByCityNameAgentByBaseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameAgentByBaseError = PatchV0CityByCityNameAgentByBaseErrors[keyof PatchV0CityByCityNameAgentByBaseErrors];
@@ -7479,17 +5594,9 @@ export type GetV0CityByCityNameAgentByBaseOutputData = {
 
 export type GetV0CityByCityNameAgentByBaseOutputErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameAgentByBaseOutputError = GetV0CityByCityNameAgentByBaseOutputErrors[keyof GetV0CityByCityNameAgentByBaseOutputErrors];
@@ -7567,6 +5674,40 @@ export type StreamAgentOutputResponses = {
 
 export type StreamAgentOutputResponse = StreamAgentOutputResponses[keyof StreamAgentOutputResponses];
 
+export type GetV0CityByCityNameAgentByBasePrimeData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Agent name (unqualified, no rig).
+         */
+        base: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/agent/{base}/prime';
+};
+
+export type GetV0CityByCityNameAgentByBasePrimeErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type GetV0CityByCityNameAgentByBasePrimeError = GetV0CityByCityNameAgentByBasePrimeErrors[keyof GetV0CityByCityNameAgentByBasePrimeErrors];
+
+export type GetV0CityByCityNameAgentByBasePrimeResponses = {
+    /**
+     * OK
+     */
+    200: AgentPrimeBody;
+};
+
+export type GetV0CityByCityNameAgentByBasePrimeResponse = GetV0CityByCityNameAgentByBasePrimeResponses[keyof GetV0CityByCityNameAgentByBasePrimeResponses];
+
 export type PostV0CityByCityNameAgentByBaseByActionData = {
     body?: never;
     headers: {
@@ -7587,7 +5728,7 @@ export type PostV0CityByCityNameAgentByBaseByActionData = {
         /**
          * Action to perform.
          */
-        action: 'suspend' | 'resume';
+        action: 'suspend' | 'resume' | 'nudge';
     };
     query?: never;
     url: '/v0/city/{cityName}/agent/{base}/{action}';
@@ -7595,33 +5736,9 @@ export type PostV0CityByCityNameAgentByBaseByActionData = {
 
 export type PostV0CityByCityNameAgentByBaseByActionErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameAgentByBaseByActionError = PostV0CityByCityNameAgentByBaseByActionErrors[keyof PostV0CityByCityNameAgentByBaseByActionErrors];
@@ -7663,37 +5780,9 @@ export type DeleteV0CityByCityNameAgentByDirByBaseData = {
 
 export type DeleteV0CityByCityNameAgentByDirByBaseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameAgentByDirByBaseError = DeleteV0CityByCityNameAgentByDirByBaseErrors[keyof DeleteV0CityByCityNameAgentByDirByBaseErrors];
@@ -7729,17 +5818,9 @@ export type GetV0CityByCityNameAgentByDirByBaseData = {
 
 export type GetV0CityByCityNameAgentByDirByBaseErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameAgentByDirByBaseError = GetV0CityByCityNameAgentByDirByBaseErrors[keyof GetV0CityByCityNameAgentByDirByBaseErrors];
@@ -7781,37 +5862,9 @@ export type PatchV0CityByCityNameAgentByDirByBaseData = {
 
 export type PatchV0CityByCityNameAgentByDirByBaseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameAgentByDirByBaseError = PatchV0CityByCityNameAgentByDirByBaseErrors[keyof PatchV0CityByCityNameAgentByDirByBaseErrors];
@@ -7856,17 +5909,9 @@ export type GetV0CityByCityNameAgentByDirByBaseOutputData = {
 
 export type GetV0CityByCityNameAgentByDirByBaseOutputErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameAgentByDirByBaseOutputError = GetV0CityByCityNameAgentByDirByBaseOutputErrors[keyof GetV0CityByCityNameAgentByDirByBaseOutputErrors];
@@ -7948,6 +5993,44 @@ export type StreamAgentOutputQualifiedResponses = {
 
 export type StreamAgentOutputQualifiedResponse = StreamAgentOutputQualifiedResponses[keyof StreamAgentOutputQualifiedResponses];
 
+export type GetV0CityByCityNameAgentByDirByBasePrimeData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Agent directory (rig name).
+         */
+        dir: string;
+        /**
+         * Agent base name.
+         */
+        base: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/agent/{dir}/{base}/prime';
+};
+
+export type GetV0CityByCityNameAgentByDirByBasePrimeErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type GetV0CityByCityNameAgentByDirByBasePrimeError = GetV0CityByCityNameAgentByDirByBasePrimeErrors[keyof GetV0CityByCityNameAgentByDirByBasePrimeErrors];
+
+export type GetV0CityByCityNameAgentByDirByBasePrimeResponses = {
+    /**
+     * OK
+     */
+    200: AgentPrimeBody;
+};
+
+export type GetV0CityByCityNameAgentByDirByBasePrimeResponse = GetV0CityByCityNameAgentByDirByBasePrimeResponses[keyof GetV0CityByCityNameAgentByDirByBasePrimeResponses];
+
 export type PostV0CityByCityNameAgentByDirByBaseByActionData = {
     body?: never;
     headers: {
@@ -7972,7 +6055,7 @@ export type PostV0CityByCityNameAgentByDirByBaseByActionData = {
         /**
          * Action to perform.
          */
-        action: 'suspend' | 'resume';
+        action: 'suspend' | 'resume' | 'nudge';
     };
     query?: never;
     url: '/v0/city/{cityName}/agent/{dir}/{base}/{action}';
@@ -7980,33 +6063,9 @@ export type PostV0CityByCityNameAgentByDirByBaseByActionData = {
 
 export type PostV0CityByCityNameAgentByDirByBaseByActionErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameAgentByDirByBaseByActionError = PostV0CityByCityNameAgentByDirByBaseByActionErrors[keyof PostV0CityByCityNameAgentByDirByBaseByActionErrors];
@@ -8059,17 +6118,9 @@ export type GetV0CityByCityNameAgentsData = {
 
 export type GetV0CityByCityNameAgentsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameAgentsError = GetV0CityByCityNameAgentsErrors[keyof GetV0CityByCityNameAgentsErrors];
@@ -8090,10 +6141,6 @@ export type CreateAgentData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
-        /**
-         * Idempotency key for safe retries.
-         */
-        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -8107,45 +6154,9 @@ export type CreateAgentData = {
 
 export type CreateAgentErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-    /**
-     * Gateway Timeout
-     */
-    504: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateAgentError = CreateAgentErrors[keyof CreateAgentErrors];
@@ -8183,29 +6194,9 @@ export type DeleteV0CityByCityNameBeadByIdData = {
 
 export type DeleteV0CityByCityNameBeadByIdErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameBeadByIdError = DeleteV0CityByCityNameBeadByIdErrors[keyof DeleteV0CityByCityNameBeadByIdErrors];
@@ -8237,21 +6228,9 @@ export type GetV0CityByCityNameBeadByIdData = {
 
 export type GetV0CityByCityNameBeadByIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameBeadByIdError = GetV0CityByCityNameBeadByIdErrors[keyof GetV0CityByCityNameBeadByIdErrors];
@@ -8289,33 +6268,9 @@ export type PatchV0CityByCityNameBeadByIdData = {
 
 export type PatchV0CityByCityNameBeadByIdErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameBeadByIdError = PatchV0CityByCityNameBeadByIdErrors[keyof PatchV0CityByCityNameBeadByIdErrors];
@@ -8353,33 +6308,9 @@ export type PostV0CityByCityNameBeadByIdAssignData = {
 
 export type PostV0CityByCityNameBeadByIdAssignErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameBeadByIdAssignError = PostV0CityByCityNameBeadByIdAssignErrors[keyof PostV0CityByCityNameBeadByIdAssignErrors];
@@ -8396,7 +6327,7 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
 export type PostV0CityByCityNameBeadByIdCloseData = {
-    body?: never;
+    body?: BeadCloseBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -8419,29 +6350,9 @@ export type PostV0CityByCityNameBeadByIdCloseData = {
 
 export type PostV0CityByCityNameBeadByIdCloseErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameBeadByIdCloseError = PostV0CityByCityNameBeadByIdCloseErrors[keyof PostV0CityByCityNameBeadByIdCloseErrors];
@@ -8473,17 +6384,9 @@ export type GetV0CityByCityNameBeadByIdDepsData = {
 
 export type GetV0CityByCityNameBeadByIdDepsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameBeadByIdDepsError = GetV0CityByCityNameBeadByIdDepsErrors[keyof GetV0CityByCityNameBeadByIdDepsErrors];
@@ -8521,29 +6424,9 @@ export type PostV0CityByCityNameBeadByIdReopenData = {
 
 export type PostV0CityByCityNameBeadByIdReopenErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameBeadByIdReopenError = PostV0CityByCityNameBeadByIdReopenErrors[keyof PostV0CityByCityNameBeadByIdReopenErrors];
@@ -8581,33 +6464,9 @@ export type PostV0CityByCityNameBeadByIdUpdateData = {
 
 export type PostV0CityByCityNameBeadByIdUpdateErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameBeadByIdUpdateError = PostV0CityByCityNameBeadByIdUpdateErrors[keyof PostV0CityByCityNameBeadByIdUpdateErrors];
@@ -8676,25 +6535,9 @@ export type GetV0CityByCityNameBeadsData = {
 
 export type GetV0CityByCityNameBeadsErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameBeadsError = GetV0CityByCityNameBeadsErrors[keyof GetV0CityByCityNameBeadsErrors];
@@ -8732,33 +6575,9 @@ export type CreateBeadData = {
 
 export type CreateBeadErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateBeadError = CreateBeadErrors[keyof CreateBeadErrors];
@@ -8790,17 +6609,9 @@ export type GetV0CityByCityNameBeadsGraphByRootIdData = {
 
 export type GetV0CityByCityNameBeadsGraphByRootIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameBeadsGraphByRootIdError = GetV0CityByCityNameBeadsGraphByRootIdErrors[keyof GetV0CityByCityNameBeadsGraphByRootIdErrors];
@@ -8837,21 +6648,9 @@ export type GetV0CityByCityNameBeadsReadyData = {
 
 export type GetV0CityByCityNameBeadsReadyErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameBeadsReadyError = GetV0CityByCityNameBeadsReadyErrors[keyof GetV0CityByCityNameBeadsReadyErrors];
@@ -8879,17 +6678,9 @@ export type GetV0CityByCityNameConfigData = {
 
 export type GetV0CityByCityNameConfigErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameConfigError = GetV0CityByCityNameConfigErrors[keyof GetV0CityByCityNameConfigErrors];
@@ -8902,44 +6693,6 @@ export type GetV0CityByCityNameConfigResponses = {
 };
 
 export type GetV0CityByCityNameConfigResponse = GetV0CityByCityNameConfigResponses[keyof GetV0CityByCityNameConfigResponses];
-
-export type GetV0CityByCityNameConfigDefaultsData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/config/defaults';
-};
-
-export type GetV0CityByCityNameConfigDefaultsErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-};
-
-export type GetV0CityByCityNameConfigDefaultsError = GetV0CityByCityNameConfigDefaultsErrors[keyof GetV0CityByCityNameConfigDefaultsErrors];
-
-export type GetV0CityByCityNameConfigDefaultsResponses = {
-    /**
-     * OK
-     */
-    200: ConfigResponse;
-};
-
-export type GetV0CityByCityNameConfigDefaultsResponse = GetV0CityByCityNameConfigDefaultsResponses[keyof GetV0CityByCityNameConfigDefaultsResponses];
 
 export type GetV0CityByCityNameConfigExplainData = {
     body?: never;
@@ -8955,17 +6708,9 @@ export type GetV0CityByCityNameConfigExplainData = {
 
 export type GetV0CityByCityNameConfigExplainErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameConfigExplainError = GetV0CityByCityNameConfigExplainErrors[keyof GetV0CityByCityNameConfigExplainErrors];
@@ -8993,17 +6738,9 @@ export type GetV0CityByCityNameConfigValidateData = {
 
 export type GetV0CityByCityNameConfigValidateErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameConfigValidateError = GetV0CityByCityNameConfigValidateErrors[keyof GetV0CityByCityNameConfigValidateErrors];
@@ -9041,29 +6778,9 @@ export type DeleteV0CityByCityNameConvoyByIdData = {
 
 export type DeleteV0CityByCityNameConvoyByIdErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameConvoyByIdError = DeleteV0CityByCityNameConvoyByIdErrors[keyof DeleteV0CityByCityNameConvoyByIdErrors];
@@ -9095,21 +6812,9 @@ export type GetV0CityByCityNameConvoyByIdData = {
 
 export type GetV0CityByCityNameConvoyByIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameConvoyByIdError = GetV0CityByCityNameConvoyByIdErrors[keyof GetV0CityByCityNameConvoyByIdErrors];
@@ -9147,29 +6852,9 @@ export type PostV0CityByCityNameConvoyByIdAddData = {
 
 export type PostV0CityByCityNameConvoyByIdAddErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameConvoyByIdAddError = PostV0CityByCityNameConvoyByIdAddErrors[keyof PostV0CityByCityNameConvoyByIdAddErrors];
@@ -9201,25 +6886,9 @@ export type GetV0CityByCityNameConvoyByIdCheckData = {
 
 export type GetV0CityByCityNameConvoyByIdCheckErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameConvoyByIdCheckError = GetV0CityByCityNameConvoyByIdCheckErrors[keyof GetV0CityByCityNameConvoyByIdCheckErrors];
@@ -9257,29 +6926,9 @@ export type PostV0CityByCityNameConvoyByIdCloseData = {
 
 export type PostV0CityByCityNameConvoyByIdCloseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameConvoyByIdCloseError = PostV0CityByCityNameConvoyByIdCloseErrors[keyof PostV0CityByCityNameConvoyByIdCloseErrors];
@@ -9317,29 +6966,9 @@ export type PostV0CityByCityNameConvoyByIdRemoveData = {
 
 export type PostV0CityByCityNameConvoyByIdRemoveErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameConvoyByIdRemoveError = PostV0CityByCityNameConvoyByIdRemoveErrors[keyof PostV0CityByCityNameConvoyByIdRemoveErrors];
@@ -9384,21 +7013,9 @@ export type GetV0CityByCityNameConvoysData = {
 
 export type GetV0CityByCityNameConvoysErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameConvoysError = GetV0CityByCityNameConvoysErrors[keyof GetV0CityByCityNameConvoysErrors];
@@ -9419,10 +7036,6 @@ export type CreateConvoyData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
-        /**
-         * Idempotency key for safe retries.
-         */
-        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -9436,33 +7049,9 @@ export type CreateConvoyData = {
 
 export type CreateConvoyErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateConvoyError = CreateConvoyErrors[keyof CreateConvoyErrors];
@@ -9519,21 +7108,9 @@ export type GetV0CityByCityNameEventsData = {
 
 export type GetV0CityByCityNameEventsErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameEventsError = GetV0CityByCityNameEventsErrors[keyof GetV0CityByCityNameEventsErrors];
@@ -9567,29 +7144,9 @@ export type EmitEventData = {
 
 export type EmitEventErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type EmitEventError = EmitEventErrors[keyof EmitEventErrors];
@@ -9628,29 +7185,9 @@ export type RotateEventsData = {
 
 export type RotateEventsErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Method Not Allowed
-     */
-    405: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type RotateEventsError = RotateEventsErrors[keyof RotateEventsErrors];
@@ -9755,29 +7292,9 @@ export type DeleteV0CityByCityNameExtmsgAdaptersData = {
 
 export type DeleteV0CityByCityNameExtmsgAdaptersErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameExtmsgAdaptersError = DeleteV0CityByCityNameExtmsgAdaptersErrors[keyof DeleteV0CityByCityNameExtmsgAdaptersErrors];
@@ -9805,21 +7322,9 @@ export type GetV0CityByCityNameExtmsgAdaptersData = {
 
 export type GetV0CityByCityNameExtmsgAdaptersErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameExtmsgAdaptersError = GetV0CityByCityNameExtmsgAdaptersErrors[keyof GetV0CityByCityNameExtmsgAdaptersErrors];
@@ -9853,29 +7358,9 @@ export type RegisterExtmsgAdapterData = {
 
 export type RegisterExtmsgAdapterErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type RegisterExtmsgAdapterError = RegisterExtmsgAdapterErrors[keyof RegisterExtmsgAdapterErrors];
@@ -9909,37 +7394,9 @@ export type PostV0CityByCityNameExtmsgBindData = {
 
 export type PostV0CityByCityNameExtmsgBindErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameExtmsgBindError = PostV0CityByCityNameExtmsgBindErrors[keyof PostV0CityByCityNameExtmsgBindErrors];
@@ -9972,25 +7429,9 @@ export type GetV0CityByCityNameExtmsgBindingsData = {
 
 export type GetV0CityByCityNameExtmsgBindingsErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameExtmsgBindingsError = GetV0CityByCityNameExtmsgBindingsErrors[keyof GetV0CityByCityNameExtmsgBindingsErrors];
@@ -10003,6 +7444,134 @@ export type GetV0CityByCityNameExtmsgBindingsResponses = {
 };
 
 export type GetV0CityByCityNameExtmsgBindingsResponse = GetV0CityByCityNameExtmsgBindingsResponses[keyof GetV0CityByCityNameExtmsgBindingsResponses];
+
+export type RegisterExtmsgClientData = {
+    body: ExtMsgClientRegisterInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/clients';
+};
+
+export type RegisterExtmsgClientErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type RegisterExtmsgClientError = RegisterExtmsgClientErrors[keyof RegisterExtmsgClientErrors];
+
+export type RegisterExtmsgClientResponses = {
+    /**
+     * OK
+     */
+    200: ExtMsgClientRegisterOutputBody;
+};
+
+export type RegisterExtmsgClientResponse = RegisterExtmsgClientResponses[keyof RegisterExtmsgClientResponses];
+
+export type SubscribeExtmsgClientData = {
+    body?: never;
+    headers?: {
+        /**
+         * Bearer token from client registration.
+         */
+        'X-GC-Client-Token'?: string;
+        /**
+         * Decimal sequence number for reconnect replay.
+         */
+        'Last-Event-ID'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Client identifier from POST /v0/extmsg/clients.
+         */
+        client_id: string;
+        /**
+         * Opaque conversation identifier.
+         */
+        conversation_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe';
+};
+
+export type SubscribeExtmsgClientErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type SubscribeExtmsgClientError = SubscribeExtmsgClientErrors[keyof SubscribeExtmsgClientErrors];
+
+export type SubscribeExtmsgClientResponses = {
+    /**
+     * Server Sent Events
+     *
+     * Each oneOf object represents one possible SSE message.
+     */
+    200: Array<{
+        data: SseErrorEvent;
+        /**
+         * The event name.
+         */
+        event: 'error';
+        /**
+         * The event ID (composite cursor).
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SseHeartbeatEvent;
+        /**
+         * The event name.
+         */
+        event: 'heartbeat';
+        /**
+         * The event ID (composite cursor).
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SseMessageEvent;
+        /**
+         * The event name.
+         */
+        event?: 'message';
+        /**
+         * The event ID (composite cursor).
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    }>;
+};
+
+export type SubscribeExtmsgClientResponse = SubscribeExtmsgClientResponses[keyof SubscribeExtmsgClientResponses];
 
 export type GetV0CityByCityNameExtmsgGroupsData = {
     body?: never;
@@ -10039,21 +7608,9 @@ export type GetV0CityByCityNameExtmsgGroupsData = {
 
 export type GetV0CityByCityNameExtmsgGroupsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameExtmsgGroupsError = GetV0CityByCityNameExtmsgGroupsErrors[keyof GetV0CityByCityNameExtmsgGroupsErrors];
@@ -10087,29 +7644,9 @@ export type EnsureExtmsgGroupData = {
 
 export type EnsureExtmsgGroupErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type EnsureExtmsgGroupError = EnsureExtmsgGroupErrors[keyof EnsureExtmsgGroupErrors];
@@ -10143,33 +7680,9 @@ export type PostV0CityByCityNameExtmsgInboundData = {
 
 export type PostV0CityByCityNameExtmsgInboundErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameExtmsgInboundError = PostV0CityByCityNameExtmsgInboundErrors[keyof PostV0CityByCityNameExtmsgInboundErrors];
@@ -10203,29 +7716,9 @@ export type PostV0CityByCityNameExtmsgOutboundData = {
 
 export type PostV0CityByCityNameExtmsgOutboundErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameExtmsgOutboundError = PostV0CityByCityNameExtmsgOutboundErrors[keyof PostV0CityByCityNameExtmsgOutboundErrors];
@@ -10259,29 +7752,9 @@ export type DeleteV0CityByCityNameExtmsgParticipantsData = {
 
 export type DeleteV0CityByCityNameExtmsgParticipantsErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameExtmsgParticipantsError = DeleteV0CityByCityNameExtmsgParticipantsErrors[keyof DeleteV0CityByCityNameExtmsgParticipantsErrors];
@@ -10315,29 +7788,9 @@ export type PostV0CityByCityNameExtmsgParticipantsData = {
 
 export type PostV0CityByCityNameExtmsgParticipantsErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameExtmsgParticipantsError = PostV0CityByCityNameExtmsgParticipantsErrors[keyof PostV0CityByCityNameExtmsgParticipantsErrors];
@@ -10384,39 +7837,15 @@ export type GetV0CityByCityNameExtmsgTranscriptData = {
          * Conversation kind.
          */
         kind?: string;
-        /**
-         * Return entries with sequence greater than this cursor (default 0).
-         */
-        after_sequence?: number;
-        /**
-         * Maximum number of entries to return (default 100, max 500).
-         */
-        limit?: number;
-        /**
-         * Sort order by sequence: asc (oldest-first, default) or desc (newest-first).
-         */
-        order?: 'asc' | 'desc';
     };
     url: '/v0/city/{cityName}/extmsg/transcript';
 };
 
 export type GetV0CityByCityNameExtmsgTranscriptErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameExtmsgTranscriptError = GetV0CityByCityNameExtmsgTranscriptErrors[keyof GetV0CityByCityNameExtmsgTranscriptErrors];
@@ -10450,29 +7879,9 @@ export type PostV0CityByCityNameExtmsgTranscriptAckData = {
 
 export type PostV0CityByCityNameExtmsgTranscriptAckErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameExtmsgTranscriptAckError = PostV0CityByCityNameExtmsgTranscriptAckErrors[keyof PostV0CityByCityNameExtmsgTranscriptAckErrors];
@@ -10506,33 +7915,9 @@ export type PostV0CityByCityNameExtmsgUnbindData = {
 
 export type PostV0CityByCityNameExtmsgUnbindErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameExtmsgUnbindError = PostV0CityByCityNameExtmsgUnbindErrors[keyof PostV0CityByCityNameExtmsgUnbindErrors];
@@ -10568,7 +7953,7 @@ export type GetV0CityByCityNameFormulaByNameData = {
          */
         scope_ref?: string;
         /**
-         * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
+         * Target agent for preview compilation.
          */
         target: string;
     };
@@ -10577,25 +7962,9 @@ export type GetV0CityByCityNameFormulaByNameData = {
 
 export type GetV0CityByCityNameFormulaByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameFormulaByNameError = GetV0CityByCityNameFormulaByNameErrors[keyof GetV0CityByCityNameFormulaByNameErrors];
@@ -10632,25 +8001,9 @@ export type GetV0CityByCityNameFormulasData = {
 
 export type GetV0CityByCityNameFormulasErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameFormulasError = GetV0CityByCityNameFormulasErrors[keyof GetV0CityByCityNameFormulasErrors];
@@ -10691,25 +8044,9 @@ export type GetV0CityByCityNameFormulasFeedData = {
 
 export type GetV0CityByCityNameFormulasFeedErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameFormulasFeedError = GetV0CityByCityNameFormulasFeedErrors[keyof GetV0CityByCityNameFormulasFeedErrors];
@@ -10722,70 +8059,6 @@ export type GetV0CityByCityNameFormulasFeedResponses = {
 };
 
 export type GetV0CityByCityNameFormulasFeedResponse = GetV0CityByCityNameFormulasFeedResponses[keyof GetV0CityByCityNameFormulasFeedResponses];
-
-export type DeleteV0CityByCityNameFormulasByNameData = {
-    body?: never;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Formula name.
-         */
-        name: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/formulas/{name}';
-};
-
-export type DeleteV0CityByCityNameFormulasByNameErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type DeleteV0CityByCityNameFormulasByNameError = DeleteV0CityByCityNameFormulasByNameErrors[keyof DeleteV0CityByCityNameFormulasByNameErrors];
-
-export type DeleteV0CityByCityNameFormulasByNameResponses = {
-    /**
-     * OK
-     */
-    200: OkResponseBody;
-};
-
-export type DeleteV0CityByCityNameFormulasByNameResponse = DeleteV0CityByCityNameFormulasByNameResponses[keyof DeleteV0CityByCityNameFormulasByNameResponses];
 
 export type GetV0CityByCityNameFormulasByNameData = {
     body?: never;
@@ -10809,7 +8082,7 @@ export type GetV0CityByCityNameFormulasByNameData = {
          */
         scope_ref?: string;
         /**
-         * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
+         * Target agent for preview compilation.
          */
         target: string;
     };
@@ -10818,25 +8091,9 @@ export type GetV0CityByCityNameFormulasByNameData = {
 
 export type GetV0CityByCityNameFormulasByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameFormulasByNameError = GetV0CityByCityNameFormulasByNameErrors[keyof GetV0CityByCityNameFormulasByNameErrors];
@@ -10849,74 +8106,6 @@ export type GetV0CityByCityNameFormulasByNameResponses = {
 };
 
 export type GetV0CityByCityNameFormulasByNameResponse = GetV0CityByCityNameFormulasByNameResponses[keyof GetV0CityByCityNameFormulasByNameResponses];
-
-export type PutV0CityByCityNameFormulasByNameData = {
-    body: Blob | File;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Formula name.
-         */
-        name: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/formulas/{name}';
-};
-
-export type PutV0CityByCityNameFormulasByNameErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Request Entity Too Large
-     */
-    413: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type PutV0CityByCityNameFormulasByNameError = PutV0CityByCityNameFormulasByNameErrors[keyof PutV0CityByCityNameFormulasByNameErrors];
-
-export type PutV0CityByCityNameFormulasByNameResponses = {
-    /**
-     * OK
-     */
-    200: OkResponseBody;
-};
-
-export type PutV0CityByCityNameFormulasByNameResponse = PutV0CityByCityNameFormulasByNameResponses[keyof PutV0CityByCityNameFormulasByNameResponses];
 
 export type PostV0CityByCityNameFormulasByNamePreviewData = {
     body: FormulaPreviewBody;
@@ -10942,33 +8131,9 @@ export type PostV0CityByCityNameFormulasByNamePreviewData = {
 
 export type PostV0CityByCityNameFormulasByNamePreviewErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameFormulasByNamePreviewError = PostV0CityByCityNameFormulasByNamePreviewErrors[keyof PostV0CityByCityNameFormulasByNamePreviewErrors];
@@ -11013,25 +8178,9 @@ export type GetV0CityByCityNameFormulasByNameRunsData = {
 
 export type GetV0CityByCityNameFormulasByNameRunsErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameFormulasByNameRunsError = GetV0CityByCityNameFormulasByNameRunsErrors[keyof GetV0CityByCityNameFormulasByNameRunsErrors];
@@ -11044,116 +8193,6 @@ export type GetV0CityByCityNameFormulasByNameRunsResponses = {
 };
 
 export type GetV0CityByCityNameFormulasByNameRunsResponse = GetV0CityByCityNameFormulasByNameRunsResponses[keyof GetV0CityByCityNameFormulasByNameRunsResponses];
-
-export type GetV0CityByCityNameFormulasByNameSourceData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Formula name.
-         */
-        name: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/formulas/{name}/source';
-};
-
-export type GetV0CityByCityNameFormulasByNameSourceErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type GetV0CityByCityNameFormulasByNameSourceError = GetV0CityByCityNameFormulasByNameSourceErrors[keyof GetV0CityByCityNameFormulasByNameSourceErrors];
-
-export type GetV0CityByCityNameFormulasByNameSourceResponses = {
-    /**
-     * OK
-     */
-    200: FormulaSourceOutputBody;
-};
-
-export type GetV0CityByCityNameFormulasByNameSourceResponse = GetV0CityByCityNameFormulasByNameSourceResponses[keyof GetV0CityByCityNameFormulasByNameSourceResponses];
-
-export type PostV0CityByCityNameFormulasByNameValidateData = {
-    body: Blob | File;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Formula name.
-         */
-        name: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/formulas/{name}/validate';
-};
-
-export type PostV0CityByCityNameFormulasByNameValidateErrors = {
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Request Entity Too Large
-     */
-    413: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-};
-
-export type PostV0CityByCityNameFormulasByNameValidateError = PostV0CityByCityNameFormulasByNameValidateErrors[keyof PostV0CityByCityNameFormulasByNameValidateErrors];
-
-export type PostV0CityByCityNameFormulasByNameValidateResponses = {
-    /**
-     * OK
-     */
-    200: FormulaValidateOutputBody;
-};
-
-export type PostV0CityByCityNameFormulasByNameValidateResponse = PostV0CityByCityNameFormulasByNameValidateResponses[keyof PostV0CityByCityNameFormulasByNameValidateResponses];
 
 export type GetV0CityByCityNameHealthData = {
     body?: never;
@@ -11169,17 +8208,9 @@ export type GetV0CityByCityNameHealthData = {
 
 export type GetV0CityByCityNameHealthErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameHealthError = GetV0CityByCityNameHealthErrors[keyof GetV0CityByCityNameHealthErrors];
@@ -11236,25 +8267,9 @@ export type GetV0CityByCityNameMailData = {
 
 export type GetV0CityByCityNameMailErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameMailError = GetV0CityByCityNameMailErrors[keyof GetV0CityByCityNameMailErrors];
@@ -11292,33 +8307,9 @@ export type SendMailData = {
 
 export type SendMailErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type SendMailError = SendMailErrors[keyof SendMailErrors];
@@ -11355,21 +8346,9 @@ export type GetV0CityByCityNameMailCountData = {
 
 export type GetV0CityByCityNameMailCountErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameMailCountError = GetV0CityByCityNameMailCountErrors[keyof GetV0CityByCityNameMailCountErrors];
@@ -11406,21 +8385,9 @@ export type GetV0CityByCityNameMailThreadByIdData = {
 
 export type GetV0CityByCityNameMailThreadByIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameMailThreadByIdError = GetV0CityByCityNameMailThreadByIdErrors[keyof GetV0CityByCityNameMailThreadByIdErrors];
@@ -11463,25 +8430,9 @@ export type DeleteV0CityByCityNameMailByIdData = {
 
 export type DeleteV0CityByCityNameMailByIdErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameMailByIdError = DeleteV0CityByCityNameMailByIdErrors[keyof DeleteV0CityByCityNameMailByIdErrors];
@@ -11518,21 +8469,9 @@ export type GetV0CityByCityNameMailByIdData = {
 
 export type GetV0CityByCityNameMailByIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameMailByIdError = GetV0CityByCityNameMailByIdErrors[keyof GetV0CityByCityNameMailByIdErrors];
@@ -11575,25 +8514,9 @@ export type PostV0CityByCityNameMailByIdArchiveData = {
 
 export type PostV0CityByCityNameMailByIdArchiveErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameMailByIdArchiveError = PostV0CityByCityNameMailByIdArchiveErrors[keyof PostV0CityByCityNameMailByIdArchiveErrors];
@@ -11636,25 +8559,9 @@ export type PostV0CityByCityNameMailByIdMarkUnreadData = {
 
 export type PostV0CityByCityNameMailByIdMarkUnreadErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameMailByIdMarkUnreadError = PostV0CityByCityNameMailByIdMarkUnreadErrors[keyof PostV0CityByCityNameMailByIdMarkUnreadErrors];
@@ -11697,25 +8604,9 @@ export type PostV0CityByCityNameMailByIdReadData = {
 
 export type PostV0CityByCityNameMailByIdReadErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameMailByIdReadError = PostV0CityByCityNameMailByIdReadErrors[keyof PostV0CityByCityNameMailByIdReadErrors];
@@ -11758,25 +8649,9 @@ export type ReplyMailData = {
 
 export type ReplyMailErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type ReplyMailError = ReplyMailErrors[keyof ReplyMailErrors];
@@ -11789,113 +8664,6 @@ export type ReplyMailResponses = {
 };
 
 export type ReplyMailResponse = ReplyMailResponses[keyof ReplyMailResponses];
-
-export type TriggerMaintenanceDoltGcData = {
-    body?: never;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.
-         */
-        wait?: boolean;
-    };
-    url: '/v0/city/{cityName}/maintenance/dolt-gc';
-};
-
-export type TriggerMaintenanceDoltGcErrors = {
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type TriggerMaintenanceDoltGcError = TriggerMaintenanceDoltGcErrors[keyof TriggerMaintenanceDoltGcErrors];
-
-export type TriggerMaintenanceDoltGcResponses = {
-    /**
-     * Accepted
-     */
-    202: MaintenanceTriggerBody;
-};
-
-export type TriggerMaintenanceDoltGcResponse = TriggerMaintenanceDoltGcResponses[keyof TriggerMaintenanceDoltGcResponses];
-
-export type GetV0CityByCityNameMaintenanceStatusData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/maintenance/status';
-};
-
-export type GetV0CityByCityNameMaintenanceStatusErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameMaintenanceStatusError = GetV0CityByCityNameMaintenanceStatusErrors[keyof GetV0CityByCityNameMaintenanceStatusErrors];
-
-export type GetV0CityByCityNameMaintenanceStatusResponses = {
-    /**
-     * OK
-     */
-    200: MaintenanceStatusBody;
-};
-
-export type GetV0CityByCityNameMaintenanceStatusResponse = GetV0CityByCityNameMaintenanceStatusResponses[keyof GetV0CityByCityNameMaintenanceStatusResponses];
 
 export type GetV0CityByCityNameOrderHistoryByBeadIdData = {
     body?: never;
@@ -11920,21 +8688,9 @@ export type GetV0CityByCityNameOrderHistoryByBeadIdData = {
 
 export type GetV0CityByCityNameOrderHistoryByBeadIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameOrderHistoryByBeadIdError = GetV0CityByCityNameOrderHistoryByBeadIdErrors[keyof GetV0CityByCityNameOrderHistoryByBeadIdErrors];
@@ -11966,21 +8722,9 @@ export type GetV0CityByCityNameOrderByNameData = {
 
 export type GetV0CityByCityNameOrderByNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameOrderByNameError = GetV0CityByCityNameOrderByNameErrors[keyof GetV0CityByCityNameOrderByNameErrors];
@@ -12018,37 +8762,9 @@ export type PostV0CityByCityNameOrderByNameDisableData = {
 
 export type PostV0CityByCityNameOrderByNameDisableErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameOrderByNameDisableError = PostV0CityByCityNameOrderByNameDisableErrors[keyof PostV0CityByCityNameOrderByNameDisableErrors];
@@ -12086,37 +8802,9 @@ export type PostV0CityByCityNameOrderByNameEnableData = {
 
 export type PostV0CityByCityNameOrderByNameEnableErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameOrderByNameEnableError = PostV0CityByCityNameOrderByNameEnableErrors[keyof PostV0CityByCityNameOrderByNameEnableErrors];
@@ -12129,66 +8817,6 @@ export type PostV0CityByCityNameOrderByNameEnableResponses = {
 };
 
 export type PostV0CityByCityNameOrderByNameEnableResponse = PostV0CityByCityNameOrderByNameEnableResponses[keyof PostV0CityByCityNameOrderByNameEnableResponses];
-
-export type PostV0CityByCityNameOrderByNameRunData = {
-    body: OrderRunInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Order name or scoped name of a trigger="webhook" order.
-         */
-        name: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/order/{name}/run';
-};
-
-export type PostV0CityByCityNameOrderByNameRunErrors = {
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type PostV0CityByCityNameOrderByNameRunError = PostV0CityByCityNameOrderByNameRunErrors[keyof PostV0CityByCityNameOrderByNameRunErrors];
-
-export type PostV0CityByCityNameOrderByNameRunResponses = {
-    /**
-     * Accepted
-     */
-    202: OrderRunOutputBody;
-};
-
-export type PostV0CityByCityNameOrderByNameRunResponse = PostV0CityByCityNameOrderByNameRunResponses[keyof PostV0CityByCityNameOrderByNameRunResponses];
 
 export type GetV0CityByCityNameOrdersData = {
     body?: never;
@@ -12204,17 +8832,9 @@ export type GetV0CityByCityNameOrdersData = {
 
 export type GetV0CityByCityNameOrdersErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameOrdersError = GetV0CityByCityNameOrdersErrors[keyof GetV0CityByCityNameOrdersErrors];
@@ -12247,17 +8867,9 @@ export type GetV0CityByCityNameOrdersCheckData = {
 
 export type GetV0CityByCityNameOrdersCheckErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameOrdersCheckError = GetV0CityByCityNameOrdersCheckErrors[keyof GetV0CityByCityNameOrdersCheckErrors];
@@ -12298,21 +8910,9 @@ export type GetV0CityByCityNameOrdersFeedData = {
 
 export type GetV0CityByCityNameOrdersFeedErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameOrdersFeedError = GetV0CityByCityNameOrdersFeedErrors[keyof GetV0CityByCityNameOrdersFeedErrors];
@@ -12353,25 +8953,9 @@ export type GetV0CityByCityNameOrdersHistoryData = {
 
 export type GetV0CityByCityNameOrdersHistoryErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameOrdersHistoryError = GetV0CityByCityNameOrdersHistoryErrors[keyof GetV0CityByCityNameOrdersHistoryErrors];
@@ -12399,21 +8983,9 @@ export type GetV0CityByCityNamePacksData = {
 
 export type GetV0CityByCityNamePacksErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePacksError = GetV0CityByCityNamePacksErrors[keyof GetV0CityByCityNamePacksErrors];
@@ -12426,134 +8998,6 @@ export type GetV0CityByCityNamePacksResponses = {
 };
 
 export type GetV0CityByCityNamePacksResponse = GetV0CityByCityNamePacksResponses[keyof GetV0CityByCityNamePacksResponses];
-
-export type AddPackData = {
-    body: PackAddInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-        /**
-         * Idempotency key for safe retries.
-         */
-        'Idempotency-Key'?: string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/packs';
-};
-
-export type AddPackErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Bad Gateway
-     */
-    502: ErrorModel;
-};
-
-export type AddPackError = AddPackErrors[keyof AddPackErrors];
-
-export type AddPackResponses = {
-    /**
-     * Created
-     */
-    201: PackAddedOutputBody;
-};
-
-export type AddPackResponse = AddPackResponses[keyof AddPackResponses];
-
-export type DeleteV0CityByCityNamePacksByNameData = {
-    body?: never;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * The import binding name to remove (the [imports.<name>] key).
-         */
-        name: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/packs/{name}';
-};
-
-export type DeleteV0CityByCityNamePacksByNameErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-};
-
-export type DeleteV0CityByCityNamePacksByNameError = DeleteV0CityByCityNamePacksByNameErrors[keyof DeleteV0CityByCityNamePacksByNameErrors];
-
-export type DeleteV0CityByCityNamePacksByNameResponses = {
-    /**
-     * OK
-     */
-    200: PackRemovedOutputBody;
-};
-
-export type DeleteV0CityByCityNamePacksByNameResponse = DeleteV0CityByCityNamePacksByNameResponses[keyof DeleteV0CityByCityNamePacksByNameResponses];
 
 export type DeleteV0CityByCityNamePatchesAgentByBaseData = {
     body?: never;
@@ -12579,33 +9023,9 @@ export type DeleteV0CityByCityNamePatchesAgentByBaseData = {
 
 export type DeleteV0CityByCityNamePatchesAgentByBaseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNamePatchesAgentByBaseError = DeleteV0CityByCityNamePatchesAgentByBaseErrors[keyof DeleteV0CityByCityNamePatchesAgentByBaseErrors];
@@ -12637,17 +9057,9 @@ export type GetV0CityByCityNamePatchesAgentByBaseData = {
 
 export type GetV0CityByCityNamePatchesAgentByBaseErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesAgentByBaseError = GetV0CityByCityNamePatchesAgentByBaseErrors[keyof GetV0CityByCityNamePatchesAgentByBaseErrors];
@@ -12689,33 +9101,9 @@ export type DeleteV0CityByCityNamePatchesAgentByDirByBaseData = {
 
 export type DeleteV0CityByCityNamePatchesAgentByDirByBaseErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNamePatchesAgentByDirByBaseError = DeleteV0CityByCityNamePatchesAgentByDirByBaseErrors[keyof DeleteV0CityByCityNamePatchesAgentByDirByBaseErrors];
@@ -12751,17 +9139,9 @@ export type GetV0CityByCityNamePatchesAgentByDirByBaseData = {
 
 export type GetV0CityByCityNamePatchesAgentByDirByBaseErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesAgentByDirByBaseError = GetV0CityByCityNamePatchesAgentByDirByBaseErrors[keyof GetV0CityByCityNamePatchesAgentByDirByBaseErrors];
@@ -12789,17 +9169,9 @@ export type GetV0CityByCityNamePatchesAgentsData = {
 
 export type GetV0CityByCityNamePatchesAgentsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesAgentsError = GetV0CityByCityNamePatchesAgentsErrors[keyof GetV0CityByCityNamePatchesAgentsErrors];
@@ -12833,33 +9205,9 @@ export type PutV0CityByCityNamePatchesAgentsData = {
 
 export type PutV0CityByCityNamePatchesAgentsErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PutV0CityByCityNamePatchesAgentsError = PutV0CityByCityNamePatchesAgentsErrors[keyof PutV0CityByCityNamePatchesAgentsErrors];
@@ -12897,33 +9245,9 @@ export type DeleteV0CityByCityNamePatchesProviderByNameData = {
 
 export type DeleteV0CityByCityNamePatchesProviderByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNamePatchesProviderByNameError = DeleteV0CityByCityNamePatchesProviderByNameErrors[keyof DeleteV0CityByCityNamePatchesProviderByNameErrors];
@@ -12955,17 +9279,9 @@ export type GetV0CityByCityNamePatchesProviderByNameData = {
 
 export type GetV0CityByCityNamePatchesProviderByNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesProviderByNameError = GetV0CityByCityNamePatchesProviderByNameErrors[keyof GetV0CityByCityNamePatchesProviderByNameErrors];
@@ -12993,17 +9309,9 @@ export type GetV0CityByCityNamePatchesProvidersData = {
 
 export type GetV0CityByCityNamePatchesProvidersErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesProvidersError = GetV0CityByCityNamePatchesProvidersErrors[keyof GetV0CityByCityNamePatchesProvidersErrors];
@@ -13037,33 +9345,9 @@ export type PutV0CityByCityNamePatchesProvidersData = {
 
 export type PutV0CityByCityNamePatchesProvidersErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PutV0CityByCityNamePatchesProvidersError = PutV0CityByCityNamePatchesProvidersErrors[keyof PutV0CityByCityNamePatchesProvidersErrors];
@@ -13101,33 +9385,9 @@ export type DeleteV0CityByCityNamePatchesRigByNameData = {
 
 export type DeleteV0CityByCityNamePatchesRigByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNamePatchesRigByNameError = DeleteV0CityByCityNamePatchesRigByNameErrors[keyof DeleteV0CityByCityNamePatchesRigByNameErrors];
@@ -13159,17 +9419,9 @@ export type GetV0CityByCityNamePatchesRigByNameData = {
 
 export type GetV0CityByCityNamePatchesRigByNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesRigByNameError = GetV0CityByCityNamePatchesRigByNameErrors[keyof GetV0CityByCityNamePatchesRigByNameErrors];
@@ -13197,17 +9449,9 @@ export type GetV0CityByCityNamePatchesRigsData = {
 
 export type GetV0CityByCityNamePatchesRigsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNamePatchesRigsError = GetV0CityByCityNamePatchesRigsErrors[keyof GetV0CityByCityNamePatchesRigsErrors];
@@ -13241,33 +9485,9 @@ export type PutV0CityByCityNamePatchesRigsData = {
 
 export type PutV0CityByCityNamePatchesRigsErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PutV0CityByCityNamePatchesRigsError = PutV0CityByCityNamePatchesRigsErrors[keyof PutV0CityByCityNamePatchesRigsErrors];
@@ -13280,48 +9500,6 @@ export type PutV0CityByCityNamePatchesRigsResponses = {
 };
 
 export type PutV0CityByCityNamePatchesRigsResponse = PutV0CityByCityNamePatchesRigsResponses[keyof PutV0CityByCityNamePatchesRigsResponses];
-
-export type GetV0CityByCityNamePendingData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/pending';
-};
-
-export type GetV0CityByCityNamePendingErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNamePendingError = GetV0CityByCityNamePendingErrors[keyof GetV0CityByCityNamePendingErrors];
-
-export type GetV0CityByCityNamePendingResponses = {
-    /**
-     * OK
-     */
-    200: ListBodyCityPendingEntry;
-};
-
-export type GetV0CityByCityNamePendingResponse = GetV0CityByCityNamePendingResponses[keyof GetV0CityByCityNamePendingResponses];
 
 export type GetV0CityByCityNameProviderReadinessData = {
     body?: never;
@@ -13346,21 +9524,9 @@ export type GetV0CityByCityNameProviderReadinessData = {
 
 export type GetV0CityByCityNameProviderReadinessErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameProviderReadinessError = GetV0CityByCityNameProviderReadinessErrors[keyof GetV0CityByCityNameProviderReadinessErrors];
@@ -13398,37 +9564,9 @@ export type DeleteV0CityByCityNameProviderByNameData = {
 
 export type DeleteV0CityByCityNameProviderByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameProviderByNameError = DeleteV0CityByCityNameProviderByNameErrors[keyof DeleteV0CityByCityNameProviderByNameErrors];
@@ -13460,17 +9598,9 @@ export type GetV0CityByCityNameProviderByNameData = {
 
 export type GetV0CityByCityNameProviderByNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameProviderByNameError = GetV0CityByCityNameProviderByNameErrors[keyof GetV0CityByCityNameProviderByNameErrors];
@@ -13508,37 +9638,9 @@ export type PatchV0CityByCityNameProviderByNameData = {
 
 export type PatchV0CityByCityNameProviderByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameProviderByNameError = PatchV0CityByCityNameProviderByNameErrors[keyof PatchV0CityByCityNameProviderByNameErrors];
@@ -13566,17 +9668,9 @@ export type GetV0CityByCityNameProvidersData = {
 
 export type GetV0CityByCityNameProvidersErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameProvidersError = GetV0CityByCityNameProvidersErrors[keyof GetV0CityByCityNameProvidersErrors];
@@ -13597,10 +9691,6 @@ export type CreateProviderData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
-        /**
-         * Idempotency key for safe retries.
-         */
-        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -13614,37 +9704,9 @@ export type CreateProviderData = {
 
 export type CreateProviderErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateProviderError = CreateProviderErrors[keyof CreateProviderErrors];
@@ -13672,17 +9734,9 @@ export type GetV0CityByCityNameProvidersPublicData = {
 
 export type GetV0CityByCityNameProvidersPublicErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameProvidersPublicError = GetV0CityByCityNameProvidersPublicErrors[keyof GetV0CityByCityNameProvidersPublicErrors];
@@ -13719,21 +9773,9 @@ export type GetV0CityByCityNameReadinessData = {
 
 export type GetV0CityByCityNameReadinessErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameReadinessError = GetV0CityByCityNameReadinessErrors[keyof GetV0CityByCityNameReadinessErrors];
@@ -13771,33 +9813,9 @@ export type DeleteV0CityByCityNameRigByNameData = {
 
 export type DeleteV0CityByCityNameRigByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameRigByNameError = DeleteV0CityByCityNameRigByNameErrors[keyof DeleteV0CityByCityNameRigByNameErrors];
@@ -13834,17 +9852,9 @@ export type GetV0CityByCityNameRigByNameData = {
 
 export type GetV0CityByCityNameRigByNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameRigByNameError = GetV0CityByCityNameRigByNameErrors[keyof GetV0CityByCityNameRigByNameErrors];
@@ -13882,33 +9892,9 @@ export type PatchV0CityByCityNameRigByNameData = {
 
 export type PatchV0CityByCityNameRigByNameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameRigByNameError = PatchV0CityByCityNameRigByNameErrors[keyof PatchV0CityByCityNameRigByNameErrors];
@@ -13940,9 +9926,9 @@ export type PostV0CityByCityNameRigByNameByActionData = {
          */
         name: string;
         /**
-         * Action to perform.
+         * Action to perform (suspend, resume, restart).
          */
-        action: 'suspend' | 'resume' | 'restart';
+        action: string;
     };
     query?: never;
     url: '/v0/city/{cityName}/rig/{name}/{action}';
@@ -13950,29 +9936,9 @@ export type PostV0CityByCityNameRigByNameByActionData = {
 
 export type PostV0CityByCityNameRigByNameByActionErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameRigByNameByActionError = PostV0CityByCityNameRigByNameByActionErrors[keyof PostV0CityByCityNameRigByNameByActionErrors];
@@ -14013,21 +9979,9 @@ export type GetV0CityByCityNameRigsData = {
 
 export type GetV0CityByCityNameRigsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameRigsError = GetV0CityByCityNameRigsErrors[keyof GetV0CityByCityNameRigsErrors];
@@ -14048,10 +10002,6 @@ export type CreateRigData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
-        /**
-         * Idempotency key for safe retries.
-         */
-        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -14065,37 +10015,9 @@ export type CreateRigData = {
 
 export type CreateRigErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateRigError = CreateRigErrors[keyof CreateRigErrors];
@@ -14108,197 +10030,6 @@ export type CreateRigResponses = {
 };
 
 export type CreateRigResponse = CreateRigResponses[keyof CreateRigResponses];
-
-export type GetV0CityByCityNameRunsData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * Maximum runs to return (0 uses the server default).
-         */
-        limit?: number;
-    };
-    url: '/v0/city/{cityName}/runs';
-};
-
-export type GetV0CityByCityNameRunsErrors = {
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameRunsError = GetV0CityByCityNameRunsErrors[keyof GetV0CityByCityNameRunsErrors];
-
-export type GetV0CityByCityNameRunsResponses = {
-    /**
-     * OK
-     */
-    200: RunsListOutputBody;
-};
-
-export type GetV0CityByCityNameRunsResponse = GetV0CityByCityNameRunsResponses[keyof GetV0CityByCityNameRunsResponses];
-
-export type GetV0CityByCityNameRunsByRunIdData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Run identifier.
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/runs/{run_id}';
-};
-
-export type GetV0CityByCityNameRunsByRunIdErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameRunsByRunIdError = GetV0CityByCityNameRunsByRunIdErrors[keyof GetV0CityByCityNameRunsByRunIdErrors];
-
-export type GetV0CityByCityNameRunsByRunIdResponses = {
-    /**
-     * OK
-     */
-    200: Run;
-};
-
-export type GetV0CityByCityNameRunsByRunIdResponse = GetV0CityByCityNameRunsByRunIdResponses[keyof GetV0CityByCityNameRunsByRunIdResponses];
-
-export type PostV0CityByCityNameRunsByRunIdCancelData = {
-    body?: never;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Run identifier.
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/runs/{run_id}/cancel';
-};
-
-export type PostV0CityByCityNameRunsByRunIdCancelErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type PostV0CityByCityNameRunsByRunIdCancelError = PostV0CityByCityNameRunsByRunIdCancelErrors[keyof PostV0CityByCityNameRunsByRunIdCancelErrors];
-
-export type PostV0CityByCityNameRunsByRunIdCancelResponses = {
-    /**
-     * Accepted
-     */
-    202: RunCancelOutputBody;
-};
-
-export type PostV0CityByCityNameRunsByRunIdCancelResponse = PostV0CityByCityNameRunsByRunIdCancelResponses[keyof PostV0CityByCityNameRunsByRunIdCancelResponses];
-
-export type GetV0CityByCityNameRunsByRunIdStepsData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Run identifier.
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/runs/{run_id}/steps';
-};
-
-export type GetV0CityByCityNameRunsByRunIdStepsErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameRunsByRunIdStepsError = GetV0CityByCityNameRunsByRunIdStepsErrors[keyof GetV0CityByCityNameRunsByRunIdStepsErrors];
-
-export type GetV0CityByCityNameRunsByRunIdStepsResponses = {
-    /**
-     * OK
-     */
-    200: RunStepsOutputBody;
-};
-
-export type GetV0CityByCityNameRunsByRunIdStepsResponse = GetV0CityByCityNameRunsByRunIdStepsResponses[keyof GetV0CityByCityNameRunsByRunIdStepsResponses];
 
 export type GetV0CityByCityNameServiceByNameData = {
     body?: never;
@@ -14318,17 +10049,9 @@ export type GetV0CityByCityNameServiceByNameData = {
 
 export type GetV0CityByCityNameServiceByNameErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameServiceByNameError = GetV0CityByCityNameServiceByNameErrors[keyof GetV0CityByCityNameServiceByNameErrors];
@@ -14366,25 +10089,9 @@ export type PostV0CityByCityNameServiceByNameRestartData = {
 
 export type PostV0CityByCityNameServiceByNameRestartErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameServiceByNameRestartError = PostV0CityByCityNameServiceByNameRestartErrors[keyof PostV0CityByCityNameServiceByNameRestartErrors];
@@ -14412,17 +10119,9 @@ export type GetV0CityByCityNameServicesData = {
 
 export type GetV0CityByCityNameServicesErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameServicesError = GetV0CityByCityNameServicesErrors[keyof GetV0CityByCityNameServicesErrors];
@@ -14463,25 +10162,9 @@ export type GetV0CityByCityNameSessionByIdData = {
 
 export type GetV0CityByCityNameSessionByIdErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameSessionByIdError = GetV0CityByCityNameSessionByIdErrors[keyof GetV0CityByCityNameSessionByIdErrors];
@@ -14519,37 +10202,9 @@ export type PatchV0CityByCityNameSessionByIdData = {
 
 export type PatchV0CityByCityNameSessionByIdErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PatchV0CityByCityNameSessionByIdError = PatchV0CityByCityNameSessionByIdErrors[keyof PatchV0CityByCityNameSessionByIdErrors];
@@ -14581,25 +10236,9 @@ export type GetV0CityByCityNameSessionByIdAgentsData = {
 
 export type GetV0CityByCityNameSessionByIdAgentsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameSessionByIdAgentsError = GetV0CityByCityNameSessionByIdAgentsErrors[keyof GetV0CityByCityNameSessionByIdAgentsErrors];
@@ -14635,29 +10274,9 @@ export type GetV0CityByCityNameSessionByIdAgentsByAgentIdData = {
 
 export type GetV0CityByCityNameSessionByIdAgentsByAgentIdErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameSessionByIdAgentsByAgentIdError = GetV0CityByCityNameSessionByIdAgentsByAgentIdErrors[keyof GetV0CityByCityNameSessionByIdAgentsByAgentIdErrors];
@@ -14700,33 +10319,9 @@ export type PostV0CityByCityNameSessionByIdCloseData = {
 
 export type PostV0CityByCityNameSessionByIdCloseErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdCloseError = PostV0CityByCityNameSessionByIdCloseErrors[keyof PostV0CityByCityNameSessionByIdCloseErrors];
@@ -14764,33 +10359,9 @@ export type PostV0CityByCityNameSessionByIdKillData = {
 
 export type PostV0CityByCityNameSessionByIdKillErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdKillError = PostV0CityByCityNameSessionByIdKillErrors[keyof PostV0CityByCityNameSessionByIdKillErrors];
@@ -14828,29 +10399,9 @@ export type SendSessionMessageData = {
 
 export type SendSessionMessageErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type SendSessionMessageError = SendSessionMessageErrors[keyof SendSessionMessageErrors];
@@ -14882,25 +10433,9 @@ export type GetV0CityByCityNameSessionByIdPendingData = {
 
 export type GetV0CityByCityNameSessionByIdPendingErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameSessionByIdPendingError = GetV0CityByCityNameSessionByIdPendingErrors[keyof GetV0CityByCityNameSessionByIdPendingErrors];
@@ -14938,41 +10473,9 @@ export type PostV0CityByCityNameSessionByIdPermissionModeData = {
 
 export type PostV0CityByCityNameSessionByIdPermissionModeErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdPermissionModeError = PostV0CityByCityNameSessionByIdPermissionModeErrors[keyof PostV0CityByCityNameSessionByIdPermissionModeErrors];
@@ -15010,37 +10513,9 @@ export type PostV0CityByCityNameSessionByIdRenameData = {
 
 export type PostV0CityByCityNameSessionByIdRenameErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdRenameError = PostV0CityByCityNameSessionByIdRenameErrors[keyof PostV0CityByCityNameSessionByIdRenameErrors];
@@ -15078,37 +10553,9 @@ export type RespondSessionData = {
 
 export type RespondSessionErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type RespondSessionError = RespondSessionErrors[keyof RespondSessionErrors];
@@ -15146,33 +10593,9 @@ export type PostV0CityByCityNameSessionByIdStopData = {
 
 export type PostV0CityByCityNameSessionByIdStopErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdStopError = PostV0CityByCityNameSessionByIdStopErrors[keyof PostV0CityByCityNameSessionByIdStopErrors];
@@ -15321,29 +10744,9 @@ export type SubmitSessionData = {
 
 export type SubmitSessionErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type SubmitSessionError = SubmitSessionErrors[keyof SubmitSessionErrors];
@@ -15381,33 +10784,9 @@ export type PostV0CityByCityNameSessionByIdSuspendData = {
 
 export type PostV0CityByCityNameSessionByIdSuspendErrors = {
     /**
-     * Unauthorized
+     * Error
      */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdSuspendError = PostV0CityByCityNameSessionByIdSuspendErrors[keyof PostV0CityByCityNameSessionByIdSuspendErrors];
@@ -15456,25 +10835,9 @@ export type GetV0CityByCityNameSessionByIdTranscriptData = {
 
 export type GetV0CityByCityNameSessionByIdTranscriptErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameSessionByIdTranscriptError = GetV0CityByCityNameSessionByIdTranscriptErrors[keyof GetV0CityByCityNameSessionByIdTranscriptErrors];
@@ -15512,37 +10875,9 @@ export type PostV0CityByCityNameSessionByIdWakeData = {
 
 export type PostV0CityByCityNameSessionByIdWakeErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSessionByIdWakeError = PostV0CityByCityNameSessionByIdWakeErrors[keyof PostV0CityByCityNameSessionByIdWakeErrors];
@@ -15591,21 +10926,9 @@ export type GetV0CityByCityNameSessionsData = {
 
 export type GetV0CityByCityNameSessionsErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameSessionsError = GetV0CityByCityNameSessionsErrors[keyof GetV0CityByCityNameSessionsErrors];
@@ -15639,33 +10962,9 @@ export type CreateSessionData = {
 
 export type CreateSessionErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateSessionError = CreateSessionErrors[keyof CreateSessionErrors];
@@ -15699,33 +10998,9 @@ export type PostV0CityByCityNameSlingData = {
 
 export type PostV0CityByCityNameSlingErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type PostV0CityByCityNameSlingError = PostV0CityByCityNameSlingErrors[keyof PostV0CityByCityNameSlingErrors];
@@ -15756,31 +11031,15 @@ export type GetV0CityByCityNameStatusData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
-        /**
-         * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
-         */
-        lite?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };
 
 export type GetV0CityByCityNameStatusErrors = {
     /**
-     * Not Found
+     * Error
      */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameStatusError = GetV0CityByCityNameStatusErrors[keyof GetV0CityByCityNameStatusErrors];
@@ -15830,103 +11089,6 @@ export type PostV0CityByCityNameUnregisterResponses = {
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];
 
-export type GetV0CityByCityNameWaitByIdData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Wait bead ID.
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/wait/{id}';
-};
-
-export type GetV0CityByCityNameWaitByIdErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameWaitByIdError = GetV0CityByCityNameWaitByIdErrors[keyof GetV0CityByCityNameWaitByIdErrors];
-
-export type GetV0CityByCityNameWaitByIdResponses = {
-    /**
-     * OK
-     */
-    200: WaitView;
-};
-
-export type GetV0CityByCityNameWaitByIdResponse = GetV0CityByCityNameWaitByIdResponses[keyof GetV0CityByCityNameWaitByIdResponses];
-
-export type GetV0CityByCityNameWaitsData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * Filter by wait state.
-         */
-        state?: string;
-        /**
-         * Filter by session ID.
-         */
-        session?: string;
-    };
-    url: '/v0/city/{cityName}/waits';
-};
-
-export type GetV0CityByCityNameWaitsErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameWaitsError = GetV0CityByCityNameWaitsErrors[keyof GetV0CityByCityNameWaitsErrors];
-
-export type GetV0CityByCityNameWaitsResponses = {
-    /**
-     * OK
-     */
-    200: WaitListBody;
-};
-
-export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
-
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;
     headers: {
@@ -15964,29 +11126,9 @@ export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdError = DeleteV0CityByCityNameWorkflowByWorkflowIdErrors[keyof DeleteV0CityByCityNameWorkflowByWorkflowIdErrors];
@@ -16027,21 +11169,9 @@ export type GetV0CityByCityNameWorkflowByWorkflowIdData = {
 
 export type GetV0CityByCityNameWorkflowByWorkflowIdErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
+    default: ErrorModel;
 };
 
 export type GetV0CityByCityNameWorkflowByWorkflowIdError = GetV0CityByCityNameWorkflowByWorkflowIdErrors[keyof GetV0CityByCityNameWorkflowByWorkflowIdErrors];

@@ -188,7 +188,7 @@ func TestSubscribeHandler_ValidTokenStreamsMessages(t *testing.T) {
 	}
 }
 
-func TestSubscribeHandler_ForbiddenSessionEmitsSSEError(t *testing.T) {
+func TestSubscribeHandler_ForbiddenSessionReturns403(t *testing.T) {
 	fs, srv, _, _, _ := newExtMsgSubscribeFixture(t)
 
 	// Register a distinct client with AllowedSessions=["session-A"]. A
@@ -226,12 +226,11 @@ func TestSubscribeHandler_ForbiddenSessionEmitsSSEError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	body := rec.Body.String()
-	if !strings.Contains(body, "event: error") {
-		t.Errorf("stream missing SSE error event type; body: %s", body)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403; body: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(body, `"code":"session_forbidden"`) {
-		t.Errorf("stream missing session_forbidden code; body: %s", body)
+	if !strings.Contains(rec.Body.String(), "session_forbidden") {
+		t.Errorf("body missing session_forbidden; body: %s", rec.Body.String())
 	}
 }
 

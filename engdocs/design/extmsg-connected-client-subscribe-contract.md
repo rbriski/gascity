@@ -52,12 +52,13 @@ GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe
 
 These errors are returned as standard HTTP responses before the server commits `Content-Type: text/event-stream`. Once the server has written the SSE response headers, all subsequent errors travel as SSE `event: error` frames (see §Post-stream errors).
 
-**Response body shape:**
+**Response body shape** (RFC 9457 Problem Details, as produced by Huma):
 
 ```json
 {
-  "code": "session_forbidden",
-  "message": "Token not authorized to bind to session 'mayor'."
+  "title": "Forbidden",
+  "status": 403,
+  "detail": "session_forbidden: session is not permitted by this client token"
 }
 ```
 

@@ -246,7 +246,7 @@ type onceForbiddenBindings struct {
 	forbidden *extmsg.SessionBindingRecord
 }
 
-func (b *onceForbiddenBindings) ResolveByConversation(ctx context.Context, ref extmsg.ConversationRef) (*extmsg.SessionBindingRecord, error) {
+func (b *onceForbiddenBindings) ResolveByConversation(_ context.Context, _ extmsg.ConversationRef) (*extmsg.SessionBindingRecord, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.firstDone {

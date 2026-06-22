@@ -231,7 +231,7 @@ func noSubscriberExtmsgHandler(t *testing.T) http.Handler {
 // errorExtmsgHandler returns a handler that responds with 500.
 func errorExtmsgHandler(t *testing.T) http.Handler {
 	t.Helper()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{

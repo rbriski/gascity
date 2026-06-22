@@ -34,16 +34,16 @@ type ClientTokenRecord struct {
 
 // RegisterClientInput is the input for registering or re-issuing a client token.
 type RegisterClientInput struct {
-	Credential      string
-	AllowedSessions []string
+	Credential        string
+	AllowedSessions   []string
 	AllowNoCredential bool
 }
 
 // RegisterClientResult is the result of a client registration.
 type RegisterClientResult struct {
-	ClientID  string
-	Token     string
-	Created   bool
+	ClientID string
+	Token    string
+	Created  bool
 }
 
 // RegisterClient issues or re-issues a client token bead for the given

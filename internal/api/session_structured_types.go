@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -468,7 +469,7 @@ func inferStructuredToolResult(block worker.HistoryBlock, context structuredTool
 	}
 	if name == "apply_patch" || isEditTool(name, context.Input) || (context.Input != nil && context.Input.Kind == "patch") || looksLikePatch(content) {
 		resultPatch, resultFile := editPatchFromRawResult(block.Content)
-		patch := firstNonEmptyString(resultPatch, patchContent(content), inputPatch(context.Input))
+		patch := firstNonEmptyString(resultPatch, patchContent(content))
 		return &SessionStructuredToolResult{
 			Kind:     "edit",
 			FilePath: firstNonEmptyString(resultFile, patchFilePath(patch), patchFilePath(content), inputFilePath(context.Input)),
@@ -684,7 +685,17 @@ func editPatchFromRawResult(raw json.RawMessage) (string, string) {
 			return patch, filePath
 		}
 	}
+	for _, key := range []string{"tool_result", "toolUseResult", "provider_result"} {
+		if resultRaw, ok := object[key]; ok {
+			if patch, filePath := editPatchFromRawResult(resultRaw); patch != "" {
+				return patch, filePath
+			}
+		}
+	}
 	if patch, filePath := editPatchFromResultDisplay(raw); patch != "" {
+		return patch, filePath
+	}
+	if patch, filePath := editPatchFromStructuredPatch(object); patch != "" {
 		return patch, filePath
 	}
 	if patch := jsonStringField(object, "patch", "diff", "file_diff", "fileDiff"); patch != "" {
@@ -795,6 +806,64 @@ func jsonStringField(object map[string]json.RawMessage, names ...string) string 
 	return ""
 }
 
+func editPatchFromStructuredPatch(object map[string]json.RawMessage) (string, string) {
+	rawPatch, ok := object["structuredPatch"]
+	if !ok {
+		return "", ""
+	}
+	var hunks []struct {
+		OldStart int      `json:"oldStart"`
+		OldLines int      `json:"oldLines"`
+		NewStart int      `json:"newStart"`
+		NewLines int      `json:"newLines"`
+		Lines    []string `json:"lines"`
+	}
+	if json.Unmarshal(rawPatch, &hunks) != nil || len(hunks) == 0 {
+		return "", ""
+	}
+	filePath := jsonStringField(object, "file_path", "filePath", "path", "file")
+	var b strings.Builder
+	from := firstNonEmptyString(filePath, "file")
+	b.WriteString("--- ")
+	b.WriteString(from)
+	b.WriteString("\n+++ ")
+	b.WriteString(from)
+	for _, hunk := range hunks {
+		b.WriteString("\n@@")
+		if hunk.OldStart > 0 || hunk.NewStart > 0 {
+			b.WriteString(" -")
+			b.WriteString(formatPatchRange(hunk.OldStart, hunk.OldLines))
+			b.WriteString(" +")
+			b.WriteString(formatPatchRange(hunk.NewStart, hunk.NewLines))
+			b.WriteString(" ")
+		}
+		b.WriteString("@@\n")
+		for _, line := range hunk.Lines {
+			if line == "" || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\\") {
+				b.WriteString(line)
+			} else {
+				b.WriteString(" ")
+				b.WriteString(line)
+			}
+			b.WriteString("\n")
+		}
+	}
+	return b.String(), filePath
+}
+
+func formatPatchRange(start, lines int) string {
+	if start <= 0 {
+		start = 1
+	}
+	if lines <= 0 {
+		return fmt.Sprintf("%d,0", start)
+	}
+	if lines == 1 {
+		return fmt.Sprintf("%d", start)
+	}
+	return fmt.Sprintf("%d,%d", start, lines)
+}
+
 func inputFilePath(input *SessionStructuredToolInput) string {
 	if input == nil {
 		return ""
@@ -807,13 +876,6 @@ func inputCode(input *SessionStructuredToolInput) string {
 		return ""
 	}
 	return input.Code
-}
-
-func inputPatch(input *SessionStructuredToolInput) string {
-	if input == nil {
-		return ""
-	}
-	return input.Patch
 }
 
 func resultCode(raw json.RawMessage) string {

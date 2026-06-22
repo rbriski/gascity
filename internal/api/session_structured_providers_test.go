@@ -68,7 +68,7 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "updated successfully",
-			resultPatch:   []string{"--- README.md", "+++ README.md", "-old line", "+new line"},
+			resultPatch:   []string{"--- README.md", "+++ README.md", "-export const message = \"old line\";", "+export const message = \"new line\";"},
 		},
 		{
 			name:          "codex patch",
@@ -81,7 +81,7 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "city.toml",
 			resultContent: "Updated the following files",
-			resultPatch:   []string{"*** Update File: city.toml", "+[workspace]"},
+			resultPatch:   []string{"--- city.toml", "+++ city.toml", "+[workspace]"},
 		},
 		{
 			name:         "gemini grep",
@@ -130,7 +130,6 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "Edited README.md",
-			resultPatch:   []string{"--- README.md", "+++ README.md", "-old", "+new"},
 		},
 		{
 			name:          "groq opencode alias edit",
@@ -143,7 +142,6 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "Edited README.md",
-			resultPatch:   []string{"--- README.md", "+++ README.md", "-old", "+new"},
 		},
 		{
 			name:          "cerebras opencode alias edit",
@@ -156,7 +154,6 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "README.md",
 			resultContent: "Edited README.md",
-			resultPatch:   []string{"--- README.md", "+++ README.md", "-old", "+new"},
 		},
 		{
 			name:         "mimocode bash",
@@ -217,7 +214,6 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultKind:    "edit",
 			resultFile:    "notes.txt",
 			resultContent: "wrote notes.txt",
-			resultPatch:   []string{"+hello structured world"},
 		},
 	}
 
@@ -521,6 +517,9 @@ func assertStructuredResult(t *testing.T, result *SessionStructuredToolResult, k
 			t.Fatalf("result patch = %q, missing %q; result = %+v", result.Patch, want, result)
 		}
 	}
+	if kind == "edit" && len(patchSubstrings) == 0 && result.Patch != "" {
+		t.Fatalf("edit result unexpectedly has generated patch %q; result = %+v", result.Patch, result)
+	}
 	if kind != "edit" && result.Patch != "" {
 		t.Fatalf("non-edit result unexpectedly has patch %q; result = %+v", result.Patch, result)
 	}
@@ -538,7 +537,7 @@ func writeStructuredClaudeEditFixture(t *testing.T, root, workDir, sessionKey st
 	t.Helper()
 	writeNamedSessionJSONL(t, root, workDir, sessionKey+".jsonl",
 		`{"uuid":"claude-edit-1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call-claude-edit","name":"Edit","input":{"file_path":"README.md","old_string":"old line","new_string":"new line"}}]},"timestamp":"2026-06-01T00:00:00Z"}`,
-		`{"uuid":"claude-edit-2","parentUuid":"claude-edit-1","type":"tool_result","toolUseID":"call-claude-edit","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-claude-edit","content":"The file README.md has been updated successfully."}]},"timestamp":"2026-06-01T00:00:01Z"}`,
+		`{"uuid":"claude-edit-2","parentUuid":"claude-edit-1","type":"tool_result","toolUseID":"call-claude-edit","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-claude-edit","content":"The file README.md has been updated successfully."}]},"toolUseResult":{"filePath":"README.md","oldString":"old line","newString":"new line","originalFile":"export const message = \"old line\";\n","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-export const message = \"old line\";","+export const message = \"new line\";"]}],"userModified":false,"replaceAll":false},"timestamp":"2026-06-01T00:00:01Z"}`,
 	)
 }
 
@@ -551,6 +550,7 @@ func writeStructuredCodexPatchFixture(t *testing.T, root, workDir, _ string) {
 	payload := strings.Join([]string{
 		fmt.Sprintf(`{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-codex-patch","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+[workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-codex-patch","stdout":"Success. Updated the following files:\nM city.toml\n","stderr":"","success":true,"changes":{"city.toml":{"type":"update","unified_diff":"@@\n+[workspace]\n","move_path":null}},"status":"completed"}}`,
 		`{"timestamp":"2026-06-01T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-codex-patch","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-01T00-00-00-structured.jsonl"), []byte(payload), 0o644); err != nil {

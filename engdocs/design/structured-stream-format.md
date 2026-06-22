@@ -281,6 +281,16 @@ Fallbacks preserve useful display data, but they do not preserve arbitrary
 provider-native JSON. Consumers that need byte-level provider evidence must ask
 for `format=raw`.
 
+For edit results specifically, `tool_result.structured.patch` must come from
+result-side evidence: a provider's structured tool-result field, a provider's
+file-diff result display, or textual result content that is itself a patch.
+Gas City may normalize those result-side shapes into one provider-neutral patch
+string for the wire. It must not synthesize a result patch from the preceding
+tool input (`old_string` / `new_string`, `apply_patch` input, write contents,
+or similar). Tool inputs can still expose their own provider-neutral input
+shape, but the result must represent what the provider reported after running
+the tool.
+
 Do not use anonymous maps, raw JSON fields, unregistered unions, or "any JSON"
 carriers directly on the structured API types.
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -66,6 +67,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 			}
 		}
 	}
+	patchApplyResults := collectCodexPatchApplyResults(entries)
 
 	var messages []*Entry
 	idx := 0
@@ -76,7 +78,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 
 		switch e.raw.Type {
 		case "response_item":
-			entry := convertResponseItem(e.raw.Payload, e.line, idx, ts)
+			entry := convertResponseItem(e.raw.Payload, e.line, idx, ts, patchApplyResults)
 			if entry != nil {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -184,7 +186,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}, nil
 }
 
-func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts time.Time) *Entry {
+func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts time.Time, patchApplyResults map[string]json.RawMessage) *Entry {
 	var ri codexResponseItem
 	if json.Unmarshal(payload, &ri) != nil {
 		return nil
@@ -253,6 +255,10 @@ func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts ti
 
 	case "function_call_output", "custom_tool_call_output":
 		callID := firstNonEmpty(ri.CallID, ri.ID)
+		content := cloneRawJSON(ri.Output)
+		if patchResult := patchApplyResults[callID]; len(patchResult) > 0 {
+			content = codexToolResultContentWithPatch(ri.Output, patchResult)
+		}
 		return &Entry{
 			UUID:      uuid,
 			Type:      "tool_result",
@@ -263,7 +269,7 @@ func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts ti
 				Content: mustMarshal([]ContentBlock{{
 					Type:      "tool_result",
 					ToolUseID: callID,
-					Content:   cloneRawJSON(ri.Output),
+					Content:   content,
 				}}),
 			}),
 			Raw: json.RawMessage(rawLine),
@@ -294,6 +300,134 @@ func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts ti
 	}
 
 	return nil
+}
+
+func collectCodexPatchApplyResults(entries []codexEntry) map[string]json.RawMessage {
+	results := make(map[string]json.RawMessage)
+	for _, e := range entries {
+		if e.raw.Type != "event_msg" {
+			continue
+		}
+		var em codexEventMsg
+		if json.Unmarshal(e.raw.Payload, &em) != nil || em.Type != "patch_apply_end" || strings.TrimSpace(em.CallID) == "" {
+			continue
+		}
+		if result := codexPatchApplyResultContent(em); len(result) > 0 {
+			results[em.CallID] = result
+		}
+	}
+	return results
+}
+
+func codexPatchApplyResultContent(em codexEventMsg) json.RawMessage {
+	patch, filePath := codexPatchFromChanges(em.Changes)
+	if patch == "" && strings.TrimSpace(em.Stdout) == "" && strings.TrimSpace(em.Stderr) == "" {
+		return nil
+	}
+	payload := struct {
+		Output   string `json:"output,omitempty"`
+		Stderr   string `json:"stderr,omitempty"`
+		Patch    string `json:"patch,omitempty"`
+		FilePath string `json:"file_path,omitempty"`
+	}{
+		Output:   em.Stdout,
+		Stderr:   em.Stderr,
+		Patch:    patch,
+		FilePath: filePath,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+func codexToolResultContentWithPatch(output json.RawMessage, patchResult json.RawMessage) json.RawMessage {
+	var patchObject struct {
+		Output   string `json:"output,omitempty"`
+		Stderr   string `json:"stderr,omitempty"`
+		Patch    string `json:"patch,omitempty"`
+		FilePath string `json:"file_path,omitempty"`
+	}
+	if json.Unmarshal(patchResult, &patchObject) != nil {
+		return cloneRawJSON(output)
+	}
+	patchObject.Output = firstNonEmpty(codexOutputText(output), patchObject.Output)
+	raw, err := json.Marshal(patchObject)
+	if err != nil {
+		return cloneRawJSON(output)
+	}
+	return raw
+}
+
+func codexOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var object struct {
+		Output string `json:"output"`
+		Stdout string `json:"stdout"`
+		Stderr string `json:"stderr"`
+		Text   string `json:"text"`
+	}
+	if json.Unmarshal(raw, &object) == nil {
+		return strings.Join(codexNonEmptyStrings(object.Output, object.Stdout, object.Stderr, object.Text), "\n")
+	}
+	return ""
+}
+
+func codexPatchFromChanges(changes map[string]codexPatchChange) (string, string) {
+	if len(changes) == 0 {
+		return "", ""
+	}
+	paths := make([]string, 0, len(changes))
+	for path, change := range changes {
+		if strings.TrimSpace(change.UnifiedDiff) == "" {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return "", ""
+	}
+	sort.Strings(paths)
+
+	var b strings.Builder
+	for i, path := range paths {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		change := changes[path]
+		b.WriteString("--- ")
+		b.WriteString(path)
+		b.WriteString("\n+++ ")
+		if strings.TrimSpace(change.MovePath) != "" {
+			b.WriteString(change.MovePath)
+		} else {
+			b.WriteString(path)
+		}
+		b.WriteString("\n")
+		b.WriteString(strings.TrimRight(change.UnifiedDiff, "\n"))
+		b.WriteString("\n")
+	}
+	if len(paths) == 1 {
+		return b.String(), paths[0]
+	}
+	return b.String(), ""
+}
+
+func codexNonEmptyStrings(values ...string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func codexErrorText(em codexEventMsg) string {
@@ -364,10 +498,20 @@ type codexEntry struct {
 }
 
 type codexEventMsg struct {
-	Type           string `json:"type"`             // user_message, agent_message, agent_reasoning, token_count
-	Message        string `json:"message"`          // for user_message, agent_message, error
-	Text           string `json:"text"`             // for agent_reasoning
-	CodexErrorInfo string `json:"codex_error_info"` // for usage_limit_exceeded and related errors
+	Type           string                      `json:"type"`             // user_message, agent_message, agent_reasoning, token_count
+	Message        string                      `json:"message"`          // for user_message, agent_message, error
+	Text           string                      `json:"text"`             // for agent_reasoning
+	CodexErrorInfo string                      `json:"codex_error_info"` // for usage_limit_exceeded and related errors
+	CallID         string                      `json:"call_id,omitempty"`
+	Stdout         string                      `json:"stdout,omitempty"`
+	Stderr         string                      `json:"stderr,omitempty"`
+	Changes        map[string]codexPatchChange `json:"changes,omitempty"`
+}
+
+type codexPatchChange struct {
+	Type        string `json:"type,omitempty"`
+	UnifiedDiff string `json:"unified_diff,omitempty"`
+	MovePath    string `json:"move_path,omitempty"`
 }
 
 type codexResponseItem struct {

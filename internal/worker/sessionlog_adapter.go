@@ -338,13 +338,17 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 			if kind == BlockKindInteraction {
 				toolUseID = ""
 			}
+			content := cloneRaw(block.Content)
+			if kind == BlockKindToolResult {
+				content = toolResultContentWithEvidence(entry, content)
+			}
 			result = append(result, HistoryBlock{
 				Kind:        kind,
 				Text:        block.Text,
 				ToolUseID:   toolUseID,
 				Name:        block.Name,
 				Input:       cloneRaw(block.Input),
-				Content:     cloneRaw(block.Content),
+				Content:     content,
 				IsError:     block.IsError,
 				Interaction: interaction,
 			})
@@ -365,6 +369,38 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 	}
 
 	return nil
+}
+
+func toolResultContentWithEvidence(entry *sessionlog.Entry, content json.RawMessage) json.RawMessage {
+	evidence := toolResultEvidence(entry)
+	if len(evidence) == 0 {
+		return cloneRaw(content)
+	}
+	payload := struct {
+		Content    json.RawMessage `json:"content,omitempty"`
+		ToolResult json.RawMessage `json:"tool_result,omitempty"`
+	}{
+		Content:    cloneRaw(content),
+		ToolResult: evidence,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return cloneRaw(content)
+	}
+	return raw
+}
+
+func toolResultEvidence(entry *sessionlog.Entry) json.RawMessage {
+	if entry == nil || len(entry.Raw) == 0 {
+		return nil
+	}
+	var rawEntry struct {
+		ToolUseResult json.RawMessage `json:"toolUseResult"`
+	}
+	if err := json.Unmarshal(entry.Raw, &rawEntry); err != nil || len(rawEntry.ToolUseResult) == 0 || string(rawEntry.ToolUseResult) == "null" {
+		return nil
+	}
+	return cloneRaw(rawEntry.ToolUseResult)
 }
 
 func actorForEntry(entry *sessionlog.Entry) Actor {

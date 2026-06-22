@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strconv"
@@ -627,7 +628,8 @@ func (s *Server) humaHandleExtMsgAdapterUnregister(_ context.Context, input *Ext
 // GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe.
 // Runs before response headers are committed so errors produce standard HTTP error responses.
 func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscribeInput) error {
-	if _, err := s.humaExtmsgServices(); err != nil {
+	svc, err := s.humaExtmsgServices()
+	if err != nil {
 		return err
 	}
 	if _, err := s.humaExtmsgAdapterRegistry(); err != nil {
@@ -674,13 +676,10 @@ func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscrib
 	}
 
 	if len(allowedSessions) > 0 {
-		svc, svcErr := s.humaExtmsgServices()
-		if svcErr == nil {
-			binding, bindErr := svc.Bindings.ResolveByConversation(ctx, input.resolved.convRef)
-			if bindErr == nil && binding != nil {
-				if !slices.Contains(allowedSessions, binding.SessionID) {
-					return huma.Error403Forbidden("session_forbidden: session is not permitted by this client token")
-				}
+		binding, bindErr := svc.Bindings.ResolveByConversation(ctx, input.resolved.convRef)
+		if bindErr == nil && binding != nil {
+			if !slices.Contains(allowedSessions, binding.SessionID) {
+				return huma.Error403Forbidden("session_forbidden: session is not permitted by this client token")
 			}
 		}
 	}
@@ -730,6 +729,10 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 	// Steps c + d (conditional on binding existence): EnsureMembership + backfill replay.
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api-subscribe"}
 	if binding, lookupErr := svc.Bindings.ResolveByConversation(reqCtx, state.convRef); lookupErr == nil && binding != nil {
+		if len(state.allowedSessions) > 0 && !slices.Contains(state.allowedSessions, binding.SessionID) {
+			slog.WarnContext(reqCtx, "extmsg: stream-time session_forbidden; disconnecting", "client", state.clientID)
+			return
+		}
 		svc.Transcript.EnsureMembership(reqCtx, extmsg.EnsureMembershipInput{ //nolint:errcheck
 			Caller:         caller,
 			Conversation:   state.convRef,
@@ -795,4 +798,3 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 		}
 	}
 }
-

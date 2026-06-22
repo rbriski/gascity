@@ -40,9 +40,7 @@ var extmsgReplyStdin = func() io.Reader { return os.Stdin }
 
 // extmsgReplyAPIClient is indirected for tests — they inject a client pointed
 // at an httptest.Server or nil to force error paths.
-var extmsgReplyAPIClient = func(cityPath string) *api.Client {
-	return apiClient(cityPath)
-}
+var extmsgReplyAPIClient = apiClient
 
 // newExtMsgCmd groups the external-conversation binding verbs. These are
 // thin projections over the extmsg binding service via the city API —

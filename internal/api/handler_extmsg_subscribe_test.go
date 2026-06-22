@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -231,6 +232,64 @@ func TestSubscribeHandler_ForbiddenSessionReturns403(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "session_forbidden") {
 		t.Errorf("body missing session_forbidden; body: %s", rec.Body.String())
+	}
+}
+
+// onceForbiddenBindings wraps a BindingService so that the first
+// ResolveByConversation call returns nil (no binding — simulating the precheck
+// window) and all subsequent calls return a pre-configured forbidden binding
+// (simulating a race-created binding that appears after the precheck).
+type onceForbiddenBindings struct {
+	extmsg.BindingService
+	mu        sync.Mutex
+	firstDone bool
+	forbidden *extmsg.SessionBindingRecord
+}
+
+func (b *onceForbiddenBindings) ResolveByConversation(ctx context.Context, ref extmsg.ConversationRef) (*extmsg.SessionBindingRecord, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.firstDone {
+		b.firstDone = true
+		return nil, nil
+	}
+	return b.forbidden, nil
+}
+
+// TestSubscribeHandler_ForbiddenSessionAtStreamTimeDisconnects validates the
+// second enforcement line: when no binding exists at precheck but a binding to
+// a forbidden session appears at stream-time (TOCTOU window), the stream
+// disconnects silently without delivering any SSE events.
+func TestSubscribeHandler_ForbiddenSessionAtStreamTimeDisconnects(t *testing.T) {
+	fs, srv, _, _, _ := newExtMsgSubscribeFixture(t)
+
+	result, err := extmsg.RegisterClient(context.Background(), fs.cityBeadStore, extmsg.RegisterClientInput{
+		Credential:      "test-cred-toctou",
+		AllowedSessions: []string{"session-A"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+
+	// Inject proxy: precheck sees no binding (first call → nil); stream sees
+	// a binding to "session-B" which is not in AllowedSessions.
+	fs.extmsgSvc.Bindings = &onceForbiddenBindings{
+		BindingService: fs.extmsgSvc.Bindings,
+		forbidden:      &extmsg.SessionBindingRecord{SessionID: "session-B"},
+	}
+
+	h := newTestCityHandlerWith(t, fs, srv)
+	req := httptest.NewRequest("GET", subscribeURL(fs, result.ClientID, "test-conv-toctou"), nil)
+	req.Header.Set("X-GC-Client-Token", result.Token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (stream opened then closed); body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "event:") || strings.Contains(body, "data:") {
+		t.Errorf("stream delivered SSE events but should have disconnected silently; body: %s", body)
 	}
 }
 

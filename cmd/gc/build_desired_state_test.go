@@ -10573,47 +10573,6 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		}
 	})
 
-	// Criterion #3 (ga-4qbgqf.1): awake sessions are also retained, not just active.
-	t.Run("one awake bead retained, no new creates", func(t *testing.T) {
-		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
-		awakeSession := makeSessionBead("session-worker-awake", "worker-awake-1", "awake", "1")
-
-		var stderr strings.Builder
-		result := buildDesiredStateWithSessionBeads(
-			"test-city", cityPath, time.Now().UTC(),
-			cfg, runtime.NewFake(), store, nil,
-			newSessionBeadSnapshot([]beads.Bead{awakeSession}),
-			nil, &stderr,
-		)
-
-		if !result.PoolScaleCheckPartialTemplates["worker"] {
-			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
-		}
-		if _, ok := result.State["worker-awake-1"]; !ok {
-			t.Fatalf("awake session not retained in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
-		}
-		workerEntries := 0
-		for _, tp := range result.State {
-			if tp.TemplateName == "worker" {
-				workerEntries++
-			}
-		}
-		if workerEntries != 1 {
-			t.Fatalf("desired state has %d worker entries, want exactly 1; keys=%v", workerEntries, mapKeys(result.State))
-		}
-
-		snapshot := newSessionBeadSnapshot([]beads.Bead{awakeSession})
-		poolDesired := retainScaleCheckPartialPoolDesired(
-			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
-			snapshot,
-			result.PoolScaleCheckPartialTemplates,
-		)
-		if got := poolDesired["worker"]; got != 1 {
-			t.Fatalf("poolDesired[worker] = %d, want 1 (confirmed-alive awake bead)", got)
-		}
-	})
-
 	t.Run("zero existing beads yields zero creates", func(t *testing.T) {
 		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 

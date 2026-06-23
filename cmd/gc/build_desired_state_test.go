@@ -10738,3 +10738,151 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildDesiredState_ProviderRedBlocksNewPoolSessionCreate(t *testing.T) {
+	writeHealthFile := func(t *testing.T, cityPath, status string) {
+		t.Helper()
+		dir := filepath.Join(cityPath, ".gc", "cache")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		probedAt := float64(time.Now().UnixNano()) / 1e9
+		content := fmt.Sprintf(`{"providers":[{"provider":"claude","status":%q,"probed_at":%f}]}`, status, probedAt)
+		if err := os.WriteFile(filepath.Join(dir, "provider-health.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	makeCfg := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:              "worker",
+				Provider:          "claude",
+				StartCommand:      "echo",
+				ScaleCheck:        "printf 3",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			}},
+		}
+	}
+
+	makeSessionBead := func(id, sessionName, state, slot string) beads.Bead {
+		return beads.Bead{
+			ID:     id,
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         sessionName,
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            slot,
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                state,
+			},
+		}
+	}
+
+	// Scenario A: registry red — no new creates for pool agent.
+	t.Run("registry red blocks new creates", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "unhealthy")
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				t.Fatalf("expected no worker creates when provider is red; got entry %q; stderr=%s", tp.SessionName, stderr.String())
+			}
+		}
+		if !strings.Contains(stderr.String(), "provider red, fresh create blocked") {
+			t.Fatalf("expected 'provider red, fresh create blocked' in stderr; stderr=%s", stderr.String())
+		}
+	})
+
+	// Scenario B: registry absent — fail-open, creates proceed normally.
+	t.Run("registry absent fails open", func(t *testing.T) {
+		cityPath := t.TempDir()
+		// no provider-health.json written
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		workerCreates := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerCreates++
+			}
+		}
+		if workerCreates == 0 {
+			t.Fatalf("expected worker creates when registry absent (fail-open); stderr=%s", stderr.String())
+		}
+	})
+
+	// Scenario C: registry healthy — creates proceed normally.
+	t.Run("registry healthy allows create", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "healthy")
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		workerCreates := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerCreates++
+			}
+		}
+		if workerCreates == 0 {
+			t.Fatalf("expected worker creates when provider is healthy; stderr=%s", stderr.String())
+		}
+	})
+
+	// Scenario D: red gate does not block reuse of an existing active session;
+	// no additional new creates are planned.
+	t.Run("red gate does not block reuse of active session", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "unhealthy")
+		cfg := makeCfg()
+		active := makeSessionBead("session-worker-1", "worker-1", "active", "1")
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{active}),
+			nil, &stderr,
+		)
+		if _, ok := result.State["worker-1"]; !ok {
+			t.Fatalf("active session must be reused even when provider is red; keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		// The active session is reused; the red gate blocks any additional creates.
+		if workerEntries != 1 {
+			t.Fatalf("expected exactly 1 worker entry (reused active); got %d; keys=%v stderr=%s", workerEntries, mapKeys(result.State), stderr.String())
+		}
+	})
+}

@@ -62,6 +62,14 @@ type agentBuildParams struct {
 	// evaluatePendingPoolsMap runs; newAgentBuildParams does not set it.
 	poolScaleCheckPartialTemplates map[string]bool
 
+	// providerHealthSnapshot is the per-build provider-health registry view.
+	// Loaded once at the start of buildDesiredState; nil when the registry
+	// file is absent, unreadable, or stale. A nil snapshot means fail-open
+	// (same semantics as the reconciler's gate at session_reconciler.go:2424).
+	// This field is assigned in buildDesiredState before the pool realization
+	// loop; newAgentBuildParams does not set it.
+	providerHealthSnapshot *providerHealthSnapshot
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string

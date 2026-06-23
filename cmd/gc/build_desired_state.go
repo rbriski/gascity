@@ -1900,8 +1900,15 @@ func discoverSessionBeadsWithRoots(
 				desiredHasCanonicalNonExpandingPoolSession(desired, template, cfgAgent) {
 				continue
 			}
+			// Use a narrower partial-alive guard than scaleCheckPartial here: for
+			// creating/start-pending beads, only protect in-flight creates with an
+			// active pending_create_claim lease; stale creates (lease cleared/expired)
+			// roll back even during a partial tick. For all other states (active, awake,
+			// asleep, stopped, …) the broad preservable rule applies unchanged.
+			poolPartialAlive := (poolScaleCheckPartial || namedScaleCheckPartial) &&
+				(isPendingPoolCreate(b) || (!creating && scaleCheckPartialSessionPreservable(b)))
 			if controllerManagedPool && !manualSession && !isNamedSessionBead(b) &&
-				!sessionAlreadyDesired && !templateDesired && !scaleCheckPartial {
+				!sessionAlreadyDesired && !templateDesired && !poolPartialAlive {
 				continue
 			}
 			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial {

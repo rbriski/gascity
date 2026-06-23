@@ -58,7 +58,8 @@ type agentBuildParams struct {
 	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
 	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
 	// refuses new creates for these templates; existing-session reuse is
-	// unaffected.
+	// unaffected. This field is assigned in buildDesiredState after
+	// evaluatePendingPoolsMap runs; newAgentBuildParams does not set it.
 	poolScaleCheckPartialTemplates map[string]bool
 
 	// beadNames caches qualifiedName → session_name mappings resolved

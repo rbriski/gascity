@@ -10532,6 +10532,88 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		}
 	})
 
+	// Criterion #3 (ga-4qbgqf.1): awake sessions are also retained, not just active.
+	t.Run("one awake bead retained, no new creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		awakeSession := makeSessionBead("session-worker-awake", "worker-awake-1", "awake", "1")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{awakeSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-awake-1"]; !ok {
+			t.Fatalf("awake session not retained in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		if workerEntries != 1 {
+			t.Fatalf("desired state has %d worker entries, want exactly 1; keys=%v", workerEntries, mapKeys(result.State))
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{awakeSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (confirmed-alive awake bead)", got)
+		}
+	})
+
+	// Criterion #3 (ga-4qbgqf.1): awake sessions are also retained, not just active.
+	t.Run("one awake bead retained, no new creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		awakeSession := makeSessionBead("session-worker-awake", "worker-awake-1", "awake", "1")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{awakeSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-awake-1"]; !ok {
+			t.Fatalf("awake session not retained in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		if workerEntries != 1 {
+			t.Fatalf("desired state has %d worker entries, want exactly 1; keys=%v", workerEntries, mapKeys(result.State))
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{awakeSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (confirmed-alive awake bead)", got)
+		}
+	})
+
 	t.Run("zero existing beads yields zero creates", func(t *testing.T) {
 		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 
@@ -10602,15 +10684,17 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		}
 	})
 
-	// Criterion #5 (ga-4qbgqf.1): stale creating beads are shielded from drain
-	// during a partial tick by scaleCheckPartial, but roll back within one
-	// reconciler tick once the partial resolves.
-	t.Run("stale creating bead rolls back on next non-partial tick", func(t *testing.T) {
+	// Criterion #5 (ga-4qbgqf.1): the narrow alive-on-partial guard for pool creates
+	// allows stale creating beads to roll back within the partial tick itself.
+	// Only in-flight creates holding an active pending_create_claim lease are
+	// shielded; expired/cleared creates (no lease) drain immediately.
+	t.Run("stale creating bead rolls back during partial tick", func(t *testing.T) {
 		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 		staleSession := makeSessionBead("session-worker-stale", "worker-stale-4", "creating", "4")
 		snapshot := newSessionBeadSnapshot([]beads.Bead{staleSession})
 
-		// Partial tick: scaleCheckPartial shields the pool-managed creating bead from drain.
+		// Partial tick: the narrow pool-create guard (poolPartialCreate) does NOT
+		// shield a stale creating bead (no pending_create_claim), so it rolls back now.
 		var pStderr strings.Builder
 		partialResult := buildDesiredStateWithSessionBeads(
 			"test-city", cityPath, time.Now().UTC(),
@@ -10620,20 +10704,8 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		if !partialResult.PoolScaleCheckPartialTemplates["worker"] {
 			t.Fatalf("partial tick: PoolScaleCheckPartialTemplates[worker] = false; stderr=%s", pStderr.String())
 		}
-		if _, ok := partialResult.State["worker-stale-4"]; !ok {
-			t.Fatalf("partial tick: stale creating bead absent from State (scaleCheckPartialSessionPreservable must retain it); keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
-		}
-
-		// Normal tick: partial resolves; scaleCheckPartial is false.
-		// The pool bead is not desired (poolDesired=0 with no demand), so
-		// the controllerManagedPool guard at build_desired_state.go:1903 drains it.
-		normalResult := buildDesiredStateWithSessionBeads(
-			"test-city", cityPath, time.Now().UTC(),
-			cfg, runtime.NewFake(), beads.NewMemStore(), nil,
-			snapshot, nil, io.Discard,
-		)
-		if _, ok := normalResult.State["worker-stale-4"]; ok {
-			t.Fatalf("normal tick: stale creating bead still in State after partial resolved; keys=%v", mapKeys(normalResult.State))
+		if _, ok := partialResult.State["worker-stale-4"]; ok {
+			t.Fatalf("partial tick: stale creating bead unexpectedly retained in State; narrow guard must allow rollback; keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
 		}
 	})
 }

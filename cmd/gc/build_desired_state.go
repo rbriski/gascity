@@ -87,7 +87,10 @@ type defaultScaleCheckTarget struct {
 	err      error
 }
 
-var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+var (
+	errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+	errPoolScaleCheckPartialCreate      = errors.New("pool session create blocked: scale_check partial for this template")
+)
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
 // contending pools so stable template sort order does not always win.
@@ -737,6 +740,7 @@ func buildDesiredStateWithSessionBeads(
 		bp.assignedWorkBeads = poolWorkBeads
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
+		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {
@@ -1561,10 +1565,10 @@ func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 
 func scaleCheckPartialSessionRetainable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "active", "awake", "start-pending", "creating":
+	case "active", "awake":
 		return true
 	default:
-		return isPendingPoolCreate(b)
+		return false
 	}
 }
 
@@ -2184,9 +2188,13 @@ func realizePoolDesiredSessions(
 			}
 			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
 			if err != nil {
-				if errors.Is(err, errPoolSessionCreateBudgetExhausted) {
+				switch {
+				case errors.Is(err, errPoolScaleCheckPartialCreate):
+					// debug-level: fires every tick during store contention; not operator noise
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
-				} else {
+				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
 				item.skip = true
@@ -2940,6 +2948,15 @@ func selectOrPlanPoolSessionBead(
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
+
+	// Partial demand read: refuse new creates for this template this tick.
+	// Only existing beads (reuse/resume paths above) may be selected.
+	// Symmetric with the drain gates in discoverSessionBeadsWithRoots and
+	// the reconciler's !storeQueryPartial rollback guard.
+	if bp.poolScaleCheckPartialTemplates[template] {
+		delete(usedSlots, slot)
+		return beads.Bead{}, 0, nil, errPoolScaleCheckPartialCreate
+	}
 
 	if !bp.tryClaimPoolSessionCreate(template) {
 		delete(usedSlots, slot)

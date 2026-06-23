@@ -10453,3 +10453,125 @@ func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
 		t.Fatalf("openControlDispatcherDemand = %v, want demand keyed by qualified name from bare route", demand)
 	}
 }
+
+// TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates verifies that
+// when a pool template's scale_check read is partial, the supervisor blocks
+// new session creates for that template (Change 1) while retaining existing
+// confirmed-alive sessions. Also tests that scaleCheckPartialSessionRetainable
+// counts only active/awake sessions, not creating/start-pending (Change 2).
+func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
+	cityPath := t.TempDir()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "echo",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	t.Run("NoExistingSessions_NoCreates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city",
+			cityPath,
+			time.Now().UTC(),
+			cfg,
+			runtime.NewFake(),
+			store,
+			nil,
+			newSessionBeadSnapshot(nil),
+			nil,
+			&stderr,
+		)
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		for k, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				t.Fatalf("partial guard failed: desired state got worker session %q; stderr=%s", k, stderr.String())
+			}
+		}
+	})
+
+	t.Run("OneActiveSession_Retained_NoNew", func(t *testing.T) {
+		activeSession := beads.Bead{
+			ID:     "session-worker-active-1",
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         "worker-active-bd-1",
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            "1",
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                "active",
+			},
+		}
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city",
+			cityPath,
+			time.Now().UTC(),
+			cfg,
+			runtime.NewFake(),
+			store,
+			nil,
+			newSessionBeadSnapshot([]beads.Bead{activeSession}),
+			nil,
+			&stderr,
+		)
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-active-bd-1"]; !ok {
+			t.Fatalf("existing active session not retained; state keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		// Confirm no second session was created beyond the retained active one.
+		workerCount := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerCount++
+			}
+		}
+		if workerCount != 1 {
+			t.Fatalf("want exactly 1 worker session (retained), got %d; state=%v stderr=%s", workerCount, mapKeys(result.State), stderr.String())
+		}
+	})
+
+	t.Run("RetainableCountsOnlyActiveAwake", func(t *testing.T) {
+		partial := map[string]bool{"worker": true}
+		snapshot := newSessionBeadSnapshot([]beads.Bead{
+			{
+				ID: "s-active", Type: sessionBeadType, Status: "open",
+				Labels:   []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{"template": "worker", "state": "active", poolManagedMetadataKey: boolMetadata(true)},
+			},
+			{
+				ID: "s-awake", Type: sessionBeadType, Status: "open",
+				Labels:   []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{"template": "worker", "state": "awake", poolManagedMetadataKey: boolMetadata(true)},
+			},
+			{
+				ID: "s-creating", Type: sessionBeadType, Status: "open",
+				Labels:   []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{"template": "worker", "state": "creating", poolManagedMetadataKey: boolMetadata(true)},
+			},
+			{
+				ID: "s-start-pending", Type: sessionBeadType, Status: "open",
+				Labels:   []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{"template": "worker", "state": "start-pending", poolManagedMetadataKey: boolMetadata(true)},
+			},
+		})
+		got := retainScaleCheckPartialPoolDesired(cfg, nil, snapshot, partial)
+		if got["worker"] != 2 {
+			t.Fatalf("retainScaleCheckPartialPoolDesired[worker] = %d, want 2 (active+awake only, not creating/start-pending)", got["worker"])
+		}
+	})
+}

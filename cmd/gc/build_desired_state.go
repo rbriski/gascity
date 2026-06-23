@@ -1553,10 +1553,12 @@ func retainScaleCheckPartialPoolDesired(cfg *config.City, counts map[string]int,
 }
 
 // Preserve dormant affected-template beads during transient scale_check
-// failures, but do not count them as awake demand.
+// failures, but do not count them as awake demand. Sessions that are already
+// mid-drain or past-drain (draining/drained/archived) are not preserved so a
+// partial read cannot interrupt an in-progress drain lifecycle.
 func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined", "draining", "drained", "archived":
+	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined":
 		return true
 	default:
 		return isPendingPoolCreate(b)

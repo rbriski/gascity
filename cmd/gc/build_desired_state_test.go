@@ -10713,4 +10713,28 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 			t.Fatalf("poolDesired[worker] = %d, want 1 (fresh pending_create_claim=true create counts as retained capacity)", got)
 		}
 	})
+
+	// Change 3 (ga-btv7tm): draining/drained/archived sessions must NOT be
+	// preserved in desired state during a partial tick. Preserving them would
+	// interrupt an in-progress drain lifecycle.
+	t.Run("draining/drained/archived NOT preserved during partial tick", func(t *testing.T) {
+		for _, state := range []string{"draining", "drained", "archived"} {
+			state := state
+			t.Run(state, func(t *testing.T) {
+				store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+				b := makeSessionBead("session-worker-"+state, "worker-"+state+"-1", state, "1")
+				var pStderr strings.Builder
+				result := buildDesiredStateWithSessionBeads(
+					"test-city", cityPath, time.Now().UTC(),
+					cfg, runtime.NewFake(), store, nil,
+					newSessionBeadSnapshot([]beads.Bead{b}),
+					nil, &pStderr,
+				)
+				if _, ok := result.State["worker-"+state+"-1"]; ok {
+					t.Fatalf("state=%s bead must NOT be preserved in desired during partial tick (would interrupt drain); keys=%v stderr=%s",
+						state, mapKeys(result.State), pStderr.String())
+				}
+			})
+		}
+	})
 }

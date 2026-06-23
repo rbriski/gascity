@@ -10667,4 +10667,50 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 			t.Fatalf("partial tick: stale creating bead unexpectedly retained in State; narrow guard must allow rollback; keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
 		}
 	})
+
+	// Criterion #6 (ga-4qbgqf.3): fresh in-flight creates (pending_create_claim=true)
+	// are retained in desired state and in the retained count during a partial tick.
+	// poolPartialAlive is true via isPendingPoolCreate, so the narrow guard keeps them.
+	t.Run("fresh pending_create_claim creating bead retained during partial tick", func(t *testing.T) {
+		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		freshCreate := beads.Bead{
+			ID:     "session-worker-fresh",
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         "worker-fresh-3",
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            "3",
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                "creating",
+				"pending_create_claim": boolMetadata(true),
+			},
+		}
+		snapshot := newSessionBeadSnapshot([]beads.Bead{freshCreate})
+
+		var pStderr strings.Builder
+		partialResult := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), partialStore, nil,
+			snapshot, nil, &pStderr,
+		)
+		if !partialResult.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("partial tick: PoolScaleCheckPartialTemplates[worker] = false; stderr=%s", pStderr.String())
+		}
+		if _, ok := partialResult.State["worker-fresh-3"]; !ok {
+			t.Fatalf("partial tick: fresh pending_create_claim=true bead absent from State; poolPartialAlive must retain it; keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
+		}
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), partialResult.ScaleCheckCounts)),
+			snapshot,
+			partialResult.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (fresh pending_create_claim=true create counts as retained capacity)", got)
+		}
+	})
 }

@@ -562,9 +562,9 @@ func inferStructuredToolResult(block HistoryBlock, context structuredToolContext
 		if write.NumLines != 0 {
 			numLines = write.NumLines
 		}
-		resultPatch, resultFile := editPatchFromRawResult(block.Content)
+		resultPatch, resultFile := explicitPatchFromRawResult(block.Content)
 		patch := firstNonEmptyString(resultPatch, patchContent(content))
-		patchHunks, filePaths := editPatchHunksFromRawResult(block.Content)
+		patchHunks, filePaths := explicitPatchHunksFromRawResult(block.Content)
 		if len(patchHunks) == 0 && patch != "" {
 			patchHunks = parsePatchHunks(patch, firstNonEmptyString(resultFile, write.FilePath, inputFilePath(context.Input)))
 			filePaths = patchHunkFilePaths(patchHunks)
@@ -856,6 +856,38 @@ func editPatchFromRawResult(raw json.RawMessage) (string, string) {
 	return "", ""
 }
 
+func explicitPatchFromRawResult(raw json.RawMessage) (string, string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) == 0 {
+		return "", ""
+	}
+	if displayRaw, ok := object["resultDisplay"]; ok {
+		if patch, filePath := explicitPatchFromResultDisplay(displayRaw); patch != "" {
+			return patch, filePath
+		}
+	}
+	for _, key := range []string{"tool_result", "toolUseResult", "provider_result"} {
+		if resultRaw, ok := object[key]; ok {
+			if patch, filePath := explicitPatchFromRawResult(resultRaw); patch != "" {
+				return patch, filePath
+			}
+		}
+	}
+	if patch, filePath := explicitPatchFromResultDisplay(raw); patch != "" {
+		return patch, filePath
+	}
+	if patch, filePath := editPatchFromStructuredPatch(object); patch != "" {
+		return patch, filePath
+	}
+	if patch := jsonStringField(object, "patch", "diff", "file_diff", "fileDiff"); patch != "" {
+		return patch, firstNonEmptyString(jsonStringField(object, "file_path", "filePath", "path", "file"), patchFilePath(patch))
+	}
+	return "", ""
+}
+
 func editPatchHunksFromRawResult(raw json.RawMessage) ([]StructuredPatchHunk, []string) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -877,6 +909,40 @@ func editPatchHunksFromRawResult(raw json.RawMessage) ([]StructuredPatchHunk, []
 		}
 	}
 	if hunks, filePaths := patchHunksFromResultDisplay(raw); len(hunks) > 0 {
+		return hunks, filePaths
+	}
+	if hunks, filePaths := patchHunksFromStructuredPatch(object); len(hunks) > 0 {
+		return hunks, filePaths
+	}
+	if patch := jsonStringField(object, "patch", "diff", "file_diff", "fileDiff"); patch != "" {
+		filePath := firstNonEmptyString(jsonStringField(object, "file_path", "filePath", "path", "file"), patchFilePath(patch))
+		hunks := parsePatchHunks(patch, filePath)
+		return hunks, patchHunkFilePaths(hunks)
+	}
+	return nil, nil
+}
+
+func explicitPatchHunksFromRawResult(raw json.RawMessage) ([]StructuredPatchHunk, []string) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) == 0 {
+		return nil, nil
+	}
+	if displayRaw, ok := object["resultDisplay"]; ok {
+		if hunks, filePaths := explicitPatchHunksFromResultDisplay(displayRaw); len(hunks) > 0 {
+			return hunks, filePaths
+		}
+	}
+	for _, key := range []string{"tool_result", "toolUseResult", "provider_result"} {
+		if resultRaw, ok := object[key]; ok {
+			if hunks, filePaths := explicitPatchHunksFromRawResult(resultRaw); len(hunks) > 0 {
+				return hunks, filePaths
+			}
+		}
+	}
+	if hunks, filePaths := explicitPatchHunksFromResultDisplay(raw); len(hunks) > 0 {
 		return hunks, filePaths
 	}
 	if hunks, filePaths := patchHunksFromStructuredPatch(object); len(hunks) > 0 {
@@ -956,6 +1022,18 @@ func editPatchFromResultDisplay(raw json.RawMessage) (string, string) {
 	return "", ""
 }
 
+func explicitPatchFromResultDisplay(raw json.RawMessage) (string, string) {
+	var display map[string]json.RawMessage
+	if json.Unmarshal(raw, &display) != nil || len(display) == 0 {
+		return "", ""
+	}
+	filePath := jsonStringField(display, "file_path", "filePath", "fileName", "file")
+	if patch := jsonStringField(display, "file_diff", "fileDiff", "patch", "diff"); patch != "" {
+		return patch, firstNonEmptyString(filePath, patchFilePath(patch))
+	}
+	return "", ""
+}
+
 func patchHunksFromResultDisplay(raw json.RawMessage) ([]StructuredPatchHunk, []string) {
 	var display map[string]json.RawMessage
 	if json.Unmarshal(raw, &display) != nil || len(display) == 0 {
@@ -970,6 +1048,19 @@ func patchHunksFromResultDisplay(raw json.RawMessage) ([]StructuredPatchHunk, []
 	newText := jsonStringField(display, "new_content", "newContent", "content")
 	if oldText != "" || newText != "" {
 		hunks := parsePatchHunks(buildUnifiedPatch(filePath, []editPatchHunk{{OldText: oldText, NewText: newText}}), filePath)
+		return hunks, patchHunkFilePaths(hunks)
+	}
+	return nil, nil
+}
+
+func explicitPatchHunksFromResultDisplay(raw json.RawMessage) ([]StructuredPatchHunk, []string) {
+	var display map[string]json.RawMessage
+	if json.Unmarshal(raw, &display) != nil || len(display) == 0 {
+		return nil, nil
+	}
+	filePath := jsonStringField(display, "file_path", "filePath", "fileName", "file")
+	if patch := jsonStringField(display, "file_diff", "fileDiff", "patch", "diff"); patch != "" {
+		hunks := parsePatchHunks(patch, firstNonEmptyString(filePath, patchFilePath(patch)))
 		return hunks, patchHunkFilePaths(hunks)
 	}
 	return nil, nil

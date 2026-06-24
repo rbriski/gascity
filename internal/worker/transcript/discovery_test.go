@@ -262,6 +262,45 @@ func TestDiscoverPathAmpPrefersCapturedSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathCursorPrefersCapturedSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "cursor-project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target-session.jsonl")
+	other := filepath.Join(base, "other-session.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		body := `{"type":"system","subtype":"init","cwd":` + quoteJSONString(workDir) + `,"session_id":"` + item.id + `"}` + "\n"
+		if err := os.WriteFile(item.path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "cursor/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+	gotMiss := DiscoverPath([]string{base}, "cursor/tmux-cli", workDir, "missing-session")
+	if gotMiss != "" {
+		t.Fatalf("DiscoverPath() missing Cursor session = %q, want empty", gotMiss)
+	}
+	gotFallback := DiscoverFallbackPath([]string{base}, "cursor/tmux-cli", workDir, "missing-session")
+	if gotFallback != "" {
+		t.Fatalf("DiscoverFallbackPath() missing Cursor session = %q, want empty", gotFallback)
+	}
+}
+
 func TestDiscoverPathGrokPrefersCapturedSessionID(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "grok-project")

@@ -45,6 +45,8 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return sessionlog.FindAmpSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "copilot":
 		return sessionlog.FindCopilotSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "cursor":
+		return sessionlog.FindCursorSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "grok":
 		return sessionlog.FindGrokSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "kiro":
@@ -79,6 +81,9 @@ func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID s
 		return ""
 	}
 	if sessionID != "" && family == "grok" {
+		return ""
+	}
+	if sessionID != "" && family == "cursor" {
 		return ""
 	}
 	if sessionID != "" && SupportsIDLookup(provider) {

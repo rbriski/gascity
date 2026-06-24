@@ -520,6 +520,46 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultNewString: "new",
 		},
 		{
+			name:          "cursor stream-json write",
+			provider:      "cursor",
+			writeFixture:  writeStructuredCursorWriteFixture,
+			toolCallID:    "call-cursor-write",
+			toolName:      "Write",
+			inputKind:     "write",
+			inputFilePath: "notes.txt",
+			inputText:     "hello cursor\n",
+			resultKind:    "write",
+			resultFile:    "notes.txt",
+			resultContent: "hello cursor",
+			resultAbsent:  []string{"fileText", "linesCreated", "fileSize"},
+		},
+		{
+			name:          "cursor stream-json read",
+			provider:      "cursor",
+			writeFixture:  writeStructuredCursorReadFixture,
+			toolCallID:    "call-cursor-read",
+			toolName:      "Read",
+			inputKind:     "file",
+			inputFilePath: "src/app.ts",
+			resultKind:    "read",
+			resultFile:    "src/app.ts",
+			resultContent: "export const app = true;",
+			resultAbsent:  []string{"readToolCall", "toolCallId", "totalLines", "totalChars"},
+		},
+		{
+			name:         "cursor stream-json bash",
+			provider:     "cursor",
+			writeFixture: writeStructuredCursorBashFixture,
+			toolCallID:   "call-cursor-bash",
+			toolName:     "Bash",
+			inputKind:    "command",
+			inputCommand: "npm test",
+			resultKind:   "bash",
+			resultStdout: "ok\n",
+			resultExit:   intPtr(0),
+			resultAbsent: []string{"exitCode"},
+		},
+		{
 			name:            "grok acp edit result patch",
 			provider:        "grok",
 			writeFixture:    writeStructuredGrokACPEditPatchFixture,
@@ -650,6 +690,13 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 				"originalFile",
 				"replaceAll",
 				"userModified",
+				"readToolCall",
+				"writeToolCall",
+				"fileText",
+				"linesCreated",
+				"fileSize",
+				"totalLines",
+				"totalChars",
 				"oldTodos",
 				"newTodos",
 				"activeForm",
@@ -1791,6 +1838,55 @@ func writeStructuredAmpEditPatchFixture(t *testing.T, root, workDir, sessionKey 
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write amp fixture: %v", err)
+	}
+}
+
+func writeStructuredCursorWriteFixture(t *testing.T, root, workDir, sessionKey string) {
+	t.Helper()
+	path := filepath.Join(root, sessionKey+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir cursor fixture dir: %v", err)
+	}
+	body := strings.Join([]string{
+		fmt.Sprintf(`{"type":"system","subtype":"init","cwd":%q,"session_id":%q}`, workDir, sessionKey),
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"writing"}]},"session_id":"` + sessionKey + `"}`,
+		`{"type":"tool_call","subtype":"started","call_id":"call-cursor-write","tool_call":{"writeToolCall":{"toolCallId":"call-cursor-write","args":{"path":"notes.txt","fileText":"hello cursor\n"}}},"session_id":"` + sessionKey + `"}`,
+		`{"type":"tool_call","subtype":"completed","call_id":"call-cursor-write","tool_call":{"writeToolCall":{"toolCallId":"call-cursor-write","args":{"path":"notes.txt","fileText":"hello cursor\n"},"result":{"success":{"path":"notes.txt","linesCreated":1,"fileSize":13}}}},"session_id":"` + sessionKey + `"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write cursor fixture: %v", err)
+	}
+}
+
+func writeStructuredCursorReadFixture(t *testing.T, root, workDir, sessionKey string) {
+	t.Helper()
+	path := filepath.Join(root, sessionKey+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir cursor fixture dir: %v", err)
+	}
+	body := strings.Join([]string{
+		fmt.Sprintf(`{"type":"system","subtype":"init","cwd":%q,"session_id":%q}`, workDir, sessionKey),
+		`{"type":"tool_call","subtype":"started","call_id":"call-cursor-read","tool_call":{"readToolCall":{"toolCallId":"call-cursor-read","args":{"path":"src/app.ts"}}},"session_id":"` + sessionKey + `"}`,
+		`{"type":"tool_call","subtype":"completed","call_id":"call-cursor-read","tool_call":{"readToolCall":{"toolCallId":"call-cursor-read","args":{"path":"src/app.ts"},"result":{"success":{"content":"export const app = true;\n","isEmpty":false,"exceededLimit":false,"totalLines":1,"totalChars":25}}}},"session_id":"` + sessionKey + `"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write cursor fixture: %v", err)
+	}
+}
+
+func writeStructuredCursorBashFixture(t *testing.T, root, workDir, sessionKey string) {
+	t.Helper()
+	path := filepath.Join(root, sessionKey+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir cursor fixture dir: %v", err)
+	}
+	body := strings.Join([]string{
+		fmt.Sprintf(`{"type":"system","subtype":"init","cwd":%q,"session_id":%q}`, workDir, sessionKey),
+		`{"type":"tool_call","subtype":"started","call_id":"call-cursor-bash","tool_call":{"function":{"name":"Bash","arguments":{"command":"npm test"}}},"session_id":"` + sessionKey + `"}`,
+		`{"type":"tool_call","subtype":"completed","call_id":"call-cursor-bash","tool_call":{"function":{"name":"Bash","arguments":{"command":"npm test"},"result":{"success":{"stdout":"ok\n","stderr":"","exitCode":0}}}},"session_id":"` + sessionKey + `"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write cursor fixture: %v", err)
 	}
 }
 

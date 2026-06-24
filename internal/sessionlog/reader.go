@@ -160,6 +160,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		return ReadCodexFile(path, tailCompactions)
 	case "copilot":
 		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
 	case "grok":
 		return ReadGrokFile(path, tailCompactions)
 	case "kiro":
@@ -227,6 +229,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		return ReadCodexFile(path, tailCompactions)
 	case "copilot":
 		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
 	case "grok":
 		return ReadGrokFile(path, tailCompactions)
 	case "kiro":
@@ -318,6 +322,8 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 		return ReadCodexFile(path, tailCompactions)
 	case "copilot":
 		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
 	case "grok":
 		return ReadGrokFile(path, tailCompactions)
 	case "kiro":
@@ -352,6 +358,8 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 		return ReadCodexFile(path, tailCompactions)
 	case "copilot":
 		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
 	case "grok":
 		return ReadGrokFile(path, tailCompactions)
 	case "kiro":
@@ -442,6 +450,8 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 		return ReadCodexFile(path, tailCompactions)
 	case "copilot":
 		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
 	case "grok":
 		return ReadGrokFile(path, tailCompactions)
 	case "kiro":
@@ -476,6 +486,8 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 		return ReadCodexFile(path, tailCompactions)
 	case "copilot":
 		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
 	case "grok":
 		return ReadGrokFile(path, tailCompactions)
 	case "kiro":
@@ -649,6 +661,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "copilot":
 		return FindCopilotSessionFile(searchPaths, workDir)
+	case "cursor":
+		return FindCursorSessionFile(searchPaths, workDir)
 	case "grok":
 		return FindGrokSessionFile(searchPaths, workDir)
 	case "kiro":
@@ -686,6 +700,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "copilot":
 		return FindCopilotSessionFile(searchPaths, workDir)
+	case "cursor":
+		return FindCursorSessionFile(searchPaths, workDir)
 	case "grok":
 		return FindGrokSessionFile(searchPaths, workDir)
 	case "kiro":
@@ -1379,6 +1395,8 @@ func ProviderFamily(provider string) string {
 		return "codex"
 	case strings.Contains(p, "copilot"):
 		return "copilot"
+	case p == "cursor" || strings.HasPrefix(p, "cursor/") || strings.HasSuffix(p, "/cursor") || strings.HasSuffix(p, "-cursor") || p == "cursor-agent":
+		return "cursor"
 	case p == "grok" || strings.HasPrefix(p, "grok/") || strings.HasSuffix(p, "/grok") || strings.HasSuffix(p, "-grok"):
 		return "grok"
 	case strings.Contains(p, "kiro"):

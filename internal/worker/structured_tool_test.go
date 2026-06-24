@@ -571,6 +571,41 @@ func TestInferStructuredToolResultNormalizesWriteFileResult(t *testing.T) {
 	}
 }
 
+func TestInferStructuredToolResultDoesNotGeneratePatchFromNeutralWriteContent(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]any{
+		"file_path": "notes.txt",
+		"content":   "hello cursor\n",
+		"num_lines": 1,
+	})
+	block := HistoryBlock{
+		Kind:    BlockKindToolResult,
+		Name:    "Write",
+		Content: raw,
+	}
+	context := structuredToolContext{
+		Name: "Write",
+		Input: &StructuredToolInput{
+			Kind:     "write",
+			FilePath: "notes.txt",
+			Text:     "hello cursor\n",
+		},
+	}
+
+	got := inferStructuredToolResult(block, context, structuredJSONText(raw))
+	if got == nil {
+		t.Fatal("inferStructuredToolResult returned nil")
+	}
+	if got.Kind != "write" {
+		t.Fatalf("Kind = %q, want write; result = %+v", got.Kind, got)
+	}
+	if got.Content != "hello cursor\n" || got.FilePath != "notes.txt" || got.NumLines != 1 {
+		t.Fatalf("write result fields = content %q path %q lines %d, want neutral write content", got.Content, got.FilePath, got.NumLines)
+	}
+	if got.Patch != "" || len(got.PatchHunks) != 0 {
+		t.Fatalf("write result unexpectedly generated patch data: %+v", got)
+	}
+}
+
 func TestInferStructuredToolResultNormalizesWebFetchResult(t *testing.T) {
 	raw := mustMarshalStructuredToolTest(t, struct {
 		URL        string `json:"url"`

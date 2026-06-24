@@ -34,13 +34,12 @@ frame parsing** to recover structure
 The result is that rich structured consumers cannot be built on the supervisor
 API without each client owning a fragile, untested, client-side normalization
 layer for 17 built-in profiles spanning fewer provider transcript families.
-This is precisely what one downstream
-consumer does today — its server reads `format=raw` and reconstructs full
-fidelity (tool inputs, structured tool results, thinking, usage, subagent
-nesting) before its clients consume the transcript. That work is duplicated in
-every consumer that wants rich presentation or programmatic access, and it
-lives one layer removed from the provider knowledge that already exists
-*inside* Gas City.
+This is precisely what MC does today — its server reads `format=raw` and
+reconstructs full fidelity (tool inputs, structured tool results, thinking,
+usage, subagent nesting) before its clients consume the transcript. That work
+is duplicated in every consumer that wants rich presentation or programmatic
+access, and it lives one layer removed from the provider knowledge that already
+exists *inside* Gas City.
 
 This design adds a third requested format, **`format=structured`**, that emits
 Gas City's already-parsed content blocks as a typed, versioned schema — text,
@@ -74,14 +73,14 @@ the fact, hiding it in an untyped map, or pushing native provider shape to the
 client.
 
 The headline finding from the cross-codebase and provider-format audit behind
-this spec: Gas City now parses provider frames into typed blocks for 12
-transcript families, covering 16 of the 17 built-in provider profiles once
-OpenCode-backed and Pi-family aliases are routed correctly. The dominant gap
-is not a lack of a structured wire shape — it is that Gas City's API flattens
-the structure it already has, and several providers need either modernized
-readers or managed capture because their public persisted transcript is not a
-rich complete trace. One cross-cutting carrier/schema change therefore unlocks
-most fidelity immediately; targeted provider adapters close the remainder.
+this spec: Gas City now parses provider frames into typed blocks for all 17
+built-in provider profiles when a supported native transcript or configured
+capture source is available. The dominant gap is not a lack of a structured
+wire shape — it is that Gas City's API flattens the structure it already has,
+and several providers need either modernized readers, managed capture, or
+fixture hardening because their public persisted transcript is not a rich
+complete trace. One cross-cutting carrier/schema change therefore unlocks most
+fidelity immediately; targeted provider adapters close the remainder.
 This is **transcript-schema parity**, not end-to-end provider parity: provider
 resume, hooks, MCP projection, skills, and runtime behavior remain governed by
 their own provider-specific designs.
@@ -180,18 +179,20 @@ The current adapter/capture target is:
 | antigravity | Antigravity transcript JSONL / brain artifacts | rich messages, tool calls/results, interactions, artifacts where exposed |
 | copilot | Copilot CLI session-state event log | rich for messages, `tool.execution_*`, command output, errors, and result-side edit diffs when present |
 | kiro | Kiro ACP JSONL event log under `~/.kiro/sessions/cli` | rich through ACP `session/update` events (`ToolCall`, `ToolCallUpdate`, `TurnEnd`); DB-only chat export needs sampling before use |
-| cursor | Cursor transcript plus Gas City hook capture | native JSONL has messages and tool-call inputs only; tool outputs require hook capture |
+| cursor | Cursor stream JSON plus Gas City hook capture | stream/hook captures normalize messages, tool calls/results, command output, read/write evidence, and result events; native local JSONL omits tool outputs and cannot provide complete rich results by itself |
 | amp | `amp --execute --stream-json` live capture | rich for execute/headless flows; retrospective local thread discovery is not a public stable source |
 | grok | captured Grok ACP JSONL (`session/update`) | rich for ACP capture; `--output-format streaming-json` and persisted `~/.grok/sessions` need fixture/schema validation before use |
 | auggie | captured Auggie ACP JSONL (`session/update`) | rich for configured ACP capture; saved-session `chatHistory` / node graph, SDK capture, and hook capture need fixture/schema validation before use |
 
 Practical consequence: the carrier + stop-flatten change immediately lights up
-the 12 existing transcript families and 16 built-in profiles. The remaining
-native profile requires reader/capture work, not client-side provider parsers.
+the provider-normalized transcript families for all 17 built-in profiles where
+GC has either a native transcript reader or configured capture. Remaining gaps
+require provider-reader hardening, managed capture, and real-provider fixtures,
+not client-side provider parsers.
 
 ## The streaming ceiling (read before scoping "streaming")
 
-Both Gas City and the audited consumer operate on **whole committed
+Both Gas City and MC operate on **whole committed
 frames**, not token/sub-frame deltas:
 
 - Claude Code writes whole JSONL message lines (a `tool_use` block is
@@ -201,7 +202,7 @@ frames**, not token/sub-frame deltas:
 - Codex writes a whole `function_call_output` per result; its
   `exec_command_begin/end` progress frames are dropped today in
   `skipCodexEventMsgType` (`internal/sessionlog/codex_reader.go:315-327`).
-- The consumer's streaming-delta assemblers exist but are **bypassed** in
+- MC's streaming-delta assemblers exist but are **bypassed** in
   production — they consume the same whole frames.
 
 Gas City's session stream already delivers these frames **live as they
@@ -215,8 +216,8 @@ This spec therefore defines streaming in two phases (per direction set in
 review):
 
 - **Phase 1 — frame-granular streaming.** Structured blocks delivered live
-  as each transcript frame commits. This matches the best fidelity any
-  consumer ships today and is the v1 target.
+  as each transcript frame commits. This matches the best fidelity MC ships
+  today and is the v1 target.
 - **Phase 2 — sub-frame streaming.** Token/delta-level streaming by tapping
   providers' live API output. A materially larger effort, scoped as future
   work, not blocking Phase 1.
@@ -236,12 +237,12 @@ Phase 1 hardening task for Gemini specifically.
   every provider fact that is present, derivable, or capturable must land in a
   provider-neutral typed field/result family rather than being flattened,
   ignored, hidden in untyped JSON, or exposed as provider-native shape.
-- Phase 1 rich support prioritizes the first-class provider families currently
-  under active structured-session validation: Claude, Codex, Gemini,
-  OpenCode-compatible providers, Grok ACP capture, and Auggie ACP capture. The
-  remaining built-in profiles still use the same typed envelope and must
-  gracefully downgrade to provider-neutral fallback data until their rich source
-  capture is complete.
+- Phase 1 rich support prioritizes the provider families currently under active
+  structured-session validation: Claude, Codex, Gemini, OpenCode-compatible
+  providers, Pi-family providers, Cursor stream/hook capture, Amp stream-json
+  capture, Grok ACP capture, and Auggie ACP capture. Every built-in profile uses
+  the same typed envelope and gracefully downgrades to provider-neutral fallback
+  data where provider-native or managed-capture evidence is incomplete.
 - Highest available fidelity for tool inputs, **structured tool results**, file
   edits/diffs, thinking + signature, usage, model, stop-reason, provider
   subagent relationships, artifacts, interactions, and any future provider data
@@ -441,7 +442,7 @@ generated clients, dashboard types, and golden fixtures together.
 | Amp | Dedicated reader maps captured `amp --execute --stream-json` JSONL into provider-neutral user/assistant/system messages, tool-use blocks, tool-result blocks, thinking blocks when present, usage metadata, and final result system events. Tool inputs/results normalize common command/file/edit/result keys before worker inference; JSON-string tool result payloads are decoded and neutralized before reaching `format=structured`. Discovery uses configured GC-owned capture paths only, because Amp does not document a stable retrospective local transcript store. | Add managed stdout capture before enabling stream-json in the builtin profile; validate against real Amp tool-result fixtures and subagent `parent_tool_use_id` cases. |
 | Grok | Dedicated reader maps captured Grok ACP JSONL `session/update` events into provider-neutral assistant text, `tool_use`, and `tool_result` blocks by reusing the ACP normalization path. ACP `rawInput` / `rawOutput` fields normalize to neutral command/file/edit/result keys; ACP diff content normalizes to result-side patch data. Discovery uses configured GC-owned capture paths only, because the documented `~/.grok/sessions` persisted schema and `streaming-json` event schema still need fixture validation before use. | Add managed ACP/headless capture for builtin sessions if GC should launch Grok in that mode; collect real Grok ACP and streaming-json fixtures before claiming persisted/headless parity outside configured captures. |
 | Auggie | Dedicated reader maps captured Auggie ACP JSONL `session/update` events into provider-neutral assistant text, `tool_use`, and `tool_result` blocks by reusing the ACP normalization path. ACP `rawInput` / `rawOutput` fields normalize to neutral command/file/edit/result keys; ACP diff content normalizes to result-side patch data. Discovery uses configured GC-owned capture paths only, because GC does not yet rely on a stable retrospective local Auggie transcript store. | Add managed ACP, SDK, or hook capture for builtin sessions; collect real Auggie ACP/hook/SDK fixtures before claiming saved-session, hook, or live SDK parity outside configured captures. |
-| Cursor | Native transcript/capture work remains incomplete. | Guarantee structured fallback now; add hook capture or a dedicated rich source before claiming result/diff parity. |
+| Cursor | Dedicated reader maps Cursor stream JSON and configured hook captures into provider-neutral user/assistant messages, `tool_use`, `tool_result`, and final result system events. Cursor stream tool calls normalize read/write/shell evidence into neutral file, command, output, and edit/result keys; configured capture discovery validates cwd and session ID. Native local Cursor transcripts intentionally omit tool outputs, so they are not a complete rich source by themselves. | Add managed stream/hook capture for builtin Cursor sessions; collect real Cursor stream/hook fixtures across CLI versions before claiming parity beyond configured captures. |
 
 ### Implementation sequence
 
@@ -893,12 +894,13 @@ exactly why Codex results are opaque today. Then:
   SDK `tool_call_update` / `rawOutput` formats with real fixtures before
   relying on them.
 
-**1J. Native reader/capture work for the remaining 1 profile.**
+**1J. Cursor capture hardening.**
 
 - Cursor: native local transcripts intentionally omit tool outputs, so rich
-  structured support requires Gas City-managed hook capture (for example
-  `postToolUse`) or sidecar output reconstruction. The native JSONL alone may
-  provide tool-call intent but is insufficient for rich results/diffs.
+  structured support requires Cursor stream JSON or Gas City-managed hook
+  capture (for example `postToolUse`) rather than the native local JSONL alone.
+  GC now has a dedicated Cursor reader for stream/hook captures; remaining work
+  is managed builtin capture and real-provider fixture hardening.
 
 **1K. Golden-fixture test corpus (cross-cutting; do alongside 1A–1J).**
 
@@ -1057,6 +1059,12 @@ authorization/redaction layer.
     assistant text, and tool-call inputs but intentionally omit tool-call
     outputs; they recommend hooks for full output capture:
     <https://forum.cursor.com/t/accessing-the-full-agent-transcript-in-cursor/157311>.
+  - Cursor documents `--output-format stream-json` as line-delimited JSON
+    events with `tool_call` started/completed frames:
+    <https://cursor.com/docs/cli/reference/output-format>.
+  - Cursor documents hooks as local processes configured through Cursor hook
+    manifests:
+    <https://cursor.com/docs/hooks>.
   - Amp documents `--execute --stream-json` as line-delimited structured
     output, plus `--stream-json-input` for programmatic conversations:
     <https://ampcode.com/manual>.

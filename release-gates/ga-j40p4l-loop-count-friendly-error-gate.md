@@ -1,59 +1,42 @@
-# Release Gate: ga-j40p4l loop.count friendly error UX
+# Release Gate: Loop Count Friendly Error
 
-Date: 2026-06-24
+Decision: PASS
 
-Branch: `release/ga-j40p4l-loop-count-friendly-error`
-Head before gate commit: `0a2b1e7edac3c1c9bf8d716652965d5d10266bfb`
-Base: `origin/main`
-Deploy bead: `ga-j40p4l`
-Source review bead: `ga-acfcqc`
+## Scope
 
-Note: this repo does not contain `docs/PROJECT_MANIFEST.md`; no Gas City
-project manifest was found with `rg --files -g PROJECT_MANIFEST.md` or `find`.
-This gate uses the deployer prompt release criteria and the repo gates in
-`TESTING.md` plus `gascity-docs` verification rules for the tutorial change.
+- Deploy bead: ga-j40p4l
+- Source review bead: ga-acfcqc
+- Reviewed commit: 0a2b1e7edac3c1c9bf8d716652965d5d10266bfb
+- Actual source branch: builder/ga-sdv68f-loop-count-friendly-error
+- Release branch: release/ga-j40p4l-loop-count-friendly-error
+- Base: origin/main 4c3b612b7fc0cbfff01ae527a9dcd4a1e9ee5741
+- Shape: single-bead PR
 
-## Summary
-
-PASS. The branch is a single feature theme: make string-valued
-`loop.count` fail with an actionable formula compile error and document the
-integer-literal requirement in the formulas tutorial.
+The deploy bead listed the branch as `main`, but the reviewed commit is present
+on `origin/builder/ga-sdv68f-loop-count-friendly-error` and not on
+`origin/main`. This gate uses a clean release branch cut from the reviewed
+commit so the PR has a valid feature head and does not depend on a dirty local
+builder worktree.
 
 ## Criteria
 
 | # | Criterion | Result | Evidence |
-|---|---|---|---|
-| 1 | Review PASS present | PASS | `ga-acfcqc` is closed with reason `pass`; notes contain `Review Verdict: PASS` from `reviewer-gm-wisp-22n14q2` dated 2026-06-24. |
-| 2 | Acceptance criteria met | PASS | `internal/formula/types.go` rejects string-valued `loop.count` before JSON decoding; `internal/formula/compile_test.go` adds `TestCompile_LoopCountStringParseError`; `docs/tutorials/05-formulas.md` notes integer-only `count` and points variable-driven counts to `range = "1..{n}"` with `var = "n"`. |
-| 3 | Tests pass | PASS | Focused test, formula package, full fast baseline, vet, and docs sync all passed. Details below. |
-| 4 | No high-severity review findings open | PASS | Review notes list one LOW style/wording finding; no HIGH findings. |
-| 5 | Final branch is clean | PASS | `git status --short --branch` was clean before writing this gate file; the gate file is committed as the final branch tip. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-base --is-ancestor origin/main HEAD` exited 0; `git merge-tree origin/main HEAD` returned a tree id with no conflict output. |
-| 7 | Single feature theme | PASS | Diff is limited to `internal/formula` parser behavior/tests and the matching formulas tutorial note. |
+|---|-----------|--------|----------|
+| 1 | Review PASS present | PASS | Source review bead ga-acfcqc is closed with `Review Verdict: PASS` for commit 0a2b1e7edac3c1c9bf8d716652965d5d10266bfb. |
+| 2 | Acceptance criteria met | PASS | Branch delta adds a pre-check in `internal/formula/types.go` so string-valued `loop.count` fails with a friendly message that points users to `range = "1..{n}"` plus `var = "n"`. `TestCompile_LoopCountStringParseError` covers the parse error. `docs/tutorials/05-formulas.md` documents that `count` accepts only integer literals and points variable-driven loops to `range`. |
+| 3 | Tests pass | PASS | `make check-docs`, `go test ./internal/formula -run TestCompile_LoopCountStringParseError`, `go test ./internal/formula`, `make test-fast-parallel`, `go vet ./...`, and `go build -o /tmp/gc-ga-j40p4l ./cmd/gc` all passed. |
+| 4 | No high-severity review findings open | PASS | Review findings are PASS/LOW only; no unresolved HIGH or CRITICAL findings appear in the deploy or review bead notes. |
+| 5 | Final branch is clean | PASS | The gate ran in a dedicated clean worktree on `release/ga-j40p4l-loop-count-friendly-error`; `git status --short --branch` was clean before adding this gate file. |
+| 6 | Branch diverges cleanly from main | PASS | `git merge-base --is-ancestor origin/main HEAD` passed on the reviewed commit; the release branch is a straight descendant of current `origin/main`. |
+| 7 | Single feature theme | PASS | Commit set is one formula parser UX fix, one focused regression test, and one tutorial note for the same `loop.count` behavior. |
 
-## Test Evidence
+## Commands Run
 
-- PASS: `git diff --check origin/main..HEAD`
-- PASS: `go test ./internal/formula/ -run TestCompile_LoopCountStringParseError -count=1`
-  - `ok github.com/gastownhall/gascity/internal/formula 0.003s`
-- PASS: `go test ./internal/formula/...`
-  - `ok github.com/gastownhall/gascity/internal/formula 0.263s`
-- PASS: `go vet ./internal/formula/...`
-- PASS: `make check-docs`
-  - `ok github.com/gastownhall/gascity/test/docsync (cached)`
-- PASS: `go vet ./...`
-- PASS: `make test-fast-parallel`
-  - `All fast jobs passed`
-
-## Commit Set
-
-- `50bc876a4` - `test(formula): regression coverage for loop.count string parse errors (ga-sdv68f.1)`
-- `2703d79d1` - `fix(formula): friendly error when loop.count is a string or template value (ga-sdv68f.3)`
-- `0a2b1e7ed` - `docs(formula): note that loop.count is integer-only; point to range for variable counts (ga-sdv68f.2)`
-
-## Changed Paths
-
-- `internal/formula/types.go`
-- `internal/formula/compile_test.go`
-- `docs/tutorials/05-formulas.md`
-
+```text
+make check-docs
+go test ./internal/formula -run TestCompile_LoopCountStringParseError
+go test ./internal/formula
+make test-fast-parallel
+go vet ./...
+go build -o /tmp/gc-ga-j40p4l ./cmd/gc
+```

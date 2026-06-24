@@ -189,7 +189,9 @@ func TestModelUsageFact(t *testing.T) {
 		CacheReadTokens:     10,
 		CacheCreationTokens: 5,
 	}
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+	// The session bead carries gc.active_work_bead (the step it is currently on),
+	// stamped by the claim hook; modelUsageFact reads it into Fact.StepID.
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.active_work_bead": "mol.finalize"}}
 
 	priced := modelUsageFact(u, bead, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
 	if priced.Kind != usage.KindModel {
@@ -203,6 +205,11 @@ func TestModelUsageFact(t *testing.T) {
 	// key to the spend plane (EIA session_id) and recall transcripts.
 	if priced.SessionID != "session-1" {
 		t.Fatalf("SessionID = %q, want the session bead id session-1", priced.SessionID)
+	}
+	// StepID is the session's gc.active_work_bead (the bare logical step), distinct
+	// from RunID — the exact-join key to the events plane and per-step spend rollup.
+	if priced.StepID != "mol.finalize" {
+		t.Fatalf("StepID = %q, want mol.finalize (the session's gc.active_work_bead), distinct from RunID", priced.StepID)
 	}
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)

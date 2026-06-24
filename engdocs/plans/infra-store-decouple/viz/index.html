@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gas City — Infra/Beads Decoupling · Final Architecture</title>
+<style>
+  :root{
+    --bg:#0c0f15; --panel:#141a24; --panel2:#1b2330; --ink:#e7edf5; --mut:#93a1b5; --line:#2a3645;
+    --bd:#f2a341; --bd-dim:#5a4424;       /* bd / Dolt front-door work */
+    --sq:#39d0c8; --sq-dim:#1d4744;       /* SQLite infra */
+    --dom:#a98bff; --dom-dim:#39305c;     /* domain layer */
+    --svc:#7fb2ff; --wire:#ff8fb0; --evt:#9be36b;
+    --ok:#52d273; --go:#5aa9ff; --nogo:#ff6b6b; --prereq:#c08bff; --defer:#7c8aa0;
+    --shadow:0 1px 0 #ffffff0a, 0 12px 30px #00000055;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:radial-gradient(1200px 700px at 70% -10%, #16202e 0%, var(--bg) 60%);color:var(--ink);
+    font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial}
+  a{color:var(--sq)}
+  .wrap{max-width:1180px;margin:0 auto;padding:34px 22px 90px}
+  header h1{font-size:26px;margin:0 0 4px;letter-spacing:.2px}
+  header .sub{color:var(--mut);margin:0 0 16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:12.5px;color:var(--ink)}
+  .chip b{color:var(--dom)}
+  h2{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--mut);margin:40px 0 14px;font-weight:700}
+  .card{background:linear-gradient(180deg,var(--panel) 0%, #0f141c 100%);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;color:var(--mut);font-size:12.5px;margin:8px 0 0}
+  .key{display:inline-flex;align-items:center;gap:7px}
+  .sw{width:13px;height:13px;border-radius:4px;display:inline-block}
+
+  /* two-tier */
+  .tiers{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .tier{padding:16px 16px 14px;border-radius:14px}
+  .tier h3{margin:0 0 4px;font-size:16px;display:flex;align-items:center;gap:9px}
+  .tier .tag{font-size:11px;font-weight:700;letter-spacing:.08em;padding:2px 8px;border-radius:6px}
+  .tier p{color:var(--mut);margin:6px 0 10px;font-size:13px}
+  .tier ul{margin:0;padding-left:18px;color:var(--ink);font-size:13px}
+  .tier li{margin:3px 0}
+  .tier.bd{background:linear-gradient(180deg,#1d160a, #12100a);border:1px solid #4a3a1e}
+  .tier.sq{background:linear-gradient(180deg,#0c1f1e, #0c1614);border:1px solid #1f4f4b}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+
+  /* layered architecture */
+  .stack{display:flex;flex-direction:column;gap:0}
+  .band{position:relative;border:1px solid var(--line);border-bottom:none;padding:14px 16px;background:var(--panel)}
+  .band:first-child{border-top-left-radius:14px;border-top-right-radius:14px}
+  .band:last-child{border-bottom:1px solid var(--line);border-bottom-left-radius:14px;border-bottom-right-radius:14px}
+  .band .lh{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+  .band .lh b{font-size:14px}
+  .band .lh span{color:var(--mut);font-size:12px}
+  .row{display:flex;flex-wrap:wrap;gap:9px}
+  .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-width:120px}
+  .box .t{font-weight:650;font-size:13px}
+  .box .d{color:var(--mut);font-size:11.5px;margin-top:2px}
+  .box.dom{border-color:#4a3f74;background:linear-gradient(180deg,#221d35,#181426)}
+  .box.dom .t{color:var(--dom)}
+  .box.sub{border-color:#33404f}
+  .box.proj{border-color:#34465f}
+  .box.svc{border-color:#33404f}
+  .flowtag{position:absolute;right:14px;top:12px;font-size:11px;color:var(--mut)}
+  .arrowcol{display:flex;justify-content:center;gap:60px;color:var(--mut);font-size:11px;margin:0}
+  .edge{font-size:11.5px;color:var(--mut);margin-top:8px}
+  .edge b{color:var(--ink)}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:880px){.tiers,.grid2{grid-template-columns:1fr}}
+
+  /* svg blocks */
+  .svgcard{padding:10px 8px 4px;overflow-x:auto}
+  svg{display:block;max-width:100%;height:auto}
+  .cap{color:var(--mut);font-size:12px;padding:4px 10px 12px}
+
+  /* router survive list */
+  .surv{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 16px}
+  .surv .it{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--sq);border-radius:8px;padding:9px 11px}
+  .surv .it.die{border-left-color:var(--nogo);opacity:.85}
+  .surv .it b{font-size:13px}
+  .surv .it span{display:block;color:var(--mut);font-size:11.5px;margin-top:2px}
+
+  /* roadmap */
+  .road{display:flex;flex-direction:column;gap:9px;padding:14px 16px}
+  .ph{display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;background:var(--panel2);
+     border:1px solid var(--line);border-radius:10px;padding:10px 12px;border-left:4px solid var(--line)}
+  .ph .id{font-weight:800;font-size:15px}
+  .ph .ti{font-size:13px}
+  .ph .ti small{color:var(--mut);display:block;font-size:11.5px;margin-top:2px}
+  .ph .st{font-size:11px;font-weight:700;letter-spacing:.05em;padding:3px 9px;border-radius:6px;white-space:nowrap}
+  .ph.done{border-left-color:var(--ok)} .st.done{background:#13351f;color:var(--ok)}
+  .ph.go{border-left-color:var(--go)} .st.go{background:#102844;color:var(--go)}
+  .ph.nogo{border-left-color:var(--nogo)} .st.nogo{background:#3a1717;color:var(--nogo)}
+  .ph.prereq{border-left-color:var(--prereq)} .st.prereq{background:#291a3d;color:var(--prereq)}
+  .ph.defer{border-left-color:var(--defer)} .st.defer{background:#1c242f;color:var(--defer)}
+  .ph .cp{font-size:10.5px;color:var(--bd);margin-left:8px}
+
+  .cpbar{font-size:12.5px;color:var(--mut);padding:0 16px 14px}
+  .cpbar code{background:#0c1119;border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--bd);font-size:11.5px;display:inline-block;line-height:1.9}
+  .ponr{padding:0 16px 16px}
+  .ponr .p{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--ink);margin:6px 0}
+  .ponr .p::before{content:"⛔";font-size:12px;line-height:1.4}
+  footer{color:var(--mut);font-size:12px;margin-top:46px;border-top:1px solid var(--line);padding-top:14px}
+  .pill{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:11.5px;color:var(--mut)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Gas City — Infra / Beads Decoupling</h1>
+    <p class="sub">Final architecture · branch <span class="mono">plan/decouple-infra-beads</span> · 8 phases · 102 tasks · domain-typed stores, full arc to SQLite</p>
+    <div class="chips">
+      <span class="chip"><b>1</b>&nbsp; Domain types to the wire</span>
+      <span class="chip"><b>2</b>&nbsp; Full arc to SQLite</span>
+      <span class="chip"><b>3</b>&nbsp; Delete the Router</span>
+      <span class="chip"><b>4</b>&nbsp; extmsg deferred after mail</span>
+      <span class="chip"><b>5</b>&nbsp; Controller-mediated infra writes</span>
+      <span class="chip"><b>6</b>&nbsp; Conformance-only validation</span>
+    </div>
+    <div class="legend">
+      <span class="key"><span class="sw" style="background:var(--bd)"></span> bd / Dolt — front-door work</span>
+      <span class="key"><span class="sw" style="background:var(--sq)"></span> SQLite — infrastructure</span>
+      <span class="key"><span class="sw" style="background:var(--dom)"></span> domain-typed (fork-owned)</span>
+      <span class="key"><span class="sw" style="background:var(--wire)"></span> wire / DTO</span>
+      <span class="key"><span class="sw" style="background:var(--evt)"></span> events</span>
+    </div>
+  </header>
+
+  <!-- TWO-TIER END STATE -->
+  <h2>The end state — two persistence tiers</h2>
+  <div class="tiers">
+    <div class="tier bd">
+      <h3><span class="dot" style="background:var(--bd)"></span> Front-door WorkStore <span class="tag" style="background:var(--bd-dim);color:var(--bd)">bd / Dolt · git-synced</span></h3>
+      <p><span class="mono">beads.Bead</span> is BOTH the storage row and the wire type here. This store gets <i>simpler</i> as infra leaves. <span class="mono">GET /v0/beads</span> stays.</p>
+      <ul>
+        <li>task · epic · bug · feature</li>
+        <li>merge-request · spec · pack types</li>
+        <li>user / sling convoys</li>
+        <li>the <span class="mono">gc.routed_to</span> Ready/claim oracle</li>
+      </ul>
+    </div>
+    <div class="tier sq">
+      <h3><span class="dot" style="background:var(--sq)"></span> Infrastructure stores <span class="tag" style="background:var(--sq-dim);color:var(--sq)">embedded SQLite · per-class file</span></h3>
+      <p>Each class behind a fork-owned <b>domain-typed</b> interface; one file <span class="mono">&lt;cityPath&gt;/.gc/&lt;class&gt;.sqlite</span>, distinct id prefix, controller is the single writer.</p>
+      <ul>
+        <li>sessions <span class="pill mono">gcs-</span> + durable waits</li>
+        <li>mail <span class="pill mono">gcm-</span> &nbsp;·&nbsp; orders <span class="pill mono">gco-</span></li>
+        <li>nudges <span class="pill mono">gcn-</span></li>
+        <li>graph engine <span class="pill mono">gcg-</span> <span class="pill">already live</span></li>
+        <li><span style="color:var(--defer)">extmsg → deferred follow-on (history-tier)</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- LAYERED ARCHITECTURE -->
+  <h2>Layered architecture — domain type is the type-safe middle</h2>
+  <div class="stack">
+    <div class="band">
+      <span class="flowtag">projections ↑ read · ↓ write</span>
+      <div class="lh"><b>Layer 3 · Projections</b> <span>internal/api · cmd/gc — no domain logic</span></div>
+      <div class="row">
+        <div class="box proj"><div class="t">internal/api</div><div class="d">typed Huma DTOs per domain · typed event payloads</div></div>
+        <div class="box proj"><div class="t">GET /v0/sessions·orders·nudges·convoys</div><div class="d">domain → DTO at the wire edge</div></div>
+        <div class="box proj"><div class="t">GET /v0/beads</div><div class="d">stays beads.Bead (ClassWork)</div></div>
+        <div class="box proj"><div class="t">cmd/gc</div><div class="d">CLI · composition root · controller-mediated infra writes</div></div>
+      </div>
+    </div>
+    <div class="band">
+      <div class="lh"><b>Layer 2 · Services</b> <span>constructor-injected typed store · runtime enrichment lives here</span></div>
+      <div class="row">
+        <div class="box svc"><div class="t">session.Manager</div><div class="d">infoFromBead enrichment (impure) stays here</div></div>
+        <div class="box svc"><div class="t">mail services</div></div>
+        <div class="box svc"><div class="t">order dispatch</div></div>
+        <div class="box svc"><div class="t">nudge terminalization</div></div>
+        <div class="box svc"><div class="t">dispatch · molecule · sling</div></div>
+      </div>
+    </div>
+    <div class="band">
+      <div class="lh"><b>Layer 1 · Domain ownership</b> <span>fork-owned domain types + Store interfaces, IN the owning package</span></div>
+      <div class="row">
+        <div class="box dom"><div class="t">session.Info · SessionStore</div><div class="d">+ WAIT sub-entity</div></div>
+        <div class="box dom"><div class="t">mail.Message · MailStore</div></div>
+        <div class="box dom"><div class="t">orders.OrderTracking · OrderStore</div></div>
+        <div class="box dom"><div class="t">nudgequeue.Item · NudgeStore</div></div>
+        <div class="box dom"><div class="t">graphstore.GraphStore</div><div class="d">+ ClassifyGraphPlan (moved in)</div></div>
+        <div class="box dom"><div class="t">convoy.ConvoyStore</div><div class="d">user→work · synthetic→graph</div></div>
+      </div>
+      <div class="edge">↕ <b>storage-row edge</b> — <span class="mono">beads.Bead ⇄ domain</span> via a versioned typed-extras codec <span class="mono">{v; known; unknown}</span> (lossless round-trip)</div>
+    </div>
+    <div class="band">
+      <div class="lh"><b>Layer 0 · Substrate</b> <span>side effects · unchanged as a substrate</span></div>
+      <div class="row">
+        <div class="box sub"><div class="t">beads.Bead · beads.Store</div></div>
+        <div class="box sub"><div class="t">BdStore → Dolt</div></div>
+        <div class="box sub"><div class="t">SQLiteStore</div><div class="d">+ injected raw RowChanged emitter</div></div>
+        <div class="box sub"><div class="t">CachingStore · MemStore</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PER-CLASS STRANGLER FLOW + EVENT FLOW -->
+  <h2>Per-class strangler flow &amp; the two translation edges</h2>
+  <div class="grid2">
+    <div class="card svgcard">
+      <svg viewBox="0 0 520 340" role="img" aria-label="strangler flow">
+        <defs>
+          <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7f8da0"/></marker>
+          <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#93a1b5"/></marker>
+        </defs>
+        <!-- consumer -->
+        <rect x="180" y="14" width="160" height="40" rx="9" fill="#181426" stroke="#4a3f74"/>
+        <text x="260" y="33" fill="#a98bff" font-size="12.5" font-weight="700" text-anchor="middle">consumer (Layer 2)</text>
+        <text x="260" y="47" fill="#93a1b5" font-size="11" text-anchor="middle">session.Manager · dispatch · …</text>
+        <!-- interface -->
+        <rect x="170" y="92" width="180" height="46" rx="10" fill="#221d35" stroke="#6a59a6"/>
+        <text x="260" y="112" fill="#c9b8ff" font-size="13" font-weight="800" text-anchor="middle">Domain Store interface</text>
+        <text x="260" y="128" fill="#93a1b5" font-size="11" text-anchor="middle">SessionStore / MailStore / …</text>
+        <line x1="260" y1="54" x2="260" y2="90" stroke="#7f8da0" marker-end="url(#ar)"/>
+        <!-- two impls -->
+        <rect x="40" y="186" width="190" height="56" rx="10" fill="#12100a" stroke="#4a3a1e"/>
+        <text x="135" y="206" fill="#f2a341" font-size="12.5" font-weight="700" text-anchor="middle">bd-delegating adapter</text>
+        <text x="135" y="222" fill="#93a1b5" font-size="10.5" text-anchor="middle">FIRST impl · byte-identical</text>
+        <text x="135" y="235" fill="#93a1b5" font-size="10.5" text-anchor="middle">racy gate kept behind Skip+Reason</text>
+        <rect x="290" y="186" width="190" height="56" rx="10" fill="#0c1614" stroke="#1f4f4b"/>
+        <text x="385" y="206" fill="#39d0c8" font-size="12.5" font-weight="700" text-anchor="middle">SQLite impl</text>
+        <text x="385" y="222" fill="#93a1b5" font-size="10.5" text-anchor="middle">typed columns + extras blob</text>
+        <text x="385" y="235" fill="#93a1b5" font-size="10.5" text-anchor="middle">controller = single writer</text>
+        <path d="M232,138 C160,156 140,168 135,184" stroke="#7f8da0" fill="none" marker-end="url(#ar)"/>
+        <path d="M288,138 C360,156 380,168 385,184" stroke="#7f8da0" fill="none" marker-end="url(#ar)" stroke-dasharray="4 3"/>
+        <text x="150" y="166" fill="#f2a341" font-size="10" text-anchor="middle">today</text>
+        <text x="372" y="166" fill="#39d0c8" font-size="10" text-anchor="middle">cutover</text>
+        <!-- storage -->
+        <rect x="55" y="276" width="160" height="40" rx="9" fill="#1d160a" stroke="#4a3a1e"/>
+        <text x="135" y="300" fill="#f2a341" font-size="12" font-weight="700" text-anchor="middle">Dolt (bd)</text>
+        <rect x="305" y="276" width="160" height="40" rx="9" fill="#0c1f1e" stroke="#1f4f4b"/>
+        <text x="385" y="300" fill="#39d0c8" font-size="12" font-weight="700" text-anchor="middle">&lt;class&gt;.sqlite</text>
+        <line x1="135" y1="242" x2="135" y2="274" stroke="#7f8da0" marker-end="url(#ar)"/>
+        <line x1="385" y1="242" x2="385" y2="274" stroke="#7f8da0" marker-end="url(#ar)"/>
+      </svg>
+      <div class="cap"><b>Strangler:</b> interface first, bd adapter (byte-identical), then a SQLite impl behind the same interface — clean drain-then-switch, one-line config flip per class.</div>
+    </div>
+
+    <div class="card svgcard">
+      <svg viewBox="0 0 520 340" role="img" aria-label="event + wire flow">
+        <defs><marker id="ae" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9be36b"/></marker>
+        <marker id="aw2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ff8fb0"/></marker></defs>
+        <!-- wire path (right→up) -->
+        <text x="260" y="20" fill="#93a1b5" font-size="11" text-anchor="middle">— wire edge (domain ⇄ DTO) —</text>
+        <rect x="150" y="30" width="220" height="40" rx="9" fill="#1a1118" stroke="#7a3a52"/>
+        <text x="260" y="50" fill="#ff8fb0" font-size="12.5" font-weight="700" text-anchor="middle">dashboard · HTTP / SSE</text>
+        <text x="260" y="64" fill="#93a1b5" font-size="10.5" text-anchor="middle">typed DTOs · regenerated OpenAPI + TS</text>
+        <rect x="150" y="92" width="220" height="34" rx="8" fill="#181426" stroke="#4a3f74"/>
+        <text x="260" y="113" fill="#c9b8ff" font-size="12" font-weight="700" text-anchor="middle">internal/api handler  to&lt;X&gt;Response</text>
+        <line x1="260" y1="92" x2="260" y2="72" stroke="#ff8fb0" marker-end="url(#aw2)"/>
+        <!-- store -->
+        <rect x="150" y="150" width="220" height="40" rx="9" fill="#0c1614" stroke="#1f4f4b"/>
+        <text x="260" y="170" fill="#39d0c8" font-size="12.5" font-weight="700" text-anchor="middle">domain store (SQLite)</text>
+        <text x="260" y="184" fill="#93a1b5" font-size="10.5" text-anchor="middle">commit → emit RAW RowChanged (Layer 0)</text>
+        <line x1="260" y1="150" x2="260" y2="128" stroke="#ff8fb0" marker-end="url(#aw2)"/>
+        <!-- event path (down→bus→up) -->
+        <text x="260" y="214" fill="#93a1b5" font-size="11" text-anchor="middle">— event path (raw → typed → bus) —</text>
+        <rect x="60" y="226" width="180" height="40" rx="9" fill="#10180c" stroke="#2f5a1f"/>
+        <text x="150" y="246" fill="#9be36b" font-size="12" font-weight="700" text-anchor="middle">RowChanged (raw)</text>
+        <text x="150" y="259" fill="#93a1b5" font-size="10" text-anchor="middle">Layer 0 · primitive payload</text>
+        <rect x="280" y="226" width="180" height="40" rx="9" fill="#10180c" stroke="#2f5a1f"/>
+        <text x="370" y="246" fill="#9be36b" font-size="12" font-weight="700" text-anchor="middle">typed domain event</text>
+        <text x="370" y="259" fill="#93a1b5" font-size="10" text-anchor="middle">Layer 2/3 · RegisterPayload</text>
+        <line x1="240" y1="246" x2="278" y2="246" stroke="#9be36b" marker-end="url(#ae)"/>
+        <line x1="260" y1="190" x2="200" y2="224" stroke="#9be36b" marker-end="url(#ae)"/>
+        <rect x="170" y="290" width="180" height="36" rx="9" fill="#101a26" stroke="#2b4866"/>
+        <text x="260" y="312" fill="#7fb2ff" font-size="12" font-weight="700" text-anchor="middle">event bus → dispatcher · SSE</text>
+        <path d="M370,266 C360,284 320,288 300,290" stroke="#9be36b" fill="none" marker-end="url(#ae)"/>
+      </svg>
+      <div class="cap"><b>Two edges only:</b> the store emits a <i>raw</i> RowChanged (no upward dep); Layer 2/3 builds the typed domain event and the wire DTO. Layer 0 never knows about <span class="mono">internal/api</span>.</div>
+    </div>
+  </div>
+
+  <!-- ROUTER DELETION -->
+  <h2>The Router disappears — what survives is not a classifier</h2>
+  <div class="card">
+    <div class="surv">
+      <div class="it die"><b>✗ coordrouter.Router</b><span>Create-time Classify · by-id Get-probe · read federation — all dead once each call site holds a typed store</span></div>
+      <div class="it die"><b>✗ runtime coordclass.Classify(bead)</b><span>demoted to a test/audit-only census tool; leaves the hot write path</span></div>
+      <div class="it"><b>✓ (storeRef,id) IDPrefix resolver</b><span>~20 lines — gcg-/gc-/ga-/gcm-/gco-/gcn-/gcs- → for workflow-finalize &amp; diagnostics</span></div>
+      <div class="it"><b>✓ ClassifyGraphPlan</b><span>moved INTO internal/graphstore — plan-wholesale, not per-bead</span></div>
+      <div class="it"><b>✓ bd front-door WorkStore</b><span>serves GET /v0/beads + the gc.routed_to oracle — it IS the work backend</span></div>
+      <div class="it"><b>✓ cmd_bd_shim verb dispatcher</b><span>the class-blind shell <span class="mono">bd ready/close &lt;id&gt;</span> the agent emits — a CLI verb router</span></div>
+    </div>
+  </div>
+
+  <!-- ROADMAP -->
+  <h2>Phase roadmap — 102 tasks, strangler-ordered</h2>
+  <div class="card">
+    <div class="road">
+      <div class="ph done"><div class="id">P0</div><div class="ti">Landed baseline — graph already on SQLite <small>proof-of-pattern; coordrouter live only under graph_store=sqlite</small></div><div class="st done">DONE</div></div>
+      <div class="ph go"><div class="id">P1</div><div class="ti">Domain-typed interfaces + bd-delegating adapters <small>byte-identical · versioned-extras codec + conformance harness first <span class="cp">◆ critical path</span></small></div><div class="st go">GO · corr</div></div>
+      <div class="ph nogo"><div class="id">P2</div><div class="ti">Greenfield Layer-0 event emission + autoclose re-home <small>raw RowChanged only · 3 cross-store cascades</small></div><div class="st nogo">NO-GO until corr</div></div>
+      <div class="ph go"><div class="id">P3</div><div class="ti">Full typed wire + dashboard regen (every class) <small>DTO discipline · OpenAPI×3 + TS-drift + Vitest gates</small></div><div class="st go">GO · corr</div></div>
+      <div class="ph prereq"><div class="id">P3.5</div><div class="ti">Cross-store foundation <small>prefix resolver · controller write API · retention sweep · reader/writer inventory</small></div><div class="st prereq">PREREQ of any move</div></div>
+      <div class="ph nogo"><div class="id">P4</div><div class="ti">SQLite cutover — mail → orders → nudges <small>controller-mediated writes · clean drain-then-switch <span class="cp">◆ critical path</span></small></div><div class="st nogo">NO-GO until P1/P2/P3/P3.5</div></div>
+      <div class="ph nogo"><div class="id">P5</div><div class="ti">SQLite cutover — sessions (live-adopt) <small>atomic controller-locked copy + projection-equality over LIVE corpus <span class="cp">◆ critical path</span></small></div><div class="st nogo">NO-GO until corr</div></div>
+      <div class="ph go"><div class="id">P6</div><div class="ti">Graph finalize + Router retirement <small>promote GraphStore reads · delete Router via 3-mechanism gate</small></div><div class="st go">GO · corr</div></div>
+      <div class="ph defer"><div class="id">P7</div><div class="ti">extmsg follow-on <small>own ExtMsgStore · history backfill (NOT clean-drain) · after mail proves the pattern</small></div><div class="st defer">DEFERRED</div></div>
+    </div>
+    <div class="cpbar">
+      <b style="color:var(--bd)">Critical path&nbsp;</b><br>
+      <code>P1-T1 → P1-T2 → P1-T3 → P1-T4 → P1-T5 → P1-T6 → P1-T15 → P4-T1 → P4-T2 → P4-T8 → P4-T9 → P4-T10 → P4-T15 → P5-T8 → P5-T11 → P5-T12 → P5-T13</code>
+    </div>
+    <div class="ponr">
+      <div style="color:var(--mut);font-size:12px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">Points of no return</div>
+      <div class="p">P4-T6 — mail cutover (first bd-row drain; revert only at a maintenance window)</div>
+      <div class="p">P4-T7 / P4-T11 / P6-T12 — readyExcludeTypes deletions (the deletion <i>is</i> the proof)</div>
+      <div class="p">P5-T11 — sessions live-adopt (metadata long-tail can't be reconstructed by crash-adoption)</div>
+      <div class="p">P6-T10 — coordrouter.Router deletion (removes the federation safety net — the FINAL PONR)</div>
+    </div>
+  </div>
+
+  <footer>
+    Generated from <span class="mono">engdocs/plans/infra-store-decouple/DESIGN.md</span> + <span class="mono">PLAN.md</span>.
+    Pipeline: 10-explorer survey → 4-architecture panel (judged) → 7-adversary hardening → 8-phase decomposition.
+    All <span class="mono">file:line</span> refs pinned to <span class="mono">204b66aee</span>.
+  </footer>
+</div>
+</body>
+</html>

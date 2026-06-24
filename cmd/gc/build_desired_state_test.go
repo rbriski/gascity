@@ -5627,6 +5627,91 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 }
 
+// TestBuildDesiredState_NamedBackingPoolNoCap_RoutedDemandDoesNotSpawnPhantoms
+// is the ga-xq1fsv regression repro (molecule-patrol demand ratchet, healthy
+// reads). A [[named_session]] backed by a pool-capable agent template that has
+// NO custom scale_check and NO max_active_sessions cap must resolve unassigned
+// gc.routed_to=<template> patrol demand to its single canonical named identity
+// — never to generic "{name}-N" pool phantoms.
+//
+// Root cause (bda368b0e "keep template-routed graph work unassigned"): the
+// backsNamedSession branch in buildDesiredStateWithSessionBeads now appends the
+// template's default probe to defaultScaleTargets (build_desired_state.go:561),
+// so the unassigned routed patrol roots are counted as generic pool demand by
+// defaultScaleCheckCounts. ComputePoolDesiredStates then emits N "new" requests,
+// and because the template has no max=1 cap (UsesCanonicalSingletonPoolIdentity
+// is false) realizePoolDesiredSessions materializes them as witness-1..N
+// alongside the canonical "witness" named session. Before bda368b0e the same
+// probe fed only defaultNamedScaleTargets, so routed demand resolved to the
+// single named identity.
+//
+// This facet engages on fully healthy (non-partial) reads, so the ga-01yukx /
+// #3686 partial-read fail-closed guards never trigger. MemStore reads are
+// non-partial, asserted below. MUST fail on e22049f86 (1 named + N phantoms)
+// and pass after the fix.
+func TestBuildDesiredState_NamedBackingPoolNoCap_RoutedDemandDoesNotSpawnPhantoms(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const template = "witness"
+	const routedDemand = 3
+	for i := 0; i < routedDemand; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  "witness patrol root",
+			Type:   "task", // actionable root (wisp/task); molecule/step roots are Ready()-excluded
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": template,
+			},
+		}); err != nil {
+			t.Fatalf("create routed patrol demand %d: %v", i, err)
+		}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         template,
+			StartCommand: "true",
+			WorkQuery:    "printf ''",
+			// no ScaleCheck        -> default routed-work probe drives demand
+			// no MaxActiveSessions -> UsesCanonicalSingletonPoolIdentity()==false,
+			//                         so pool path synthesizes {name}-N identities
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: template,
+			Mode:     "always",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	// This facet must engage on healthy reads, distinguishing it from the
+	// ga-01yukx partial-read facet whose guards fail closed.
+	if len(dsResult.ScaleCheckPartialTemplates) != 0 ||
+		len(dsResult.PoolScaleCheckPartialTemplates) != 0 ||
+		len(dsResult.NamedScaleCheckPartialTemplates) != 0 {
+		t.Fatalf("repro must exercise healthy (non-partial) reads, but reads were partial: scale=%v pool=%v named=%v",
+			dsResult.ScaleCheckPartialTemplates, dsResult.PoolScaleCheckPartialTemplates, dsResult.NamedScaleCheckPartialTemplates)
+	}
+
+	var named, phantom []string
+	for key, tp := range dsResult.State {
+		if tp.ConfiguredNamedIdentity == identity {
+			named = append(named, key)
+			continue
+		}
+		phantom = append(phantom, key)
+	}
+	if len(named) != 1 {
+		t.Fatalf("expected exactly 1 canonical named session %q, got %d: %v (state=%+v)", identity, len(named), named, dsResult.State)
+	}
+	if len(phantom) != 0 {
+		t.Fatalf("named-backing pool template %q spawned %d phantom pool session(s) %v alongside the canonical named session; "+
+			"unassigned gc.routed_to patrol demand must resolve to the single named identity (<=1), not generic {name}-N pool workers "+
+			"(scale_check_counts=%v)", template, len(phantom), phantom, dsResult.ScaleCheckCounts)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_RuntimeAssigneeDoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "fixture")

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -121,7 +122,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 					IncludeClosed: input.All,
 					Live:          input.Status == "in_progress",
 					Sort:          beads.SortCreatedDesc,
-					Metadata:      map[string]string{"gc.kind": "workflow"},
+					Metadata:      map[string]string{beadmeta.KindMetadataKey: "workflow"},
 				})
 			}
 			for qi, query := range queries {

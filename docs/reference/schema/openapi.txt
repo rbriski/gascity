@@ -932,6 +932,16 @@
         },
         "type": "object"
       },
+      "BeadClaimInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "description": "Agent to claim the bead for. The claim is atomic (rejected if the bead is already assigned to a different agent).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "BeadClaimRejectedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -949,6 +959,23 @@
           "bead_id",
           "existing_claimant",
           "attempted_claimant"
+        ],
+        "type": "object"
+      },
+      "BeadClaimResult": {
+        "additionalProperties": false,
+        "properties": {
+          "bead": {
+            "$ref": "#/components/schemas/Bead",
+            "description": "The claimed bead, populated when claimed=true."
+          },
+          "claimed": {
+            "description": "Whether the claim succeeded (false if the bead was not claimable, e.g. already assigned).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "claimed"
         ],
         "type": "object"
       },
@@ -1073,6 +1100,16 @@
           "beads",
           "deps"
         ],
+        "type": "object"
+      },
+      "BeadReleaseIfCurrentInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_assignee": {
+            "description": "Release the assignment only if the bead is currently assigned to this agent (compare-and-swap).",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "BeadUpdateBody": {
@@ -17254,6 +17291,104 @@
         "summary": "Post v0 city by city name bead by ID assign"
       }
     },
+    "/v0/city/{cityName}/bead/{id}/claim": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-bead-by-id-claim",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadClaimInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeadClaimResult"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name bead by ID claim"
+      }
+    },
     "/v0/city/{cityName}/bead/{id}/close": {
       "post": {
         "operationId": "post-v0-city-by-city-name-bead-by-id-close",
@@ -17402,6 +17537,107 @@
           }
         },
         "summary": "Get v0 city by city name bead by ID deps"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/release-if-current": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-bead-by-id-release-if-current",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadReleaseIfCurrentInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name bead by ID release if current"
       }
     },
     "/v0/city/{cityName}/bead/{id}/reopen": {
@@ -17822,6 +18058,144 @@
           }
         },
         "summary": "Create a bead"
+      }
+    },
+    "/v0/city/{cityName}/beads/ephemeral": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-beads-ephemeral",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by status.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Filter by status.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by bead type.",
+            "explode": false,
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "description": "Filter by bead type.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by label.",
+            "explode": false,
+            "in": "query",
+            "name": "label",
+            "schema": {
+              "description": "Filter by label.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by assignee.",
+            "explode": false,
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "description": "Filter by assignee.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by parent bead id.",
+            "explode": false,
+            "in": "query",
+            "name": "parent",
+            "schema": {
+              "description": "Filter by parent bead id.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include closed ephemeral beads.",
+            "explode": false,
+            "in": "query",
+            "name": "all",
+            "schema": {
+              "description": "Include closed ephemeral beads.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Max rows (0 = unbounded).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max rows (0 = unbounded).",
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyBead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name beads ephemeral"
       }
     },
     "/v0/city/{cityName}/beads/graph/{rootID}": {

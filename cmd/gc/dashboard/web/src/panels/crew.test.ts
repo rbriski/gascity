@@ -330,19 +330,273 @@ describe("crew empty states", () => {
           data: {
             format: "structured",
             structured_messages: [{
+              id: "u-1",
+              role: "user",
+              timestamp: "2026-04-18T19:59:58Z",
+              user_prompt: {
+                text: "Please inspect this.",
+                opened_files: ["/tmp/project/src/app.ts"],
+                uploaded_files: [{
+                  original_name: "diagram.png",
+                  size: "12 KB",
+                  mime_type: "image/png",
+                  file_path: "/tmp/uploads/diagram.png",
+                }],
+                selections: [{ text: "const answer = 42;" }],
+              },
+              blocks: [{ type: "text", text: "raw prompt with <ide_opened_file>metadata</ide_opened_file>" }],
+            }, {
+              id: "sys-1",
+              role: "system",
+              timestamp: "2026-04-18T19:59:59Z",
+              system_event: {
+                kind: "error",
+                category: "usage_limit",
+                code: "usage_limit_exceeded",
+                message: "You've hit your usage limit.",
+              },
+              blocks: [{ type: "text", text: "You've hit your usage limit." }],
+            }, {
               id: "m-1",
               role: "assistant",
               timestamp: "2026-04-18T20:00:00Z",
               blocks: [
                 { type: "text", text: "Applying the patch now." },
-                { type: "tool_use", id: "tool-1", name: "apply_patch", input: { kind: "patch", file_path: "src/app.ts" } },
+                { type: "image", file_path: "screens/shot.png", image_url: "https://example.com/shot.png", mime_type: "image/png" },
+                { type: "tool_use", id: "tool-1", name: "apply_patch", input: { kind: "patch", file_path: "src/app.ts", language: "typescript" } },
                 {
                   type: "tool_result",
                   tool_call_id: "tool-1",
                   structured: {
                     kind: "edit",
                     file_path: "src/app.ts",
-                    patch: "@@\n- old line\n+ new line",
+                    language: "typescript",
+                    old_string: "old line",
+                    new_string: "new line",
+                    original_file: "export const message = \"old line\";\n",
+                    replace_all: false,
+                    user_modified: false,
+                    patch_hunks: [{
+                      file_path: "src/app.ts",
+                      old_start: 1,
+                      old_lines: 1,
+                      new_start: 1,
+                      new_lines: 1,
+                      lines: ["- old line", "+ new line"],
+                    }],
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-search",
+                  structured: {
+                    kind: "search",
+                    query: "structured tool result formats",
+                    mode: "query",
+                    filenames: ["https://example.com/provider-format"],
+                    num_results: 1,
+                    result_items: [{
+                      title: "Provider format notes",
+                      url: "https://example.com/provider-format",
+                      snippet: "Typed provider-neutral search item.",
+                    }],
+                    content: "https://example.com/provider-format: Provider format notes\n",
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-write",
+                  structured: {
+                    kind: "write",
+                    file_path: "notes.txt",
+                    language: "text",
+                    content: "wrote notes.txt",
+                    num_lines: 1,
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-grep-count",
+                  structured: {
+                    kind: "grep",
+                    mode: "count",
+                    filenames: ["README.md", "src/app.ts"],
+                    counts: [
+                      { name: "README.md", value: "2" },
+                      { name: "src/app.ts", value: "5" },
+                    ],
+                    num_files: 2,
+                    num_results: 7,
+                    applied_limit: 100,
+                    content: "README.md:2\nsrc/app.ts:5\n",
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-glob",
+                  structured: {
+                    kind: "glob",
+                    filenames: ["internal/api/session_structured_types.go"],
+                    num_files: 1,
+                    duration_ms: 27,
+                    truncated: true,
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "tool-fetch",
+                  name: "WebFetch",
+                  input: {
+                    kind: "fetch",
+                    url: "https://example.com/spec",
+                    prompt: "Extract the structured contract",
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-fetch",
+                  structured: {
+                    kind: "fetch",
+                    url: "https://example.com/spec",
+                    status_code: 200,
+                    status_text: "OK",
+                    bytes: 4096,
+                    duration_ms: 83,
+                    content: "Fetched structured spec content.",
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "tool-todo",
+                  name: "TodoWrite",
+                  input: {
+                    kind: "todo",
+                    todos: [{
+                      content: "Normalize typed todos",
+                      status: "in_progress",
+                      active_form: "Normalizing typed todos",
+                      priority: "high",
+                    }],
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-todo",
+                  structured: {
+                    kind: "todo",
+                    content: "todos updated",
+                    old_todos: [{
+                      content: "Normalize typed todos",
+                      status: "in_progress",
+                      active_form: "Normalizing typed todos",
+                    }],
+                    new_todos: [{
+                      content: "Normalize typed todos",
+                      status: "completed",
+                      active_form: "Normalizing typed todos",
+                    }],
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "tool-plan",
+                  name: "ExitPlanMode",
+                  input: {
+                    kind: "plan",
+                    plan: "Expose typed plan data without HTML.",
+                    explanation: "Keep clients provider-neutral.",
+                    steps: [{
+                      step: "Add plan DTO",
+                      status: "in_progress",
+                    }],
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-plan",
+                  structured: {
+                    kind: "plan",
+                    plan: "Expose typed plan data without HTML.",
+                    content: "plan captured",
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "tool-question",
+                  name: "AskUserQuestion",
+                  input: {
+                    kind: "question",
+                    question: "Proceed with typed question DTOs?",
+                    options: ["Yes", "No"],
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-question",
+                  structured: {
+                    kind: "question",
+                    question: "Select rollout scope",
+                    questions: [{
+                      question: "Select rollout scope",
+                      header: "Scope",
+                      multi_select: true,
+                      options: [
+                        { label: "All providers", description: "Validate first-class and graceful providers" },
+                        { label: "Claude only", description: "Narrow smoke test" },
+                      ],
+                    }],
+                    options: ["All providers", "Claude only"],
+                    answer: "All providers",
+                    answers: [{ name: "Select rollout scope", value: "All providers" }],
+                    content: "question answered",
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "tool-stdin",
+                  name: "write_stdin",
+                  input: {
+                    kind: "stdin",
+                    task_id: "42",
+                    text: "hello\n",
+                    linked_command: "claude --resume",
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-stdin",
+                  structured: {
+                    kind: "stdin",
+                    task_id: "42",
+                    content: "sent",
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "tool-task",
+                  name: "TaskOutput",
+                  input: {
+                    kind: "task",
+                    task_id: "task-123",
+                    task_type: "subagent",
+                    task_status: "running",
+                    description: "Run delegated check",
+                  },
+                },
+                {
+                  type: "tool_result",
+                  tool_call_id: "tool-task",
+                  structured: {
+                    kind: "task",
+                    task_id: "task-123",
+                    task_type: "subagent",
+                    task_status: "completed",
+                    description: "Run delegated check",
+                    total_duration_ms: 1234,
+                    total_tokens: 321,
+                    total_tool_use_count: 4,
+                    output: "delegated check passed",
+                    exit_code: 0,
                   },
                 },
               ],
@@ -366,15 +620,97 @@ describe("crew empty states", () => {
     await waitFor(() => {
       expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Applying the patch now.");
     });
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("prompt: Please inspect this.");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("opened files: /tmp/project/src/app.ts");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("uploaded files:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("diagram.png (12 KB, image/png): /tmp/uploads/diagram.png");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("selections:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("const answer = 42;");
+    expect(document.getElementById("log-drawer-messages")?.textContent).not.toContain("raw prompt with");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("system event");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("kind: error");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("category: usage_limit");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("code: usage_limit_exceeded");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("message: You've hit your usage limit.");
     expect(transcriptQueries[0]).toMatchObject({ format: "structured" });
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("apply_patch");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("src/app.ts");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("language: typescript");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("old: old line");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("new: new line");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("original file: export const message = \"old line\";");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("replace all: false");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("user modified: false");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("+ new line");
     expect(document.querySelector(".log-msg-diff")).not.toBeNull();
-    expect(document.querySelector(".log-msg-diff-hunk")?.textContent).toBe("@@");
+    expect(document.querySelector(".log-msg-diff-file")?.textContent).toBe("*** Update File: src/app.ts");
+    expect(document.querySelector(".log-msg-diff-hunk")?.textContent).toBe("@@ -1 +1 @@");
     expect(document.querySelector(".log-msg-diff-del")?.textContent).toBe("- old line");
     expect(document.querySelector(".log-msg-diff-add")?.textContent).toBe("+ new line");
+    expect(document.querySelectorAll(".log-msg-diff-del").length).toBe(1);
+    expect(document.querySelectorAll(".log-msg-diff-add").length).toBe(1);
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("write result");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("file: notes.txt");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("wrote notes.txt");
+    expect(document.querySelector(".log-msg-image-block")?.textContent).toContain("file: screens/shot.png");
+    expect(document.querySelector(".log-msg-image-block")?.textContent).toContain("url: https://example.com/shot.png");
+    expect(document.querySelector(".log-msg-image-block")?.textContent).toContain("mime: image/png");
+    expect(document.querySelector<HTMLImageElement>(".log-msg-image-block img")?.getAttribute("src")).toBe("https://example.com/shot.png");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("query: structured tool result formats");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("result items:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Provider format notes | https://example.com/provider-format | Typed provider-neutral search item.");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("results: 1");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("mode: count");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("counts:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("README.md: 2");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("src/app.ts: 5");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("results: 7");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("applied limit: 100");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("duration ms: 27");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("truncated");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("WebFetch");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("url: https://example.com/spec");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("prompt: Extract the structured contract");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("status: 200");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("status text: OK");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("bytes: 4096");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("duration ms: 83");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Fetched structured spec content.");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("TodoWrite");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("todos:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("[in_progress] Normalize typed todos priority high");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("old todos:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("new todos:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("[completed] Normalize typed todos");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("ExitPlanMode");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("plan: Expose typed plan data without HTML.");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("explanation: Keep clients provider-neutral.");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("steps:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("[in_progress] Add plan DTO");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("plan captured");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("AskUserQuestion");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("question: Select rollout scope");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("questions:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Scope | Select rollout scope | multi-select");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("All providers | Validate first-class and graceful providers");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("options: All providers, Claude only");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("answer: All providers");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("answers:");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("Select rollout scope: All providers");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("write_stdin");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("kind: stdin");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("linked command: claude --resume");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("hello");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("TaskOutput");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("task: task-123");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("task type: subagent");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("task status: completed");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("description: Run delegated check");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("total duration ms: 1234");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("total tokens: 321");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("total tool calls: 4");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("output: delegated check passed");
 
     streamHandler?.({
       type: "structured",
@@ -384,12 +720,40 @@ describe("crew empty states", () => {
           id: "m-2",
           role: "assistant",
           timestamp: "2026-04-18T20:00:01Z",
-          blocks: [{ type: "tool_result", structured: { kind: "bash", stdout: "tests passed", exit_code: 0 } }],
+          blocks: [{
+            type: "tool_result",
+            structured: {
+              kind: "bash",
+              command: "npm test",
+              task_id: "shell-123",
+              task_status: "completed",
+              stdout: "tests passed",
+              stderr: "warn",
+              exit_code: 0,
+              stdout_lines: 1,
+              stderr_lines: 1,
+              timestamp: "2026-06-01T00:00:02Z",
+			              error: {
+			                category: "command_failure",
+			                message: "npm ERR! test failed",
+			                user_reason: "stopped by user",
+			              },
+            },
+          }],
         }],
       },
     });
 
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("tests passed");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("command: npm test");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("task: shell-123");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("task status: completed");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("stdout lines: 1");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("stderr lines: 1");
+	    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("timestamp: 2026-06-01T00:00:02Z");
+	    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("error category: command_failure");
+	    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("error: npm ERR! test failed");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("user reason: stopped by user");
   });
 
   it("opens structured session logs from crew, rigged, and pooled panels", async () => {
@@ -479,6 +843,16 @@ describe("crew empty states", () => {
               status: "final",
               stop_reason: "stop",
               timestamp: "2026-04-18T20:00:00Z",
+              usage: {
+                input_tokens: 100,
+                output_tokens: 20,
+                reasoning_tokens: 7,
+                cache_read_tokens: 5,
+                cache_creation_tokens: 3,
+                context_used_tokens: 108,
+                context_window_tokens: 200000,
+                context_percent: 1,
+              },
               blocks: [
                 { type: "text", text: `Transcript for ${sessionID}` },
                 {
@@ -520,6 +894,7 @@ describe("crew empty states", () => {
     expect(requestedSessions).toEqual(["s-claude", "s-codex", "s-gemini"]);
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("gemini stderr");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("gemini-model");
+    expect(document.getElementById("log-drawer-messages")?.textContent).toContain("tokens in 100 out 20 reason 7 cache 5 write 3 108/200000 1%");
     expect(document.getElementById("log-drawer-messages")?.textContent).toContain("stop");
   });
 

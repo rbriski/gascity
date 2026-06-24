@@ -2817,7 +2817,7 @@ export type SessionStreamMessageEvent = {
     id: string;
     pagination?: PaginationInfo;
     /**
-     * Producing provider identifier (claude, codex, gemini, open-code, etc.).
+     * Producing provider identifier (claude, codex, gemini, opencode, etc.).
      */
     provider: string;
     template: string;
@@ -2833,7 +2833,7 @@ export type SessionStreamRawMessageEvent = {
     messages: Array<SessionRawMessageFrame> | null;
     pagination?: PaginationInfo;
     /**
-     * Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
+     * Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.
      */
     provider: string;
     template: string;
@@ -2851,7 +2851,7 @@ export type SessionStreamStructuredMessageEvent = {
     id: string;
     pagination?: PaginationInfo;
     /**
-     * Producing provider identifier (claude, codex, gemini, open-code, etc.).
+     * Producing provider identifier (claude, codex, gemini, opencode, etc.).
      */
     provider: string;
     /**
@@ -2872,10 +2872,13 @@ export type SessionStructuredArgument = {
 
 export type SessionStructuredBlock = {
     content?: string;
+    file_path?: string;
     id?: string;
+    image_url?: string;
     input?: SessionStructuredToolInput;
     interaction?: SessionStructuredInteraction;
     is_error?: boolean;
+    mime_type?: string;
     name?: string;
     signature?: string;
     structured?: SessionStructuredToolResult;
@@ -2919,6 +2922,10 @@ export type SessionStructuredHistory = {
     transcript_stream_id: string;
 };
 
+export type SessionStructuredIdeSelection = {
+    text?: string;
+};
+
 export type SessionStructuredInteraction = {
     action?: string;
     kind?: string;
@@ -2938,7 +2945,49 @@ export type SessionStructuredMessage = {
     role: string;
     status: string;
     stop_reason?: string;
+    system_event?: SessionStructuredSystemEvent;
     timestamp?: string;
+    usage?: SessionStructuredUsage;
+    user_prompt?: SessionStructuredUserPrompt;
+};
+
+export type SessionStructuredPatchHunk = {
+    file_path?: string;
+    lines?: Array<string> | null;
+    new_lines?: number;
+    new_start?: number;
+    old_lines?: number;
+    old_start?: number;
+};
+
+export type SessionStructuredPlanStep = {
+    status?: string;
+    step?: string;
+};
+
+export type SessionStructuredQuestion = {
+    header?: string;
+    multi_select?: boolean;
+    options?: Array<SessionStructuredQuestionOption> | null;
+    question?: string;
+};
+
+export type SessionStructuredQuestionOption = {
+    description?: string;
+    label?: string;
+};
+
+export type SessionStructuredSearchResultItem = {
+    snippet?: string;
+    title?: string;
+    url?: string;
+};
+
+export type SessionStructuredSystemEvent = {
+    category?: string;
+    code?: string;
+    kind?: string;
+    message?: string;
 };
 
 export type SessionStructuredTailState = {
@@ -2950,40 +2999,138 @@ export type SessionStructuredTailState = {
     pending_interaction_ids?: Array<string> | null;
 };
 
+export type SessionStructuredTodoItem = {
+    active_form?: string;
+    content?: string;
+    id?: string;
+    priority?: string;
+    status?: string;
+};
+
+export type SessionStructuredToolError = {
+    /**
+     * Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown.
+     */
+    category?: string;
+    message?: string;
+    user_reason?: string;
+};
+
 export type SessionStructuredToolInput = {
     arguments?: Array<SessionStructuredArgument> | null;
     code?: string;
     command?: string;
+    description?: string;
+    explanation?: string;
     file_path?: string;
     /**
-     * Provider-neutral input kind such as command, code, patch, search, file, arguments, or text.
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
      */
     kind?: string;
+    language?: string;
+    linked_command?: string;
+    options?: Array<string> | null;
     patch?: string;
     pattern?: string;
+    plan?: string;
+    prompt?: string;
     query?: string;
+    question?: string;
+    steps?: Array<SessionStructuredPlanStep> | null;
+    task_id?: string;
+    task_status?: string;
+    task_type?: string;
     text?: string;
+    todos?: Array<SessionStructuredTodoItem> | null;
+    url?: string;
 };
 
 export type SessionStructuredToolResult = {
+    answer?: string;
+    answers?: Array<SessionStructuredArgument> | null;
+    applied_limit?: number;
+    bytes?: number;
     code?: string;
+    command?: string;
     content?: string;
+    counts?: Array<SessionStructuredArgument> | null;
+    description?: string;
+    duration_ms?: number;
+    error?: SessionStructuredToolError;
     exit_code?: number;
+    explanation?: string;
     file_path?: string;
+    file_paths?: Array<string> | null;
     filenames?: Array<string> | null;
     interrupted?: boolean;
     is_image?: boolean;
     kind: string;
+    language?: string;
     mode?: string;
+    new_string?: string;
+    new_todos?: Array<SessionStructuredTodoItem> | null;
     num_files?: number;
     num_lines?: number;
+    num_results?: number;
+    old_string?: string;
+    old_todos?: Array<SessionStructuredTodoItem> | null;
+    options?: Array<string> | null;
+    original_file?: string;
+    output?: string;
     patch?: string;
+    patch_hunks?: Array<SessionStructuredPatchHunk> | null;
+    plan?: string;
+    query?: string;
+    question?: string;
+    questions?: Array<SessionStructuredQuestion> | null;
+    replace_all?: boolean;
+    result_items?: Array<SessionStructuredSearchResultItem> | null;
     start_line?: number;
+    status_code?: number;
+    status_text?: string;
     stderr?: string;
+    stderr_lines?: number;
     stdout?: string;
+    stdout_lines?: number;
+    steps?: Array<SessionStructuredPlanStep> | null;
+    task_id?: string;
+    task_status?: string;
+    task_type?: string;
     text?: string;
+    timestamp?: string;
+    total_duration_ms?: number;
     total_lines?: number;
+    total_tokens?: number;
+    total_tool_use_count?: number;
     truncated?: boolean;
+    url?: string;
+    user_modified?: boolean;
+};
+
+export type SessionStructuredUploadedFile = {
+    file_path?: string;
+    mime_type?: string;
+    original_name?: string;
+    preview_url?: string;
+    size?: string;
+};
+
+export type SessionStructuredUsage = {
+    cache_creation_tokens?: number;
+    cache_read_tokens?: number;
+    context_percent?: number;
+    context_used_tokens?: number;
+    context_window_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    reasoning_tokens?: number;
+};
+
+export type SessionStructuredUserPrompt = {
+    opened_files?: Array<string> | null;
+    selections?: Array<SessionStructuredIdeSelection> | null;
+    text?: string;
+    uploaded_files?: Array<SessionStructuredUploadedFile> | null;
 };
 
 export type SessionSubmitInputBody = {
@@ -3032,7 +3179,7 @@ export type SessionTranscriptGetResponse = {
     messages?: Array<SessionRawMessageFrame> | null;
     pagination?: PaginationInfo;
     /**
-     * Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
+     * Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.
      */
     provider: string;
     /**

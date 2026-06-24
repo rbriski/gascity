@@ -31,14 +31,16 @@ frame parsing** to recover structure
 (`internal/api/session_frame_types.go:26-150`;
 `internal/api/supervisor_city_routes.go:13-21`).
 
-The result is that a rich chat UI cannot be built on the supervisor API
-without each client owning a fragile, untested, client-side normalization
-layer for ~17 provider dialects. This is precisely what one downstream
+The result is that rich structured consumers cannot be built on the supervisor
+API without each client owning a fragile, untested, client-side normalization
+layer for 17 built-in profiles spanning fewer provider transcript families.
+This is precisely what one downstream
 consumer does today — its server reads `format=raw` and reconstructs full
 fidelity (tool inputs, structured tool results, thinking, usage, subagent
-nesting) before the browser ever sees it. That work is duplicated in every
-consumer that wants a rich UI, and it lives one layer removed from the
-provider knowledge that already exists *inside* Gas City.
+nesting) before its clients consume the transcript. That work is duplicated in
+every consumer that wants rich presentation or programmatic access, and it
+lives one layer removed from the provider knowledge that already exists
+*inside* Gas City.
 
 This design adds a third requested format, **`format=structured`**, that emits
 Gas City's already-parsed content blocks as a typed, versioned schema — text,
@@ -50,9 +52,30 @@ per-provider knowledge stays in **one tested place near the source**
 the dashboard, an external client — gets a rich, provider-agnostic event model
 without duplicating provider parsers.
 
+The north-star goal, and the primary success criterion for this design, is a
+**rich, complete, unified, provider-neutral, structured, typed stream of
+data** that exposes 100% of the semantically available data from every
+supported provider without encoding UI decisions. A client that requests
+`format=structured` must be able to consume the data programmatically, render a
+rich GUI comparable to MC, build a CLI or analytics view, or
+persist its own normalized model without falling back to provider-specific
+parsing.
+
+Completeness does **not** mean shipping provider-native JSON objects,
+provider-native field names, or display HTML on the structured wire. The
+provider-native evidence remains available through `format=raw`; the
+structured contract is the typed normalization target. If MC or a
+provider-specific adapter can recover a useful fact from raw provider data,
+Gas City should expose the fact as provider-neutral typed data, not as HTML,
+anonymous JSON, or provider-shaped escape hatches. When a provider exposes a
+fact that the current schema cannot represent, Gas City must add or extend
+typed provider-neutral fields/result families and tests rather than dropping
+the fact, hiding it in an untyped map, or pushing native provider shape to the
+client.
+
 The headline finding from the cross-codebase and provider-format audit behind
-this spec: Gas City already parses provider frames into typed blocks for 8
-transcript families, covering 11 of the 17 built-in provider profiles once
+this spec: Gas City now parses provider frames into typed blocks for 12
+transcript families, covering 16 of the 17 built-in provider profiles once
 OpenCode-backed and Pi-family aliases are routed correctly. The dominant gap
 is not a lack of a structured wire shape — it is that Gas City's API flattens
 the structure it already has, and several providers need either modernized
@@ -68,11 +91,12 @@ their own provider-specific designs.
 ### Provider frames are already parsed per family
 
 `ReadProviderFile` dispatches by `ProviderFamily` to a dedicated reader per
-vendor (`internal/sessionlog/reader.go:153-172,1283-1303`):
-`ReadCodexFile`, `ReadGeminiFile`, `ReadKimiFile`, `ReadMimoCodeFile`,
-`ReadOpenCodeFile`, `ReadPiFile`, `ReadAntigravityFile`, and the default
-Claude JSONL DAG reader (`ReadFile`). Each one translates that vendor's
-native transcript into the common `sessionlog.Entry` / `ContentBlock` shape
+vendor (`internal/sessionlog/reader.go`): `ReadAuggieFile`, `ReadAmpFile`,
+`ReadCodexFile`, `ReadCopilotFile`, `ReadGeminiFile`, `ReadGrokFile`,
+`ReadKimiFile`, `ReadKiroFile`, `ReadMimoCodeFile`, `ReadOpenCodeFile`,
+`ReadPiFile`, `ReadAntigravityFile`, and the default Claude JSONL DAG reader
+(`ReadFile`). Each one translates that vendor's native transcript into the
+common `sessionlog.Entry` / `ContentBlock` shape
 (`internal/sessionlog/entry.go:60-77`) **and** preserves the original
 provider-frame bytes in `Entry.Raw` for raw pass-through. Valid raw frames are
 byte-preserved by the API; malformed string control characters are escaped as a
@@ -81,36 +105,46 @@ transport-validity repair before emission.
 This is the per-provider translation layer the structured format needs. It
 is not greenfield.
 
-### The fidelity is parsed, then discarded
+### The fidelity is parsed, then discarded or only partially carried
 
 `sessionlog.ContentBlock` already retains full tool input
 (`Input json.RawMessage`, `entry.go:73`), full tool-result content
 (`Content json.RawMessage`, `entry.go:75`), `IsError` (`entry.go:76`), text,
 and structured interaction fields (`entry.go:64-71`). The normalized
 `worker.HistoryBlock` mirrors the core block shape and has a first-class
-`HistoryInteraction` pointer (`internal/worker/types.go:160-170,199-210`).
-The structure survives all the way to the API edge, where `entryToTurn` /
-`historyEntryToTurn` deliberately throw it away into a flat string
-(`internal/api/handler_agent_output_turns.go:26-54,73-101`).
+`HistoryInteraction` pointer plus initial `StructuredInput` /
+`StructuredResult` carriers for provider-neutral tool data
+(`internal/worker/types.go`). The structure now survives through the worker
+history path used by `format=structured`, but legacy `conversation` output
+still deliberately throws it away into a flat string
+(`internal/api/handler_agent_output_turns.go:26-54,73-101`). The remaining
+structured-format work is to expand those carriers and push every
+provider-specific extraction rule into provider/sessionlog normalization rather
+than reintroducing inference at the API edge.
 
-What the typed model **cannot** carry today:
+What the typed model still needs to complete:
 
-- **thinking signature + canonical thinking text** — `ContentBlock` and
-  `HistoryBlock` can represent a `thinking` block kind, and several
-  non-Claude readers currently put thinking text in `Text`, but there is no
-  dedicated `thinking` field and no `signature` field. Anthropic thinking
-  blocks whose text lives under `thinking` rather than `text` therefore still
-  have no lossless carrier; the API then stamps `[thinking]`.
-- **usage / model / stop_reason** — Claude and Codex usage are parsed through
-  tail-only extractors (`ExtractTailUsage`, `ExtractCodexTailUsage`) and
-  worker invocation telemetry, and tail metadata can infer model/context
-  usage/activity, but those values are never joined to a `HistoryEntry`.
-  `stop_reason` is inferred for activity, not preserved as entry data
-  (`internal/sessionlog/tail.go:145-180`;
-  `internal/worker/invocation_telemetry.go:188-225`).
-- **structured tool results** — there is no carrier field analogous to a
-  parsed `{stdout, stderr, exitCode}`; tool-result content is an opaque
-  blob.
+- **complete thinking provider coverage** — `ContentBlock` and `HistoryBlock`
+  now carry canonical thinking text plus a provider-neutral `signature` marker,
+  and `format=structured` gates thinking text behind `include_thinking=true`.
+  Remaining work is to normalize every provider's thinking/reasoning dialect
+  into that carrier, including encrypted or signature-only reasoning evidence
+  where available.
+- **complete usage / model / stop_reason coverage** — the normalized worker
+  history entry now carries `model`, `stop_reason`, and typed token usage when
+  those facts are present on the provider message or preserved raw frame. Claude,
+  Pi-family, Gemini-style top-level model fields, and similar direct evidence can
+  flow to `format=structured`. Codex per-invocation `token_count` events are
+  parsed through `ExtractCodexTailUsage` and correlated to the nearest visible
+  assistant message so `model`, token usage, and reported context window flow
+  through the same provider-neutral structured usage fields.
+- **complete structured tool-result families** — an initial worker carrier
+  exists for
+  command/stdin/read/grep/glob/edit/search/fetch/todo/plan/question/task/text data,
+  including typed patch hunks, todo before/after lists, plan text/steps,
+  question answer maps, and task/subprocess status/output, but not every
+  provider-specific result family from the MC audit has a first-class
+  provider-neutral DTO yet.
 - **inline subagent nesting** — subagent mappings and transcript reads exist
   as separate worker/API surfaces (`AgentMappings`, `AgentTranscript`), but
   the session stream does not currently nest or reference subagent messages in
@@ -144,16 +178,16 @@ The current adapter/capture target is:
 | pi | Pi JSONL under `~/.pi/agent/sessions` | rich messages, tool calls/results, Bash/Python execution where present |
 | omp | Oh My Pi JSONL under `~/.omp/agent/sessions` | same Pi-family adapter, including Bash/Python execution records |
 | antigravity | Antigravity transcript JSONL / brain artifacts | rich messages, tool calls/results, interactions, artifacts where exposed |
-| copilot | Copilot CLI session-state event log | rich once a dedicated reader maps `tool.execution_*`, terminal output, and write diffs |
-| kiro | Kiro ACP JSONL event log or chat DB export | rich through ACP events (`ToolCall`, `ToolCallUpdate`, `TurnEnd`); DB-only chat export needs sampling |
+| copilot | Copilot CLI session-state event log | rich for messages, `tool.execution_*`, command output, errors, and result-side edit diffs when present |
+| kiro | Kiro ACP JSONL event log under `~/.kiro/sessions/cli` | rich through ACP `session/update` events (`ToolCall`, `ToolCallUpdate`, `TurnEnd`); DB-only chat export needs sampling before use |
 | cursor | Cursor transcript plus Gas City hook capture | native JSONL has messages and tool-call inputs only; tool outputs require hook capture |
 | amp | `amp --execute --stream-json` live capture | rich for execute/headless flows; retrospective local thread discovery is not a public stable source |
-| grok | Grok `--output-format streaming-json` or ACP capture | rich for headless/ACP capture; persisted `~/.grok/sessions` schema is not public enough to rely on alone |
-| auggie | Auggie saved session JSON or SDK/stream capture | rich through saved session `chatHistory` / node graph once a dedicated reader is added |
+| grok | captured Grok ACP JSONL (`session/update`) | rich for ACP capture; `--output-format streaming-json` and persisted `~/.grok/sessions` need fixture/schema validation before use |
+| auggie | captured Auggie ACP JSONL (`session/update`) | rich for configured ACP capture; saved-session `chatHistory` / node graph, SDK capture, and hook capture need fixture/schema validation before use |
 
 Practical consequence: the carrier + stop-flatten change immediately lights up
-the 8 existing transcript families and 11 built-in profiles. The remaining 6
-native profiles require reader/capture work, not client-side provider parsers.
+the 12 existing transcript families and 16 built-in profiles. The remaining
+native profile requires reader/capture work, not client-side provider parsers.
 
 ## The streaming ceiling (read before scoping "streaming")
 
@@ -198,17 +232,36 @@ Phase 1 hardening task for Gemini specifically.
 
 - A third session-stream/transcript format, `format=structured`, emitting a
   typed, versioned, provider-agnostic message + block schema.
-- Highest available fidelity for all 17 built-in provider profiles: tool
-  inputs, **structured tool results**, file edits/diffs, thinking + signature,
-  usage, model, stop-reason, and provider subagent relationships where those
-  fields are present or derivable.
-- Zero client-side per-provider enrichment required to render a rich UI.
+- A complete typed normalization target for all 17 built-in provider profiles:
+  every provider fact that is present, derivable, or capturable must land in a
+  provider-neutral typed field/result family rather than being flattened,
+  ignored, hidden in untyped JSON, or exposed as provider-native shape.
+- Phase 1 rich support prioritizes the first-class provider families currently
+  under active structured-session validation: Claude, Codex, Gemini,
+  OpenCode-compatible providers, Grok ACP capture, and Auggie ACP capture. The
+  remaining built-in profiles still use the same typed envelope and must
+  gracefully downgrade to provider-neutral fallback data until their rich source
+  capture is complete.
+- Highest available fidelity for tool inputs, **structured tool results**, file
+  edits/diffs, thinking + signature, usage, model, stop-reason, provider
+  subagent relationships, artifacts, interactions, and any future provider data
+  family that clients may need for display or programmatic use.
+- 100% of provider data that is present, derivable, or capturable in a
+  provider run is represented as typed provider-neutral data in
+  `format=structured`; provider-native bytes remain a separate `format=raw`
+  escape hatch for audit/debug use only.
+- Zero client-side per-provider enrichment required to build MC-parity
+  presentation, build an alternate GUI/CLI, or consume the transcript
+  programmatically.
 - Provider-specific parsing/capture remains inside Gas City adapter code. A
   client asking for `format=structured` must never need to know a provider's
   native transcript dialect.
-- Existing long-tail families and aliases (`kimi`, `opencode`, `mimocode`,
-  `groq`, `cerebras`, `pi`, `omp`, `antigravity`) gain useful structured
-  output without inventing new wire contracts.
+- No UI-specific payloads in the structured contract: no HTML, pre-rendered
+  markdown, syntax-highlighted fragments, dashboard-only display blobs, or
+  other presentation encodings.
+- Existing additional families and aliases (`kimi`, `mimocode`, `groq`,
+  `cerebras`, `pi`, `omp`, `antigravity`, `copilot`, `kiro`, `amp`) gain useful
+  structured output without inventing new wire contracts.
 - A golden-fixture regression guard so server-side translation is safe
   across provider/version drift.
 
@@ -222,6 +275,207 @@ Phase 1 hardening task for Gemini specifically.
 - Presentation concerns — markdown→HTML, syntax highlighting, diff
   rendering, visual tool_use/result pairing. These stay in the consumer;
   `format=structured` ships *data*, not HTML.
+
+## Tool result normalization contract
+
+MC proves the rich-data surface is possible today by reading Gas
+City's `format=raw`, parsing provider frames, and then adding display-ready
+HTML and other augment fields before the browser renders the transcript. Gas
+City should port the **data extraction algorithms**, not the presentation
+output. Provider-specific raw frames are normalized once, inside Gas City's
+provider/sessionlog layer, into typed provider-neutral tool inputs and tool
+results. API handlers then project those typed values to OpenAPI/Huma wire
+types. Clients may render HTML, colorized diffs, tables, or programmatic views
+from the data, but `format=structured` itself must not ship HTML,
+provider-native objects, anonymous JSON maps, or provider-specific field names.
+
+### Ownership boundary
+
+The normalization owner is the provider adapter path:
+
+- `internal/sessionlog/*_reader.go` maps provider transcript frames into common
+  content blocks and typed structured tool data.
+- `internal/worker` carries the normalized data as part of history snapshots.
+- `internal/api` only projects normalized history into Huma-registered wire
+  structs.
+- `cmd/gc/dashboard` renders the typed data but does not parse provider-native
+  transcript formats.
+
+The current implementation is partially aligned: the API projection consumes
+worker-carried typed structured input/result data, and the structured wire
+tests forbid native provider keys. `internal/api/session_structured_types.go`
+no longer infers tool semantics from provider-native JSON; if a worker history
+block lacks `StructuredInput` or `StructuredResult`, the structured API leaves
+that typed field empty instead of re-parsing native data. The remaining
+alignment work is to keep expanding provider/sessionlog/worker normalization
+until every supported provider's rich data is represented before it reaches
+the API edge. The end state is that provider-native field names appear only in
+provider adapters and `format=raw` fixtures, never in structured wire DTOs,
+API inference, or dashboard parsing code.
+
+### Non-negotiable wire rules
+
+- `format=structured` returns typed provider-neutral data, not display HTML.
+- Provider-specific fields such as `toolUseResult`, `resultDisplay`,
+  `_structuredPatch`, `_diffHtml`, `_highlightedContentHtml`, `call_id`,
+  `tool_use_id`, or raw SDK result objects must not cross the structured API
+  boundary.
+- Rich edit results expose typed patch hunks, file paths, result-side old/new
+  text, original-file text, and provider-reported edit flags such as
+  replace-all and user-modified state when present. A flat patch string may
+  remain as a convenience field while clients migrate, but it is not the only
+  rich edit representation.
+- Result-side edit evidence comes from provider result data: structured result
+  fields, result displays, patch-apply events, or textual result content that
+  is itself a patch. GC must not fabricate an edit result from a tool input and
+  claim the provider reported it.
+- Long-tail providers must degrade gracefully to typed neutral fallback data
+  such as `kind: "text"` or typed argument strings. They must not leak raw
+  provider JSON to preserve fidelity.
+- Serialization/deserialization stays at the edges. Internal code should carry
+  typed Go structs, and Huma/OpenAPI generated types are the wire source of
+  truth.
+
+### MC algorithm inventory
+
+MC has two relevant layers:
+
+1. `server/src/services/gc_message_format/*` translates raw provider frames
+   into richer app blocks.
+2. `server/src/services/render_enrichment/*` adds display-oriented augments
+   such as HTML and syntax-highlighted snippets.
+
+Only the data algorithms belong in Gas City structured normalization.
+
+| MC area | Algorithm to port to GC data | GC target |
+|---|---|---|
+| Codex tool invocation | Canonicalize names (`apply_patch` → edit, shell commands → bash, web search aliases), parse JSON-string arguments, preserve call context for results. | `internal/sessionlog/codex_reader.go` |
+| Codex shell classification | Reclassify `cat`, `sed -n`, `nl -ba ... \| sed -n`, `rg`, and `grep` shell commands into provider-neutral Read/Grep inputs, after unwrapping shell launchers such as `/usr/bin/env bash -lc "..."`, `/bin/bash -lc "..."`, and nested variants. | Codex reader/sessionlog normalization |
+| Codex output normalization | Strip `Output:` wrappers, parse nested JSON-string outputs, extract stdout/stderr/exit code/error state, and avoid treating no-match grep as a provider failure. | Codex reader/sessionlog normalization |
+| Codex event filtering and errors | Preserve user/assistant/reasoning/error events as provider-neutral messages, normalize error/stream-error/turn-aborted events into typed `system_event` data, and skip unknown provider event frames such as shutdown/diagnostic events instead of exposing native `event_msg` records on the structured wire. | Codex reader/sessionlog normalization |
+| Codex Read result | Strip `nl -ba` line number prefixes, compute `start_line`, `num_lines`, and `total_lines`. | typed Read result |
+| Codex Grep result | Distinguish `mode: "content"`, `mode: "files_with_matches"`, and `mode: "count"`; expose filenames, counts, and matched content. | typed Grep result |
+| Codex image blocks | Preserve user `input_image` evidence as provider-neutral image blocks with file path, external image URL, and MIME type; keep inline image bytes out of `format=structured`. | typed Image block |
+| Patch parsing | Parse raw `*** Begin Patch` / unified diff text into `{file_path, old_start, old_lines, new_start, new_lines, lines}` hunks, including multi-file patches. | typed Edit result |
+| Edit diff computation | When a provider result contains old/new/original edit fields or replace-all/user-modified flags, expose those facts as typed data and compute patch hunks from result-side old/new text when no provider hunk exists. Do not expose MC's HTML. | provider-specific Edit result normalizer |
+| Claude SDK tool results | Normalize Bash, Read, Edit, Write, Glob, Grep, TodoWrite, WebSearch, WebFetch, BashOutput, KillShell, TaskOutput, AskUserQuestion, and plan-mode result schemas. | Claude reader/sessionlog normalization |
+| Async shell stdin correlation | Link `WriteStdin` / stdin tools back to the parent shell command by normalizing provider shell/session identifiers to `task_id` and attaching the parent command as typed `linked_command` input data. | typed Stdin input/result |
+| Search result items | Flatten provider result arrays such as MC's nested WebSearch result `content` items into provider-neutral `{ title, url, snippet? }` items; parse URL-prefixed search output only when the tool context is a web query, not grep. | typed Search result `result_items` |
+| Gemini result display | Translate `resultDisplay.fileDiff`, file path, original content, and new content into typed edit/write data. | Gemini reader/sessionlog normalization |
+| Tool error classification | Classify explicit tool failures into provider-neutral categories such as user rejection, command failure, file error, validation error, timeout, network error, and unknown; expose cleaned messages and user rejection reasons as typed data, not UI badges. | typed `StructuredToolError` |
+| User prompt metadata | Extract opened IDE files, IDE selections, uploaded-file sections, and cleaned prompt text from user messages so clients do not parse prompt boilerplate. | typed `StructuredUserPrompt` |
+| Markdown/code rendering | Preserve source text, file path, language/truncation hints when derivable; do not pre-render HTML. | typed `language` / `truncated` data only; dashboard owns rendering |
+
+### Typed result families
+
+The first structured result families are sketched in the schema section. To
+reach MC richness without HTML, GC needs these provider-neutral DTOs over time:
+
+- **Command**: `stdout`, `stderr`, `exit_code`, `interrupted`, `truncated`,
+  `is_image`, command text, optional shell/task identifiers, status, stream
+  line counts, and timestamp when providers expose async shell output polling.
+  Shell-control results such as kill/stop messages expose the shell identifier
+  as neutral `task_id` and the provider result message as `stdout`/`content`;
+  they do not leak provider-native shell-control field names.
+- **Stdin**: async shell input tools expose the provider-neutral shell
+  identifier as `task_id`, the submitted stdin text as `text`, and the parent
+  shell command as `linked_command` when it can be derived from an earlier Bash
+  result. Provider-native identifiers such as `sessionId` and `shellId` stay in
+  `format=raw`.
+- **Tool errors**: failed tool results carry provider-neutral error metadata:
+  `category`, cleaned `message`, and optional `user_reason`.
+  Categories are `user_rejection`, `user_rejection_with_reason`,
+  `command_failure`, `file_error`, `validation_error`, `timeout`,
+  `network_error`, and `unknown`. This ports MC's data classification
+  algorithm without shipping MC's UI rendering.
+- **System events**: provider transcript events such as provider errors,
+  stream errors, and turn-aborted notices carry typed `system_event` metadata
+  with neutral `kind`, `category`, optional semantic `code`, and cleaned
+  `message`. Provider-native frame names and fields such as `event_msg` and
+  `codex_error_info` stay in `format=raw`.
+- **User prompts**: user messages carry cleaned prompt text, opened IDE file
+  paths, uploaded-file metadata, and IDE selection text as typed
+  `user_prompt` data. Raw provider/user text remains available through the
+  text block and `format=raw`; clients that want MC-style display can use the
+  typed prompt metadata without parsing IDE tags or upload sections.
+- **Read/Write**: `file_path`, `content`, `language`, `num_lines`,
+  `start_line`, `total_lines`, optional result-side `patch` / `patch_hunks`
+  for providers that report write diffs, and optional image metadata where
+  providers return images. Write result patches still come only from
+  result-side evidence, never from the write input text.
+- **Edit/Patch**: operation type, `file_path`, `file_paths`, optional raw
+  neutral patch text, `patch_hunks`, `old_string`, `new_string`,
+  `original_file`, `replace_all`, and `user_modified` when the provider result
+  reports them.
+- **Grep/Glob**: mode/pattern where applicable, filenames, counts, matched
+  content, applied limit, `duration_ms`, and truncation state when present.
+- **Search/Fetch**: query/url, result items, `status_code`, `status_text`,
+  bytes, `duration_ms`, and response content where present.
+- **Todo**: todo input lists plus result-side `old_todos` / `new_todos`
+  before/after lists.
+- **Plan**: plan text, explanation text, and provider-neutral plan step lists.
+- **Question**: full question arrays, headers, option labels/descriptions,
+  multi-select state, selected answer, and answer maps.
+- **Task/Subprocess output**: task id/type/status/description/output/exit code.
+  Bash results that launch background work may also carry the neutral task id
+  while remaining `kind: "bash"`.
+- **Fallback text**: neutral text with `kind: "text"` for providers or tools
+  without a known typed result.
+
+Adding a new result family is a schema change: update Go wire structs, OpenAPI,
+generated clients, dashboard types, and golden fixtures together.
+
+### Provider normalization status
+
+| Provider family | Current GC state | Required gap closure |
+|---|---|---|
+| Claude | Reads JSONL blocks; Claude `toolUseResult` sidecar evidence is normalized by the sessionlog entry layer into provider-neutral result evidence before worker inference, covering initial command/edit/read/glob/search/fetch/todo/plan/question/task/text data. Read sidecars with nested `file` evidence flatten to neutral file/range/content fields; WebSearch sidecar `results[].content[]` items flatten to neutral `result_items` with title, URL, and snippet; read/write file path evidence derives provider-neutral `language` hints before API projection. | Expand Claude SDK result parsing in sessionlog/worker for the remaining MC tool family set; continue shrinking raw Claude key handling outside the reader/sessionlog boundary. |
+| Codex | Reads rollout JSONL; the reader normalizes JSON-string tool arguments, canonicalizes common tool input/result keys, preserves user image blocks as provider-neutral `image` blocks (`file_path`, external `image_url`, `mime_type`), preserves web-search `query`, `action`, and extra input fields as provider-neutral typed search input/arguments, derives provider-neutral command/read/grep input evidence for recognized shell commands including file `language`, unwraps common shell launchers (`/usr/bin/env bash -lc`, `/bin/bash -lc`, nested variants) before read/grep classification, strips Codex `Output:` wrappers, parses nested JSON command results, derives result `is_error` from explicit flags/status, JSON/text exit-code forms, and error-like text, normalizes read result content/ranges/language and grep result mode/count/filename summaries, treats no-match grep JSON results as zero-result search data rather than provider failures, parses URL-prefixed web-query output into neutral `result_items`, and carries patch-apply evidence before worker inference. Worker normalization prefers those neutral result fields and keeps typed edit hunk inference plus generic read/grep fallback for older fixtures. | Continue porting the remaining MC Codex output variants and real-provider fixtures, especially richer stderr/status forms and richer web/search result payloads beyond current URL/text result summaries. |
+| Gemini | Current JSONL message `model`, nested `tokens.cache.read/write`, `type:"error"` messages, and tool-result status flow to provider-neutral structured metadata, typed `system_event`, error/text fields. Whole-file write inputs normalize as `kind: "write"` with file path/content text instead of fabricated input patches; `resultDisplay.fileDiff` and result-side file path evidence normalize in the Gemini reader into neutral patch data for current edit/write fixtures. | Normalize the remaining current Gemini `resultDisplay` and tool-response variants to typed edit/write/search/fetch data in the Gemini reader; add incremental parsing for live frame-granular streaming. |
+| Kimi | Useful tool calls/results via reader; common tool input/result object keys normalize to provider-neutral names before worker inference, native `is_error` / `isError` / status fields normalize to provider-neutral `is_error`, and result-side patch evidence produces typed edit hunks. | Expand typed command/read/edit parsing where newer Kimi wire evidence supports richer execution, search, and artifact data. |
+| OpenCode/MiMo/Groq/Cerebras | OpenCode-compatible reader gives useful blocks, neutralizes common camel-case tool input/output keys before worker inference, and export `info.modelID` / `info.tokens` now flow to provider-neutral structured model/usage metadata, including reasoning tokens when present. Result-side patch evidence from OpenCode tool output states produces typed edit hunks; input-only edit evidence still does not fabricate result diffs. | Expand OpenCode tool output-state normalization beyond the current common command/edit/file fields where native evidence supports richer read/grep/artifact data. |
+| Pi/OMP | Pi-family reader provides messages/tool records, preserves generic image-part metadata as provider-neutral `image` blocks, normalizes common tool input/result object keys before worker inference, and OMP `bashExecution` / `pythonExecution` records emit provider-neutral execution fields that normalize through worker history into typed Bash/Python structured results. Result-side Pi patch evidence produces typed edit hunks. | Expand beyond current command/read/edit/image support where Pi-family evidence exposes richer search/artifact data; per-invocation usage is still absent. |
+| Antigravity | Reader provides messages/tools/interactions, normalizes common tool input/result object keys before worker inference, maps native status fields to provider-neutral `is_error`, preserves whole-file write inputs as `kind: "write"` with file path/content text, and result-side diff/patch evidence produces typed edit hunks. | Expand typed result extraction for command/artifact/search shapes where Antigravity exposes richer evidence. |
+| Copilot | Dedicated reader maps `~/.copilot/session-state/<sessionId>/events.jsonl` into provider-neutral messages and tool use/result blocks, including command stdout/stderr/exit code, failed-tool error content, and result-side patch/edit evidence when present. Keyed discovery uses the session-state directory and verifies `workspace.yaml` or `session.start.data.context.cwd` against the workdir. | Expand against real provider fixtures as Copilot event variants evolve, including any separate terminal-output chunk events and richer file-change records beyond current `tool.execution_complete` result evidence. |
+| Kiro | Dedicated reader maps Kiro ACP JSONL `session/update` events under `~/.kiro/sessions/cli/<session-id>.jsonl` into provider-neutral assistant text, `tool_use`, and `tool_result` blocks. ACP `rawInput` / `rawOutput` fields normalize to neutral command/file/edit/result keys; ACP diff content normalizes to result-side patch data. Keyed discovery validates the JSON sidecar or JSONL context cwd against the workdir. Persisted `AssistantMessage` / `ToolResults` history frames are supported where they carry message content. | Capture real Kiro ACP fixtures to harden field variants and chunk coalescing; sample the default chat database/export path before claiming retrospective rich chat-session parity. |
+| Amp | Dedicated reader maps captured `amp --execute --stream-json` JSONL into provider-neutral user/assistant/system messages, tool-use blocks, tool-result blocks, thinking blocks when present, usage metadata, and final result system events. Tool inputs/results normalize common command/file/edit/result keys before worker inference; JSON-string tool result payloads are decoded and neutralized before reaching `format=structured`. Discovery uses configured GC-owned capture paths only, because Amp does not document a stable retrospective local transcript store. | Add managed stdout capture before enabling stream-json in the builtin profile; validate against real Amp tool-result fixtures and subagent `parent_tool_use_id` cases. |
+| Grok | Dedicated reader maps captured Grok ACP JSONL `session/update` events into provider-neutral assistant text, `tool_use`, and `tool_result` blocks by reusing the ACP normalization path. ACP `rawInput` / `rawOutput` fields normalize to neutral command/file/edit/result keys; ACP diff content normalizes to result-side patch data. Discovery uses configured GC-owned capture paths only, because the documented `~/.grok/sessions` persisted schema and `streaming-json` event schema still need fixture validation before use. | Add managed ACP/headless capture for builtin sessions if GC should launch Grok in that mode; collect real Grok ACP and streaming-json fixtures before claiming persisted/headless parity outside configured captures. |
+| Auggie | Dedicated reader maps captured Auggie ACP JSONL `session/update` events into provider-neutral assistant text, `tool_use`, and `tool_result` blocks by reusing the ACP normalization path. ACP `rawInput` / `rawOutput` fields normalize to neutral command/file/edit/result keys; ACP diff content normalizes to result-side patch data. Discovery uses configured GC-owned capture paths only, because GC does not yet rely on a stable retrospective local Auggie transcript store. | Add managed ACP, SDK, or hook capture for builtin sessions; collect real Auggie ACP/hook/SDK fixtures before claiming saved-session, hook, or live SDK parity outside configured captures. |
+| Cursor | Native transcript/capture work remains incomplete. | Guarantee structured fallback now; add hook capture or a dedicated rich source before claiming result/diff parity. |
+
+### Implementation sequence
+
+1. Extend structured result DTOs with typed patch hunks and file path lists.
+   Keep the existing flat `patch` field temporarily for compatibility.
+2. Port MC patch parsing as typed data and update dashboard rendering to prefer
+   typed hunks when present.
+3. Tighten Codex read/grep/output normalization, including line-number
+   stripping and grep mode detection.
+4. Move provider-specific result extraction from `internal/api` into
+   `internal/sessionlog` and `internal/worker` carriers.
+5. Add first-class and high-coverage typed result normalizers from real
+   provider fixtures, including Claude, Codex, Gemini, OpenCode-compatible
+   providers, Grok ACP, Auggie ACP, and existing Pi-family evidence.
+6. Build a golden fixture corpus from real `format=raw` transcripts and assert
+   provider-neutral structured output for every first-class provider.
+7. Expand long-tail providers with reader/capture work while preserving typed
+   graceful fallback for all 17 profiles.
+
+Each step should land with tests that prove both positive fidelity and negative
+provider-neutrality: rich data is present, HTML is absent, and native provider
+field names do not appear on the structured wire.
+
+Current implementation status: steps 1-3 are partially implemented for the
+initial
+command/stdin/read/grep/glob/edit/search/fetch/todo/plan/question/task/text families.
+The worker/API carrier now also projects direct-entry `model`, `stop_reason`,
+and typed token usage when provider evidence is present; Codex `token_count`
+events are correlated to structured assistant messages in worker history. Step
+4 is complete for the API edge: structured API projection no longer performs
+provider-native tool inference. Step 4 remains incomplete at the
+provider-normalization layer until every extraction algorithm lives in
+provider/sessionlog/worker code and the remaining first-class provider result
+families are covered by real fixtures.
 
 ## Architectural alignment
 
@@ -296,71 +550,152 @@ carriers directly on the structured API types.
 
 ```
 StructuredHistory
-  gcSessionId           string?
-  logicalConversationId string?
-  providerSessionId     string?
-  transcriptStreamId    string
-  generation            { id, observedAt? }
-  cursor                { afterEntryId? }
-  continuity            { status, compactionCount?, hasBranches?, note? }
-  tailState             { activity, lastEntryId?, openToolCallIds?, pendingInteractionIds?, degraded?, degradedReason? }
+  gc_session_id           string?
+  logical_conversation_id string?
+  provider_session_id     string?
+  transcript_stream_id    string
+  generation              { id, observed_at? }
+  cursor                  { after_entry_id? }
+  continuity              { status, compaction_count?, has_branches?, note? }
+  tail_state              { activity, last_entry_id?, open_tool_call_ids?, pending_interaction_ids?, degraded?, degraded_reason? }
   diagnostics           []StructuredDiagnostic?
 
 StructuredMessage
-  id          string
-  role        "user" | "assistant" | "system" | "tool"
-  provider    string                 // claude, codex, gemini, ...
-  timestamp   string (RFC3339Nano)
-  model       string?                // assistant turns
-  stopReason  string?
-  usage       StructuredUsage?
-  isSubagent  bool?
-  parentToolCallId string?
-  status      string                 // final | partial | superseded | unknown
-  blocks      []StructuredBlock
+  id                  string
+  role                "user" | "assistant" | "system" | "tool"
+  provider            string                 // claude, codex, gemini, ...
+  timestamp           string (RFC3339Nano)
+  model               string?                // assistant turns
+  stop_reason         string?
+  usage               StructuredUsage?
+  user_prompt         StructuredUserPrompt?
+  system_event        StructuredSystemEvent?
+  is_subagent         bool?
+  parent_tool_call_id string?
+  status              string                 // final | partial | superseded | unknown
+  blocks              []StructuredBlock
+
+StructuredUserPrompt
+  text          string?
+  opened_files  []string
+  uploaded_files []UploadedFile
+  selections    []IDESelection
+
+UploadedFile
+  original_name string?
+  size         string?
+  mime_type    string?
+  file_path    string?
+  preview_url  string?
+
+IDESelection
+  text string?
+
+StructuredSystemEvent
+  kind     string          // error | turn_aborted | ...
+  category string          // usage_limit | stream_error | provider_error | turn_aborted | ...
+  code     string?         // semantic provider code when useful, never the provider field name
+  message  string?
 
 StructuredUsage
-  inputTokens         int
-  outputTokens        int
-  cacheReadTokens     int?
-  cacheCreationTokens int?
-  contextWindowTokens int?           // when derivable server-side
-  contextUsedTokens   int?
-  contextPercent      int?
+  input_tokens          int
+  output_tokens         int
+  reasoning_tokens      int?
+  cache_read_tokens     int?
+  cache_creation_tokens int?
+  context_window_tokens int?           // when derivable server-side
+  context_used_tokens   int?
+  context_percent       int?
 
 StructuredBlock  (discriminated on `type`)
   type "text"        => { text }
   type "thinking"    => { thinking, signature? }     // gated, see policy
   type "tool_use"    => { id, name, input, caller? } // input = provider-neutral typed shape
-  type "tool_result" => { toolCallId, content, isError, structured? }
-  type "interaction" => { requestId, kind, state, prompt, options, action }
-  type "image"       => { ... }
+  type "tool_result" => { tool_call_id, content, is_error, structured? }
+  type "interaction" => { request_id, kind, state, prompt, options, action }
+  type "image"       => { file_path?, image_url?, mime_type? }
 
 StructuredToolInput  (the `input` on tool_use; discriminated on `kind`)
   kind "command"   => { command, args? }
+  kind "stdin"     => { task_id, text, linked_command? }
   kind "code"      => { code }
-  kind "patch"     => { patch, filePath? }
+  kind "patch"     => { patch, file_path? }
+  kind "glob"      => { pattern, file_path? }
+  kind "fetch"     => { url, prompt? }
   kind "search"    => { query?, pattern? }
-  kind "file"      => { filePath }
+  kind "file"      => { file_path, language? }
+  kind "write"     => { file_path, language?, text } // whole-file write input, not a fabricated patch
+  kind "todo"      => { todos: TodoItem[] }
+  kind "plan"      => { plan?, explanation?, steps: PlanStep[] }
+  kind "question"  => { question, options[] }
+  kind "task"      => { task_id?, task_type?, task_status?, description?, prompt? }
   kind "arguments" => { arguments: [{ name, value }] } // provider-neutral strings
   kind "text"      => { text }
 
 StructuredToolResult  (the `structured?` on tool_result; discriminated on `kind`)
-  kind "bash"   => { stdout, stderr, exitCode?, interrupted, truncated?, isImage? }
-  kind "python" => { code?, stdout, stderr, exitCode?, interrupted, truncated? }
-  kind "grep"   => { mode, filenames[], numFiles, content, numLines }
-  kind "read"   => { filePath, content, numLines, startLine?, totalLines? }
-  kind "edit"   => { filePath?, patch?, content? }
-  kind "search" => { query?, content, numResults? }
+  common optional => { error?: StructuredToolError }
+  kind "bash"   => { command?, stdout, stderr, exit_code?, interrupted, truncated?, is_image?, task_id?, task_status?, stdout_lines?, stderr_lines?, timestamp?, content? }
+  kind "stdin"  => { task_id?, text?, content? }
+  kind "python" => { code?, stdout, stderr, exit_code?, interrupted, truncated? }
+  kind "grep"   => { mode, filenames[], counts: [{ name, value }], num_files, num_results?, content, num_lines, applied_limit? }
+  kind "glob"   => { filenames[], num_files, duration_ms?, truncated?, content? }
+  kind "fetch"  => { url?, status_code?, status_text?, bytes?, duration_ms?, content? }
+  kind "read"   => { file_path, language?, content, num_lines, start_line?, total_lines? }
+  kind "write"  => { file_path, language?, content?, num_lines?, start_line?, total_lines?, text?, patch?, patch_hunks[]? }
+  kind "edit"   => { file_path?, file_paths[], patch?, patch_hunks[], old_string?, new_string?, original_file?, replace_all?, user_modified?, content? }
+  kind "search" => { query?, mode?, filenames[], counts: [{ name, value }], result_items[], duration_ms?, content, num_results? }
+  kind "todo"   => { old_todos[], new_todos[], content? }
+  kind "plan"   => { plan?, explanation?, steps: PlanStep[], content? }
+  kind "question" => { question?, questions: Question[], options[], answer?, answers: [{ name, value }], content? }
+  kind "task"   => { task_id?, task_type?, task_status?, description?, total_duration_ms?, total_tokens?, total_tool_use_count?, output?, stdout?, stderr?, exit_code?, content? }
   kind "text"   => { text, content? }                 // provider-neutral fallback
+
+StructuredToolError
+  category   "user_rejection" | "user_rejection_with_reason" | "command_failure" |
+             "file_error" | "validation_error" | "timeout" | "network_error" | "unknown"
+  message    string?       // cleaned provider text, with wrappers/prefixes removed
+  user_reason string?      // only when the provider reports a user-supplied rejection reason
+
+PatchHunk
+  file_path? string
+  old_start  int
+  old_lines  int
+  new_start  int
+  new_lines  int
+  lines      []string       // unified diff lines prefixed with " ", "-", or "+"
+
+TodoItem
+  id?        string
+  content?   string
+  status?    string
+  active_form? string
+  priority?  string
+
+PlanStep
+  step?   string
+  status? string
+
+SearchResultItem
+  title?   string
+  url?     string
+  snippet? string
+
+Question
+  question?    string
+  header?      string
+  options?     QuestionOption[]
+  multi_select? bool
+
+QuestionOption
+  label?       string
+  description? string
 ```
 
-The concrete Go wire structs should use Gas City's normal JSON spelling
-(`schema_version`, `stop_reason`, `is_subagent`, `parent_tool_call_id`,
-`tool_call_id`, `is_error`, etc.). The camel-case pseudocode above names the
-concepts, not the literal tags. Use `tool_call_id` even when the native
-provider calls the value `tool_use_id`, `call_id`, or something else; native
-spelling belongs only in `format=raw`.
+The concrete Go wire structs should use Gas City's normal JSON spelling shown
+above (`schema_version`, `stop_reason`, `is_subagent`,
+`parent_tool_call_id`, `tool_call_id`, `is_error`, etc.). Use `tool_call_id`
+even when the native provider calls the value `tool_use_id`, `call_id`, or
+something else; native spelling belongs only in `format=raw`.
 
 The structured transcript response and the structured stream must preserve the
 worker history envelope, not only individual messages. Transcript snapshots can
@@ -386,13 +721,13 @@ still honors the requested structured wire contract. The response or stream
 frame must use `format: "structured"`, include `schema_version`, and include a
 degraded `history` envelope with `continuity.status = "degraded"` plus a
 `transcript_unavailable` diagnostic. If live pane text is the only observable
-source, it may appear only as a provider-neutral `text` block in
-`structured_messages`; the server must not return `format: "text"` to a
-structured request and must not forward provider-native frames through the
-structured format. This graceful downgrade is mandatory for every built-in
-provider, including providers whose rich transcript parser has not landed yet,
-so clients can render one provider-neutral shape without learning provider
-file formats.
+source, it may appear only as a provider-neutral `text` block on a degraded
+`assistant` message in `structured_messages`; the server must not return
+`format: "text"` to a structured request and must not forward provider-native
+frames through the structured format. This graceful downgrade is mandatory for
+every built-in provider, including providers whose rich transcript parser has
+not landed yet, so clients can render one provider-neutral shape without
+learning provider file formats.
 
 ### Thinking-exposure policy
 
@@ -410,15 +745,15 @@ decision flagged for sign-off, not just a code toggle.
 
 ### Phase 1 — Structured, frame-granular format
 
-**1A. Carrier + schema + stop-flatten (cross-cutting; unlocks 8 transcript
-families and 11 profiles).**
+**1A. Carrier + schema + stop-flatten (cross-cutting; currently unlocks 12
+transcript families and 16 profiles).**
 
-- `internal/sessionlog/entry.go:60-77` — add `Thinking`, `Signature`, and a
-  structured `ToolResult` field to `ContentBlock`; map Anthropic `thinking`
-  → the new field in `Entry.ContentBlocks()`.
+- `internal/sessionlog/entry.go` — carry `Thinking` and `Signature` on
+  `ContentBlock`; map provider thinking/reasoning fields into canonical
+  thinking text and neutral signature markers.
 - `internal/worker/types.go` — add `Usage`, `Model`, `StopReason` to
-  `HistoryEntry` (187-197); `Thinking` / `Signature` / structured-result to
-  `HistoryBlock` (200-210).
+  `HistoryEntry`; add signature and structured-result carriers to
+  `HistoryBlock`.
 - `internal/worker/sessionlog_adapter.go:293-368` — decode
   `message.usage` / `model` / `stop_reason` (reuse the cache-aware parser in
   `tail_usage.go`) and populate the new fields instead of only `cloneRaw`.
@@ -459,20 +794,21 @@ exactly why Codex results are opaque today. Then:
 - exit-code / `is_error` derivation from text and fields;
 - `web_search_call` handling; reasoning fallback to the item's `content`
   when `summary` is empty, and `encrypted_content` → `signature: "encrypted"`;
-- `token_count` event → per-entry usage; capture `model`.
-- extend `codexResponseItem` only for the genuinely missing fields —
-  `arguments` and `encrypted_content`. `content` (the typed `[{text}]`
-  slice), `summary`, `input`, and `output` already exist as struct fields
-  (`codex_reader.go:373-391`), so the reasoning `content`-fallback is a
-  read-path change — reasoning items read only `summary` today
-  (`codex_reader.go:220-234`) — not a new field.
+- `token_count` event → per-entry usage; capture `model` and the reported
+  context window (currently implemented in worker history via
+  `ExtractCodexTailUsage` correlation).
+- `codexResponseItem` already carries typed `content`, `summary`, `arguments`,
+  `input`, and `output`; `encrypted_content` is carried only as neutral
+  signature evidence. Keep encrypted provider bytes off the structured wire.
 
 **1C. Gemini and Kimi current-format gaps.**
 
-- Gemini: support the current JSONL session format, add `tokens` → usage,
-  set `tool_result.is_error` from `toolCall.status`, handle `type:"error"`
-  messages, preserve model/stop metadata, and add an **incremental parser** so
-  live frame-granular streaming works (the legacy reader is whole-file).
+- Gemini: current JSONL session format is supported; `model`, nested
+  `tokens.cache.read/write`, `type:"error"` messages, and tool-result status
+  now normalize to provider-neutral metadata/usage/text/error fields. Remaining
+  work: cover every current `resultDisplay` variant and add an **incremental
+  parser** so live frame-granular streaming works (the legacy reader is
+  whole-file).
 - Kimi: prefer current `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`
   and subagent `wire.jsonl` files, while retaining legacy context-log support
   until it is no longer useful.
@@ -483,36 +819,88 @@ exactly why Codex results are opaque today. Then:
   OpenCode-backed profiles, not distinct transcript dialects.
 - Route `omp` through the Pi-family adapter and normalize OMP `bashExecution`
   / `pythonExecution` messages to provider-neutral Bash/Python tool-result
-  shapes with output, exit code, cancellation/interruption, and truncation.
-- Add `is_error` where omitted today for kimi/antigravity tool results.
+  shapes with output, exit code, cancellation/interruption, and truncation
+  (covered in worker history).
+- Kimi and Antigravity status/error fields normalize to provider-neutral
+  `is_error`; remaining work is richer typed result extraction where their
+  native evidence exposes command/edit/artifact/file shapes.
 - Note: per-invocation usage is absent for some long-tail readers today. Pi
   exposes compaction `PreTokens`, but that is context-boundary evidence, not
   response usage.
 
-**1E. Native reader/capture work for the remaining 6 profiles.**
+**1E. Copilot reader hardening.**
 
-- Copilot: add a reader for `~/.copilot/session-state/<sessionId>/events.jsonl`
-  that maps assistant/user events, `tool.execution_start`,
-  `tool.execution_complete`, terminal output blocks, and write diffs to the
-  neutral block/result schema.
-- Kiro: prefer ACP JSONL event logs under `~/.kiro/sessions/cli/` because ACP
-  explicitly exposes `ToolCall`, `ToolCallUpdate`, and `TurnEnd`; sample and
-  document the chat database/export path before using it.
+- Copilot: `~/.copilot/session-state/<sessionId>/events.jsonl` is now mapped
+  through the sessionlog provider layer into neutral user/assistant/system
+  messages, `tool.execution_start` / assistant `toolRequests` tool-use blocks,
+  and `tool.execution_complete` tool results. Command output fields normalize
+  to `stdout`, `stderr`, and `exit_code`; failed tool errors normalize to
+  neutral error content; result-side patch/edit evidence normalizes to
+  `file_path`, `patch`, old/new/original text, and edit flags when present.
+  Remaining work: validate against a real fixture corpus for newer Copilot
+  event variants, including any separate terminal-output chunk events and richer
+  file-change records beyond completion-result evidence.
+
+**1F. Kiro ACP structured reader.**
+
+- Kiro: `~/.kiro/sessions/cli/<session-id>.jsonl` is now mapped through the
+  sessionlog provider layer into neutral assistant text, tool-use, and
+  tool-result blocks. ACP `rawInput` / `rawOutput` normalize to provider-neutral
+  command/file/edit/result fields, failed statuses become neutral error result
+  content, and ACP diff content normalizes to result-side `file_path` + `patch`
+  data. Keyed discovery uses the ACP session file plus JSON sidecar/JSONL cwd
+  evidence to verify the workdir. Remaining work: capture real ACP fixture
+  variants for chunk coalescing and sample the default Kiro chat DB/export path
+  before relying on retrospective chat sessions.
+
+**1G. Amp captured stream-json reader.**
+
+- Amp: configured GC-owned captures of `amp --execute --stream-json` output are
+  now mapped through the sessionlog provider layer into neutral user/assistant
+  messages, tool-use blocks, tool-result blocks, and final result system
+  events. Assistant usage metadata flows to worker history. Tool inputs and
+  JSON-string result payloads normalize to provider-neutral command/file/edit
+  fields before worker inference, including typed Bash/Edit structured results
+  when the captured stream contains stdout/stderr/exit-code or result-side patch
+  evidence. Remaining work: add managed stdout capture before changing the
+  builtin interactive Amp profile to stream-json/headless mode, and validate
+  against real Amp fixtures for subagents and richer tool-result variants.
+
+**1H. Grok ACP captured reader.**
+
+- Grok: configured GC-owned captures of ACP JSONL `session/update` events are
+  now mapped through the sessionlog provider layer into neutral assistant text,
+  tool-use blocks, and tool-result blocks. ACP `rawInput` / `rawOutput`
+  normalize to provider-neutral command/file/edit/result fields, and ACP diff
+  content normalizes to result-side `file_path` + `patch` data before worker
+  inference. Discovery uses configured capture roots and validates cwd from
+  `session/new` / nested context frames. Remaining work: add managed ACP or
+  headless capture before changing the builtin Grok profile, and validate
+  documented `--output-format streaming-json` plus persisted `~/.grok/sessions`
+  formats with real fixtures before relying on them.
+
+**1I. Auggie ACP captured reader.**
+
+- Auggie: configured GC-owned captures of ACP JSONL `session/update` events are
+  now mapped through the sessionlog provider layer into neutral assistant text,
+  tool-use blocks, and tool-result blocks. ACP `rawInput` / `rawOutput`
+  normalize to provider-neutral command/file/edit/result fields, and ACP diff
+  content normalizes to result-side `file_path` + `patch` data before worker
+  inference. Discovery uses configured capture roots and validates cwd from
+  `session/new` / nested context frames. Remaining work: add managed ACP, SDK,
+  or hook capture before changing the builtin Auggie profile, and validate saved
+  session `chatHistory` / node graph, hook `tool_output` / `file_changes`, and
+  SDK `tool_call_update` / `rawOutput` formats with real fixtures before
+  relying on them.
+
+**1J. Native reader/capture work for the remaining 1 profile.**
+
 - Cursor: native local transcripts intentionally omit tool outputs, so rich
   structured support requires Gas City-managed hook capture (for example
   `postToolUse`) or sidecar output reconstruction. The native JSONL alone may
   provide tool-call intent but is insufficient for rich results/diffs.
-- Amp: capture `amp --execute --stream-json` / `--stream-json-input` stdout for
-  structured non-interactive sessions. Do not claim retrospective rich local
-  thread discovery unless Amp publishes a stable local transcript source.
-- Grok: capture `--output-format streaming-json` or ACP `session/update`
-  events for headless/ACP sessions. The documented `~/.grok/sessions` path is
-  not enough by itself without a stable persisted schema.
-- Auggie: add a saved-session reader for `chatHistory` / node graph data, or
-  use SDK/stream capture, mapping `tool_use`, `tool_result_node`, command
-  output, edit metrics, and diffs into neutral tool-result shapes.
 
-**1F. Golden-fixture test corpus (cross-cutting; do alongside 1A–1E).**
+**1K. Golden-fixture test corpus (cross-cutting; do alongside 1A–1J).**
 
 Capture real `format=raw` transcripts per provider/version into a fixture
 corpus and snapshot-test the structured producer. A provider CLI bump
@@ -596,11 +984,12 @@ authorization/redaction layer.
 - **`worker-conformance.md` alignment** — the carrier change extends the
   canonical normalized model that doc designates as core; the new fields
   should land as conformance assertions, not incidental observability.
-- **Provider capture completeness** — Cursor, Amp, Grok, and some Kiro paths
-  are not safely solved by generic local transcript discovery. Their rich
-  structured coverage depends on managed hook/stream/ACP capture, and tests
-  must distinguish "message/tool-call intent available" from "full rich
-  result/diff trace available."
+- **Provider capture completeness** — Cursor, Auggie saved-session/hook/SDK
+  paths, streaming-json/persisted Grok paths, and some Kiro paths are not safely
+  solved by generic local transcript discovery. Their rich structured coverage
+  depends on managed hook/stream/ACP capture, and tests must distinguish
+  "message/tool-call intent available" from "full rich result/diff trace
+  available."
 
 ## Appendix: source facts
 
@@ -626,7 +1015,7 @@ authorization/redaction layer.
   (`handler_agent_output_turns.go:26-101`).
 - Typed block fidelity retained pre-flatten: `ContentBlock`
   (`entry.go:60-77`), `HistoryBlock` (`worker/types.go:199-210`).
-- Per-family dispatch: `reader.go:153-172,1283-1303`.
+- Per-family dispatch: `reader.go` `ReadProviderFile` and `ProviderFamily`.
 - Tail-only usage: `tail_usage.go:12-98`, `codex_usage.go:31-123`,
   `worker/invocation_telemetry.go:188-225`.
 - Codex opacity: `codex_reader.go:254-270,315-327`.
@@ -659,7 +1048,7 @@ authorization/redaction layer.
     <https://github.com/can1357/oh-my-pi/blob/main/docs/session.md>,
     <https://github.com/can1357/oh-my-pi/blob/main/docs/hooks.md>.
   - Copilot CLI documents local session data and full-history resume behavior:
-    <https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/chronicle>.
+    <https://docs.github.com/en/copilot/concepts/agents/copilot-cli/chronicle>.
   - Kiro documents local database-backed chat sessions and ACP JSONL session
     logs with `ToolCall`, `ToolCallUpdate`, and `TurnEnd` updates:
     <https://kiro.dev/docs/cli/chat/session-management/>,
@@ -674,9 +1063,16 @@ authorization/redaction layer.
   - Grok documents headless sessions under `~/.grok/sessions`,
     `--output-format streaming-json`, and ACP `session/update` chunks:
     <https://docs.x.ai/build/cli/headless-scripting>.
-  - Auggie documents saved session resume/list commands and cache relocation;
-    package inspection confirms saved session `chatHistory`/node graph shape:
-    <https://docs.augmentcode.com/cli/reference>.
+  - Auggie documents `--print --output-format json`, `--acp`, saved session
+    resume/list commands, cache relocation, and diagnostic log-file controls;
+    Auggie ACP uses JSON-RPC over stdio; Auggie hooks expose `tool_output`,
+    `tool_error`, and `file_changes`; and the TypeScript SDK exposes
+    `agent_message_chunk`, `tool_call`, `tool_call_update`, and `rawOutput`
+    session updates:
+    <https://docs.augmentcode.com/cli/reference>,
+    <https://docs.augmentcode.com/cli/acp/agent>,
+    <https://docs.augmentcode.com/cli/hooks>,
+    <https://docs.augmentcode.com/cli/sdk-typescript>.
   - Google documents Antigravity CLI as the Gemini CLI successor with hooks,
     subagents, and extensions:
     <https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>.

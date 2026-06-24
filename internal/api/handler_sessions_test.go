@@ -7192,7 +7192,7 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	}
 }
 
-func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T) {
+func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
@@ -7245,12 +7245,12 @@ func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T
 	if resp.Turns[0].Role != "system" {
 		t.Fatalf("turn role = %q, want system", resp.Turns[0].Role)
 	}
-	if !strings.Contains(resp.Turns[0].Text, "usage_limit_exceeded") || !strings.Contains(resp.Turns[0].Text, "You've hit your usage limit.") {
-		t.Fatalf("turn text = %q, want Codex error code and message", resp.Turns[0].Text)
+	if resp.Turns[0].Text != "You've hit your usage limit." {
+		t.Fatalf("turn text = %q, want normalized Codex system error message", resp.Turns[0].Text)
 	}
 }
 
-func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
+func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
@@ -7288,8 +7288,11 @@ func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "usage_limit_exceeded") || !strings.Contains(body, "You've hit your usage limit.") {
-		t.Fatalf("conversation stream body missing Codex error frame: %s", body)
+	if !strings.Contains(body, "You've hit your usage limit.") {
+		t.Fatalf("conversation stream body missing Codex system error: %s", body)
+	}
+	if strings.Contains(body, "codex_error_info") || strings.Contains(body, "event_msg") {
+		t.Fatalf("conversation stream leaked provider-native Codex error fields: %s", body)
 	}
 }
 

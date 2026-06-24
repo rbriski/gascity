@@ -384,7 +384,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 type sessionTranscriptGetResponse struct {
 	ID                 string                     `json:"id"`
 	Template           string                     `json:"template"`
-	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
 	Format             string                     `json:"format" doc:"conversation, text, raw, or structured."`
 	SchemaVersion      string                     `json:"schema_version,omitempty" doc:"Structured session transcript schema version when format is structured."`
 	History            *SessionStructuredHistory  `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`

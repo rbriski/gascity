@@ -4126,7 +4126,7 @@ export interface components {
             format: string;
             id: string;
             pagination?: components["schemas"]["PaginationInfo"];
-            /** @description Producing provider identifier (claude, codex, gemini, open-code, etc.). */
+            /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). */
             provider: string;
             template: string;
             turns: components["schemas"]["OutputTurn"][] | null;
@@ -4137,7 +4137,7 @@ export interface components {
             /** @description Provider-native transcript frames, emitted verbatim as the provider wrote them. */
             messages: components["schemas"]["SessionRawMessageFrame"][] | null;
             pagination?: components["schemas"]["PaginationInfo"];
-            /** @description Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing. */
+            /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing. */
             provider: string;
             template: string;
         };
@@ -4148,7 +4148,7 @@ export interface components {
             history?: components["schemas"]["SessionStructuredHistory"];
             id: string;
             pagination?: components["schemas"]["PaginationInfo"];
-            /** @description Producing provider identifier (claude, codex, gemini, open-code, etc.). */
+            /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). */
             provider: string;
             /** @description Structured session transcript schema version. */
             schema_version: string;
@@ -4162,10 +4162,13 @@ export interface components {
         };
         SessionStructuredBlock: {
             content?: string;
+            file_path?: string;
             id?: string;
+            image_url?: string;
             input?: components["schemas"]["SessionStructuredToolInput"];
             interaction?: components["schemas"]["SessionStructuredInteraction"];
             is_error?: boolean;
+            mime_type?: string;
             name?: string;
             signature?: string;
             structured?: components["schemas"]["SessionStructuredToolResult"];
@@ -4205,6 +4208,9 @@ export interface components {
             tail_state: components["schemas"]["SessionStructuredTailState"];
             transcript_stream_id: string;
         };
+        SessionStructuredIDESelection: {
+            text?: string;
+        };
         SessionStructuredInteraction: {
             action?: string;
             kind?: string;
@@ -4223,7 +4229,47 @@ export interface components {
             role: string;
             status: string;
             stop_reason?: string;
+            system_event?: components["schemas"]["SessionStructuredSystemEvent"];
             timestamp?: string;
+            usage?: components["schemas"]["SessionStructuredUsage"];
+            user_prompt?: components["schemas"]["SessionStructuredUserPrompt"];
+        };
+        SessionStructuredPatchHunk: {
+            file_path?: string;
+            lines?: string[] | null;
+            /** Format: int64 */
+            new_lines?: number;
+            /** Format: int64 */
+            new_start?: number;
+            /** Format: int64 */
+            old_lines?: number;
+            /** Format: int64 */
+            old_start?: number;
+        };
+        SessionStructuredPlanStep: {
+            status?: string;
+            step?: string;
+        };
+        SessionStructuredQuestion: {
+            header?: string;
+            multi_select?: boolean;
+            options?: components["schemas"]["SessionStructuredQuestionOption"][] | null;
+            question?: string;
+        };
+        SessionStructuredQuestionOption: {
+            description?: string;
+            label?: string;
+        };
+        SessionStructuredSearchResultItem: {
+            snippet?: string;
+            title?: string;
+            url?: string;
+        };
+        SessionStructuredSystemEvent: {
+            category?: string;
+            code?: string;
+            kind?: string;
+            message?: string;
         };
         SessionStructuredTailState: {
             activity: string;
@@ -4233,42 +4279,151 @@ export interface components {
             open_tool_call_ids?: string[] | null;
             pending_interaction_ids?: string[] | null;
         };
+        SessionStructuredTodoItem: {
+            active_form?: string;
+            content?: string;
+            id?: string;
+            priority?: string;
+            status?: string;
+        };
+        SessionStructuredToolError: {
+            /** @description Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown. */
+            category?: string;
+            message?: string;
+            user_reason?: string;
+        };
         SessionStructuredToolInput: {
             arguments?: components["schemas"]["SessionStructuredArgument"][] | null;
             code?: string;
             command?: string;
+            description?: string;
+            explanation?: string;
             file_path?: string;
-            /** @description Provider-neutral input kind such as command, code, patch, search, file, arguments, or text. */
+            /** @description Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text. */
             kind?: string;
+            language?: string;
+            linked_command?: string;
+            options?: string[] | null;
             patch?: string;
             pattern?: string;
+            plan?: string;
+            prompt?: string;
             query?: string;
+            question?: string;
+            steps?: components["schemas"]["SessionStructuredPlanStep"][] | null;
+            task_id?: string;
+            task_status?: string;
+            task_type?: string;
             text?: string;
+            todos?: components["schemas"]["SessionStructuredTodoItem"][] | null;
+            url?: string;
         };
         SessionStructuredToolResult: {
+            answer?: string;
+            answers?: components["schemas"]["SessionStructuredArgument"][] | null;
+            /** Format: int64 */
+            applied_limit?: number;
+            /** Format: int64 */
+            bytes?: number;
             code?: string;
+            command?: string;
             content?: string;
+            counts?: components["schemas"]["SessionStructuredArgument"][] | null;
+            description?: string;
+            /** Format: int64 */
+            duration_ms?: number;
+            error?: components["schemas"]["SessionStructuredToolError"];
             /** Format: int64 */
             exit_code?: number;
+            explanation?: string;
             file_path?: string;
+            file_paths?: string[] | null;
             filenames?: string[] | null;
             interrupted?: boolean;
             is_image?: boolean;
             kind: string;
+            language?: string;
             mode?: string;
+            new_string?: string;
+            new_todos?: components["schemas"]["SessionStructuredTodoItem"][] | null;
             /** Format: int64 */
             num_files?: number;
             /** Format: int64 */
             num_lines?: number;
+            /** Format: int64 */
+            num_results?: number;
+            old_string?: string;
+            old_todos?: components["schemas"]["SessionStructuredTodoItem"][] | null;
+            options?: string[] | null;
+            original_file?: string;
+            output?: string;
             patch?: string;
+            patch_hunks?: components["schemas"]["SessionStructuredPatchHunk"][] | null;
+            plan?: string;
+            query?: string;
+            question?: string;
+            questions?: components["schemas"]["SessionStructuredQuestion"][] | null;
+            replace_all?: boolean;
+            result_items?: components["schemas"]["SessionStructuredSearchResultItem"][] | null;
             /** Format: int64 */
             start_line?: number;
+            /** Format: int64 */
+            status_code?: number;
+            status_text?: string;
             stderr?: string;
+            /** Format: int64 */
+            stderr_lines?: number;
             stdout?: string;
+            /** Format: int64 */
+            stdout_lines?: number;
+            steps?: components["schemas"]["SessionStructuredPlanStep"][] | null;
+            task_id?: string;
+            task_status?: string;
+            task_type?: string;
             text?: string;
+            timestamp?: string;
+            /** Format: int64 */
+            total_duration_ms?: number;
             /** Format: int64 */
             total_lines?: number;
+            /** Format: int64 */
+            total_tokens?: number;
+            /** Format: int64 */
+            total_tool_use_count?: number;
             truncated?: boolean;
+            url?: string;
+            user_modified?: boolean;
+        };
+        SessionStructuredUploadedFile: {
+            file_path?: string;
+            mime_type?: string;
+            original_name?: string;
+            preview_url?: string;
+            size?: string;
+        };
+        SessionStructuredUsage: {
+            /** Format: int64 */
+            cache_creation_tokens?: number;
+            /** Format: int64 */
+            cache_read_tokens?: number;
+            /** Format: int64 */
+            context_percent?: number;
+            /** Format: int64 */
+            context_used_tokens?: number;
+            /** Format: int64 */
+            context_window_tokens?: number;
+            /** Format: int64 */
+            input_tokens?: number;
+            /** Format: int64 */
+            output_tokens?: number;
+            /** Format: int64 */
+            reasoning_tokens?: number;
+        };
+        SessionStructuredUserPrompt: {
+            opened_files?: string[] | null;
+            selections?: components["schemas"]["SessionStructuredIDESelection"][] | null;
+            text?: string;
+            uploaded_files?: components["schemas"]["SessionStructuredUploadedFile"][] | null;
         };
         SessionSubmitInputBody: {
             /**
@@ -4298,7 +4453,7 @@ export interface components {
             /** @description Populated for raw format; provider-native frames emitted verbatim as the provider wrote them. */
             messages?: components["schemas"]["SessionRawMessageFrame"][] | null;
             pagination?: components["schemas"]["PaginationInfo"];
-            /** @description Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing. */
+            /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing. */
             provider: string;
             /** @description Structured session transcript schema version when format is structured. */
             schema_version?: string;

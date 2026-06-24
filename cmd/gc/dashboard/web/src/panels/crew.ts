@@ -459,7 +459,12 @@ function renderTurn(role: string, text: string, timestamp: string | undefined): 
 function renderStructuredMessage(message: SessionStructuredMessage): HTMLElement {
   const role = message.role || "agent";
   const body = el("div", { class: "log-msg-body log-msg-body-structured" });
+  const promptMetadata = renderUserPromptMetadata(message.user_prompt);
+  if (promptMetadata) body.append(promptMetadata);
+  const systemEvent = renderSystemEventMetadata(message.system_event);
+  if (systemEvent) body.append(systemEvent);
   for (const block of message.blocks ?? []) {
+    if ((promptMetadata || systemEvent) && block.type === "text") continue;
     const rendered = renderStructuredBlock(block);
     if (rendered) body.append(rendered);
   }
@@ -472,12 +477,49 @@ function renderStructuredMessage(message: SessionStructuredMessage): HTMLElement
       message.provider ? el("span", { class: "log-msg-provider" }, [message.provider]) : null,
       el("span", { class: "log-msg-time" }, [formatTimestamp(message.timestamp)]),
       message.model ? el("span", { class: "log-msg-model" }, [message.model]) : null,
+      message.usage ? el("span", { class: "log-msg-status" }, [formatUsage(message.usage)]) : null,
       message.status ? el("span", { class: "log-msg-status" }, [message.status]) : null,
       message.stop_reason ? el("span", { class: "log-msg-stop" }, [message.stop_reason]) : null,
       message.is_subagent ? el("span", { class: "log-msg-status" }, ["subagent"]) : null,
       message.parent_tool_call_id ? el("span", { class: "log-msg-status" }, [`parent ${message.parent_tool_call_id}`]) : null,
     ]),
     body,
+  ]);
+}
+
+function renderSystemEventMetadata(value: unknown): HTMLElement | null {
+  const event = recordOf(value);
+  if (!event) return null;
+  const rows: string[] = [];
+  appendField(rows, "kind", event.kind);
+  appendField(rows, "category", event.category);
+  appendField(rows, "code", event.code);
+  appendField(rows, "message", event.message);
+  if (rows.length === 0) return null;
+  return el("div", { class: "log-msg-tool log-msg-system-event" }, [
+    el("div", { class: "log-msg-tool-title" }, [
+      el("span", { class: "log-msg-tool-kind" }, ["system"]),
+      " event",
+    ]),
+    el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]),
+  ]);
+}
+
+function renderUserPromptMetadata(value: unknown): HTMLElement | null {
+  const prompt = recordOf(value);
+  if (!prompt) return null;
+  const rows: string[] = [];
+  appendField(rows, "prompt", prompt.text);
+  appendStringList(rows, "opened files", prompt.opened_files);
+  appendUploadedFiles(rows, prompt.uploaded_files);
+  appendIDESelections(rows, prompt.selections);
+  if (rows.length === 0) return null;
+  return el("div", { class: "log-msg-tool log-msg-user-prompt" }, [
+    el("div", { class: "log-msg-tool-title" }, [
+      el("span", { class: "log-msg-tool-kind" }, ["user"]),
+      " prompt",
+    ]),
+    el("pre", { class: "log-msg-tool-pre" }, [rows.join("\n")]),
   ]);
 }
 
@@ -543,9 +585,33 @@ function renderStructuredBlock(block: SessionStructuredBlock): HTMLElement | nul
       ]);
     case "interaction":
       return el("div", { class: "log-msg-tool" }, [formatInteraction(block)]);
+    case "image":
+      return renderImageBlock(block);
     default:
       return el("div", { class: "log-msg-tool-result" }, [formatInlineValue(block)]);
   }
+}
+
+function renderImageBlock(block: SessionStructuredBlock): HTMLElement {
+  const rows: string[] = [];
+  appendField(rows, "file", block.file_path);
+  appendField(rows, "url", block.image_url);
+  appendField(rows, "mime", block.mime_type);
+  const children: Array<HTMLElement | string> = [
+    el("div", { class: "log-msg-tool-title" }, [
+      el("span", { class: "log-msg-tool-kind" }, ["image"]),
+      " block",
+    ]),
+    el("pre", { class: "log-msg-tool-pre" }, [rows.length > 0 ? rows.join("\n") : "image"]),
+  ];
+  if (typeof block.image_url === "string" && block.image_url !== "") {
+    children.push(el("img", {
+      alt: typeof block.file_path === "string" && block.file_path !== "" ? block.file_path : "image",
+      src: block.image_url,
+      style: "display:block;max-width:100%;max-height:220px;margin-top:8px;border-radius:4px;",
+    }));
+  }
+  return el("div", { class: "log-msg-tool log-msg-image-block" }, children);
 }
 
 function renderToolInput(block: SessionStructuredBlock): HTMLElement {
@@ -557,12 +623,26 @@ function renderToolInput(block: SessionStructuredBlock): HTMLElement {
   const patch = stringValue(input.patch);
   appendField(rows, "kind", input.kind);
   appendField(rows, "file", input.file_path);
+  appendField(rows, "language", input.language);
+  appendField(rows, "url", input.url);
+  appendField(rows, "prompt", input.prompt);
+  appendField(rows, "task", input.task_id);
+  appendField(rows, "task type", input.task_type);
+  appendField(rows, "task status", input.task_status);
+  appendField(rows, "description", input.description);
+  appendField(rows, "question", input.question);
+  appendStringList(rows, "options", input.options);
   appendField(rows, "command", input.command);
+  appendField(rows, "linked command", input.linked_command);
   appendField(rows, "code", input.code);
   appendField(rows, "query", input.query);
   appendField(rows, "pattern", input.pattern);
+  appendField(rows, "plan", input.plan);
+  appendField(rows, "explanation", input.explanation);
+  appendPlanSteps(rows, input.steps);
   appendField(rows, "text", input.text);
   appendField(rows, "patch", patch);
+  appendTodoList(rows, "todos", input.todos);
   if (Array.isArray(input.arguments) && input.arguments.length > 0) {
     rows.push(...input.arguments.map((arg) => formatArgument(arg)));
   }
@@ -577,9 +657,17 @@ function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
     const lines: string[] = [];
     appendField(lines, "kind", kind);
     appendField(lines, "file", structured.file_path);
+    appendField(lines, "language", structured.language);
+    appendToolError(lines, structured.error);
     if (kind === "bash") {
+      appendField(lines, "command", structured.command);
+      appendField(lines, "task", structured.task_id);
+      appendField(lines, "task status", structured.task_status);
       appendField(lines, "stdout", structured.stdout);
       appendField(lines, "stderr", structured.stderr);
+      appendNumber(lines, "stdout lines", structured.stdout_lines);
+      appendNumber(lines, "stderr lines", structured.stderr_lines);
+      appendField(lines, "timestamp", structured.timestamp);
       appendExit(lines, structured.exit_code);
       appendFlags(lines, structured);
       return toolResultNodes(kind, lines);
@@ -592,8 +680,19 @@ function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
       appendFlags(lines, structured);
       return toolResultNodes(kind, lines);
     }
+    if (kind === "stdin") {
+      appendField(lines, "task", structured.task_id);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      return toolResultNodes(kind, lines);
+    }
     if (kind === "edit") {
-      const patch = stringValue(structured.patch);
+      const patch = stringValue(structured.patch) || patchTextFromHunks(structured.patch_hunks);
+      appendField(lines, "old", structured.old_string);
+      appendField(lines, "new", structured.new_string);
+      appendField(lines, "original file", structured.original_file);
+      appendBoolean(lines, "replace all", structured.replace_all);
+      appendBoolean(lines, "user modified", structured.user_modified);
       appendField(lines, "content", structured.content);
       return toolResultNodes(kind, lines, patch);
     }
@@ -605,14 +704,79 @@ function renderToolResult(block: SessionStructuredBlock): HTMLElement[] {
       appendFlags(lines, structured);
       return toolResultNodes(kind, lines);
     }
-    if (kind === "grep" || kind === "search") {
+    if (kind === "write") {
+      const patch = stringValue(structured.patch) || patchTextFromHunks(structured.patch_hunks);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      appendNumber(lines, "start", structured.start_line);
+      appendNumber(lines, "lines", structured.num_lines);
+      appendNumber(lines, "total", structured.total_lines);
+      return toolResultNodes(kind, lines, patch);
+    }
+    if (kind === "fetch") {
+      appendField(lines, "url", structured.url);
+      appendNumber(lines, "status", structured.status_code);
+      appendField(lines, "status text", structured.status_text);
+      appendNumber(lines, "bytes", structured.bytes);
+      appendNumber(lines, "duration ms", structured.duration_ms);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      return toolResultNodes(kind, lines);
+    }
+    if (kind === "todo") {
+      appendField(lines, "content", structured.content);
+      appendTodoList(lines, "old todos", structured.old_todos);
+      appendTodoList(lines, "new todos", structured.new_todos);
+      return toolResultNodes(kind, lines);
+    }
+    if (kind === "plan") {
+      appendField(lines, "plan", structured.plan);
+      appendField(lines, "explanation", structured.explanation);
+      appendPlanSteps(lines, structured.steps);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      return toolResultNodes(kind, lines);
+    }
+    if (kind === "question") {
+      appendField(lines, "question", structured.question);
+      appendQuestions(lines, structured.questions);
+      appendStringList(lines, "options", structured.options);
+      appendField(lines, "answer", structured.answer);
+      appendArgumentList(lines, "answers", structured.answers);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      return toolResultNodes(kind, lines);
+    }
+    if (kind === "task") {
+      appendField(lines, "task", structured.task_id);
+      appendField(lines, "task type", structured.task_type);
+      appendField(lines, "task status", structured.task_status);
+      appendField(lines, "description", structured.description);
+      appendNumber(lines, "total duration ms", structured.total_duration_ms);
+      appendNumber(lines, "total tokens", structured.total_tokens);
+      appendNumber(lines, "total tool calls", structured.total_tool_use_count);
+      appendField(lines, "output", structured.output);
+      appendField(lines, "stdout", structured.stdout);
+      appendField(lines, "stderr", structured.stderr);
+      appendExit(lines, structured.exit_code);
+      appendField(lines, "content", structured.content);
+      appendField(lines, "text", structured.text);
+      return toolResultNodes(kind, lines);
+    }
+    if (kind === "grep" || kind === "search" || kind === "glob") {
       if (Array.isArray(structured.filenames) && structured.filenames.length > 0) {
         appendField(lines, "files", structured.filenames.join(", "));
       }
+      appendField(lines, "query", structured.query);
       appendField(lines, "mode", structured.mode);
+      appendArgumentList(lines, "counts", structured.counts);
+      appendSearchResultItems(lines, structured.result_items);
       appendField(lines, "content", structured.content);
       appendField(lines, "text", structured.text);
       appendNumber(lines, "files", structured.num_files);
+      appendNumber(lines, "results", structured.num_results);
+      appendNumber(lines, "duration ms", structured.duration_ms);
+      appendNumber(lines, "applied limit", structured.applied_limit);
       appendNumber(lines, "lines", structured.num_lines);
       appendFlags(lines, structured);
       return toolResultNodes(kind, lines);
@@ -654,9 +818,46 @@ function renderDiffPre(diffText: string): HTMLElement {
   return el("pre", { class: "log-msg-tool-pre log-msg-diff" }, children);
 }
 
+function patchTextFromHunks(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  const lines: string[] = [];
+  let lastFilePath = "";
+  value.forEach((item) => {
+    const hunk = recordOf(item);
+    if (!hunk) return;
+    const filePath = stringValue(hunk.file_path);
+    if (filePath !== "" && filePath !== lastFilePath) {
+      lines.push(`*** Update File: ${filePath}`);
+      lastFilePath = filePath;
+    }
+    lines.push(formatPatchHunkHeader(hunk));
+    if (Array.isArray(hunk.lines)) {
+      hunk.lines.forEach((line) => {
+        if (typeof line === "string") lines.push(line);
+      });
+    }
+  });
+  return lines.join("\n");
+}
+
+function formatPatchHunkHeader(hunk: Record<string, unknown>): string {
+  const oldStart = numberValue(hunk.old_start);
+  const oldLines = numberValue(hunk.old_lines);
+  const newStart = numberValue(hunk.new_start);
+  const newLines = numberValue(hunk.new_lines);
+  if (oldStart === undefined && newStart === undefined) return "@@";
+  return `@@ -${formatPatchRange(oldStart, oldLines)} +${formatPatchRange(newStart, newLines)} @@`;
+}
+
+function formatPatchRange(start: number | undefined, lines: number | undefined): string {
+  const safeStart = start ?? 1;
+  if (lines === undefined || lines === 1) return String(safeStart);
+  return `${safeStart},${lines}`;
+}
+
 function diffLineClass(line: string): string {
   if (line.startsWith("@@")) return "log-msg-diff-line log-msg-diff-hunk";
-  if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
+  if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("*** ") || line.startsWith("---") || line.startsWith("+++")) {
     return "log-msg-diff-line log-msg-diff-file";
   }
   if (line.startsWith("+")) return "log-msg-diff-line log-msg-diff-add";
@@ -668,13 +869,30 @@ function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
 function appendField(rows: string[], label: string, value: unknown): void {
   if (typeof value !== "string" || value === "") return;
   rows.push(`${label}: ${value}`);
 }
 
+function appendToolError(rows: string[], value: unknown): void {
+	const toolError = recordOf(value);
+	if (!toolError) return;
+	appendField(rows, "error category", toolError.category);
+	appendField(rows, "error", toolError.message);
+	appendField(rows, "user reason", toolError.user_reason);
+}
+
 function appendNumber(rows: string[], label: string, value: unknown): void {
   if (typeof value !== "number") return;
+  rows.push(`${label}: ${String(value)}`);
+}
+
+function appendBoolean(rows: string[], label: string, value: unknown): void {
+  if (typeof value !== "boolean") return;
   rows.push(`${label}: ${String(value)}`);
 }
 
@@ -688,11 +906,129 @@ function appendFlags(rows: string[], structured: Record<string, unknown>): void 
   if (structured.interrupted === true) rows.push("interrupted");
 }
 
-function appendStringList(rows: string[], label: string, value: string[] | null | undefined): void {
-  if (!value || value.length === 0) return;
-  const parts = value.filter((item) => item !== "");
+function appendStringList(rows: string[], label: string, value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  const parts = value.filter((item): item is string => typeof item === "string" && item !== "");
   if (parts.length === 0) return;
   rows.push(`${label}: ${parts.join(", ")}`);
+}
+
+function appendUploadedFiles(rows: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  const files = value
+    .map((item) => recordOf(item))
+    .filter((item): item is Record<string, unknown> => item !== null);
+  if (files.length === 0) return;
+  rows.push("uploaded files:");
+  files.forEach((file) => {
+    const name = stringValue(file.original_name);
+    const size = stringValue(file.size);
+    const mime = stringValue(file.mime_type);
+    const path = stringValue(file.file_path);
+    const preview = stringValue(file.preview_url);
+    const detail = [size, mime].filter((part) => part !== "").join(", ");
+    const suffix = preview !== "" ? ` preview: ${preview}` : "";
+    rows.push(`- ${name}${detail !== "" ? ` (${detail})` : ""}${path !== "" ? `: ${path}` : ""}${suffix}`);
+  });
+}
+
+function appendIDESelections(rows: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  const selections = value
+    .map((item) => recordOf(item))
+    .map((item) => (item ? stringValue(item.text) : ""))
+    .filter((text) => text !== "");
+  if (selections.length === 0) return;
+  rows.push("selections:");
+  selections.forEach((selection) => rows.push(`- ${selection}`));
+}
+
+function appendPlanSteps(rows: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  rows.push("steps:");
+  value.forEach((item, index) => {
+    const step = recordOf(item);
+    if (!step) return;
+    const text = stringValue(step.step);
+    const status = stringValue(step.status);
+    const parts = [
+      status !== "" ? `[${status}]` : "",
+      text !== "" ? text : `step ${index + 1}`,
+    ].filter((part) => part !== "");
+    rows.push(`- ${parts.join(" ")}`);
+  });
+}
+
+function appendArgumentList(rows: string[], label: string, value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  rows.push(`${label}:`);
+  value.forEach((item) => {
+    const formatted = formatArgument(item);
+    if (formatted !== "") rows.push(`- ${formatted}`);
+  });
+}
+
+function appendSearchResultItems(rows: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  rows.push("result items:");
+  value.forEach((item, index) => {
+    const resultItem = recordOf(item);
+    if (!resultItem) return;
+    const title = stringValue(resultItem.title);
+    const url = stringValue(resultItem.url);
+    const snippet = stringValue(resultItem.snippet);
+    const label = title !== "" ? title : `result ${index + 1}`;
+    const parts = [label, url, snippet].filter((part) => part !== "");
+    rows.push(`- ${parts.join(" | ")}`);
+  });
+}
+
+function appendQuestions(rows: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  rows.push("questions:");
+  value.forEach((item, index) => {
+    const question = recordOf(item);
+    if (!question) return;
+    const text = stringValue(question.question);
+    const header = stringValue(question.header);
+    const multiSelect = question.multi_select === true ? "multi-select" : "";
+    const label = text !== "" ? text : `question ${index + 1}`;
+    const parts = [header, label, multiSelect].filter((part) => part !== "");
+    rows.push(`- ${parts.join(" | ")}`);
+    const options = question.options;
+    if (Array.isArray(options) && options.length > 0) {
+      const rendered = options
+        .map((option) => {
+          const optionRecord = recordOf(option);
+          if (!optionRecord) return "";
+          const optionLabel = stringValue(optionRecord.label);
+          const description = stringValue(optionRecord.description);
+          return [optionLabel, description].filter((part) => part !== "").join(" | ");
+        })
+        .filter((part) => part !== "");
+      if (rendered.length > 0) rows.push(`  options: ${rendered.join("; ")}`);
+    }
+  });
+}
+
+function appendTodoList(rows: string[], label: string, value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  rows.push(`${label}:`);
+  value.forEach((item, index) => {
+    const todo = recordOf(item);
+    if (!todo) return;
+    const status = stringValue(todo.status);
+    const content = stringValue(todo.content);
+    const activeForm = stringValue(todo.active_form);
+    const priority = stringValue(todo.priority);
+    const parts = [
+      status !== "" ? `[${status}]` : "",
+      content !== "" ? content : `todo ${index + 1}`,
+      priority !== "" ? `priority ${priority}` : "",
+      activeForm !== "" ? `(${activeForm})` : "",
+    ].filter((part) => part !== "");
+    rows.push(`- ${parts.join(" ")}`);
+  });
 }
 
 function formatArgument(value: unknown): string {
@@ -712,6 +1048,32 @@ function formatInteraction(block: SessionStructuredBlock): string {
   const action = interaction?.action ?? "";
   const options = interaction?.options?.join(", ") ?? "";
   return [kind, state, requestID, action, prompt, options].filter(Boolean).join(" ");
+}
+
+function formatUsage(value: unknown): string {
+  const usage = recordOf(value);
+  if (!usage) return "";
+  const parts: string[] = [];
+  appendUsagePart(parts, "in", usage.input_tokens);
+  appendUsagePart(parts, "out", usage.output_tokens);
+  appendUsagePart(parts, "reason", usage.reasoning_tokens);
+  appendUsagePart(parts, "cache", usage.cache_read_tokens);
+  appendUsagePart(parts, "write", usage.cache_creation_tokens);
+  const contextUsed = numberValue(usage.context_used_tokens);
+  const contextWindow = numberValue(usage.context_window_tokens);
+  if (contextUsed !== undefined && contextWindow !== undefined) {
+    parts.push(`${contextUsed}/${contextWindow}`);
+  }
+  const contextPercent = numberValue(usage.context_percent);
+  if (contextPercent !== undefined) {
+    parts.push(`${contextPercent}%`);
+  }
+  return parts.length > 0 ? `tokens ${parts.join(" ")}` : "";
+}
+
+function appendUsagePart(parts: string[], label: string, value: unknown): void {
+  if (typeof value !== "number" || value === 0) return;
+  parts.push(`${label} ${String(value)}`);
 }
 
 function renderPendingInteraction(pending: PendingInteraction): HTMLElement {

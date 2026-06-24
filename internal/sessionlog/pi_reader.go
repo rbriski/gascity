@@ -476,7 +476,7 @@ func piMessageBlocks(message piMessage) []ContentBlock {
 			Type:      "tool_result",
 			ToolUseID: strings.TrimSpace(message.ToolCallID),
 			Name:      strings.TrimSpace(message.ToolName),
-			Content:   cloneRawJSON(message.Content),
+			Content:   piToolResultContent(message.Content),
 			IsError:   message.IsError,
 		}}
 	}
@@ -512,7 +512,7 @@ func piMessageBlocks(message piMessage) []ContentBlock {
 				Type:  "tool_use",
 				ID:    strings.TrimSpace(part.ID),
 				Name:  strings.TrimSpace(part.Name),
-				Input: cloneRawJSON(part.Arguments),
+				Input: piNeutralToolObject(part.Arguments),
 			})
 		case "interaction":
 			blocks = append(blocks, ContentBlock{
@@ -528,7 +528,16 @@ func piMessageBlocks(message piMessage) []ContentBlock {
 				Metadata:  cloneRawJSON(part.Metadata),
 			})
 		case "image":
-			blocks = append(blocks, ContentBlock{Type: "image"})
+			imageURL := strings.TrimSpace(part.ImageURL)
+			if strings.HasPrefix(strings.ToLower(imageURL), "data:") {
+				imageURL = ""
+			}
+			blocks = append(blocks, ContentBlock{
+				Type:     "image",
+				FilePath: strings.TrimSpace(part.FilePath),
+				ImageURL: imageURL,
+				MIMEType: strings.TrimSpace(firstNonEmpty(part.MIMEType, part.MediaType)),
+			})
 		}
 	}
 	return blocks
@@ -538,7 +547,7 @@ type piExecutionResultContent struct {
 	Command     string `json:"command,omitempty"`
 	Code        string `json:"code,omitempty"`
 	Output      string `json:"output,omitempty"`
-	ExitCode    *int   `json:"exitCode,omitempty"`
+	ExitCode    *int   `json:"exit_code,omitempty"`
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Canceled    bool   `json:"canceled,omitempty"`
 	Truncated   bool   `json:"truncated,omitempty"`
@@ -566,6 +575,75 @@ func piExecutionResultBlock(name string, message piMessage) ContentBlock {
 		Name:    name,
 		Content: mustMarshal(content),
 		IsError: isError,
+	}
+}
+
+func piToolResultContent(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var blocks []ContentBlock
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		return mustMarshal(blocks)
+	}
+	return piNeutralToolObject(raw)
+}
+
+func piNeutralToolObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		encoded = strings.TrimSpace(encoded)
+		if encoded != "" && json.Valid([]byte(encoded)) {
+			return piNeutralToolObject(json.RawMessage(encoded))
+		}
+		return mustMarshal(encoded)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return cloneRawJSON(raw)
+	}
+	neutral := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		neutral[piNeutralToolKey(key)] = cloneRawJSON(value)
+	}
+	return mustMarshal(neutral)
+}
+
+func piNeutralToolKey(key string) string {
+	switch strings.TrimSpace(key) {
+	case "filePath", "filepath", "path", "file":
+		return "file_path"
+	case "oldString", "oldStr":
+		return "old_string"
+	case "newString", "newStr":
+		return "new_string"
+	case "exitCode":
+		return "exit_code"
+	case "durationMs":
+		return "duration_ms"
+	case "statusCode", "code":
+		return "status_code"
+	case "codeText", "statusText":
+		return "status_text"
+	case "numFiles":
+		return "num_files"
+	case "numResults":
+		return "num_results"
+	case "taskId", "backgroundTaskId", "bashId", "agentId":
+		return "task_id"
+	case "taskType", "taskKind", "subagentType", "agentType":
+		return "task_type"
+	case "taskStatus":
+		return "task_status"
+	case "oldTodos":
+		return "old_todos"
+	case "newTodos":
+		return "new_todos"
+	default:
+		return key
 	}
 }
 
@@ -722,4 +800,8 @@ type piContentBlock struct {
 	Metadata  json.RawMessage `json:"metadata"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	FilePath  string          `json:"file_path"`
+	ImageURL  string          `json:"image_url"`
+	MIMEType  string          `json:"mime_type"`
+	MediaType string          `json:"media_type"`
 }

@@ -21,7 +21,7 @@ import (
 type SessionStreamMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
-	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.)."`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
 	Format     string                     `json:"format"`
 	Turns      []outputTurn               `json:"turns"`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
@@ -32,7 +32,7 @@ type SessionStreamMessageEvent struct {
 type SessionStreamRawMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
-	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
 	Format     string                     `json:"format"`
 	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames, emitted verbatim as the provider wrote them."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`

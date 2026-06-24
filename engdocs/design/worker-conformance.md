@@ -17,8 +17,11 @@ providers. Today, provider behavior is spread across provider presets,
 config resolution, runtime startup logic, transcript readers, and
 session-management code. The existing `runtime.Provider` conformance
 suite proves low-level runtime mechanics, but it does not prove the
-behavioral contract that Gas City actually depends on for Claude,
-Codex, and Gemini as first-class interactive workers.
+behavioral contract that Gas City actually depends on for interactive
+workers. This design's first slice used Claude, Codex, and Gemini as the
+initial canonical profiles; later structured-session work extends rich typed
+transcript validation to OpenCode-compatible providers, Grok ACP capture, and
+Auggie ACP capture.
 
 This design introduces a transport-agnostic worker conformance program
 and uses it as the executable specification for a future canonical
@@ -36,7 +39,7 @@ The design has four pillars:
    becomes the long-term home of the canonical worker boundary.
 
 The first required slice focuses on transcript/session-history and
-continuation semantics across the three canonical profiles:
+continuation semantics across the initial three canonical profiles:
 
 - `claude/tmux-cli`
 - `codex/tmux-cli`
@@ -741,7 +744,7 @@ event, the profile fails tier-1 criteria.
 
 The conformance unit is a **worker profile**, not a provider family.
 
-Examples:
+Initial examples:
 
 - `claude/tmux-cli`
 - `codex/tmux-cli`
@@ -1244,6 +1247,9 @@ V1 should add dedicated targets such as:
 - `make test-worker-inference PROFILE=gemini`
 - `make test-worker-e2e-smoke PROFILE=...`
 
+As additional profiles graduate to first-class rich structured support, their
+worker-core and inference targets should use the same profile-scoped shape.
+
 #### 12.2 Required PR CI
 
 Required deterministic CI is:
@@ -1414,8 +1420,9 @@ Deliverables:
 - top-level conformance catalog and requirement codes
 - deterministic transcript fixture conformance
 - fake worker engine scaffold
-- fake profile behavior for `claude/tmux-cli`, `codex/tmux-cli`,
-  `gemini/tmux-cli`
+- fake profile behavior for the initial `claude/tmux-cli`, `codex/tmux-cli`,
+  and `gemini/tmux-cli` profiles, with the same shape reused as additional
+  first-class profiles graduate
 - required deterministic transcript + continuation suite
 - dedicated `worker-core-*` CI jobs and artifacts
 - thin GC continuation smoke covering current wake/reset state
@@ -1425,7 +1432,7 @@ Deliverables:
 Done when:
 
 - all `WC-TX-*` and `WC-CONT-*` required deterministic requirements are
-  green for the three canonical fake-backed profiles
+  green for the initial three canonical fake-backed profiles
 - the thin GC continuation smoke is green on required CI
 - transcript normalization changes made in this phase land through
   `internal/worker` contract surfaces first
@@ -1588,7 +1595,8 @@ The first slice should combine:
 - provider-native transcript fixture conformance
 - fake-worker-driven lifecycle and continuation scenarios
 
-And it should run across all three canonical profiles from day one.
+And it should run across the initial three canonical profiles from day one,
+then expand as additional profiles graduate to first-class support.
 
 ## Risks
 

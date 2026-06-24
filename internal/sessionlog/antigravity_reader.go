@@ -223,7 +223,7 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) 
 				Type:  "tool_use",
 				ID:    callID,
 				Name:  tc.Name,
-				Input: tc.Args,
+				Input: agyToolInputContent(tc.Args),
 			})
 		}
 		blocks = append(blocks, agyInteractionBlocks(raw.Interactions)...)
@@ -246,7 +246,8 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) 
 		block := ContentBlock{
 			Type:      "tool_result",
 			ToolUseID: callID,
-			Content:   mustMarshal(raw.Content),
+			Content:   agyToolResultContent(raw.Content),
+			IsError:   antigravityStatusIsError(raw.Status),
 		}
 		return &Entry{
 			UUID:      uuid,
@@ -283,6 +284,93 @@ func agyToolCallID(tc agyToolCall, fallback string) string {
 
 func agyResultCallID(raw agyLogEntry) string {
 	return firstTrimmedNonEmpty(raw.ToolCallID, raw.ToolCallIDJS, raw.CallID)
+}
+
+func agyToolInputContent(raw json.RawMessage) json.RawMessage {
+	return agyNeutralToolObject(raw)
+}
+
+func agyToolResultContent(content string) json.RawMessage {
+	if content == "" {
+		return mustMarshal("")
+	}
+	if !json.Valid([]byte(content)) {
+		return mustMarshal(content)
+	}
+	return agyNeutralToolObject(json.RawMessage(content))
+}
+
+func agyNeutralToolObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		encoded = strings.TrimSpace(encoded)
+		if encoded != "" && json.Valid([]byte(encoded)) {
+			return agyNeutralToolObject(json.RawMessage(encoded))
+		}
+		return mustMarshal(encoded)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return cloneRawJSON(raw)
+	}
+	neutral := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		neutral[agyNeutralToolKey(key)] = cloneRawJSON(value)
+	}
+	return mustMarshal(neutral)
+}
+
+func agyNeutralToolKey(key string) string {
+	switch strings.TrimSpace(key) {
+	case "filePath", "filepath", "path", "file":
+		return "file_path"
+	case "oldString", "oldStr":
+		return "old_string"
+	case "newString", "newStr":
+		return "new_string"
+	case "diff", "fileDiff":
+		return "patch"
+	case "exitCode":
+		return "exit_code"
+	case "statusCode", "code":
+		return "status_code"
+	case "codeText", "statusText":
+		return "status_text"
+	case "durationMs":
+		return "duration_ms"
+	case "numFiles":
+		return "num_files"
+	case "numResults":
+		return "num_results"
+	case "isImage":
+		return "is_image"
+	case "taskId", "backgroundTaskId", "bashId", "agentId":
+		return "task_id"
+	case "taskType", "taskKind", "subagentType", "agentType":
+		return "task_type"
+	case "taskStatus":
+		return "task_status"
+	case "oldTodos":
+		return "old_todos"
+	case "newTodos":
+		return "new_todos"
+	case "answerMap":
+		return "answer_map"
+	default:
+		return key
+	}
+}
+
+func antigravityStatusIsError(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "error", "failed", "failure", "canceled", "interrupted", "rejected", "denied":
+		return true
+	default:
+		return false
+	}
 }
 
 func consumeAgyPendingCallID(pendingCallIDs *[]string, preferred string) string {

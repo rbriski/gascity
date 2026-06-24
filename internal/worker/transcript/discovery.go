@@ -39,6 +39,16 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return ""
 	}
 	switch sessionlog.ProviderFamily(provider) {
+	case "auggie":
+		return sessionlog.FindAuggieSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "amp":
+		return sessionlog.FindAmpSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "copilot":
+		return sessionlog.FindCopilotSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "grok":
+		return sessionlog.FindGrokSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "kiro":
+		return sessionlog.FindKiroSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "gemini":
 		return sessionlog.FindGeminiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "kimi":
@@ -60,6 +70,15 @@ func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID s
 		return ""
 	}
 	if sessionID != "" && family == "antigravity" && !isProvisionalGCSessionID(sessionID) {
+		return ""
+	}
+	if sessionID != "" && family == "amp" {
+		return ""
+	}
+	if sessionID != "" && family == "auggie" {
+		return ""
+	}
+	if sessionID != "" && family == "grok" {
 		return ""
 	}
 	if sessionID != "" && SupportsIDLookup(provider) {
@@ -117,7 +136,7 @@ func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey stri
 // never clears a resume key for a provider whose transcript we cannot verify.
 func providerHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
-	case "kimi", "pi", "antigravity":
+	case "copilot", "kiro", "kimi", "pi", "antigravity":
 		return true
 	}
 	// claude and claude-eco fall through ProviderFamily unchanged; match them

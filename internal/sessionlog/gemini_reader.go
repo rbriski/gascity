@@ -192,6 +192,24 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 			Message:   mustMarshal(MessageContent{Role: "system", Content: mustMarshal(text)}),
 			Raw:       append(json.RawMessage(nil), rawMessage...),
 		}
+	case "error":
+		text := strings.TrimSpace(geminiContentText(message.Content))
+		if text == "" {
+			text = strings.Trim(strings.TrimSpace(string(message.Content)), `"`)
+		}
+		if text == "" {
+			text = "Gemini reported an error"
+		}
+		systemEvent := geminiSystemErrorEvent(text)
+		return &Entry{
+			UUID:        uuid,
+			Type:        "system",
+			Subtype:     systemEvent.Kind,
+			SystemEvent: systemEvent,
+			Timestamp:   ts,
+			Message:     mustMarshal(MessageContent{Role: "system", Content: mustMarshal(text)}),
+			Raw:         append(json.RawMessage(nil), rawMessage...),
+		}
 	case "gemini":
 		content := make([]ContentBlock, 0, len(message.Thoughts)+1+len(message.ToolCalls)+len(message.Interactions))
 		for _, thought := range message.Thoughts {
@@ -228,6 +246,7 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 					Type:      "tool_result",
 					ToolUseID: firstNonEmpty(result.FunctionResponse.ID, toolCall.ID),
 					Content:   geminiToolResultContent(output, toolCall.ResultDisplay),
+					IsError:   geminiToolResultIsError(toolCall.Status, result.FunctionResponse.Response.Status),
 				})
 			}
 		}
@@ -246,6 +265,14 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 		}
 	default:
 		return nil
+	}
+}
+
+func geminiSystemErrorEvent(message string) *SystemEvent {
+	return &SystemEvent{
+		Kind:     "error",
+		Category: "provider_error",
+		Message:  strings.TrimSpace(message),
 	}
 }
 
@@ -572,6 +599,7 @@ type geminiThought struct {
 type geminiToolCall struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
+	Status        string          `json:"status"`
 	Args          json.RawMessage `json:"args"`
 	ResultDisplay json.RawMessage `json:"resultDisplay"`
 	Result        []struct {
@@ -579,19 +607,124 @@ type geminiToolCall struct {
 			ID       string `json:"id"`
 			Response struct {
 				Output string `json:"output"`
+				Status string `json:"status"`
 			} `json:"response"`
 		} `json:"functionResponse"`
 	} `json:"result"`
+}
+
+func geminiToolResultIsError(statuses ...string) bool {
+	for _, status := range statuses {
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "error", "failed", "failure", "canceled", "interrupted", "rejected", "denied":
+			return true
+		}
+	}
+	return false
 }
 
 func geminiToolResultContent(output string, resultDisplay json.RawMessage) json.RawMessage {
 	if len(resultDisplay) == 0 {
 		return mustMarshal(output)
 	}
-	return mustMarshal(map[string]json.RawMessage{
-		"output":        mustMarshal(output),
-		"resultDisplay": cloneRawJSON(resultDisplay),
-	})
+	normalized := map[string]json.RawMessage{
+		"output": mustMarshal(output),
+	}
+	if filePath, patch := geminiResultDisplayPatch(resultDisplay); patch != "" {
+		normalized["file_path"] = mustMarshal(filePath)
+		normalized["patch"] = mustMarshal(patch)
+		return mustMarshal(normalized)
+	}
+	normalized["content"] = cloneRawJSON(resultDisplay)
+	return mustMarshal(normalized)
+}
+
+func geminiResultDisplayPatch(raw json.RawMessage) (string, string) {
+	var display map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &display); err != nil || len(display) == 0 {
+		return "", ""
+	}
+	filePath := firstNonEmpty(
+		geminiStringField(display, "filePath", "file_path", "fileName", "file"),
+		geminiPatchFilePath(geminiStringField(display, "fileDiff", "file_diff", "patch", "diff")),
+	)
+	if patch := geminiStringField(display, "fileDiff", "file_diff", "patch", "diff"); patch != "" {
+		return filePath, patch
+	}
+	oldContent := geminiStringField(display, "originalContent", "original_content", "oldContent", "old_content")
+	newContent := geminiStringField(display, "newContent", "new_content", "content")
+	if oldContent == "" && newContent == "" {
+		return "", ""
+	}
+	return filePath, geminiUnifiedPatch(filePath, oldContent, newContent)
+}
+
+func geminiStringField(object map[string]json.RawMessage, names ...string) string {
+	for _, name := range names {
+		raw, ok := object[name]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func geminiPatchFilePath(patch string) string {
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Index: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "Index: "))
+		}
+		if strings.HasPrefix(line, "+++ ") {
+			path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+			path = strings.TrimSuffix(path, "\tWritten")
+			path = strings.TrimSuffix(path, "\tModified")
+			path = strings.TrimSuffix(path, "\tNew")
+			if path != "/dev/null" {
+				return strings.TrimSpace(path)
+			}
+		}
+	}
+	return ""
+}
+
+func geminiUnifiedPatch(filePath, oldContent, newContent string) string {
+	from := firstNonEmpty(filePath, "file")
+	to := from
+	if oldContent == "" && newContent != "" {
+		from = "/dev/null"
+	}
+	if oldContent != "" && newContent == "" {
+		to = "/dev/null"
+	}
+	var b strings.Builder
+	b.WriteString("--- ")
+	b.WriteString(from)
+	b.WriteString("\n+++ ")
+	b.WriteString(to)
+	b.WriteString("\n@@\n")
+	geminiAppendPatchLines(&b, "-", oldContent)
+	geminiAppendPatchLines(&b, "+", newContent)
+	return b.String()
+}
+
+func geminiAppendPatchLines(b *strings.Builder, prefix, text string) {
+	if text == "" {
+		return
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for idx, line := range lines {
+		if idx == len(lines)-1 && line == "" {
+			continue
+		}
+		b.WriteString(prefix)
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
 }
 
 type geminiInteraction struct {

@@ -599,18 +599,31 @@ func buildDesiredStateWithSessionBeads(
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
-			// Cross-store cold-wake (FR-S0.1 / vp-s37): a cold rig pool's routed
-			// demand may live in the city store (vp-kvp cross-store delivery),
-			// which the own-rig probe above cannot see while the pool sleeps —
-			// so a sleeping rig pool would never wake to discover it. Add a
-			// city-store probe for cold rig pools so their demand reflects
-			// routed work in either store. No clamp: unlike a custom-scale_check
-			// pool — where the probe is clamped so it cannot override the custom
-			// count (see coldWakeTemplates below) — the default probe IS the
-			// authoritative count, so it scales to total routed demand (bounded
-			// by max_active and the daemon's max_wakes_per_tick), matching the
-			// retired cold-pool-spawner's scale-to-want. A city-scoped pool's
-			// own target is already the city store, so it needs no extra probe.
+			// Cross-store wake (FR-S0.1 / vp-s37): a rig pool's routed demand may
+			// live in the city store (vp-kvp cross-store delivery), which the
+			// own-rig probe above cannot see — under graph_store=sqlite the
+			// graph-classified workflow nodes routed to a rig pool are minted into
+			// the CITY sqlite graph leg, not the rig work store. Add a city-store
+			// probe so a rig pool's demand reflects routed work in either store.
+			// No clamp: unlike a custom-scale_check pool — where the probe is
+			// clamped so it cannot override the custom count (see coldWakeTemplates
+			// below) — the default probe IS the authoritative count, so it scales to
+			// total routed demand (bounded by max_active and the daemon's
+			// max_wakes_per_tick), matching the retired cold-pool-spawner's
+			// scale-to-want. A city-scoped pool's own target is already the city
+			// store, so it needs no extra probe.
+			//
+			// NOT gated on isCold (runningSessions==0): a lingering pool session
+			// bead in a non-serving state (asleep on no-work, draining, drained,
+			// quarantined, stale-creating) makes runningSessions>=1 and would flip
+			// isCold to false, yet that session is NOT claiming this city-resident
+			// routed work. Gating the city probe on isCold therefore starved the
+			// pool: with one such phantom session the cross-store probe was skipped,
+			// the own-rig probe could not see the city graph work, demand fell to 0,
+			// and no fresh worker spawned. The authoritative count must always reflect
+			// city-resident routed demand; running sessions are reconciled downstream
+			// in computePoolDesiredStates (new demand is offset by in-flight/running
+			// sessions), so an always-on probe over-counts nothing.
 			//
 			// Gated on a healthy own rig store: when the rig store is missing or
 			// errored we stay partial and do NOT wake on cross-store demand —
@@ -624,7 +637,7 @@ func buildDesiredStateWithSessionBeads(
 			// double-count the same beads, since defaultScaleCheckCounts dedups
 			// per group, not across groups. Current store-map builders skip
 			// such rigs, so this is defense-in-depth against future callers.
-			if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+			if ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue
@@ -725,6 +738,25 @@ func buildDesiredStateWithSessionBeads(
 			for template, hasDemand := range controlDispatcherOpenDemand {
 				if hasDemand && scaleCheckCounts[template] < 1 {
 					scaleCheckCounts[template] = 1
+				}
+			}
+		}
+		// Respawn pool members for routed work stranded on a dead pool instance
+		// name (assignee is a gone session, not the template). Only on a complete
+		// session snapshot: a degraded snapshot can omit a live owner and the
+		// liveness guard would then misread in-flight work as cold demand and mint
+		// a duplicate worker — skip and let a later complete tick converge (NDI).
+		if sessionBeads != nil && sessionBeads.LoadError() == nil {
+			if instanceDemand := strandedPoolInstanceDemand(cfg, assignedWorkBeads, sessionBeads); len(instanceDemand) > 0 {
+				if scaleCheckCounts == nil {
+					scaleCheckCounts = make(map[string]int)
+				}
+				for template, hasDemand := range instanceDemand {
+					// Cold-pool wake: scale from zero by one. Never override a
+					// custom scale_check's authoritative higher count.
+					if hasDemand && scaleCheckCounts[template] < 1 {
+						scaleCheckCounts[template] = 1
+					}
 				}
 			}
 		}
@@ -1596,6 +1628,71 @@ func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[s
 				break
 			}
 		}
+	}
+	return demand
+}
+
+// strandedPoolInstanceDemand reports scale-from-zero demand for open pool work
+// that is routed to a known pool template but stranded on a pool INSTANCE /
+// session name (e.g. "gc__run-operator-mc-wisp-cydc") whose session bead is
+// gone. The pool decays to zero at a workflow group boundary: a worker drains,
+// its session bead closes, but the next group's routed work it was holding stays
+// open and assigned to that now-dead instance name. That bead is invisible to
+// every other demand source — the assignee is neither empty (so the
+// unassigned-routed and default-scale probes skip it) nor the pool template (so
+// the wake-known-identity tier in computePoolDesiredStates drops it as orphaned
+// work) — so nothing counts it and the pool never respawns. releaseOrphanedPool-
+// Assignments clears the assignee on a later complete tick, but only this
+// function makes the controller spawn the member that will claim it.
+//
+// This is the pool analog of the named-session respawn fix
+// (assigneeMatchesNamedIdentity / routedSanitizedNamedIdentities): both close
+// the gap where routed work assigned in a session-name form, not the template
+// form, fails to register as demand for the configured agent it was routed to.
+//
+// The caller MUST gate this on a complete session snapshot (non-nil, no
+// LoadError). The liveness check below treats an assignee absent from
+// sessionByAssignee as a dead instance; on a degraded snapshot a live owner can
+// be missing, which would falsely count its in-flight work as cold demand and
+// mint a duplicate worker. On a degraded snapshot the caller skips this pass and
+// a later complete tick converges it (NDI) — mirroring
+// canonicalizeLegacyBoundAssignedWork and
+// releaseOrphanedPoolAssignmentsWhenSnapshotsComplete.
+//
+// Only work whose route names a KNOWN pool template contributes; named-session
+// and human assignments are left untouched. The returned demand is intended to
+// be clamped to 1 per template by the caller (cold-pool wake semantics).
+func strandedPoolInstanceDemand(cfg *config.City, workBeads []beads.Bead, sessionBeads *sessionBeadSnapshot) map[string]bool {
+	demand := make(map[string]bool)
+	if cfg == nil || len(workBeads) == 0 {
+		return demand
+	}
+	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
+	for _, wb := range workBeads {
+		if wb.Status != "open" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		// An assignee that already IS a known pool template (e.g. a legacy bound
+		// form) is the wake-known-identity tier's job — computePoolDesiredStates
+		// emits demand for it directly. This pass only recovers work stranded on
+		// a concrete instance/session name that resolves to no template.
+		if isKnownPoolTemplate(assignee, cfg) {
+			continue
+		}
+		routedTo := routedToOrLegacyWorkflowTarget(wb)
+		if routedTo == "" || !isKnownPoolTemplate(routedTo, cfg) {
+			continue
+		}
+		// A live session still owns this assignment under the instance name — its
+		// own work_query resumes it; respawning would mint a duplicate worker.
+		if match, served := sessionByAssignee[assignee]; served && !match.ambiguous {
+			continue
+		}
+		demand[normalizeAgentTemplateIdentity(cfg, routedTo)] = true
 	}
 	return demand
 }

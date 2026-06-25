@@ -694,6 +694,190 @@ func TestNormalizeCanonicalBdScopeFilesPreservesExistingPostgresMetadata(t *test
 	if state.DoltDatabase != "" || state.DoltMode != "" {
 		t.Fatalf("metadata state = %+v, want dolt fields absent on postgres metadata", state)
 	}
+	configState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadConfigState: %v", err)
+	}
+	if !ok {
+		t.Fatal("config.yaml missing after normalization")
+	}
+	if configState.DoltMode != "" {
+		t.Fatalf("config DoltMode = %q, want absent for postgres-backed scope", configState.DoltMode)
+	}
+}
+
+func TestDesiredDoltConfigStateMarksKnownServerModes(t *testing.T) {
+	t.Run("managed city without endpoint coordinates", func(t *testing.T) {
+		cityPath := t.TempDir()
+		state, err := syncDesiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
+		if err != nil {
+			t.Fatalf("syncDesiredCityDoltConfigState: %v", err)
+		}
+		if state.EndpointOrigin != contract.EndpointOriginManagedCity {
+			t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginManagedCity)
+		}
+		if state.DoltHost != "" || state.DoltPort != "" {
+			t.Fatalf("managed city host/port = %q/%q, want empty managed runtime coordinates", state.DoltHost, state.DoltPort)
+		}
+		if state.DoltMode != "server" {
+			t.Fatalf("DoltMode = %q, want server for managed city runtime", state.DoltMode)
+		}
+	})
+
+	t.Run("city canonical external endpoint", func(t *testing.T) {
+		cityPath := t.TempDir()
+		state, err := syncDesiredCityDoltConfigState(cityPath, config.DoltConfig{Host: "db.example.test", Port: 4406}, "gc")
+		if err != nil {
+			t.Fatalf("syncDesiredCityDoltConfigState: %v", err)
+		}
+		if state.EndpointOrigin != contract.EndpointOriginCityCanonical {
+			t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginCityCanonical)
+		}
+		if state.DoltHost != "db.example.test" || state.DoltPort != "4406" {
+			t.Fatalf("city canonical host/port = %q/%q, want db.example.test/4406", state.DoltHost, state.DoltPort)
+		}
+		if state.DoltMode != "server" {
+			t.Fatalf("DoltMode = %q, want server for resolved city Dolt endpoint", state.DoltMode)
+		}
+	})
+
+	t.Run("explicit rig endpoint", func(t *testing.T) {
+		cityPath := t.TempDir()
+		rigPath := filepath.Join(cityPath, "frontend")
+		if err := os.MkdirAll(rigPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cityState := contract.ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: contract.EndpointOriginManagedCity,
+			EndpointStatus: contract.EndpointStatusVerified,
+			DoltMode:       "server",
+		}
+		state, err := syncDesiredRigDoltConfigState(cityPath, config.Rig{
+			Name:     "frontend",
+			Path:     rigPath,
+			Prefix:   "fe",
+			DoltHost: "rig-db.example.test",
+			DoltPort: "4407",
+		}, cityState)
+		if err != nil {
+			t.Fatalf("syncDesiredRigDoltConfigState: %v", err)
+		}
+		if state.EndpointOrigin != contract.EndpointOriginExplicit {
+			t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginExplicit)
+		}
+		if state.DoltHost != "rig-db.example.test" || state.DoltPort != "4407" {
+			t.Fatalf("explicit rig host/port = %q/%q, want rig-db.example.test/4407", state.DoltHost, state.DoltPort)
+		}
+		if state.DoltMode != "server" {
+			t.Fatalf("DoltMode = %q, want server for explicit rig Dolt endpoint", state.DoltMode)
+		}
+	})
+
+	t.Run("inherited city canonical endpoint", func(t *testing.T) {
+		cityPath := t.TempDir()
+		rigPath := filepath.Join(cityPath, "frontend")
+		if err := os.MkdirAll(rigPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cityState := contract.ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: contract.EndpointOriginCityCanonical,
+			EndpointStatus: contract.EndpointStatusVerified,
+			DoltHost:       "db.example.test",
+			DoltPort:       "4406",
+			DoltMode:       "server",
+		}
+		state, err := syncDesiredRigDoltConfigState(cityPath, config.Rig{
+			Name:   "frontend",
+			Path:   rigPath,
+			Prefix: "fe",
+		}, cityState)
+		if err != nil {
+			t.Fatalf("syncDesiredRigDoltConfigState: %v", err)
+		}
+		if state.EndpointOrigin != contract.EndpointOriginInheritedCity {
+			t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginInheritedCity)
+		}
+		if state.DoltHost != "db.example.test" || state.DoltPort != "4406" {
+			t.Fatalf("inherited rig host/port = %q/%q, want db.example.test/4406", state.DoltHost, state.DoltPort)
+		}
+		if state.DoltMode != "server" {
+			t.Fatalf("DoltMode = %q, want server inherited from city Dolt endpoint", state.DoltMode)
+		}
+	})
+}
+
+func TestManagedCityDoltModeReachesBdContextAndPreflight(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"gc-local"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := syncDesiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
+	if err != nil {
+		t.Fatalf("syncDesiredCityDoltConfigState: %v", err)
+	}
+	if state.EndpointOrigin != contract.EndpointOriginManagedCity {
+		t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginManagedCity)
+	}
+	if state.DoltHost != "" || state.DoltPort != "" {
+		t.Fatalf("managed city host/port = %q/%q, want empty managed runtime coordinates", state.DoltHost, state.DoltPort)
+	}
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server before canonical config write", state.DoltMode)
+	}
+	if err := normalizeScopeDoltConfig(cityPath, state); err != nil {
+		t.Fatalf("normalizeScopeDoltConfig: %v", err)
+	}
+
+	configState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadConfigState: %v", err)
+	}
+	if !ok {
+		t.Fatal("config.yaml missing after normalization")
+	}
+	if configState.DoltMode != "server" {
+		t.Fatalf("config DoltMode = %q, want server", configState.DoltMode)
+	}
+
+	installConfigBackedBdContextForTest(t)
+	reader := preflightBDContextReader(cityPath)
+	ctx, err := reader(cityPath)
+	if err != nil {
+		t.Fatalf("preflightBDContextReader: %v", err)
+	}
+	if ctx.Backend != "dolt" || ctx.DoltMode != "server" {
+		t.Fatalf("bd context = %+v, want backend=dolt dolt_mode=server", ctx)
+	}
+
+	checker := contract.PreflightChecker{
+		FS:                  fsys.OSFS{},
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext:           reader,
+		DatabaseProjectID: func(scope string) (string, bool, error) {
+			if !samePath(scope, cityPath) {
+				return "", false, fmt.Errorf("unexpected scope %s", scope)
+			}
+			return "gc-local", true, nil
+		},
+	}
+	result, err := checker.Check(cityPath)
+	if err != nil {
+		t.Fatalf("PreflightChecker.Check: %v", err)
+	}
+	if !result.NativeStoreEligible {
+		t.Fatalf("NativeStoreEligible = false, want true; checks=%+v", result.Checks)
+	}
+	if got := preflightCheckStateForTest(t, result, contract.PreflightCheckDoltModeSafe); got != contract.PreflightCheckPass {
+		t.Fatalf("dolt_mode_safe state = %q, want %q; checks=%+v", got, contract.PreflightCheckPass, result.Checks)
+	}
 }
 
 func TestNormalizeCanonicalBdScopeFilesRejectsExistingManagedSystemDatabase(t *testing.T) {
@@ -11588,6 +11772,37 @@ func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMiss(t *testing.T) {
 	}
 }
 
+func installConfigBackedBdContextForTest(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != "context" ] || [ "$2" != "--json" ]; then
+  exit 2
+fi
+mode=""
+if [ -f "${BEADS_DIR}/config.yaml" ]; then
+  mode="$(sed -n 's/^[[:space:]]*mode:[[:space:]]*//p' "${BEADS_DIR}/config.yaml" | head -n 1)"
+fi
+printf '{"backend":"dolt","dolt_mode":"%s","bd_version":"1.0.4","schema_version":1}' "$mode"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func preflightCheckStateForTest(t *testing.T, result contract.PreflightResult, id contract.PreflightCheckID) contract.PreflightCheckState {
+	t.Helper()
+	for _, check := range result.Checks {
+		if check.ID == id {
+			return check.State
+		}
+	}
+	t.Fatalf("missing preflight check %s in %+v", id, result.Checks)
+	return ""
+}
+
 func setupFileProviderCityForTest(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
@@ -11846,4 +12061,190 @@ func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) fu
 		_ = ln.Close()
 		<-done
 	}
+}
+
+// ga-yqn5py.2.2: managed-Dolt server-mode write chain end-to-end tests.
+
+func TestDesiredCityDoltConfigStateSetsServerModeForManagedCity(t *testing.T) {
+	cityPath := t.TempDir()
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "hq")
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server for managed city", state.DoltMode)
+	}
+}
+
+func TestDesiredCityDoltConfigStateSetsServerModeForExternalCity(t *testing.T) {
+	cityPath := t.TempDir()
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{Host: "db.example.com", Port: 3307}, "hq")
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server for external city", state.DoltMode)
+	}
+}
+
+func TestDesiredRigDoltConfigStateSetsServerModeForExplicitRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+	rig := config.Rig{
+		Name:     "fe",
+		Path:     rigPath,
+		DoltHost: "127.0.0.1",
+		DoltPort: "4406",
+	}
+	cityState := contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "server"}
+	state := desiredRigDoltConfigState(cityPath, rig, cityState)
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server for explicit rig", state.DoltMode)
+	}
+}
+
+func TestInheritedRigDoltConfigStatePropagatesDoltMode(t *testing.T) {
+	rigPath := t.TempDir()
+	cases := []struct {
+		name         string
+		cityDoltMode string
+		wantDoltMode string
+	}{
+		{"managed city with server mode", "server", "server"},
+		{"canonical city with server mode", "server", "server"},
+		{"city with no dolt mode", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityState := contract.ConfigState{
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				DoltMode:       tc.cityDoltMode,
+			}
+			state := inheritedRigDoltConfigState(rigPath, "fe", cityState)
+			if state.DoltMode != tc.wantDoltMode {
+				t.Fatalf("DoltMode = %q, want %q", state.DoltMode, tc.wantDoltMode)
+			}
+		})
+	}
+}
+
+func TestManagedCityDoltEnsuresServerModeInConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cityPath, ".beads", "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("issue_prefix: hq\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "hq")
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, cfgPath, state); err != nil {
+		t.Fatalf("EnsureCanonicalConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	got := doltModeFromLifecycleTestYAML(t, data)
+	if got != "server" {
+		t.Fatalf("dolt.mode = %q after EnsureCanonicalConfig for managed city, want server; config:\n%s", got, data)
+	}
+}
+
+func TestPreflightCheckerReportsEligibleForManagedDoltServerMode(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"gc-local"}`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	checker := contract.PreflightChecker{
+		FS:                  fsys.OSFS{},
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (contract.PreflightBDContext, error) {
+			return contract.PreflightBDContext{
+				Backend:       "dolt",
+				DoltMode:      "server",
+				BDVersion:     "1.0.4",
+				SchemaVersion: 1,
+			}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(cityPath)
+	if err != nil {
+		t.Fatalf("PreflightChecker.Check: %v", err)
+	}
+	if !result.NativeStoreEligible {
+		t.Fatalf("NativeStoreEligible = false for managed Dolt server mode; checks=%+v", result.Checks)
+	}
+}
+
+func TestScopeWithNoDoltModeKeepsDoltModeAbsent(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(rigPath, ".beads", "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("issue_prefix: fe\nbackup.enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityState := contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: ""}
+	rigState := inheritedRigDoltConfigState(rigPath, "fe", cityState)
+	if rigState.DoltMode != "" {
+		t.Fatalf("DoltMode = %q from empty city, want empty", rigState.DoltMode)
+	}
+
+	rigState.IssuePrefix = "fe"
+	rigState.EndpointStatus = contract.EndpointStatusVerified
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, cfgPath, rigState); err != nil {
+		t.Fatalf("EnsureCanonicalConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if mode := doltModeFromLifecycleTestYAMLOrEmpty(data); mode != "" {
+		t.Fatalf("dolt.mode = %q after EnsureCanonicalConfig with empty DoltMode, want absent; config:\n%s", mode, data)
+	}
+
+	_ = cityPath
+}
+
+// doltModeFromLifecycleTestYAML reads the nested dolt.mode key from a YAML
+// config. It fails the test if the key is absent or the YAML is invalid.
+func doltModeFromLifecycleTestYAML(t *testing.T, data []byte) string {
+	t.Helper()
+	mode := doltModeFromLifecycleTestYAMLOrEmpty(data)
+	if mode == "" {
+		t.Fatalf("dolt.mode missing from config:\n%s", data)
+	}
+	return mode
+}
+
+// doltModeFromLifecycleTestYAMLOrEmpty reads the nested dolt.mode key from YAML,
+// returning "" when the key is absent.
+func doltModeFromLifecycleTestYAMLOrEmpty(data []byte) string {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || doc.Kind == 0 || len(doc.Content) == 0 {
+		return ""
+	}
+	root := doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "dolt" && root.Content[i+1].Kind == yaml.MappingNode {
+			doltNode := root.Content[i+1]
+			for j := 0; j+1 < len(doltNode.Content); j += 2 {
+				if doltNode.Content[j].Value == "mode" {
+					return doltNode.Content[j+1].Value
+				}
+			}
+		}
+	}
+	return ""
 }

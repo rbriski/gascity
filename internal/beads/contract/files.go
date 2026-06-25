@@ -522,7 +522,8 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	}
 
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
-		changed = setString(root, "dolt.mode", mode) || changed
+		changed = setNestedString(root, "dolt", "mode", mode) || changed
+		changed = deleteKeys(root, "dolt.mode") || changed
 	}
 
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
@@ -912,6 +913,7 @@ func readConfigStateFromData(data []byte) ConfigState {
 }
 
 func readConfigStateFromRoot(root *yaml.Node) ConfigState {
+	doltMode, _ := nestedConfigStringValue(root, "dolt", "mode")
 	return ConfigState{
 		IssuePrefix:    configValue(root, "issue_prefix", "issue-prefix"),
 		EndpointOrigin: endpointOriginValue(configValue(root, "gc.endpoint_origin")),
@@ -919,8 +921,17 @@ func readConfigStateFromRoot(root *yaml.Node) ConfigState {
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
 		DoltUser:       configValue(root, "dolt.user"),
+		DoltMode:       doltMode,
 		Dolt:           readDoltConfigFromRoot(root),
 	}
+}
+
+func nestedConfigStringValue(root *yaml.Node, section string, keys ...string) (string, bool) {
+	sectionNode := findValue(root, section)
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		return "", false
+	}
+	return configStringValue(sectionNode, keys...)
 }
 
 func readDoltConfigFromRoot(root *yaml.Node) DoltConfig {
@@ -1105,6 +1116,16 @@ func setNestedBool(root *yaml.Node, section, key string, value bool) bool {
 		changed = setMapping(root, section, sectionNode) || changed
 	}
 	return setBool(sectionNode, key, value) || changed
+}
+
+func setNestedString(root *yaml.Node, section, key, value string) bool {
+	sectionNode := findValue(root, section)
+	changed := false
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		sectionNode = &yaml.Node{Kind: yaml.MappingNode}
+		changed = setMapping(root, section, sectionNode) || changed
+	}
+	return setString(sectionNode, key, value) || changed
 }
 
 func setMapping(root *yaml.Node, key string, value *yaml.Node) bool {

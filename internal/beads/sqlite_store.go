@@ -38,6 +38,7 @@ type SQLiteStoreOptions struct {
 	retentionPeriod         time.Duration
 	retentionSweepInterval  time.Duration
 	disableRetentionSweeper bool
+	emit                    RowChangeEmitter
 }
 
 var _ ConditionalAssignmentReleaser = (*SQLiteStore)(nil)
@@ -61,6 +62,15 @@ func WithSQLiteStoreRetention(period, sweepInterval time.Duration) SQLiteStoreOp
 		o.retentionPeriod = period
 		o.retentionSweepInterval = sweepInterval
 		o.disableRetentionSweeper = sweepInterval <= 0
+	}
+}
+
+// WithSQLiteStoreRecorder registers an emitter invoked after every committed
+// mutation with a low-level RowChange (the store-edge event source the
+// controller subscribes to so a relocated class keeps feeding the event bus).
+func WithSQLiteStoreRecorder(emit RowChangeEmitter) SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		o.emit = emit
 	}
 }
 
@@ -105,6 +115,7 @@ type SQLiteStore struct {
 	retentionDone           chan struct{}
 	seq                     atomic.Int64 // in-memory sequence; recovered from DB on Open
 	closeOnce               sync.Once
+	emit                    RowChangeEmitter
 }
 
 // OpenSQLiteStore opens or creates a pure-Go SQLite bead store under dir.
@@ -139,6 +150,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		retentionPeriod:         cfg.retentionPeriod,
 		retentionSweepInterval:  cfg.retentionSweepInterval,
 		disableRetentionSweeper: cfg.disableRetentionSweeper,
+		emit:                    cfg.emit,
 	}
 
 	if err := s.applySchema(context.Background()); err != nil {
@@ -301,6 +313,15 @@ func (s *SQLiteStore) CloseStore() error {
 }
 
 // Create persists a new bead.
+// emitRowChange invokes the configured recorder (if any). Callers must invoke it
+// AFTER the write transaction commits and outside retryOnBusy, so the single
+// write connection's lock is released and the emitter observes committed state.
+func (s *SQLiteStore) emitRowChange(rc RowChange) {
+	if s.emit != nil {
+		s.emit(rc)
+	}
+}
+
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	var stored Bead
 	autoID := b.ID == ""
@@ -340,6 +361,7 @@ func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
+	s.emitRowChange(RowChange{ID: stored.ID, Type: stored.Type, Op: RowCreated})
 	return cloneBead(stored), nil
 }
 
@@ -576,7 +598,8 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
-	return retryOnBusy(func() error {
+	var changedType string
+	err := retryOnBusy(func() error {
 		ctx := context.Background()
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -633,11 +656,17 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 			b.Labels = filtered
 		}
 		b.UpdatedAt = time.Now()
+		changedType = b.Type
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}
 		return tx.Commit()
 	})
+	if err != nil {
+		return err
+	}
+	s.emitRowChange(RowChange{ID: id, Type: changedType, Op: RowUpdated})
+	return nil
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
@@ -969,12 +998,17 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 
 // Delete permanently removes a bead and its indexed rows.
 func (s *SQLiteStore) Delete(id string) error {
-	return retryOnBusy(func() error {
-		tx, err := s.db.BeginTx(context.Background(), nil)
+	var deletedType string
+	err := retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		// Capture the type before removing the row so the deleted RowChange can be
+		// translated without re-reading the (now gone) bead.
+		_ = tx.QueryRowContext(ctx, `SELECT issue_type FROM beads WHERE id=?`, id).Scan(&deletedType)
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
@@ -987,6 +1021,11 @@ func (s *SQLiteStore) Delete(id string) error {
 		}
 		return tx.Commit()
 	})
+	if err != nil {
+		return err
+	}
+	s.emitRowChange(RowChange{ID: id, Type: deletedType, Op: RowDeleted})
+	return nil
 }
 
 // DepAdd records a dependency edge.

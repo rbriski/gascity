@@ -1,7 +1,6 @@
 package beads
 
 import (
-	"errors"
 	"testing"
 )
 
@@ -27,34 +26,13 @@ func TestPostgresStoreOptions(t *testing.T) {
 	}
 }
 
-func TestPostgresStoreScaffoldStubsReturnSentinel(t *testing.T) {
+func TestPostgresStoreIDPrefixAndCloseAreSafeWithoutDB(t *testing.T) {
 	s := &PostgresStore{prefix: "gcn"}
 	if got := s.IDPrefix(); got != "gcn" {
 		t.Errorf("IDPrefix() = %q, want gcn", got)
 	}
-	// The CRUD/query/dep methods are scaffolded; until ported each returns the
-	// sentinel (and never touches the nil db here).
-	checks := []struct {
-		name string
-		err  error
-	}{
-		{"Create", func() error { _, e := s.Create(Bead{}); return e }()},
-		{"Update", s.Update("x", UpdateOpts{})},
-		{"Close", s.Close("x")},
-		{"Reopen", s.Reopen("x")},
-		{"Delete", s.Delete("x")},
-		{"SetMetadata", s.SetMetadata("x", "k", "v")},
-		{"SetMetadataBatch", s.SetMetadataBatch("x", map[string]string{"k": "v"})},
-		{"DepAdd", s.DepAdd("a", "b", "blocks")},
-		{"DepRemove", s.DepRemove("a", "b")},
-		{"List", func() error { _, e := s.List(ListQuery{AllowScan: true}); return e }()},
-		{"Ready", func() error { _, e := s.Ready(); return e }()},
-		{"Tx", s.Tx("msg", func(Tx) error { return nil })},
-	}
-	for _, c := range checks {
-		if !errors.Is(c.err, errPostgresNotImplemented) {
-			t.Errorf("%s err = %v, want errPostgresNotImplemented", c.name, c.err)
-		}
+	if err := s.CloseStore(); err != nil {
+		t.Errorf("CloseStore() on a db-less store = %v, want nil", err)
 	}
 }
 

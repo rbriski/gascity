@@ -1022,14 +1022,14 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 }
 
-func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
+func closeOrderTrackingBead(ctx context.Context, store orders.OrderStore, trackingID string) error {
 	_, err := closeAndVerifyOrderTrackingBeads(ctx, store, []string{trackingID}, map[string]string{
 		"close_reason": completedOrderTrackingCloseReason,
 	})
 	return err
 }
 
-func closeAndVerifyOrderTrackingBeads(ctx context.Context, store beads.Store, ids []string, metadata map[string]string) (int, error) {
+func closeAndVerifyOrderTrackingBeads(ctx context.Context, store orders.OrderStore, ids []string, metadata map[string]string) (int, error) {
 	ids = uniqueNonEmptyOrderTrackingIDs(ids)
 	if len(ids) == 0 {
 		return 0, nil
@@ -1109,7 +1109,7 @@ func uniqueNonEmptyOrderTrackingIDs(ids []string) []string {
 	return out
 }
 
-func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
+func openOrderTrackingIDs(store orders.OrderStore, ids []string) ([]string, error) {
 	var openIDs []string
 	for _, id := range ids {
 		b, err := store.Get(id)
@@ -1405,7 +1405,7 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	return m.rigSuspendedByName(rigName)
 }
 
-func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
+func (m *memoryOrderDispatcher) markTrackingFailure(store orders.OrderStore, trackingID, scoped string, a orders.Order, headSeq uint64) {
 	labels := []string{"wisp", "wisp-failed"}
 	if a.Trigger == "event" && headSeq > 0 {
 		labels = append(labels, eventCursorLabels(scoped, headSeq)...)

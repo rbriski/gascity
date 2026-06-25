@@ -145,7 +145,7 @@ func newControllerState(
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true, cityPath)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
-		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
+		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
@@ -679,7 +679,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true, cs.cityPath)
-		cityMailProv = newMailProvider(cityStore)
+		cityMailProv = newCityMailProvider(cityStore, cfg, cs.cityPath)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
 	}

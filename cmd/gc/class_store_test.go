@@ -172,3 +172,30 @@ func TestMailSQLiteStore_EmitsBeadEventsOnWrites(t *testing.T) {
 		t.Error("Archive did not emit bead.deleted from the SQLite mail store")
 	}
 }
+
+// TestResolveClassStore_DispatchesByBackend pins the single per-class backend
+// dispatch point: bd stays on the work store (byte-identical), sqlite opens a
+// distinct embedded store, and the reserved postgres slot LOUDLY stays on the work
+// store (not yet implemented) rather than silently diverting.
+func TestResolveClassStore_DispatchesByBackend(t *testing.T) {
+	workStore := beads.NewMemStore()
+	cityPath := t.TempDir()
+	classCfg := func(class, backend string) *config.City {
+		return &config.City{Beads: config.BeadsConfig{
+			Classes: map[string]config.BeadClassConfig{class: {Backend: backend}},
+		}}
+	}
+
+	if got := resolveClassStore(workStore, classCfg(config.BeadClassOrders, "bd"), cityPath, config.BeadClassOrders, nil); got != workStore {
+		t.Fatal("bd backend: want the work store")
+	}
+	if got := resolveClassStore(workStore, nil, cityPath, config.BeadClassOrders, nil); got != workStore {
+		t.Fatal("nil cfg: want the work store")
+	}
+	if got := resolveClassStore(workStore, classCfg(config.BeadClassOrders, "sqlite"), cityPath, config.BeadClassOrders, nil); got == workStore {
+		t.Fatal("sqlite backend: want a distinct embedded store, got the work store")
+	}
+	if got := resolveClassStore(workStore, classCfg(config.BeadClassNudges, "postgres"), cityPath, config.BeadClassNudges, nil); got != workStore {
+		t.Fatal("postgres backend (reserved, unimplemented): want the work store, not a silent divert")
+	}
+}

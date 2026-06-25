@@ -955,9 +955,10 @@
           "enum": [
             "",
             "bd",
-            "sqlite"
+            "sqlite",
+            "postgres"
           ],
-          "description": "Backend selects this class's store backend: \"bd\" (default) keeps the class\non the Provider/Dolt work store; \"sqlite\" routes it to an embedded\nprocess-local SQLite store at \u003cscope\u003e/.gc/\u003cclass\u003e.sqlite. Unknown values are\ntreated as \"bd\" by runtime code (validation reports them separately)."
+          "description": "Backend selects this class's store backend: \"bd\" (default) keeps the class\non the Provider/Dolt work store; \"sqlite\" routes it to an embedded\nprocess-local SQLite store at \u003cscope\u003e/.gc/\u003cclass\u003e.sqlite; \"postgres\" routes\nit to a shared Postgres backend (a server DB with native concurrent writers,\nso it needs no controller-mediated single-writer path — the slot is reserved\nand not yet implemented). Unknown values are treated as \"bd\" by runtime code\n(validation reports them separately)."
         }
       },
       "additionalProperties": false,

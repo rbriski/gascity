@@ -13,7 +13,9 @@ func TestNormalizedClassBackend(t *testing.T) {
 		{"explicit bd -> bd", BeadsConfig{Classes: map[string]BeadClassConfig{"messaging": {Backend: "bd"}}}, BeadClassMessaging, BeadsBackendBD},
 		{"explicit sqlite -> sqlite", BeadsConfig{Classes: map[string]BeadClassConfig{"messaging": {Backend: "sqlite"}}}, BeadClassMessaging, BeadsBackendSQLite},
 		{"case-insensitive + whitespace", BeadsConfig{Classes: map[string]BeadClassConfig{"orders": {Backend: "  SQLite "}}}, BeadClassOrders, BeadsBackendSQLite},
-		{"unknown backend value falls back to bd", BeadsConfig{Classes: map[string]BeadClassConfig{"nudges": {Backend: "postgres"}}}, BeadClassNudges, BeadsBackendBD},
+		{"explicit postgres -> postgres", BeadsConfig{Classes: map[string]BeadClassConfig{"nudges": {Backend: "postgres"}}}, BeadClassNudges, BeadsBackendPostgres},
+		{"case-insensitive postgres", BeadsConfig{Classes: map[string]BeadClassConfig{"sessions": {Backend: " Postgres "}}}, BeadClassSessions, BeadsBackendPostgres},
+		{"unknown backend value falls back to bd", BeadsConfig{Classes: map[string]BeadClassConfig{"nudges": {Backend: "mariadb"}}}, BeadClassNudges, BeadsBackendBD},
 		{"empty backend value -> bd", BeadsConfig{Classes: map[string]BeadClassConfig{"sessions": {Backend: ""}}}, BeadClassSessions, BeadsBackendBD},
 		{"unconfigured class -> bd", BeadsConfig{Classes: map[string]BeadClassConfig{"messaging": {Backend: "sqlite"}}}, BeadClassSessions, BeadsBackendBD},
 		// Backward compatibility: the legacy top-level graph_store knob selects the

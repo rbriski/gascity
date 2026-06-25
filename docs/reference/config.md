@@ -257,7 +257,7 @@ BeadClassConfig selects the storage backend for one coordination class.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `backend` | string |  |  | Backend selects this class's store backend: "bd" (default) keeps the class on the Provider/Dolt work store; "sqlite" routes it to an embedded process-local SQLite store at &lt;scope&gt;/.gc/&lt;class&gt;.sqlite. Unknown values are treated as "bd" by runtime code (validation reports them separately). Enum: ``, `bd`, `sqlite` |
+| `backend` | string |  |  | Backend selects this class's store backend: "bd" (default) keeps the class on the Provider/Dolt work store; "sqlite" routes it to an embedded process-local SQLite store at &lt;scope&gt;/.gc/&lt;class&gt;.sqlite; "postgres" routes it to a shared Postgres backend (a server DB with native concurrent writers, so it needs no controller-mediated single-writer path — the slot is reserved and not yet implemented). Unknown values are treated as "bd" by runtime code (validation reports them separately). Enum: ``, `bd`, `sqlite`, `postgres` |
 
 ## BeadPolicyConfig
 

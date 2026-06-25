@@ -1299,9 +1299,12 @@ type BeadsConfig struct {
 type BeadClassConfig struct {
 	// Backend selects this class's store backend: "bd" (default) keeps the class
 	// on the Provider/Dolt work store; "sqlite" routes it to an embedded
-	// process-local SQLite store at <scope>/.gc/<class>.sqlite. Unknown values are
-	// treated as "bd" by runtime code (validation reports them separately).
-	Backend string `toml:"backend,omitempty" jsonschema:"enum=,enum=bd,enum=sqlite"`
+	// process-local SQLite store at <scope>/.gc/<class>.sqlite; "postgres" routes
+	// it to a shared Postgres backend (a server DB with native concurrent writers,
+	// so it needs no controller-mediated single-writer path — the slot is reserved
+	// and not yet implemented). Unknown values are treated as "bd" by runtime code
+	// (validation reports them separately).
+	Backend string `toml:"backend,omitempty" jsonschema:"enum=,enum=bd,enum=sqlite,enum=postgres"`
 }
 
 // Coordination class names, mirroring coordclass.Class.String(). They are part of
@@ -1322,16 +1325,27 @@ const (
 	BeadsBackendBD = "bd"
 	// BeadsBackendSQLite routes a class to an embedded process-local SQLite store.
 	BeadsBackendSQLite = "sqlite"
+	// BeadsBackendPostgres routes a class to a shared Postgres backend. Postgres is
+	// a client-server DB with native concurrent multi-process writes, so a relocated
+	// class needs no controller-mediated single-writer path (unlike SQLite). Reserved
+	// vocabulary; the backend implementation is a follow-on.
+	BeadsBackendPostgres = "postgres"
 )
 
 // NormalizedClassBackend returns the storage backend for the given coordination
-// class: "sqlite" only when explicitly selected (or, for the graph class, via the
-// legacy graph_store knob), otherwise "bd". Unknown backend values default to
-// "bd" so a typo can never silently divert a class off the work store.
+// class: "sqlite" or "postgres" when that value is explicitly selected (or, for
+// the graph class, "sqlite" via the legacy graph_store knob), otherwise "bd".
+// Unknown backend values default to "bd" so a typo can never silently divert a
+// class off the work store.
 func (b BeadsConfig) NormalizedClassBackend(class string) string {
 	class = strings.TrimSpace(class)
-	if c, ok := b.Classes[class]; ok && strings.EqualFold(strings.TrimSpace(c.Backend), BeadsBackendSQLite) {
-		return BeadsBackendSQLite
+	if c, ok := b.Classes[class]; ok {
+		switch strings.ToLower(strings.TrimSpace(c.Backend)) {
+		case BeadsBackendSQLite:
+			return BeadsBackendSQLite
+		case BeadsBackendPostgres:
+			return BeadsBackendPostgres
+		}
 	}
 	// Backward compatibility: the legacy top-level graph_store knob selects the
 	// graph class's backend when no explicit [beads.classes.graph] entry exists.

@@ -128,18 +128,38 @@ func openClassSQLiteStore(cityPath, class string, rec events.Recorder) (beads.St
 	return shared, true
 }
 
-// resolveMailMessagesStore returns beadmail's message-persistence seam: the
-// embedded SQLite messaging store (emitting bead.* events via rec) when
-// [beads.classes.messaging].backend="sqlite" and it opens, otherwise the work
-// store. Session reads always stay on the work store until sessions relocate, so
-// the two seams diverge exactly here.
-func resolveMailMessagesStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beadmail.MailStore {
-	if cfg != nil && cfg.Beads.ClassUsesSQLite(config.BeadClassMessaging) {
-		if sqliteStore, ok := openClassSQLiteStore(cityPath, config.BeadClassMessaging, rec); ok {
+// resolveClassStore returns the beads.Store backing a coordination class, honoring
+// [beads.classes.<class>].backend. It is the single dispatch point for per-class
+// backend selection, so a new backend plugs in here rather than at every consumer:
+//   - "bd" (default): the Provider/Dolt work store.
+//   - "sqlite": the embedded class store, emitting bead.* events via rec (falls
+//     back to the work store with a log if it cannot open).
+//   - "postgres": a reserved slot. Postgres is a server DB with native concurrent
+//     writers, so a relocated class needs no controller-mediated single-writer path
+//     (the SQLite-only constraint), and multi-process writers (nudges/sessions) flip
+//     directly. The backend is not yet implemented, so the class LOUDLY stays on the
+//     work store until the opener lands — never a silent divert.
+func resolveClassStore(workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
+	if cfg == nil {
+		return workStore
+	}
+	switch cfg.Beads.NormalizedClassBackend(class) {
+	case config.BeadsBackendSQLite:
+		if sqliteStore, ok := openClassSQLiteStore(cityPath, class, rec); ok {
 			return sqliteStore
 		}
+	case config.BeadsBackendPostgres:
+		log.Printf("beads: class %q backend=postgres is configured but the Postgres backend is not yet implemented; the class stays on the work store", class)
 	}
 	return workStore
+}
+
+// resolveMailMessagesStore returns beadmail's message-persistence seam: the
+// configured class store (emitting bead.* events via rec) when messaging is
+// relocated, otherwise the work store. Session reads always stay on the work store
+// until sessions relocate, so the two seams diverge exactly here.
+func resolveMailMessagesStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beadmail.MailStore {
+	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassMessaging, rec)
 }
 
 // resolveOrderStore returns the order-tracking store: the embedded SQLite order
@@ -149,12 +169,7 @@ func resolveMailMessagesStore(workStore beads.Store, cfg *config.City, cityPath 
 // the work store, as an extra gate-read store (so the single-flight gate finds the
 // relocated tracking bead). Byte-identical to the work store at the default backend.
 func resolveOrderStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	if cfg != nil && cfg.Beads.ClassUsesSQLite(config.BeadClassOrders) {
-		if sqliteStore, ok := openClassSQLiteStore(cityPath, config.BeadClassOrders, rec); ok {
-			return sqliteStore
-		}
-	}
-	return workStore
+	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassOrders, rec)
 }
 
 // newCityMailProvider builds the controller's mail provider. Message persistence

@@ -24,9 +24,9 @@ var classStoreHandleCache sync.Map // dir string -> beads.Store (noClose-wrapped
 // controller already publishes for bd-backed stores, so a relocated SQLite class
 // keeps feeding the event bus (order triggers, the dashboard bead feed, cache
 // observers) exactly as before. getBead reads the post-commit bead for the
-// payload (created/updated); a delete carries the type captured pre-removal. An
-// "updated" whose committed status is closed is published as bead.closed so
-// close-observers are preserved.
+// payload (created/updated/closed); a delete carries the type captured
+// pre-removal. The store distinguishes RowClosed (a true open->closed
+// transition) from RowUpdated, so this maps op-for-op to CachingStore's events.
 func beadEventRowRecorder(getBead func(id string) (beads.Bead, error), rec events.Recorder) beads.RowChangeEmitter {
 	if rec == nil {
 		return nil
@@ -48,12 +48,18 @@ func beadEventRowRecorder(getBead func(id string) (beads.Bead, error), rec event
 			if err != nil {
 				return
 			}
-			bead = b
-			if b.Status == "closed" {
-				eventType = events.BeadClosed
-			} else {
-				eventType = events.BeadUpdated
+			// RowUpdated -> bead.updated unconditionally: the store emits RowClosed
+			// only on a true open->closed transition, matching CachingStore (which
+			// emits bead.closed only on a transition, bead.updated for an update to
+			// an already-closed bead). Inferring closed from status here would
+			// diverge for orders/sessions that update already-closed beads.
+			bead, eventType = b, events.BeadUpdated
+		case beads.RowClosed:
+			b, err := getBead(rc.ID)
+			if err != nil {
+				return
 			}
+			bead, eventType = b, events.BeadClosed
 		case beads.RowDeleted:
 			bead, eventType = beads.Bead{ID: rc.ID, Type: rc.Type}, events.BeadDeleted
 		default:
@@ -63,16 +69,29 @@ func beadEventRowRecorder(getBead func(id string) (beads.Bead, error), rec event
 		if err != nil {
 			return
 		}
-		rec.Record(events.Event{Type: eventType, Actor: "sqlite-store", Subject: rc.ID, Payload: payload})
+		// Actor "cache-reconcile" matches the default mail path (api_state.go's
+		// CachingStore onChange) so applyBeadEventToStores does not Poke the work
+		// reconciler on every relocated-class write — the controller can no longer
+		// observe these writes via its own reconcile, so a wake would be wasted.
+		rec.Record(events.Event{Type: eventType, Actor: "cache-reconcile", Subject: rc.ID, Payload: payload})
 	}
 }
 
 // openClassSQLiteStore opens (or returns the cached) embedded SQLite store for a
 // coordination class at <cityPath>/.gc/<class>/, with the class's id prefix and
-// per-process retention disabled (a single controller-owned sweep handles GC, as
-// for the graph store). When rec is non-nil the store emits bead.* events on every
-// committed mutation (the store-edge replacement for bd hooks). Returns
-// (nil,false) on failure so the caller falls back to the work backend.
+// per-process retention disabled. Controller-owned retention GC is a deferred
+// follow-up (no such sweep exists yet, same as the graph store); messaging needs
+// none because it self-GCs via Archive->Delete. Retention MUST stay disabled
+// while a recorder is attached: purgeTerminal would Delete rows and emit a
+// bead.deleted storm with no bd-path equivalent.
+//
+// When rec is non-nil the store emits bead.* events on every committed mutation
+// (the store-edge replacement for bd hooks). INVARIANT: this opener is the
+// controller-only path and is always called WITH the controller's recorder; the
+// migration command opens its dest directly (no recorder, no cache). On a cache
+// hit the already-open handle (and its recorder, if any) is returned as-is, so a
+// recorder-less caller must never share a dir with a recorder-wanting one.
+// Returns (nil,false) on failure so the caller falls back to the work backend.
 func openClassSQLiteStore(cityPath, class string, rec events.Recorder) (beads.Store, bool) {
 	dir := classSQLiteDir(cityPath, class)
 	if cached, ok := classStoreHandleCache.Load(dir); ok {
@@ -98,7 +117,7 @@ func openClassSQLiteStore(cityPath, class string, rec events.Recorder) (beads.St
 	// handle out from under the others (same discipline as the graph store).
 	shared := store
 	if sq, ok := store.(*beads.SQLiteStore); ok {
-		shared = noCloseGraphStore{sq}
+		shared = noCloseSQLiteStore{sq}
 	}
 	if actual, loaded := classStoreHandleCache.LoadOrStore(dir, shared); loaded {
 		if closer, ok := store.(interface{ CloseStore() error }); ok {

@@ -22,13 +22,13 @@ func graphSQLiteCfg() *config.City {
 }
 
 // graphSQLiteBackend extracts the embedded *beads.SQLiteStore from a graph
-// backend, unwrapping the noCloseGraphStore the cache registers (the shared
+// backend, unwrapping the noCloseSQLiteStore the cache registers (the shared
 // handle is wrapped so a consumer's CloseStore is a no-op; see 7cfff89fa).
 func graphSQLiteBackend(b beads.Store) (*beads.SQLiteStore, bool) {
 	switch s := b.(type) {
 	case *beads.SQLiteStore:
 		return s, true
-	case noCloseGraphStore:
+	case noCloseSQLiteStore:
 		return s.SQLiteStore, true
 	}
 	return nil, false

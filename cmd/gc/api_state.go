@@ -300,19 +300,20 @@ func graphStoreSQLiteEnabled(cfg *config.City) bool {
 // short-lived CLI processes release it on exit.
 var graphStoreHandleCache sync.Map // dir(string) -> beads.Store
 
-// noCloseGraphStore wraps the shared cached SQLite graph store so a consumer's
+// noCloseSQLiteStore wraps a shared cached SQLite store (graph or any relocated
+// class) so a consumer's
 // closeBeadStoreHandle CloseStore() is a no-op. The handle is shared per dir
 // across many short-lived store opens (gc ready, order dispatch, sweeps — each
 // defers closeBeadStoreHandle); the first one to close it would leave the shared
 // DB closed for every other consumer (reconciler, order dispatch, convergence:
 // "sql: database is closed"). The cache owns the lifetime — process exit is the
 // real release.
-type noCloseGraphStore struct {
+type noCloseSQLiteStore struct {
 	*beads.SQLiteStore
 }
 
 // CloseStore is a no-op: the cache, not the caller, owns the shared handle.
-func (noCloseGraphStore) CloseStore() error { return nil }
+func (noCloseSQLiteStore) CloseStore() error { return nil }
 
 func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath string) {
 	if !graphStoreSQLiteEnabled(cfg) {
@@ -332,7 +333,7 @@ func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath
 	// close the handle out from under the other consumers of the cached store.
 	shared := store
 	if sq, ok := store.(*beads.SQLiteStore); ok {
-		shared = noCloseGraphStore{sq}
+		shared = noCloseSQLiteStore{sq}
 	}
 	if actual, loaded := graphStoreHandleCache.LoadOrStore(dir, shared); loaded {
 		// Lost the open race: close OUR real handle, use the cached shared one.

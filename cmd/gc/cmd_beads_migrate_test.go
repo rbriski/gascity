@@ -77,3 +77,35 @@ func TestResolveMigrateClasses_ExplicitArgsPassThrough(t *testing.T) {
 		t.Fatalf("classes = %v, want [messaging orders]", got)
 	}
 }
+
+// TestClassSQLitePrefixesDisjoint guards cross-store routing: each class's id
+// namespace (prefix+"-") must not be a string-prefix of another class's or of the
+// work prefixes, so a relocated-class bead id can never resolve into the wrong
+// store / pollute a work cache (ownsBeadID fan-out safety).
+func TestClassSQLitePrefixesDisjoint(t *testing.T) {
+	var classPrefixes []string
+	seen := map[string]bool{}
+	for class, p := range classSQLitePrefix {
+		if p == "" {
+			t.Fatalf("class %q has an empty SQLite prefix", class)
+		}
+		if seen[p] {
+			t.Fatalf("duplicate class SQLite prefix %q", p)
+		}
+		seen[p] = true
+		classPrefixes = append(classPrefixes, p)
+	}
+	// Common work prefixes the relocated classes must stay disjoint from.
+	all := append(append([]string{}, classPrefixes...), "gc", "ga")
+	for i, a := range all {
+		for j, b := range all {
+			if i == j {
+				continue
+			}
+			an, bn := a+"-", b+"-"
+			if strings.HasPrefix(bn, an) {
+				t.Fatalf("id namespace %q is a prefix of %q — cross-store routing would be ambiguous", an, bn)
+			}
+		}
+	}
+}

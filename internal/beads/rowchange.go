@@ -6,10 +6,15 @@ type RowOp string
 const (
 	// RowCreated is emitted after a bead is created.
 	RowCreated RowOp = "created"
-	// RowUpdated is emitted after a bead's fields change (this includes status
-	// transitions like close/reopen and metadata writes, which are physically
-	// updates — a higher layer refines them into semantic events if needed).
+	// RowUpdated is emitted after a bead's fields change without a close
+	// transition (field edits, metadata writes, reopen, an update to an
+	// already-closed bead).
 	RowUpdated RowOp = "updated"
+	// RowClosed is emitted after an update transitions a bead from a non-closed
+	// status to "closed". It is distinct from RowUpdated so the translator can
+	// match the CachingStore semantics, which emit bead.closed ONLY on a true
+	// open->closed transition — not on every update to a closed bead.
+	RowClosed RowOp = "closed"
 	// RowDeleted is emitted after a bead is removed.
 	RowDeleted RowOp = "deleted"
 )

@@ -29,17 +29,17 @@ func TestSQLiteStore_RowChangeEmission(t *testing.T) {
 	if err := s.Update(b.ID, UpdateOpts{Title: &title}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if err := s.Close(b.ID); err != nil { // status update -> "updated"
+	if err := s.Close(b.ID); err != nil { // open->closed transition -> "closed"
 		t.Fatalf("Close: %v", err)
 	}
-	if err := s.SetMetadata(b.ID, "k", "v"); err != nil { // update -> "updated"
+	if err := s.SetMetadata(b.ID, "k", "v"); err != nil { // update on closed bead -> "updated"
 		t.Fatalf("SetMetadata: %v", err)
 	}
 	if err := s.Delete(b.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	wantOps := []RowOp{RowCreated, RowUpdated, RowUpdated, RowUpdated, RowDeleted}
+	wantOps := []RowOp{RowCreated, RowUpdated, RowClosed, RowUpdated, RowDeleted}
 	if len(got) != len(wantOps) {
 		t.Fatalf("emitted %d changes, want %d: %+v", len(got), len(wantOps), got)
 	}
@@ -64,7 +64,7 @@ func TestSQLiteStore_RowChangeEmitsAfterCommit(t *testing.T) {
 	var sawClosed, sawDeletedGone bool
 	s = openRecordingSQLite(t, func(rc RowChange) {
 		switch rc.Op {
-		case RowUpdated:
+		case RowClosed:
 			if got, err := s.Get(rc.ID); err == nil && got.Status == "closed" {
 				sawClosed = true
 			}
@@ -116,5 +116,34 @@ func TestSQLiteStore_NoEmitWithoutRecorderOrOnNoop(t *testing.T) {
 	t.Cleanup(func() { _ = plain.(*SQLiteStore).CloseStore() })
 	if _, err := plain.Create(Bead{Title: "x"}); err != nil {
 		t.Fatalf("Create without recorder: %v", err)
+	}
+}
+
+// TestSQLiteStore_NoOpReStampDoesNotEmit proves the metadata re-stamp guard:
+// SetMetadata with a value that already matches is a no-op — no commit, no event
+// — matching CachingStore's idempotence and avoiding the heartbeat event storm.
+func TestSQLiteStore_NoOpReStampDoesNotEmit(t *testing.T) {
+	var ops []RowOp
+	s := openRecordingSQLite(t, func(rc RowChange) { ops = append(ops, rc.Op) })
+	b, err := s.Create(Bead{Title: "x", Type: "chore", Metadata: map[string]string{"heartbeat": "1"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Re-stamp the same value: must NOT emit.
+	if err := s.SetMetadata(b.ID, "heartbeat", "1"); err != nil {
+		t.Fatalf("SetMetadata(same): %v", err)
+	}
+	// A changed value DOES emit.
+	if err := s.SetMetadata(b.ID, "heartbeat", "2"); err != nil {
+		t.Fatalf("SetMetadata(changed): %v", err)
+	}
+	want := []RowOp{RowCreated, RowUpdated} // create + the real change; the re-stamp is suppressed
+	if len(ops) != len(want) {
+		t.Fatalf("ops = %v, want %v (re-stamp must be suppressed)", ops, want)
+	}
+	for i := range want {
+		if ops[i] != want[i] {
+			t.Fatalf("op %d = %q, want %q", i, ops[i], want[i])
+		}
 	}
 }

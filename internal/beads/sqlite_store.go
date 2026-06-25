@@ -313,6 +313,25 @@ func (s *SQLiteStore) CloseStore() error {
 }
 
 // Create persists a new bead.
+// isMetadataOnlyNoop reports whether opts is a pure-metadata update whose every
+// key already matches current — a re-stamp. Skipping these mirrors CachingStore's
+// idempotence (caching_store_writes.go SetMetadata) and avoids the no-op event
+// storm from ~2s reconciler heartbeat/deferral re-stamps on a recorder-attached
+// store.
+func isMetadataOnlyNoop(current Bead, opts UpdateOpts) bool {
+	if opts.Title != nil || opts.Status != nil || opts.Type != nil || opts.Priority != nil ||
+		opts.Description != nil || opts.ParentID != nil || opts.Assignee != nil ||
+		len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 || len(opts.Metadata) == 0 {
+		return false
+	}
+	for k, v := range opts.Metadata {
+		if cur, ok := current.Metadata[k]; !ok || cur != v {
+			return false
+		}
+	}
+	return true
+}
+
 // emitRowChange invokes the configured recorder (if any). Callers must invoke it
 // AFTER the write transaction commits and outside retryOnBusy, so the single
 // write connection's lock is released and the emitter observes committed state.
@@ -598,8 +617,13 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
-	var changedType string
+	var (
+		changedType string
+		op          RowOp
+		noop        bool
+	)
 	err := retryOnBusy(func() error {
+		op, noop = RowUpdated, false
 		ctx := context.Background()
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -610,6 +634,11 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		if err != nil {
 			return err
 		}
+		if isMetadataOnlyNoop(b, opts) {
+			noop = true
+			return nil
+		}
+		prevStatus := b.Status
 		if opts.Title != nil {
 			b.Title = *opts.Title
 		}
@@ -657,6 +686,9 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		}
 		b.UpdatedAt = time.Now()
 		changedType = b.Type
+		if b.Status == "closed" && prevStatus != "closed" {
+			op = RowClosed
+		}
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}
@@ -665,7 +697,9 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 	if err != nil {
 		return err
 	}
-	s.emitRowChange(RowChange{ID: id, Type: changedType, Op: RowUpdated})
+	if !noop {
+		s.emitRowChange(RowChange{ID: id, Type: changedType, Op: op})
+	}
 	return nil
 }
 

@@ -111,6 +111,11 @@ func TestBeadEventRowRecorder_TranslatesOps(t *testing.T) {
 	if err := store.Update(id, beads.UpdateOpts{Status: &closed}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
+	// RowClosed -> bead.closed (the store flags the true transition).
+	emit(beads.RowChange{ID: id, Type: "message", Op: beads.RowClosed})
+	// Parity guard: RowUpdated -> bead.updated even though the bead is now closed
+	// (no status inference); CachingStore emits bead.updated for an update to an
+	// already-closed bead.
 	emit(beads.RowChange{ID: id, Type: "message", Op: beads.RowUpdated})
 	emit(beads.RowChange{ID: id, Type: "message", Op: beads.RowDeleted})
 
@@ -118,7 +123,7 @@ func TestBeadEventRowRecorder_TranslatesOps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	wantTypes := []string{events.BeadCreated, events.BeadClosed, events.BeadDeleted}
+	wantTypes := []string{events.BeadCreated, events.BeadClosed, events.BeadUpdated, events.BeadDeleted}
 	if len(evs) != len(wantTypes) {
 		t.Fatalf("emitted %d events, want %d: %+v", len(evs), len(wantTypes), evs)
 	}

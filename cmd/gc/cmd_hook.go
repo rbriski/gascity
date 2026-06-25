@@ -88,7 +88,7 @@ verbatim.`,
 	return cmd
 }
 
-const defaultHookRunTimeout = 15 * time.Second
+const defaultHookRunTimeout = 30 * time.Second
 
 type hookRunOptions struct {
 	Timeout         time.Duration
@@ -414,7 +414,7 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // the pre-bounded behavior (30s) so existing tests that legitimately
 // take >15s don't regress; the package-level var lets us lower it in
 // follow-up work after slow paths are identified and optimized.
-var hookWorkQueryTimeout = 30 * time.Second
+var hookWorkQueryTimeout = 60 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment

@@ -16,14 +16,10 @@ import (
 
 // classSQLitePrefix maps a coordination class to the id prefix its embedded
 // SQLite store mints. Distinct prefixes keep cross-store ids unambiguous so a
-// stranded bd-era id never resolves into the wrong SQLite store.
-var classSQLitePrefix = map[string]string{
-	config.BeadClassMessaging: "gcm",
-	config.BeadClassSessions:  "gcs",
-	config.BeadClassOrders:    "gco",
-	config.BeadClassNudges:    "gcn",
-	config.BeadClassGraph:     graphStoreIDPrefix,
-}
+// stranded bd-era id never resolves into the wrong SQLite store. Sourced from
+// the single registry in internal/config; TestClassSQLitePrefixRegistryParity
+// pins the graph entry to graphStoreIDPrefix.
+var classSQLitePrefix = config.ReservedClassPrefixes()
 
 // classSQLiteDir returns the per-class SQLite store directory under the city
 // runtime root (each class gets its own file so lifecycles/ids stay independent).

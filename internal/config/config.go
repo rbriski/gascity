@@ -4816,6 +4816,11 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		}
 		seenPrefixes[prefix] = r.Name
 	}
+	// A rig/HQ prefix that overlaps a reserved class id-prefix (gcg/gcm/gco/gcn/gcs)
+	// would mis-route beads between the work store and a relocated class store.
+	if err := ValidateReservedPrefixesIn(rigs, hqPrefix); err != nil {
+		return err
+	}
 	return nil
 }
 

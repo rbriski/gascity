@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestRunBeadsMigrateSQLite_RoutesByClassAndReports(t *testing.T) {
@@ -107,5 +108,29 @@ func TestClassSQLitePrefixesDisjoint(t *testing.T) {
 				t.Fatalf("id namespace %q is a prefix of %q — cross-store routing would be ambiguous", an, bn)
 			}
 		}
+	}
+}
+
+// TestClassSQLitePrefixRegistryParity pins cmd/gc's class prefix map to the
+// internal/config registry and to graphStoreIDPrefix, so the consolidation never
+// drifts (the graph store opener at api_state.go still uses graphStoreIDPrefix).
+func TestClassSQLitePrefixRegistryParity(t *testing.T) {
+	if got := classSQLitePrefix[config.BeadClassGraph]; got != graphStoreIDPrefix {
+		t.Fatalf("classSQLitePrefix[graph] = %q, want graphStoreIDPrefix %q", got, graphStoreIDPrefix)
+	}
+	want := map[string]string{
+		config.BeadClassMessaging: "gcm",
+		config.BeadClassSessions:  "gcs",
+		config.BeadClassOrders:    "gco",
+		config.BeadClassNudges:    "gcn",
+		config.BeadClassGraph:     "gcg",
+	}
+	for class, wantPrefix := range want {
+		if got := classSQLitePrefix[class]; got != wantPrefix {
+			t.Errorf("classSQLitePrefix[%q] = %q, want %q", class, got, wantPrefix)
+		}
+	}
+	if len(classSQLitePrefix) != len(want) {
+		t.Errorf("classSQLitePrefix has %d entries, want %d", len(classSQLitePrefix), len(want))
 	}
 }

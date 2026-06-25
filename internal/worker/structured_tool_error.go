@@ -33,7 +33,8 @@ var structuredToolErrorPatterns = []structuredToolErrorPattern{
 	{regexp.MustCompile(`(?i)^\[Request interrupted by user`), toolErrorUserRejection},
 	{regexp.MustCompile(`(?i)^User canceled`), toolErrorUserRejection},
 	{regexp.MustCompile(`(?i)^Plan mode - tools not executed`), toolErrorUserRejection},
-	{regexp.MustCompile(`(?i)^Exit code [1-9]\d*`), toolErrorCommandFailure},
+	{regexp.MustCompile(`(?i)^Exit code[: ]+[1-9]\d*`), toolErrorCommandFailure},
+	{regexp.MustCompile(`(?i)^Process exited with code [1-9]\d*`), toolErrorCommandFailure},
 	{regexp.MustCompile(`(?i)ELIFECYCLE.*Command failed`), toolErrorCommandFailure},
 	{regexp.MustCompile(`(?i)command not found`), toolErrorCommandFailure},
 	{regexp.MustCompile(`(?i)Shell \d+ is not running`), toolErrorCommandFailure},
@@ -64,8 +65,8 @@ var (
 	toolUseErrorTagPattern   = regexp.MustCompile(`(?i)</?tool_use_error>`)
 	errorPrefixPattern       = regexp.MustCompile(`(?i)^Error:\s*`)
 	rejectionReasonPattern   = regexp.MustCompile(`(?is)provided the following reason[^:]*:\s*(.+)`)
-	explicitToolErrorPattern = regexp.MustCompile(`(?i)exit code|ENOENT|EACCES|command failed|command not found|permission denied|does not exist|not found|timed? ?out|ECONNREFUSED|ENOTFOUND|fetch failed`)
-	systemErrorPattern       = regexp.MustCompile(`(?i)exit code|ENOENT|EACCES|command failed|permission denied|not found|does not exist`)
+	explicitToolErrorPattern = regexp.MustCompile(`(?i)(exit code[: ]+|process exited with code )[1-9]\d*|ENOENT|EACCES|command failed|command not found|permission denied|does not exist|not found|timed? ?out|ECONNREFUSED|ENOTFOUND|fetch failed`)
+	systemErrorPattern       = regexp.MustCompile(`(?i)(exit code[: ]+|process exited with code )[1-9]\d*|ENOENT|EACCES|command failed|permission denied|not found|does not exist`)
 	rejectionStartPattern    = regexp.MustCompile(`^[a-zA-Z]`)
 	shoutingPrefixPattern    = regexp.MustCompile(`^[A-Z_]+:`)
 	multilinePattern         = regexp.MustCompile(`\n.*\n`)

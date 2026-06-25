@@ -3163,38 +3163,79 @@ export type SessionSubmitSucceededPayload = {
     session_id: string;
 };
 
-export type SessionTranscriptGetResponse = {
+export type SessionTranscriptConversationResponse = {
     /**
-     * conversation, text, raw, or structured.
+     * Conversation or text transcript format.
      */
-    format: string;
+    format: 'conversation' | 'text';
+    id: string;
+    pagination?: PaginationInfo;
     /**
-     * Normalized worker-history envelope when format is structured.
+     * Producing provider identifier (claude, codex, gemini, opencode, etc.).
      */
-    history?: SessionStructuredHistory;
+    provider: string;
+    template: string;
+    /**
+     * Conversation/text transcript turns.
+     */
+    turns?: Array<OutputTurn> | null;
+};
+
+/**
+ * Session transcript response
+ *
+ * Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.
+ */
+export type SessionTranscriptGetResponse = ({
+    format: 'conversation' | 'text';
+} & SessionTranscriptConversationResponse) | ({
+    format: 'raw';
+} & SessionTranscriptRawResponse) | ({
+    format: 'structured';
+} & SessionTranscriptStructuredResponse);
+
+export type SessionTranscriptRawResponse = {
+    /**
+     * Raw provider-native transcript format.
+     */
+    format: 'raw';
     id: string;
     /**
-     * Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.
+     * Provider-native transcript frames emitted only for raw format.
      */
-    messages?: Array<SessionRawMessageFrame> | null;
+    messages: Array<SessionRawMessageFrame> | null;
     pagination?: PaginationInfo;
     /**
      * Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.
      */
     provider: string;
-    /**
-     * Structured session transcript schema version when format is structured.
-     */
-    schema_version?: string;
-    /**
-     * Populated for structured format; provider-normalized structured messages.
-     */
-    structured_messages?: Array<SessionStructuredMessage> | null;
     template: string;
+};
+
+export type SessionTranscriptStructuredResponse = {
     /**
-     * Populated for conversation/text formats.
+     * Structured provider-neutral transcript format.
      */
-    turns?: Array<OutputTurn> | null;
+    format: 'structured';
+    /**
+     * Normalized worker-history envelope when format is structured.
+     */
+    history?: SessionStructuredHistory;
+    id: string;
+    pagination?: PaginationInfo;
+    /**
+     * Producing provider identifier (claude, codex, gemini, opencode, etc.).
+     */
+    provider: string;
+    /**
+     * Structured session transcript schema version.
+     */
+    schema_version: string;
+    /**
+     * Provider-normalized structured messages.
+     */
+    structured_messages: Array<SessionStructuredMessage> | null;
+    template: string;
 };
 
 export type SlingInputBody = {

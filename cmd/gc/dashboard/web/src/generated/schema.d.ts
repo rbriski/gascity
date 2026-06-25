@@ -4444,24 +4444,56 @@ export interface components {
             /** @description Session ID that received the submission. */
             session_id: string;
         };
-        SessionTranscriptGetResponse: {
-            /** @description conversation, text, raw, or structured. */
-            format: string;
-            /** @description Normalized worker-history envelope when format is structured. */
-            history?: components["schemas"]["SessionStructuredHistory"];
+        SessionTranscriptConversationResponse: {
+            /**
+             * @description Conversation or text transcript format. (enum property replaced by openapi-typescript)
+             * @enum {string}
+             */
+            format: "conversation" | "text";
             id: string;
-            /** @description Populated for raw format; provider-native frames emitted verbatim as the provider wrote them. */
-            messages?: components["schemas"]["SessionRawMessageFrame"][] | null;
+            pagination?: components["schemas"]["PaginationInfo"];
+            /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). */
+            provider: string;
+            template: string;
+            /** @description Conversation/text transcript turns. */
+            turns?: components["schemas"]["OutputTurn"][] | null;
+        };
+        /**
+         * Session transcript response
+         * @description Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.
+         */
+        SessionTranscriptGetResponse: components["schemas"]["SessionTranscriptConversationResponse"] | components["schemas"]["SessionTranscriptRawResponse"] | components["schemas"]["SessionTranscriptStructuredResponse"];
+        SessionTranscriptRawResponse: {
+            /**
+             * @description Raw provider-native transcript format. (enum property replaced by openapi-typescript)
+             * @enum {string}
+             */
+            format: "raw";
+            id: string;
+            /** @description Provider-native transcript frames emitted only for raw format. */
+            messages: components["schemas"]["SessionRawMessageFrame"][] | null;
             pagination?: components["schemas"]["PaginationInfo"];
             /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing. */
             provider: string;
-            /** @description Structured session transcript schema version when format is structured. */
-            schema_version?: string;
-            /** @description Populated for structured format; provider-normalized structured messages. */
-            structured_messages?: components["schemas"]["SessionStructuredMessage"][] | null;
             template: string;
-            /** @description Populated for conversation/text formats. */
-            turns?: components["schemas"]["OutputTurn"][] | null;
+        };
+        SessionTranscriptStructuredResponse: {
+            /**
+             * @description Structured provider-neutral transcript format. (enum property replaced by openapi-typescript)
+             * @enum {string}
+             */
+            format: "structured";
+            /** @description Normalized worker-history envelope when format is structured. */
+            history?: components["schemas"]["SessionStructuredHistory"];
+            id: string;
+            pagination?: components["schemas"]["PaginationInfo"];
+            /** @description Producing provider identifier (claude, codex, gemini, opencode, etc.). */
+            provider: string;
+            /** @description Structured session transcript schema version. */
+            schema_version: string;
+            /** @description Provider-normalized structured messages. */
+            structured_messages: components["schemas"]["SessionStructuredMessage"][] | null;
+            template: string;
         };
         SlingInputBody: {
             /** @description Bead ID to attach a formula to. */

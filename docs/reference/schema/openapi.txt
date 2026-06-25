@@ -7866,22 +7866,88 @@
         ],
         "type": "object"
       },
-      "SessionTranscriptGetResponse": {
+      "SessionTranscriptConversationResponse": {
         "additionalProperties": false,
         "properties": {
           "format": {
-            "description": "conversation, text, raw, or structured.",
+            "description": "Conversation or text transcript format.",
+            "enum": [
+              "conversation",
+              "text"
+            ],
             "type": "string"
           },
-          "history": {
-            "$ref": "#/components/schemas/SessionStructuredHistory",
-            "description": "Normalized worker-history envelope when format is structured."
+          "id": {
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.).",
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "turns": {
+            "description": "Conversation/text transcript turns.",
+            "items": {
+              "$ref": "#/components/schemas/OutputTurn"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "provider",
+          "format"
+        ],
+        "type": "object"
+      },
+      "SessionTranscriptGetResponse": {
+        "description": "Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.",
+        "discriminator": {
+          "mapping": {
+            "conversation": "#/components/schemas/SessionTranscriptConversationResponse",
+            "raw": "#/components/schemas/SessionTranscriptRawResponse",
+            "structured": "#/components/schemas/SessionTranscriptStructuredResponse",
+            "text": "#/components/schemas/SessionTranscriptConversationResponse"
+          },
+          "propertyName": "format"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionTranscriptConversationResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionTranscriptRawResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionTranscriptStructuredResponse"
+          }
+        ],
+        "title": "Session transcript response"
+      },
+      "SessionTranscriptRawResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "Raw provider-native transcript format.",
+            "enum": [
+              "raw"
+            ],
+            "type": "string"
           },
           "id": {
             "type": "string"
           },
           "messages": {
-            "description": "Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.",
+            "description": "Provider-native transcript frames emitted only for raw format.",
             "items": {
               "$ref": "#/components/schemas/SessionRawMessageFrame"
             },
@@ -7897,12 +7963,49 @@
             "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.",
             "type": "string"
           },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "provider",
+          "format",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "SessionTranscriptStructuredResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "Structured provider-neutral transcript format.",
+            "enum": [
+              "structured"
+            ],
+            "type": "string"
+          },
+          "history": {
+            "$ref": "#/components/schemas/SessionStructuredHistory",
+            "description": "Normalized worker-history envelope when format is structured."
+          },
+          "id": {
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.).",
+            "type": "string"
+          },
           "schema_version": {
-            "description": "Structured session transcript schema version when format is structured.",
+            "description": "Structured session transcript schema version.",
             "type": "string"
           },
           "structured_messages": {
-            "description": "Populated for structured format; provider-normalized structured messages.",
+            "description": "Provider-normalized structured messages.",
             "items": {
               "$ref": "#/components/schemas/SessionStructuredMessage"
             },
@@ -7913,23 +8016,15 @@
           },
           "template": {
             "type": "string"
-          },
-          "turns": {
-            "description": "Populated for conversation/text formats.",
-            "items": {
-              "$ref": "#/components/schemas/OutputTurn"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
           }
         },
         "required": [
           "id",
           "template",
           "provider",
-          "format"
+          "format",
+          "schema_version",
+          "structured_messages"
         ],
         "type": "object"
       },

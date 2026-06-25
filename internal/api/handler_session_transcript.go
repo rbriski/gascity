@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -24,7 +23,7 @@ type sessionRawTranscriptResponse struct {
 	ID         string                       `json:"id"`
 	Template   string                       `json:"template"`
 	Format     string                       `json:"format"`
-	Messages   []json.RawMessage            `json:"messages"`
+	Messages   []SessionRawMessageFrame     `json:"messages"`
 	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
@@ -84,6 +83,8 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		if wantStructured {
 			history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), worker.HistoryRequest{
 				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
 			})
 			if historyErr != nil {
 				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
@@ -102,6 +103,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 				SchemaVersion:      sessionStructuredSchemaVersion,
 				History:            structuredHistoryFromSnapshot(history),
 				StructuredMessages: messages,
+				Pagination:         history.Pagination,
 			})
 			return
 		}
@@ -121,7 +123,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 				ID:         info.ID,
 				Template:   info.Template,
 				Format:     "raw",
-				Messages:   transcript.RawMessages,
+				Messages:   wrapRawFrameBytes(transcript.RawMessages),
 				Pagination: transcript.Session.Pagination,
 			})
 			return
@@ -161,7 +163,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
-			Messages: []json.RawMessage{},
+			Messages: []SessionRawMessageFrame{},
 		})
 		return
 	}

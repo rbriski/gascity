@@ -590,6 +590,7 @@ func inferStructuredToolResult(block HistoryBlock, context structuredToolContext
 		patch := firstNonEmptyString(resultPatch, patchContent(content))
 		patchHunks, filePaths := editPatchHunksFromRawResult(block.Content)
 		metadata := editMetadataFromRawResult(block.Content)
+		resultContent := commandOutputPayload(content)
 		if len(patchHunks) == 0 && patch != "" {
 			patchHunks = parsePatchHunks(patch, firstNonEmptyString(resultFile, inputFilePath(context.Input)))
 			filePaths = patchHunkFilePaths(patchHunks)
@@ -607,7 +608,7 @@ func inferStructuredToolResult(block HistoryBlock, context structuredToolContext
 			OriginalFile: metadata.OriginalFile,
 			ReplaceAll:   metadata.ReplaceAll,
 			UserModified: metadata.UserModified,
-			Content:      content,
+			Content:      resultContent,
 		}
 	}
 	return &StructuredToolResult{
@@ -1277,6 +1278,48 @@ func parsePatchHunks(patch string, fallbackFilePath string) []StructuredPatchHun
 	nextNewStart := 1
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
+		if operation, filePath := patchFileOperation(line); filePath != "" {
+			currentFilePath = filePath
+			nextOldStart = 1
+			nextNewStart = 1
+			if operation == "add" || operation == "delete" {
+				hunkLines := make([]string, 0)
+				for i++; i < len(lines); i++ {
+					current := lines[i]
+					if current == "*** End Patch" || strings.HasPrefix(current, "@@") || patchLineFilePath(current) != "" {
+						i--
+						break
+					}
+					switch {
+					case operation == "add" && strings.HasPrefix(current, "+"):
+						hunkLines = append(hunkLines, current)
+					case operation == "delete" && strings.HasPrefix(current, "-"):
+						hunkLines = append(hunkLines, current)
+					}
+				}
+				if len(hunkLines) == 0 {
+					continue
+				}
+				oldStart, newStart := 1, 1
+				if operation == "add" {
+					oldStart = 0
+				}
+				if operation == "delete" {
+					newStart = 0
+				}
+				out = append(out, StructuredPatchHunk{
+					FilePath: currentFilePath,
+					OldStart: oldStart,
+					OldLines: countOldPatchLines(hunkLines),
+					NewStart: newStart,
+					NewLines: countNewPatchLines(hunkLines),
+					Lines:    hunkLines,
+				})
+				nextOldStart = oldStart + countOldPatchLines(hunkLines)
+				nextNewStart = newStart + countNewPatchLines(hunkLines)
+			}
+			continue
+		}
 		if filePath := patchLineFilePath(line); filePath != "" {
 			currentFilePath = filePath
 			nextOldStart = 1
@@ -1327,6 +1370,22 @@ func parsePatchHunks(patch string, fallbackFilePath string) []StructuredPatchHun
 		nextNewStart = newStart + newLines
 	}
 	return out
+}
+
+func patchFileOperation(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	for _, op := range []struct {
+		prefix string
+		name   string
+	}{
+		{prefix: "*** Add File:", name: "add"},
+		{prefix: "*** Delete File:", name: "delete"},
+	} {
+		if rest, ok := strings.CutPrefix(line, op.prefix); ok {
+			return op.name, cleanPatchFilePath(rest)
+		}
+	}
+	return "", ""
 }
 
 func parsePatchHunkHeader(line string) (int, int, int, int, bool) {
@@ -2413,10 +2472,31 @@ func commandOutputPayload(content string) string {
 	if !ok {
 		return content
 	}
-	if !strings.HasPrefix(strings.TrimSpace(before), "Command:") {
+	if !strings.HasPrefix(strings.TrimSpace(before), "Command:") && !looksLikeCommandOutputWrapper(before) {
 		return content
 	}
 	return strings.TrimPrefix(after, "\n")
+}
+
+func looksLikeCommandOutputWrapper(header string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(header, "\r\n", "\n"), "\n") {
+		normalized := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(normalized, "chunk id:"):
+			return true
+		case strings.HasPrefix(normalized, "wall time:"):
+			return true
+		case strings.HasPrefix(normalized, "process exited with code "):
+			return true
+		case strings.HasPrefix(normalized, "exit code:"):
+			return true
+		case strings.HasPrefix(normalized, "exit code "):
+			return true
+		case strings.HasPrefix(normalized, "original token count:"):
+			return true
+		}
+	}
+	return false
 }
 
 func shellReadStripsLineNumbers(command string) bool {
@@ -3262,10 +3342,50 @@ func isAllASCIIDigits(value string) bool {
 
 func commandResultFields(raw json.RawMessage, content string) (stdout string, stderr string, exitCode *int, interrupted bool, truncated bool, isImage bool) {
 	stdout, stderr, exitCode, interrupted, truncated, isImage = commandResultFieldsDepth(raw, 0)
+	if exitCode == nil {
+		if parsed, ok := commandWrapperExitCode(firstNonEmptyString(stdout, stderr, content)); ok {
+			exitCode = &parsed
+		}
+	}
+	if stdout != "" {
+		stdout = commandOutputPayload(stdout)
+	}
+	if stderr != "" {
+		stderr = commandOutputPayload(stderr)
+	}
 	if stdout == "" && stderr == "" {
 		stdout = content
 	}
 	return stdout, stderr, exitCode, interrupted, truncated, isImage
+}
+
+func commandWrapperExitCode(content string) (int, bool) {
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		for _, prefix := range []string{
+			"Process exited with code",
+			"Exit code:",
+			"Exit code",
+		} {
+			if value, ok := valueAfterCaseInsensitivePrefix(line, prefix); ok {
+				fields := strings.Fields(strings.TrimSpace(value))
+				if len(fields) == 0 {
+					continue
+				}
+				if parsed, parsedOK := parseNonNegativeInt(strings.Trim(fields[0], ":")); parsedOK {
+					return parsed, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func valueAfterCaseInsensitivePrefix(value string, prefix string) (string, bool) {
+	if !strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
+		return "", false
+	}
+	return strings.TrimSpace(value[len(prefix):]), true
 }
 
 func commandResultFieldsDepth(raw json.RawMessage, depth int) (stdout string, stderr string, exitCode *int, interrupted bool, truncated bool, isImage bool) {

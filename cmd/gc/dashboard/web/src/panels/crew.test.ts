@@ -230,7 +230,13 @@ describe("crew empty states", () => {
         if (query.before) {
           return {
             data: {
-              turns: [{ role: "assistant", text: "Older transcript turn", timestamp: "2026-04-18T19:00:00Z" }],
+              format: "structured",
+              structured_messages: [{
+                id: "older-1",
+                role: "assistant",
+                timestamp: "2026-04-18T19:00:00Z",
+                blocks: [{ type: "text", text: "Older transcript turn" }],
+              }],
               pagination: {
                 has_older_messages: false,
                 returned_message_count: 1,
@@ -242,7 +248,13 @@ describe("crew empty states", () => {
         }
         return {
           data: {
-            turns: [{ role: "assistant", text: "Newest transcript turn", timestamp: "2026-04-18T20:00:00Z" }],
+            format: "structured",
+            structured_messages: [{
+              id: "newest-1",
+              role: "assistant",
+              timestamp: "2026-04-18T20:00:00Z",
+              blocks: [{ type: "text", text: "Newest transcript turn" }],
+            }],
             pagination: {
               has_older_messages: true,
               returned_message_count: 1,

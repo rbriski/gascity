@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const streamEvents = vi.fn();
 const streamSession = vi.fn();
 const streamSupervisorEvents = vi.fn();
+const reportUIError = vi.fn();
 
 vi.mock("./generated/client.gen", () => ({
   client: {},
@@ -15,7 +16,7 @@ vi.mock("./generated/sdk.gen", () => ({
 }));
 
 vi.mock("./ui", () => ({
-  reportUIError: vi.fn(),
+  reportUIError,
 }));
 
 async function* quietStream(): AsyncGenerator<never> {
@@ -28,6 +29,7 @@ describe("dashboard SSE status", () => {
     streamEvents.mockReset();
     streamSession.mockReset();
     streamSupervisorEvents.mockReset();
+    reportUIError.mockReset();
   });
 
   it("marks a quiet city event stream live after the connection opens", async () => {
@@ -75,5 +77,31 @@ describe("dashboard SSE status", () => {
       path: { cityName: "mc-city", id: "session-1" },
       query: { format: "structured" },
     }));
+  });
+
+  it("rejects raw message frames on structured session streams", async () => {
+    streamSession.mockImplementation(async (options: {
+      onSseEvent?: (frame: { data?: unknown; event?: string; id?: string }) => void;
+    }) => {
+      options.onSseEvent?.({
+        data: { format: "raw", messages: [{ role: "assistant" }] },
+        event: "message",
+        id: "raw-1",
+      });
+      return { stream: quietStream() };
+    });
+    const delivered: unknown[] = [];
+
+    const { connectAgentOutput } = await import("./sse");
+    const handle = connectAgentOutput("mc-city", "session-1", (msg) => delivered.push(msg));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    handle.close();
+    expect(delivered).toEqual([]);
+    expect(reportUIError).toHaveBeenCalledWith(
+      "Unexpected session SSE event: message",
+      expect.objectContaining({ event: "message", id: "raw-1" }),
+    );
   });
 });

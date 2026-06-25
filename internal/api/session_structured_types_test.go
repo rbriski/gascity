@@ -354,6 +354,40 @@ func TestHistorySnapshotStructuredMessagesDoNotInferProviderNativeFallbacks(t *t
 	}
 }
 
+func TestHistorySnapshotStructuredMessagesUseWorkerCarriedContentText(t *testing.T) {
+	snapshot := &worker.HistorySnapshot{
+		Entries: []worker.HistoryEntry{{
+			ID:     "tool-1",
+			Kind:   "tool",
+			Actor:  worker.ActorTool,
+			Status: worker.ResultStatusFinal,
+			Blocks: []worker.HistoryBlock{{
+				Kind:      worker.BlockKindToolResult,
+				ToolUseID: "call-1",
+				Name:      "exec_command",
+				Content: mustMarshalForStructuredTest(t, struct {
+					ToolUseResult struct {
+						Stdout string `json:"stdout"`
+					} `json:"toolUseResult"`
+				}{
+					ToolUseResult: struct {
+						Stdout string `json:"stdout"`
+					}{Stdout: "provider-native stdout"},
+				}),
+				ContentText: "provider-neutral content text",
+			}},
+		}},
+	}
+
+	messages, _ := historySnapshotStructuredMessages(snapshot, false)
+	if len(messages) != 1 || len(messages[0].Blocks) != 1 {
+		t.Fatalf("messages = %+v, want one tool-result block", messages)
+	}
+	if got := messages[0].Blocks[0].Content; got != "provider-neutral content text" {
+		t.Fatalf("content = %q, want worker-carried content text", got)
+	}
+}
+
 func mustMarshalForStructuredTest(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	out, err := json.Marshal(value)

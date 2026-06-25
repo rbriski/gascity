@@ -478,6 +478,62 @@ provider-normalization layer until every extraction algorithm lives in
 provider/sessionlog/worker code and the remaining first-class provider result
 families are covered by real fixtures.
 
+## Gap analysis: spirit vs. implementation
+
+This gap list is part of the spec, not a transient review note. The structured
+stream is not done when the API can return typed frames; it is done when a
+client can build MC-class presentation, alternate GUIs, CLIs, analytics, and
+programmatic automations from typed provider-neutral data without provider
+parsers, native JSON escape hatches, or HTML.
+
+### Weakest current areas
+
+- **Provider parity is not proven until it is fixture-backed.** The code now
+  has typed paths and graceful downgrade for every built-in profile, but the
+  evidence must be a real provider/version matrix: Claude, Codex, Gemini,
+  OpenCode-compatible providers, Pi-family providers, Copilot, Kiro, Cursor,
+  Amp, Grok, Auggie, Kimi, and Antigravity. Synthetic fixtures are useful unit
+  tests, not proof that current live provider sessions produce rich structured
+  output.
+- **Capture is the highest live-session risk.** Providers whose retrospective
+  local transcript is incomplete or undocumented must have GC-managed capture
+  for the source that actually contains rich data: stdout stream-json, ACP
+  `session/update`, hook output, SDK event streams, or provider event logs. A
+  profile that depends on a manually configured capture path should be reported
+  as a degraded structured source, not described as complete.
+- **The central normalizer must keep shrinking.** Shared helpers for patch
+  parsing, command output normalization, shell unwrapping, and common
+  provider-neutral key canonicalization are useful. Provider-specific semantic
+  evidence should be emitted by provider readers/adapters, then carried by
+  worker history. A generic worker/API normalizer that guesses semantics from
+  arbitrary native-looking fields recreates the client-side parser problem on
+  the server.
+- **Provider-native key leakage is still the easiest regression.** Fallback
+  `arguments: [{name, value}]` is only acceptable when names are
+  provider-neutral or intentionally generic. Native field names such as
+  `toolUseResult`, `resultDisplay`, `call_id`, `tool_use_id`, `sessionId`, and
+  provider SDK object names belong in `format=raw`, fixtures, and adapters, not
+  in structured DTOs.
+- **Structured pagination and cursors must stay first-class.** Structured
+  history and stream consumers need the same navigability as raw/conversation:
+  `before`, `after`, stable entry cursors, and explicit pagination metadata.
+  This branch adds structured cursor support, but provider-conformance tests
+  must include cursor behavior so future structured work does not silently fall
+  back to whole-session dumps.
+- **Subagent lineage is represented but not complete.** Inline provider
+  subagents need typed parent/child relationships, parent tool call references
+  when available, and transcript linkage that does not confuse provider
+  subagents with Gas City formulas, drains, convoys, or beads.
+- **Dashboard rendering must not be the evidence source.** Dashboard tests
+  should prove that typed data renders rich results and colorized diffs, but the
+  provider truth must be proven below the dashboard: native transcript/capture
+  fixture -> provider reader -> worker history -> typed API/SSE. A beautiful
+  dashboard over mocked payloads does not prove `format=structured`.
+- **Spec claims must be mechanically tied to coverage.** Provider counts,
+  first-class status, and supported result families should be backed by fixture
+  manifests or conformance tables that fail tests when a provider/profile is
+  added without structured evidence.
+
 ## Architectural alignment
 
 Scoped to respect Gas City's load-bearing invariants (AGENTS.md):

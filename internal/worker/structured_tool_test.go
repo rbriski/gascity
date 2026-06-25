@@ -1102,6 +1102,47 @@ func TestInferStructuredToolResultNormalizesBashOutputMetadata(t *testing.T) {
 	}
 }
 
+func TestInferStructuredToolResultParsesCodexCommandWrapperExitCode(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]string{
+		"output": strings.Join([]string{
+			"Chunk ID: ddfdd1",
+			"Wall time: 0.0000 seconds",
+			"Process exited with code 7",
+			"Original token count: 7",
+			"Output:",
+			"bad-err-codex",
+			"bad-out-codex",
+			"",
+		}, "\n"),
+	})
+	block := HistoryBlock{
+		Kind:    BlockKindToolResult,
+		Name:    "exec_command",
+		Content: raw,
+	}
+	context := structuredToolContext{
+		Name: "exec_command",
+		Input: &StructuredToolInput{
+			Kind:    "command",
+			Command: `sh -c 'printf "bad-out-codex\n"; printf "bad-err-codex\n" >&2; exit 7'`,
+		},
+	}
+
+	got := attachStructuredToolError(inferStructuredToolResult(block, context, structuredJSONText(raw)), block, structuredJSONText(raw))
+	if got == nil {
+		t.Fatal("inferStructuredToolResult returned nil")
+	}
+	if got.ExitCode == nil || *got.ExitCode != 7 {
+		t.Fatalf("ExitCode = %v, want 7; result = %+v", got.ExitCode, got)
+	}
+	if got.Stdout != "bad-err-codex\nbad-out-codex\n" {
+		t.Fatalf("Stdout = %q, want command output payload only; result = %+v", got.Stdout, got)
+	}
+	if got.Error == nil || got.Error.Category != "command_failure" {
+		t.Fatalf("Error = %+v, want command_failure; result = %+v", got.Error, got)
+	}
+}
+
 func TestAttachStructuredToolDataLinksWriteStdinToBashCommand(t *testing.T) {
 	entries := []HistoryEntry{
 		{
@@ -1744,6 +1785,98 @@ func TestInferStructuredToolResultExposesTypedPatchHunks(t *testing.T) {
 	}
 	if !stringSliceContains(got.FilePaths, "README.md") {
 		t.Fatalf("FilePaths = %#v, want README.md", got.FilePaths)
+	}
+}
+
+func TestInferStructuredToolResultDoesNotUseInputPatchForCodexApplyPatch(t *testing.T) {
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Delete File: /tmp/project/src/app.ts",
+		"*** Add File: /tmp/project/src/app.ts",
+		"+before direct codex",
+		"+after direct live structured codex",
+		"*** End Patch",
+	}, "\n")
+	raw := mustMarshalStructuredToolTest(t, map[string]string{
+		"output": "Success. Updated the following files:\nM /tmp/project/src/app.ts\n",
+	})
+	block := HistoryBlock{
+		Kind:    BlockKindToolResult,
+		Name:    "apply_patch",
+		Content: raw,
+	}
+	context := structuredToolContext{
+		Name: "apply_patch",
+		Input: &StructuredToolInput{
+			Kind:     "patch",
+			Patch:    patch,
+			FilePath: "/tmp/project/src/app.ts",
+		},
+	}
+
+	got := inferStructuredToolResult(block, context, structuredJSONText(raw))
+	if got == nil {
+		t.Fatal("inferStructuredToolResult returned nil")
+	}
+	if got.Kind != "edit" {
+		t.Fatalf("Kind = %q, want edit; result = %+v", got.Kind, got)
+	}
+	if got.Patch != "" || len(got.PatchHunks) != 0 {
+		t.Fatalf("patch data = patch %q hunks %#v, want no input-derived result patch", got.Patch, got.PatchHunks)
+	}
+	if got.FilePath != "/tmp/project/src/app.ts" {
+		t.Fatalf("FilePath = %q, want input file path for edit association", got.FilePath)
+	}
+	if !strings.Contains(got.Content, "Success. Updated the following files") {
+		t.Fatalf("Content = %q, want provider result output preserved", got.Content)
+	}
+}
+
+func TestInferStructuredToolResultIgnoresSuccessfulCodexEditWrapper(t *testing.T) {
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: /tmp/project/src/app.ts",
+		"@@",
+		"-before-codex",
+		"+after-codex",
+		"*** End Patch",
+	}, "\n")
+	raw := mustMarshalStructuredToolTest(t, map[string]string{
+		"output": strings.Join([]string{
+			"Exit code: 0",
+			"Wall time: 0 seconds",
+			"Output:",
+			"Success. Updated the following files:",
+			"M /tmp/project/src/app.ts",
+			"",
+		}, "\n"),
+	})
+	block := HistoryBlock{
+		Kind:    BlockKindToolResult,
+		Name:    "apply_patch",
+		Content: raw,
+	}
+	context := structuredToolContext{
+		Name: "apply_patch",
+		Input: &StructuredToolInput{
+			Kind:     "patch",
+			Patch:    patch,
+			FilePath: "/tmp/project/src/app.ts",
+		},
+	}
+
+	got := attachStructuredToolError(inferStructuredToolResult(block, context, structuredJSONText(raw)), block, structuredJSONText(raw))
+	if got == nil {
+		t.Fatal("inferStructuredToolResult returned nil")
+	}
+	if got.Error != nil {
+		t.Fatalf("Error = %+v, want nil for successful edit wrapper; result = %+v", got.Error, got)
+	}
+	if got.Content != "Success. Updated the following files:\nM /tmp/project/src/app.ts\n" {
+		t.Fatalf("Content = %q, want command output payload only; result = %+v", got.Content, got)
+	}
+	if got.Patch != "" || len(got.PatchHunks) != 0 {
+		t.Fatalf("patch data = patch %q hunks %#v, want no input-derived result patch", got.Patch, got.PatchHunks)
 	}
 }
 

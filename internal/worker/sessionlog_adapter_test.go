@@ -788,6 +788,48 @@ func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterLoadHistoryHonorsCursors(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"first"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"second"}`,
+		`{"step_index":2,"type":"USER_INPUT","created_at":"2026-04-04T09:00:02Z","content":"third"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
+	)
+
+	older, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+		BeforeEntryID:  "agy-2",
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory older: %v", err)
+	}
+	if got := historyEntryIDs(older); strings.Join(got, ",") != "agy-0,agy-1" {
+		t.Fatalf("older history IDs = %v, want [agy-0 agy-1]", got)
+	}
+	if older.Pagination == nil || older.Pagination.ReturnedMessageCount != 2 || older.Pagination.TotalMessageCount != 4 {
+		t.Fatalf("older pagination = %+v, want returned/total counts 2/4", older.Pagination)
+	}
+
+	newer, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+		AfterEntryID:   "agy-2",
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory newer: %v", err)
+	}
+	if got := historyEntryIDs(newer); strings.Join(got, ",") != "agy-3" {
+		t.Fatalf("newer history IDs = %v, want [agy-3]", got)
+	}
+	if newer.Pagination == nil || newer.Pagination.ReturnedMessageCount != 1 || newer.Pagination.TotalMessageCount != 4 {
+		t.Fatalf("newer pagination = %+v, want returned/total counts 1/4", newer.Pagination)
+	}
+}
+
 func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -815,6 +857,14 @@ func transcriptEntryIDs(result *TranscriptResult) []string {
 	ids := make([]string, 0, len(result.Session.Messages))
 	for _, entry := range result.Session.Messages {
 		ids = append(ids, entry.UUID)
+	}
+	return ids
+}
+
+func historyEntryIDs(snapshot *HistorySnapshot) []string {
+	ids := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		ids = append(ids, entry.ID)
 	}
 	return ids
 }

@@ -20,6 +20,8 @@ type LoadRequest struct {
 	GCSessionID           string
 	LogicalConversationID string
 	TailCompactions       int
+	BeforeEntryID         string
+	AfterEntryID          string
 }
 
 // TranscriptRequest scopes provider-native transcript reads that preserve raw
@@ -207,7 +209,22 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		return nil, fmt.Errorf("transcript path is required")
 	}
 
-	session, err := sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+	var (
+		session *sessionlog.Session
+		err     error
+	)
+	beforeID := strings.TrimSpace(req.BeforeEntryID)
+	afterID := strings.TrimSpace(req.AfterEntryID)
+	switch {
+	case beforeID != "" && afterID != "":
+		return nil, fmt.Errorf("before and after entry IDs are mutually exclusive")
+	case afterID != "":
+		session, err = sessionlog.ReadProviderFileRawNewer(req.Provider, path, req.TailCompactions, afterID)
+	case beforeID != "":
+		session, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, beforeID)
+	default:
+		session, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +309,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 			DegradedReason:        tailDegradedReason,
 		},
 		Diagnostics: diagnostics,
+		Pagination:  session.Pagination,
 		Entries:     entries,
 	}, nil
 }
@@ -662,6 +680,7 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 			if kind == BlockKindToolResult {
 				content = toolResultContentWithEvidence(entry, content)
 			}
+			contentText := structuredJSONText(content)
 			result = append(result, HistoryBlock{
 				Kind:        kind,
 				Text:        text,
@@ -673,6 +692,7 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 				MIMEType:    strings.TrimSpace(block.MIMEType),
 				Input:       cloneRaw(block.Input),
 				Content:     content,
+				ContentText: contentText,
 				IsError:     block.IsError,
 				Interaction: interaction,
 			})

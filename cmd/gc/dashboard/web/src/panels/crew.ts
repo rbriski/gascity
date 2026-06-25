@@ -360,11 +360,6 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
       fragment.append(renderStructuredMessage(message));
       logCount += 1;
     }
-  } else {
-    for (const turn of res.data.turns ?? []) {
-      fragment.append(renderTurn(turn.role, turn.text, turn.timestamp));
-      logCount += 1;
-    }
   }
   if (prepend) {
     messagesEl.prepend(fragment);
@@ -383,7 +378,7 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
     nextBeforeCursor: logBeforeCursor,
     prepend,
     sessionID,
-    turnCount: res.data.turns?.length ?? 0,
+    structuredMessageCount: structuredMessages.length,
   });
 }
 
@@ -419,41 +414,18 @@ function appendStreamEvent(msg: AgentOutputMessage): void {
     if (body) body.scrollTop = body.scrollHeight;
     return;
   }
-  const payload = msg.data as { data?: { message?: { role?: string; text?: string; timestamp?: string } }; event?: string } | null;
-  if (msg.type !== "message" || !payload?.data?.message) return;
-  messagesEl.append(renderTurn(payload.data.message.role ?? "agent", payload.data.message.text ?? "", payload.data.message.timestamp));
-  logCount += 1;
-  byId("log-drawer-count")!.textContent = String(logCount);
-  const body = byId("log-drawer-body");
-  if (body) body.scrollTop = body.scrollHeight;
 }
 
 function structuredMessagesFromEnvelope(value: unknown): SessionStructuredMessage[] {
   if (!isRecord(value)) return [];
   const structured = value.structured_messages;
   if (Array.isArray(structured)) return structured.filter(isStructuredMessage);
-
-  // Accept the final spec shape too: a structured envelope may use
-  // `messages` for normalized messages. Raw frames also use `messages`,
-  // so only treat objects with block arrays as structured messages.
-  const messages = value.messages;
-  if (Array.isArray(messages)) return messages.filter(isStructuredMessage);
   return [];
 }
 
 function structuredHistoryFromEnvelope(value: unknown): SessionStructuredHistory | null {
   if (!isRecord(value)) return null;
   return isSessionStructuredHistory(value.history) ? value.history : null;
-}
-
-function renderTurn(role: string, text: string, timestamp: string | undefined): HTMLElement {
-  return el("div", { class: "log-msg" }, [
-    el("div", { class: "log-msg-header" }, [
-      el("span", { class: `log-msg-type log-msg-type-${roleClass(role)}` }, [role]),
-      el("span", { class: "log-msg-time" }, [formatTimestamp(timestamp)]),
-    ]),
-    el("div", { class: "log-msg-body" }, [text]),
-  ]);
 }
 
 function renderStructuredMessage(message: SessionStructuredMessage): HTMLElement {

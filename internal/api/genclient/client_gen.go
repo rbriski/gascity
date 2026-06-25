@@ -126,6 +126,54 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 	}
 }
 
+// Defines values for SessionTranscriptConversationResponseFormat.
+const (
+	SessionTranscriptConversationResponseFormatConversation SessionTranscriptConversationResponseFormat = "conversation"
+	SessionTranscriptConversationResponseFormatText         SessionTranscriptConversationResponseFormat = "text"
+)
+
+// Valid indicates whether the value is a known member of the SessionTranscriptConversationResponseFormat enum.
+func (e SessionTranscriptConversationResponseFormat) Valid() bool {
+	switch e {
+	case SessionTranscriptConversationResponseFormatConversation:
+		return true
+	case SessionTranscriptConversationResponseFormatText:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTranscriptRawResponseFormat.
+const (
+	SessionTranscriptRawResponseFormatRaw SessionTranscriptRawResponseFormat = "raw"
+)
+
+// Valid indicates whether the value is a known member of the SessionTranscriptRawResponseFormat enum.
+func (e SessionTranscriptRawResponseFormat) Valid() bool {
+	switch e {
+	case SessionTranscriptRawResponseFormatRaw:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTranscriptStructuredResponseFormat.
+const (
+	Structured SessionTranscriptStructuredResponseFormat = "structured"
+)
+
+// Valid indicates whether the value is a known member of the SessionTranscriptStructuredResponseFormat enum.
+func (e SessionTranscriptStructuredResponseFormat) Valid() bool {
+	switch e {
+	case Structured:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SubmitIntent.
 const (
 	Default      SubmitIntent = "default"
@@ -3183,30 +3231,68 @@ type SessionSubmitSucceededPayload struct {
 	SessionId string `json:"session_id"`
 }
 
-// SessionTranscriptGetResponse defines model for SessionTranscriptGetResponse.
-type SessionTranscriptGetResponse struct {
-	// Format conversation, text, raw, or structured.
-	Format  string                    `json:"format"`
-	History *SessionStructuredHistory `json:"history,omitempty"`
-	Id      string                    `json:"id"`
+// SessionTranscriptConversationResponse defines model for SessionTranscriptConversationResponse.
+type SessionTranscriptConversationResponse struct {
+	// Format Conversation or text transcript format.
+	Format     SessionTranscriptConversationResponseFormat `json:"format"`
+	Id         string                                      `json:"id"`
+	Pagination *PaginationInfo                             `json:"pagination,omitempty"`
 
-	// Messages Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.
-	Messages   *[]SessionRawMessageFrame `json:"messages,omitempty"`
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.).
+	Provider string `json:"provider"`
+	Template string `json:"template"`
+
+	// Turns Conversation/text transcript turns.
+	Turns *[]OutputTurn `json:"turns,omitempty"`
+}
+
+// SessionTranscriptConversationResponseFormat Conversation or text transcript format.
+type SessionTranscriptConversationResponseFormat string
+
+// SessionTranscriptGetResponse Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.
+type SessionTranscriptGetResponse struct {
+	union json.RawMessage
+}
+
+// SessionTranscriptRawResponse defines model for SessionTranscriptRawResponse.
+type SessionTranscriptRawResponse struct {
+	// Format Raw provider-native transcript format.
+	Format SessionTranscriptRawResponseFormat `json:"format"`
+	Id     string                             `json:"id"`
+
+	// Messages Provider-native transcript frames emitted only for raw format.
+	Messages   *[]SessionRawMessageFrame `json:"messages"`
 	Pagination *PaginationInfo           `json:"pagination,omitempty"`
 
 	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.
 	Provider string `json:"provider"`
-
-	// SchemaVersion Structured session transcript schema version when format is structured.
-	SchemaVersion *string `json:"schema_version,omitempty"`
-
-	// StructuredMessages Populated for structured format; provider-normalized structured messages.
-	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty"`
-	Template           string                      `json:"template"`
-
-	// Turns Populated for conversation/text formats.
-	Turns *[]OutputTurn `json:"turns,omitempty"`
+	Template string `json:"template"`
 }
+
+// SessionTranscriptRawResponseFormat Raw provider-native transcript format.
+type SessionTranscriptRawResponseFormat string
+
+// SessionTranscriptStructuredResponse defines model for SessionTranscriptStructuredResponse.
+type SessionTranscriptStructuredResponse struct {
+	// Format Structured provider-neutral transcript format.
+	Format     SessionTranscriptStructuredResponseFormat `json:"format"`
+	History    *SessionStructuredHistory                 `json:"history,omitempty"`
+	Id         string                                    `json:"id"`
+	Pagination *PaginationInfo                           `json:"pagination,omitempty"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.).
+	Provider string `json:"provider"`
+
+	// SchemaVersion Structured session transcript schema version.
+	SchemaVersion string `json:"schema_version"`
+
+	// StructuredMessages Provider-normalized structured messages.
+	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages"`
+	Template           string                      `json:"template"`
+}
+
+// SessionTranscriptStructuredResponseFormat Structured provider-neutral transcript format.
+type SessionTranscriptStructuredResponseFormat string
 
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
@@ -7724,6 +7810,121 @@ func (t SessionStreamCommonEvent) MarshalJSON() ([]byte, error) {
 }
 
 func (t *SessionStreamCommonEvent) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionTranscriptConversationResponse returns the union data inside the SessionTranscriptGetResponse as a SessionTranscriptConversationResponse
+func (t SessionTranscriptGetResponse) AsSessionTranscriptConversationResponse() (SessionTranscriptConversationResponse, error) {
+	var body SessionTranscriptConversationResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionTranscriptConversationResponse overwrites any union data inside the SessionTranscriptGetResponse as the provided SessionTranscriptConversationResponse
+func (t *SessionTranscriptGetResponse) FromSessionTranscriptConversationResponse(v SessionTranscriptConversationResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionTranscriptConversationResponse performs a merge with any union data inside the SessionTranscriptGetResponse, using the provided SessionTranscriptConversationResponse
+func (t *SessionTranscriptGetResponse) MergeSessionTranscriptConversationResponse(v SessionTranscriptConversationResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionTranscriptRawResponse returns the union data inside the SessionTranscriptGetResponse as a SessionTranscriptRawResponse
+func (t SessionTranscriptGetResponse) AsSessionTranscriptRawResponse() (SessionTranscriptRawResponse, error) {
+	var body SessionTranscriptRawResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionTranscriptRawResponse overwrites any union data inside the SessionTranscriptGetResponse as the provided SessionTranscriptRawResponse
+func (t *SessionTranscriptGetResponse) FromSessionTranscriptRawResponse(v SessionTranscriptRawResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionTranscriptRawResponse performs a merge with any union data inside the SessionTranscriptGetResponse, using the provided SessionTranscriptRawResponse
+func (t *SessionTranscriptGetResponse) MergeSessionTranscriptRawResponse(v SessionTranscriptRawResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionTranscriptStructuredResponse returns the union data inside the SessionTranscriptGetResponse as a SessionTranscriptStructuredResponse
+func (t SessionTranscriptGetResponse) AsSessionTranscriptStructuredResponse() (SessionTranscriptStructuredResponse, error) {
+	var body SessionTranscriptStructuredResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionTranscriptStructuredResponse overwrites any union data inside the SessionTranscriptGetResponse as the provided SessionTranscriptStructuredResponse
+func (t *SessionTranscriptGetResponse) FromSessionTranscriptStructuredResponse(v SessionTranscriptStructuredResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionTranscriptStructuredResponse performs a merge with any union data inside the SessionTranscriptGetResponse, using the provided SessionTranscriptStructuredResponse
+func (t *SessionTranscriptGetResponse) MergeSessionTranscriptStructuredResponse(v SessionTranscriptStructuredResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionTranscriptGetResponse) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"format"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t SessionTranscriptGetResponse) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "conversation":
+		return t.AsSessionTranscriptConversationResponse()
+	case "raw":
+		return t.AsSessionTranscriptRawResponse()
+	case "structured":
+		return t.AsSessionTranscriptStructuredResponse()
+	case "text":
+		return t.AsSessionTranscriptConversationResponse()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t SessionTranscriptGetResponse) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }

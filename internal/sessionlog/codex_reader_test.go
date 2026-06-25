@@ -358,6 +358,74 @@ func TestReadCodexFileNormalizesExecCommandGrepResult(t *testing.T) {
 	}
 }
 
+func TestReadCodexFileStripsLiveExecCommandWrapperForReadAndGrep(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
+	writeCodexReaderFixture(t, path,
+		map[string]any{
+			"timestamp": "2026-06-01T00:00:00Z",
+			"type":      "response_item",
+			"payload": map[string]any{
+				"type":      "function_call",
+				"call_id":   "call-read",
+				"name":      "exec_command",
+				"arguments": `{"cmd":"sed -n '1,3p' /tmp/sample.txt"}`,
+			},
+		},
+		map[string]any{
+			"timestamp": "2026-06-01T00:00:01Z",
+			"type":      "response_item",
+			"payload": map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call-read",
+				"output":  "Chunk ID: 434495\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 8\nOutput:\nalpha\nbeta\nneedle codex claude\n",
+			},
+		},
+		map[string]any{
+			"timestamp": "2026-06-01T00:00:02Z",
+			"type":      "response_item",
+			"payload": map[string]any{
+				"type":      "function_call",
+				"call_id":   "call-grep",
+				"name":      "exec_command",
+				"arguments": `{"cmd":"rg -n needle /tmp/sample.txt /tmp/data.json"}`,
+			},
+		},
+		map[string]any{
+			"timestamp": "2026-06-01T00:00:03Z",
+			"type":      "response_item",
+			"payload": map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call-grep",
+				"output":  "Chunk ID: 414539\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 34\nOutput:\n/tmp/sample.txt:3:needle codex claude\n/tmp/data.json:1:{\"name\":\"live-rich\",\"needle\":true}\n",
+			},
+		},
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCodexFile: %v", err)
+	}
+	read := codexReaderToolResultContent(t, sess, "call-read")
+	if got := jsonStringValue(read["content"]); got != "alpha\nbeta\nneedle codex claude\n" {
+		t.Fatalf("read content = %q, want wrapper-stripped payload; result = %s", got, mustMarshal(read))
+	}
+	if got := jsonStringValue(read["output"]); got != "alpha\nbeta\nneedle codex claude\n" {
+		t.Fatalf("read output = %q, want wrapper-stripped payload; result = %s", got, mustMarshal(read))
+	}
+
+	grep := codexReaderToolResultContent(t, sess, "call-grep")
+	if got := jsonStringValue(grep["content"]); got != "/tmp/sample.txt:3:needle codex claude\n/tmp/data.json:1:{\"name\":\"live-rich\",\"needle\":true}\n" {
+		t.Fatalf("grep content = %q, want wrapper-stripped payload; result = %s", got, mustMarshal(grep))
+	}
+	filenames := codexReaderStringSlice(t, grep["filenames"])
+	if len(filenames) != 2 || filenames[0] != "/tmp/data.json" || filenames[1] != "/tmp/sample.txt" {
+		t.Fatalf("filenames = %#v, want only matched files; result = %s", filenames, mustMarshal(grep))
+	}
+	if got, ok := jsonIntValue(grep["num_files"]); !ok || got != 2 {
+		t.Fatalf("num_files = %d/%v, want 2/true; result = %s", got, ok, mustMarshal(grep))
+	}
+}
+
 func TestReadCodexFileNormalizesExecCommandGrepCountResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
 	writeCodexReaderFixture(t, path,

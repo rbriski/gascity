@@ -167,6 +167,62 @@ func TestSessionStreamStructuredEventInSpec(t *testing.T) {
 	}
 }
 
+func TestSessionTranscriptStructuredSchemaExcludesRawMessages(t *testing.T) {
+	for _, source := range eventStreamSpecCases(t) {
+		t.Run(source.name, func(t *testing.T) {
+			schemas := componentSchemas(t, source.spec)
+			transcriptSchema, ok := schemas["SessionTranscriptGetResponse"]
+			if !ok {
+				t.Fatal("components.schemas missing SessionTranscriptGetResponse")
+			}
+			oneOf, ok := transcriptSchema["oneOf"].([]any)
+			if !ok || len(oneOf) == 0 {
+				t.Fatalf("SessionTranscriptGetResponse oneOf missing: %#v", transcriptSchema)
+			}
+			discriminator, ok := transcriptSchema["discriminator"].(map[string]any)
+			if !ok {
+				t.Fatalf("SessionTranscriptGetResponse discriminator missing: %#v", transcriptSchema)
+			}
+			if property, _ := discriminator["propertyName"].(string); property != "format" {
+				t.Fatalf("SessionTranscriptGetResponse discriminator property = %q, want format", property)
+			}
+			mapping, ok := discriminator["mapping"].(map[string]any)
+			if !ok {
+				t.Fatalf("SessionTranscriptGetResponse discriminator mapping missing: %#v", discriminator)
+			}
+			structuredRef, _ := mapping["structured"].(string)
+			if structuredRef != "#/components/schemas/SessionTranscriptStructuredResponse" {
+				t.Fatalf("structured mapping = %q, want SessionTranscriptStructuredResponse", structuredRef)
+			}
+			rawRef, _ := mapping["raw"].(string)
+			if rawRef != "#/components/schemas/SessionTranscriptRawResponse" {
+				t.Fatalf("raw mapping = %q, want SessionTranscriptRawResponse", rawRef)
+			}
+
+			structuredSchema := schemaByRef(t, schemas, structuredRef)
+			structuredProps, ok := structuredSchema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("structured transcript properties missing: %#v", structuredSchema)
+			}
+			if _, ok := structuredProps["messages"]; ok {
+				t.Fatalf("structured transcript schema exposes raw messages: %#v", structuredProps["messages"])
+			}
+			if _, ok := structuredProps["structured_messages"]; !ok {
+				t.Fatalf("structured transcript schema missing structured_messages: %#v", structuredProps)
+			}
+
+			rawSchema := schemaByRef(t, schemas, rawRef)
+			rawProps, ok := rawSchema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("raw transcript properties missing: %#v", rawSchema)
+			}
+			if _, ok := rawProps["messages"]; !ok {
+				t.Fatalf("raw transcript schema missing raw messages: %#v", rawProps)
+			}
+		})
+	}
+}
+
 func TestTypedEventEnvelopeUnionsCoverKnownEventTypes(t *testing.T) {
 	for _, source := range eventStreamSpecCases(t) {
 		t.Run(source.name, func(t *testing.T) {

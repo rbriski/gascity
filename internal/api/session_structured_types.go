@@ -1,8 +1,6 @@
 package api
 
 import (
-	"bytes"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -551,7 +549,7 @@ func historyBlockToStructuredBlock(block worker.HistoryBlock, includeThinking bo
 		ImageURL:   block.ImageURL,
 		MIMEType:   block.MIMEType,
 		Input:      sessionStructuredToolInputFromWorker(block.StructuredInput),
-		Content:    structuredJSONText(block.Content),
+		Content:    block.ContentText,
 		IsError:    block.IsError,
 	}
 	switch block.Kind {
@@ -812,64 +810,4 @@ func formatOptionalTime(t time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339Nano)
-}
-
-func structuredJSONText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
-	}
-	var textBlocks []struct {
-		Text    string `json:"text"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &textBlocks); err == nil {
-		parts := make([]string, 0, len(textBlocks))
-		for _, block := range textBlocks {
-			switch {
-			case block.Text != "":
-				parts = append(parts, block.Text)
-			case block.Content != "":
-				parts = append(parts, block.Content)
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-	}
-	var object struct {
-		Text    json.RawMessage `json:"text"`
-		Content json.RawMessage `json:"content"`
-		Output  json.RawMessage `json:"output"`
-		Stdout  json.RawMessage `json:"stdout"`
-		Stderr  json.RawMessage `json:"stderr"`
-		Result  json.RawMessage `json:"result"`
-		Error   json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &object); err == nil {
-		if len(object.Text) > 0 {
-			return structuredJSONText(object.Text)
-		}
-		if len(object.Content) > 0 {
-			return structuredJSONText(object.Content)
-		}
-		values := make([]string, 0, 5)
-		for _, value := range []json.RawMessage{object.Output, object.Stdout, object.Stderr, object.Result, object.Error} {
-			if text := structuredJSONText(value); strings.TrimSpace(text) != "" {
-				values = append(values, text)
-			}
-		}
-		if len(values) > 0 {
-			return strings.Join(values, "\n")
-		}
-		return ""
-	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err == nil {
-		return buf.String()
-	}
-	return string(raw)
 }

@@ -780,7 +780,7 @@ func TestHandleSessionTranscriptStructuredSkipsCodexUnknownEvents(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "rollout-2026-06-01T00-05-00-unknown-event.jsonl", []string{
+	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "2026-06-01T00-05-00", info.SessionKey, []string{
 		`{"timestamp":"2026-06-01T00:05:01Z","type":"event_msg","payload":{"type":"shutdown_complete","data":"provider-native event"}}`,
 		`{"timestamp":"2026-06-01T00:05:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"assistant survived unknown event"}]}}`,
 	})
@@ -824,7 +824,7 @@ func TestHandleSessionTranscriptStructuredNormalizesCodexSystemErrors(t *testing
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "rollout-2026-06-01T00-06-00-errors.jsonl", []string{
+	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "2026-06-01T00-06-00", info.SessionKey, []string{
 		`{"timestamp":"2026-06-01T00:06:01Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
 		`{"timestamp":"2026-06-01T00:06:02Z","type":"event_msg","payload":{"type":"stream_error","message":"stream interrupted"}}`,
 		`{"timestamp":"2026-06-01T00:06:03Z","type":"event_msg","payload":{"type":"turn_aborted","message":"turn was aborted"}}`,
@@ -1544,7 +1544,7 @@ func writeStructuredClaudeKillShellFixture(t *testing.T, root, workDir, sessionK
 	)
 }
 
-func writeStructuredCodexPatchFixture(t *testing.T, root, workDir, _ string) {
+func writeStructuredCodexPatchFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
 	dir := filepath.Join(root, "2026", "06", "01")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1556,52 +1556,52 @@ func writeStructuredCodexPatchFixture(t *testing.T, root, workDir, _ string) {
 		`{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-codex-patch","stdout":"Success. Updated the following files:\nM city.toml\n","stderr":"","success":true,"changes":{"city.toml":{"type":"update","unified_diff":"@@\n+[workspace]\n","move_path":null}},"status":"completed"}}`,
 		`{"timestamp":"2026-06-01T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-codex-patch","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-01T00-00-00-structured.jsonl"), []byte(payload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, structuredCodexFixtureFilename("2026-06-01T00-00-00", sessionKey)), []byte(payload), 0o644); err != nil {
 		t.Fatalf("write codex fixture: %v", err)
 	}
 }
 
-func writeStructuredCodexShellReadFixture(t *testing.T, root, workDir, _ string) {
+func writeStructuredCodexShellReadFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	writeStructuredCodexFixture(t, root, workDir, "rollout-2026-06-01T00-01-00-read.jsonl", []string{
+	writeStructuredCodexFixture(t, root, workDir, "2026-06-01T00-01-00", sessionKey, []string{
 		`{"timestamp":"2026-06-01T00:01:01Z","type":"response_item","payload":{"type":"function_call","call_id":"call-codex-read","name":"exec_command","arguments":"{\"cmd\":\"sed -n '12,14p' src/app.ts\"}"}}`,
 		`{"timestamp":"2026-06-01T00:01:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-codex-read","output":"Command: sed -n '12,14p' src/app.ts\nOutput:\nline 12\nline 13\nline 14\n"}}`,
 	})
 }
 
-func writeStructuredCodexWrappedShellReadFixture(t *testing.T, root, workDir, _ string) {
+func writeStructuredCodexWrappedShellReadFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	writeStructuredCodexFixture(t, root, workDir, "rollout-2026-06-01T00-01-30-wrapped-read.jsonl", []string{
+	writeStructuredCodexFixture(t, root, workDir, "2026-06-01T00-01-30", sessionKey, []string{
 		`{"timestamp":"2026-06-01T00:01:31Z","type":"response_item","payload":{"type":"function_call","call_id":"call-codex-wrapped-read","name":"exec_command","arguments":"{\"cmd\":\"/usr/bin/env bash -lc \\\"sed -n '12,14p' src/app.ts\\\"\"}"}}`,
 		`{"timestamp":"2026-06-01T00:01:32Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-codex-wrapped-read","output":"Command: /usr/bin/env bash -lc \"sed -n '12,14p' src/app.ts\"\nOutput:\nline 12\nline 13\nline 14\n"}}`,
 	})
 }
 
-func writeStructuredCodexShellGrepFixture(t *testing.T, root, workDir, _ string) {
+func writeStructuredCodexShellGrepFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	writeStructuredCodexFixture(t, root, workDir, "rollout-2026-06-01T00-02-00-grep.jsonl", []string{
+	writeStructuredCodexFixture(t, root, workDir, "2026-06-01T00-02-00", sessionKey, []string{
 		`{"timestamp":"2026-06-01T00:02:01Z","type":"response_item","payload":{"type":"function_call","call_id":"call-codex-grep","name":"exec_command","arguments":"{\"cmd\":\"rg -n \\\"needle\\\" README.md src/app.ts\"}"}}`,
 		`{"timestamp":"2026-06-01T00:02:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-codex-grep","output":"Command: rg -n \"needle\" README.md src/app.ts\nOutput:\nREADME.md:1:needle\nsrc/app.ts:7:needle\n"}}`,
 	})
 }
 
-func writeStructuredCodexJSONStringCommandFixture(t *testing.T, root, workDir, _ string) {
+func writeStructuredCodexJSONStringCommandFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	writeStructuredCodexFixture(t, root, workDir, "rollout-2026-06-01T00-03-00-json-command.jsonl", []string{
+	writeStructuredCodexFixture(t, root, workDir, "2026-06-01T00-03-00", sessionKey, []string{
 		`{"timestamp":"2026-06-01T00:03:01Z","type":"response_item","payload":{"type":"function_call","call_id":"call-codex-json-command","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\"}"}}`,
 		`{"timestamp":"2026-06-01T00:03:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-codex-json-command","output":"{\"stdout\":\"ok ./...\\n\",\"stderr\":\"\",\"exit_code\":0}"}}`,
 	})
 }
 
-func writeStructuredCodexWebSearchFixture(t *testing.T, root, workDir, _ string) {
+func writeStructuredCodexWebSearchFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	writeStructuredCodexFixture(t, root, workDir, "rollout-2026-06-01T00-04-00-web-search.jsonl", []string{
+	writeStructuredCodexFixture(t, root, workDir, "2026-06-01T00-04-00", sessionKey, []string{
 		`{"timestamp":"2026-06-01T00:04:01Z","type":"response_item","payload":{"type":"web_search_call","id":"call-codex-web-search","query":"structured tool result formats","input":{"query":"ignored fallback","scope":"web"},"action":{"type":"search","source":"web"}}}`,
 		`{"timestamp":"2026-06-01T00:04:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-codex-web-search","output":"Output:\nhttps://example.com/provider-format: Provider format notes\n"}}`,
 	})
 }
 
-func writeStructuredCodexFixture(t *testing.T, root, workDir, filename string, entries []string) {
+func writeStructuredCodexFixture(t *testing.T, root, workDir, localTimestamp, sessionKey string, entries []string) {
 	t.Helper()
 	dir := filepath.Join(root, "2026", "06", "01")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1610,9 +1610,17 @@ func writeStructuredCodexFixture(t *testing.T, root, workDir, filename string, e
 	lines := []string{fmt.Sprintf(`{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir)}
 	lines = append(lines, entries...)
 	payload := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(dir, filename), []byte(payload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, structuredCodexFixtureFilename(localTimestamp, sessionKey)), []byte(payload), 0o644); err != nil {
 		t.Fatalf("write codex fixture: %v", err)
 	}
+}
+
+func structuredCodexFixtureFilename(localTimestamp, sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return "rollout-" + localTimestamp + "-structured.jsonl"
+	}
+	return "rollout-" + localTimestamp + "-" + sessionKey + ".jsonl"
 }
 
 func writeStructuredGeminiGrepFixture(t *testing.T, root, workDir, _ string) {

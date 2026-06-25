@@ -102,6 +102,8 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		GCSessionID:           gcSessionID,
 		LogicalConversationID: strings.TrimSpace(req.LogicalID),
 		TailCompactions:       req.TailCompactions,
+		BeforeEntryID:         req.BeforeEntryID,
+		AfterEntryID:          req.AfterEntryID,
 	})
 	if err != nil {
 		return nil, err
@@ -303,7 +305,16 @@ func cloneHistorySnapshot(snapshot *HistorySnapshot) *HistorySnapshot {
 	cloned.Diagnostics = append([]HistoryDiagnostic(nil), snapshot.Diagnostics...)
 	cloned.TailState.OpenToolUseIDs = append([]string(nil), snapshot.TailState.OpenToolUseIDs...)
 	cloned.TailState.PendingInteractionIDs = append([]string(nil), snapshot.TailState.PendingInteractionIDs...)
+	cloned.Pagination = cloneTranscriptPagination(snapshot.Pagination)
 	cloned.Entries = cloneHistoryEntries(snapshot.Entries)
+	return &cloned
+}
+
+func cloneTranscriptPagination(pagination *TranscriptPagination) *TranscriptPagination {
+	if pagination == nil {
+		return nil
+	}
+	cloned := *pagination
 	return &cloned
 }
 

@@ -373,16 +373,17 @@ type StructuredToolResult struct {
 
 // HistorySnapshot is the Phase 1 normalized transcript/history view.
 type HistorySnapshot struct {
-	GCSessionID           string              `json:"gc_session_id,omitempty"`
-	LogicalConversationID string              `json:"logical_conversation_id,omitempty"`
-	ProviderSessionID     string              `json:"provider_session_id,omitempty"`
-	TranscriptStreamID    string              `json:"transcript_stream_id"`
-	Generation            Generation          `json:"generation"`
-	Cursor                Cursor              `json:"cursor"`
-	Continuity            Continuity          `json:"continuity"`
-	TailState             TailState           `json:"tail_state"`
-	Diagnostics           []HistoryDiagnostic `json:"diagnostics,omitempty"`
-	Entries               []HistoryEntry      `json:"entries"`
+	GCSessionID           string                `json:"gc_session_id,omitempty"`
+	LogicalConversationID string                `json:"logical_conversation_id,omitempty"`
+	ProviderSessionID     string                `json:"provider_session_id,omitempty"`
+	TranscriptStreamID    string                `json:"transcript_stream_id"`
+	Generation            Generation            `json:"generation"`
+	Cursor                Cursor                `json:"cursor"`
+	Continuity            Continuity            `json:"continuity"`
+	TailState             TailState             `json:"tail_state"`
+	Diagnostics           []HistoryDiagnostic   `json:"diagnostics,omitempty"`
+	Pagination            *TranscriptPagination `json:"pagination,omitempty"`
+	Entries               []HistoryEntry        `json:"entries"`
 }
 
 // HistoryEntry is a normalized transcript entry.
@@ -416,6 +417,7 @@ type HistoryBlock struct {
 	Input            json.RawMessage       `json:"input,omitempty"`
 	StructuredInput  *StructuredToolInput  `json:"structured_input,omitempty"`
 	Content          json.RawMessage       `json:"content,omitempty"`
+	ContentText      string                `json:"content_text,omitempty"`
 	StructuredResult *StructuredToolResult `json:"structured_result,omitempty"`
 	IsError          bool                  `json:"is_error,omitempty"`
 	Interaction      *HistoryInteraction   `json:"interaction,omitempty"`

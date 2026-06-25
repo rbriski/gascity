@@ -7027,6 +7027,14 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	}
 }
 
+func codexFixtureFilename(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return "rollout-2026-05-02T00-00-00-test.jsonl"
+	}
+	return "rollout-2026-05-02T00-00-00-" + sessionKey + ".jsonl"
+}
+
 func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -7054,9 +7062,10 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	codexPayload := strings.Join([]string{
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-edit","stdout":"Success. Updated the following files:\nM city.toml\n","stderr":"","success":true,"changes":{"city.toml":{"type":"update","unified_diff":"@@\n+# Created by Chris Sells\n [workspace]\n","move_path":null}},"status":"completed"}}`,
 		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
@@ -7118,9 +7127,10 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	codexPayload := strings.Join([]string{
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-edit","stdout":"Success. Updated the following files:\nM city.toml\n","stderr":"","success":true,"changes":{"city.toml":{"type":"update","unified_diff":"@@\n+# Created by Chris Sells\n [workspace]\n","move_path":null}},"status":"completed"}}`,
 		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
@@ -7177,6 +7187,16 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	if second.Blocks[0].Structured.FilePath != "city.toml" {
 		t.Fatalf("tool result structured file_path = %q, want city.toml", second.Blocks[0].Structured.FilePath)
 	}
+	if !strings.Contains(second.Blocks[0].Structured.Patch, "Created by Chris Sells") {
+		t.Fatalf("tool result structured patch lost result-side diff: %+v", second.Blocks[0].Structured)
+	}
+	if len(second.Blocks[0].Structured.PatchHunks) != 1 {
+		t.Fatalf("tool result structured patch_hunks = %#v, want one hunk", second.Blocks[0].Structured.PatchHunks)
+	}
+	hunk := second.Blocks[0].Structured.PatchHunks[0]
+	if hunk.FilePath != "city.toml" || !stringSliceContains(hunk.Lines, "+# Created by Chris Sells") {
+		t.Fatalf("tool result structured patch_hunks[0] = %+v, want city.toml created-by hunk", hunk)
+	}
 	if !strings.Contains(second.Blocks[0].Structured.Content, "Success. Updated the following files") {
 		t.Fatalf("tool result structured content lost output payload: %+v", second.Blocks[0].Structured)
 	}
@@ -7220,7 +7240,7 @@ func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
@@ -7276,7 +7296,7 @@ func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 

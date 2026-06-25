@@ -96,7 +96,7 @@ func TestDiscoverFallbackPathUsesNewestClaudeLatestSessionAcrossAliases(t *testi
 	}
 }
 
-func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
+func TestDiscoverPathCodexFallsBackByWorkDirWithoutSessionID(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "codex-project")
 
@@ -127,9 +127,54 @@ func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := DiscoverPath([]string{codexRoot}, "codex/tmux-cli", workDir, "gc-123")
+	got := DiscoverPath([]string{codexRoot}, "codex/tmux-cli", workDir, "")
 	if got != codexPath {
 		t.Fatalf("DiscoverPath() = %q, want %q", got, codexPath)
+	}
+}
+
+func TestDiscoverPathCodexPrefersProviderSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "codex-project")
+	sessionID := "019d9845-abcd-7000-8000-000000000123"
+	codexRoot := filepath.Join(base, "sessions")
+	now := time.Now()
+	codexDir := filepath.Join(codexRoot, now.Format("2006"), now.Format("01"), now.Format("02"))
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(codexDir, "rollout-"+now.Format("2006-01-02T15-04-05")+"-"+sessionID+".jsonl")
+	payload, err := json.Marshal(map[string]any{
+		"type": "session_meta",
+		"payload": map[string]string{
+			"id":  sessionID,
+			"cwd": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, append(payload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherSessionID := "019d9845-dead-7000-8000-000000000123"
+	otherPath := filepath.Join(codexDir, "rollout-"+now.Add(time.Second).Format("2006-01-02T15-04-05")+"-"+otherSessionID+".jsonl")
+	otherPayload, err := json.Marshal(map[string]any{
+		"type": "session_meta",
+		"payload": map[string]string{
+			"id":  otherSessionID,
+			"cwd": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherPath, append(otherPayload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := DiscoverPath([]string{codexRoot}, "codex/tmux-cli", workDir, sessionID)
+	if got != codexPath {
+		t.Fatalf("DiscoverPath() = %q, want keyed Codex transcript %q", got, codexPath)
 	}
 }
 

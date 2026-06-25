@@ -1381,10 +1381,31 @@ func codexCommandOutputPayload(content string) string {
 	if !ok {
 		return content
 	}
-	if !strings.HasPrefix(strings.TrimSpace(before), "Command:") {
+	if !strings.HasPrefix(strings.TrimSpace(before), "Command:") && !codexLooksLikeCommandOutputWrapper(before) {
 		return content
 	}
 	return strings.TrimPrefix(after, "\n")
+}
+
+func codexLooksLikeCommandOutputWrapper(header string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(header, "\r\n", "\n"), "\n") {
+		normalized := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(normalized, "chunk id:"):
+			return true
+		case strings.HasPrefix(normalized, "wall time:"):
+			return true
+		case strings.HasPrefix(normalized, "process exited with code "):
+			return true
+		case strings.HasPrefix(normalized, "exit code:"):
+			return true
+		case strings.HasPrefix(normalized, "exit code "):
+			return true
+		case strings.HasPrefix(normalized, "original token count:"):
+			return true
+		}
+	}
+	return false
 }
 
 func codexToolResultContentWithPatch(output json.RawMessage, patchResult json.RawMessage) json.RawMessage {

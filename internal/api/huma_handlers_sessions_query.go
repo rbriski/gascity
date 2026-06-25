@@ -181,6 +181,8 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 			}
 			history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{
 				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
 			})
 			if historyErr != nil {
 				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
@@ -199,6 +201,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 					SchemaVersion:      sessionStructuredSchemaVersion,
 					History:            structuredHistoryFromSnapshot(history),
 					StructuredMessages: messages,
+					Pagination:         history.Pagination,
 				},
 			}, nil
 		}

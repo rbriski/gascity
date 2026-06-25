@@ -30,6 +30,11 @@ import type {
   HeartbeatEvent,
   SupervisorEventStreamEnvelope,
 } from "./api";
+import type {
+  PendingInteraction,
+  SessionActivityEvent,
+  SessionStreamStructuredMessageEvent,
+} from "./generated";
 import { reportUIError } from "./ui";
 
 export interface SSEHandle {
@@ -67,11 +72,11 @@ export type DashboardEventMessage =
   | CityEventMessage
   | SupervisorEventMessage;
 
-export interface AgentOutputMessage {
-  id?: string;
-  type: string;
-  data: unknown;
-}
+export type AgentOutputMessage =
+  | { id?: string; type: "structured"; data: SessionStreamStructuredMessageEvent }
+  | { id?: string; type: "activity"; data: SessionActivityEvent }
+  | { id?: string; type: "pending"; data: PendingInteraction }
+  | { id?: string; type: "heartbeat"; data: HeartbeatEvent };
 
 // --- Runtime type guards -------------------------------------------
 
@@ -104,6 +109,22 @@ function isCityEventEnvelope(value: unknown): value is CityEventStreamEnvelope {
 
 function isSupervisorEventEnvelope(value: unknown): value is SupervisorEventStreamEnvelope {
   return isBaseEventEnvelope(value) && typeof (value as { city?: unknown }).city === "string";
+}
+
+function isSessionStructuredEvent(value: unknown): value is SessionStreamStructuredMessageEvent {
+  return (
+    isRecord(value)
+    && value.format === "structured"
+    && Array.isArray(value.structured_messages)
+  );
+}
+
+function isSessionActivityEvent(value: unknown): value is SessionActivityEvent {
+  return isRecord(value) && typeof value.activity === "string";
+}
+
+function isPendingInteractionEvent(value: unknown): value is PendingInteraction {
+  return isRecord(value) && typeof value.kind === "string" && typeof value.request_id === "string";
 }
 
 // --- Stream wrappers -----------------------------------------------
@@ -304,12 +325,11 @@ async function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 // connectAgentOutput opens the per-session transcript stream
-// (/v0/city/{cityName}/session/{id}/stream). Session frames are one
-// of turn, message, activity, pending, or heartbeat; the bridge
-// shape collapses them into AgentOutputMessage so consumers don't
-// need to discriminate by type at the transport layer. We verify
-// `data` is at least a JSON value (object, array, null, primitive)
-// so we never pass through garbage.
+// (/v0/city/{cityName}/session/{id}/stream) in structured mode. The endpoint is
+// format-polymorphic, but this dashboard subscription deliberately exposes only
+// structured provider-neutral frames plus activity/pending/heartbeat lifecycle
+// frames. Raw `message` and conversation `turn` frames are rejected as malformed
+// for this subscription.
 export function connectAgentOutput(
   city: string,
   sessionID: string,
@@ -324,20 +344,45 @@ export function connectAgentOutput(
         query: { format: "structured" },
         signal: controller.signal,
         onSseEvent: (frame) => {
-          // Session frames carry heterogeneous typed payloads per
-          // variant (SessionStreamRawMessageEvent,
-          // SessionStreamMessageEvent, etc.). Consumers treat them
-          // as AgentOutputMessage opaquely; the type field carries
-          // the semantic event name so consumers can dispatch.
           if (frame.data === undefined) {
             reportUIError("Session frame missing data", frame);
             return;
           }
-          onEvent({
-            id: frame.id !== undefined ? String(frame.id) : undefined,
-            type: frame.event ?? "message",
-            data: frame.data,
-          });
+          const eventName = frame.event ?? "message";
+          const id = frame.id !== undefined ? String(frame.id) : undefined;
+          if (eventName === "structured") {
+            if (!isSessionStructuredEvent(frame.data)) {
+              reportUIError("Invalid structured session frame", frame);
+              return;
+            }
+            onEvent({ id, type: "structured", data: frame.data });
+            return;
+          }
+          if (eventName === "activity") {
+            if (!isSessionActivityEvent(frame.data)) {
+              reportUIError("Invalid session activity frame", frame);
+              return;
+            }
+            onEvent({ id, type: "activity", data: frame.data });
+            return;
+          }
+          if (eventName === "pending") {
+            if (!isPendingInteractionEvent(frame.data)) {
+              reportUIError("Invalid pending interaction frame", frame);
+              return;
+            }
+            onEvent({ id, type: "pending", data: frame.data });
+            return;
+          }
+          if (eventName === "heartbeat") {
+            if (!isHeartbeat(frame.data)) {
+              reportUIError("Invalid session heartbeat frame", frame);
+              return;
+            }
+            onEvent({ id, type: "heartbeat", data: frame.data });
+            return;
+          }
+          reportUIError(`Unexpected session SSE event: ${eventName}`, frame);
         },
       });
       for await (const _ of stream) {

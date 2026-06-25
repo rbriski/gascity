@@ -167,8 +167,9 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	case format == "raw":
 		// No log file yet. If the session is running, poll tmux pane content
-		// and wrap it as a fake raw JSONL assistant message so a real-world app's existing
-		// rendering pipeline shows terminal output (e.g. OAuth prompts).
+		// and wrap that live output as a synthetic raw JSONL assistant message
+		// so a real-world app's existing rendering pipeline shows terminal
+		// output (e.g. OAuth prompts).
 		s.streamSessionPeekRaw(ctx, w, info, handle)
 		return
 	default:
@@ -740,7 +741,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			lastOutput = output
 			seq++
 			if output != "" {
-				fakeMsg, _ := json.Marshal(syntheticAssistantFrame{
+				syntheticMsg, _ := json.Marshal(syntheticAssistantFrame{
 					Role:    "assistant",
 					Content: []syntheticContentBlock{{Type: "text", Text: output}},
 				})
@@ -749,7 +750,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 					Template: info.Template,
 					Provider: info.Provider,
 					Format:   "raw",
-					Messages: wrapRawFrameBytes([]json.RawMessage{fakeMsg}),
+					Messages: wrapRawFrameBytes([]json.RawMessage{syntheticMsg}),
 				})
 				if err == nil {
 					writeSSE(w, "message", seq, data)
@@ -1398,7 +1399,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 		lastOutput = output
 
 		if output != "" {
-			fakeMsg, err := json.Marshal(syntheticAssistantFrame{
+			syntheticMsg, err := json.Marshal(syntheticAssistantFrame{
 				Role:    "assistant",
 				Content: []syntheticContentBlock{{Type: "text", Text: output}},
 			})
@@ -1409,7 +1410,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 					Template: info.Template,
 					Provider: info.Provider,
 					Format:   "raw",
-					Messages: wrapRawFrameBytes([]json.RawMessage{fakeMsg}),
+					Messages: wrapRawFrameBytes([]json.RawMessage{syntheticMsg}),
 				}})
 			}
 		}

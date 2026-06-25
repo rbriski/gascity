@@ -270,8 +270,14 @@ type orderSetSnapshot struct {
 // ctx OR dispatchCtx is done (see launchDispatchOne). cancel() cancels
 // dispatchCtx.
 type memoryOrderDispatcher struct {
-	aa                   []orders.Order
-	storeFn              orderStoreFunc
+	aa      []orders.Order
+	storeFn orderStoreFunc
+	// orderStoreFn resolves the order-tracking store (the orders.OrderStore seam)
+	// from the per-target work store. nil means identity — tracking beads live in
+	// the work store, byte-identical to the pre-seam path. The orders SQLite
+	// cutover injects a resolver that returns the embedded SQLite order store so
+	// tracking beads relocate off the work backend while wisps stay on it.
+	orderStoreFn         func(workStore beads.Store) orders.OrderStore
 	ep                   events.Provider
 	execRun              ExecRunner
 	rec                  events.Recorder
@@ -494,6 +500,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			stores[storeKey] = store
 		}
+		orderStore := m.orderStoreFor(store)
 
 		storesForGate := []beads.Store{store}
 		legacyStore, legacyOK := m.legacyCityStoreForTarget(cityPath, target, stores)
@@ -551,7 +558,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
 			// Leave this open so the existing open-work gate suppresses repeat
 			// ticks until the normal stale tracking sweep gives the order another try.
-			trackingBead, createErr := store.Create(beads.Bead{
+			trackingBead, createErr := orderStore.Create(beads.Bead{
 				Title:     "order:" + scoped,
 				Labels:    []string{"order-run:" + scoped, labelOrderTracking, labelTriggerEnvFailed},
 				NoHistory: true,
@@ -615,7 +622,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 		// Create tracking bead synchronously BEFORE dispatch goroutine.
 		// This prevents the cooldown trigger from re-firing on the next tick.
-		trackingBead, err := store.Create(beads.Bead{
+		trackingBead, err := orderStore.Create(beads.Bead{
 			Title:     "order:" + scoped,
 			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
 			NoHistory: true,
@@ -631,7 +638,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// controller exit or config reload.
 		m.addInflight()
 		inFlight.Add(1)
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
+		m.launchDispatchOne(ctx, orderStore, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -646,14 +653,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, onDone func()) {
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, orderStore orders.OrderStore, workStore beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, onDone func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+			m.dispatchOne(ctx, orderStore, workStore, target, a, cityPath, trackingID)
 		}()
 		return
 	}
@@ -666,7 +673,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID)
+		m.dispatchOne(mergedCtx, orderStore, workStore, target, a, cityPath, trackingID)
 	}()
 }
 
@@ -945,6 +952,18 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	return store, true
 }
 
+// orderStoreFor returns the order-tracking store (the orders.OrderStore seam)
+// for a given per-target work store. Without an injected resolver it is the work
+// store itself, so the tracking-bead Create/Update/Close path is byte-identical
+// to the pre-seam behavior; the orders SQLite cutover injects a resolver that
+// diverges tracking beads onto the embedded SQLite order store.
+func (m *memoryOrderDispatcher) orderStoreFor(workStore beads.Store) orders.OrderStore {
+	if m.orderStoreFn != nil {
+		return m.orderStoreFn(workStore)
+	}
+	return workStore
+}
+
 func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, bool, error) {
 	key := orderHistoryCacheKey(orderName, storeKeys)
 	m.cacheMu.Lock()
@@ -994,12 +1013,12 @@ func eventCursorLabels(scoped string, headSeq uint64) []string {
 // dispatchOne runs a single order dispatch in its own goroutine.
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, orderStore orders.OrderStore, workStore beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
 	defer func() {
-		if err := closeOrderTrackingBead(ctx, store, trackingID); err != nil {
+		if err := closeOrderTrackingBead(ctx, orderStore, trackingID); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -1016,9 +1035,9 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	})
 
 	if a.IsExec() {
-		m.dispatchExec(childCtx, store, target, a, cityPath, trackingID)
+		m.dispatchExec(childCtx, orderStore, target, a, cityPath, trackingID)
 	} else {
-		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
+		m.dispatchWisp(childCtx, orderStore, workStore, a, cityPath, trackingID)
 	}
 }
 
@@ -1126,8 +1145,10 @@ func openOrderTrackingIDs(store orders.OrderStore, ids []string) ([]string, erro
 	return openIDs, nil
 }
 
-// dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+// dispatchExec runs an exec order's shell command. It touches only the
+// order-tracking bead (outcome/cursor labels), so it speaks the orders.OrderStore
+// seam — exec orders never create wisp/graph work.
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store orders.OrderStore, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
 	labels := []string{"exec"}
 	var headSeq uint64
@@ -1248,8 +1269,12 @@ func redactOrderEnvError(err error, env []string) string {
 	return execenv.RedactText(err.Error(), env)
 }
 
-// dispatchWisp instantiates a wisp from the order's formula.
-func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, a orders.Order, cityPath, trackingID string) {
+// dispatchWisp instantiates a wisp from the order's formula. It speaks TWO seams:
+// the orders.OrderStore for the order-tracking bead (outcome labels, failure
+// stamps) and the work/graph beads.Store for the wisp itself (recipe prep,
+// molecule instantiation, routing decoration, wisp-root label). The two are the
+// same store in the bd phase and diverge at the orders SQLite cutover.
+func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, orderStore orders.OrderStore, workStore beads.Store, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
 
 	if err := ctx.Err(); err != nil {
@@ -1259,7 +1284,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
+		orderStore.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
 		return
 	}
 
@@ -1278,7 +1303,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 				Subject: scoped,
 				Message: errMsg,
 			})
-			m.markTrackingFailure(store, trackingID, scoped, a, 0)
+			m.markTrackingFailure(orderStore, trackingID, scoped, a, 0)
 			return
 		}
 	}
@@ -1287,7 +1312,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths)
+	recipe, err := prepareOrderWispRecipe(ctx, workStore, a, searchPaths)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -1295,7 +1320,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(orderStore, trackingID, scoped, a, headSeq)
 		return
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
@@ -1305,7 +1330,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(orderStore, trackingID, scoped, a, headSeq)
 		return
 	}
 	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
@@ -1323,7 +1348,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 				Subject: scoped,
 				Message: err.Error(),
 			})
-			m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+			m.markTrackingFailure(orderStore, trackingID, scoped, a, headSeq)
 			return
 		}
 	}
@@ -1331,13 +1356,13 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// Decorate graph workflow recipes with routing metadata so child step
 	// beads get gc.routed_to set before instantiation.
 	if a.Pool != "" {
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", workStore, m.cityName, cityPath, m.cfg); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
 		}
 	}
 
-	cookResult, err := molecule.Instantiate(ctx, store, recipe, molecule.Options{})
+	cookResult, err := molecule.Instantiate(ctx, workStore, recipe, molecule.Options{})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -1345,7 +1370,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(orderStore, trackingID, scoped, a, headSeq)
 		return
 	}
 	rootID := cookResult.RootID
@@ -1362,7 +1387,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
-	if err := store.Update(rootID, update); err != nil {
+	if err := workStore.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
 		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
@@ -1372,7 +1397,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(orderStore, trackingID, scoped, a, headSeq)
 		return
 	}
 
@@ -1383,7 +1408,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	})
 
 	// Label tracking bead with outcome.
-	store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+	orderStore.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.

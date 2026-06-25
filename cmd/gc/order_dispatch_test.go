@@ -956,7 +956,7 @@ func TestOrderDispatchEventWispLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
 
-	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.dispatchWisp(context.Background(), store, store, mad.aa[0], t.TempDir(), tracking.ID)
 
 	all := trackingBeads(t, store, "order-run:release-watch")
 	if len(all) != 1 {
@@ -1011,7 +1011,7 @@ description = "Inspect convoy {{convoy_id}}"
 	}
 	mad := ad.(*memoryOrderDispatcher)
 
-	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.dispatchWisp(context.Background(), store, store, mad.aa[0], t.TempDir(), tracking.ID)
 
 	all := trackingBeads(t, store, "order-run:convoy-patrol")
 	if len(all) != 1 {

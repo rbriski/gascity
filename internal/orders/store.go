@@ -13,13 +13,14 @@ import "github.com/gastownhall/gascity/internal/beads"
 // beads.HandlesFor(store).Live and union multiple stores (tracking beads here +
 // wisp roots in the graph store), so they stay on beads.Store.
 //
-// P1 surface: the minimal set the already-narrowed tracking-bead helpers use
-// (close/close-batch/recency-read/outcome-stamp). The richer surface the design
-// sketches — Create (the find-or-create-by-key tracking-bead create leg),
-// List/ListByLabel (recency + gate scans), DepList/DepRemove/Delete (retention
-// prune) — folds in as the dispatch create and sweep paths are narrowed behind
-// this seam at the orders SQLite cutover, never ahead of a consumer.
+// P1 surface: the tracking-bead lifecycle the dispatch path owns — Create (the
+// tracking-bead create leg), recency-read (Get), outcome-stamp (Update), and
+// close/close-batch (Close/CloseAll). The remaining design surface
+// (List/ListByLabel recency + gate scans, DepList/DepRemove/Delete retention
+// prune) folds in as the sweep paths are narrowed behind this seam at the orders
+// SQLite cutover, never ahead of a consumer.
 type OrderStore interface {
+	Create(b beads.Bead) (beads.Bead, error)
 	Get(id string) (beads.Bead, error)
 	Update(id string, opts beads.UpdateOpts) error
 	Close(id string) error

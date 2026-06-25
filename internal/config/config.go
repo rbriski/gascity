@@ -1283,6 +1283,67 @@ type BeadsConfig struct {
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
 	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+	// Classes selects per-class storage backends for the work-vs-infrastructure
+	// split (engdocs/plans/infra-store-decouple/DESIGN.md). Keys are coordination
+	// class names (mirroring coordclass.Class.String()): "messaging", "sessions",
+	// "orders", "nudges", "graph". Each class defaults to the Provider backend
+	// ("bd"); set backend="sqlite" to relocate that class to an embedded,
+	// process-local SQLite store, isolating its churn from the Dolt work store.
+	// Unknown keys are preserved (forward-compat). The legacy top-level
+	// graph_store knob still selects the graph class when no [beads.classes.graph]
+	// entry is present.
+	Classes map[string]BeadClassConfig `toml:"classes,omitempty"`
+}
+
+// BeadClassConfig selects the storage backend for one coordination class.
+type BeadClassConfig struct {
+	// Backend selects this class's store backend: "bd" (default) keeps the class
+	// on the Provider/Dolt work store; "sqlite" routes it to an embedded
+	// process-local SQLite store at <scope>/.gc/<class>.sqlite. Unknown values are
+	// treated as "bd" by runtime code (validation reports them separately).
+	Backend string `toml:"backend,omitempty" jsonschema:"enum=,enum=bd,enum=sqlite"`
+}
+
+// Coordination class names, mirroring coordclass.Class.String(). They are part of
+// the [beads.classes.<name>] config contract and must not change without a
+// migration.
+const (
+	BeadClassWork      = "work"
+	BeadClassGraph     = "graph"
+	BeadClassMessaging = "messaging"
+	BeadClassSessions  = "sessions"
+	BeadClassOrders    = "orders"
+	BeadClassNudges    = "nudges"
+)
+
+// Per-class storage backends.
+const (
+	// BeadsBackendBD keeps a class on the Provider/Dolt work store (default).
+	BeadsBackendBD = "bd"
+	// BeadsBackendSQLite routes a class to an embedded process-local SQLite store.
+	BeadsBackendSQLite = "sqlite"
+)
+
+// NormalizedClassBackend returns the storage backend for the given coordination
+// class: "sqlite" only when explicitly selected (or, for the graph class, via the
+// legacy graph_store knob), otherwise "bd". Unknown backend values default to
+// "bd" so a typo can never silently divert a class off the work store.
+func (b BeadsConfig) NormalizedClassBackend(class string) string {
+	class = strings.TrimSpace(class)
+	if c, ok := b.Classes[class]; ok && strings.EqualFold(strings.TrimSpace(c.Backend), BeadsBackendSQLite) {
+		return BeadsBackendSQLite
+	}
+	// Backward compatibility: the legacy top-level graph_store knob selects the
+	// graph class's backend when no explicit [beads.classes.graph] entry exists.
+	if strings.EqualFold(class, BeadClassGraph) && strings.EqualFold(strings.TrimSpace(b.GraphStore), BeadsBackendSQLite) {
+		return BeadsBackendSQLite
+	}
+	return BeadsBackendBD
+}
+
+// ClassUsesSQLite reports whether the given class is routed to SQLite.
+func (b BeadsConfig) ClassUsesSQLite(class string) bool {
+	return b.NormalizedClassBackend(class) == BeadsBackendSQLite
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.

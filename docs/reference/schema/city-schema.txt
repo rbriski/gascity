@@ -948,6 +948,22 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
+    "BeadClassConfig": {
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "",
+            "bd",
+            "sqlite"
+          ],
+          "description": "Backend selects this class's store backend: \"bd\" (default) keeps the class\non the Provider/Dolt work store; \"sqlite\" routes it to an embedded\nprocess-local SQLite store at \u003cscope\u003e/.gc/\u003cclass\u003e.sqlite. Unknown values are\ntreated as \"bd\" by runtime code (validation reports them separately)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadClassConfig selects the storage backend for one coordination class."
+    },
     "BeadPolicyConfig": {
       "properties": {
         "storage": {
@@ -1006,6 +1022,13 @@
           },
           "type": "object",
           "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
+        },
+        "classes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BeadClassConfig"
+          },
+          "type": "object",
+          "description": "Classes selects per-class storage backends for the work-vs-infrastructure\nsplit (engdocs/plans/infra-store-decouple/DESIGN.md). Keys are coordination\nclass names (mirroring coordclass.Class.String()): \"messaging\", \"sessions\",\n\"orders\", \"nudges\", \"graph\". Each class defaults to the Provider backend\n(\"bd\"); set backend=\"sqlite\" to relocate that class to an embedded,\nprocess-local SQLite store, isolating its churn from the Dolt work store.\nUnknown keys are preserved (forward-compat). The legacy top-level\ngraph_store knob still selects the graph class when no [beads.classes.graph]\nentry is present."
         }
       },
       "additionalProperties": false,

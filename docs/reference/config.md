@@ -251,6 +251,14 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
+## BeadClassConfig
+
+BeadClassConfig selects the storage backend for one coordination class.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `backend` | string |  |  | Backend selects this class's store backend: "bd" (default) keeps the class on the Provider/Dolt work store; "sqlite" routes it to an embedded process-local SQLite store at &lt;scope&gt;/.gc/&lt;class&gt;.sqlite. Unknown values are treated as "bd" by runtime code (validation reports them separately). Enum: ``, `bd`, `sqlite` |
+
 ## BeadPolicyConfig
 
 BeadPolicyConfig holds storage and retention defaults for a named bead use.
@@ -272,6 +280,7 @@ BeadsConfig holds bead store settings.
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close) that shell out to `gc event emit` on every bead write. Defaults to true. Set to false once the controller's native cache-events already observe bead changes (the bd_hooks doctor gate): the lifecycle then removes the event hooks (leaving git hooks untouched) and stops reinstalling them, clearing the per-write churn and the native-store gate. |
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `classes` | map[string]BeadClassConfig |  |  | Classes selects per-class storage backends for the work-vs-infrastructure split (engdocs/plans/infra-store-decouple/DESIGN.md). Keys are coordination class names (mirroring coordclass.Class.String()): "messaging", "sessions", "orders", "nudges", "graph". Each class defaults to the Provider backend ("bd"); set backend="sqlite" to relocate that class to an embedded, process-local SQLite store, isolating its churn from the Dolt work store. Unknown keys are preserved (forward-compat). The legacy top-level graph_store knob still selects the graph class when no [beads.classes.graph] entry is present. |
 
 ## ChatSessionsConfig
 

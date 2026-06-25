@@ -38,6 +38,10 @@ const (
 	labelOrderTracking    = "order-tracking"
 	labelTriggerEnvFailed = "trigger-env-failed"
 
+	// orderClassSQLiteStoreKey is the gate/last-run cache key for the relocated
+	// SQLite order store, used when the orders class is flipped off the work store.
+	orderClassSQLiteStoreKey = "class:orders"
+
 	orderTrackingSweepOrder                = "order-tracking-sweep"
 	orderTrackingBeadPolicyName            = "order_tracking"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
@@ -411,6 +415,9 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			return openStoreAtForCity(target.ScopeRoot, cityPath)
 		},
+		orderStoreFn: func(workStore beads.Store) orders.OrderStore {
+			return resolveOrderStore(workStore, cfg, cityPath, rec)
+		},
 		ep:                   ep,
 		execRun:              shellExecRunner,
 		rec:                  rec,
@@ -513,6 +520,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		storeKeysForGate := []string{storeKey}
 		if legacyStore != nil {
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
+		}
+		// When the orders class is relocated to its own (SQLite) store, the
+		// tracking bead no longer lives in the work store; the single-flight gate
+		// and last-run/cursor reads must include the order store or they would miss
+		// the in-flight tracking bead and re-fire. Wisp roots stay reachable via
+		// `store`. At the default backend orderStore == store, so this is skipped
+		// and the gate is byte-identical.
+		if obs, ok := orderStore.(beads.Store); ok && obs != store {
+			storesForGate = append([]beads.Store{obs}, storesForGate...)
+			storeKeysForGate = append([]string{orderClassSQLiteStoreKey}, storeKeysForGate...)
 		}
 		scoped := a.ScopedName()
 		hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {

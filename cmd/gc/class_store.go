@@ -142,6 +142,21 @@ func resolveMailMessagesStore(workStore beads.Store, cfg *config.City, cityPath 
 	return workStore
 }
 
+// resolveOrderStore returns the order-tracking store: the embedded SQLite order
+// store (emitting bead.* events via rec) when [beads.classes.orders].backend="sqlite"
+// and it opens, otherwise the work store. Returned as a beads.Store so the dispatch
+// path uses it both as the orders.OrderStore tracking seam and, when distinct from
+// the work store, as an extra gate-read store (so the single-flight gate finds the
+// relocated tracking bead). Byte-identical to the work store at the default backend.
+func resolveOrderStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	if cfg != nil && cfg.Beads.ClassUsesSQLite(config.BeadClassOrders) {
+		if sqliteStore, ok := openClassSQLiteStore(cityPath, config.BeadClassOrders, rec); ok {
+			return sqliteStore
+		}
+	}
+	return workStore
+}
+
 // newCityMailProvider builds the controller's mail provider. Message persistence
 // routes to SQLite when configured (controller-mediated: the long-lived
 // controller owns the single writer) while session reads stay on the work store.

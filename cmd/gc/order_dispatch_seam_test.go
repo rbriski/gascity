@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -105,5 +106,57 @@ description = "Static work, no runtime vars"
 		if !strings.HasPrefix(b.Title, "order:") {
 			t.Fatalf("order store contains a non-tracking order-run bead %s (title=%q) — the wisp leaked into the order store", b.ID, b.Title)
 		}
+	}
+}
+
+// TestOrderDispatchSeamGateReadsOrderStoreForSingleFlight is the orders O2
+// (SQLite flip) proof: when order-tracking is relocated to its own store, the
+// single-flight gate must read that store or it would miss the in-flight tracking
+// bead and re-fire. We seed an OPEN tracking bead in the (divergent) order store
+// and assert dispatch is gated — exec never runs, no order.fired, no second
+// tracking bead. Without the O2 storesForGate change this fails (the gate reads
+// only the work store, where the tracking bead no longer lives).
+func TestOrderDispatchSeamGateReadsOrderStoreForSingleFlight(t *testing.T) {
+	workStore := beads.NewMemStore()
+	orderStore := beads.NewMemStore()
+	if _, err := orderStore.Create(beads.Bead{
+		Title:  "order:seam-sf",
+		Labels: []string{"order-run:seam-sf", labelOrderTracking},
+	}); err != nil {
+		t.Fatalf("seed tracking bead: %v", err)
+	}
+
+	var calls int
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		calls++
+		return []byte("ok"), nil
+	}
+	var rec memRecorder
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "seam-sf",
+		Trigger:  "cooldown",
+		Interval: "15m",
+		Exec:     "scripts/run.sh",
+	}}, workStore, nil, execRun, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	mad.orderStoreFn = func(beads.Store) orders.OrderStore { return orderStore }
+
+	mad.dispatch(context.Background(), t.TempDir(), time.Now())
+	mad.drain(context.Background())
+
+	if calls != 0 {
+		t.Fatalf("exec ran %d times; the open tracking bead in the order store should have gated dispatch", calls)
+	}
+	if rec.hasType(events.OrderFired) {
+		t.Fatal("order.fired emitted despite an open tracking bead in the order store — the gate did not read the order store")
+	}
+	if got := trackingBeads(t, orderStore, labelOrderTracking); len(got) != 1 {
+		t.Fatalf("order store tracking beads = %d, want 1 (the gate must not create a second)", len(got))
+	}
+	if got := trackingBeads(t, workStore, labelOrderTracking); len(got) != 0 {
+		t.Fatalf("work store tracking beads = %d, want 0 (tracking must not leak to the work store)", len(got))
 	}
 }

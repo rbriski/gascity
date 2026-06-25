@@ -31,9 +31,13 @@ const (
 // beads.Store operations performed on message-class beads (type=message). It is
 // the swap point for relocating mail off bd — the bd-delegating first impl is any
 // beads.Store (proven below), and a future SQLite-backed store satisfies the same
-// interface. mail.Message is the lossy service/wire projection layered above this
-// seam (it intentionally omits routing metadata such as mail.from_session_id), so
-// the persistence currency here stays beads.Bead.
+// interface.
+//
+// mail.Message is the domain type AND the direct wire type (no DTO; see
+// internal/api which serves []mail.Message). It intentionally omits the bead
+// routing metadata (mail.from_session_id / to_session_id, the read backup, etc.),
+// which lives only at this persistence edge — so the seam's currency stays
+// beads.Bead while the service/wire above it speaks mail.Message.
 type MailStore interface {
 	Create(b beads.Bead) (beads.Bead, error)
 	Get(id string) (beads.Bead, error)
@@ -73,7 +77,18 @@ type sessionBeadCache struct {
 // The default provider is stateless so long-lived shared users such as the API
 // always see fresh session topology.
 func New(store beads.Store) *Provider {
-	return &Provider{messages: store, sessions: store}
+	return NewWithStores(store, store)
+}
+
+// NewWithStores returns a stateless beadmail provider with the message-persistence
+// seam (messages) and the cross-class session-read seam (sessions) supplied
+// independently. New delegates here with the same store for both, which is the
+// byte-identical bd phase; the seams diverge when mail relocates to SQLite
+// (messages -> SQLite, sessions stay on bd until sessions relocate). Exposed so
+// the divergent routing is testable today and the cutover is a constructor change,
+// not a rewrite.
+func NewWithStores(messages MailStore, sessions beads.Store) *Provider {
+	return &Provider{messages: messages, sessions: sessions}
 }
 
 // NewCached returns a beadmail provider backed by the given store with a
@@ -83,9 +98,15 @@ func New(store beads.Store) *Provider {
 // a bounded interval so new and closed sessions are observed without controller
 // restart.
 func NewCached(store beads.Store) *Provider {
+	return NewCachedWithStores(store, store)
+}
+
+// NewCachedWithStores is [NewWithStores] with a provider-local session
+// enumeration cache (see [NewCached]).
+func NewCachedWithStores(messages MailStore, sessions beads.Store) *Provider {
 	return &Provider{
-		messages:     store,
-		sessions:     store,
+		messages:     messages,
+		sessions:     sessions,
 		sessionCache: &sessionBeadCache{refreshInterval: cachedSessionBeadRefreshInterval},
 	}
 }

@@ -18,7 +18,6 @@ package coordtest
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -206,130 +205,6 @@ func RunGraphStoreTestsWithOptions(t *testing.T, newStore func() coordrouter.Gra
 			t.Fatalf("ApplyGraphPlan(empty) = %v, want nil", err)
 		}
 	})
-}
-
-// codecSkipReason is the default skip reason for RunCodecTests. Each per-class
-// bd-delegating row codec flips Skip:false as it lands in P1.
-const codecSkipReason = "coordtest: codec-fidelity conformance is a P1 seam skeleton; " +
-	"each per-class bd-delegating row codec is proven against it as it lands " +
-	"(engdocs/plans/infra-store-decouple/PLAN.md, phase P1)"
-
-// RowCodec is the bead<->durable-row translation a per-class adapter implements.
-// The conformance suite only needs the composed metadata round-trip plus the
-// reconstructed metadata union, so the concrete row type stays private to each
-// adapter. Under conformance-only validation this is the load-bearing fidelity
-// contract: it is the sole guarantee that the bead<->domain<->row translation
-// never drops, duplicates, or mutates a metadata key.
-type RowCodec interface {
-	// RoundTrip encodes a bead to its row form and decodes it back. The returned
-	// bead's Metadata must equal the input's, key-for-key, including any key this
-	// binary did not enumerate (the unknown passthrough).
-	RoundTrip(beads.Bead) (beads.Bead, error)
-	// ReconstructMetadata returns the full metadata map the codec rebuilds from a
-	// bead's row form as the disjoint union of promoted columns, the typed known
-	// fields, and the unknown passthrough. It must error if those parts overlap
-	// (the double-write/drift guard).
-	ReconstructMetadata(beads.Bead) (map[string]string, error)
-}
-
-// Projection is a pure function over a bead (e.g. session ProjectLifecycle)
-// whose output must be invariant across the codec round-trip. A nil Projection
-// skips the projection-invariance subtest.
-type Projection func(beads.Bead) any
-
-// CodecConformance parameterizes RunCodecTests for one class's row codec.
-type CodecConformance struct {
-	// Class identifies the owning class (for subtest naming and context).
-	Class coordclass.Class
-	// Codec is the implementation under test.
-	Codec RowCodec
-	// Projection, when non-nil, is asserted invariant across the round-trip.
-	Projection Projection
-	// Samples are representative beads of the class. They MUST include beads
-	// carrying metadata keys the codec does not promote (the unknown passthrough)
-	// and at least one bead with nil/empty metadata.
-	Samples []beads.Bead
-}
-
-// RunCodecTests runs the codec-fidelity conformance suite for a class's row
-// codec. P1 default: skipped (see Options) until the codec lands.
-func RunCodecTests(t *testing.T, cc CodecConformance) {
-	RunCodecTestsWithOptions(t, cc, Options{Skip: true, Reason: codecSkipReason})
-}
-
-// RunCodecTestsWithOptions runs the codec-fidelity suite with explicit options
-// (e.g. Skip:false once a codec is ready).
-func RunCodecTestsWithOptions(t *testing.T, cc CodecConformance, opts Options) {
-	t.Helper()
-	if opts.Skip {
-		t.Skip(opts.Reason)
-	}
-	if cc.Codec == nil {
-		t.Fatal("coordtest: CodecConformance.Codec is nil")
-	}
-	if len(cc.Samples) == 0 {
-		t.Fatal("coordtest: CodecConformance.Samples is empty; provide representative beads incl. unknown metadata keys")
-	}
-
-	// (a) Golden round-trip: the loss detector. Every metadata key — including
-	// keys the codec does not enumerate — survives encode→decode unchanged.
-	t.Run("GoldenRoundTrip", func(t *testing.T) {
-		for i, b := range cc.Samples {
-			rt, err := cc.Codec.RoundTrip(b)
-			if err != nil {
-				t.Fatalf("sample %d: RoundTrip: %v", i, err)
-			}
-			if !metadataEqual(rt.Metadata, b.Metadata) {
-				t.Fatalf("sample %d: metadata not preserved\n got  %v\n want %v", i, rt.Metadata, b.Metadata)
-			}
-		}
-	})
-
-	// (b) Reconstruct-union: the rebuilt metadata is the disjoint union of the
-	// codec's parts (no key dropped, duplicated, or invented), and the drift
-	// guard fires on overlap (surfaced as an error from ReconstructMetadata).
-	t.Run("ReconstructUnion", func(t *testing.T) {
-		for i, b := range cc.Samples {
-			m, err := cc.Codec.ReconstructMetadata(b)
-			if err != nil {
-				t.Fatalf("sample %d: ReconstructMetadata: %v (a non-nil error here means the codec's known/unknown parts overlap — the drift guard)", i, err)
-			}
-			if !metadataEqual(m, b.Metadata) {
-				t.Fatalf("sample %d: reconstructed metadata != original\n got  %v\n want %v", i, m, b.Metadata)
-			}
-		}
-	})
-
-	// (e) Projection-invariance: a pure projection over the persisted subset
-	// yields identical output before and after the round-trip.
-	t.Run("ProjectionInvariance", func(t *testing.T) {
-		if cc.Projection == nil {
-			t.Skip("no Projection supplied for this class")
-		}
-		for i, b := range cc.Samples {
-			rt, err := cc.Codec.RoundTrip(b)
-			if err != nil {
-				t.Fatalf("sample %d: RoundTrip: %v", i, err)
-			}
-			before, after := cc.Projection(b), cc.Projection(rt)
-			if !reflect.DeepEqual(before, after) {
-				t.Fatalf("sample %d: projection not invariant across round-trip\n before %v\n after  %v", i, before, after)
-			}
-		}
-	})
-}
-
-// metadataEqual compares two metadata maps treating nil and empty as equal.
-func metadataEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
 }
 
 // representativeBead returns a minimal bead that coordclass.Classify maps to the

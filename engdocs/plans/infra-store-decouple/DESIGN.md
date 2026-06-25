@@ -346,3 +346,35 @@ bd; the "messaging" first cut is mail only.
   infra writes for relocated classes (reads continue on WAL). Acceptable because the controller
   is already the orchestration spine; CLI write commands become controller API calls.
 - **Citation drift**: all `file:line` are pinned to `204b66aee`; re-verify at execution time.
+
+## 14. P1 implementation notes (milestone-review reconciliations)
+
+Settled during the P1 foundation + mail-pilot milestone review; the other four
+domain extractions follow these as the canonical template:
+
+- **P1 seam currency is `beads.Bead` by design.** Each domain seam (e.g.
+  `beadmail.MailStore`) is declared in the adapter package as a faithful subset of
+  `beads.Store`, proven by `var _ Seam = beads.Store(nil)` so the bd-delegating
+  first impl needs no wrapper. The richer **domain-typed** interface and the
+  lossless row codec fold in at the **SQLite cutover (P4/P5)**, not P1 — the bd
+  phase is a pure, byte-identical extract-interface refactor. (The literal PLAN
+  P1-T9/DESIGN §4 phrasing "domain-typed `mail.MailStore` in `internal/mail`" is
+  superseded by this: shape is bead-subset-in-adapter for P1.)
+- **`mail.Message` is the domain type AND the direct wire type** (no DTO; the API
+  serves `[]mail.Message`). It omits bead routing metadata, which lives only at the
+  persistence edge — so the seam currency is `beads.Bead` while the service/wire
+  above speaks `mail.Message`.
+- **The two-seam split is the template.** A domain that reads another class's beads
+  (mail reads sessions; orders read graph wisp roots) splits its store dependency
+  into its own owned-class seam plus a cross-class `beads.Store` read seam, with an
+  injectable constructor (`NewWithStores`) and a divergent-store routing test.
+  `New`/`NewCached` wire both to the same store for the byte-identical bd phase.
+- **Deferred behavior changes are owned by P4, not P1.** Populating `Message.Rig`
+  and collapsing the read label/metadata double-encode are *behavior changes* and
+  were deliberately NOT done under the P1 byte-identical bar (pinned by
+  characterization tests). They belong to the mail SQLite cutover (P4).
+- **The codec-fidelity conformance suite lives in `internal/beads/codectest`**
+  (a Layer-0 package), NOT in `internal/coordrouter/coordtest` — so it survives the
+  Router deletion (P6). It asserts FULL-bead invariance (metadata key-for-key plus
+  every non-metadata field a projection reads) and requires a projection; metadata-
+  only validation was insufficient for the session domain.

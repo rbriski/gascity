@@ -78,6 +78,38 @@ func TestIsReadyExcludedType(t *testing.T) {
 	}
 }
 
+func TestIsReadyExcludedBead(t *testing.T) {
+	// Label-based exclusions are Gas City infra-shadow classes that must never
+	// surface as Ready work even though their bead TYPE is actionable. The
+	// nudge-queue shadow (type=chore + gc:nudge, see cmd/gc/nudge_beads.go) is
+	// one of these. "chore" is also a legitimate formula step type
+	// (internal/formula/recipe.go), so the shadow is excluded by LABEL, not by
+	// type — excluding the type would hide real chore work. Mirrors the
+	// order-tracking / gc:session sibling exclusions.
+	tests := []struct {
+		name string
+		bead Bead
+		want bool
+	}{
+		{"nudge shadow (chore + gc:nudge)", Bead{Type: "chore", Labels: []string{"gc:nudge", "agent:dog", "nudge:n1"}}, true},
+		{"plain chore work is NOT excluded", Bead{Type: "chore"}, false},
+		{"chore step without gc:nudge is NOT excluded", Bead{Type: "chore", Labels: []string{"step:1"}}, false},
+		{"session shadow", Bead{Type: "task", Labels: []string{"gc:session"}}, true},
+		{"order-tracking shadow", Bead{Type: "task", Labels: []string{"order-tracking"}}, true},
+		{"gc:order-tracking shadow", Bead{Type: "task", Labels: []string{"gc:order-tracking"}}, true},
+		{"excluded type still excluded", Bead{Type: "molecule"}, true},
+		{"plain task is actionable", Bead{Type: "task"}, false},
+		{"unrelated label is actionable", Bead{Type: "task", Labels: []string{"agent:dog"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsReadyExcludedBead(tt.bead); got != tt.want {
+				t.Fatalf("IsReadyExcludedBead(%+v) = %v, want %v", tt.bead, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsReadyCandidate(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	past := now.Add(-time.Minute)
@@ -117,6 +149,19 @@ func TestIsReadyCandidate(t *testing.T) {
 			name: "excluded type",
 			bead: Bead{Status: "open", Type: "message"},
 			want: false,
+		},
+		{
+			// Latent leak closure: a nudge shadow is type=chore + gc:nudge and is
+			// stored NoHistory (not Ephemeral), so it passes the TierIssues tier
+			// filter and would be Ready but for the gc:nudge label exclusion.
+			name: "nudge shadow excluded from Ready",
+			bead: Bead{Status: "open", Type: "chore", Labels: []string{"gc:nudge"}, NoHistory: true},
+			want: false,
+		},
+		{
+			name: "plain no-history chore stays ready work",
+			bead: Bead{Status: "open", Type: "chore", NoHistory: true},
+			want: true,
 		},
 		{
 			name: "nil defer",

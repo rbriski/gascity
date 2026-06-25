@@ -240,7 +240,15 @@ func IsReadyExcludedBead(b Bead) bool {
 	}
 	for _, label := range b.Labels {
 		switch label {
-		case "gc:session", "gc:order-tracking", "order-tracking":
+		case "gc:session", "gc:order-tracking", "order-tracking", "gc:nudge":
+			// gc:nudge marks the nudge-queue shadow (type=chore, cmd/gc/nudge_beads.go).
+			// Excluded by label, not type: "chore" is also a legitimate formula step
+			// type (internal/formula/recipe.go), so a type exclusion would hide real
+			// chore work. On the bd path these shadows already never surface (they are
+			// born unrouted — no gc.routed_to — and live on the no-history tier, which
+			// `bd ready` does not return). This Go-side label exclusion closes the
+			// latent Ready leak before the nudge class relocates to a store whose Ready
+			// scan gates on neither.
 			return true
 		}
 	}

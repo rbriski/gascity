@@ -27,9 +27,35 @@ const (
 	cachedSessionBeadRefreshInterval = 30 * time.Second
 )
 
-// Provider implements [mail.Provider] using [beads.Store] as the backend.
+// MailStore is the message-persistence seam beadmail depends on: the subset of
+// beads.Store operations performed on message-class beads (type=message). It is
+// the swap point for relocating mail off bd — the bd-delegating first impl is any
+// beads.Store (proven below), and a future SQLite-backed store satisfies the same
+// interface. mail.Message is the lossy service/wire projection layered above this
+// seam (it intentionally omits routing metadata such as mail.from_session_id), so
+// the persistence currency here stays beads.Bead.
+type MailStore interface {
+	Create(b beads.Bead) (beads.Bead, error)
+	Get(id string) (beads.Bead, error)
+	Update(id string, opts beads.UpdateOpts) error
+	Delete(id string) error
+	List(query beads.ListQuery) ([]beads.Bead, error)
+}
+
+// Compile-time proof the bd-delegating first impl of MailStore is any beads.Store
+// — introducing the seam is a no-op refactor with no wrapper code.
+var _ MailStore = beads.Store(nil)
+
+// Provider implements [mail.Provider] using bead-backed stores. Message
+// persistence flows through messages (a MailStore); cross-class session lookups
+// (sender/recipient resolution) flow through sessions (a beads.Store), because
+// those helpers read session-class beads. In the bd phase New/NewCached set both
+// to the same store, so behavior is identical; when mail relocates to SQLite they
+// diverge (messages -> SQLite, sessions stay on bd until sessions relocate) — the
+// cross-store boundary made explicit at construction rather than sniffed at runtime.
 type Provider struct {
-	store        beads.Store
+	messages     MailStore
+	sessions     beads.Store
 	sessionCache *sessionBeadCache
 }
 
@@ -47,7 +73,7 @@ type sessionBeadCache struct {
 // The default provider is stateless so long-lived shared users such as the API
 // always see fresh session topology.
 func New(store beads.Store) *Provider {
-	return &Provider{store: store}
+	return &Provider{messages: store, sessions: store}
 }
 
 // NewCached returns a beadmail provider backed by the given store with a
@@ -58,7 +84,8 @@ func New(store beads.Store) *Provider {
 // restart.
 func NewCached(store beads.Store) *Provider {
 	return &Provider{
-		store:        store,
+		messages:     store,
+		sessions:     store,
 		sessionCache: &sessionBeadCache{refreshInterval: cachedSessionBeadRefreshInterval},
 	}
 }
@@ -67,13 +94,13 @@ func NewCached(store beads.Store) *Provider {
 // Cached providers reuse a single enumeration; stateless providers fetch
 // fresh results on every call.
 func (p *Provider) cachedSessionBeads() ([]beads.Bead, error) {
-	if p.store == nil {
+	if p.sessions == nil {
 		return nil, nil
 	}
 	if p.sessionCache == nil {
-		return session.ListAllSessionBeads(p.store, beads.ListQuery{IncludeClosed: true})
+		return session.ListAllSessionBeads(p.sessions, beads.ListQuery{IncludeClosed: true})
 	}
-	return p.sessionCache.get(p.store)
+	return p.sessionCache.get(p.sessions)
 }
 
 func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
@@ -126,7 +153,7 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		}
 	}
 
-	b, err := p.store.Create(beads.Bead{
+	b, err := p.messages.Create(beads.Bead{
 		Title:       title,
 		Description: body,
 		Type:        "message",
@@ -144,17 +171,17 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
 	from = strings.TrimSpace(from)
-	if from == "" || from == "human" || p.store == nil {
+	if from == "" || from == "human" || p.sessions == nil {
 		return from, nil, nil
 	}
-	sessionID, err := session.ResolveSessionID(p.store, from)
+	sessionID, err := session.ResolveSessionID(p.sessions, from)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
 			return from, nil, nil
 		}
 		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
 	}
-	b, err := p.store.Get(sessionID)
+	b, err := p.sessions.Get(sessionID)
 	if err != nil {
 		return "", nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
 	}
@@ -197,7 +224,7 @@ func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) 
 // Get retrieves a message by ID without marking it read.
 // Returns an error if the bead is not a message type.
 func (p *Provider) Get(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	b, err := p.messages.Get(id)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail get: %w", err)
 	}
@@ -210,12 +237,12 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 // Read retrieves a message by ID and marks it as read (adds "read" label).
 // The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	b, err := p.messages.Get(id)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail read: %w", err)
 	}
 	if !hasLabel(b.Labels, "read") {
-		if err := p.store.Update(id, beads.UpdateOpts{
+		if err := p.messages.Update(id, beads.UpdateOpts{
 			Labels:   []string{"read"},
 			Metadata: map[string]string{"mail.read": "true"},
 		}); err != nil {
@@ -229,10 +256,10 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 
 // MarkRead marks a message as read (adds "read" label).
 func (p *Provider) MarkRead(id string) error {
-	if _, err := p.store.Get(id); err != nil {
+	if _, err := p.messages.Get(id); err != nil {
 		return fmt.Errorf("beadmail mark-read: %w", err)
 	}
-	return p.store.Update(id, beads.UpdateOpts{
+	return p.messages.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
 		Metadata: map[string]string{"mail.read": "true"},
 	})
@@ -240,10 +267,10 @@ func (p *Provider) MarkRead(id string) error {
 
 // MarkUnread marks a message as unread (removes "read" label).
 func (p *Provider) MarkUnread(id string) error {
-	if _, err := p.store.Get(id); err != nil {
+	if _, err := p.messages.Get(id); err != nil {
 		return fmt.Errorf("beadmail mark-unread: %w", err)
 	}
-	return p.store.Update(id, beads.UpdateOpts{
+	return p.messages.Update(id, beads.UpdateOpts{
 		RemoveLabels: []string{"read"},
 		Metadata:     map[string]string{"mail.read": "false"},
 	})
@@ -263,7 +290,7 @@ type ArchiveFilter struct {
 
 // Archive deletes a message bead without reading it.
 func (p *Provider) Archive(id string) error {
-	b, err := p.store.Get(id)
+	b, err := p.messages.Get(id)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
@@ -274,7 +301,7 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
-		if err := p.store.Delete(id); err != nil {
+		if err := p.messages.Delete(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				return mail.ErrAlreadyArchived
 			}
@@ -282,7 +309,7 @@ func (p *Provider) Archive(id string) error {
 		}
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Delete(id); err != nil {
+	if err := p.messages.Delete(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
@@ -348,7 +375,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Delete(id); err != nil {
+		if err := p.messages.Delete(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -368,7 +395,7 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 		if id == "" {
 			continue
 		}
-		b, err := p.store.Get(id)
+		b, err := p.messages.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -381,7 +408,7 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
 			continue
 		}
-		if err := p.store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		if err := p.messages.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
 			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
 		}
 	}
@@ -462,7 +489,7 @@ func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 // original, sets ReplyTo to the original's ID. Reply is addressed to the
 // original sender.
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
-	original, err := p.store.Get(id)
+	original, err := p.messages.Get(id)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
@@ -499,7 +526,7 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 
 	labels := []string{"thread:" + threadID, "reply-to:" + id}
 
-	b, err := p.store.Create(beads.Bead{
+	b, err := p.messages.Create(beads.Bead{
 		Title:       deriveReplyTitle(subject, original.Title, body),
 		Description: body,
 		Type:        "message",
@@ -549,7 +576,7 @@ func deriveReplyTitle(subject, originalTitle, body string) string {
 // so callers that already know the thread ID still work.
 func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	threadID := id
-	msgBead, err := p.store.Get(id)
+	msgBead, err := p.messages.Get(id)
 	switch {
 	case err == nil:
 		if msgBead.Type != "message" {
@@ -563,7 +590,7 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	default:
 		return nil, fmt.Errorf("beadmail thread: resolving %q: %w", id, err)
 	}
-	bs, err := p.store.List(beads.ListQuery{
+	bs, err := p.messages.List(beads.ListQuery{
 		Label:    "thread:" + threadID,
 		Type:     "message",
 		Sort:     beads.SortCreatedAsc,
@@ -656,7 +683,7 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 	}
 	routes := make([]string, 0, 4)
 	routes = appendRecipientRoute(routes, recipient)
-	if recipient == "human" || p.store == nil {
+	if recipient == "human" || p.sessions == nil {
 		return routes
 	}
 
@@ -688,9 +715,9 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 
 func (p *Provider) recipientSessionMatchesByCurrentAddress(recipient string, closed bool) ([]beads.Bead, error) {
 	var matches []beads.Bead
-	b, err := p.store.Get(recipient)
+	b, err := p.sessions.Get(recipient)
 	if err == nil && session.IsSessionBeadOrRepairable(b) && sessionRouteStatusMatches(b, closed) {
-		session.RepairEmptyType(p.store, &b)
+		session.RepairEmptyType(p.sessions, &b)
 		matches = appendUniqueSessionRecipientMatch(matches, b)
 	} else if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return nil, fmt.Errorf("looking up session %q: %w", recipient, err)
@@ -720,7 +747,7 @@ func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status stri
 	if status != "" {
 		query.Status = status
 	}
-	items, err := p.store.List(query)
+	items, err := p.sessions.List(query)
 	if err != nil {
 		return nil, err
 	}
@@ -729,7 +756,7 @@ func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status stri
 		if !session.IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		session.RepairEmptyType(p.store, &b)
+		session.RepairEmptyType(p.sessions, &b)
 		if !sessionRouteStatusMatches(b, status == "closed") {
 			continue
 		}
@@ -865,7 +892,7 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	} else {
 		query.AllowScan = true
 	}
-	all, err := p.store.List(query)
+	all, err := p.messages.List(query)
 	if err != nil {
 		return nil, fmt.Errorf("scanning message beads: %w", err)
 	}

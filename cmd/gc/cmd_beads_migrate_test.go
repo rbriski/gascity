@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -55,6 +56,115 @@ func TestRunBeadsMigrateSQLite_RoutesByClassAndReports(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "messaging: scanned=2 migrated=2 skipped=0") {
 		t.Fatalf("unexpected report: %q", out.String())
+	}
+}
+
+// TestRunBeadsMigrateSQLite_AllClassesEndToEnd proves the dolt->sqlite migration
+// path works for EVERY relocatable class, against real SQLite destination stores:
+// each class's bead lands in its own store, ID-preserved, with no cross-class
+// leakage and the work bead migrated nowhere; a second run is idempotent. This is
+// the end-to-end answer to "we have a way to migrate everything to sqlite".
+func TestRunBeadsMigrateSQLite_AllClassesEndToEnd(t *testing.T) {
+	// Bead shapes mirror coordclass.Classify (internal/coordclass/classify.go).
+	src := beads.NewMemStore()
+	seeds := []struct {
+		class string
+		bead  beads.Bead
+	}{
+		{config.BeadClassMessaging, beads.Bead{Type: "message", Title: "mail"}},
+		{config.BeadClassSessions, beads.Bead{Type: "session", Title: "sess", Labels: []string{"gc:session"}}},
+		{config.BeadClassOrders, beads.Bead{Type: "task", Title: "order", Labels: []string{"order-tracking"}}},
+		{config.BeadClassNudges, beads.Bead{Type: "chore", Title: "nudge", Labels: []string{"gc:nudge"}}},
+		{config.BeadClassGraph, beads.Bead{Type: "molecule", Title: "wisp", Metadata: map[string]string{"gc.kind": "workflow"}}},
+	}
+	wantID := map[string]string{}
+	for _, s := range seeds {
+		created, err := src.Create(s.bead)
+		if err != nil {
+			t.Fatalf("seed %s: %v", s.class, err)
+		}
+		wantID[s.class] = created.ID
+	}
+	workBead, err := src.Create(beads.Bead{Type: "task", Title: "real work"})
+	if err != nil {
+		t.Fatalf("seed work: %v", err)
+	}
+
+	cityPath := t.TempDir()
+	opened := map[string]beads.Store{}
+	deps := migrateDeps{
+		openSource: func() (beads.Store, func(), error) { return src, func() {}, nil },
+		openDest: func(class string) (beads.Store, func(), error) {
+			if d, ok := opened[class]; ok {
+				return d, func() {}, nil // reuse across runs (idempotency)
+			}
+			// Real SQLite dest so ID-preservation is proven on the actual backend.
+			d, err := beads.OpenSQLiteStore(
+				classSQLiteDir(cityPath, class),
+				beads.WithSQLiteStoreIDPrefix(classSQLitePrefix[class]),
+				beads.WithSQLiteStoreRetention(0, 0),
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			opened[class] = d
+			return d, func() {}, nil // keep open for assertions
+		},
+	}
+	t.Cleanup(func() {
+		for _, d := range opened {
+			if c, ok := d.(interface{ CloseStore() error }); ok {
+				_ = c.CloseStore() //nolint:errcheck // best-effort
+			}
+		}
+	})
+
+	classes := []string{
+		config.BeadClassMessaging, config.BeadClassSessions, config.BeadClassOrders,
+		config.BeadClassNudges, config.BeadClassGraph,
+	}
+	var out, errb bytes.Buffer
+	if code := runBeadsMigrateSQLite(classes, deps, &out, &errb); code != 0 {
+		t.Fatalf("migrate code=%d stderr=%s", code, errb.String())
+	}
+
+	for _, class := range classes {
+		store := opened[class]
+		list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("%s: list dest: %v", class, err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("%s store has %d beads, want exactly 1", class, len(list))
+		}
+		if list[0].ID != wantID[class] {
+			t.Fatalf("%s store bead id = %q, want %q (ID not preserved)", class, list[0].ID, wantID[class])
+		}
+		if _, err := store.Get(workBead.ID); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("%s store unexpectedly holds the work bead %q (err=%v)", class, workBead.ID, err)
+		}
+		for other, id := range wantID {
+			if other == class {
+				continue
+			}
+			if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("%s store unexpectedly holds the %s bead %q", class, other, id)
+			}
+		}
+		if !strings.Contains(out.String(), class+": scanned=1 migrated=1 skipped=0") {
+			t.Fatalf("first-run report for %s missing/wrong: %q", class, out.String())
+		}
+	}
+
+	// Idempotent re-run: everything already present, nothing re-copied.
+	var out2, errb2 bytes.Buffer
+	if code := runBeadsMigrateSQLite(classes, deps, &out2, &errb2); code != 0 {
+		t.Fatalf("re-run code=%d stderr=%s", code, errb2.String())
+	}
+	for _, class := range classes {
+		if !strings.Contains(out2.String(), class+": scanned=1 migrated=0 skipped=1") {
+			t.Fatalf("re-run not idempotent for %s: %q", class, out2.String())
+		}
 	}
 }
 

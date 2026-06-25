@@ -42,15 +42,15 @@ var openNudgeBeadStore = func(cityPath string) beads.Store {
 	return store
 }
 
-func findQueuedNudgeBead(store beads.Store, nudgeID string) (beads.Bead, bool, error) {
+func findQueuedNudgeBead(store nudgequeue.NudgeStore, nudgeID string) (beads.Bead, bool, error) {
 	return findNudgeBead(store, nudgeID, false)
 }
 
-func findAnyQueuedNudgeBead(store beads.Store, nudgeID string) (beads.Bead, bool, error) {
+func findAnyQueuedNudgeBead(store nudgequeue.NudgeStore, nudgeID string) (beads.Bead, bool, error) {
 	return findNudgeBead(store, nudgeID, true)
 }
 
-func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
+func findNudgeBead(store nudgequeue.NudgeStore, nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
 	if store == nil || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
@@ -94,7 +94,7 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 	return beads.Bead{}, false, nil
 }
 
-func ensureQueuedNudgeBead(store beads.Store, item queuedNudge) (string, bool, error) {
+func ensureQueuedNudgeBead(store nudgequeue.NudgeStore, item queuedNudge) (string, bool, error) {
 	if store == nil {
 		return "", false, nil
 	}
@@ -139,7 +139,7 @@ func ensureQueuedNudgeBead(store beads.Store, item queuedNudge) (string, bool, e
 	return created.ID, true, nil
 }
 
-func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason, commitBoundary string, now time.Time) error {
+func markQueuedNudgeTerminal(store nudgequeue.NudgeStore, item queuedNudge, state, reason, commitBoundary string, now time.Time) error {
 	if store == nil {
 		return nil
 	}

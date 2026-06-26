@@ -1293,6 +1293,28 @@ type BeadsConfig struct {
 	// graph_store knob still selects the graph class when no [beads.classes.graph]
 	// entry is present.
 	Classes map[string]BeadClassConfig `toml:"classes,omitempty"`
+	// Postgres holds the connection details for classes routed to the "postgres"
+	// backend. One shared database; each relocated class lives in its own schema.
+	Postgres BeadsPostgresConfig `toml:"postgres,omitempty"`
+}
+
+// BeadsPostgresConfig holds the NON-SECRET connection details for the "postgres"
+// internal-DB backend ([beads.classes.<class>].backend = "postgres"). The password
+// is never stored here — it resolves through the pgauth chain
+// (GC_POSTGRES_PASSWORD / BEADS_POSTGRES_PASSWORD env, <scope>/.beads/.env, or
+// ~/.config/beads/credentials). Provision the database with `gc beads postgres init`
+// before pointing a class at it.
+type BeadsPostgresConfig struct {
+	// Host is the Postgres server host (default "localhost").
+	Host string `toml:"host,omitempty" jsonschema:"default=localhost"`
+	// Port is the Postgres server port (default 5432).
+	Port int `toml:"port,omitempty" jsonschema:"default=5432"`
+	// Database is the database holding the per-class schemas. Required.
+	Database string `toml:"database,omitempty"`
+	// User is the connection role (default "postgres"); the password comes from pgauth.
+	User string `toml:"user,omitempty" jsonschema:"default=postgres"`
+	// SSLMode is the libpq sslmode (default "prefer").
+	SSLMode string `toml:"sslmode,omitempty" jsonschema:"default=prefer"`
 }
 
 // BeadClassConfig selects the storage backend for one coordination class.

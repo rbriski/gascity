@@ -1030,11 +1030,46 @@
           },
           "type": "object",
           "description": "Classes selects per-class storage backends for the work-vs-infrastructure\nsplit (engdocs/plans/infra-store-decouple/DESIGN.md). Keys are coordination\nclass names (mirroring coordclass.Class.String()): \"messaging\", \"sessions\",\n\"orders\", \"nudges\", \"graph\". Each class defaults to the Provider backend\n(\"bd\"); set backend=\"sqlite\" to relocate that class to an embedded,\nprocess-local SQLite store, isolating its churn from the Dolt work store.\nUnknown keys are preserved (forward-compat). The legacy top-level\ngraph_store knob still selects the graph class when no [beads.classes.graph]\nentry is present."
+        },
+        "postgres": {
+          "$ref": "#/$defs/BeadsPostgresConfig",
+          "description": "Postgres holds the connection details for classes routed to the \"postgres\"\nbackend. One shared database; each relocated class lives in its own schema."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "BeadsConfig holds bead store settings."
+    },
+    "BeadsPostgresConfig": {
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Host is the Postgres server host (default \"localhost\").",
+          "default": "localhost"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port is the Postgres server port (default 5432).",
+          "default": 5432
+        },
+        "database": {
+          "type": "string",
+          "description": "Database is the database holding the per-class schemas. Required."
+        },
+        "user": {
+          "type": "string",
+          "description": "User is the connection role (default \"postgres\"); the password comes from pgauth.",
+          "default": "postgres"
+        },
+        "sslmode": {
+          "type": "string",
+          "description": "SSLMode is the libpq sslmode (default \"prefer\").",
+          "default": "prefer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadsPostgresConfig holds the NON-SECRET connection details for the \"postgres\" internal-DB backend ([beads.classes.\u003cclass\u003e].backend = \"postgres\")."
     },
     "ChatSessionsConfig": {
       "properties": {

@@ -281,6 +281,19 @@ BeadsConfig holds bead store settings.
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 | `classes` | map[string]BeadClassConfig |  |  | Classes selects per-class storage backends for the work-vs-infrastructure split (engdocs/plans/infra-store-decouple/DESIGN.md). Keys are coordination class names (mirroring coordclass.Class.String()): "messaging", "sessions", "orders", "nudges", "graph". Each class defaults to the Provider backend ("bd"); set backend="sqlite" to relocate that class to an embedded, process-local SQLite store, isolating its churn from the Dolt work store. Unknown keys are preserved (forward-compat). The legacy top-level graph_store knob still selects the graph class when no [beads.classes.graph] entry is present. |
+| `postgres` | BeadsPostgresConfig |  |  | Postgres holds the connection details for classes routed to the "postgres" backend. One shared database; each relocated class lives in its own schema. |
+
+## BeadsPostgresConfig
+
+BeadsPostgresConfig holds the NON-SECRET connection details for the "postgres" internal-DB backend ([beads.classes.<class>].backend = "postgres").
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `host` | string |  | `localhost` | Host is the Postgres server host (default "localhost"). |
+| `port` | integer |  | `5432` | Port is the Postgres server port (default 5432). |
+| `database` | string |  |  | Database is the database holding the per-class schemas. Required. |
+| `user` | string |  | `postgres` | User is the connection role (default "postgres"); the password comes from pgauth. |
+| `sslmode` | string |  | `prefer` | SSLMode is the libpq sslmode (default "prefer"). |
 
 ## ChatSessionsConfig
 

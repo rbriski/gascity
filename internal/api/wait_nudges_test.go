@@ -69,3 +69,19 @@ func TestFakeStateNudgesBeadStoreFallsBackToCityStore(t *testing.T) {
 		t.Fatalf("relocated backend: NudgesBeadStore() must return the configured nudges store")
 	}
 }
+
+// TestFakeStateSessionsBeadStoreFallsBackToCityStore documents the default-backend
+// equivalence for the sessions seam: with no relocated sessions store configured,
+// SessionsBeadStore returns the work store, so the API path is byte-identical at
+// the default backend.
+func TestFakeStateSessionsBeadStoreFallsBackToCityStore(t *testing.T) {
+	f := newFakeState(t)
+	if got := f.SessionsBeadStore(); got != f.CityBeadStore() {
+		t.Fatalf("default backend: SessionsBeadStore() must equal CityBeadStore(); got distinct stores")
+	}
+	relocated := beads.NewMemStore()
+	f.sessionsBeadStore = relocated
+	if got := f.SessionsBeadStore(); got != relocated {
+		t.Fatalf("relocated backend: SessionsBeadStore() must return the configured sessions store")
+	}
+}

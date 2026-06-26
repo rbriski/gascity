@@ -1213,6 +1213,17 @@ func (cs *controllerState) NudgesBeadStore() beads.Store {
 	return resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
 }
 
+// SessionsBeadStore returns the store backing session-class beads. At the default
+// backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
+// CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
+// store. cs.eventProv is the recorder, matching the nudges/mail wiring, so relocated
+// session writes emit bead.* exactly like the controller's own session writes.
+func (cs *controllerState) SessionsBeadStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+}
+
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()

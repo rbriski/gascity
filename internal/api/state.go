@@ -104,6 +104,16 @@ type State interface {
 	// on the work store. Returns nil if no store is available.
 	NudgesBeadStore() beads.Store
 
+	// SessionsBeadStore returns the store backing session-class beads — session
+	// lifecycle (type=session/gc:session) and durable session waits
+	// (type=gate/gc:wait). At the default backend this is the same store as
+	// CityBeadStore; when [beads.classes.sessions] is relocated it is the
+	// per-class store, so session/wait reads and writes reach the relocated
+	// beads instead of the work store. Session handlers source their store from
+	// here (not CityBeadStore); cross-class WORK-bead reads stay on
+	// CityBeadStore. Returns nil if no store is available.
+	SessionsBeadStore() beads.Store
+
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order

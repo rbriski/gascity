@@ -15,6 +15,11 @@ func TestPostgresStoreOptions(t *testing.T) {
 		t.Errorf("blank prefix clobbered the value: %q", o.prefix)
 	}
 
+	WithPostgresStoreSchema("  gcn  ")(&o)
+	if o.schema != "gcn" {
+		t.Errorf("schema = %q, want %q (trimmed)", o.schema, "gcn")
+	}
+
 	called := false
 	WithPostgresStoreRecorder(func(RowChange) { called = true })(&o)
 	if o.emit == nil {

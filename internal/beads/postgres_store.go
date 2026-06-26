@@ -3,16 +3,16 @@ package beads
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	_ "github.com/lib/pq" // database/sql driver, registers "postgres"
+	"github.com/lib/pq" // database/sql driver ("postgres") + NewConnector/QuoteIdentifier
 )
 
 // PostgresStore is a Postgres-backed Store — the shared, server-DB backend the
@@ -29,13 +29,15 @@ import (
 // Why Postgres needs no controller-mediated single-writer path (unlike SQLite):
 // it is a client-server DB with native concurrent multi-process writes and MVCC,
 // so the relocated infra classes whose writers span processes (nudges, sessions)
-// flip directly. A standard database/sql pool with per-connection transactions is
-// the whole concurrency model — no busy-retry, no separate read/write handles.
+// flip directly. Auto-ids are minted from a native per-schema SEQUENCE (nextval),
+// which is concurrency-safe across processes — unlike an in-memory counter, two
+// writers can never mint the same id. Per-class isolation is a Postgres SCHEMA
+// (one DB, schema-per-class); the store sets search_path on every connection.
 type PostgresStore struct {
 	db        *sql.DB
 	prefix    string
+	schema    string // per-class schema (search_path); "" or "public" for the default
 	emit      RowChangeEmitter
-	seq       atomic.Int64 // in-memory id sequence; recovered from the DB on Open
 	closeOnce sync.Once
 }
 
@@ -43,6 +45,7 @@ type PostgresStore struct {
 // SQLiteStoreOptions so the two backends stay option-compatible at the call site.
 type postgresStoreOptions struct {
 	prefix string
+	schema string
 	emit   RowChangeEmitter
 }
 
@@ -59,6 +62,16 @@ func WithPostgresStoreIDPrefix(prefix string) PostgresStoreOption {
 	}
 }
 
+// WithPostgresStoreSchema scopes the store to a Postgres schema (search_path),
+// giving each coordination class its own namespace in one shared database. Empty
+// or "public" uses the default schema. The schema must already be provisioned
+// (ProvisionPostgres / `gc beads postgres init`) — Open verifies, it does not create.
+func WithPostgresStoreSchema(schema string) PostgresStoreOption {
+	return func(o *postgresStoreOptions) {
+		o.schema = strings.TrimSpace(schema)
+	}
+}
+
 // WithPostgresStoreRecorder registers an emitter invoked after every committed
 // mutation with a low-level RowChange — the same store-edge event source the
 // SQLite store exposes (see WithSQLiteStoreRecorder), so the controller's event
@@ -72,12 +85,23 @@ func WithPostgresStoreRecorder(emit RowChangeEmitter) PostgresStoreOption {
 // postgresDefaultPrefix mirrors sqliteDefaultPrefix.
 const postgresDefaultPrefix = "gc"
 
+// Connection-pool defaults for the shared server. Bounded so many gc processes do
+// not exhaust Postgres's connection slots.
+const (
+	postgresMaxOpenConns    = 8
+	postgresMaxIdleConns    = 4
+	postgresConnMaxLifetime = 30 * time.Minute
+)
+
 var _ ConditionalAssignmentReleaser = (*PostgresStore)(nil)
 
 // OpenPostgresStore opens a Postgres-backed bead store at dsn (a lib/pq DSN or
-// connection URI, e.g. "postgres://user:pass@host:5432/db?sslmode=disable"),
-// verifies connectivity, ensures the schema exists, and recovers the id sequence
-// from the max persisted suffix. The caller closes it via CloseStore.
+// connection URI, e.g. "postgres://user:pass@host:5432/db?sslmode=disable"). It
+// configures a bounded connection pool, sets search_path to the configured schema
+// on every connection, verifies connectivity, and verifies the schema is already
+// PROVISIONED — it does NOT run DDL. Provisioning (ProvisionPostgres /
+// `gc beads postgres init`) is a separate, advisory-lock-guarded step, so opening a
+// store never races schema creation across the many processes that share the DB.
 func OpenPostgresStore(dsn string, opts ...PostgresStoreOption) (Store, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, errors.New("beads: OpenPostgresStore: empty dsn")
@@ -87,85 +111,169 @@ func OpenPostgresStore(dsn string, opts ...PostgresStoreOption) (Store, error) {
 		opt(&cfg)
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	base, err := pq.NewConnector(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("beads: OpenPostgresStore: open: %w", err)
+		return nil, fmt.Errorf("beads: OpenPostgresStore: connector: %w", err)
 	}
+	db := sql.OpenDB(searchPathConnector{base: base, schema: cfg.schema})
+	db.SetMaxOpenConns(postgresMaxOpenConns)
+	db.SetMaxIdleConns(postgresMaxIdleConns)
+	db.SetConnMaxLifetime(postgresConnMaxLifetime)
 	if err := db.Ping(); err != nil {
 		_ = db.Close() //nolint:errcheck // best-effort on the failed-open path
 		return nil, fmt.Errorf("beads: OpenPostgresStore: ping: %w", err)
 	}
-	s := &PostgresStore{db: db, prefix: cfg.prefix, emit: cfg.emit}
-	if err := s.initSchema(); err != nil {
+	s := &PostgresStore{db: db, prefix: cfg.prefix, schema: cfg.schema, emit: cfg.emit}
+	if err := s.verifyProvisioned(); err != nil {
 		_ = db.Close() //nolint:errcheck // best-effort on the failed-open path
-		return nil, fmt.Errorf("beads: OpenPostgresStore: init schema: %w", err)
-	}
-	if err := s.recoverSequence(); err != nil {
-		_ = db.Close() //nolint:errcheck // best-effort on the failed-open path
-		return nil, fmt.Errorf("beads: OpenPostgresStore: recover sequence: %w", err)
+		return nil, err
 	}
 	return s, nil
 }
 
-// postgresSchema mirrors the SQLite store's tables (sqlite_store.go) in Postgres
-// dialect: the full bead is stored as JSON in bead_json with the predicate columns
-// promoted for indexed queries. Timestamps are unix nanoseconds in BIGINT to match
-// the SQLite store's integer time storage exactly (so a dolt/sqlite->postgres
-// migration is a value-preserving copy).
-var postgresSchema = []string{
-	`CREATE TABLE IF NOT EXISTS kv (
-		key TEXT PRIMARY KEY,
-		value TEXT NOT NULL
-	)`,
-	`CREATE TABLE IF NOT EXISTS beads (
-		id TEXT PRIMARY KEY,
-		tier TEXT NOT NULL CHECK (tier IN ('main','wisp')),
-		title TEXT NOT NULL,
-		status TEXT NOT NULL,
-		issue_type TEXT NOT NULL,
-		priority BIGINT,
-		created_at BIGINT NOT NULL,
-		updated_at BIGINT NOT NULL,
-		assignee TEXT NOT NULL DEFAULT '',
-		from_agent TEXT NOT NULL DEFAULT '',
-		parent_id TEXT NOT NULL DEFAULT '',
-		ref TEXT NOT NULL DEFAULT '',
-		description TEXT NOT NULL DEFAULT '',
-		bead_json TEXT NOT NULL
-	)`,
-	`CREATE TABLE IF NOT EXISTS labels (
-		bead_id TEXT NOT NULL REFERENCES beads(id) ON DELETE CASCADE,
-		label TEXT NOT NULL,
-		PRIMARY KEY(bead_id, label)
-	)`,
-	`CREATE TABLE IF NOT EXISTS metadata (
-		bead_id TEXT NOT NULL REFERENCES beads(id) ON DELETE CASCADE,
-		meta_key TEXT NOT NULL,
-		meta_value TEXT NOT NULL,
-		PRIMARY KEY(bead_id, meta_key)
-	)`,
-	`CREATE TABLE IF NOT EXISTS deps (
-		issue_id TEXT NOT NULL,
-		depends_on_id TEXT NOT NULL,
-		dep_type TEXT NOT NULL,
-		PRIMARY KEY(issue_id, depends_on_id, dep_type)
-	)`,
-	`CREATE INDEX IF NOT EXISTS idx_beads_tier_status ON beads(tier, status)`,
-	`CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(issue_type)`,
-	`CREATE INDEX IF NOT EXISTS idx_beads_assignee ON beads(assignee)`,
-	`CREATE INDEX IF NOT EXISTS idx_beads_parent ON beads(parent_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_beads_created ON beads(created_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_beads_updated ON beads(updated_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_labels_label ON labels(label)`,
-	`CREATE INDEX IF NOT EXISTS idx_metadata_key_value ON metadata(meta_key, meta_value)`,
-	`CREATE INDEX IF NOT EXISTS idx_deps_issue ON deps(issue_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_deps_depends ON deps(depends_on_id)`,
+// searchPathConnector wraps a lib/pq connector and runs `SET search_path` on every
+// new connection, so unqualified table/sequence names resolve to the class's schema
+// regardless of which pooled connection serves a query. Schema-isolation without
+// schema-qualifying every statement (and DSN-agnostic — no fragile DSN munging).
+type searchPathConnector struct {
+	base   driver.Connector
+	schema string
 }
 
-func (s *PostgresStore) initSchema() error {
-	for _, stmt := range postgresSchema {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("exec %q: %w", firstLine(stmt), err)
+func (c searchPathConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.base.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if c.schema != "" && c.schema != "public" {
+		execer, ok := conn.(driver.ExecerContext)
+		if !ok {
+			_ = conn.Close() //nolint:errcheck
+			return nil, fmt.Errorf("beads: postgres connection does not support setting search_path")
+		}
+		if _, err := execer.ExecContext(ctx, `SET search_path = `+pq.QuoteIdentifier(c.schema), nil); err != nil {
+			_ = conn.Close() //nolint:errcheck
+			return nil, fmt.Errorf("beads: setting search_path=%q: %w", c.schema, err)
+		}
+	}
+	return conn, nil
+}
+
+func (c searchPathConnector) Driver() driver.Driver { return c.base.Driver() }
+
+// verifyProvisioned errors when the configured schema's bead tables/sequence are
+// absent, pointing the operator at the provisioning step rather than silently
+// running DDL on a hot path.
+func (s *PostgresStore) verifyProvisioned() error {
+	schema := s.schema
+	if schema == "" {
+		schema = "public"
+	}
+	var beadsTbl, beadSeq sql.NullString
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT to_regclass($1), to_regclass($2)`,
+		schema+".beads", schema+".bead_seq",
+	).Scan(&beadsTbl, &beadSeq); err != nil {
+		return fmt.Errorf("beads: OpenPostgresStore: checking schema %q: %w", schema, err)
+	}
+	if !beadsTbl.Valid || !beadSeq.Valid {
+		return fmt.Errorf("beads: OpenPostgresStore: schema %q is not provisioned (run `gc beads postgres init`)", schema)
+	}
+	return nil
+}
+
+// provisionStatements returns the schema-qualified DDL that creates the bead store
+// in a Postgres schema: the native id SEQUENCE plus the tables (mirroring
+// sqlite_store.go — full bead JSON + promoted predicate columns + label/metadata/dep
+// side tables, BIGINT unix-nano timestamps for value-preserving migration) and
+// indexes. All IF NOT EXISTS, so it is idempotent.
+func provisionStatements(schema string) []string {
+	q := pq.QuoteIdentifier(schema)
+	return []string{
+		`CREATE SCHEMA IF NOT EXISTS ` + q,
+		`CREATE SEQUENCE IF NOT EXISTS ` + q + `.bead_seq`,
+		`CREATE TABLE IF NOT EXISTS ` + q + `.kv (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ` + q + `.beads (
+			id TEXT PRIMARY KEY,
+			tier TEXT NOT NULL CHECK (tier IN ('main','wisp')),
+			title TEXT NOT NULL,
+			status TEXT NOT NULL,
+			issue_type TEXT NOT NULL,
+			priority BIGINT,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL,
+			assignee TEXT NOT NULL DEFAULT '',
+			from_agent TEXT NOT NULL DEFAULT '',
+			parent_id TEXT NOT NULL DEFAULT '',
+			ref TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			bead_json TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ` + q + `.labels (
+			bead_id TEXT NOT NULL REFERENCES ` + q + `.beads(id) ON DELETE CASCADE,
+			label TEXT NOT NULL,
+			PRIMARY KEY(bead_id, label)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ` + q + `.metadata (
+			bead_id TEXT NOT NULL REFERENCES ` + q + `.beads(id) ON DELETE CASCADE,
+			meta_key TEXT NOT NULL,
+			meta_value TEXT NOT NULL,
+			PRIMARY KEY(bead_id, meta_key)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ` + q + `.deps (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dep_type TEXT NOT NULL,
+			PRIMARY KEY(issue_id, depends_on_id, dep_type)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_beads_tier_status ON ` + q + `.beads(tier, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_beads_type ON ` + q + `.beads(issue_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_beads_assignee ON ` + q + `.beads(assignee)`,
+		`CREATE INDEX IF NOT EXISTS idx_beads_parent ON ` + q + `.beads(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_beads_created ON ` + q + `.beads(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_beads_updated ON ` + q + `.beads(updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_labels_label ON ` + q + `.labels(label)`,
+		`CREATE INDEX IF NOT EXISTS idx_metadata_key_value ON ` + q + `.metadata(meta_key, meta_value)`,
+		`CREATE INDEX IF NOT EXISTS idx_deps_issue ON ` + q + `.deps(issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_deps_depends ON ` + q + `.deps(depends_on_id)`,
+	}
+}
+
+// ProvisionPostgres creates (idempotently) the bead-store schema, sequence, tables,
+// and indexes for one coordination class in its Postgres schema. It is the
+// separated, privileged provisioning step Open assumes has run. A session advisory
+// lock keyed on the schema serializes concurrent inits so Postgres's non-atomic
+// CREATE ... IF NOT EXISTS can never race across the processes sharing the DB. Safe
+// to re-run. Empty schema provisions the default "public" schema.
+func ProvisionPostgres(dsn, schema string) error {
+	if strings.TrimSpace(dsn) == "" {
+		return errors.New("beads: ProvisionPostgres: empty dsn")
+	}
+	if strings.TrimSpace(schema) == "" {
+		schema = "public"
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("beads: ProvisionPostgres: open: %w", err)
+	}
+	defer db.Close() //nolint:errcheck
+	ctx := context.Background()
+	conn, err := db.Conn(ctx) // the advisory lock + DDL must share one connection
+	if err != nil {
+		return fmt.Errorf("beads: ProvisionPostgres: conn: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	lockArg := "gascity-beads-provision:" + schema
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, lockArg); err != nil {
+		return fmt.Errorf("beads: ProvisionPostgres: advisory lock: %w", err)
+	}
+	defer conn.ExecContext(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockArg) //nolint:errcheck
+	for _, stmt := range provisionStatements(schema) {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("beads: ProvisionPostgres: exec %q: %w", firstLine(stmt), err)
 		}
 	}
 	return nil
@@ -176,47 +284,6 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return strings.TrimSpace(s)
-}
-
-// recoverSequence lifts the in-memory id floor to the max persisted suffix so a
-// store-minted id is never reissued after a restart (mirrors SQLiteStore).
-func (s *PostgresStore) recoverSequence() error {
-	rows, err := s.db.Query(`SELECT id FROM beads WHERE id LIKE $1`, s.prefix+"-%")
-	if err != nil {
-		return fmt.Errorf("recovering postgres sequence: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var maxSeq int64
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		if n := int64(numericIDSuffix(id)); n > maxSeq {
-			maxSeq = n
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	s.ensureSequenceAtLeast(maxSeq)
-	return nil
-}
-
-func (s *PostgresStore) ensureSequenceAtLeast(n int64) {
-	for {
-		cur := s.seq.Load()
-		if n <= cur {
-			return
-		}
-		if s.seq.CompareAndSwap(cur, n) {
-			return
-		}
-	}
-}
-
-func (s *PostgresStore) nextID() string {
-	return fmt.Sprintf("%s-%d", s.prefix, s.seq.Add(1))
 }
 
 func (s *PostgresStore) emitRowChange(rc RowChange) {
@@ -255,11 +322,6 @@ func (s *PostgresStore) CloseStore() error {
 
 func (s *PostgresStore) normalizeCreate(b Bead) Bead {
 	b = cloneBead(b)
-	if b.ID == "" {
-		b.ID = s.nextID()
-	} else if n := numericIDSuffix(b.ID); n > 0 {
-		s.ensureSequenceAtLeast(int64(n))
-	}
 	if b.Status == "" {
 		b.Status = "open"
 	}
@@ -275,21 +337,12 @@ func (s *PostgresStore) normalizeCreate(b Bead) Bead {
 	return b
 }
 
-func (s *PostgresStore) idExistsTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
-	var found int
-	err := tx.QueryRowContext(ctx, `SELECT 1 FROM beads WHERE id=$1`, id).Scan(&found)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("checking duplicate postgres bead %q: %w", id, err)
-	}
-	return true, nil
-}
-
-// Create persists a new bead. A caller-pinned id that already exists is a hard
-// duplicate-id error (preserving resume/crash-adoption semantics); a store-minted
-// id self-heals past a stale sequence floor on collision.
+// Create persists a new bead. Auto-ids come from the native per-schema SEQUENCE
+// (nextval — concurrency-safe across processes), so two writers can never mint the
+// same id. A caller-pinned id is inserted atomically (ON CONFLICT DO NOTHING); an
+// already-present pinned id is a hard duplicate-id error, and the sequence floor is
+// lifted past the pinned suffix so a later nextval never re-mints it. Unqualified
+// names resolve to the store's schema via the connection search_path.
 func (s *PostgresStore) Create(b Bead) (Bead, error) {
 	autoID := b.ID == ""
 	ctx := context.Background()
@@ -300,26 +353,26 @@ func (s *PostgresStore) Create(b Bead) (Bead, error) {
 	defer tx.Rollback() //nolint:errcheck
 	stored := s.normalizeCreate(b)
 	if autoID {
-		for attempt := 0; ; attempt++ {
-			exists, err := s.idExistsTx(ctx, tx, stored.ID)
-			if err != nil {
-				return Bead{}, err
-			}
-			if !exists {
-				break
-			}
-			if attempt >= mintUniqueIDMaxAttempts {
-				return Bead{}, fmt.Errorf("postgres create: exhausted id minting attempts for prefix %q", s.prefix)
-			}
-			stored.ID = s.nextID()
+		var n int64
+		if err := tx.QueryRowContext(ctx, `SELECT nextval('bead_seq')`).Scan(&n); err != nil {
+			return Bead{}, fmt.Errorf("postgres create: nextval: %w", err)
 		}
-	} else if exists, err := s.idExistsTx(ctx, tx, stored.ID); err != nil {
+		stored.ID = fmt.Sprintf("%s-%d", s.prefix, n)
+	}
+	inserted, err := s.insertBeadTx(ctx, tx, stored)
+	if err != nil {
 		return Bead{}, err
-	} else if exists {
+	}
+	if !inserted {
 		return Bead{}, fmt.Errorf("creating bead %q: duplicate id", stored.ID)
 	}
-	if err := s.upsertBeadTx(ctx, tx, stored); err != nil {
-		return Bead{}, err
+	if !autoID {
+		if suffix := int64(numericIDSuffix(stored.ID)); suffix > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`SELECT setval('bead_seq', GREATEST((SELECT last_value FROM bead_seq), $1))`, suffix); err != nil {
+				return Bead{}, fmt.Errorf("postgres create: setval: %w", err)
+			}
+		}
 	}
 	for _, dep := range depsFromBeadFields(stored) {
 		if err := s.depAddTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
@@ -331,6 +384,48 @@ func (s *PostgresStore) Create(b Bead) (Bead, error) {
 	}
 	s.emitRowChange(RowChange{ID: stored.ID, Type: stored.Type, Op: RowCreated})
 	return cloneBead(stored), nil
+}
+
+// insertBeadTx atomically inserts a NEW bead row (ON CONFLICT DO NOTHING) plus its
+// labels and metadata. Returns false (no error) when the id already exists, so
+// Create can report a duplicate-id error without a separate racy existence probe.
+// Distinct from upsertBeadTx (ON CONFLICT DO UPDATE), which Update uses.
+func (s *PostgresStore) insertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) (bool, error) {
+	payload, err := json.Marshal(b)
+	if err != nil {
+		return false, fmt.Errorf("postgres marshal bead %q: %w", b.ID, err)
+	}
+	tier := "main"
+	if b.Ephemeral {
+		tier = "wisp"
+	}
+	var priority any
+	if b.Priority != nil {
+		priority = *b.Priority
+	}
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO beads(id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT(id) DO NOTHING`,
+		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
+		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))
+	if err != nil {
+		return false, fmt.Errorf("postgres insert bead %q: %w", b.ID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	for _, label := range b.Labels {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO labels(bead_id,label) VALUES($1,$2) ON CONFLICT DO NOTHING`, b.ID, label); err != nil {
+			return false, fmt.Errorf("postgres insert label for %q: %w", b.ID, err)
+		}
+	}
+	for k, v := range b.Metadata {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO metadata(bead_id,meta_key,meta_value) VALUES($1,$2,$3)`, b.ID, k, v); err != nil {
+			return false, fmt.Errorf("postgres insert metadata for %q: %w", b.ID, err)
+		}
+	}
+	return true, nil
 }
 
 func (s *PostgresStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) error {

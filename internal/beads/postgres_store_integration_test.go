@@ -1,12 +1,115 @@
 package beads_test
 
 import (
+	"database/sql"
 	"errors"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func openPostgresSchema(t *testing.T, dsn, schema, prefix string) beads.Store {
+	t.Helper()
+	if err := beads.ProvisionPostgres(dsn, schema); err != nil {
+		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
+	}
+	truncatePostgresSchema(t, dsn, schema)
+	s, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema(schema), beads.WithPostgresStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("OpenPostgresStore(%q): %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if c, ok := s.(interface{ CloseStore() error }); ok {
+			_ = c.CloseStore() //nolint:errcheck
+		}
+	})
+	return s
+}
+
+// TestPostgresStoreSchemaIsolation proves the per-class isolation model: two
+// stores in different schemas of the same database do not see each other's beads
+// (the property that would silently break if classes shared one public.beads).
+func TestPostgresStoreSchemaIsolation(t *testing.T) {
+	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set GC_TEST_POSTGRES_DSN")
+	}
+	a := openPostgresSchema(t, dsn, "iso_a", "gca")
+	b := openPostgresSchema(t, dsn, "iso_b", "gcb")
+	ba, err := a.Create(beads.Bead{Title: "in-a", Type: "task"})
+	if err != nil {
+		t.Fatalf("create in iso_a: %v", err)
+	}
+	bb, err := b.Create(beads.Bead{Title: "in-b", Type: "task"})
+	if err != nil {
+		t.Fatalf("create in iso_b: %v", err)
+	}
+	la, err := a.List(beads.ListQuery{AllowScan: true})
+	if err != nil || len(la) != 1 || la[0].ID != ba.ID {
+		t.Fatalf("iso_a List = %+v (err=%v), want only its own bead %q", la, err, ba.ID)
+	}
+	if _, err := a.Get(bb.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("iso_a Get(%q) = %v, want ErrNotFound — schemas must not leak", bb.ID, err)
+	}
+	lb, err := b.List(beads.ListQuery{AllowScan: true})
+	if err != nil || len(lb) != 1 || lb[0].ID != bb.ID {
+		t.Fatalf("iso_b List = %+v (err=%v), want only its own bead %q", lb, err, bb.ID)
+	}
+}
+
+// TestPostgresStoreOpenRequiresProvisionedSchema proves Open does NOT run DDL: an
+// unprovisioned schema fails fast with a clear "not provisioned" error rather than
+// silently creating tables on the hot path.
+func TestPostgresStoreOpenRequiresProvisionedSchema(t *testing.T) {
+	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set GC_TEST_POSTGRES_DSN")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`DROP SCHEMA IF EXISTS unprovisioned_xyz CASCADE`); err != nil {
+		t.Fatalf("drop schema: %v", err)
+	}
+	_, err = beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema("unprovisioned_xyz"))
+	if err == nil {
+		t.Fatal("OpenPostgresStore on an unprovisioned schema should error")
+	}
+	if !strings.Contains(err.Error(), "not provisioned") {
+		t.Fatalf("error = %v, want a 'not provisioned' message", err)
+	}
+}
+
+// TestPostgresStorePinnedIDBumpsSequence proves a caller-pinned id lifts the native
+// sequence past its suffix, so a later auto-id (nextval) never re-mints a pinned id
+// — the property a dolt->pg migration (which pins ids) relies on.
+func TestPostgresStorePinnedIDBumpsSequence(t *testing.T) {
+	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set GC_TEST_POSTGRES_DSN")
+	}
+	s := openPostgresSchema(t, dsn, "seqbump", "gcx")
+	if _, err := s.Create(beads.Bead{ID: "gcx-100", Title: "pinned"}); err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	auto, err := s.Create(beads.Bead{Title: "auto"})
+	if err != nil {
+		t.Fatalf("create auto: %v", err)
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(auto.ID, "gcx-"))
+	if err != nil || n <= 100 {
+		t.Fatalf("auto id = %q (suffix %d); want a suffix > 100 (sequence not bumped past the pinned id)", auto.ID, n)
+	}
+	// And a duplicate pinned id is rejected.
+	if _, err := s.Create(beads.Bead{ID: "gcx-100", Title: "dup"}); err == nil {
+		t.Fatal("creating a duplicate pinned id should error")
+	}
+}
 
 // TestPostgresStoreFullSurface exercises the Store methods the shared classed-store
 // conformance suite does not cover (deps, metadata, CloseAll, the label/metadata
@@ -17,11 +120,15 @@ func TestPostgresStoreFullSurface(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set GC_TEST_POSTGRES_DSN to a disposable Postgres to run the full-surface test")
 	}
-	s, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreIDPrefix("gcp"))
+	const schema = "gcp_fullsurface"
+	if err := beads.ProvisionPostgres(dsn, schema); err != nil {
+		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
+	}
+	truncatePostgresSchema(t, dsn, schema)
+	s, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema(schema), beads.WithPostgresStoreIDPrefix("gcp"))
 	if err != nil {
 		t.Fatalf("OpenPostgresStore: %v", err)
 	}
-	truncatePostgresBeadTables(t, dsn)
 	t.Cleanup(func() {
 		if c, ok := s.(interface{ CloseStore() error }); ok {
 			_ = c.CloseStore() //nolint:errcheck

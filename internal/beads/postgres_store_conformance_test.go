@@ -2,6 +2,7 @@ package beads_test
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 
@@ -15,26 +16,28 @@ import (
 // TestPostgresStoreSatisfiesClassedStoreConformance runs the SHARED classed-store
 // conformance suite (the same coordtest.RunClassedStoreTests every backend must
 // pass) against a real Postgres, proving the PostgresStore round-trips and
-// classifies beads identically to the bd/SQLite backends.
+// classifies beads identically to the bd/SQLite backends — in its own provisioned
+// schema (the per-class isolation model).
 //
 // SKIPPED unless GC_TEST_POSTGRES_DSN points at a DISPOSABLE Postgres database —
 // the suite truncates the bead tables between factory calls, so never aim it at a
-// real store. This is the harness to run while porting the scaffolded
-// PostgresStore methods from sqlite_store.go; today every method is a stub, so the
-// suite fails fast until they are implemented (which is the point — it is the
-// executable definition of "done").
+// real store.
 func TestPostgresStoreSatisfiesClassedStoreConformance(t *testing.T) {
 	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
 	if dsn == "" {
 		t.Skip("set GC_TEST_POSTGRES_DSN to a disposable Postgres to run the conformance suite")
 	}
+	const schema = "gco_conformance"
+	if err := beads.ProvisionPostgres(dsn, schema); err != nil {
+		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
+	}
 	coordtest.RunClassedStoreTestsWithOptions(t, coordclass.ClassOrders,
 		func() beads.Store {
-			s, err := beads.OpenPostgresStore(dsn)
+			truncatePostgresSchema(t, dsn, schema) // clean slate per factory call
+			s, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema(schema))
 			if err != nil {
 				t.Fatalf("OpenPostgresStore: %v", err)
 			}
-			truncatePostgresBeadTables(t, dsn) // clean slate per factory call
 			t.Cleanup(func() {
 				if c, ok := s.(interface{ CloseStore() error }); ok {
 					_ = c.CloseStore() //nolint:errcheck // best-effort
@@ -45,14 +48,20 @@ func TestPostgresStoreSatisfiesClassedStoreConformance(t *testing.T) {
 		coordtest.Options{Skip: false})
 }
 
-func truncatePostgresBeadTables(t *testing.T, dsn string) {
+// truncatePostgresSchema clears a provisioned class schema between runs and resets
+// its id sequence so minted ids are deterministic. schema is a controlled test
+// identifier (a reserved-prefix-style name), not user input.
+func truncatePostgresSchema(t *testing.T, dsn, schema string) {
 	t.Helper()
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("truncate: open: %v", err)
 	}
 	defer db.Close() //nolint:errcheck // best-effort
-	if _, err := db.Exec(`TRUNCATE beads, labels, metadata, deps, kv CASCADE`); err != nil {
-		t.Fatalf("truncate bead tables (DSN must point at a disposable Postgres): %v", err)
+	if _, err := db.Exec(fmt.Sprintf(`TRUNCATE %[1]s.beads, %[1]s.labels, %[1]s.metadata, %[1]s.deps, %[1]s.kv CASCADE`, schema)); err != nil {
+		t.Fatalf("truncate schema %q (DSN must point at a disposable Postgres): %v", schema, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER SEQUENCE %s.bead_seq RESTART WITH 1`, schema)); err != nil {
+		t.Fatalf("reset sequence for schema %q: %v", schema, err)
 	}
 }

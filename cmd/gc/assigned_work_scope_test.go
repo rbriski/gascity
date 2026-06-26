@@ -205,7 +205,16 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 	}
 }
 
-func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
+// TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore: a rig-scoped session's
+// reachable stores are the primary (graph) store AND its rig store. Under
+// graph_store=sqlite its routed graph.v2 work (gcg-…) lives in the primary store
+// while rig-native work lives in the rig store; both must keep the session from
+// being mis-read as unassigned and closed (the drained-pool-member strand: a
+// codex-mini pool member drained while its next-group gcg- work, routed to it,
+// sat open in the primary store). This updates the pre-sqlite #3453-era assertion
+// that a rig-scoped session counted only its rig store — the graph.v2 migration
+// moved the work to the primary store, so the reachability guard follows it.
+func TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
 	cfg := &config.City{
@@ -227,20 +236,20 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 		},
 	}
 	if _, err := cityStore.Create(beads.Bead{
-		ID:       "city-work",
+		ID:       "gcg-primary-work",
 		Type:     "task",
 		Status:   "open",
 		Assignee: session.ID,
 	}); err != nil {
-		t.Fatalf("Create city work: %v", err)
+		t.Fatalf("Create primary (graph) store work: %v", err)
 	}
 
 	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, session)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
-	if has {
-		t.Fatal("city-store assigned work should not count for a rig-scoped session")
+	if !has {
+		t.Fatal("primary/graph-store assigned work must count for a rig-scoped session — its graph.v2 routed work lives in the primary store under graph_store=sqlite")
 	}
 
 	if _, err := rigStore.Create(beads.Bead{
@@ -269,8 +278,10 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 // openSessionReachableStoreRef's cross-store wildcard. Before the fix these guards
 // resolved the city-scoped session to a single configured store and missed its
 // rig-store work, so a live holder could be closed/drained/recycled or
-// under-reported (#3453 re-regression). Rig-scoped sessions stay single-store
-// (covered by TestSessionHasOpenAssignedWorkUsesOnlyReachableStore).
+// under-reported (#3453 re-regression). Rig-scoped sessions reach the primary
+// (graph) store AND their rig store — under graph_store=sqlite their routed
+// graph.v2 work lives in the primary store (covered by
+// TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore).
 func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

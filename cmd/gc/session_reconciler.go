@@ -2769,9 +2769,12 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 // A cross-store-eligible (city-scoped) session federates across the primary store
 // and every rig store (vp-kvp); a session whose template/agent can't be resolved
 // falls back to the same fan-out (legacy keep-on-match fail-safe); a rig-bound
-// session routes to its one rig store; every other session routes to the primary
-// store. The slice is ordered primary-first so "first match" callers keep their
-// historical ordering. Returns an error only when a resolved rig store is missing.
+// session routes to the primary (graph) store AND its one rig store, because
+// under graph_store=sqlite its routed graph.v2 work lives in the primary store
+// while rig-native work lives in the rig store; every other session routes to
+// the primary store. The slice is ordered primary-first so "first match" callers
+// keep their historical ordering. Returns an error only when a resolved rig
+// store is missing.
 func reachableStoresForSession(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]beads.Store, error) {
 	agentCfg := sessionAgentConfig(cfg, session)
 	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
@@ -2790,7 +2793,13 @@ func reachableStoresForSession(cityPath string, cfg *config.City, store beads.St
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
 	}
-	return []beads.Store{rigStore}, nil
+	// Include the primary (graph) store as well as the rig store: under
+	// graph_store=sqlite a rig-scoped agent's routed graph.v2 work (gcg-…) lives
+	// in the primary store, not its rig store. A rig-only reach misses that work
+	// and mis-reads the session as unassigned, closing an owner that still holds
+	// open work (the drained-pool-member strand). Primary-first preserves
+	// first-match callers' ordering.
+	return []beads.Store{store, rigStore}, nil
 }
 
 // firstOpenAssignedWorkBeadForReachableStore returns the first open or

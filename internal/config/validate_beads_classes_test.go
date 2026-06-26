@@ -9,6 +9,10 @@ func graphClass(backend string) *City {
 	return &City{Beads: BeadsConfig{Classes: map[string]BeadClassConfig{BeadClassGraph: {Backend: backend}}}}
 }
 
+func classCfg(class, backend string) *City {
+	return &City{Beads: BeadsConfig{Classes: map[string]BeadClassConfig{class: {Backend: backend}}}}
+}
+
 func TestValidateBeadsClasses(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -21,16 +25,19 @@ func TestValidateBeadsClasses(t *testing.T) {
 		{"graph bd", graphClass("bd"), false},
 		{"graph sqlite", graphClass("sqlite"), false},
 		{"graph sqlite case+space", graphClass("  SQLite "), false},
-		{"graph unknown normalizes to bd", graphClass("garbage"), false},
-		// graph=postgres is now honored: the Router registers a Postgres graph
-		// backend (registerGraphStoreBackend). The reject branch is forward-defense
-		// for a future enum backend graph can't honor — unreachable while
-		// normalizeBackend's recognized set == graph's honored set.
+		// A typo'd backend is now REJECTED (fail-fast) rather than silently
+		// normalizing to bd and diverting infra beads to the work store.
+		{"graph typo rejected", graphClass("garbage"), true},
 		{"graph postgres allowed", graphClass("postgres"), false},
 		{"graph postgres case+space allowed", graphClass(" Postgres "), false},
-		// Other classes route through resolveClassStore, so postgres is fine there.
-		{"orders postgres allowed", &City{Beads: BeadsConfig{Classes: map[string]BeadClassConfig{BeadClassOrders: {Backend: "postgres"}}}}, false},
-		{"nudges postgres allowed", &City{Beads: BeadsConfig{Classes: map[string]BeadClassConfig{BeadClassNudges: {Backend: "postgres"}}}}, false},
+		// Every relocatable class honors bd|sqlite|postgres; typos fail fast.
+		{"orders postgres allowed", classCfg(BeadClassOrders, "postgres"), false},
+		{"nudges postgres allowed", classCfg(BeadClassNudges, "postgres"), false},
+		{"sessions postgres allowed", classCfg(BeadClassSessions, "postgres"), false},
+		{"sessions sqlite allowed", classCfg(BeadClassSessions, "sqlite"), false},
+		{"sessions unset allowed", classCfg(BeadClassSessions, ""), false},
+		{"sessions typo rejected", classCfg(BeadClassSessions, "postgre"), true},
+		{"messaging typo rejected", classCfg(BeadClassMessaging, "sqlit"), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

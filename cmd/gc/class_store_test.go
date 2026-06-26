@@ -65,6 +65,43 @@ func TestResolveMailMessagesStore_RoutesToSQLiteWhenConfigured(t *testing.T) {
 	}
 }
 
+// TestResolveSessionStore_DefaultReturnsWorkStore pins the byte-identical floor:
+// at the default (bd) backend the session seam IS the work store (same pointer).
+func TestResolveSessionStore_DefaultReturnsWorkStore(t *testing.T) {
+	work := beads.NewMemStore()
+	got := resolveSessionStore(work, &config.City{}, t.TempDir(), nil)
+	if any(got) != any(work) {
+		t.Fatal("default backend should return the work store as the session seam (byte-identical)")
+	}
+}
+
+// TestResolveSessionStore_RoutesToSQLiteWhenConfigured proves sessions=sqlite
+// routes session-class beads to a distinct relocated store, leaving the work store
+// empty.
+func TestResolveSessionStore_RoutesToSQLiteWhenConfigured(t *testing.T) {
+	work := beads.NewMemStore()
+	cfg := &config.City{Beads: config.BeadsConfig{Classes: map[string]config.BeadClassConfig{
+		config.BeadClassSessions: {Backend: config.BeadsBackendSQLite},
+	}}}
+	got := resolveSessionStore(work, cfg, t.TempDir(), nil)
+	if got == nil {
+		t.Fatal("expected a SQLite session store, got nil")
+	}
+	if any(got) == any(work) {
+		t.Fatal("expected a distinct SQLite store for sessions=sqlite, got the work store")
+	}
+	sb, err := got.Create(beads.Bead{Title: "sess", Type: "session", Labels: []string{"gc:session"}})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := got.Get(sb.ID); err != nil {
+		t.Fatalf("session bead not in the relocated store: %v", err)
+	}
+	if all, _ := work.List(beads.ListQuery{AllowScan: true}); len(all) != 0 {
+		t.Fatalf("work store has %d beads, want 0 (session should land in SQLite)", len(all))
+	}
+}
+
 // TestNewCityMailProvider_DefaultByteIdentical proves the default provider writes
 // to the work store exactly as before the cutover wiring.
 func TestNewCityMailProvider_DefaultByteIdentical(t *testing.T) {

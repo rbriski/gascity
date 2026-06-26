@@ -202,6 +202,18 @@ func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string
 	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassNudges, rec)
 }
 
+// resolveSessionStore returns the session-lifecycle store: the configured class
+// store (emitting bead.* events via rec) when [beads.classes.sessions].backend
+// relocates sessions, otherwise the work store. Session-class beads are session
+// lifecycle beads (type=session/gc:session) AND durable session waits
+// (type=gate/gc:wait); both classify to ClassSessions. Only the SESSION/WAIT bead
+// ops route here — the controller's cross-class WORK-bead assignment reads stay on
+// the work store (see the two-store split in cmd/gc/session_beads.go). Byte-
+// identical to the work store at the default backend.
+func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+}
+
 // newCityMailProvider builds the controller's mail provider. Message persistence
 // routes to SQLite when configured (controller-mediated: the long-lived
 // controller owns the single writer) while session reads stay on the work store.

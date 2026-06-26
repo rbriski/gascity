@@ -400,8 +400,14 @@ func reopenClosedConfiguredNamedSessionBead(
 	return reopened, true
 }
 
+// Store pair ordered (sessionStore, workStore) to match the close-family. The
+// session-bead archive legs (RetireNamedSessionPatch, Status update) and the
+// wait-reassign use sessionStore; the work-reassign (reassignWorkAssignedTo...)
+// and the deferred runtime-stop use workStore/rigStores. Byte-identical at the
+// default bd backend.
 func retireDuplicateConfiguredNamedSessionBeads(
-	store beads.Store,
+	sessionStore beads.Store,
+	workStore beads.Store,
 	rigStores map[string]beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -412,7 +418,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 	now time.Time,
 	stderr io.Writer,
 ) []beads.Bead {
-	if store == nil || cfg == nil {
+	if sessionStore == nil || workStore == nil || cfg == nil {
 		return openBeads
 	}
 	byIdentity := make(map[string][]int)
@@ -448,20 +454,20 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutation(workStore, sp, cfg, b, "duplicate named session", stderr) {
 				continue
 			}
 			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
-			if setMetaBatch(store, b.ID, batch, stderr) != nil {
+			if setMetaBatch(sessionStore, b.ID, batch, stderr) != nil {
 				continue
 			}
 			status := "open"
-			if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			if err := sessionStore.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
 				continue
 			}
-			reassignWorkAssignedToRetiredSessionBead(store, rigStores, b, openBeads[winner].ID, stderr)
-			reassignStateAssignedToRetiredSessionBead(store, store, b.ID, openBeads[winner].ID, now, stderr)
+			reassignWorkAssignedToRetiredSessionBead(workStore, rigStores, b, openBeads[winner].ID, stderr)
+			reassignStateAssignedToRetiredSessionBead(sessionStore, workStore, b.ID, openBeads[winner].ID, now, stderr)
 			if b.Metadata == nil {
 				b.Metadata = make(map[string]string, len(batch))
 			}
@@ -507,31 +513,35 @@ func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canoni
 	return candidate.ID > incumbent.ID
 }
 
+// Store pair ordered (sessionStore, workStore) to match the close-family: the
+// session-bead archive legs use sessionStore; the work-unclaim and the deferred
+// runtime-stop use workStore/rigStores. Byte-identical at the default bd backend.
 func retireRemovedConfiguredNamedSessionBead(
-	store beads.Store,
+	sessionStore beads.Store,
+	workStore beads.Store,
 	rigStores map[string]beads.Store,
 	sp runtime.Provider,
 	b beads.Bead,
 	now time.Time,
 	stderr io.Writer,
 ) bool {
-	if store == nil {
+	if sessionStore == nil || workStore == nil {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(store, sp, nil, b, "removed named session", stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(workStore, sp, nil, b, "removed named session", stderr) {
 		return false
 	}
 	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
-	if setMetaBatch(store, b.ID, batch, stderr) != nil {
+	if setMetaBatch(sessionStore, b.ID, batch, stderr) != nil {
 		return false
 	}
 	status := "open"
-	if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+	if err := sessionStore.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
 		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, b, retiredSessionFallbackRoute(b), stderr)
-	cancelStateAssignedToRetiredSessionBead(store, store, b.ID, now, stderr)
+	unclaimWorkAssignedToRetiredSessionBead(workStore, rigStores, b, retiredSessionFallbackRoute(b), stderr)
+	cancelStateAssignedToRetiredSessionBead(sessionStore, workStore, b.ID, now, stderr)
 	return true
 }
 
@@ -976,7 +986,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			openBeads[i].Status = "closed"
 		}
 		openBeads = retireDuplicateConfiguredNamedSessionBeads(
-			store, rigStores, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
+			store, store, rigStores, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
 		)
 	}
 
@@ -1556,7 +1566,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if isNamedSessionBead(b) {
 				identity := namedSessionIdentity(b)
 				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
-					if retireRemovedConfiguredNamedSessionBead(store, rigStores, sp, b, now, stderr) {
+					if retireRemovedConfiguredNamedSessionBead(store, store, rigStores, sp, b, now, stderr) {
 						if idx, ok := indexBySessionName[sn]; ok {
 							openBeads[idx].Status = "open"
 							if openBeads[idx].Metadata == nil {

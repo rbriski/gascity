@@ -1030,7 +1030,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 		sessions = retireDuplicateConfiguredNamedSessionBeads(
-			store, rigStores, sp, cfg, cityName, sessions, bySessionName, indexBySessionName, clk.Now().UTC(), stderr,
+			store, store, rigStores, sp, cfg, cityName, sessions, bySessionName, indexBySessionName, clk.Now().UTC(), stderr,
 		)
 	}
 	recordPhase(TraceSiteSessionReconcileHealRetire, "session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{

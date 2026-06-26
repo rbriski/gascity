@@ -49,7 +49,10 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	if assignee == "" {
 		return []string{""}
 	}
-	store := s.state.CityBeadStore()
+	// Assignee resolution reads session beads, so source the session store
+	// (relocated when [beads.classes.sessions] moves); the work bead being
+	// filtered lives on the work store at the caller. Byte-identical at default.
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return []string{assignee}
 	}
@@ -91,7 +94,10 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	if assignee == "" {
 		return "", nil
 	}
-	store := s.state.CityBeadStore()
+	// Assignee resolution reads (and may materialize) session beads, so source
+	// the session store; the work bead whose assignee this normalizes lives on
+	// the work store at the caller. Byte-identical at the default backend.
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return assignee, nil
 	}

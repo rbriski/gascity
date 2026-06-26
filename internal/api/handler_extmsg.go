@@ -53,7 +53,7 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return extmsgHandleLabel(selector)
 	}
@@ -65,7 +65,7 @@ func (s *Server) extmsgSessionHandleForSelector(selector string) string {
 }
 
 func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) string {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return extmsgHandleLabel(fallback)
 	}
@@ -100,7 +100,7 @@ func (s *Server) extmsgNotifyMembers(
 	explicitTarget string,
 ) {
 	svc := s.state.ExtMsgServices()
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if svc == nil || store == nil {
 		return
 	}

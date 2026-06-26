@@ -43,7 +43,7 @@ type nudgeMailSweepResult struct {
 // limit caps total closes (nudge + mail combined). Pass 0 for no cap.
 // Per-bead errors do not abort the sweep; they are returned via errors.Join so
 // the caller can report them without treating the sweep as fatal.
-func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+func sweepStaleNudgeMail(nudgeStore, mailStore beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 	var beadErrs []error
 
@@ -56,7 +56,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 		nudgeQueryLimit = 0
 	}
 	// nudge/mail beads are NoHistory (wisp-tier); read both tiers explicitly.
-	nudgeCandidates, err := store.List(beads.ListQuery{
+	nudgeCandidates, err := nudgeStore.List(beads.ListQuery{
 		Label:         nudgeBeadLabel,
 		CreatedBefore: nudgeCutoff,
 		Limit:         nudgeQueryLimit,
@@ -78,7 +78,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 		if nudgeID != "" && liveIDs[nudgeID] {
 			continue
 		}
-		if err := store.SetMetadataBatch(b.ID, map[string]string{
+		if err := nudgeStore.SetMetadataBatch(b.ID, map[string]string{
 			"state":           "gc-swept",
 			"terminal_reason": "gc-swept-stale",
 			"commit_boundary": "gc-swept",
@@ -88,7 +88,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 			beadErrs = append(beadErrs, fmt.Errorf("nudge %s: set metadata: %w", b.ID, err))
 			continue
 		}
-		if err := store.Close(b.ID); err != nil {
+		if err := nudgeStore.Close(b.ID); err != nil {
 			beadErrs = append(beadErrs, fmt.Errorf("nudge %s: close: %w", b.ID, err))
 			continue
 		}
@@ -103,7 +103,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 		if limit == 0 {
 			mailQueryLimit = 0
 		}
-		mailCandidates, err := store.List(beads.ListQuery{
+		mailCandidates, err := mailStore.List(beads.ListQuery{
 			Type:          "message",
 			Label:         "read",
 			CreatedBefore: mailCutoff,
@@ -121,11 +121,11 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 			if b.Status != "open" {
 				continue
 			}
-			if err := store.SetMetadata(b.ID, "close_reason", nudgeMailSweepMailCloseReason); err != nil {
+			if err := mailStore.SetMetadata(b.ID, "close_reason", nudgeMailSweepMailCloseReason); err != nil {
 				beadErrs = append(beadErrs, fmt.Errorf("mail %s: set close_reason: %w", b.ID, err))
 				continue
 			}
-			if err := store.Close(b.ID); err != nil {
+			if err := mailStore.Close(b.ID); err != nil {
 				beadErrs = append(beadErrs, fmt.Errorf("mail %s: close: %w", b.ID, err))
 				continue
 			}
@@ -140,7 +140,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 // making any changes. Used by --dry-run to report candidate count without side
 // effects. The limit parameter caps the count the same way sweepStaleNudgeMail
 // caps closes; pass 0 for no cap.
-func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+func countStaleNudgeMail(nudgeStore, mailStore beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 
 	liveIDs := liveNudgeIDSet(nudgeState)
@@ -150,7 +150,7 @@ func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 	if nudgeQueryLimit < 0 {
 		nudgeQueryLimit = 0
 	}
-	nudgeCandidates, err := store.List(beads.ListQuery{
+	nudgeCandidates, err := nudgeStore.List(beads.ListQuery{
 		Label:         nudgeBeadLabel,
 		CreatedBefore: nudgeCutoff,
 		Limit:         nudgeQueryLimit,
@@ -181,7 +181,7 @@ func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 		if limit == 0 {
 			mailQueryLimit = 0
 		}
-		mailCandidates, err := store.List(beads.ListQuery{
+		mailCandidates, err := mailStore.List(beads.ListQuery{
 			Type:          "message",
 			Label:         "read",
 			CreatedBefore: mailCutoff,

@@ -1457,7 +1457,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 					return true
 				}
 				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessionStore, ref.sessionName)
-				deliverSlingNudge(target, sp, sessionStore, cityPath, stdout, stderr)
+				deliverSlingNudge(target, sp, sessionStore, resolveNudgesStore(sessionStore, cfg, cityPath, nil), cityPath, stdout, stderr)
 				return true
 			}
 			return false
@@ -1484,7 +1484,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	// Fixed agent: nudge directly.
 	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
 	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, store, sn)
-	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+	deliverSlingNudge(target, sp, store, resolveNudgesStore(store, cfg, cityPath, nil), cityPath, stdout, stderr)
 }
 
 // pokeController sends a "poke" command to the controller socket to
@@ -1544,7 +1544,7 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 	})
 }
 
-func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
+func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, nudgeStore beads.Store, cityPath string, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
 	obs, err := workerObserveNudgeTarget(target, store, sp)
 	running := err == nil && obs.Running
@@ -1567,7 +1567,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, store, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudgeStore, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

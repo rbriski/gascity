@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -67,7 +68,7 @@ var openNudgesClassStore = func(cityPath string) beads.Store {
 	if workStore == nil {
 		return nil
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return workStore
 	}

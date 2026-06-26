@@ -643,6 +643,16 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	if store == nil {
 		return result, code
 	}
+	// The nudge SHADOW reads below (retryClosedWait/nextWaitDeliveryAttempt) must
+	// target the relocated nudge store when nudges are relocated; everything else
+	// here is a session/wait op on the work store. At the default backend
+	// resolveNudgesStore returns the work store, so nudgeStore == store.
+	nudgeStore := store
+	if cityPath, cityErr := resolveCity(); cityErr == nil {
+		if cfg, cfgErr := loadCityConfig(cityPath, io.Discard); cfgErr == nil {
+			nudgeStore = resolveNudgesStore(store, cfg, cityPath, nil)
+		}
+	}
 	b, err := store.Get(waitID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
@@ -660,7 +670,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if state == waitStateReady && b.Status == "closed" {
-		retried, err := retryClosedWait(store, b, now)
+		retried, err := retryClosedWait(store, nudgeStore, b, now)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -676,7 +686,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	switch state {
 	case waitStateReady:
 		batch["ready_at"] = now
-		nextAttempt, err := nextWaitDeliveryAttempt(store, b)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeStore, b)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -981,10 +991,10 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 }
 
 func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
-	return prepareWaitWakeStateForCityWithSnapshot(cityPath, store, now, nil)
+	return prepareWaitWakeStateForCityWithSnapshot(cityPath, store, store, now, nil)
 }
 
-func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(store)
@@ -1062,7 +1072,7 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store,
 			}
 		}
 		if state == waitStateReady {
-			done, err := finalizeReadyWaitFromNudge(store, wait, now)
+			done, err := finalizeReadyWaitFromNudge(store, nudgeStore, wait, now)
 			if err != nil {
 				return nil, err
 			}
@@ -1126,10 +1136,10 @@ func lookupSessionBeadByID(store beads.Store, id string) (beads.Bead, bool, erro
 }
 
 func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, store, now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, store, store, now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store, nudgeStore beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(store)
@@ -1160,7 +1170,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := findQueuedNudgeBead(store, nudgeID)
+		_, ok, err := findQueuedNudgeBead(nudgeStore, nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
 				stampWaitLookupCapDiagnostic(store, sessionID, err, now, "ready-wait-nudge")
@@ -1182,7 +1192,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 			ContinuationEpoch: wait.Metadata["registered_epoch"],
 			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
 		})
-		if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		if err := enqueueQueuedNudgeWithStore(cityPath, nudgeStore, item); err != nil {
 			return err
 		}
 		if err := store.SetMetadata(wait.ID, "nudge_id", nudgeID); err != nil {
@@ -1219,7 +1229,7 @@ func cachedSessionCanReceiveWaitNudge(sessionBead beads.Bead) bool {
 	}
 }
 
-func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Time) (bool, error) {
+func finalizeReadyWaitFromNudge(store, nudgeStore beads.Store, wait beads.Bead, now time.Time) (bool, error) {
 	nudgeID := wait.Metadata["nudge_id"]
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
@@ -1227,7 +1237,7 @@ func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Tim
 	if nudgeID == "" {
 		return false, nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
+	nudge, ok, err := findAnyQueuedNudgeBead(nudgeStore, nudgeID)
 	if err != nil {
 		if beads.IsLookupLimitError(err) {
 			stampWaitLookupCapDiagnostic(store, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
@@ -1361,8 +1371,8 @@ func setWaitTerminalState(store beads.Store, waitID string, batch map[string]str
 	return store.Close(waitID)
 }
 
-func retryClosedWait(store beads.Store, wait beads.Bead, now string) (beads.Bead, error) {
-	nextAttempt, err := nextWaitDeliveryAttempt(store, wait)
+func retryClosedWait(store, nudgeStore beads.Store, wait beads.Bead, now string) (beads.Bead, error) {
+	nextAttempt, err := nextWaitDeliveryAttempt(nudgeStore, wait)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1404,7 +1414,7 @@ func retryClosedWait(store beads.Store, wait beads.Bead, now string) (beads.Bead
 	})
 }
 
-func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error) {
+func nextWaitDeliveryAttempt(nudgeStore beads.Store, wait beads.Bead) (string, error) {
 	state := wait.Metadata["state"]
 	if state == waitStatePending || state == waitStateReady {
 		return "", nil
@@ -1417,10 +1427,10 @@ func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error)
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
 	}
-	if nudgeID == "" || store == nil {
+	if nudgeID == "" || nudgeStore == nil {
 		return strconv.Itoa(attempt + 1), nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
+	nudge, ok, err := findAnyQueuedNudgeBead(nudgeStore, nudgeID)
 	if err != nil {
 		return "", err
 	}
@@ -1440,7 +1450,7 @@ func isTerminalNudgeState(state string) bool {
 }
 
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath), cityPath, nudgeIDs)
+	return nudgequeue.WithdrawWaitNudges(openNudgesClassStore(cityPath), cityPath, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

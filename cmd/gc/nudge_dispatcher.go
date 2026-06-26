@@ -112,7 +112,7 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 //
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, workStore, nudgeStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
@@ -176,7 +176,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if !matched {
 			continue
 		}
-		obs, err := workerObserveNudgeTarget(target, store, sp)
+		obs, err := workerObserveNudgeTarget(target, workStore, sp)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -186,7 +186,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if !obs.Running {
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sp, defaultNudgePollQuiescence, obs)
+		ok, err := tryDeliverQueuedNudgesByPoller(target, workStore, nudgeStore, sp, defaultNudgePollQuiescence, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

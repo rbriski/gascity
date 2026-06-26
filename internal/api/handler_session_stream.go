@@ -65,7 +65,7 @@ func runtimePendingInteraction(pending *worker.PendingInteraction) runtime.Pendi
 }
 
 func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -935,7 +935,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore(), info.ID)
 	if err != nil {
 		return
 	}
@@ -1016,7 +1016,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore(), info.ID)
 	if err != nil {
 		return
 	}

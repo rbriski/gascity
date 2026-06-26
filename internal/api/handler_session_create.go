@@ -34,7 +34,7 @@ type sessionCreateRequest struct {
 }
 
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return

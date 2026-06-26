@@ -12,7 +12,7 @@ import (
 //	GET /v0/session/{id}/agents
 //	Response: { "agents": [{ "agent_id": "...", "parent_tool_use_id": "..." }] }
 func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -49,7 +49,7 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 //	GET /v0/session/{id}/agents/{agentId}
 //	Response: { "messages": [...], "status": "completed|running|pending|failed" }
 func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return

@@ -222,7 +222,7 @@ func writeResolveError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -287,7 +287,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -320,7 +320,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -344,7 +344,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -431,7 +431,7 @@ func (s *Server) handleSessionPermissionMode(w http.ResponseWriter, r *http.Requ
 
 // handleSessionWake clears hold and quarantine on a session.
 func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -477,7 +477,7 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionRename updates a session's title.
 func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -564,7 +564,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		stateHandle = v
 		peekHandle = v
 	case runtime.Provider:
-		store := s.state.CityBeadStore()
+		store := s.state.SessionsBeadStore()
 		if store == nil {
 			return
 		}
@@ -622,7 +622,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
 		}
-		factory, err := s.workerFactory(s.state.CityBeadStore())
+		factory, err := s.workerFactory(s.state.SessionsBeadStore())
 		if err != nil {
 			return
 		}
@@ -662,7 +662,7 @@ func canUseCheapTranscriptLookup(provider, sessionKey string) bool {
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
 func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return

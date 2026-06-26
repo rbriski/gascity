@@ -48,6 +48,36 @@ var openNudgeBeadStore = func(cityPath string) beads.Store {
 	return store
 }
 
+// openNudgesClassStore opens the nudge SHADOW store for cityPath: the relocated
+// per-class store when [beads.classes.nudges].backend is set, else the work store
+// (byte-identical default). It threads the work store (via openNudgeBeadStore, so
+// it inherits that test seam) through resolveNudgesStore. Unlike openNudgeBeadStore
+// — which is deliberately the work store because its result also serves the session
+// and worker reads the nudge subsystem shares — this opener is for the LEAF
+// nudge-bead shadow ops ONLY (the self-opening claim/list/ack/release/enqueue/record
+// helpers). CLI callers pass no recorder: the controller is the single durable
+// writer and CLI shadow writes are transient and gate-excluded.
+//
+// When nudges are relocated the work-store handle opened here is unused by the leaf
+// ops, so it is closed before returning the cached (noClose) class handle — leaving
+// exactly one handle, as before. On a config-load failure it falls back to the work
+// store (the resolveClassStore default), so a misconfigured class degrades to bd.
+var openNudgesClassStore = func(cityPath string) beads.Store {
+	workStore := openNudgeBeadStore(cityPath)
+	if workStore == nil {
+		return nil
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return workStore
+	}
+	store := resolveNudgesStore(workStore, cfg, cityPath, nil)
+	if store != workStore {
+		_ = closeBeadStoreHandle(workStore) //nolint:errcheck // relocated: work handle unused
+	}
+	return store
+}
+
 func findQueuedNudgeBead(store nudgequeue.NudgeStore, nudgeID string) (beads.Bead, bool, error) {
 	return findNudgeBead(store, nudgeID, false)
 }

@@ -192,6 +192,16 @@ func resolveOrderStore(workStore beads.Store, cfg *config.City, cityPath string,
 	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassOrders, rec)
 }
 
+// resolveNudgesStore returns the nudge-shadow store: the configured class store
+// (emitting bead.* events via rec) when [beads.classes.nudges].backend relocates
+// nudges, otherwise the work store. Returned as a beads.Store, which satisfies
+// nudgequeue.NudgeStore for free, so only the LEAF nudge-bead operations route
+// here; the session/wait/mail ops that share the nudge subsystem stay on the work
+// store. Byte-identical to the work store at the default backend.
+func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassNudges, rec)
+}
+
 // newCityMailProvider builds the controller's mail provider. Message persistence
 // routes to SQLite when configured (controller-mediated: the long-lived
 // controller owns the single writer) while session reads stay on the work store.

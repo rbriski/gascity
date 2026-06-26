@@ -23,6 +23,7 @@ import (
 // re-verified.
 func closeSessionBeadIfUnassigned(
 	store beads.Store,
+	sessionStore beads.Store,
 	rigStores map[string]beads.Store,
 	cfg *config.City,
 	session beads.Bead,
@@ -33,6 +34,9 @@ func closeSessionBeadIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	// The work-assignment guard reads the WORK store(s) — never the session
+	// store. The session-close legs target sessionStore. At the default bd
+	// backend the two stores are identical, so this is byte-identical.
 	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, session, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
@@ -42,9 +46,9 @@ func closeSessionBeadIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(store, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, session.ID, now, stderr)
 	}
-	return closeBead(store, store, session.ID, reason, now, stderr)
+	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -55,6 +59,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
+	sessionStore beads.Store,
 	rigStores map[string]beads.Store,
 	session beads.Bead,
 	reason string,
@@ -64,6 +69,8 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	// The reachable-store work guard reads the WORK store(s); the session-close
+	// legs target sessionStore. Byte-identical at the default bd backend.
 	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
@@ -73,7 +80,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(store, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, session.ID, now, stderr)
 	}
-	return closeBead(store, store, session.ID, reason, now, stderr)
+	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
 }

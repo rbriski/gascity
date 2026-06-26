@@ -320,7 +320,7 @@ func finalizeDrainAckStoppedSession(
 		hasAssignedWork = true
 	}
 	if closeIfUnassigned && !hasAssignedWork {
-		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, "drained", clk.Now().UTC(), stderr) {
+		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, store, rigStores, *session, "drained", clk.Now().UTC(), stderr) {
 			session.Status = "closed"
 			if session.Metadata == nil {
 				session.Metadata = make(map[string]string)
@@ -1255,7 +1255,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storeQueryPartial {
 						continue
 					}
-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
+					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, store, rigStores, *session, string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
 						session.Status = "closed"
 					}
 					continue
@@ -1429,7 +1429,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storeQueryPartial {
 						continue
 					}
-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
+					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
 						session.Status = "closed"
 					}
 				}

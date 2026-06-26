@@ -1362,7 +1362,7 @@ const (
 func (b BeadsConfig) NormalizedClassBackend(class string) string {
 	class = strings.TrimSpace(class)
 	if c, ok := b.Classes[class]; ok {
-		switch strings.ToLower(strings.TrimSpace(c.Backend)) {
+		switch normalizeBackend(c.Backend) {
 		case BeadsBackendSQLite:
 			return BeadsBackendSQLite
 		case BeadsBackendPostgres:
@@ -1375,6 +1375,25 @@ func (b BeadsConfig) NormalizedClassBackend(class string) string {
 		return BeadsBackendSQLite
 	}
 	return BeadsBackendBD
+}
+
+// normalizeBackend canonicalizes a [beads.classes.<class>].backend value to one of
+// BeadsBackendBD, BeadsBackendSQLite, BeadsBackendPostgres, or "" (unset/unknown).
+// Unknown values normalize to "" so a typo can never silently divert a class off
+// the work store — callers treat "" (and "bd") as "use the work store". Shared by
+// NormalizedClassBackend and ValidateBeadsClasses so the dispatcher and the guard
+// can never disagree on what a backend string means.
+func normalizeBackend(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case BeadsBackendBD:
+		return BeadsBackendBD
+	case BeadsBackendSQLite:
+		return BeadsBackendSQLite
+	case BeadsBackendPostgres:
+		return BeadsBackendPostgres
+	default:
+		return ""
+	}
 }
 
 // ClassUsesSQLite reports whether the given class is routed to SQLite.
@@ -5080,6 +5099,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 		return nil, err
 	}
 	if err := ValidateDoltConfig(cfg, path); err != nil {
+		return nil, err
+	}
+	if err := ValidateBeadsClasses(cfg, path); err != nil {
 		return nil, err
 	}
 	return cfg, nil

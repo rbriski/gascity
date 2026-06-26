@@ -656,6 +656,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := ValidateDoltConfig(root, path); err != nil {
 		return nil, nil, err
 	}
+	if err := ValidateBeadsClasses(root, path); err != nil {
+		return nil, nil, err
+	}
 
 	// Validate cross-entity semantic constraints.
 	if !opts.AllowMissingProviderReferences {

@@ -1,0 +1,404 @@
+{
+  "extraFiles": [
+    "cmd/gc/session_reconcile.go",
+    "cmd/gc/session_sleep.go",
+    "cmd/gc/session_name_lookup.go",
+    "cmd/gc/adoption_barrier.go",
+    "cmd/gc/cmd_session.go",
+    "cmd/gc/cmd_session_pin.go",
+    "cmd/gc/cmd_stop.go",
+    "cmd/gc/providers.go",
+    "cmd/gc/session_index.go",
+    "cmd/gc/session_bead_snapshot.go",
+    "cmd/gc/session_resolve.go",
+    "cmd/gc/doctor_session_model.go",
+    "cmd/gc/doctor_work_option_metadata.go",
+    "cmd/gc/doctor_backlog_depth.go",
+    "cmd/gc/cmd_mail.go",
+    "cmd/gc/completion.go",
+    "cmd/gc/city_status_snapshot.go",
+    "cmd/gc/template_resolve.go",
+    "cmd/gc/cmd_session_logs.go",
+    "cmd/gc/compute_awake_bridge.go",
+    "cmd/gc/compute_awake_set.go",
+    "cmd/gc/pool_session_name.go",
+    "cmd/gc/pool_desired_state.go",
+    "cmd/gc/assigned_work_scope.go",
+    "cmd/gc/session_affinity_metadata.go",
+    "cmd/gc/bead_policy_store.go",
+    "cmd/gc/api_state.go",
+    "cmd/gc/build_desired_state.go",
+    "cmd/gc/cmd_convoy_dispatch.go",
+    "cmd/gc/detached_probe.go",
+    "cmd/gc/chat_autosuspend.go",
+    "cmd/gc/class_store.go"
+  ],
+  "hits": [
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:666",
+      "func": "clearLastWokeAt",
+      "op": "store.SetMetadata(session.ID, \"last_woke_at\", \"\")",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Writes session-lifecycle metadata on a session bead ID. session_reconcile.go (NOT the already-named session_reconciler.go) is a major un-inventoried session-bead WRITER file holding ~14 SetMetadata/SetMetadataBatch sites against session.ID."
+    },
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:678",
+      "func": "recordRateLimitQuarantine",
+      "op": "store.SetMetadataBatch(session.ID, RateLimitQuarantinePatch(...))",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Quarantine patch persisted on the session bead. Must route to session store."
+    },
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:711",
+      "func": "recordWakeFailure",
+      "op": "store.SetMetadataBatch(session.ID, reset) / SetMetadata(session.ID,\"wake_attempts\",next) / accrual.Patch",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "wake_attempts + quarantine accrual written on session.ID (lines 711/718/726). Session lifecycle state."
+    },
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:743",
+      "func": "recordChurn/recordWakeSuccess paths",
+      "op": "store.SetMetadataBatch(session.ID, batch) / SetMetadata(session.ID,\"churn_count\",...) / SetMetadata(session.ID,\"last_woke_at\",\"\")",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "churn_count and last_woke_at writes on session.ID (lines 743/766/801/809/819/828). Session lifecycle state."
+    },
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:922",
+      "func": "session_reconcile.go (state reset / orphan path)",
+      "op": "store.SetMetadataBatch(session.ID, batch)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Session metadata batch on session.ID; comment at line 910 references the closeBead path on session beads. Session-store write."
+    },
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:570",
+      "func": "session_reconcile.go wake/reset path",
+      "op": "store.SetMetadataBatch(session.ID, batch) (also 580)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Two more session.ID metadata batch writes in the wake-resume path. Session-store writes."
+    },
+    {
+      "fileLine": "cmd/gc/session_reconcile.go:946",
+      "func": "session_reconcile.go lifecycle projection",
+      "op": "sessionpkg.ProjectLifecycle(LifecycleInput{Status,Metadata,...})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "ProjectLifecycle over a session bead — session-class read/projection consumer."
+    },
+    {
+      "fileLine": "cmd/gc/session_sleep.go:156",
+      "func": "reconcileDetachedAt",
+      "op": "store.SetMetadata(session.ID, \"detached_at\", ...) (156/171/181)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "detached_at is session-lifecycle metadata written on session.ID. session_sleep.go is an un-inventoried session-bead writer."
+    },
+    {
+      "fileLine": "cmd/gc/session_sleep.go:295",
+      "func": "persistSleepPolicyFingerprint (sleep policy patch)",
+      "op": "store.SetMetadataBatch(session.ID, changed)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "sleep_policy_* fingerprint batch on session.ID. Session-store write."
+    },
+    {
+      "fileLine": "cmd/gc/session_sleep.go:310",
+      "func": "markIdleSleepPending",
+      "op": "store.SetMetadata(session.ID, \"sleep_intent\", \"idle-stop-pending\")",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "sleep_intent on session.ID. Session-store write."
+    },
+    {
+      "fileLine": "cmd/gc/session_sleep.go:332",
+      "func": "recoverPendingIdleSleep",
+      "op": "store.SetMetadataBatch(session.ID, SleepPatch(...))",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "SleepPatch written on session.ID. Session-store write."
+    },
+    {
+      "fileLine": "cmd/gc/session_sleep.go:130",
+      "func": "pendingInteractionKeepsAwake",
+      "op": "sessionpkg.ProjectLifecycle(LifecycleInput{...})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Lifecycle projection over a session bead. Session-class read consumer."
+    },
+    {
+      "fileLine": "cmd/gc/session_name_lookup.go:211",
+      "func": "createPendingPoolSessionBead (pool create path)",
+      "op": "store.Create(beads.Bead{Type:sessionBeadType, Labels:[sessionBeadLabel,...]}); store.Close(bead.ID); store.SetMetadata(bead.ID,\"session_name\",...)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Direct CREATE of a session bead (type=session/gc:session) plus follow-up Close/SetMetadata on it (lines 211/223/230/231). A session-bead creation site outside the named 10 — must route to session store."
+    },
+    {
+      "fileLine": "cmd/gc/session_name_lookup.go:214",
+      "func": "newPoolSessionBeadFor (Labeled query builder for pool name)",
+      "op": "beads.ListQuery{Type:sessionBeadType, Labels:[sessionBeadLabel, \"agent:\"+agentName]}",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Constructs a session-class query (Type+Label) used to enumerate/reserve session names. Session-store read."
+    },
+    {
+      "fileLine": "cmd/gc/session_name_lookup.go:616",
+      "func": "resolve-by-alias helper",
+      "op": "sessionpkg.ListAllSessionBeads(store, ...)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Lists session beads to resolve a session identifier. Session-store read."
+    },
+    {
+      "fileLine": "cmd/gc/adoption_barrier.go:233",
+      "func": "adoptRunningSessions.createSessionBead",
+      "op": "store.Create(beads.Bead{Type:sessionBeadType, Labels:[sessionBeadLabel,\"agent:\"+name], Metadata:meta})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Crash-adoption CREATES session beads directly (lines 233-238). A second session-bead creation site outside the named 10. Must route to session store, and openSessionBeadExists (line 276) gates it via ListAllSessionBeads."
+    },
+    {
+      "fileLine": "cmd/gc/adoption_barrier.go:91",
+      "func": "adoptRunningSessions (dedup load)",
+      "op": "sessionpkg.ListAllSessionBeads(store, ...) (also 276)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Loads existing session beads for adoption dedup; openSessionBeadExists re-queries session beads by session_name. Session-store reads gating the Create above."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_session.go:1601",
+      "func": "session suspend (reconciler-first path)",
+      "op": "store.SetMetadataBatch(sessionID, {held_until, sleep_intent:\"user-hold\", state:\"suspended\"})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "held_until/sleep_intent/state written on a session bead ID during `gc session suspend`. Session-store write outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_session.go:892",
+      "func": "session list",
+      "op": "session.ListAllSessionBeads(store, ListQuery{Sort:SortCreatedDesc})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "`gc session list` enumerates session beads. Session-store read."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_session.go:1322",
+      "func": "readyWaitSetForList",
+      "op": "loadWaitBeads(store) -> filter Metadata[state]==ready -> map session_id",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Reads durable WAIT beads (gc:wait) to compute the ready-wait set for session listing. Wait beads classify to ClassSessions, so this read must federate to the session store. Outside the named 10 (cmd_session.go)."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_session.go:1258",
+      "func": "session show/resume lifecycle",
+      "op": "session.ProjectLifecycle(LifecycleInput{...})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Lifecycle projection over a session bead in cmd_session.go. Session-class read consumer."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_session_pin.go:125",
+      "func": "runSessionPin (gc session pin/unpin)",
+      "op": "store.SetMetadata(id, \"pin_awake\", value)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "pin_awake is session-lifecycle metadata; guarded by IsSessionBeadOrRepairable (line 110). Session-store write outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_stop.go:351",
+      "func": "markCityStopSessionSleepReason",
+      "op": "store.ListByLabel(\"gc:session\", 0) then store.SetMetadata(session.ID, \"sleep_reason\", ...)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Enumerates session beads by gc:session label and WRITES sleep_reason on each during `gc stop` (lines 351/364). Both a session-store read and write outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/providers.go:221",
+      "func": "loadProviderSessionSnapshot",
+      "op": "store.ListByLabel(sessionBeadLabel, 0)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Loads the session-bead snapshot that seeds the runtime provider's name resolution. Label-only session-store read outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/session_index.go:47",
+      "func": "(*sessionIndex).populateIndex",
+      "op": "loadSessionBeads(store)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "One-time scan of session beads to build the in-memory reconciler index. Session-store read outside the named 10 (calls the session_beads.go helper)."
+    },
+    {
+      "fileLine": "cmd/gc/session_bead_snapshot.go:85",
+      "func": "session bead snapshot loader",
+      "op": "sessionpkg.ListAllSessionBeads(store, ListQuery{})",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Loads all session beads into the snapshot used everywhere downstream. Session-store read outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/session_resolve.go:186",
+      "func": "resolveOpenQualifiedAliasBasename",
+      "op": "session.ListAllSessionBeads(store, ListQuery{}) + RepairEmptyType",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Session identifier resolution enumerates session beads and repairs empty types. Session-store read/repair outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/doctor_session_model.go:149",
+      "func": "doctor session-model audit",
+      "op": "session.ListAllSessionBeads(store, ...) + IsSessionBeadOrRepairable filters (49/69/109)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Doctor enumerates the Type=session ∪ gc:session union to audit the session model. Session-store read outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/doctor_work_option_metadata.go:109",
+      "func": "collectWorkOptionMigrationTargets",
+      "op": "loadSessionBeads(store) then SetMetadataBatch(beadID, kvs) at line 246",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Loads session beads (line 109) and migrates session-cleanup metadata via SetMetadataBatch (line 246) on session-bead IDs. Both read and WRITE on session beads, outside the named 10. (Same loop also migrates type=task work beads at line 92 — those stay on work store.)"
+    },
+    {
+      "fileLine": "cmd/gc/doctor_backlog_depth.go:57",
+      "func": "isSessionBead (backlog classifier)",
+      "op": "b.Type == sessionBeadType || hasLabel(b.Labels, sessionBeadLabel)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Classifies beads as the session/control-plane registry for backlog-depth reporting. Read-only session classification consumer outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_mail.go:1134",
+      "func": "mailIdentitySessionCache / identity resolution",
+      "op": "session.ListAllSessionBeads(store, ListQuery{}) (1134/1141) + IsSessionBeadOrRepairable filters (1058/1163)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Mail identity resolution enumerates session beads (memoized) to map senders/recipients to sessions. Session-store reads outside the named 10. No writes."
+    },
+    {
+      "fileLine": "cmd/gc/completion.go:251",
+      "func": "shell completion for session ids",
+      "op": "session.ListAllSessionBeads(store, ...)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Tab-completion enumerates session beads. Session-store read outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/city_status_snapshot.go:412",
+      "func": "city status snapshot",
+      "op": "filter via session.IsSessionBeadOrRepairable + status",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Status snapshot reads session beads to report session health. Read-only session consumer outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/template_resolve.go:252",
+      "func": "template session lookup",
+      "op": "filter via session.IsSessionBeadOrRepairable + status",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Template rendering resolves session beads for the `session` template function (prompt.go:397). Read-only session consumer outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_session_logs.go:249",
+      "func": "session logs id resolution",
+      "op": "filter via sessionpkg.IsSessionBeadOrRepairable",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "`gc session logs` resolves the target session bead. Read-only session consumer outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/compute_awake_bridge.go:36",
+      "func": "buildAwakeInputFromReconciler",
+      "op": "AwakeInput{ReadyWaitSet: readyWaitSet, ...} + ProjectLifecycle per session bead (line 102)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Bridges session beads + the durable-wait ready set into the awake/sleep decision. Pure consumer of already-loaded session+wait beads; the upstream LOAD of readyWaitSet must come from the session store. Outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/compute_awake_set.go:371",
+      "func": "ComputeAwakeSet",
+      "op": "input.ReadyWaitSet[bead.ID] (durable-wait readiness gate on session resume)",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Durable WAIT readiness drives session resume (lines 33/349/370/371). Pure in-memory consumer, but the wait-bead source feeding it is session-class. Outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/pool_session_name.go:405",
+      "func": "liveSessionBeadExistsByIdentity (label-only query)",
+      "op": "ListByLabel(sessionBeadLabel ...) style session-existence probe",
+      "klass": "session",
+      "landmine": false,
+      "evidence": "Probes for a live OPEN session bead by identity (intentional label-only query, see comment 391-405). Session-store read outside the named 10."
+    },
+    {
+      "fileLine": "cmd/gc/pool_session_name.go:364",
+      "func": "releaseOrphanedPoolAssignment",
+      "op": "store.Update(id, UpdateOpts{Assignee:\"\", Status:\"open\", Metadata: withClearedSessionAffinityMetadata + detachedProbe})",
+      "klass": "work",
+      "landmine": true,
+      "evidence": "LANDMINE: this mutates a WORK bead (clears assignee, reopens, clears session-affinity + detached_probe). It is gated on session liveness but operates on the work store and MUST NOT move to the session store."
+    },
+    {
+      "fileLine": "cmd/gc/pool_session_name.go:260",
+      "func": "clearDetachedProbeMetadata",
+      "op": "store.SetMetadata(id, detachedProbeMetadataKey, \"\")",
+      "klass": "work",
+      "landmine": true,
+      "evidence": "LANDMINE: detachedProbeMetadataKey is a WORK-bead metadata contract (detached_probe.go:16-18). Called from session_reconciler.go:3062 on item.bead (a work bead). Stays on work store."
+    },
+    {
+      "fileLine": "cmd/gc/assigned_work_scope.go:113",
+      "func": "assignedWorkScope (assignee→session join)",
+      "op": "sessionBeadAssigneeIdentities(sb) to map WORK beads to session templates",
+      "klass": "work",
+      "landmine": true,
+      "evidence": "LANDMINE-adjacent: reads in-memory session beads only to scope/classify WORK beads (assignee→template). The store ops it informs are work-store ops; session beads are consumed from a passed slice, not queried/mutated here."
+    },
+    {
+      "fileLine": "cmd/gc/pool_desired_state.go:113",
+      "func": "pool desired-state computation",
+      "op": "sessionBeadAssigneeIdentities(sb) (in-memory)",
+      "klass": "work",
+      "landmine": false,
+      "evidence": "Consumes already-loaded session beads to compute pool demand against work; no store op gated here. Informational join, work-side."
+    },
+    {
+      "fileLine": "cmd/gc/session_affinity_metadata.go:28",
+      "func": "clearSessionAffinityMetadataOnBead",
+      "op": "store.SetMetadata(beadID, sessionAffinityKey, \"\") for each key",
+      "klass": "work",
+      "landmine": true,
+      "evidence": "LANDMINE: called from cmd_convoy_dispatch.go:1373 on a convoy SOURCE (work) bead. Despite the 'session' in the name, it clears session-affinity metadata on a WORK bead and stays on the work store."
+    },
+    {
+      "fileLine": "cmd/gc/bead_policy_store.go:278",
+      "func": "policyNameForBead",
+      "op": "case hasBeadLabel(b.Labels, session.LabelSession) || b.Type==session.BeadType -> session; case session.WaitBeadLabel -> wait",
+      "klass": "ambiguous-federated",
+      "evidence": "This IS the per-bead class router that maps session/wait beads to their policy/backend. Not a call site to relocate — it is the classification seam the refactor depends on. Must recognize both session AND wait beads as ClassSessions."
+    },
+    {
+      "fileLine": "cmd/gc/api_state.go:311",
+      "func": "registerSessionStoreBackend / sessionRelocated",
+      "op": "r.Register(coordclass.ClassSessions, store) gated on sessionRelocated(cfg)",
+      "klass": "ambiguous-federated",
+      "evidence": "The federation seam itself: registers the relocated SQLite/Postgres session backend on the Router so session+wait Create/by-id route to it and List federates. Comment (286-296) is explicit that session+wait classify to ClassSessions and the IsSessionBeadOrRepairable/hasNonSessionAssignedWork post-filters keep the split correct. This is the central mechanism, not a missed call site."
+    },
+    {
+      "fileLine": "cmd/gc/class_store.go:208",
+      "func": "class_store classification doc/contract",
+      "op": "type=session/gc:session AND type=gate/gc:wait both -> ClassSessions",
+      "klass": "ambiguous-federated",
+      "evidence": "Documents and implements that BOTH session lifecycle beads and durable session waits (type=gate/gc:wait) classify to ClassSessions. Confirms the wait/gate class is part of the session-store routing surface — any wait-bead op is in scope."
+    }
+  ],
+  "summary": "The hand-written 10-file list misses a large session-bead surface. The biggest gap is cmd/gc/session_reconcile.go (note: distinct from the already-named session_reconciler.go) and cmd/gc/session_sleep.go — together they hold ~17 SetMetadata/SetMetadataBatch writes on session.ID (last_woke_at, churn_count, wake_attempts, rate-limit quarantine, sleep_intent, sleep_policy_*, detached_at, held_until). Two additional session-bead CREATE sites exist outside the named files: session_name_lookup.go:211 (pool create) and adoption_barrier.go:233 (crash adoption), each with follow-up Close/SetMetadata. Other writers: cmd_session.go:1601 (suspend held_until), cmd_session_pin.go:125 (pin_awake), cmd_stop.go:364 (sleep_reason). Many read-only session-store consumers also live outside the list (providers.go, session_index.go, session_bead_snapshot.go, session_resolve.go, doctor_session_model.go, cmd_mail.go, completion.go, city_status_snapshot.go, template_resolve.go, cmd_session_logs.go). The durable-WAIT (gc:wait/type=gate) class is also session-routed: readyWaitSetForList in cmd_session.go:1322 (via loadWaitBeads) and the awake bridge feed it into resume decisions. LANDMINES that must STAY on the work store despite session-sounding names: pool_session_name.go:364 releaseOrphanedPoolAssignment, pool_session_name.go:260 / detached_probe.go clearDetachedProbeMetadata, and session_affinity_metadata.go:28 clearSessionAffinityMetadataOnBead (called on convoy work beads) — all mutate WORK beads. The federation seam itself is api_state.go (registerSessionStoreBackend/sessionRelocated) plus the bead_policy_store.go/class_store.go classifier that routes both session and wait beads to ClassSessions."
+}

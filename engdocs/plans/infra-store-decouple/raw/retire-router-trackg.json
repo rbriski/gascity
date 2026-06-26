@@ -1,0 +1,93 @@
+{
+  "graphReadPaths": [
+    {
+      "path": "GET /v0/beads/ready ReadyGraphOnly fast-path (worker/dispatcher readiness hot loop)",
+      "fileLine": "internal/api/huma_handlers_beads.go:349-350",
+      "howRouterObtained": "NOT a *coordrouter.Router assertion. The store is a generic beads.Store from s.state.BeadStores()/CityBeadStore(). Capability is probed via beads.GraphOnlyReadyFor(store) (internal/beads/ready_graph_only.go:27), which the Router happens to satisfy. quote: `if g, ok := beads.GraphOnlyReadyFor(store); ok { ready, err = g.ReadyGraphOnly() }`",
+      "routerMethod": "ReadyGraphOnly() — via the beads.GraphOnlyReadyStore interface, not the concrete Router. ListGraphOnly/GraphIDPrefix are NOT used here.",
+      "classAwareReplacement": "Already class-aware via interface. The Router's ReadyGraphOnly (internal/coordrouter/router_federation.go:167) returns the ClassGraph backend's ready set alone; a non-Router store that implements GraphOnlyReadyStore (or a plain store, falling through to Live.Ready) is a drop-in. No change needed at this call site when the Router is retired — only the implementation behind the interface must move."
+    },
+    {
+      "path": "?type=molecule augment (GET /v0/beads list, gc.kind=workflow second query)",
+      "fileLine": "internal/api/huma_handlers_beads.go:121-134 (augment query) + :153 store.List(query)",
+      "howRouterObtained": "Does NOT call any Router graph method. The augment simply appends a second beads.ListQuery with Metadata{gc.kind:workflow} and runs it through the ordinary store.List(query) federation (line 153) over each rig store from s.state.BeadStores(). The prompt's premise that this path calls ReadyGraphOnly is incorrect — ReadyGraphOnly lives only on the /v0/beads/ready handler (line 349). The molecule augment is a plain federated List with a metadata filter.",
+      "routerMethod": "none (store.List) — no ReadyGraphOnly/ListGraphOnly/GraphIDPrefix",
+      "classAwareReplacement": "Nothing to change: store.List already routes through whatever store is configured (Router today, explicit handles later). No Router method on this path."
+    },
+    {
+      "path": "dispatcher root-scoped scope-check List (liveListForRoot)",
+      "fileLine": "internal/dispatch/runtime.go:441-446",
+      "howRouterObtained": "Via interface: beads.GraphOnlyListFor(store) (internal/beads/graph_only_list.go:28). store is a generic beads.Store passed in. quote: `if gol, ok := beads.GraphOnlyListFor(store); ok { if pfx := gol.GraphIDPrefix(); pfx != \"\" && strings.HasPrefix(rootID, pfx+\"-\") { return gol.ListGraphOnly(query) } }`",
+      "routerMethod": "GraphIDPrefix() + ListGraphOnly() via beads.GraphOnlyListStore interface",
+      "classAwareReplacement": "Already interface-mediated; storeref.PrefixOwner gives the same prefix routing over an explicit []beads.Store. Drop-in once the underlying store provides the capability without a Router."
+    },
+    {
+      "path": "order gate storesForGate (order dispatch single-flight + last-run/cursor)",
+      "fileLine": "cmd/gc/order_dispatch.go:512-562",
+      "howRouterObtained": "EXPLICIT HANDLES, not the Router and not any graph-only method. storesForGate is built as []beads.Store{store} (line 512) where store comes from m.storeFn(target) (line 503), then appends legacyStore (m.legacyCityStoreForTarget, line 513/518) and the relocated orderStore (m.orderStoreFor(store) asserted to beads.Store, line 530-531). All gate reads (trackingIndex.hasOpenTracking, orders.LastRunAcrossStores, orders.CursorAcrossStores, bdCursorAcrossStores) iterate this explicit slice. quote: `storesForGate := []beads.Store{store}` ... `if obs, ok := orderStore.(beads.Store); ok && obs != store { storesForGate = append([]beads.Store{obs}, storesForGate...) }`",
+      "routerMethod": "NONE — reads graph/orders via explicit beads.Store handles, never Router graph methods. This path is already off the Router.",
+      "classAwareReplacement": "No change needed; it is the model for the post-Router pattern (caller assembles an explicit []beads.Store)."
+    },
+    {
+      "path": "controller-demand awake/readiness gate (liveReadyForControllerDemandQuery)",
+      "fileLine": "cmd/gc/build_desired_state.go:1762-1766",
+      "howRouterObtained": "interface beads.GraphOnlyReadyFor(store); falls back to beads.HandlesFor(store).Live.Ready",
+      "routerMethod": "ReadyGraphOnly() via GraphOnlyReadyStore interface",
+      "classAwareReplacement": "interface drop-in; no concrete Router dependency"
+    },
+    {
+      "path": "gc ready CLI (readyStoreSet)",
+      "fileLine": "cmd/gc/cmd_ready.go:181-183",
+      "howRouterObtained": "interface beads.GraphOnlyReadyFor(store); else store.Ready",
+      "routerMethod": "ReadyGraphOnly() via interface",
+      "classAwareReplacement": "interface drop-in"
+    },
+    {
+      "path": "session reconciler graph-only awake-work probes",
+      "fileLine": "cmd/gc/session_reconciler.go:2804 (ListGraphOnly) and :2853 (ReadyGraphOnly)",
+      "howRouterObtained": "interface beads.GraphOnlyListFor / beads.GraphOnlyReadyFor on a beads.Store",
+      "routerMethod": "ListGraphOnly(), ReadyGraphOnly() via interfaces",
+      "classAwareReplacement": "interface drop-in"
+    },
+    {
+      "path": "orphan-release strand heal (pool_session_name)",
+      "fileLine": "cmd/gc/pool_session_name.go:199-201",
+      "howRouterObtained": "interface beads.GraphOnlyListFor(store)",
+      "routerMethod": "GraphIDPrefix() via GraphOnlyListStore interface",
+      "classAwareReplacement": "storeref.PrefixOwner over explicit []beads.Store is the equivalent"
+    },
+    {
+      "path": "bead policy store graph-only forwarding wrapper",
+      "fileLine": "cmd/gc/bead_policy_store.go:108 (ReadyGraphOnlyHandle) + :120-121 (ReadyGraphOnly)",
+      "howRouterObtained": "This is the wrapper side: beadPolicyStore implements GraphOnlyReadyProvider by forwarding to its inner store's handle (so the policy wrapper does not hide the Router's capability). Not a Router assertion.",
+      "routerMethod": "forwards ReadyGraphOnly through the GraphOnlyReadyProvider/Store interface",
+      "classAwareReplacement": "Keep the forwarding wrapper; it is store-agnostic and survives Router retirement unchanged."
+    }
+  ],
+  "byIdResolver": "There are TWO distinct resolvers; the prompt conflates them. (1) dispatch.ProcessOptions.ResolveStoreRef (internal/dispatch/runtime.go:55, `ResolveStoreRef func(ref string) (beads.Store, error)`) is a STORE-REF-SCHEME resolver, NOT a (storeRef,id) by-id resolver. It maps gc.source_store_ref strings ('city:<name>' / 'rig:<name>') to a whole beads.Store. It is populated in cmd/gc/cmd_convoy_dispatch.go:205 `opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)`; the closure is makeStoreRefResolver (cmd/gc/cmd_convoy_dispatch.go:324-360). It uses NEITHER coordrouter.backendForID NOR storeref.Resolve — it opens stores by scope via openStoreAtForCity(cityPath, cityPath) for 'city:' and openControlStoreAtForCity(rig.Path, cityPath, cfg) for 'rig:'. Consumed at internal/dispatch/runtime.go:827-833 to walk the source-bead chain across store boundaries. (2) The actual (id -> owning store) by-id read federation lives on the Router today: coordrouter.Router.prefixBackendForID (internal/coordrouter/router_federation.go:41) + backendForID (internal/coordrouter/router_mutation.go:21), used by Router.Get (router_federation.go:57/61) and every by-id mutation (Update/Close/Reopen/Delete/SetMetadata/DepAdd/etc. in router_mutation.go). Its standalone successor is internal/storeref (PrefixOwner + Resolve), which is NOT yet wired into any production caller.",
+  "storerefReady": "READY and UNUSED in production. internal/storeref/storeref.go defines PrefixOwner (line 31, routes purely on static IDPrefix(), mirrors Router.prefixBackendForID) and Resolve (line 51, tries the prefix owner then probes every store, returns beads.ErrNotFound; mirrors Router.Get's multi-backend body and is documented as 'a drop-in for the Router's by-id read once the Router is deleted'). It also defines the HasIDPrefix interface (line 22-24). Zero non-test callers: the only references to storeref.PrefixOwner/storeref.Resolve are in internal/storeref/storeref_test.go (TestResolve_MatchesRouterGet pins it to Router.Get). The only non-test file importing internal/storeref is internal/beads/postgres_store.go, and that is a COMMENT only (postgres_store.go:296 'resolver (internal/storeref) routes ids to it') — no symbol use. So the package is implemented, conformance-pinned to the Router, and dark.",
+  "coordrouterDeleteSurface": [
+    "cmd/gc/api_state.go:25 — import \"github.com/gastownhall/gascity/internal/coordrouter\" (the ONLY non-test production import of the package)",
+    "cmd/gc/api_state.go:199 — existingRouter, _ := baseStore.(*coordrouter.Router) (type assertion in the caching-store builder)",
+    "cmd/gc/api_state.go:202 — workBackend = existingRouter.Backend(coordclass.ClassWork) (Router.Backend)",
+    "cmd/gc/api_state.go:221 — existingRouter.Register(coordclass.ClassWork, cs) (Router.Register, swaps work backend to the cache)",
+    "cmd/gc/api_state.go:250 — router := coordrouter.New(workBackend) (the ONLY production constructor call, in routedPolicyStore)",
+    "cmd/gc/api_state.go:311 — func registerSessionStoreBackend(r *coordrouter.Router, ...) {  ... r.Register(coordclass.ClassSessions, store) at :315 and :319",
+    "cmd/gc/api_state.go:368 — func registerGraphStoreBackend(r *coordrouter.Router, ...) { ... r.Register(coordclass.ClassGraph, store) at :380",
+    "cmd/gc/api_state.go:389 — func registerGraphStoreSQLite(r *coordrouter.Router, ...) { ... r.Register(coordclass.ClassGraph, cached) at :392 and r.Register(coordclass.ClassGraph, shared) at :413",
+    "cmd/gc/api_state.go:860 — if router, ok := store.(*coordrouter.Router); ok { (type assertion in closeBeadStoreHandle)",
+    "cmd/gc/api_state.go:865 — for _, backend := range router.Backends() { (Router.Backends, to peel backends for close/StopReconciler)",
+    "NOTE: the package internals (internal/coordrouter/router*.go, stores.go, bdgraphstore.go) are the deletion target itself. internal/coordrouter/coordtest/conformance.go imports coordrouter but is a TEST-helper package. The Router's by-id/list/ready/mutation methods (Get/List/Ready/ReadyGraphOnly/ListGraphOnly/Update/Close/etc.) have NO direct production callers — every consumer reaches them through the beads.Store interface or the GraphOnlyReady/GraphOnlyList capability interfaces, so retiring the Router is concentrated entirely in api_state.go plus deleting the package."
+  ],
+  "coordclassSurvivors": [
+    "internal/storemigrate/migrate.go:80 — coordclass.Classify(b) inside ClassSelector (selects beads by class for store migration) — PRODUCTION SURVIVOR",
+    "internal/storemigrate/migrate.go:86 — coordclass.Classes() in classByName (resolve class name to Class) — PRODUCTION SURVIVOR",
+    "internal/storemigrate/migrate.go:91 — coordclass.ClassWork fallback — PRODUCTION SURVIVOR",
+    "cmd/gc/cmd_beads_migrate.go:184 — storemigrate.ClassSelector(class) (transitive coordclass.Classify) — PRODUCTION SURVIVOR",
+    "cmd/gc/cmd_beads_postgres.go:206 — storemigrate.ClassSelector(class) (transitive coordclass.Classify) — PRODUCTION SURVIVOR",
+    "cmd/gc/api_state.go:202,221,315,319,380,392,413 — coordclass.ClassWork/ClassSessions/ClassGraph constants used in Router.Register/Backend calls (these DIE with the Router; they are NOT independent coordclass survivors)",
+    "internal/config/config.go:1332,1376 — comments only mirroring Class.String(), no symbol dependency",
+    "coordclass.ClassifyGraphPlan has NO production caller outside internal/coordrouter (router.go:151,167) — it dies with the Router unless a future graph-apply router keeps it. coordclass.Classify+Classes survive via storemigrate. So coordclass the PACKAGE survives (storemigrate depends on Classify/Classes/ClassWork), but ClassifyGraphPlan's only callers are the Router."
+  ],
+  "summary": "Verified the Track-G Router surface against current code on branch plan/decouple-infra-beads. Key correction to the task's premises: (1) The graph READ paths do NOT type-assert *coordrouter.Router — every one of them (ready fast-path internal/api/huma_handlers_beads.go:349-350; dispatch scope-check internal/dispatch/runtime.go:441-446; build_desired_state.go:1762; cmd_ready.go:181; session_reconciler.go:2804/2853; pool_session_name.go:199) goes through the beads.GraphOnlyReadyFor / beads.GraphOnlyListFor capability interfaces (internal/beads/ready_graph_only.go, graph_only_list.go) which the Router merely satisfies. So those call sites need NO change when the Router is retired; only the implementation behind the interface moves. (2) The ?type=molecule augment (huma_handlers_beads.go:121-134) is a plain federated store.List(query) with a gc.kind=workflow metadata filter — it never calls ReadyGraphOnly or any Router method. (3) The order gate storesForGate (cmd/gc/order_dispatch.go:512-562) already reads via EXPLICIT []beads.Store handles, not the Router — it is the template for the post-Router pattern. (4) The entire production coordrouter delete surface is concentrated in ONE file, cmd/gc/api_state.go (import + coordrouter.New at :250 + two *coordrouter.Router assertions at :199 and :860 + Register/Backend/Backends calls); no other production file imports or calls the Router type. (5) The by-id resolver successor internal/storeref (PrefixOwner + Resolve) is fully implemented, conformance-pinned to Router.Get in storeref_test.go, and has ZERO production callers. (6) The dispatch ResolveStoreRef field is a store-ref-SCHEME resolver (city:/rig: -> store via openStoreAtForCity), not a by-id resolver, and uses neither backendForID nor storeref.Resolve. (7) coordclass SURVIVES via internal/storemigrate (Classify/Classes/ClassWork) reached from cmd/gc/cmd_beads_migrate.go:184 and cmd_beads_postgres.go:206; only ClassifyGraphPlan is Router-exclusive and would die with it. Relevant files (absolute): /data/projects/gascity/.claude/worktrees/infra-store-plan/cmd/gc/api_state.go, /internal/api/huma_handlers_beads.go, /internal/dispatch/runtime.go, /cmd/gc/order_dispatch.go, /cmd/gc/cmd_convoy_dispatch.go, /internal/storeref/storeref.go, /internal/coordrouter/router*.go, /internal/coordclass/classify.go, /internal/storemigrate/migrate.go, /internal/beads/ready_graph_only.go, /internal/beads/graph_only_list.go."
+}

@@ -154,47 +154,85 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		return nil, fmt.Errorf("no adapter for %s/%s", req.Conversation.Provider, req.Conversation.AccountID)
 	}
 
-	// Step 4: Publish. SessionID is propagated to the adapter as a
-	// first-class field on PublishRequest (gc-kvt); adapters that need
-	// per-session behavior (e.g. Slack identity overrides) read it
-	// directly. The caller-supplied metadata flows through unchanged.
+	now := time.Now()
+
+	// Step 4: Append the outbound transcript entry BEFORE publishing.
 	//
-	// Field-by-field assignment is intentional even though the structs
-	// currently share a shape — OutboundRequest is the API caller's input
-	// surface and PublishRequest is the gc-to-adapter wire contract; any
-	// future divergence (e.g. an internal-only OutboundRequest field)
-	// must not silently leak onto the wire.
-	receipt, err := adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // S1016: field-by-field copy is intentional, not a struct conversion — see comment above
+	// The transcript assigns the monotonic per-conversation sequence, and the
+	// connected-client live SSE event must carry that exact value as its `id:`
+	// (wire contract §4.1) so a reconnecting client's Last-Event-ID resumes
+	// from the right point instead of replaying the whole transcript. The
+	// sequence is only knowable after the append, so the append must precede
+	// the publish. The transcript is also the authoritative outbound record,
+	// so writing it first keeps a reply durable (and backfill-replayable) even
+	// when no live subscriber is currently attached.
+	//
+	// provider_message_id is intentionally not set here: for out-of-process
+	// adapters it only comes back on the publish receipt, which has not run
+	// yet. No outbound consumer reads it and outbound is not internally
+	// retried, so the provider-message dedup it feeds is not exercised on this
+	// path.
+	var transcriptEntry *ConversationTranscriptRecord
+	var sequence int64
+	// Transcript append is non-fatal: on failure we still publish, just
+	// without a durable record and with sequence 0 on the live event (the
+	// pre-existing degraded behavior for an append failure).
+	if entry, appendErr := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		Caller:          caller,
+		Conversation:    req.Conversation,
+		Kind:            TranscriptMessageOutbound,
+		Provenance:      TranscriptProvenanceLive,
+		Text:            req.Text,
+		SourceSessionID: req.SessionID,
+		CreatedAt:       now,
+		Metadata:        req.Metadata,
+	}); appendErr == nil {
+		transcriptEntry = &entry
+		sequence = entry.Sequence
+	}
+
+	// Step 5: Publish, carrying the transcript sequence assigned above.
+	// SessionID is propagated to the adapter as a first-class field on
+	// PublishRequest (gc-kvt); adapters that need per-session behavior (e.g.
+	// Slack identity overrides) read it directly, and the caller-supplied
+	// metadata flows through unchanged.
+	//
+	// Field-by-field assignment is intentional: OutboundRequest is the API
+	// caller's input surface and PublishRequest is the gc-to-adapter wire
+	// contract. They no longer share a shape (PublishRequest carries
+	// Sequence), and any future divergence must not silently leak onto the
+	// wire.
+	receipt, err := adapter.Publish(ctx, PublishRequest{
 		SessionID:        req.SessionID,
 		Conversation:     req.Conversation,
 		Text:             req.Text,
 		ReplyToMessageID: req.ReplyToMessageID,
 		IdempotencyKey:   req.IdempotencyKey,
+		Sequence:         sequence,
 		Metadata:         req.Metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("adapter publish: %w", err)
 	}
 
-	result := &OutboundResult{Receipt: *receipt}
+	result := &OutboundResult{Receipt: *receipt, TranscriptEntry: transcriptEntry}
 
-	// If the publish was not delivered, return the receipt without recording.
+	// If the publish was not delivered, return without recording delivery
+	// context. The transcript entry above is retained: it is the durable
+	// outbound record and drives connected-client backfill on reconnect.
 	if !receipt.Delivered {
 		return result, nil
 	}
 
-	// Step 5: Record delivery context (session-binding path only).
+	// Step 6: Record delivery context (session-binding path only).
 	//
 	// Delivery context tracks per-binding publish state and requires a
-	// non-zero BindingGeneration tied to an active binding — neither
-	// applies on the group fallback path. Recording is intentionally
-	// skipped there; transcript append below still runs and remains the
-	// authoritative outbound record for group flows. The agent-binding
-	// path is skipped for the same reason: the delivery service
-	// revalidates ownership against the binding's session ID, which an
-	// agent binding does not pin, so the transcript is the authoritative
-	// outbound record there too.
-	now := time.Now()
+	// non-zero BindingGeneration tied to an active binding — neither applies
+	// on the group fallback path, so recording is skipped there; the
+	// transcript appended above remains the authoritative outbound record for
+	// group flows. The agent-binding path is skipped for the same reason: the
+	// delivery service revalidates ownership against the binding's session ID,
+	// which an agent binding does not pin.
 	if binding != nil && !agentBound {
 		dc := DeliveryContextRecord{
 			SessionID:         publishingSession,
@@ -212,24 +250,6 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		} else {
 			result.DeliveryContext = &dc
 		}
-	}
-
-	// Step 6: Append outbound transcript entry.
-	entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
-		Caller:            caller,
-		Conversation:      req.Conversation,
-		Kind:              TranscriptMessageOutbound,
-		Provenance:        TranscriptProvenanceLive,
-		ProviderMessageID: receipt.MessageID,
-		Text:              req.Text,
-		SourceSessionID:   req.SessionID,
-		CreatedAt:         now,
-		Metadata:          req.Metadata,
-	})
-	// Transcript append is non-fatal (whether hydration-pending or otherwise);
-	// the message was already published. If it failed, the entry was not written.
-	if err == nil {
-		result.TranscriptEntry = &entry
 	}
 
 	// Step 7: Emit event.

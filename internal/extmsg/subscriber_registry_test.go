@@ -3,6 +3,7 @@ package extmsg
 import (
 	"bytes"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 )
@@ -97,6 +98,75 @@ func TestSubscriberRegistry_CancelRemovesEntry(t *testing.T) {
 	receipt := r.Publish(ref, event)
 	if receipt.Delivered {
 		t.Fatal("Publish after cancel: Delivered = true, want false")
+	}
+}
+
+func TestSubscriberRegistry_PublishDoesNotPanicOnConcurrentCancel(t *testing.T) {
+	// Regression: Publish must never send on a closed channel (panic) when a
+	// cancel races it — the exact crash that happens when a session replies
+	// at the same moment its SSE client disconnects. Run under -race to also
+	// catch the data race the previous unlocked send carried.
+	for iter := 0; iter < 300; iter++ {
+		r := NewSubscriberRegistry()
+		ref := testConversationRef()
+		_, cancel := r.Subscribe(ref, 1)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			// A send on a closed channel panics; recover and fail the test so
+			// the regression is caught even without -race.
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Errorf("Publish panicked under concurrent cancel: %v", rec)
+				}
+			}()
+			for i := 0; i < 64; i++ {
+				r.Publish(ref, NewSSEMessageEvent("x", "s", ref, int64(i), time.Now()))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			cancel()
+		}()
+		wg.Wait()
+	}
+}
+
+func TestSubscriberRegistry_ResubscribeClosesOldChannel(t *testing.T) {
+	r := NewSubscriberRegistry()
+	ref := testConversationRef()
+
+	oldCh, _ := r.Subscribe(ref, 4)
+	// A second Subscribe for the same conversation must replace the first
+	// without self-deadlocking (the old code called old.cancel() while holding
+	// r.mu, which re-locks r.mu). Reaching the next line at all proves there is
+	// no deadlock.
+	newCh, cancel := r.Subscribe(ref, 4)
+	defer cancel()
+
+	// The replaced channel must be closed, not leaked.
+	select {
+	case _, ok := <-oldCh:
+		if ok {
+			t.Fatal("old channel delivered an event; want closed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old channel was not closed after resubscribe")
+	}
+
+	// The new channel is live and receives publishes.
+	receipt := r.Publish(ref, NewSSEMessageEvent("hi", "s", ref, 1, time.Now()))
+	if !receipt.Delivered {
+		t.Fatal("Publish to resubscribed channel: Delivered = false, want true")
+	}
+	got, ok := <-newCh
+	if !ok {
+		t.Fatal("new channel closed unexpectedly")
+	}
+	if msg, ok := got.(SSEMessageEvent); !ok || msg.Text != "hi" {
+		t.Fatalf("new channel got %#v, want message %q", got, "hi")
 	}
 }
 

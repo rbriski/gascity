@@ -131,6 +131,45 @@ func TestHandleOutbound_BindingPathUnchanged(t *testing.T) {
 	}
 }
 
+func TestHandleOutbound_ThreadsTranscriptSequenceToPublish(t *testing.T) {
+	freezeTestClock(t)
+	fabric, adapter, _, deps := newOutboundTestRig(t)
+	ref := testConversationRef()
+
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-bound",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	// Two replies on the same conversation: the live publish must carry the
+	// monotonic transcript sequence assigned to each (1, then 2), not the
+	// hardcoded 0 that made every reconnecting client replay the whole
+	// transcript via Last-Event-ID: 0.
+	for i, text := range []string{"first", "second"} {
+		result, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+			SessionID:    "sess-bound",
+			Conversation: ref,
+			Text:         text,
+		})
+		if err != nil {
+			t.Fatalf("HandleOutbound[%d]: %v", i, err)
+		}
+		wantSeq := int64(i + 1)
+		if result.TranscriptEntry == nil {
+			t.Fatalf("HandleOutbound[%d]: TranscriptEntry = nil, want appended", i)
+		}
+		if result.TranscriptEntry.Sequence != wantSeq {
+			t.Fatalf("transcript sequence = %d, want %d", result.TranscriptEntry.Sequence, wantSeq)
+		}
+		if got := adapter.publishs[i].Sequence; got != wantSeq {
+			t.Fatalf("published PublishRequest.Sequence = %d, want %d (must equal transcript sequence)", got, wantSeq)
+		}
+	}
+}
+
 func TestHandleOutbound_RoomBoundParticipantPublishes(t *testing.T) {
 	freezeTestClock(t)
 	fabric, adapter, _, deps := newOutboundTestRig(t)

@@ -4409,7 +4409,7 @@ func TestCloseBeadReleasesWorkAssignedBySessionName(t *testing.T) {
 		t.Fatalf("set work in_progress: %v", err)
 	}
 
-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
 		t.Fatal("closeBead returned false, want true")
 	}
 
@@ -4430,6 +4430,96 @@ func TestCloseBeadReleasesWorkAssignedBySessionName(t *testing.T) {
 	}
 	if gotWork.Status != "open" {
 		t.Errorf("work status = %q, want open", gotWork.Status)
+	}
+}
+
+// TestCloseBeadRoutesSessionAndWorkLegsToSeparateStores is the seed of the
+// Phase-7 mass-closure guard for retiring the coordrouter.Router. It proves
+// closeBead routes its two legs to the two distinct stores it now takes: the
+// session-bead lifecycle (Get/ClosePatch/Close) lands on sessionStore, and the
+// work-release (releaseWorkFromClosedSessionBead) lands on workStore — never the
+// session store. A decoy WORK bead seeded into the SESSION store (assigned to
+// the same session) must survive, proving the work read does not federate into
+// the session backend (which, when relocated, is empty of work; a regression
+// there would close sessions that still hold live work).
+func TestCloseBeadRoutesSessionAndWorkLegsToSeparateStores(t *testing.T) {
+	sessionStore := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+
+	sessionBead, err := sessionStore.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-gm-dead",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead on sessionStore: %v", err)
+	}
+
+	work, err := workStore.Create(beads.Bead{
+		Title:    "real work",
+		Assignee: "worker-gm-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead on workStore: %v", err)
+	}
+	if err := workStore.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	// Decoy: a work bead assigned to the same session but physically on the
+	// SESSION store. If the work-release leg wrongly reads the session store, it
+	// would release this decoy; correct routing leaves it untouched.
+	decoy, err := sessionStore.Create(beads.Bead{
+		Title:    "decoy work that must not be touched",
+		Assignee: "worker-gm-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create decoy work bead on sessionStore: %v", err)
+	}
+	if err := sessionStore.Update(decoy.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set decoy in_progress: %v", err)
+	}
+
+	if !closeBead(sessionStore, workStore, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	// Session leg landed on the session store.
+	gotSess, err := sessionStore.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead from sessionStore: %v", err)
+	}
+	if gotSess.Status != "closed" {
+		t.Fatalf("session status = %q, want closed (the close leg must land on sessionStore)", gotSess.Status)
+	}
+
+	// Work-release leg landed on the work store.
+	gotWork, err := workStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead from workStore: %v", err)
+	}
+	if gotWork.Assignee != "" {
+		t.Errorf("workStore work assignee = %q, want empty (the work-release leg must land on workStore)", gotWork.Assignee)
+	}
+	if gotWork.Status != "open" {
+		t.Errorf("workStore work status = %q, want open", gotWork.Status)
+	}
+
+	// The decoy on the session store was NOT touched — the work read never
+	// reached the session backend. This is the mass-closure boundary.
+	gotDecoy, err := sessionStore.Get(decoy.ID)
+	if err != nil {
+		t.Fatalf("get decoy from sessionStore: %v", err)
+	}
+	if gotDecoy.Assignee != "worker-gm-dead" || gotDecoy.Status != "in_progress" {
+		t.Fatalf("decoy on sessionStore was released (assignee=%q status=%q) — the work-release leg leaked into the session store", gotDecoy.Assignee, gotDecoy.Status)
 	}
 }
 
@@ -4466,7 +4556,7 @@ func TestCloseBeadClearsSessionAffinityOnRelease(t *testing.T) {
 		t.Fatalf("set work in_progress: %v", err)
 	}
 
-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
 		t.Fatal("closeBead returned false, want true")
 	}
 
@@ -4513,7 +4603,7 @@ func TestCloseBeadReleasesWorkAssignedByBeadID(t *testing.T) {
 		t.Fatalf("set work in_progress: %v", err)
 	}
 
-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
 		t.Fatal("closeBead returned false, want true")
 	}
 
@@ -4557,7 +4647,7 @@ func TestCloseBeadReleasesWorkAssignedByNamedIdentity(t *testing.T) {
 		t.Fatalf("set work in_progress: %v", err)
 	}
 
-	if !closeBead(store, sessionBead.ID, "suspended", now, ioDiscard{}) {
+	if !closeBead(store, store, sessionBead.ID, "suspended", now, ioDiscard{}) {
 		t.Fatal("closeBead returned false, want true")
 	}
 
@@ -4598,7 +4688,7 @@ func TestCloseBeadLeavesUnrelatedWorkAlone(t *testing.T) {
 		t.Fatalf("set other in_progress: %v", err)
 	}
 
-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
 		t.Fatal("closeBead returned false, want true")
 	}
 
@@ -4642,7 +4732,7 @@ func TestCloseBeadReleasesWorkAssignedByAlias(t *testing.T) {
 		t.Fatalf("set work in_progress: %v", err)
 	}
 
-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
 		t.Fatal("closeBead returned false, want true")
 	}
 
@@ -7557,7 +7647,7 @@ func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
-	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+	if !closeBead(store, store, sessionBead.ID, "stale-session", now, &stderr) {
 		t.Fatalf("closeBead returned false; want true because ownership gating belongs to closeSessionBeadIfUnassigned: stderr=%s", stderr.String())
 	}
 	got, err := store.Get(sessionBead.ID)
@@ -7597,7 +7687,7 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
 
 	// First close transitions the bead to closed and stamps close_reason.
-	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+	if !closeBead(store, store, sessionBead.ID, "stale-session", now, &stderr) {
 		t.Fatalf("first closeBead returned false: stderr=%s", stderr.String())
 	}
 	afterFirst, err := store.Get(sessionBead.ID)
@@ -7611,7 +7701,7 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
 	// Second close on the already-closed bead must return false and must
 	// leave metadata identical to the post-first-close snapshot — no
 	// re-stamp of close_reason, closed_at, or state.
-	if closeBead(store, sessionBead.ID, "orphaned", now.Add(time.Minute), &stderr) {
+	if closeBead(store, store, sessionBead.ID, "orphaned", now.Add(time.Minute), &stderr) {
 		t.Fatalf("closeBead on already-closed bead returned true; want false")
 	}
 	afterSecond, err := store.Get(sessionBead.ID)
@@ -7797,7 +7887,7 @@ func TestCloseBeadCascadesExtmsgState(t *testing.T) {
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
-	if !closeBead(store, sessionBead.ID, "drained", now, &stderr) {
+	if !closeBead(store, store, sessionBead.ID, "drained", now, &stderr) {
 		t.Fatalf("closeBead returned false; want true: stderr=%s", stderr.String())
 	}
 

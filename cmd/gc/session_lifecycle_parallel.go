@@ -2062,7 +2062,7 @@ func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time
 			session.Metadata["session_name"] = ""
 		}
 	}
-	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+	closeBead(store, store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
 }
 
 func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {

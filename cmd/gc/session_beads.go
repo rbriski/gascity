@@ -1913,7 +1913,7 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
-		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
+		if closeBead(store, store, b.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -2009,7 +2009,7 @@ func cleanupDeadRuntimeSessionCorpses(
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
 		if store != nil {
-			closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
+			closeBead(store, store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
 	}
@@ -2215,7 +2215,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if isFailedCreateSessionBead(b) {
 		return closeFailedCreateBead(store, b.ID, now, stderr)
 	}
-	return closeBead(store, b.ID, closeReason, now, stderr)
+	return closeBead(store, store, b.ID, closeReason, now, stderr)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -2279,7 +2279,16 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 // have their assignee cleared and their status reset to "open" so the
 // pool reconciler can re-pick them. Without this, work orphaned by a
 // reap stays orphaned until someone clears the assignee by hand.
-func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+//
+// closeBead takes the session and work stores SEPARATELY so the controller
+// can become class-aware (retiring the coordrouter.Router): the session-bead
+// lifecycle legs (Get snapshot, ClosePatch, Close, wait/extmsg cancel) use
+// sessionStore, while the work-release leg (releaseWorkFromClosedSessionBead)
+// uses workStore. This is the mass-closure boundary in code form — the work
+// read must never reach the (empty, when relocated) session store, or a
+// session would be closed while it still holds live work. At the default bd
+// backend sessionStore == workStore, so it is byte-identical.
+func closeBead(sessionStore, workStore beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -2297,17 +2306,17 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// We reuse this Get result as the snapshot for releaseWorkFromClosedSessionBead.
 	// A missing/failed Get is non-fatal — we still attempt the close, and
 	// releaseOrphanedPoolAssignments on the next tick is our idempotent fallback.
-	snapshot, snapshotErr := store.Get(id)
+	snapshot, snapshotErr := sessionStore.Get(id)
 	if snapshotErr == nil && snapshot.Status == "closed" {
 		return false
 	}
 	if reason == string(session.StateFailedCreate) {
-		return closeFailedCreateBead(store, id, now, stderr)
+		return closeFailedCreateBead(sessionStore, id, now, stderr)
 	}
-	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
+	if setMetaBatch(sessionStore, id, session.ClosePatch(now, reason), stderr) != nil {
 		return false
 	}
-	if err := store.Close(id); err != nil {
+	if err := sessionStore.Close(id); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
@@ -2315,10 +2324,12 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// named-session retirement calls this directly at
 	// retireRemovedConfiguredNamedSessionBead. Without it, pool respawn
 	// leaves zombie memberships and the successor never re-binds to
-	// slack (#1939).
-	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
+	// slack (#1939). The wait cancel inside is session-class; the extmsg
+	// cancel is work-class — that internal split lands in a later phase (the
+	// stores are identical at the default backend, so it is byte-identical now).
+	cancelStateAssignedToRetiredSessionBead(sessionStore, id, now, stderr)
 	if snapshotErr == nil {
-		releaseWorkFromClosedSessionBead(store, snapshot, stderr)
+		releaseWorkFromClosedSessionBead(workStore, snapshot, stderr)
 	}
 	return true
 }

@@ -1,6 +1,19 @@
 # Infra-Store Decouple — Next Session
 
-Branch `plan/decouple-infra-beads` @ `b47f5daa3` · worktree `/data/projects/gascity/.claude/worktrees/infra-store-plan`
+Branch `plan/decouple-infra-beads` @ `1bf1cd3a5` · worktree `/data/projects/gascity/.claude/worktrees/infra-store-plan`
+
+> **STATUS 2026-06-26 (later session): §4 NUDGES ✅ DONE, §5 graph Step-0 guard ✅ DONE.**
+> Nudges fully relocated (`d722e45b9` seam + `1d45620f8` untangle) and the graph
+> config-conflict guard landed (`1bf1cd3a5`) — both byte-identical at the default
+> backend, verified by the Nudge/Wait/Sweep/Sling/Dispatch suites + the sharded
+> `make test-cmd-gc-process-parallel` guard. **Pick up at §5 graph P6 Step 1**
+> (promote the GraphStore read/finalize surface — additive, reversible), then the
+> ordered P6 steps, then §6 sessions P5. NOTE: §4's mixed-fn list was incomplete —
+> the executed untangle also split `finalizeReadyWaitFromNudge` /
+> `prepareWaitWakeStateForCityWithSnapshot` / `nextWaitDeliveryAttempt`
+> (+`cmdWaitSetStateResult`/`retryClosedWait`); always grep EVERY nudge-bead op,
+> don't trust a fixed list. New secondary `loadCityConfig` loads need `io.Discard`
+> (arch guard `TestNonTestLoadCityConfigCallersPassWarningWriter`).
 
 > **Mission.** Move infra bead classes (sessions, mail, orders, nudges, graph) off the bd/Dolt work store onto per-class backends (`bd|sqlite|postgres`) selected by `[beads.classes.<class>].backend`, keeping bd/Dolt for front-door work. **The bar is ZERO behavior change at the DEFAULT backend (byte-identical), proven by conformance.**
 
@@ -54,7 +67,13 @@ Execute the remaining classes **full**, phased + verified, in this order: **nudg
 
 ---
 
-## 4. NUDGES — full relocation (reversible; do first)
+## 4. NUDGES — full relocation ✅ DONE (`d722e45b9` + `1d45620f8`)
+
+> **✅ LANDED 2026-06-26.** Executed as written PLUS the three sites the list
+> below missed (`finalizeReadyWaitFromNudge`,
+> `prepareWaitWakeStateForCityWithSnapshot`, `nextWaitDeliveryAttempt` +
+> `cmdWaitSetStateResult`/`retryClosedWait`). Byte-identical at default; full
+> suite + sharded guard green. The rest of this section is the executed record.
 
 The nudge **bead is a pure shadow**: `dispatchAllQueuedNudges` (`nudge_dispatcher.go:122`) loads dispatch state from the flock-guarded queue file via `nudgequeue.LoadState(cityPath)`; the bead is "its persistent shadow" (`nudgequeue/store.go:11-13`). Relocating the bead cannot change dispatch semantics. The leaf ops already take `nudgequeue.NudgeStore` (`var _ NudgeStore = beads.Store(nil)`, `internal/nudgequeue/store.go:14-25`); the P1-nudges seam landed byte-identically in `303a80158`.
 
@@ -131,6 +150,14 @@ go vet ./...
 ### Why graph is different (verified)
 
 Graph routes via `coordrouter.Router`, **NOT** `resolveClassStore` — there is no `resolveGraphStore`. The Router is built only in `routedPolicyStore` (`cmd/gc/api_state.go:240-247`), gated on `graphStoreSQLiteEnabled` (`:272-274`) which reads ONLY the legacy `cfg.Beads.GraphStore` knob; `registerGraphStoreBackend` (`:318-346`) registers only a **SQLite** backend (no Postgres branch). Routing happens at coarser granularity than per-bead: whole-plan `ClassifyGraphPlan` (`internal/coordclass/classify.go:88`, dispatched at `internal/coordrouter/router.go:151,167`), the order-gate multi-store read set `storesForGate` (`cmd/gc/order_dispatch.go:512-532`), and the capability seam `beads.GraphApplyFor(store)` (`internal/molecule/molecule.go:476,785`; `internal/dispatch/ralph.go:394`). A `resolveClassStore`-style per-bead split would tear an atomic graph apply across two stores.
+
+### The config-conflict bug ✅ FIXED (`1bf1cd3a5`)
+
+> **✅ Step 0 LANDED 2026-06-26.** `ValidateBeadsClasses` rejects `graph=postgres`
+> at config load (wired into `Load` + compose root-validation); shared
+> `normalizeBackend` extracted; `validate_beads_classes_test.go` added. Proceed to
+> the ordered P6 execution below (Step 1). The analysis below is retained as the
+> rationale.
 
 ### The config-conflict bug (CONFIRMED — fix it FIRST, before any P6 wiring)
 

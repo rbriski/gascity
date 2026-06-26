@@ -2,9 +2,17 @@
 title: "Infra/beads decoupling — session handoff"
 date: 2026-06-26
 branch: plan/decouple-infra-beads
-head: b47f5daa3
+head: 1bf1cd3a5
 epic: ga-pd6tcg
 ---
+
+> **UPDATE 2026-06-26 (later session):** **NUDGES is now fully relocated**
+> (`d722e45b9` seam + `1d45620f8` untangle) and **GRAPH P6 Step-0 (the
+> config-conflict guard) is landed** (`1bf1cd3a5`). Both green at the default
+> backend (byte-identical), verified by the Nudge/Wait/Sweep/Sling/Dispatch
+> suites + `make test-cmd-gc-process-parallel`. §5.A (nudges) and §5.B-B0 below
+> are DONE — see the per-item ✅ notes. Remaining in owner order: **graph P6
+> Steps 1-5** (§5.B) then **sessions P5** (§5.C).
 
 > Where the bd→embedded-store infra decoupling stands, what's left, and how to
 > finish it without breaking anything. Read alongside `DESIGN.md` (hardened
@@ -89,7 +97,24 @@ look like nudge ops but are NOT:
 
 ## 5. Remaining work, in order
 
-### A. NUDGES — all-or-nothing untangle (no live-city dependency)
+### A. NUDGES — all-or-nothing untangle ✅ DONE (`d722e45b9` + `1d45620f8`)
+
+> **✅ LANDED 2026-06-26, byte-identical at default.** The full untangle is in:
+> `resolveNudgesStore`/`openNudgesClassStore` added; every leaf nudge-bead op
+> routes through the nudge store; every session/wait/mail op stays on the work
+> store; the `(workStore, nudgeStore)` pair is threaded through tryDeliver /
+> dispatchAll / deliverSessionNudgeWithWorker / queueManagedSessionNudgeWake /
+> enqueueManagedNudgeThenWake / sendMailNotifyWithWorker / deliverSlingNudge /
+> dispatchReadyWaitNudgesWithSnapshot, and the sweep is split `(nudgeStore,
+> mailStore)`. **Plan-list gaps found by grepping ALL nudge-bead ops (not just
+> the listed fns):** also split `finalizeReadyWaitFromNudge` +
+> `prepareWaitWakeStateForCityWithSnapshot` and `nextWaitDeliveryAttempt` +
+> its CLI callers (`cmdWaitSetStateResult`/`retryClosedWait`). Controller paths
+> pass `cr.rec`; CLI/secondary loads pass `io.Discard` to `loadCityConfig` (arch
+> guard `TestNonTestLoadCityConfigCallersPassWarningWriter`). The checklist below
+> is the historical record of what was executed.
+
+
 
 The seam already exists: leaf ops take `nudgequeue.NudgeStore`
 (`internal/nudgequeue/store.go:14-25`, `var _ NudgeStore = beads.Store(nil)`), and
@@ -137,7 +162,7 @@ SQLite/Dolt → **silent wrong-store**, reachable via `gc beads postgres init gr
 `cmd_hook_claim.go:276`, `work_query_probe.go:89`, `cmd_bd_shim.go:1049`,
 `config.go:3731`.
 
-**B0 — config-conflict guard (do FIRST, ship now; zero blast radius):**
+**B0 — config-conflict guard ✅ DONE (`1bf1cd3a5`):** `internal/config/validate_beads_classes.go` `ValidateBeadsClasses` rejects `graph` backend other than `bd|sqlite|""`, wired into BOTH `Load` (config.go, after `ValidateDoltConfig`) AND compose root-validation (`compose.go:656`). Shared `normalizeBackend` extracted from `NormalizedClassBackend`. Tests in `validate_beads_classes_test.go` (graph=postgres rejected; graph∈{"",bd,sqlite} + orders/nudges=postgres allowed; normalizeBackend canonicalization). No behavior change at any existing config. Relaxes to allow `graph=postgres` after P6 Step 5. Original spec retained below for reference:
 - New `internal/config/validate_beads_classes.go`: `ValidateBeadsClasses(cfg, source)` rejects `graph` backend other than `bd|sqlite|""` until graph routes through `resolveClassStore`. Wire into `Load` (`config.go:5061`) after `ValidateDoltConfig` (`config.go:5082`). Extract a shared `normalizeBackend(string)` helper from `NormalizedClassBackend` (`config.go:1365`) so guard + dispatcher share one canonicalizer.
 - Tests (`validate_beads_classes_test.go`): graph=postgres rejected; graph ∈ {"",bd,sqlite} allowed; orders=postgres allowed (it routes through `resolveClassStore`).
 - Do **NOT** instead "make `graphStoreSQLiteEnabled` honor `Classes[graph]=sqlite`" — that would start building a Router on cities that had none (new store file, prefix `gcg`, federation overhead) = real behavior change. That belongs inside P6 under conformance.

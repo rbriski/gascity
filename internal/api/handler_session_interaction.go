@@ -25,7 +25,7 @@ type sessionRespondRequest struct {
 }
 
 func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -69,7 +69,7 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -94,7 +94,7 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -119,7 +119,7 @@ func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
@@ -158,7 +158,7 @@ func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return

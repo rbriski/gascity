@@ -35,7 +35,7 @@ type sessionCommandableWaiter interface {
 }
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -394,7 +394,7 @@ type sessionTranscriptGetResponse struct {
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.
 
 func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchInput) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -464,7 +464,7 @@ func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *Sessi
 }
 
 func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -554,7 +554,7 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
 func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -601,7 +601,7 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
 func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -702,7 +702,7 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 // humaHandleSessionStop is the Huma-typed handler for POST /v0/session/{id}/stop.
 
 func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -727,7 +727,7 @@ func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionIDInput)
 // humaHandleSessionKill is the Huma-typed handler for POST /v0/session/{id}/kill.
 
 func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -758,7 +758,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
 
 func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -790,7 +790,7 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 // humaHandleSessionSuspend is the Huma-typed handler for POST /v0/session/{id}/suspend.
 
 func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDInput) (*OKResponse, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -813,7 +813,7 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 // humaHandleSessionClose is the Huma-typed handler for POST /v0/session/{id}/close.
 
 func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionCloseInput) (*OKResponse, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -859,7 +859,7 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 // humaHandleSessionWake is the Huma-typed handler for POST /v0/session/{id}/wake.
 
 func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
@@ -913,7 +913,7 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 // humaHandleSessionRename is the Huma-typed handler for POST /v0/session/{id}/rename.
 
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}

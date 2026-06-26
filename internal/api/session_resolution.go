@@ -182,18 +182,28 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 	if store == nil || strings.TrimSpace(replacementID) == "" {
 		return nil
 	}
+	// store is the session-class store (callers thread SessionsBeadStore here).
+	// The work and external-message reassignments operate on beads that do NOT
+	// relocate with sessions: open work lives on the work store, and extmsg
+	// binding/participant beads have no relocation seam (they stay on the work
+	// store too). Only durable waits (gc:wait) relocate with the session class,
+	// so ReassignWaits keeps the session store. At the default backend the two
+	// stores are identical, so this split is byte-identical until sessions
+	// relocate — at which point reassigning against the empty session store
+	// would silently orphan a retired session's open work.
+	workStore := s.state.CityBeadStore()
 	now := time.Now().UTC()
 	for _, b := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, b.ID, replacementID); err != nil {
+		if err := reassignOpenWorkAssignedToSession(workStore, b.ID, replacementID); err != nil {
 			return err
 		}
 		if err := session.ReassignWaits(store, b.ID, replacementID); err != nil {
 			return fmt.Errorf("reassign waits from retired session %s to %s: %w", b.ID, replacementID, err)
 		}
-		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {
+		if err := extmsg.ReassignSessionBindings(ctx, workStore, b.ID, replacementID, now); err != nil {
 			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", b.ID, replacementID, err)
 		}
-		if err := extmsg.ReassignSessionParticipants(ctx, store, b.ID, replacementID); err != nil {
+		if err := extmsg.ReassignSessionParticipants(ctx, workStore, b.ID, replacementID); err != nil {
 			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", b.ID, replacementID, err)
 		}
 	}

@@ -455,7 +455,7 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 // keeps the blast radius to the dispatcher open path and preserves the bd store's
 // auto-export suppression, which the Router/policy wrappers delegate through.
 func controlStoreWithGraphRouting(store beads.Store, cfg *config.City, cityPath string) beads.Store {
-	if store == nil || !graphStoreSQLiteEnabled(cfg) {
+	if store == nil || !graphRelocated(cfg) {
 		return store
 	}
 	return routedPolicyStore(store, cfg, cityPath)

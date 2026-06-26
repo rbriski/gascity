@@ -273,7 +273,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 // controller's actor instead of the worker's.
 func hookClaimDefault(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	if cityPath := hookClaimCityPath(dir, env); cityPath != "" {
-		if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && graphStoreSQLiteEnabled(cfg) {
+		if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && graphRelocated(cfg) {
 			if client := bdShimAPIClient(cityPath); client != nil {
 				claimed, ok, err := client.ClaimBead(beadID, assignee)
 				if err != nil {

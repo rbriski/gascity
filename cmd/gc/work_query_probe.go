@@ -86,7 +86,7 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 	// dir at the sudo launch boundary (sudoers env_reset/secure_path). The
 	// bwrap-agent launch wrapper fronts the same dir for the agent's interactive
 	// shell; this covers the controller-spawned probe environment.
-	if graphStoreSQLiteEnabled(cfg) {
+	if graphRelocated(cfg) {
 		prependGCBinDirToPATH(env, cityBdShimbinGCPath(cityPath))
 	}
 	return env, nil

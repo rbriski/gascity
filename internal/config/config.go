@@ -3744,10 +3744,12 @@ const (
 )
 
 // readyOracleCmd selects the ready-oracle binary for the generated work/demand
-// query. Under [beads] graph_store = "sqlite" the routed predicate reads the
-// graph store via gc ready; default cities keep bd ready and stay byte-identical.
+// query. When the graph class is relocated off the bd work store (SQLite via the
+// legacy graph_store knob or [beads.classes.graph], or Postgres), the routed
+// predicate reads the graph store via gc ready; default cities keep bd ready and
+// stay byte-identical.
 func readyOracleCmd(beads BeadsConfig) string {
-	if strings.EqualFold(strings.TrimSpace(beads.GraphStore), "sqlite") {
+	if beads.NormalizedClassBackend(BeadClassGraph) != BeadsBackendBD {
 		return gcReadyOracleCommand
 	}
 	return bdReadyOracleCommand

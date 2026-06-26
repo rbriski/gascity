@@ -1046,7 +1046,7 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	verb, verbArgs := splitBdGlobalFlags(bdArgs)
-	switch classifyBdShimVerb(verb, verbArgs, graphStoreSQLiteEnabled(cfg)) {
+	switch classifyBdShimVerb(verb, verbArgs, graphRelocated(cfg)) {
 	case bdRoute:
 		// Pure-HTTP: route the verb through the controller's HTTP API — the
 		// controller owns the store (Router + graph SQLite) and every worker is a

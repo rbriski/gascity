@@ -238,17 +238,13 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 // reconciles only the work backend via a bd subprocess, and would otherwise serve
 // stale graph reads across the processes that share the graph file).
 func routedPolicyStore(workBackend beads.Store, cfg *config.City, cityPath string) beads.Store {
-	if !graphStoreSQLiteEnabled(cfg) {
+	if !graphRelocated(cfg) {
 		return wrapStoreWithBeadPolicies(workBackend, cfg)
 	}
 	router := coordrouter.New(workBackend)
 	registerGraphStoreBackend(router, cfg, cityPath)
 	return wrapStoreWithBeadPolicies(router, cfg)
 }
-
-// graphStoreSQLite is the [beads] graph_store value that routes the graph class
-// to an embedded SQLite store.
-const graphStoreSQLite = "sqlite"
 
 // graphStoreIDPrefix is the bead-ID prefix the embedded SQLite graph store mints
 // with. It MUST differ from the work backend's prefix (the file store and the
@@ -267,23 +263,28 @@ const graphStoreSQLite = "sqlite"
 // per-rig WORK store stays on Dolt; ownership rides the bead's routing metadata.
 const graphStoreIDPrefix = "gcg"
 
-// graphStoreSQLiteEnabled reports whether the city opted the graph class onto the
-// embedded SQLite backend via [beads] graph_store = "sqlite".
-func graphStoreSQLiteEnabled(cfg *config.City) bool {
-	return cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Beads.GraphStore), graphStoreSQLite)
+// graphRelocated reports whether the graph class is routed to a non-work backend —
+// SQLite (via the legacy [beads] graph_store knob or [beads.classes.graph]) or
+// Postgres (via [beads.classes.graph]). It folds onto NormalizedClassBackend so every
+// graph-routing consumer agrees on one predicate; default cities (graph on the bd work
+// store) report false and stay byte-identical.
+func graphRelocated(cfg *config.City) bool {
+	return cfg != nil && cfg.Beads.NormalizedClassBackend(config.BeadClassGraph) != config.BeadsBackendBD
 }
 
-// registerGraphStoreBackend registers an embedded SQLite backend for the graph
-// class on r. The graph store lives at <cityPath>/.gc/beads.sqlite — a SINGLE
+// registerGraphStoreBackend registers the graph class's relocated backend on r,
+// dispatching on the configured backend: SQLite (the legacy embedded graph store)
+// or Postgres (the gcg schema). Callers gate on graphRelocated; the default arm is
+// defensive. A failed open is logged loudly and the graph class falls back to the
+// work backend rather than crashing — the loud log surfaces the misconfiguration.
+//
+// SQLite: the graph store lives at <cityPath>/.gc/beads.sqlite — a SINGLE
 // city-scope store shared by the city HQ scope AND every rig scope, isolating the
 // high-churn formula-v2 topology from the Dolt-backed work store. One store means
 // one gcg-N id sequence across all scopes, so graph-bead IDs are globally unique
 // (no cross-scope collision); the per-rig work store stays on Dolt and ownership
 // is carried by the bead's fully-qualified routing metadata (gc.routed_to,
-// gc.root_store_ref), not by physical store partitioning. A failed open is
-// logged loudly and the graph class falls back to the work backend rather than
-// crashing the process — the loud log surfaces the misconfiguration. Callers gate
-// on graphStoreSQLiteEnabled; the guard here is defensive.
+// gc.root_store_ref), not by physical store partitioning.
 //
 // Retention sweeping is disabled on these opens: under no-socket many short-lived
 // gc processes open this same file, and N concurrent sweepers deleting terminal
@@ -316,9 +317,27 @@ type noCloseSQLiteStore struct {
 func (noCloseSQLiteStore) CloseStore() error { return nil }
 
 func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath string) {
-	if !graphStoreSQLiteEnabled(cfg) {
-		return
+	switch cfg.Beads.NormalizedClassBackend(config.BeadClassGraph) {
+	case config.BeadsBackendSQLite:
+		registerGraphStoreSQLite(r, cfg, cityPath)
+	case config.BeadsBackendPostgres:
+		// Open the graph class's Postgres schema (gcg) via the shared class-store
+		// opener (cached, close-safe). No recorder: the graph store stays
+		// event-silent, matching the SQLite graph backend — the formula-v2 topology
+		// is high-churn and is not mirrored to the event bus. An unprovisioned or
+		// misconfigured backend logs loudly (openClassPostgresStore) and leaves
+		// graph on the work store; operators MUST `gc beads postgres init` first.
+		if store, ok := openClassPostgresStore(cfg, cityPath, config.BeadClassGraph, nil); ok {
+			r.Register(coordclass.ClassGraph, store)
+		}
 	}
+}
+
+// registerGraphStoreSQLite opens (or reuses the cached) embedded SQLite graph store
+// at <cityPath>/.gc/beads.sqlite and registers it for the graph class. This is the
+// legacy graph-store location — distinct from the .gc/<class>/ class-store
+// convention — so it stays byte-identical for cities already on graph_store="sqlite".
+func registerGraphStoreSQLite(r *coordrouter.Router, cfg *config.City, cityPath string) {
 	dir := filepath.Join(cityPath, citylayout.RuntimeRoot)
 	if cached, ok := graphStoreHandleCache.Load(dir); ok {
 		r.Register(coordclass.ClassGraph, cached.(beads.Store))

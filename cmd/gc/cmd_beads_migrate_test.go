@@ -34,7 +34,7 @@ func TestRunBeadsMigrateSQLite_RoutesByClassAndReports(t *testing.T) {
 	}
 
 	var out, errb bytes.Buffer
-	if code := runBeadsMigrateSQLite([]string{"messaging"}, deps, &out, &errb); code != 0 {
+	if code := runBeadsMigrate([]string{"messaging"}, deps, &out, &errb); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errb.String())
 	}
 
@@ -124,7 +124,7 @@ func TestRunBeadsMigrateSQLite_AllClassesEndToEnd(t *testing.T) {
 		config.BeadClassNudges, config.BeadClassGraph,
 	}
 	var out, errb bytes.Buffer
-	if code := runBeadsMigrateSQLite(classes, deps, &out, &errb); code != 0 {
+	if code := runBeadsMigrate(classes, deps, &out, &errb); code != 0 {
 		t.Fatalf("migrate code=%d stderr=%s", code, errb.String())
 	}
 
@@ -158,7 +158,7 @@ func TestRunBeadsMigrateSQLite_AllClassesEndToEnd(t *testing.T) {
 
 	// Idempotent re-run: everything already present, nothing re-copied.
 	var out2, errb2 bytes.Buffer
-	if code := runBeadsMigrateSQLite(classes, deps, &out2, &errb2); code != 0 {
+	if code := runBeadsMigrate(classes, deps, &out2, &errb2); code != 0 {
 		t.Fatalf("re-run code=%d stderr=%s", code, errb2.String())
 	}
 	for _, class := range classes {

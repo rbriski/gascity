@@ -34,30 +34,38 @@ type migrateDeps struct {
 	openDest   func(class string) (store beads.Store, closeFn func(), err error)
 }
 
-func newBeadsMigrateSQLiteCmd(stdout, stderr io.Writer) *cobra.Command {
+func newBeadsMigrateCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "migrate-sqlite [class...]",
-		Short: "Copy dolt-backed infra beads into their SQLite stores",
-		Long: `Copy beads of each SQLite-relocated coordination class from the bd/Dolt
-work store into that class's embedded SQLite store, ID-preserving and
-idempotent, so the read path no longer has to query Dolt for that class.
+		Use:     "migrate [class...]",
+		Aliases: []string{"migrate-sqlite"},
+		Short:   "Copy dolt-backed infra beads into their configured backend (sqlite/postgres)",
+		Long: `Copy beads of each relocated coordination class from the bd/Dolt work store
+into that class's configured backend — its embedded SQLite store
+([beads.classes.<class>].backend = "sqlite") or its Postgres schema
+("postgres", which must already be provisioned via 'gc beads postgres init').
+ID-preserving and idempotent, so re-running skips already-migrated beads.
 
-With no arguments, migrates every class whose [beads.classes.<class>].backend
-is "sqlite". Pass class names (messaging, sessions, orders, nudges, graph) to
-migrate a subset. Safe to re-run: already-migrated beads are skipped.`,
-		Example: `  gc beads migrate-sqlite
-  gc beads migrate-sqlite messaging orders`,
+With no arguments, migrates every class whose backend is "sqlite" or "postgres".
+Pass class names (messaging, sessions, orders, nudges, graph) to migrate a subset.`,
+		Example: `  gc beads migrate
+  gc beads migrate messaging orders`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc beads migrate-sqlite: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc beads migrate: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			classes, err := resolveMigrateClasses(cityPath, args, stderr)
 			if err != nil {
 				return errExit
 			}
+			cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc beads migrate: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			emitLoadCityConfigWarnings(stderr, prov)
 			deps := migrateDeps{
 				openSource: func() (beads.Store, func(), error) {
 					store, _, code := openCityStatusStore(cityPath, stderr)
@@ -67,22 +75,47 @@ migrate a subset. Safe to re-run: already-migrated beads are skipped.`,
 					return store, closeBeadStoreFunc(store), nil
 				},
 				openDest: func(class string) (beads.Store, func(), error) {
-					store, err := beads.OpenSQLiteStore(
-						classSQLiteDir(cityPath, class),
-						beads.WithSQLiteStoreIDPrefix(classSQLitePrefix[class]),
-						beads.WithSQLiteStoreRetention(0, 0),
-					)
-					if err != nil {
-						return nil, nil, err
-					}
-					return store, closeBeadStoreFunc(store), nil
+					return openClassMigrationDest(cfg, cityPath, class)
 				},
 			}
-			if runBeadsMigrateSQLite(classes, deps, stdout, stderr) != 0 {
+			if runBeadsMigrate(classes, deps, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
+	}
+}
+
+// openClassMigrationDest opens a class's migration DESTINATION store for its
+// configured backend, WITHOUT an event recorder — a bulk copy should not flood the
+// event bus. SQLite stores are created on open; a Postgres schema must already be
+// provisioned ('gc beads postgres init'). A class on the bd backend has no relocated
+// destination and is an error here.
+func openClassMigrationDest(cfg *config.City, cityPath, class string) (beads.Store, func(), error) {
+	switch cfg.Beads.NormalizedClassBackend(class) {
+	case config.BeadsBackendSQLite:
+		store, err := beads.OpenSQLiteStore(
+			classSQLiteDir(cityPath, class),
+			beads.WithSQLiteStoreIDPrefix(classSQLitePrefix[class]),
+			beads.WithSQLiteStoreRetention(0, 0),
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		return store, closeBeadStoreFunc(store), nil
+	case config.BeadsBackendPostgres:
+		dsn, err := buildPostgresDSN(cfg.Beads.Postgres, cityPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		schema, _ := config.ReservedClassPrefix(class)
+		store, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema(schema), beads.WithPostgresStoreIDPrefix(schema))
+		if err != nil {
+			return nil, nil, err
+		}
+		return store, closeBeadStoreFunc(store), nil
+	default:
+		return nil, nil, fmt.Errorf("class %q is not configured for a relocated backend (sqlite or postgres)", class)
 	}
 }
 
@@ -114,21 +147,22 @@ func resolveMigrateClasses(cityPath string, args []string, stderr io.Writer) ([]
 	emitLoadCityConfigWarnings(stderr, prov)
 	var classes []string
 	for class := range classSQLitePrefix {
-		if cfg.Beads.ClassUsesSQLite(class) {
+		switch cfg.Beads.NormalizedClassBackend(class) {
+		case config.BeadsBackendSQLite, config.BeadsBackendPostgres:
 			classes = append(classes, class)
 		}
 	}
 	sort.Strings(classes)
 	if len(classes) == 0 {
-		fmt.Fprintln(stderr, "gc beads migrate-sqlite: no classes configured with backend=\"sqlite\"; nothing to migrate") //nolint:errcheck
+		fmt.Fprintln(stderr, `gc beads migrate: no classes configured with backend="sqlite" or "postgres"; nothing to migrate`) //nolint:errcheck
 	}
 	return classes, nil
 }
 
-// runBeadsMigrateSQLite migrates each class from the source store into its
+// runBeadsMigrate migrates each class from the source store into its
 // destination SQLite store and reports per-class counts. It is the testable core
 // of the command.
-func runBeadsMigrateSQLite(classes []string, deps migrateDeps, stdout, stderr io.Writer) int {
+func runBeadsMigrate(classes []string, deps migrateDeps, stdout, stderr io.Writer) int {
 	if len(classes) == 0 {
 		return 0
 	}

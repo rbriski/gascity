@@ -300,7 +300,7 @@ gc beads
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
-| [gc beads migrate-sqlite](#gc-beads-migrate-sqlite) | Copy dolt-backed infra beads into their SQLite stores |
+| [gc beads migrate](#gc-beads-migrate) | Copy dolt-backed infra beads into their configured backend (sqlite/postgres) |
 | [gc beads postgres](#gc-beads-postgres) | Provision and migrate the Postgres internal-beads backend |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
@@ -398,25 +398,26 @@ gc beads list --status open --json
 gc beads list --format=toon
 ```
 
-## gc beads migrate-sqlite
+## gc beads migrate
 
-Copy beads of each SQLite-relocated coordination class from the bd/Dolt
-work store into that class's embedded SQLite store, ID-preserving and
-idempotent, so the read path no longer has to query Dolt for that class.
+Copy beads of each relocated coordination class from the bd/Dolt work store
+into that class's configured backend — its embedded SQLite store
+([beads.classes.&lt;class&gt;].backend = "sqlite") or its Postgres schema
+("postgres", which must already be provisioned via 'gc beads postgres init').
+ID-preserving and idempotent, so re-running skips already-migrated beads.
 
-With no arguments, migrates every class whose [beads.classes.&lt;class&gt;].backend
-is "sqlite". Pass class names (messaging, sessions, orders, nudges, graph) to
-migrate a subset. Safe to re-run: already-migrated beads are skipped.
+With no arguments, migrates every class whose backend is "sqlite" or "postgres".
+Pass class names (messaging, sessions, orders, nudges, graph) to migrate a subset.
 
 ```
-gc beads migrate-sqlite [class...]
+gc beads migrate [class...]
 ```
 
 **Example:**
 
 ```
-gc beads migrate-sqlite
-gc beads migrate-sqlite messaging orders
+gc beads migrate
+gc beads migrate messaging orders
 ```
 
 ## gc beads postgres

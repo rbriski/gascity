@@ -1540,27 +1540,23 @@ func (m *Manager) Peek(id string, lines int) (string, error) {
 }
 
 // infoFromBead converts a bead to an Info struct, enriching with runtime state.
-func (m *Manager) infoFromBead(b beads.Bead) Info {
+// infoFromPersisted projects the PERSISTED-only fields of a session bead into an
+// Info, reading nothing but b — no runtime provider (m.sp), no ACP-router mutation.
+// It is the pure codec that crosses storage backends: the same bead round-tripped
+// through bd/sqlite/postgres MUST yield an equal Info (the projection-invariance
+// proof). Transport here is the metadata-only value (transportFromMetadata); the
+// runtime override is applied by Manager.infoFromBead. State is the persisted state
+// with the closed-bead clear but WITHOUT the IsRunning degrade (also runtime).
+func infoFromPersisted(b beads.Bead) Info {
 	sessName := b.Metadata["session_name"]
 	if sessName == "" {
 		sessName = sessionNameFor(b.ID)
 	}
 	closed := b.Status == "closed"
-	transport := transportFromMetadata(b)
-	if !closed {
-		transport, _ = m.transportForBead(b, sessName)
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	}
-
 	state := normalizeInfoState(State(b.Metadata["state"]))
 	if closed {
 		state = "" // closed beads have no runtime state
-	} else if m.sp != nil && state == StateActive && !m.sp.IsRunning(sessName) {
-		// Surface stale "awake" / "active" beads as dormant immediately.
-		// The controller also heals metadata on the next tick.
-		state = StateAsleep
 	}
-
 	info := Info{
 		ID:            b.ID,
 		Template:      b.Metadata["template"],
@@ -1570,7 +1566,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		Alias:         b.Metadata["alias"],
 		AgentName:     b.Metadata["agent_name"],
 		Provider:      b.Metadata["provider"],
-		Transport:     transport,
+		Transport:     transportFromMetadata(b),
 		Command:       b.Metadata["command"],
 		WorkDir:       b.Metadata["work_dir"],
 		SessionName:   sessName,
@@ -1585,9 +1581,31 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 			info.LastNudgeDeliveredAt = parsed
 		}
 	}
+	return info
+}
+
+// infoFromBead = the pure persisted projection (infoFromPersisted) plus the
+// runtime overlay: the live transport + ACP routing, the stale-awake state degrade,
+// and the active-session enrichment — all store-agnostic (they read m.sp, not the
+// bead store), so relocating the bead's backend cannot change them.
+func (m *Manager) infoFromBead(b beads.Bead) Info {
+	info := infoFromPersisted(b)
+	sessName := info.SessionName
+
+	if !info.Closed {
+		// Runtime transport override + ACP routing (reads m.sp, mutates the router).
+		transport, _ := m.transportForBead(b, sessName)
+		info.Transport = transport
+		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		// Surface stale "awake" / "active" beads as dormant immediately.
+		// The controller also heals metadata on the next tick.
+		if m.sp != nil && info.State == StateActive && !m.sp.IsRunning(sessName) {
+			info.State = StateAsleep
+		}
+	}
 
 	// Enrich with live runtime state if active.
-	if state == StateActive && m.sp != nil {
+	if info.State == StateActive && m.sp != nil {
 		info.Attached = m.sp.IsAttached(sessName)
 		if t, err := m.sp.GetLastActivity(sessName); err == nil && !t.IsZero() {
 			info.LastActive = t

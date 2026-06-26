@@ -42,3 +42,43 @@ func TestSQLiteStoreSatisfiesClassedStoreConformanceForGraph(t *testing.T) {
 		func() beads.Store { return newSQLiteForConformance(t) },
 		coordtest.Options{Skip: false})
 }
+
+// TestSQLiteStoreSatisfiesClassedStoreConformanceForSessions runs the shared
+// classed-store conformance suite for ClassSessions against the SQLite store,
+// un-skipped — proving the embedded session-class backend round-trips and
+// correctly classifies session-class beads, the storage requirement for relocating
+// sessions onto the Router's gcs backend.
+func TestSQLiteStoreSatisfiesClassedStoreConformanceForSessions(t *testing.T) {
+	coordtest.RunClassedStoreTestsWithOptions(t, coordclass.ClassSessions,
+		func() beads.Store { return newSQLiteForConformance(t) },
+		coordtest.Options{Skip: false})
+}
+
+// TestSQLiteStoreRoundTripsSessionWaitBeads proves the session backend round-trips
+// BOTH bead shapes that classify to ClassSessions: the session lifecycle bead
+// (type=session / gc:session) and the durable session-wait bead (type=gate /
+// gc:wait). The generic conformance suite exercises the representative session
+// bead; this pins the wait bead explicitly because waits relocate WITH the session
+// class and the controller's wait dispatch reads them from the same store.
+func TestSQLiteStoreRoundTripsSessionWaitBeads(t *testing.T) {
+	store := newSQLiteForConformance(t)
+	for _, b := range []beads.Bead{
+		{Title: "session", Type: "session", Labels: []string{"gc:session"}},
+		{Title: "wait", Type: "gate", Labels: []string{"gc:wait"}},
+	} {
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%s): %v", b.Title, err)
+		}
+		got, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", created.ID, err)
+		}
+		if got.Type != b.Type {
+			t.Fatalf("round-trip %s: Type = %q, want %q", b.Title, got.Type, b.Type)
+		}
+		if coordclass.Classify(got) != coordclass.ClassSessions {
+			t.Fatalf("Classify(%s) = %v, want ClassSessions", b.Title, coordclass.Classify(got))
+		}
+	}
+}

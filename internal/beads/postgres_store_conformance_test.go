@@ -48,6 +48,38 @@ func TestPostgresStoreSatisfiesClassedStoreConformance(t *testing.T) {
 		coordtest.Options{Skip: false})
 }
 
+// TestPostgresStoreSatisfiesClassedStoreConformanceForSessions runs the shared
+// classed-store conformance suite for ClassSessions against a real Postgres,
+// proving the gcs-schema backend round-trips and classifies session-class beads —
+// the storage requirement for relocating sessions onto Postgres at cutover.
+//
+// SKIPPED unless GC_TEST_POSTGRES_DSN points at a DISPOSABLE Postgres database.
+func TestPostgresStoreSatisfiesClassedStoreConformanceForSessions(t *testing.T) {
+	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set GC_TEST_POSTGRES_DSN to a disposable Postgres to run the conformance suite")
+	}
+	const schema = "gcs_conformance"
+	if err := beads.ProvisionPostgres(dsn, schema); err != nil {
+		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
+	}
+	coordtest.RunClassedStoreTestsWithOptions(t, coordclass.ClassSessions,
+		func() beads.Store {
+			truncatePostgresSchema(t, dsn, schema) // clean slate per factory call
+			s, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema(schema))
+			if err != nil {
+				t.Fatalf("OpenPostgresStore: %v", err)
+			}
+			t.Cleanup(func() {
+				if c, ok := s.(interface{ CloseStore() error }); ok {
+					_ = c.CloseStore() //nolint:errcheck // best-effort
+				}
+			})
+			return s
+		},
+		coordtest.Options{Skip: false})
+}
+
 // truncatePostgresSchema clears a provisioned class schema between runs and resets
 // its id sequence so minted ids are deterministic. schema is a controlled test
 // identifier (a reserved-prefix-style name), not user input.

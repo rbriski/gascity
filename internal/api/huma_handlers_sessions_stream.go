@@ -16,7 +16,7 @@ import (
 // per-request streaming loop.
 
 func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamInput) (*sessionStreamState, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}

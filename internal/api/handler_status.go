@@ -441,7 +441,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore()
 	if store == nil {
 		return snapshot
 	}

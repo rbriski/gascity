@@ -445,7 +445,7 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 // enrichSessionMeta populates model and context usage fields on the agent
 // response by reading the tail of the agent's session JSONL file.
 func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, qualifiedName string) {
-	factory, err := s.workerFactory(s.state.CityBeadStore())
+	factory, err := s.workerFactory(s.state.SessionsBeadStore())
 	if err != nil {
 		return
 	}

@@ -96,6 +96,14 @@ type State interface {
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
 
+	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
+	// (gc:nudge). At the default backend this is the same store as
+	// CityBeadStore; when [beads.classes.nudges] is relocated it is the
+	// per-class store, so nudge-shadow ops (e.g. withdrawing wait nudges on
+	// session close/wake) reach the relocated beads instead of orphaning them
+	// on the work store. Returns nil if no store is available.
+	NudgesBeadStore() beads.Store
+
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order

@@ -1182,6 +1182,18 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	return cs.cityBeadStore
 }
 
+// NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
+// default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
+// to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
+// store. cs.eventProv is the recorder (an events.Recorder), matching how the city mail
+// store is wired (newCityMailProvider), so relocated writes through this store emit
+// bead.* exactly like the controller's own nudge writes.
+func (cs *controllerState) NudgesBeadStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+}
+
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()

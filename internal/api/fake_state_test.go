@@ -31,25 +31,26 @@ func newPostRequest(url string, body io.Reader) *http.Request {
 
 // fakeState implements State for testing.
 type fakeState struct {
-	cfg           *config.City
-	rawCfg        *config.City // optional: raw config for provenance detection
-	sp            *runtime.Fake
-	stores        map[string]beads.Store
-	cityBeadStore beads.Store // city-level store for session beads
-	cityBeadsDiag *beads.BeadsDiagnostic
-	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv     events.Provider
-	cityName      string
-	cityPath      string
-	startedAt     time.Time
-	quarantined   map[string]bool
-	autos         []orders.Order
-	allOrders     []orders.Order
-	services      workspacesvc.Registry
-	pokeCount     int
-	extmsgSvc     *extmsg.Services
-	adapterReg    *extmsg.AdapterRegistry
-	maintenance   MaintenanceProvider
+	cfg             *config.City
+	rawCfg          *config.City // optional: raw config for provenance detection
+	sp              *runtime.Fake
+	stores          map[string]beads.Store
+	cityBeadStore   beads.Store // city-level store for session beads
+	nudgesBeadStore beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
+	cityBeadsDiag   *beads.BeadsDiagnostic
+	cityMailProv    mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv       events.Provider
+	cityName        string
+	cityPath        string
+	startedAt       time.Time
+	quarantined     map[string]bool
+	autos           []orders.Order
+	allOrders       []orders.Order
+	services        workspacesvc.Registry
+	pokeCount       int
+	extmsgSvc       *extmsg.Services
+	adapterReg      *extmsg.AdapterRegistry
+	maintenance     MaintenanceProvider
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -101,6 +102,12 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) NudgesBeadStore() beads.Store {
+	if f.nudgesBeadStore != nil {
+		return f.nudgesBeadStore
+	}
+	return f.cityBeadStore
+}
 func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	if f.cityBeadsDiag == nil {
 		return nil

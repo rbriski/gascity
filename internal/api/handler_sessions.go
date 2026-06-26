@@ -364,7 +364,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
@@ -462,7 +462,7 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// Clear in-memory crash tracker so the reconciler doesn't immediately

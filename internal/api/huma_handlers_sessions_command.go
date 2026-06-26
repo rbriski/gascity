@@ -837,7 +837,7 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
@@ -885,7 +885,7 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	sessionName := b.Metadata["session_name"]

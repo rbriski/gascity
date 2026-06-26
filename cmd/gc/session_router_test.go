@@ -60,6 +60,89 @@ func TestRoutedPolicyStoreBuildsRouterForSessionRelocation(t *testing.T) {
 	}
 }
 
+// TestSessionBeadsRelocateOnNoHistoryTierThroughPolicyRouter is the Phase C
+// (tier) guard for the Router-relocated session class. The tier divergence the
+// migration review flagged — relocated stores opening RAW, bypassing the policy
+// wrapper, so infra beads land on the main/issues tier and only a label exclusion
+// guards Ready — does NOT apply to sessions, because routedPolicyStore wraps the
+// Router as policy(Router(...)): the policy computes the no-history tier and
+// Router.CreateWithStorage forwards it to the session backend. This proves a
+// session bead AND a durable wait bead created through the city store land on the
+// no-history tier on the relocated session backend, so the tier gate (not just the
+// label exclusion) keeps them out of Ready after relocation.
+func TestSessionBeadsRelocateOnNoHistoryTierThroughPolicyRouter(t *testing.T) {
+	dir := t.TempDir()
+	store := routedPolicyStore(beads.NewMemStore(), sessionSQLiteCfg(), dir)
+	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+
+	for _, b := range []beads.Bead{
+		{Title: "session", Type: "session", Labels: []string{"gc:session"}},
+		{Title: "wait", Type: "gate", Labels: []string{"gc:wait"}},
+	} {
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("create %s through policy(Router): %v", b.Title, err)
+		}
+		got, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", created.ID, err)
+		}
+		if !got.NoHistory {
+			t.Fatalf("%s bead %s must be stored on the no-history tier (policy wraps the Router so the seam tier divergence does NOT apply to Router-relocated sessions); got NoHistory=false", b.Title, created.ID)
+		}
+	}
+}
+
+// TestRelocatedSessionBeadsNeverLeakIntoReady is the end-to-end Phase C guard.
+// The Router FEDERATES Ready() across its backends, so after relocation the
+// controller's Ready scan also reaches the session backend. Session beads
+// (type=session) and durable waits (type=gate) must never surface as actionable
+// Ready work. This is guaranteed store-independently by readyExcludeTypes
+// (session + gate) plus the gc:session label exclusion — stronger than the tier
+// gate, which is why the nudge-style tier divergence does not endanger sessions.
+// A normal work task created alongside MUST still be Ready (positive control).
+func TestRelocatedSessionBeadsNeverLeakIntoReady(t *testing.T) {
+	dir := t.TempDir()
+	work, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
+	t.Cleanup(func() { _ = work.(interface{ CloseStore() error }).CloseStore() })
+	store := routedPolicyStore(work, sessionSQLiteCfg(), dir)
+	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+
+	sess, err := store.Create(beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}, Status: "open"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	wait, err := store.Create(beads.Bead{Title: "wait", Type: "gate", Labels: []string{"gc:wait"}, Status: "open"})
+	if err != nil {
+		t.Fatalf("create wait: %v", err)
+	}
+	task, err := store.Create(beads.Bead{Title: "real work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("federated Ready(): %v", err)
+	}
+	inReady := map[string]bool{}
+	for _, b := range ready {
+		inReady[b.ID] = true
+	}
+	if inReady[sess.ID] {
+		t.Fatalf("session bead %s leaked into federated Ready() after relocation", sess.ID)
+	}
+	if inReady[wait.ID] {
+		t.Fatalf("wait bead %s leaked into federated Ready() after relocation", wait.ID)
+	}
+	if !inReady[task.ID] {
+		t.Fatalf("real work bead %s missing from Ready() — the exclusion must be specific to session/wait beads", task.ID)
+	}
+}
+
 // TestSessionStoreBackendRoutesSessionAndWorkSplit is the keystone guard for the
 // sessions-on-the-Router design. It proves that, with a Router over a SEPARATE
 // session backend (SQLite, gcs prefix) and a work backend (mem), the federating

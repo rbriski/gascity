@@ -55,7 +55,7 @@ func (a *LLMClientAdapter) Publish(_ context.Context, req PublishRequest) (*Publ
 		req.Text,
 		req.SessionID,
 		req.Conversation,
-		0,
+		req.Sequence,
 		time.Now().UTC(),
 	)
 

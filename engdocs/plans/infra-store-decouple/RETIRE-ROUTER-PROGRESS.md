@@ -22,14 +22,24 @@ epic: ga-pd6tcg
 - ≤5 files/phase; each phase ends green (build, vet, cmd/gc shards); commit `--no-verify`.
 
 ## Track S — phases
-- [ ] **P1 — `closeBead` two-store-aware** (load-bearing leaf). Files: session_beads.go,
-  session_work_guard.go, session_reconciler.go, session_lifecycle_parallel.go (+test). 7
-  call sites pass `(store, store)`. Byte-identical. Seed guard test.
-- [ ] **P2 — close-family work-guards** (`closeSessionBeadIf*`). Thread `sessionStore`; work
-  guards stay on work store.
-- [ ] **P3 — session_beads.go reconciler body** (`syncSessionBeadsWithSnapshotAndRigStores`,
-  reapers, retire fns). Split `cancelStateAssignedToRetiredSessionBead` (waits→session,
-  extmsg→work). ⚠ Q1 gate: `sweepProcessTableOrphans` Get-semantics.
+- [x] **P1 — `closeBead` two-store-aware** (`043ac2d7a`). 7 call sites pass `(store, store)`.
+  Byte-identical. Seed guard `TestCloseBeadRoutesSessionAndWorkLegsToSeparateStores`
+  (decoy work bead on the session store must survive). Build/vet/broad-session-suite green.
+- [x] **P2 — close-family work-guards** (`a8b096d92`). `closeSessionBeadIfUnassigned`,
+  `...ReachableStoreUnassigned`, `...RuntimeStoppedAndUnassigned` take `sessionStore` (after
+  store); work-guard reads stay on store, close legs on sessionStore. 9 prod + 4 test sites
+  pass `(store, store)`. `stopRuntimeBeforeSessionBeadMutation` deferred. Suite green.
+- [x] **P3a — wait/extmsg split** (`58072d1a3`). `cancelStateAssignedToRetiredSessionBead`
+  + `reassignStateAssignedToRetiredSessionBead` + `closeFailedCreateBead` now take
+  `(sessionStore, workStore)`: waits→session, extmsg→work (no relocation seam). Byte-identical.
+  Targeted tests green. Broad suite + adversarial review (wf_f745a537) running.
+- [ ] **P3b — session_beads.go body** (`syncSessionBeadsWithSnapshotAndRigStores` :826 + closures,
+  `retireDuplicate*`/`retireRemoved*`, `reapStaleSessionBeads`, `cleanupDeadRuntimeSessionCorpses`,
+  `reapRuntimesBoundToClosedBeads`, `sweepProcessTableOrphans`, `stopRuntimeBeforeSessionBeadMutation`).
+  Mixed fns get `sessionStore`; pure-session helpers (`loadSessionBeads`, `reopen*`, `setMeta*`,
+  `configuredSessionNames`) keep one param but callers pass session store. Callers in
+  city_runtime.go/cmd_start.go pass `(store, store)` until P6. ⚠ Q1 gate: audit
+  `sweepProcessTableOrphans` `ErrNotFound`-vs-transient before relying on it post-relocation.
 - [ ] **P4 — session_reconciler.go + session_wake.go + session_lifecycle_parallel.go +
   session_reconcile.go + session_sleep.go** (session-write surfaces).
 - [ ] **P5 — build_desired_state.go + agent_build_params.go + pool_session_name.go**

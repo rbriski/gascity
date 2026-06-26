@@ -1,0 +1,680 @@
+diff --git a/cmd/gc/pool_session_name.go b/cmd/gc/pool_session_name.go
+index 6b088dd6d..04554d7bc 100644
+--- a/cmd/gc/pool_session_name.go
++++ b/cmd/gc/pool_session_name.go
+@@ -70,7 +70,7 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
+ 		if sb.Status == "closed" {
+ 			continue
+ 		}
+-		if !closeSessionBeadIfUnassigned(store, rigStores, nil, sb, "gc_swept", time.Now().UTC(), nil) {
++		if !closeSessionBeadIfUnassigned(store, store, rigStores, nil, sb, "gc_swept", time.Now().UTC(), nil) {
+ 			continue
+ 		}
+ 		closed = append(closed, sb.ID)
+diff --git a/cmd/gc/session_beads.go b/cmd/gc/session_beads.go
+index cabf16c12..2056689a8 100644
+--- a/cmd/gc/session_beads.go
++++ b/cmd/gc/session_beads.go
+@@ -461,7 +461,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
+ 				continue
+ 			}
+ 			reassignWorkAssignedToRetiredSessionBead(store, rigStores, b, openBeads[winner].ID, stderr)
+-			reassignStateAssignedToRetiredSessionBead(store, b.ID, openBeads[winner].ID, now, stderr)
++			reassignStateAssignedToRetiredSessionBead(store, store, b.ID, openBeads[winner].ID, now, stderr)
+ 			if b.Metadata == nil {
+ 				b.Metadata = make(map[string]string, len(batch))
+ 			}
+@@ -531,7 +531,7 @@ func retireRemovedConfiguredNamedSessionBead(
+ 		return false
+ 	}
+ 	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, b, retiredSessionFallbackRoute(b), stderr)
+-	cancelStateAssignedToRetiredSessionBead(store, b.ID, now, stderr)
++	cancelStateAssignedToRetiredSessionBead(store, store, b.ID, now, stderr)
+ 	return true
+ }
+ 
+@@ -736,38 +736,48 @@ func reassignWorkAssignedToRetiredSessionBead(
+ 	}
+ }
+ 
+-func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
+-	if store == nil || strings.TrimSpace(oldSessionID) == "" || strings.TrimSpace(newSessionID) == "" {
++// reassignStateAssignedToRetiredSessionBead moves a retired session's durable
++// waits AND its external-message state to the successor session. Waits relocate
++// with the session class, so they use sessionStore; external-message bindings
++// and participants have NO relocation seam (extmsg stays on the work store), so
++// they use workStore. At the default bd backend the two stores are identical, so
++// this is byte-identical.
++func reassignStateAssignedToRetiredSessionBead(sessionStore, workStore beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
++	if sessionStore == nil || workStore == nil || strings.TrimSpace(oldSessionID) == "" || strings.TrimSpace(newSessionID) == "" {
+ 		return
+ 	}
+ 	if stderr == nil {
+ 		stderr = io.Discard
+ 	}
+-	if err := session.ReassignWaits(store, oldSessionID, newSessionID); err != nil {
++	if err := session.ReassignWaits(sessionStore, oldSessionID, newSessionID); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: reassigning waits from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+ 	}
+-	if err := extmsg.ReassignSessionBindings(context.Background(), store, oldSessionID, newSessionID, now); err != nil {
++	if err := extmsg.ReassignSessionBindings(context.Background(), workStore, oldSessionID, newSessionID, now); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: reassigning external message bindings from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+ 	}
+-	if err := extmsg.ReassignSessionParticipants(context.Background(), store, oldSessionID, newSessionID); err != nil {
++	if err := extmsg.ReassignSessionParticipants(context.Background(), workStore, oldSessionID, newSessionID); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: reassigning external message participants from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+ 	}
+ }
+ 
+-func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
+-	if store == nil || strings.TrimSpace(sessionID) == "" {
++// cancelStateAssignedToRetiredSessionBead cancels a retired session's durable
++// waits (session class -> sessionStore) and closes its external-message bindings
++// (work-resident, no relocation seam -> workStore). Byte-identical at the default
++// bd backend.
++func cancelStateAssignedToRetiredSessionBead(sessionStore, workStore beads.Store, sessionID string, now time.Time, stderr io.Writer) {
++	if sessionStore == nil || workStore == nil || strings.TrimSpace(sessionID) == "" {
+ 		return
+ 	}
+ 	if stderr == nil {
+ 		stderr = io.Discard
+ 	}
+-	if _, err := session.ListSessionWaitBeads(store, sessionID); beads.IsLookupLimitError(err) {
+-		stampWaitLookupCapDiagnostic(store, sessionID, err, now, "retired-session-cleanup")
++	if _, err := session.ListSessionWaitBeads(sessionStore, sessionID); beads.IsLookupLimitError(err) {
++		stampWaitLookupCapDiagnostic(sessionStore, sessionID, err, now, "retired-session-cleanup")
+ 	}
+-	if err := session.CancelWaits(store, sessionID, now); err != nil {
++	if err := session.CancelWaits(sessionStore, sessionID, now); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+ 	}
+-	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
++	if err := extmsg.CloseSessionBindings(context.Background(), workStore, sessionID, now); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+ 	}
+ }
+@@ -877,7 +887,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
+ 			continue
+ 		}
+-		if closeFailedCreateBead(store, b.ID, now, stderr) {
++		if closeFailedCreateBead(store, store, b.ID, now, stderr) {
+ 			openBeads[i].Status = "closed"
+ 		}
+ 	}
+@@ -913,7 +923,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 		}
+ 		canonical, ok := bySessionName[sn]
+ 		if ok && canonical.ID != b.ID {
+-			if closeSessionBeadIfUnassigned(store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
++			if closeSessionBeadIfUnassigned(store, store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
+ 				openBeads[i].Status = "closed"
+ 			}
+ 		}
+@@ -958,7 +968,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
+ 				continue
+ 			}
+-			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
++			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(store, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
+ 				blockedReconfiguredNamedIdentities[identity] = true
+ 				continue
+ 			}
+@@ -1025,7 +1035,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
+ 						continue
+ 					}
+-					if closeSessionBeadIfUnassigned(store, rigStores, cfg, open, "duplicate", now, stderr) {
++					if closeSessionBeadIfUnassigned(store, store, rigStores, cfg, open, "duplicate", now, stderr) {
+ 						openBeads[i].Status = "closed"
+ 					}
+ 				}
+@@ -1156,7 +1166,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
+ 						finalizeErr = err
+ 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
+-						closeFailedCreateBead(store, newBead.ID, now, stderr)
++						closeFailedCreateBead(store, store, newBead.ID, now, stderr)
+ 						return
+ 					}
+ 					if newBead.Metadata == nil {
+@@ -1570,7 +1580,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 				continue
+ 			}
+ 			if configuredNames[sn] {
+-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
++				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
+ 					if idx, ok := indexBySessionName[sn]; ok {
+ 						openBeads[idx].Status = "closed"
+ 					}
+@@ -1584,7 +1594,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
+ 						}
+ 					}
+ 				}
+-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
++				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
+ 					if idx, ok := indexBySessionName[sn]; ok {
+ 						openBeads[idx].Status = "closed"
+ 					}
+@@ -1782,22 +1792,26 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr
+ 	return nil
+ }
+ 
+-func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
++// closeFailedCreateBead closes a session bead stuck in failed-create. The
++// session-bead legs (ClosePatch, Close) use sessionStore; it carries workStore
++// only to forward to cancelStateAssignedToRetiredSessionBead (whose extmsg leg
++// is work-resident). Byte-identical at the default bd backend.
++func closeFailedCreateBead(sessionStore, workStore beads.Store, id string, now time.Time, stderr io.Writer) bool {
+ 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
+ 	patch["pending_create_claim"] = ""
+ 	patch["pending_create_started_at"] = ""
+ 	patch["sleep_intent"] = ""
+-	if setMetaBatch(store, id, patch, stderr) != nil {
++	if setMetaBatch(sessionStore, id, patch, stderr) != nil {
+ 		return false
+ 	}
+-	if err := store.Close(id); err != nil {
++	if err := sessionStore.Close(id); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
+ 		return false
+ 	}
+ 	// Defense in depth: a startup race between bead creation and an early
+ 	// bind could leave participant records behind. Cleanup helpers no-op
+ 	// when the session has no labeled state.
+-	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
++	cancelStateAssignedToRetiredSessionBead(sessionStore, workStore, id, now, stderr)
+ 	return true
+ }
+ 
+@@ -1913,7 +1927,7 @@ func reapStaleSessionBeads(
+ 				continue
+ 			}
+ 		}
+-		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
++		if closeBead(store, store, b.ID, "stale-session", now.UTC(), stderr) {
+ 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
+ 			reaped++
+ 		}
+@@ -2009,7 +2023,7 @@ func cleanupDeadRuntimeSessionCorpses(
+ 		// runtime-Stop side effect still runs in test contexts that do not
+ 		// wire a real store; closeBead is idempotent on already-closed beads.
+ 		if store != nil {
+-			closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
++			closeBead(store, store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
+ 		}
+ 		cleaned++
+ 	}
+@@ -2181,6 +2195,7 @@ func sweepProcessTableOrphans(
+ 
+ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
+ 	store beads.Store,
++	sessionStore beads.Store,
+ 	rigStores map[string]beads.Store,
+ 	sp runtime.Provider,
+ 	cfg *config.City,
+@@ -2193,6 +2208,10 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
+ 	if stderr == nil {
+ 		stderr = io.Discard
+ 	}
++	// Work-assignment guards read the WORK store(s); the session-close legs
++	// target sessionStore. stopRuntimeBeforeSessionBeadMutation stays on store
++	// for now (a session op threaded in a later phase) — byte-identical at the
++	// default bd backend where the two stores are identical.
+ 	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
+@@ -2213,9 +2232,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
+ 		return false
+ 	}
+ 	if isFailedCreateSessionBead(b) {
+-		return closeFailedCreateBead(store, b.ID, now, stderr)
++		return closeFailedCreateBead(sessionStore, store, b.ID, now, stderr)
+ 	}
+-	return closeBead(store, b.ID, closeReason, now, stderr)
++	return closeBead(sessionStore, store, b.ID, closeReason, now, stderr)
+ }
+ 
+ func stopRuntimeBeforeSessionBeadMutation(
+@@ -2279,7 +2298,16 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
+ // have their assignee cleared and their status reset to "open" so the
+ // pool reconciler can re-pick them. Without this, work orphaned by a
+ // reap stays orphaned until someone clears the assignee by hand.
+-func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
++//
++// closeBead takes the session and work stores SEPARATELY so the controller
++// can become class-aware (retiring the coordrouter.Router): the session-bead
++// lifecycle legs (Get snapshot, ClosePatch, Close, wait/extmsg cancel) use
++// sessionStore, while the work-release leg (releaseWorkFromClosedSessionBead)
++// uses workStore. This is the mass-closure boundary in code form — the work
++// read must never reach the (empty, when relocated) session store, or a
++// session would be closed while it still holds live work. At the default bd
++// backend sessionStore == workStore, so it is byte-identical.
++func closeBead(sessionStore, workStore beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+ 	if stderr == nil {
+ 		stderr = io.Discard
+ 	}
+@@ -2297,17 +2325,17 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
+ 	// We reuse this Get result as the snapshot for releaseWorkFromClosedSessionBead.
+ 	// A missing/failed Get is non-fatal — we still attempt the close, and
+ 	// releaseOrphanedPoolAssignments on the next tick is our idempotent fallback.
+-	snapshot, snapshotErr := store.Get(id)
++	snapshot, snapshotErr := sessionStore.Get(id)
+ 	if snapshotErr == nil && snapshot.Status == "closed" {
+ 		return false
+ 	}
+ 	if reason == string(session.StateFailedCreate) {
+-		return closeFailedCreateBead(store, id, now, stderr)
++		return closeFailedCreateBead(sessionStore, workStore, id, now, stderr)
+ 	}
+-	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
++	if setMetaBatch(sessionStore, id, session.ClosePatch(now, reason), stderr) != nil {
+ 		return false
+ 	}
+-	if err := store.Close(id); err != nil {
++	if err := sessionStore.Close(id); err != nil {
+ 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
+ 		return false
+ 	}
+@@ -2315,10 +2343,12 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
+ 	// named-session retirement calls this directly at
+ 	// retireRemovedConfiguredNamedSessionBead. Without it, pool respawn
+ 	// leaves zombie memberships and the successor never re-binds to
+-	// slack (#1939).
+-	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
++	// slack (#1939). The wait cancel inside is session-class; the extmsg
++	// cancel is work-class — that internal split lands in a later phase (the
++	// stores are identical at the default backend, so it is byte-identical now).
++	cancelStateAssignedToRetiredSessionBead(sessionStore, workStore, id, now, stderr)
+ 	if snapshotErr == nil {
+-		releaseWorkFromClosedSessionBead(store, snapshot, stderr)
++		releaseWorkFromClosedSessionBead(workStore, snapshot, stderr)
+ 	}
+ 	return true
+ }
+diff --git a/cmd/gc/session_beads_test.go b/cmd/gc/session_beads_test.go
+index 011142ba0..f5fc77d6a 100644
+--- a/cmd/gc/session_beads_test.go
++++ b/cmd/gc/session_beads_test.go
+@@ -1825,7 +1825,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RechecksAssignedWorkAfter
+ 
+ 	var stderr bytes.Buffer
+ 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+-		store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
++		store, store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
+ 	)
+ 
+ 	if closed {
+@@ -1868,7 +1868,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
+ 
+ 	var stderr bytes.Buffer
+ 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+-		store, nil, sp, nil, b, "orphaned", "orphaned session", now, &stderr,
++		store, store, nil, sp, nil, b, "orphaned", "orphaned session", now, &stderr,
+ 	)
+ 
+ 	if closed {
+@@ -1935,7 +1935,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassignedPreservesConfiguredNamedSe
+ 
+ 	var stderr bytes.Buffer
+ 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+-		store, nil, sp, cfg, b, "suspended", "suspended session", now, &stderr,
++		store, store, nil, sp, cfg, b, "suspended", "suspended session", now, &stderr,
+ 	)
+ 
+ 	if closed {
+@@ -2783,7 +2783,7 @@ func TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	if closeFailedCreateBead(store, b.ID, now, ioDiscard{}) {
++	if closeFailedCreateBead(store, store, b.ID, now, ioDiscard{}) {
+ 		t.Fatal("closeFailedCreateBead returned true, want false when Close fails")
+ 	}
+ 	got, err := store.Get(b.ID)
+@@ -4409,7 +4409,7 @@ func TestCloseBeadReleasesWorkAssignedBySessionName(t *testing.T) {
+ 		t.Fatalf("set work in_progress: %v", err)
+ 	}
+ 
+-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
++	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+ 		t.Fatal("closeBead returned false, want true")
+ 	}
+ 
+@@ -4433,6 +4433,96 @@ func TestCloseBeadReleasesWorkAssignedBySessionName(t *testing.T) {
+ 	}
+ }
+ 
++// TestCloseBeadRoutesSessionAndWorkLegsToSeparateStores is the seed of the
++// Phase-7 mass-closure guard for retiring the coordrouter.Router. It proves
++// closeBead routes its two legs to the two distinct stores it now takes: the
++// session-bead lifecycle (Get/ClosePatch/Close) lands on sessionStore, and the
++// work-release (releaseWorkFromClosedSessionBead) lands on workStore — never the
++// session store. A decoy WORK bead seeded into the SESSION store (assigned to
++// the same session) must survive, proving the work read does not federate into
++// the session backend (which, when relocated, is empty of work; a regression
++// there would close sessions that still hold live work).
++func TestCloseBeadRoutesSessionAndWorkLegsToSeparateStores(t *testing.T) {
++	sessionStore := beads.NewMemStore()
++	workStore := beads.NewMemStore()
++	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
++
++	sessionBead, err := sessionStore.Create(beads.Bead{
++		Title:  "worker",
++		Type:   sessionBeadType,
++		Labels: []string{sessionBeadLabel},
++		Metadata: map[string]string{
++			"session_name": "worker-gm-dead",
++			"template":     "worker",
++		},
++	})
++	if err != nil {
++		t.Fatalf("create session bead on sessionStore: %v", err)
++	}
++
++	work, err := workStore.Create(beads.Bead{
++		Title:    "real work",
++		Assignee: "worker-gm-dead",
++		Metadata: map[string]string{"gc.routed_to": "worker"},
++	})
++	if err != nil {
++		t.Fatalf("create work bead on workStore: %v", err)
++	}
++	if err := workStore.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
++		t.Fatalf("set work in_progress: %v", err)
++	}
++
++	// Decoy: a work bead assigned to the same session but physically on the
++	// SESSION store. If the work-release leg wrongly reads the session store, it
++	// would release this decoy; correct routing leaves it untouched.
++	decoy, err := sessionStore.Create(beads.Bead{
++		Title:    "decoy work that must not be touched",
++		Assignee: "worker-gm-dead",
++		Metadata: map[string]string{"gc.routed_to": "worker"},
++	})
++	if err != nil {
++		t.Fatalf("create decoy work bead on sessionStore: %v", err)
++	}
++	if err := sessionStore.Update(decoy.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
++		t.Fatalf("set decoy in_progress: %v", err)
++	}
++
++	if !closeBead(sessionStore, workStore, sessionBead.ID, "orphaned", now, ioDiscard{}) {
++		t.Fatal("closeBead returned false, want true")
++	}
++
++	// Session leg landed on the session store.
++	gotSess, err := sessionStore.Get(sessionBead.ID)
++	if err != nil {
++		t.Fatalf("get session bead from sessionStore: %v", err)
++	}
++	if gotSess.Status != "closed" {
++		t.Fatalf("session status = %q, want closed (the close leg must land on sessionStore)", gotSess.Status)
++	}
++
++	// Work-release leg landed on the work store.
++	gotWork, err := workStore.Get(work.ID)
++	if err != nil {
++		t.Fatalf("get work bead from workStore: %v", err)
++	}
++	if gotWork.Assignee != "" {
++		t.Errorf("workStore work assignee = %q, want empty (the work-release leg must land on workStore)", gotWork.Assignee)
++	}
++	if gotWork.Status != "open" {
++		t.Errorf("workStore work status = %q, want open", gotWork.Status)
++	}
++
++	// The decoy on the session store was NOT touched — the work read never
++	// reached the session backend. This is the mass-closure boundary.
++	gotDecoy, err := sessionStore.Get(decoy.ID)
++	if err != nil {
++		t.Fatalf("get decoy from sessionStore: %v", err)
++	}
++	if gotDecoy.Assignee != "worker-gm-dead" || gotDecoy.Status != "in_progress" {
++		t.Fatalf("decoy on sessionStore was released (assignee=%q status=%q) — the work-release leg leaked into the session store", gotDecoy.Assignee, gotDecoy.Status)
++	}
++}
++
+ func TestCloseBeadClearsSessionAffinityOnRelease(t *testing.T) {
+ 	store := beads.NewMemStore()
+ 	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+@@ -4466,7 +4556,7 @@ func TestCloseBeadClearsSessionAffinityOnRelease(t *testing.T) {
+ 		t.Fatalf("set work in_progress: %v", err)
+ 	}
+ 
+-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
++	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+ 		t.Fatal("closeBead returned false, want true")
+ 	}
+ 
+@@ -4513,7 +4603,7 @@ func TestCloseBeadReleasesWorkAssignedByBeadID(t *testing.T) {
+ 		t.Fatalf("set work in_progress: %v", err)
+ 	}
+ 
+-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
++	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+ 		t.Fatal("closeBead returned false, want true")
+ 	}
+ 
+@@ -4557,7 +4647,7 @@ func TestCloseBeadReleasesWorkAssignedByNamedIdentity(t *testing.T) {
+ 		t.Fatalf("set work in_progress: %v", err)
+ 	}
+ 
+-	if !closeBead(store, sessionBead.ID, "suspended", now, ioDiscard{}) {
++	if !closeBead(store, store, sessionBead.ID, "suspended", now, ioDiscard{}) {
+ 		t.Fatal("closeBead returned false, want true")
+ 	}
+ 
+@@ -4598,7 +4688,7 @@ func TestCloseBeadLeavesUnrelatedWorkAlone(t *testing.T) {
+ 		t.Fatalf("set other in_progress: %v", err)
+ 	}
+ 
+-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
++	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+ 		t.Fatal("closeBead returned false, want true")
+ 	}
+ 
+@@ -4642,7 +4732,7 @@ func TestCloseBeadReleasesWorkAssignedByAlias(t *testing.T) {
+ 		t.Fatalf("set work in_progress: %v", err)
+ 	}
+ 
+-	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
++	if !closeBead(store, store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+ 		t.Fatal("closeBead returned false, want true")
+ 	}
+ 
+@@ -7557,7 +7647,7 @@ func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {
+ 
+ 	var stderr bytes.Buffer
+ 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+-	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
++	if !closeBead(store, store, sessionBead.ID, "stale-session", now, &stderr) {
+ 		t.Fatalf("closeBead returned false; want true because ownership gating belongs to closeSessionBeadIfUnassigned: stderr=%s", stderr.String())
+ 	}
+ 	got, err := store.Get(sessionBead.ID)
+@@ -7597,7 +7687,7 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
+ 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+ 
+ 	// First close transitions the bead to closed and stamps close_reason.
+-	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
++	if !closeBead(store, store, sessionBead.ID, "stale-session", now, &stderr) {
+ 		t.Fatalf("first closeBead returned false: stderr=%s", stderr.String())
+ 	}
+ 	afterFirst, err := store.Get(sessionBead.ID)
+@@ -7611,7 +7701,7 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
+ 	// Second close on the already-closed bead must return false and must
+ 	// leave metadata identical to the post-first-close snapshot — no
+ 	// re-stamp of close_reason, closed_at, or state.
+-	if closeBead(store, sessionBead.ID, "orphaned", now.Add(time.Minute), &stderr) {
++	if closeBead(store, store, sessionBead.ID, "orphaned", now.Add(time.Minute), &stderr) {
+ 		t.Fatalf("closeBead on already-closed bead returned true; want false")
+ 	}
+ 	afterSecond, err := store.Get(sessionBead.ID)
+@@ -7701,7 +7791,7 @@ func TestReassignStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(
+ 
+ 	var stderr bytes.Buffer
+ 	now := time.Date(2026, 5, 15, 9, 30, 0, 0, time.UTC)
+-	reassignStateAssignedToRetiredSessionBead(store, oldSessionID, newSessionID, now, &stderr)
++	reassignStateAssignedToRetiredSessionBead(store, store, oldSessionID, newSessionID, now, &stderr)
+ 	if strings.Contains(stderr.String(), "reassigning waits") {
+ 		t.Fatalf("stderr = %q, want converged reassign without cap error", stderr.String())
+ 	}
+@@ -7756,7 +7846,7 @@ func TestCancelStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(t
+ 
+ 	var stderr bytes.Buffer
+ 	now := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+-	cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, now, &stderr)
++	cancelStateAssignedToRetiredSessionBead(store, store, sessionBead.ID, now, &stderr)
+ 	if strings.Contains(stderr.String(), "canceling waits") {
+ 		t.Fatalf("stderr = %q, want converged cleanup without cap error", stderr.String())
+ 	}
+@@ -7797,7 +7887,7 @@ func TestCloseBeadCascadesExtmsgState(t *testing.T) {
+ 
+ 	var stderr bytes.Buffer
+ 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+-	if !closeBead(store, sessionBead.ID, "drained", now, &stderr) {
++	if !closeBead(store, store, sessionBead.ID, "drained", now, &stderr) {
+ 		t.Fatalf("closeBead returned false; want true: stderr=%s", stderr.String())
+ 	}
+ 
+@@ -7820,7 +7910,7 @@ func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
+ 
+ 	var stderr bytes.Buffer
+ 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+-	if !closeFailedCreateBead(store, sessionBead.ID, now, &stderr) {
++	if !closeFailedCreateBead(store, store, sessionBead.ID, now, &stderr) {
+ 		t.Fatalf("closeFailedCreateBead returned false; want true: stderr=%s", stderr.String())
+ 	}
+ 
+@@ -7856,7 +7946,7 @@ func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionNam
+ 
+ 	var stderr bytes.Buffer
+ 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+-	if closeSessionBeadIfUnassigned(store, map[string]beads.Store{"demo": rigStore}, nil, sessionBead, "stale-session", now, &stderr) {
++	if closeSessionBeadIfUnassigned(store, store, map[string]beads.Store{"demo": rigStore}, nil, sessionBead, "stale-session", now, &stderr) {
+ 		t.Fatal("closeSessionBeadIfUnassigned returned true; want false because rig-store work is still assigned by session_name")
+ 	}
+ 	got, err := store.Get(sessionBead.ID)
+diff --git a/cmd/gc/session_lifecycle_parallel.go b/cmd/gc/session_lifecycle_parallel.go
+index 6983b5d91..b70c386c3 100644
+--- a/cmd/gc/session_lifecycle_parallel.go
++++ b/cmd/gc/session_lifecycle_parallel.go
+@@ -2062,7 +2062,7 @@ func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time
+ 			session.Metadata["session_name"] = ""
+ 		}
+ 	}
+-	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
++	closeBead(store, store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+ }
+ 
+ func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
+@@ -2078,7 +2078,7 @@ func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store,
+ 			session.Metadata["session_name"] = ""
+ 		}
+ 	}
+-	if !closeFailedCreateBead(store, session.ID, now, stderr) {
++	if !closeFailedCreateBead(store, store, session.ID, now, stderr) {
+ 		return
+ 	}
+ 	if session.Metadata == nil {
+diff --git a/cmd/gc/session_reconciler.go b/cmd/gc/session_reconciler.go
+index 1ebc7a7ee..c5388e8d5 100644
+--- a/cmd/gc/session_reconciler.go
++++ b/cmd/gc/session_reconciler.go
+@@ -320,7 +320,7 @@ func finalizeDrainAckStoppedSession(
+ 		hasAssignedWork = true
+ 	}
+ 	if closeIfUnassigned && !hasAssignedWork {
+-		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, "drained", clk.Now().UTC(), stderr) {
++		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, store, rigStores, *session, "drained", clk.Now().UTC(), stderr) {
+ 			session.Status = "closed"
+ 			if session.Metadata == nil {
+ 				session.Metadata = make(map[string]string)
+@@ -1255,7 +1255,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
+ 					if storeQueryPartial {
+ 						continue
+ 					}
+-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
++					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, store, rigStores, *session, string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
+ 						session.Status = "closed"
+ 					}
+ 					continue
+@@ -1429,7 +1429,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
+ 					if storeQueryPartial {
+ 						continue
+ 					}
+-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
++					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
+ 						session.Status = "closed"
+ 					}
+ 				}
+@@ -2569,7 +2569,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
+ 			if closeReason == "" {
+ 				closeReason = "drained"
+ 			}
+-			if closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr) {
++			if closeBead(store, store, target.session.ID, closeReason, clk.Now().UTC(), stderr) {
+ 				// Pool worktrees are transient by design — reclaim disk
+ 				// when the session bead is retired. Skipped under safety
+ 				// gates (uncommitted, unpushed, stashed) and overridable
+diff --git a/cmd/gc/session_work_guard.go b/cmd/gc/session_work_guard.go
+index baee6e0e5..7e892ebbc 100644
+--- a/cmd/gc/session_work_guard.go
++++ b/cmd/gc/session_work_guard.go
+@@ -23,6 +23,7 @@ import (
+ // re-verified.
+ func closeSessionBeadIfUnassigned(
+ 	store beads.Store,
++	sessionStore beads.Store,
+ 	rigStores map[string]beads.Store,
+ 	cfg *config.City,
+ 	session beads.Bead,
+@@ -33,6 +34,9 @@ func closeSessionBeadIfUnassigned(
+ 	if stderr == nil {
+ 		stderr = io.Discard
+ 	}
++	// The work-assignment guard reads the WORK store(s) — never the session
++	// store. The session-close legs target sessionStore. At the default bd
++	// backend the two stores are identical, so this is byte-identical.
+ 	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, session, cfg)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
+@@ -42,9 +46,9 @@ func closeSessionBeadIfUnassigned(
+ 		return false
+ 	}
+ 	if isFailedCreateSessionBead(session) {
+-		return closeFailedCreateBead(store, session.ID, now, stderr)
++		return closeFailedCreateBead(sessionStore, store, session.ID, now, stderr)
+ 	}
+-	return closeBead(store, session.ID, reason, now, stderr)
++	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
+ }
+ 
+ // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
+@@ -55,6 +59,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
+ 	cityPath string,
+ 	cfg *config.City,
+ 	store beads.Store,
++	sessionStore beads.Store,
+ 	rigStores map[string]beads.Store,
+ 	session beads.Bead,
+ 	reason string,
+@@ -64,6 +69,8 @@ func closeSessionBeadIfReachableStoreUnassigned(
+ 	if stderr == nil {
+ 		stderr = io.Discard
+ 	}
++	// The reachable-store work guard reads the WORK store(s); the session-close
++	// legs target sessionStore. Byte-identical at the default bd backend.
+ 	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, session)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
+@@ -73,7 +80,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
+ 		return false
+ 	}
+ 	if isFailedCreateSessionBead(session) {
+-		return closeFailedCreateBead(store, session.ID, now, stderr)
++		return closeFailedCreateBead(sessionStore, store, session.ID, now, stderr)
+ 	}
+-	return closeBead(store, session.ID, reason, now, stderr)
++	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
+ }

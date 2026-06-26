@@ -205,16 +205,13 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 	}
 }
 
-// TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore: a rig-scoped session's
-// reachable stores are the primary (graph) store AND its rig store. Under
-// graph_store=sqlite its routed graph.v2 work (gcg-…) lives in the primary store
-// while rig-native work lives in the rig store; both must keep the session from
-// being mis-read as unassigned and closed (the drained-pool-member strand: a
-// codex-mini pool member drained while its next-group gcg- work, routed to it,
-// sat open in the primary store). This updates the pre-sqlite #3453-era assertion
-// that a rig-scoped session counted only its rig store — the graph.v2 migration
-// moved the work to the primary store, so the reachability guard follows it.
-func TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore(t *testing.T) {
+// TestSessionHasOpenAssignedWorkUsesOnlyReachableStore covers the IDENTITY-PHASE
+// (default Dolt city, no graph-only capability) fallback of the close/recycle
+// check: a rig-scoped session reaches only its one rig store, so city-store work
+// does not count while rig-store work does. Under graph_store=sqlite the check
+// instead consults the graph backend alone — see
+// TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope.
+func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
 	cfg := &config.City{
@@ -236,20 +233,20 @@ func TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore(t *testing.T) {
 		},
 	}
 	if _, err := cityStore.Create(beads.Bead{
-		ID:       "gcg-primary-work",
+		ID:       "city-work",
 		Type:     "task",
 		Status:   "open",
 		Assignee: session.ID,
 	}); err != nil {
-		t.Fatalf("Create primary (graph) store work: %v", err)
+		t.Fatalf("Create city work: %v", err)
 	}
 
 	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, session)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
-	if !has {
-		t.Fatal("primary/graph-store assigned work must count for a rig-scoped session — its graph.v2 routed work lives in the primary store under graph_store=sqlite")
+	if has {
+		t.Fatal("city-store assigned work should not count for a rig-scoped session in the identity phase")
 	}
 
 	if _, err := rigStore.Create(beads.Bead{
@@ -278,10 +275,11 @@ func TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore(t *testing.T) {
 // openSessionReachableStoreRef's cross-store wildcard. Before the fix these guards
 // resolved the city-scoped session to a single configured store and missed its
 // rig-store work, so a live holder could be closed/drained/recycled or
-// under-reported (#3453 re-regression). Rig-scoped sessions reach the primary
-// (graph) store AND their rig store — under graph_store=sqlite their routed
-// graph.v2 work lives in the primary store (covered by
-// TestSessionHasOpenAssignedWorkReachesPrimaryAndRigStore).
+// under-reported (#3453 re-regression). Rig-scoped sessions stay single-store in
+// the identity phase (covered by TestSessionHasOpenAssignedWorkUsesOnlyReachableStore);
+// under graph_store=sqlite the drain/recycle/wake checks are graph-only, matching
+// the worker's execution scope (covered by
+// TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope).
 func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
@@ -623,5 +621,92 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 
 	if got := resolveTaskWorkDir(store, "worker-session"); got != workDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
+	}
+}
+
+// graphOnlyAssignedStore is a graph_store=sqlite-shaped test store: its graph-only
+// capability exposes the ClassGraph backend (graph nodes), while the embedded
+// MemStore stands in for the federated Dolt/work leg a graph-only worker never
+// executes.
+type graphOnlyAssignedStore struct {
+	beads.Store
+	graph []beads.Bead
+	ready []beads.Bead
+}
+
+func (s *graphOnlyAssignedStore) ListGraphOnlyHandle() (beads.GraphOnlyListStore, bool) {
+	return graphOnlyAssignedReader{graph: s.graph, ready: s.ready}, true
+}
+
+func (s *graphOnlyAssignedStore) ReadyGraphOnlyHandle() (beads.GraphOnlyReadyStore, bool) {
+	return graphOnlyAssignedReader{graph: s.graph, ready: s.ready}, true
+}
+
+type graphOnlyAssignedReader struct {
+	graph []beads.Bead
+	ready []beads.Bead
+}
+
+func (r graphOnlyAssignedReader) ListGraphOnly(beads.ListQuery) ([]beads.Bead, error) {
+	return append([]beads.Bead(nil), r.graph...), nil
+}
+
+func (r graphOnlyAssignedReader) GraphIDPrefix() string { return "gcg" }
+
+func (r graphOnlyAssignedReader) ReadyGraphOnly(...beads.ReadyQuery) ([]beads.Bead, error) {
+	return append([]beads.Bead(nil), r.ready...), nil
+}
+
+// TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope: under
+// graph_store=sqlite the close/recycle check consults the graph backend ALONE,
+// mirroring the worker's execution loop (a worker executes only graph nodes).
+// Graph work assigned to the worker counts — so it is not closed out from under it
+// (the strand). Dolt/rig work the graph-only worker can never execute does NOT
+// count — counting it would pin the worker alive for unrunnable work (the livelock:
+// kept alive, never works).
+func TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{Name: "worker", Dir: "riga"}},
+	}
+	session := beads.Bead{
+		ID:     "session-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "worker-session",
+		},
+	}
+	graphStore := &graphOnlyAssignedStore{
+		Store: beads.NewMemStore(),
+		graph: []beads.Bead{{ID: "gcg-1", Status: "open", Assignee: session.ID}},
+	}
+	// Dolt/rig work assigned to the same session — a graph-only worker can never
+	// execute it, so the recycle check must ignore it.
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{ID: "rig-work", Type: "task", Status: "open", Assignee: session.ID}); err != nil {
+		t.Fatalf("create rig work: %v", err)
+	}
+	rigStores := map[string]beads.Store{"riga": rigStore}
+
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, graphStore, rigStores, session)
+	if err != nil {
+		t.Fatalf("check with graph work: %v", err)
+	}
+	if !has {
+		t.Fatal("graph-store assigned work must count — closing out from under it is the strand bug")
+	}
+
+	// Drop the graph step; only the unrunnable Dolt/rig work remains.
+	graphStore.graph = nil
+	has, err = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, graphStore, rigStores, session)
+	if err != nil {
+		t.Fatalf("check without graph work: %v", err)
+	}
+	if has {
+		t.Fatal("Dolt/rig work a graph-only worker can't execute must NOT count — counting it livelocks the worker (kept alive, never works)")
 	}
 }

@@ -2718,9 +2718,15 @@ func sessionHasInProgressAssignedWorkForConfig(store beads.Store, rigStores map[
 	return sessionHasAssignedWorkInStoresForStatuses(store, rigStores, sessionAssignmentIdentifiersForConfig(session, cfg), []string{"in_progress"})
 }
 
-// sessionHasOpenAssignedWorkForReachableStore reports whether any open or
-// in-progress work bead is assigned to the given session in the store its
-// configured agent can query and claim from.
+// sessionHasOpenAssignedWorkForReachableStore reports whether the session has open
+// or in-progress work it would actually execute, using the SAME scope as the
+// worker's execution-readiness loop. Under graph_store=sqlite a worker executes
+// ONLY graph nodes (internal/beads/ready_graph_only.go), so this consults the graph
+// backend alone via the graph-only capability; counting Dolt/rig work the worker
+// can never run would keep it alive for unrunnable work — a livelock (kept-alive ⟷
+// drain, never progressing). In the identity phase (no distinct ClassGraph backend)
+// it falls back to the full reachable-store check so default Dolt cities stay
+// byte-identical.
 func sessionHasOpenAssignedWorkForReachableStore(
 	cityPath string,
 	cfg *config.City,
@@ -2729,6 +2735,9 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	session beads.Bead,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+	if gol, ok := beads.GraphOnlyListFor(store); ok {
+		return graphOnlyHasAssignedWork(gol, identifiers, []string{"open", "in_progress"})
+	}
 	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
 	if err != nil {
 		return false, err
@@ -2743,7 +2752,11 @@ func sessionHasOpenAssignedWorkForReachableStore(
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
 // should keep a session awake: in-progress work always counts, while open work
-// counts only when it is ready: unblocked, not deferred, and not ready-excluded.
+// counts only when it is ready (unblocked, not deferred). It mirrors the worker's
+// execution scope — graph-only under graph_store=sqlite (the worker executes only
+// graph nodes), falling back to the full reachable-store check in the identity
+// phase — so the drain-cancel/wake decision can't disagree with what the worker
+// can actually run.
 func sessionHasAwakeAssignedWorkForReachableStore(
 	cityPath string,
 	cfg *config.City,
@@ -2752,6 +2765,9 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	session beads.Bead,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+	if _, ok := beads.GraphOnlyReadyFor(store); ok {
+		return graphOnlyHasAwakeAssignedWork(store, identifiers)
+	}
 	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
 	if err != nil {
 		return false, err
@@ -2764,17 +2780,105 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	return false, nil
 }
 
+// graphOnlyHasAssignedWork reports whether the graph backend ALONE holds a bead in
+// one of statuses assigned to any of identifiers — the graph_store=sqlite execution
+// scope of a worker (ClassGraph only, the ClassWork/Dolt leg skipped). The query
+// hints Assignees for backend efficiency; results are filtered in memory so the
+// answer is correct even if a backend returns a superset.
+func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string, statuses []string) (bool, error) {
+	idset := make(map[string]struct{}, len(identifiers))
+	assignees := make([]string, 0, len(identifiers))
+	for _, id := range identifiers {
+		if id == "" {
+			continue
+		}
+		if _, ok := idset[id]; ok {
+			continue
+		}
+		idset[id] = struct{}{}
+		assignees = append(assignees, id)
+	}
+	if len(assignees) == 0 {
+		return false, nil
+	}
+	list, err := gol.ListGraphOnly(beads.ListQuery{Assignees: assignees})
+	if err != nil {
+		return false, err
+	}
+	statusset := make(map[string]struct{}, len(statuses))
+	for _, s := range statuses {
+		statusset[s] = struct{}{}
+	}
+	for _, b := range list {
+		if _, ok := idset[b.Assignee]; !ok {
+			continue
+		}
+		if _, ok := statusset[b.Status]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// graphOnlyHasAwakeAssignedWork is the graph-only analog of
+// sessionHasAwakeAssignedWorkInStoreByIdentifiers: in-progress graph work always
+// keeps a worker awake, and ready (unblocked) open graph work counts via the same
+// ReadyGraphOnly set the dispatcher/worker execution loop consumes.
+func graphOnlyHasAwakeAssignedWork(store beads.Store, identifiers []string) (bool, error) {
+	idset := make(map[string]struct{}, len(identifiers))
+	assignees := make([]string, 0, len(identifiers))
+	for _, id := range identifiers {
+		if id == "" {
+			continue
+		}
+		if _, ok := idset[id]; ok {
+			continue
+		}
+		idset[id] = struct{}{}
+		assignees = append(assignees, id)
+	}
+	if len(assignees) == 0 {
+		return false, nil
+	}
+	if gol, ok := beads.GraphOnlyListFor(store); ok {
+		if has, err := graphOnlyHasAssignedWork(gol, assignees, []string{"in_progress"}); err != nil || has {
+			return has, err
+		}
+	}
+	gor, ok := beads.GraphOnlyReadyFor(store)
+	if !ok {
+		return false, nil
+	}
+	for _, id := range assignees {
+		ready, err := gor.ReadyGraphOnly(beads.ReadyQuery{Assignee: id})
+		if err != nil {
+			return false, err
+		}
+		for _, b := range ready {
+			if _, ok := idset[b.Assignee]; ok {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // reachableStoresForSession returns the store(s) in which the session's assigned
 // work can live, applying the same cross-store model as openSessionReachableStoreRef.
 // A cross-store-eligible (city-scoped) session federates across the primary store
 // and every rig store (vp-kvp); a session whose template/agent can't be resolved
 // falls back to the same fan-out (legacy keep-on-match fail-safe); a rig-bound
-// session routes to the primary (graph) store AND its one rig store, because
-// under graph_store=sqlite its routed graph.v2 work lives in the primary store
-// while rig-native work lives in the rig store; every other session routes to
-// the primary store. The slice is ordered primary-first so "first match" callers
-// keep their historical ordering. Returns an error only when a resolved rig
-// store is missing.
+// session routes to its one rig store; every other session routes to the primary
+// store. The slice is ordered primary-first so "first match" callers keep their
+// historical ordering. Returns an error only when a resolved rig store is missing.
+//
+// This store-set model is the IDENTITY-PHASE (default Dolt city) scope. Under
+// graph_store=sqlite a worker executes graph nodes ALONE (ready_graph_only.go),
+// so the drain/recycle/wake checks bypass this and consult the graph-only
+// capability directly (see sessionHasOpenAssignedWorkForReachableStore). A rig-only
+// reach would miss the worker's graph work (the strand), and adding the primary
+// store back would count Dolt work the graph-only worker can never run (a
+// livelock) — the graph-only path resolves both by matching execution scope.
 func reachableStoresForSession(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]beads.Store, error) {
 	agentCfg := sessionAgentConfig(cfg, session)
 	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
@@ -2793,13 +2897,7 @@ func reachableStoresForSession(cityPath string, cfg *config.City, store beads.St
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
 	}
-	// Include the primary (graph) store as well as the rig store: under
-	// graph_store=sqlite a rig-scoped agent's routed graph.v2 work (gcg-…) lives
-	// in the primary store, not its rig store. A rig-only reach misses that work
-	// and mis-reads the session as unassigned, closing an owner that still holds
-	// open work (the drained-pool-member strand). Primary-first preserves
-	// first-match callers' ordering.
-	return []beads.Store{store, rigStore}, nil
+	return []beads.Store{rigStore}, nil
 }
 
 // firstOpenAssignedWorkBeadForReachableStore returns the first open or

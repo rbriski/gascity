@@ -4,9 +4,9 @@
 //
 // Before beadmeta, these keys were ~126 raw string literals scattered across
 // ~70 files with no central declaration: the real interface between modules was
-// folklore. This package makes the seam named and compiler-checked. It is a
-// zero-dependency leaf (it imports nothing) so every workflow package can import
-// it without risk of an import cycle, mirroring internal/events.
+// folklore. This package makes the seam named and compiler-checked. It imports
+// only the standard library, so every workflow package can import it without
+// risk of an import cycle, mirroring internal/events.
 //
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
@@ -39,24 +39,31 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey                = "gc.attempt_log"
-	AttemptMetadataKey                   = "gc.attempt"
-	BondMetadataKey                      = "gc.bond"
-	BondVarsMetadataKey                  = "gc.bond_vars"
-	CheckModeMetadataKey                 = "gc.check_mode"
-	CheckPathMetadataKey                 = "gc.check_path"
-	CheckTimeoutMetadataKey              = "gc.check_timeout"
-	CityPathMetadataKey                  = "gc.city_path"
-	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
-	ContinuationGroupMetadataKey         = "gc.continuation_group"
-	ControlEpochMetadataKey              = "gc.control_epoch"
-	ControlForMetadataKey                = "gc.control_for"
-	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
-	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
-	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
-	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
-	ControllerErrorMetadataKey           = "gc.controller_error"
-	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	AttemptLogMetadataKey              = "gc.attempt_log"
+	AttemptMetadataKey                 = "gc.attempt"
+	BondMetadataKey                    = "gc.bond"
+	BondVarsMetadataKey                = "gc.bond_vars"
+	CheckModeMetadataKey               = "gc.check_mode"
+	CheckPathMetadataKey               = "gc.check_path"
+	CheckTimeoutMetadataKey            = "gc.check_timeout"
+	CityPathMetadataKey                = "gc.city_path"
+	ClosedByAttemptMetadataKey         = "gc.closed_by_attempt"
+	ContinuationGroupMetadataKey       = "gc.continuation_group"
+	ControlEpochMetadataKey            = "gc.control_epoch"
+	ControlForMetadataKey              = "gc.control_for"
+	ControlQuarantineReasonMetadataKey = "gc.control_quarantine_reason"
+	ControlQuarantinedAtMetadataKey    = "gc.control_quarantined_at"
+	ControlQuarantinedMetadataKey      = "gc.control_quarantined"
+	ControllerErrorClassMetadataKey    = "gc.controller_error_class"
+	ControllerErrorMetadataKey         = "gc.controller_error"
+	ControllerRetryableMetadataKey     = "gc.controller_retryable"
+	CurrentRunIDMetadataKey            = "gc.current_run_id"
+	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
+	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
+	// stamped at the claim hook and read at the usage record site to populate
+	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
+	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
+	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -165,9 +172,35 @@ const (
 	TerminalMetadataKey                  = "gc.terminal"
 	TruncatedMetadataKey                 = "gc.truncated"
 	VoteFieldMetadataKey                 = "gc.vote_field"
+	WorkBranchMetadataKey                = "gc.work_branch"
+	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
+	WorkOutcomeMetadataKey               = "gc.work_outcome"
+	WorkVerificationMetadataKey          = "gc.work_verification"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
 )
+
+// Work-record metadata keys (ADR-0009). These bind a work bead to its claim
+// and its outcome so observability/eval can answer "what work was done, by
+// whom, with what artifact, to what end":
+//
+//   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the claiming
+//     worker is on; the durable handle from the bead to its work. Stamped at
+//     claim time alongside WorkDirMetadataKey and read by the close gate.
+//   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
+//     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
+//     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
+//     result ("pass"/"fail"/"skipped") read by internal/dispatch, a disjoint
+//     vocabulary that must not be overloaded.
+//   - WorkCommitMetadataKey ("gc.work_commit") — the commit SHA that satisfied
+//     the bead; required when the outcome is "shipped" and validated reachable
+//     on WorkBranchMetadataKey by the close gate. Named in the gc.work_* family
+//     (not a bare "gc.commit") to avoid collision with future commit concepts.
+//   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
+//     record (gate result, "manual", or a link) backing a shipped outcome.
+//
+// The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
+// commit on the branch" rule live with the close gate in cmd/gc.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
@@ -217,6 +250,8 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CurrentRunIDMetadataKey,
+	ActiveWorkBeadMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -325,7 +360,11 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TruncatedMetadataKey,
 	VoteFieldMetadataKey,
+	WorkBranchMetadataKey,
+	WorkCommitMetadataKey,
 	WorkDirMetadataKey,
+	WorkOutcomeMetadataKey,
+	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
 }
 

@@ -300,6 +300,7 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	r := &Recipe{
 		Name:          f.Formula,
 		Description:   f.Description,
+		Metadata:      cloneFormulaMetadata(f.Metadata),
 		Vars:          f.Vars,
 		Phase:         f.Phase,
 		Pour:          f.Pour,
@@ -344,6 +345,17 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = "graph.v2"
 	} else if rootOnly {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
+	}
+	// Stamp the canonical run-recipe identity on the run-root so it rides the
+	// root bead.created payload (city_events.formula -> Forge "Run of <formula>").
+	// This is workflowFormulaName's gc.formula_name source, made exact and
+	// run-rooted instead of derived heuristically from a step's gc.step_ref
+	// "mol-<formula>.<step>" prefix downstream.
+	if f.Formula != "" {
+		if rootStep.Metadata == nil {
+			rootStep.Metadata = map[string]string{}
+		}
+		rootStep.Metadata[beadmeta.FormulaNameMetadataKey] = f.Formula
 	}
 	defPriority := 2
 	rootStep.Priority = &defPriority

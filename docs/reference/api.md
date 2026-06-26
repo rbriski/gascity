@@ -7,6 +7,9 @@ The `gc` supervisor exposes a single, typed HTTP control plane
 described by an OpenAPI 3.1 document. Everything the CLI does, any
 third-party client can do too — there is no hidden surface.
 
+See also: [The six primitives](/getting-started/how-gas-city-works) — the canonical model this
+API projects over.
+
 ## Get the spec
 
 - **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/openapi.json" target="_blank" rel="noopener">openapi.json</a>** —
@@ -33,10 +36,18 @@ The spec is the full reference. A brief summary of the surfaces:
   query + hook operations, dependencies, labels.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
-- **Mail, convoys, orders, formulas, molecules, participants,
+- **Connected-client external messaging.** `POST /v0/extmsg/clients`
+  registers an external LLM client and returns a bearer token.
+  `POST /v0/extmsg/inbound` (with `provider: "llm-client"`) delivers an
+  inbound turn from the registered client to a city session.
+  `GET /v0/extmsg/{provider}/{account_id}/{conversation_id}/subscribe`
+  opens a long-lived SSE reply stream for that conversation.
+  See [Connect an external LLM client](/guides/connected-clients) for
+  the full integration guide including the SSE error catalog.
+- **Mail, convoys, orders, formulas, participants,
   transcripts, adapters.** External messaging and orchestration
   surfaces; see the spec for per-operation shapes.
-- **Event bus.** `GET /v0/events` + `GET /v0/events/stream` at
+- **Events.** `GET /v0/events` + `GET /v0/events/stream` at
   supervisor scope, and `GET /v0/city/{cityName}/events` +
   `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
@@ -184,10 +195,10 @@ event multiplexer finds the new city on the very next
 
 `POST /v0/city/{cityName}/unregister` removes a city from the
 supervisor's registry and signals the supervisor to stop the city's
-controller. Like `POST /v0/city`, it is asynchronous: the response
+orchestrator. Like `POST /v0/city`, it is asynchronous: the response
 is `202 Accepted` returned as soon as the registry entry is gone
 and the supervisor is notified. The supervisor reconciler stops the
-controller on its next tick and emits the completion event.
+orchestrator on its next tick and emits the completion event.
 
 The city directory on disk is **not** touched. This operation only
 detaches the city from the supervisor; reattaching it later is a
@@ -214,9 +225,9 @@ On `/v0/events/stream` the client will see (in order):
   before the registry write so subscribers see the teardown start.
 - `request.result.city.unregister`
   (`CityUnregisterSucceededPayload`) — emitted by the reconciler once
-  the city's controller has stopped.
+  the city's orchestrator has stopped.
 - `request.failed` (`RequestFailedPayload`) — emitted by the
-  reconciler if the controller did not stop cleanly. Match
+  reconciler if the orchestrator did not stop cleanly. Match
   `payload.request_id`.
 
 Exactly one terminal event lands per successful unregister. Clients

@@ -88,7 +88,17 @@ verbatim.`,
 	return cmd
 }
 
-const defaultHookRunTimeout = 15 * time.Second
+// defaultHookRunTimeout is the hard timeout for a managed hook command run
+// via `gc hook run`. It wraps the work-query probe on the session-startup
+// path, so it must be at least as generous as hookWorkQueryTimeout — the
+// default work-probe makes ~6 sequential bd/store round-trips (three session
+// identifiers x in-progress+ready assigned tiers, then the pool-demand tier),
+// and on a multi-rig dolt city under concurrent load that routinely exceeded
+// the old 15s, killing the probe before it reached the pool-demand tier that
+// finds routed work — starving pool operators (gc.run-operator) of work they
+// were already routed. Reducing the probe's round-trip count is the proper
+// follow-up; until then this budget must cover the realistic loaded cost.
+const defaultHookRunTimeout = 30 * time.Second
 
 type hookRunOptions struct {
 	Timeout         time.Duration
@@ -231,6 +241,33 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
+	if !ok {
+		// Pool instances run with GC_AGENT/GC_ALIAS set to their per-instance name
+		// (e.g. "rig/polecat-adhoc-<hash>") which is not a config entry — only the
+		// pool binding (GC_TEMPLATE, e.g. "rig/polecat") is. When a pack script
+		// invokes "gc hook $GC_AGENT" the positional arg bypasses the no-args
+		// sessionTemplateContext fallback. Retry with GC_TEMPLATE so pool agents
+		// resolve correctly regardless of invocation style.
+		//
+		// Gate the retry to the runtime/session identity case: only fall back
+		// when the unresolved arg is this instance's own runtime name
+		// (GC_ALIAS/GC_AGENT/GC_SESSION_NAME). Otherwise an unrelated bad
+		// explicit target in a pool session would silently reinterpret as the
+		// template agent instead of erroring.
+		isRuntimeIdentity := agentName == strings.TrimSpace(os.Getenv("GC_ALIAS")) ||
+			agentName == strings.TrimSpace(os.Getenv("GC_AGENT")) ||
+			agentName == strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+		if tpl := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); tpl != "" && tpl != agentName && isRuntimeIdentity {
+			if ta, tok := resolveAgentIdentity(cfg, tpl, currentRigContext(cfg)); tok {
+				a, ok = ta, true
+				agentName = tpl
+				if !sessionTemplateContext {
+					sessionTemplateContext = strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+						strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+				}
+			}
+		}
+	}
 	if !ok {
 		fmt.Fprintf(stderr, "gc hook: agent %q not found in config\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
@@ -410,11 +447,15 @@ func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[strin
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
-// hookWorkQueryTimeout caps the work-query subprocess. Default matches
-// the pre-bounded behavior (30s) so existing tests that legitimately
-// take >15s don't regress; the package-level var lets us lower it in
-// follow-up work after slow paths are identified and optimized.
-var hookWorkQueryTimeout = 30 * time.Second
+// hookWorkQueryTimeout caps the work-query subprocess. The default work-probe
+// issues ~6 sequential bd/store round-trips before the pool-demand tier that
+// finds routed work; on a multi-rig dolt city under concurrent load the probe
+// intermittently exceeded the prior 30s cap, so `runWorkQuery` killed it and
+// pool operators were starved of routed work. Raised to 60s to cover the
+// realistic loaded cost. The package-level var lets us lower it again in
+// follow-up work once the probe's round-trip count is reduced and the slow
+// per-rig `bd ready`/`gc ready` paths are optimized.
+var hookWorkQueryTimeout = 60 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment

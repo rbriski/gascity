@@ -228,6 +228,12 @@ func (testAgentResolver) ResolveAgent(cfg *config.City, name, _ string) (config.
 	return config.Agent{}, false
 }
 
+type noMatchAgentResolver struct{}
+
+func (noMatchAgentResolver) ResolveAgent(*config.City, string, string) (config.Agent, bool) {
+	return config.Agent{}, false
+}
+
 func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "mayor", MaxActiveSessions: intPtr(1)},
@@ -394,10 +400,9 @@ on_exhausted = "hard_fail"
 		}
 	}
 
-	// Retry control beads (gc.kind=retry) must route to the control dispatcher
-	// via direct assignee (not gc.routed_to) per ApplyGraphControlRouteBinding:
-	// gc.routed_to means "config queue work" and must not be used for a known
-	// dispatcher session.
+	// Retry control beads (gc.kind=retry) route to the singleton
+	// control-dispatcher queue. They must not assign a future on-demand
+	// runtime session name before that session exists.
 	controlIDs := []string{
 		"followup-shape.load-context",
 		"followup-shape.apply-fix",
@@ -410,11 +415,11 @@ on_exhausted = "hard_fail"
 		if got := s.Metadata["gc.kind"]; got != "retry" {
 			t.Errorf("control %q gc.kind = %q, want retry", id, got)
 		}
-		if got := s.Metadata["gc.routed_to"]; got != "" {
-			t.Errorf("control %q gc.routed_to = %q, want empty (routed by direct assignee)", id, got)
+		if got := s.Metadata["gc.routed_to"]; got != "control-dispatcher" {
+			t.Errorf("control %q gc.routed_to = %q, want control-dispatcher", id, got)
 		}
-		if s.Assignee == "" {
-			t.Errorf("control %q assignee is empty; want control-dispatcher session", id)
+		if s.Assignee != "" {
+			t.Errorf("control %q assignee = %q, want empty routed control-dispatcher queue", id, s.Assignee)
 		}
 	}
 
@@ -701,7 +706,7 @@ func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	}
 }
 
-func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t *testing.T) {
+func TestControlDispatcherBinding_ConfiguredDispatcherUsesCanonicalQueue(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{
 		Name: "control-dispatcher",
 		Dir:  "gascity",
@@ -714,15 +719,48 @@ func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t 
 	if binding.QualifiedName != "gascity/control-dispatcher" {
 		t.Fatalf("QualifiedName = %q, want gascity/control-dispatcher", binding.QualifiedName)
 	}
-	if binding.SessionName != "gascity--control-dispatcher" {
-		t.Fatalf("SessionName = %q, want gascity--control-dispatcher", binding.SessionName)
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)
 	}
-	if binding.MetadataOnly {
-		t.Fatalf("MetadataOnly = true, want false")
+	if !binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = false, want true")
 	}
 }
 
-func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t *testing.T) {
+func TestControlDispatcherBinding_ConfiguredImportQualifiedDispatcherUsesScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+	}}
+
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding: %v", err)
+	}
+	if binding.QualifiedName != "fixture/core.control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want fixture/core.control-dispatcher", binding.QualifiedName)
+	}
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)
+	}
+	if !binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = false, want true")
+	}
+}
+
+func TestAssignGraphStepRoute_ControlBindingUsesRoutedQueueWithoutAssignee(t *testing.T) {
 	step := &formula.RecipeStep{
 		Metadata: map[string]string{
 			"gc.routed_to": "stale-control-route",
@@ -739,11 +777,11 @@ func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t 
 
 	AssignGraphStepRoute(step, execution, &control)
 
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	if step.Assignee != "" {
+		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("control gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "gascity/claude" {
 		t.Fatalf("control execution route = %q, want gascity/claude", got)
@@ -767,11 +805,11 @@ func TestAssignGraphStepRoute_ControlBindingPreservesDirectExecutionRoute(t *tes
 
 	AssignGraphStepRoute(step, execution, &control)
 
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	if step.Assignee != "" {
+		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("control gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "session-123" {
 		t.Fatalf("control execution route = %q, want direct session id", got)

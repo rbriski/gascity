@@ -323,13 +323,14 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	mayorSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
 	reviewerSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer", cfg.Workspace.SessionTemplate)
@@ -389,11 +390,11 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	}
 
 	control := steps["expansion-review.review-scope-check"]
-	if control.Assignee != config.ControlDispatcherAgentName {
-		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, config.ControlDispatcherAgentName)
+	if control.Assignee != "" {
+		t.Fatalf("review scope-check assignee = %q, want empty routed control-dispatcher queue", control.Assignee)
 	}
-	if got := control.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("review scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := control.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Fatalf("review scope-check gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
 	}
 	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "reviewer" {
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
@@ -469,9 +470,10 @@ func TestDecorateDrainItemRecipeUsesDirectExecutionRoute(t *testing.T) {
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 	recipe := &formula.Recipe{
 		Name: "item",
 		Steps: []formula.RecipeStep{
@@ -537,13 +539,14 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 	maxSessions := 2
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{{
 			Name:              "worker",
 			MaxActiveSessions: &maxSessions,
 		}},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 	recipe := &formula.Recipe{
 		Name: "item",
 		Steps: []formula.RecipeStep{
@@ -782,7 +785,7 @@ func TestDeleteWorkflowMatchesFailureDoesNotCloseBeads(t *testing.T) {
 
 func TestCmdWorkflowDeleteSourceClosesMatchedRootsAndClearsWorkflowID(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -1004,7 +1007,7 @@ func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 	// delete-source would list the root and close nothing. This is the
 	// exact root shape #720 exists to recover.
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -1411,12 +1414,14 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend"}},
 		Agents: []config.Agent{
 			{Name: "reviewer", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	source := beads.Bead{
 		ID:    "gc-source",
@@ -1486,11 +1491,11 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if control.Metadata["gc.scope_role"] != "control" {
 		t.Fatalf("control gc.scope_role = %q, want control", control.Metadata["gc.scope_role"])
 	}
-	if control.Assignee != config.ControlDispatcherAgentName {
-		t.Fatalf("control assignee = %q, want %q", control.Assignee, config.ControlDispatcherAgentName)
+	if control.Assignee != "" {
+		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", control.Assignee)
 	}
-	if got := control.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("control gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := control.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("control gc.routed_to = %q, want frontend/control-dispatcher", got)
 	}
 	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "frontend/reviewer" {
 		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
@@ -1513,9 +1518,11 @@ func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend"}},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 	source := beads.Bead{
 		ID:    "gc-source",
 		Title: "Source",
@@ -1565,8 +1572,11 @@ func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
 	if !ok {
 		t.Fatal("missing expansion-review.check")
 	}
-	if check.Assignee != config.ControlDispatcherAgentName {
-		t.Fatalf("check assignee = %q, want %q", check.Assignee, config.ControlDispatcherAgentName)
+	if check.Assignee != "" {
+		t.Fatalf("check assignee = %q, want empty routed control-dispatcher queue", check.Assignee)
+	}
+	if got := check.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("check gc.routed_to = %q, want frontend/control-dispatcher", got)
 	}
 	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != direct.ID {
 		t.Fatalf("check execution route = %q, want direct session %s", got, direct.ID)
@@ -1580,13 +1590,14 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "reviewer", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 			{Name: "reviewer", Dir: "backend", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	source := beads.Bead{
 		ID:    "gc-source",
@@ -1626,12 +1637,13 @@ func TestDecorateDynamicFragmentRecipeMarksRetryEvalAsScopedControl(t *testing.T
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "reviewer", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	source := beads.Bead{
 		ID:       "gc-source",
@@ -1689,7 +1701,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -1772,7 +1784,7 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -1849,11 +1861,12 @@ func TestRequireWorkflowServeFollowSessionEnvAllowsManagedSession(t *testing.T) 
 }
 
 func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	clearInheritedBeadsEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	cleanupManagedDoltTestCity(t, cityDir)
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -2131,7 +2144,7 @@ func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -2176,7 +2189,7 @@ func TestRunWorkflowServeWarnsOnLegacyTracePath(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -2222,7 +2235,7 @@ func TestRunWorkflowServeWarnsWhenLegacyTraceFileStillExists(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	legacyTracePath := filepath.Join(cityDir, "control-dispatcher-trace.log")
@@ -2274,7 +2287,7 @@ func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"+testControlDispatcherAgentTOML("")+testControlDispatcherAgentTOML("alpha")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
@@ -2326,7 +2339,7 @@ func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfigu
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"+testControlDispatcherAgentTOML("")+testControlDispatcherAgentTOML("alpha")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
@@ -2375,7 +2388,7 @@ func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfigu
 
 func TestRunControlDispatcherWithStoreRoutesRalphTraceWarningToStderr(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	checkPath := filepath.Join(cityDir, "pass-check.sh")
@@ -2478,7 +2491,7 @@ func TestRunControlDispatcherWithStoreRoutesRalphTraceWarningToStderr(t *testing
 
 func TestRunControlDispatcherWithStoreWarnsOnLegacyTracePath(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	checkPath := filepath.Join(cityDir, "pass-check.sh")
@@ -2575,7 +2588,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	checkPath := filepath.Join(cityDir, "pass-check.sh")
@@ -2711,7 +2724,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	checkPath := filepath.Join(cityDir, "pass-check.sh")
@@ -2881,6 +2894,79 @@ func TestWorkflowServeControlReadyQueryPreservesRuntimeAndLegacyTargets(t *testi
 	}
 }
 
+// TestWorkflowServeControlReadyQueryHonorsBareLegacyRoute guards the upgrade
+// gap: a qualified "core.control-dispatcher" serve loop must still claim
+// control beads that pre-1.3 builds routed to the binding-stripped bare name
+// "control-dispatcher". The supervisor-cache spec carries the bare alias and
+// the route consumer scans it alongside the qualified target so persisted
+// in-flight work is not stranded after upgrade.
+func TestWorkflowServeControlReadyQueryHonorsBareLegacyRoute(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, BindingName: "core"})
+	spec, ok, err := parseWorkflowServeControlReadyQuery(query)
+	if err != nil || !ok {
+		t.Fatalf("parseWorkflowServeControlReadyQuery() = spec=%+v ok=%v err=%v, want parsed", spec, ok, err)
+	}
+	if spec.Target != "core.control-dispatcher" {
+		t.Fatalf("spec.Target = %q, want core.control-dispatcher", spec.Target)
+	}
+	if spec.BareTarget != "control-dispatcher" {
+		t.Fatalf("spec.BareTarget = %q, want control-dispatcher", spec.BareTarget)
+	}
+	routes := workflowServeControlReadyRoutes(spec)
+	if !slices.Contains(routes, "core.control-dispatcher") {
+		t.Fatalf("routes = %#v, want qualified target", routes)
+	}
+	if !slices.Contains(routes, "control-dispatcher") {
+		t.Fatalf("routes = %#v, want bare legacy route scanned", routes)
+	}
+}
+
+// TestWorkflowServeControlReadyBeadsClaimsBareRoutedWork pins the end-to-end
+// behavior the bare route exists for: a qualified dispatcher must claim an
+// unassigned bead routed to the pre-1.3 bare name out of the supervisor cache.
+func TestWorkflowServeControlReadyBeadsClaimsBareRoutedWork(t *testing.T) {
+	spec := workflowServeControlReadySpec{
+		Target:     "core.control-dispatcher",
+		BareTarget: "control-dispatcher",
+	}
+	ready := []beads.Bead{
+		{ID: "ga-bare-routed", Metadata: map[string]string{"gc.routed_to": "control-dispatcher", "gc.kind": "workflow-finalize"}},
+		{ID: "ga-qualified-routed", Metadata: map[string]string{"gc.run_target": "core.control-dispatcher", "gc.kind": "scope-check"}},
+		{ID: "ga-other", Metadata: map[string]string{"gc.routed_to": "other/control-dispatcher", "gc.kind": "scope-check"}},
+	}
+	got := filterWorkflowServeControlReadyBeads(ready, spec, map[string]string{})
+	var ids []string
+	for _, b := range got {
+		ids = append(ids, b.ID)
+	}
+	if !slices.Contains(ids, "ga-bare-routed") {
+		t.Fatalf("filtered ids = %#v, want bare-routed work claimed", ids)
+	}
+	if !slices.Contains(ids, "ga-qualified-routed") {
+		t.Fatalf("filtered ids = %#v, want qualified-routed work claimed", ids)
+	}
+	if slices.Contains(ids, "ga-other") {
+		t.Fatalf("filtered ids = %#v, want unrelated route excluded", ids)
+	}
+}
+
+// TestControlDispatcherBareRoute pins the binding-stripping alias derivation.
+func TestControlDispatcherBareRoute(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"core.control-dispatcher", "control-dispatcher"},
+		{"rig/core.control-dispatcher", "rig/control-dispatcher"},
+		{"control-dispatcher", ""},     // already bare: no distinct alias
+		{"rig/control-dispatcher", ""}, // already bare (rig-scoped)
+		{"gascity.polecat", ""},        // not a control dispatcher
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := controlDispatcherBareRoute(tc.in); got != tc.want {
+			t.Errorf("controlDispatcherBareRoute(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestFilterWorkflowServeControlReadyBeadsPreservesPriorityAndPredicates(t *testing.T) {
 	spec := workflowServeControlReadySpec{
 		Target:             "gascity/control-dispatcher",
@@ -3040,7 +3126,7 @@ formula_v2 = true
 
 [[rigs]]
 name = "myrig"
-`
+` + testControlDispatcherAgentTOML("") + testControlDispatcherAgentTOML("myrig")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -3364,7 +3450,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -3419,7 +3505,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -3571,7 +3657,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlBeadAndProcessesLaterRead
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -3625,7 +3711,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlOnly(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -3678,7 +3764,7 @@ func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -3756,7 +3842,7 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -3802,7 +3888,7 @@ func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -4126,7 +4212,7 @@ func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -4182,7 +4268,7 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
@@ -4236,7 +4322,7 @@ path = %q
 [[agent]]
 name = "worker"
 dir = "backend"
-`, rigDir)
+`, rigDir) + testControlDispatcherAgentTOML("") + testControlDispatcherAgentTOML("backend")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -4473,6 +4559,90 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 }
 
+// TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr is the
+// regression guard for the coalescing bug where a relevant event observed just
+// before a fatal watcher error was consumed without its promised re-scan. When
+// the wait reports a relevant wake AND a pending fatal stream error (the error
+// arrived inside the same coalescing window), the loop must perform the one
+// drain that wake scheduled before surfacing the error, so newly-ready work is
+// serviced in-process rather than stranded until an external dispatcher
+// restart re-scans.
+func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+
+	watcherErr := errors.New("event stream closed")
+	waitCalls := 0
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+		waitCalls++
+		if waitCalls == 1 {
+			// A relevant event was observed, then a fatal watcher error arrived
+			// inside the coalescing window: report the wake AND the error.
+			return true, watcherErr
+		}
+		t.Fatalf("unexpected wait call %d: the loop must drain the observed wake and exit, not wait again", waitCalls)
+		return false, watcherErr
+	}
+
+	listCalls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		listCalls++
+		switch listCalls {
+		case 1:
+			// Initial drain before the first wait: nothing ready yet.
+			return nil, nil
+		case 2:
+			// The re-scan the observed wake promised finds newly-ready work that
+			// must be processed before the loop surfaces the watcher error.
+			return []hookBead{{ID: "gc-woke", Metadata: map[string]string{"gc.kind": "scope-check"}}}, nil
+		case 3:
+			// Drain's internal exit poll after processing gc-woke.
+			return nil, nil
+		default:
+			t.Fatalf("unexpected list call %d: the loop must perform exactly one re-scan for the observed wake before exiting", listCalls)
+			return nil, nil
+		}
+	}
+	processedAfterWake := false
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		if beadID == "gc-woke" {
+			processedAfterWake = true
+		}
+		return nil
+	}
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, watcherErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, watcherErr)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait calls = %d, want 1 (loop must drain the observed wake then exit, not wait again)", waitCalls)
+	}
+	if !processedAfterWake {
+		t.Fatal("observed wake's newly-ready bead was not processed before the watcher error surfaced")
+	}
+}
+
 // TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout is the
 // regression guard for the bug where a single transient work-query timeout
 // (the bead store briefly saturated) killed the entire control-dispatcher
@@ -4549,12 +4719,13 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	source := beads.Bead{
 		ID:    "gc-source",
@@ -4601,11 +4772,11 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 	if control.Metadata["gc.scope_ref"] != "body" {
 		t.Fatalf("review scope-check gc.scope_ref = %q, want body", control.Metadata["gc.scope_ref"])
 	}
-	if control.Assignee != config.ControlDispatcherAgentName {
-		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, config.ControlDispatcherAgentName)
+	if control.Assignee != "" {
+		t.Fatalf("review scope-check assignee = %q, want empty routed control-dispatcher queue", control.Assignee)
 	}
-	if got := control.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("review scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := control.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Fatalf("review scope-check gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
 	}
 	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "reviewer" {
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
@@ -4630,13 +4801,14 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	stepByID := map[string]*formula.RecipeStep{
 		"demo.owner": {
@@ -4729,13 +4901,14 @@ func TestResolveGraphStepBindingRetryEvalUsesDependencyRoute(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 			{Name: "control-dispatcher"},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	stepByID := map[string]*formula.RecipeStep{
 		"demo.owner": {
@@ -5533,6 +5706,12 @@ func TestFollowSleepDurationBacksOffThenCaps(t *testing.T) {
 }
 
 func TestWaitForRelevantWorkflowWakeReturnsTrueOnRelevantEvent(t *testing.T) {
+	// Set the debounce explicitly so a lone relevant wake is fast and
+	// intentional rather than silently inheriting the package default.
+	prevDebounce := workflowServeWakeDebounce
+	workflowServeWakeDebounce = 5 * time.Millisecond
+	defer func() { workflowServeWakeDebounce = prevDebounce }()
+
 	eventCh := make(chan workflowWatchResult, 1)
 	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadCreated, Subject: "gc-1"}}
 
@@ -5649,13 +5828,45 @@ func TestWaitForRelevantWorkflowWakeBurstSurfacesWatcherErr(t *testing.T) {
 	eventCh <- workflowWatchResult{err: os.ErrDeadlineExceeded}
 
 	// A fatal stream error that arrives during the coalescing window must still
-	// terminate the serve loop, not be swallowed by the debounce drain.
+	// terminate the serve loop, but the relevant event observed just before it
+	// must still report a wake so runWorkflowServeFollow performs the one
+	// promised re-scan for that wake before surfacing the error. Returning
+	// (false, err) here would strand the just-observed work until a dispatcher
+	// restart re-scans.
 	eventWake, err := waitForRelevantWorkflowWake(eventCh, time.Second)
 	if err == nil {
 		t.Fatal("wait returned nil err, want watcher err surfaced from coalescing window")
 	}
-	if eventWake {
-		t.Fatal("eventWake = true on error path, want false")
+	if !eventWake {
+		t.Fatal("eventWake = false, want true: the relevant event observed before the error must still wake the loop for its re-scan")
+	}
+}
+
+func TestWaitForRelevantWorkflowWakeDisabledDebounceDoesNotCoalesce(t *testing.T) {
+	prevDebounce := workflowServeWakeDebounce
+	workflowServeWakeDebounce = 0
+	defer func() { workflowServeWakeDebounce = prevDebounce }()
+
+	// With coalescing disabled (debounce <= 0) the escape hatch restores
+	// one-event-one-drain: a relevant event still wakes the loop, but the helper
+	// must not consume any trailing buffered events.
+	eventCh := make(chan workflowWatchResult, 2)
+	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadCreated, Subject: "gc-1"}}
+	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadCreated, Subject: "gc-2"}}
+
+	start := time.Now()
+	eventWake, err := waitForRelevantWorkflowWake(eventCh, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !eventWake {
+		t.Fatal("eventWake = false, want true for a relevant event with coalescing disabled")
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("returned after %v, want near-immediate when debounce is disabled", elapsed)
+	}
+	if leftover := len(eventCh); leftover != 1 {
+		t.Fatalf("eventCh has %d buffered events, want 1 (disabled debounce must not drain the trailing event)", leftover)
 	}
 }
 

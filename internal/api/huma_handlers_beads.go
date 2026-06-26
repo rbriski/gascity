@@ -6,8 +6,16 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"golang.org/x/sync/errgroup"
 )
+
+// ephemeralFederationConcurrency bounds how many backing stores the ephemeral
+// federation queries at once. It is large enough that realistic cities (a
+// handful of rigs) federate fully in parallel, and bounded so a city with many
+// rigs cannot open an unbounded number of concurrent dolt connections.
+const ephemeralFederationConcurrency = 16
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
 //
@@ -121,7 +129,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 					IncludeClosed: input.All,
 					Live:          input.Status == "in_progress",
 					Sort:          beads.SortCreatedDesc,
-					Metadata:      map[string]string{"gc.kind": "workflow"},
+					Metadata:      map[string]string{beadmeta.KindMetadataKey: "workflow"},
 				})
 			}
 			for qi, query := range queries {
@@ -415,39 +423,70 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
+
+	// Federation order is deterministic: the city store first (graph-class wisps
+	// in a single-HQ city live there, off the per-rig BeadStores()), then each
+	// rig sorted. The per-store List() calls run concurrently — a dolt-backed rig
+	// store can take seconds, and serial federation made the worker claim path
+	// (gc hook --claim hits this endpoint) scale with rig count and time out.
+	type federationTarget struct {
+		label string
+		store beads.Store
+	}
+	targets := make([]federationTarget, 0, len(rigNames)+1)
+	targets = append(targets, federationTarget{"city", s.state.CityBeadStore()})
+	for _, rigName := range rigNames {
+		targets = append(targets, federationTarget{"rig " + rigName, stores[rigName]})
+	}
+
+	type federationResult struct {
+		list []beads.Bead
+		err  error
+	}
+	results := make([]federationResult, len(targets))
+	var eg errgroup.Group
+	eg.SetLimit(ephemeralFederationConcurrency)
+	for i, t := range targets {
+		if t.store == nil {
+			continue
+		}
+		eg.Go(func() error {
+			list, err := t.store.List(query)
+			results[i] = federationResult{list: list, err: err}
+			return nil // per-store errors are aggregated below, never propagated
+		})
+	}
+	_ = eg.Wait()
+
+	// Merge sequentially in target order so the partial aggregator and dedup map
+	// stay single-threaded and the city store's beads still win on ID collisions.
 	var all []beads.Bead
 	var pa partialAggregator
 	seen := make(map[string]bool)
-	federate := func(label string, store beads.Store) {
-		if store == nil {
-			return
+	for i, t := range targets {
+		if t.store == nil {
+			continue
 		}
+		res := results[i]
 		pa.attempt()
-		list, err := store.List(query)
-		if err != nil {
-			if beads.IsPartialResult(err) && len(list) > 0 {
-				pa.record(label, err)
+		if res.err != nil {
+			if beads.IsPartialResult(res.err) && len(res.list) > 0 {
+				pa.record(t.label, res.err)
 				pa.success()
 			} else {
-				pa.record(label, err)
-				return
+				pa.record(t.label, res.err)
+				continue
 			}
 		} else {
 			pa.success()
 		}
-		for _, b := range list {
+		for _, b := range res.list {
 			if seen[b.ID] {
 				continue // legacy file mode can alias the city and rig stores
 			}
 			seen[b.ID] = true
 			all = append(all, b)
 		}
-	}
-	// The city store is NOT among the per-rig BeadStores(); graph-class wisps in
-	// a single-HQ city live there, so federate it first.
-	federate("city", s.state.CityBeadStore())
-	for _, rigName := range rigNames {
-		federate("rig "+rigName, stores[rigName])
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

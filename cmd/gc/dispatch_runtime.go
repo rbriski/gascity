@@ -65,8 +65,12 @@ var (
 	// relevant event wakes the --follow loop. Additional buffered events that
 	// arrive during the window are drained and folded into the same wake so a
 	// burst of N bead.* events (e.g. an mc-wisp-* event storm) collapses into a
-	// single work/ready re-scan instead of N heavy per-event Dolt scans.
-	// Injectable so tests can shrink it. Fixes gastownhall/gascity#3206.
+	// single work/ready re-scan instead of N heavy per-event Dolt scans. This is
+	// a fixed (max-wait) window, so a lone relevant wake also waits out the
+	// window before its drain; the delay is intentional and small relative to
+	// the 1–30s idle sleeps it replaces. Set it to 0 to disable coalescing and
+	// restore one-event-one-drain. Injectable so tests can shrink it. Fixes
+	// gastownhall/gascity#3206.
 	workflowServeWakeDebounce = 250 * time.Millisecond
 	workflowServeWaitForWake  = waitForRelevantWorkflowWakeWithTrace
 	workflowTraceNow          = time.Now
@@ -485,6 +489,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			processedThisCycle = true
 		}
 		if processedThisCycle {
+			// Signal workers to skip their poll sleep: new step beads may be ready.
+			writeDispatchWakeFile(cityPath)
 			continue
 		}
 		if pendingCount > 0 {
@@ -517,6 +523,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
 	idleSweeps := 0
+	var pendingWakeErr error
 	for {
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
@@ -535,6 +542,13 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
 			drainResult = workflowServeDrainResult{}
 		}
+		if pendingWakeErr != nil {
+			// The previous wait observed a relevant event and then a fatal
+			// watcher error in the same coalescing window. The drain above is
+			// the one re-scan that wake promised, so the observed work is now
+			// serviced; surface the watcher error to end the loop.
+			return pendingWakeErr
+		}
 		if drainResult.processedAny || drainResult.pendingAny {
 			idleSweeps = 0
 		}
@@ -549,7 +563,17 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 		)
 		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps)
 		if err != nil {
-			return err
+			if !eventWake {
+				// Fatal stream error with no relevant event observed: nothing to
+				// re-scan, so terminate immediately.
+				return err
+			}
+			// A relevant event was observed just before the fatal error. Loop
+			// once more so the next drain services that wake, then surface the
+			// error on the following iteration.
+			pendingWakeErr = err
+			idleSweeps = 0
+			continue
 		}
 		switch {
 		case eventWake, drainResult.pendingAny:
@@ -608,12 +632,18 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				// runWorkflowServeFollow does exactly one drain per return=true,
 				// so the trailing events are already covered by that single
 				// re-scan — no event is dropped, only batched.
-				if coalesced, err := coalesceWorkflowWakeBurst(eventCh); err != nil {
-					return false, err
-				} else if coalesced > 0 {
+				coalesced, coalesceErr := coalesceWorkflowWakeBurst(eventCh)
+				if coalesced > 0 {
 					workflowTracef("serve wake-coalesce extra=%d debounce=%s", coalesced, workflowServeWakeDebounce)
 				}
-				return true, nil
+				// Report the wake even when a fatal stream error arrived during
+				// the coalescing window: a relevant event was already observed,
+				// so runWorkflowServeFollow must still perform the one re-scan it
+				// promised for that wake before terminating. Surfacing
+				// (true, err) lets the caller drain the observed wake and then
+				// exit on the error, instead of stranding newly-ready work until
+				// a dispatcher restart re-scans.
+				return true, coalesceErr
 			}
 			workflowTracef("serve ignore-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
 		case <-timer.C:
@@ -630,10 +660,12 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 // coalesceWorkflowWakeBurst drains additional buffered events from eventCh for
 // the workflowServeWakeDebounce window after a relevant event has already
 // decided to wake the loop. It returns the number of extra events it folded
-// into this wake so the caller emits a single drain for the whole burst. A
-// watcher error encountered while draining is surfaced so the serve loop still
-// terminates on a fatal stream failure. Events are only batched here, never
-// dropped: the caller's single re-scan already reflects every drained event.
+// into this wake so the caller emits a single drain for the whole burst, plus
+// any watcher error encountered while draining. The caller pairs that error
+// with the already-observed wake (returning true, err) so the serve loop still
+// performs the one promised re-scan before terminating on a fatal stream
+// failure. Events are only batched here, never dropped: the caller's single
+// re-scan already reflects every drained event.
 func coalesceWorkflowWakeBurst(eventCh <-chan workflowWatchResult) (int, error) {
 	if workflowServeWakeDebounce <= 0 {
 		return 0, nil
@@ -687,7 +719,8 @@ func workflowServeWorkQuery(agentCfg config.Agent, expandedWorkQuery ...string) 
 func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 	qualified := strings.TrimSpace(agentCfg.QualifiedName())
 	return qualified == config.ControlDispatcherAgentName ||
-		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
+		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName) ||
+		strings.HasSuffix(qualified, "."+config.ControlDispatcherAgentName)
 }
 
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
@@ -698,6 +731,12 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	spec := workflowServeControlReadySpec{
 		Target:       target,
 		LegacyTarget: workflowServeLegacyControlRoute(target),
+		// Pre-1.3 builds routed control beads to the binding-stripped bare
+		// name "control-dispatcher". Carrying it in the spec lets the
+		// supervisor-cache consumer claim that in-flight work after an upgrade
+		// scaled the qualified dispatcher, mirroring the pre-cache shell loop's
+		// GC_CONTROL_BARE_TARGET routed scan.
+		BareTarget: controlDispatcherBareRoute(target),
 	}
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -718,6 +757,7 @@ type workflowServeControlReadySpec struct {
 	Target             string `json:"target"`
 	ControlSessionName string `json:"control_session_name,omitempty"`
 	LegacyTarget       string `json:"legacy_target,omitempty"`
+	BareTarget         string `json:"bare_target,omitempty"`
 }
 
 func workflowServeLegacyControlRoute(target string) string {
@@ -730,6 +770,32 @@ func workflowServeLegacyControlRoute(target string) string {
 		return strings.TrimSuffix(target, suffix) + "/workflow-control"
 	}
 	return ""
+}
+
+// controlDispatcherBareRoute returns the binding-stripped alias of a control
+// dispatcher's qualified name, e.g. "core.control-dispatcher" ->
+// "control-dispatcher" and "rig/core.control-dispatcher" ->
+// "rig/control-dispatcher". Pre-1.3 builds routed control beads to this bare
+// form (see the pre-migration controlDispatcherTargetForExecutionTarget), so
+// the qualified-name consumers must still claim/scale them after an upgrade.
+// Returns "" when target is already bare (no distinct alias) or is not a
+// control-dispatcher route.
+func controlDispatcherBareRoute(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" || target == config.ControlDispatcherAgentName {
+		return ""
+	}
+	dir, name := config.ParseQualifiedName(target)
+	if name == config.ControlDispatcherAgentName {
+		return "" // already bare (possibly rig-scoped); the target itself matches
+	}
+	if !strings.HasSuffix(name, "."+config.ControlDispatcherAgentName) {
+		return ""
+	}
+	if dir != "" {
+		return dir + "/" + config.ControlDispatcherAgentName
+	}
+	return config.ControlDispatcherAgentName
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
@@ -761,6 +827,25 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	return nil, fmt.Errorf("unexpected work query output: %s", trimmed)
 }
 
+// dispatchWakeFile returns the path of the dispatch-wake sentinel file.
+// The control dispatcher touches it after each successful batch so workers
+// can skip their poll sleep and call gc hook immediately.
+func dispatchWakeFile(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "dispatch-wake")
+}
+
+// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
+// Best-effort: if the write fails the dispatch cycle continues normally;
+// workers fall back to their standard poll interval.
+func writeDispatchWakeFile(cityPath string) {
+	path := dispatchWakeFile(cityPath)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
+}
+
 func parseWorkflowServeControlReadyQuery(workQuery string) (workflowServeControlReadySpec, bool, error) {
 	encoded, ok := strings.CutPrefix(strings.TrimSpace(workQuery), workflowServeControlReadyQueryPrefix)
 	if !ok {
@@ -777,6 +862,7 @@ func parseWorkflowServeControlReadyQuery(workQuery string) (workflowServeControl
 	spec.Target = strings.TrimSpace(spec.Target)
 	spec.ControlSessionName = strings.TrimSpace(spec.ControlSessionName)
 	spec.LegacyTarget = strings.TrimSpace(spec.LegacyTarget)
+	spec.BareTarget = strings.TrimSpace(spec.BareTarget)
 	if spec.Target == "" {
 		return workflowServeControlReadySpec{}, true, fmt.Errorf("control ready query missing target")
 	}
@@ -901,5 +987,10 @@ func workflowServeControlReadyRoutes(spec workflowServeControlReadySpec) []strin
 	}
 	add(spec.Target)
 	add(spec.LegacyTarget)
+	// Pre-1.3 builds routed control work to the binding-stripped bare name;
+	// scan it too so an upgraded qualified dispatcher claims that persisted
+	// in-flight work instead of stranding it (mirrors the pre-cache shell
+	// loop's GC_CONTROL_BARE_TARGET routed_ready scan).
+	add(spec.BareTarget)
 	return out
 }

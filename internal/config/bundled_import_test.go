@@ -33,7 +33,12 @@ func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 	}
 }
 
-func TestResolveLockedRemoteImportRejectsBundledSyntheticContentDrift(t *testing.T) {
+// TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticContentDrift
+// pins that the resolution hot path uses ValidateSyntheticRepoFast (marker-only).
+// File-level content drift does not affect the marker, so the fast validator
+// accepts the cache. Per-file content drift is caught by ValidateSyntheticRepo
+// on install, doctor, and post-materialization paths — not on the resolution path.
+func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticContentDrift(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
 	commit := canonicalBundledCommit(source)
@@ -48,16 +53,21 @@ name = "tampered"
 schema = 1
 `)
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
-	if err == nil {
-		t.Fatal("expected synthetic cache content drift error")
+	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	if err != nil {
+		t.Fatalf("fast-path resolution must not reject content drift: %v", err)
 	}
-	if !strings.Contains(err.Error(), "synthetic cache is invalid") || !strings.Contains(err.Error(), "content differs") {
-		t.Fatalf("error = %v, want synthetic cache content drift", err)
+	if !ok {
+		t.Fatal("resolveLockedRemoteImport ok = false, want true")
 	}
 }
 
-func TestResolveLockedRemoteImportRejectsBundledSyntheticExtraFile(t *testing.T) {
+// TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticExtraFile
+// pins that the resolution hot path uses ValidateSyntheticRepoFast (marker-only).
+// Extra files in the cache directory do not affect the marker, so the fast
+// validator accepts the cache. Unexpected-file detection is full-validator-only
+// (ValidateSyntheticRepo) and runs on install, doctor, and post-materialization.
+func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticExtraFile(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
 	commit := canonicalBundledCommit(source)
@@ -66,14 +76,14 @@ func TestResolveLockedRemoteImportRejectsBundledSyntheticExtraFile(t *testing.T)
 	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
-	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/agents/injected/prompt.md", "malicious")
+	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/agents/injected/prompt.md", "extra file")
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
-	if err == nil {
-		t.Fatal("expected synthetic cache extra-file error")
+	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	if err != nil {
+		t.Fatalf("fast-path resolution must not reject extra files: %v", err)
 	}
-	if !strings.Contains(err.Error(), "synthetic cache is invalid") || !strings.Contains(err.Error(), "unexpected file") {
-		t.Fatalf("error = %v, want synthetic cache unexpected-file rejection", err)
+	if !ok {
+		t.Fatal("resolveLockedRemoteImport ok = false, want true")
 	}
 }
 
@@ -491,6 +501,39 @@ func TestResolveInstalledRemoteImportNonBundledStillRequiresLock(t *testing.T) {
 	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", "", cityDir)
 	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
 		t.Fatalf("err = %v, want missing packs.lock error", err)
+	}
+}
+
+// TestResolveInstalledRemoteImportLockedBundledSelfHealsWhenCacheAbsent pins
+// the fresh/upgraded-binary fix: a LOCKED bundled source at its canonical pin
+// whose synthetic cache dir is ABSENT must rebuild offline from the binary's
+// embedded packs instead of hard-failing with "gc import install". A freshly
+// installed binary resolves a new content-hash cache dir (RepoCacheKey folds
+// the embedded-content hash), so the locked import's cache legitimately does
+// not exist yet — and the embedded content is always available offline, just
+// like the no-lock fallback. Guards the tutorial-blocking gc-fatal a fresh
+// rc binary hit on "gc start".
+func TestResolveInstalledRemoteImportLockedBundledSelfHealsWhenCacheAbsent(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := bundledPackSource()
+	commit := canonicalBundledCommit(source)
+	writeBundledImportLock(t, cityDir, source, commit)
+	cacheDir := bundledRepoCacheDir(home, source, commit)
+	// Intentionally DO NOT materialize the cache: simulate the fresh-binary
+	// content-hash cache dir that does not exist yet.
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("precondition: cache dir should be absent, stat err = %v", err)
+	}
+
+	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	if err != nil {
+		t.Fatalf("resolveInstalledRemoteImport locked+absent bundled cache: %v", err)
+	}
+	if got != cacheDir {
+		t.Fatalf("cacheDir = %q, want %q", got, cacheDir)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+		t.Fatalf("self-heal did not produce a valid synthetic cache: %v", err)
 	}
 }
 

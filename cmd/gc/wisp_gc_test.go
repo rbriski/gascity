@@ -806,6 +806,45 @@ func TestWispGC_ReapHonorsBatchCap(t *testing.T) {
 	}
 }
 
+// TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses is the post-merge
+// regression for the finding that the orphan reaper's batch cap advanced only on
+// SUCCESSFUL deletes: a failing delete backend could attempt every eligible
+// orphan in a single tick even though the cap is the safety bound for sweep
+// work. With the cap at 1 and EVERY eligible orphan's delete failing, a sweep
+// must stop after a single delete ATTEMPT — leaving the rest for a later tick —
+// rather than walking the whole backlog because no success ever advanced the
+// counter. Both candidates fail so the assertion is independent of which one the
+// store lists first.
+func TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-fail-1", now.Add(-2*time.Hour), "ghost-root"),
+		makeGCOrphanWisp("orphan-fail-2", now.Add(-2*time.Hour), "ghost-root"),
+	})
+	store.deleteErrors["orphan-fail-1"] = fmt.Errorf("delete failed")
+	store.deleteErrors["orphan-fail-2"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected reap delete error to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (every delete failed)", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %v, want none (every delete failed)", store.deletedIDs)
+	}
+	if len(store.deleteAttempts) != 1 {
+		t.Fatalf("delete attempts = %v (n=%d), want exactly 1; the batch cap must bound delete ATTEMPTS, not just successful reaps", store.deleteAttempts, len(store.deleteAttempts))
+	}
+}
+
 func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()
@@ -848,6 +887,40 @@ func TestWispGC_ReapDeleteErrorSurfacedAndContinues(t *testing.T) {
 		t.Fatalf("purged = %d, want 1 (other orphan still reaped)", purged)
 	}
 	assertDeletedIDs(t, store.deletedIDs, "orphan-ok")
+}
+
+// TestWispGC_DoesNotReapWhenRootGetErrors covers the fail-safe default branch of
+// the orphan reaper: a non-NotFound store.Get error on the root must NOT be read
+// as "root collectible". A transient read failure has to leave the descendant in
+// place (so an in-flight workflow is never stripped of its closed steps) and
+// surface the error rather than swallowing it.
+func TestWispGC_DoesNotReapWhenRootGetErrors(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-unreadable", now.Add(-2*time.Hour), "flaky-root"),
+	})
+	// The root read fails with a non-NotFound error (e.g. a transient store
+	// outage), so collectibility cannot be proven.
+	store.getErrors["flaky-root"] = fmt.Errorf("store temporarily unavailable")
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected unreadable-root Get error to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "resolving root") {
+		t.Fatalf("err = %v, want error wrapping \"resolving root\"", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 when the root is unreadable", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none when the root is unreadable", store.deletedIDs)
+	}
+	if _, getErr := store.MemStore.Get("orphan-unreadable"); getErr != nil {
+		t.Fatalf("orphan-unreadable must be preserved while its root is unreadable: %v", getErr)
+	}
 }
 
 // withCloseAbandonedEnforced runs fn with the abandoned-root closer forced
@@ -926,6 +999,208 @@ func TestWispGC_ClosesAbandonedOpenRootWhenAllDescendantsTerminal(t *testing.T) 
 	}
 	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
 		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+// TestWispGC_ClosesAbandonedV1MoleculeRootWithoutWorkflowMetadata proves the
+// abandoned-root closer covers the same root universe as the reactive autoclose
+// path. A v1 poured molecule root carries type=molecule but NEITHER gc.kind nor
+// gc.formula_contract (see internal/formula/compile.go), so sourceworkflow
+// .IsWorkflowRoot rejects it. The reactive autocloseMoleculeIfComplete still
+// closes type=molecule roots, so when its final child-close event is lost this
+// periodic backstop must close the molecule too — otherwise it leaks forever.
+func TestWispGC_ClosesAbandonedV1MoleculeRootWithoutWorkflowMetadata(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "v1-mol",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+		},
+		{
+			ID:        "v1-mol.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "v1-mol",
+		},
+	})
+	if err := store.DepAdd("v1-mol.1", "v1-mol", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(v1-mol.1->v1-mol): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("v1-mol")
+	if err != nil {
+		t.Fatalf("Get(v1-mol): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("v1-mol status = %q, want closed (v1 molecule backstop must close it)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+// TestWispGC_ClosesAbandonedInProgressGraphRootWhenAllDescendantsTerminal proves
+// the abandoned-root sweep enumerates nonterminal (open AND in_progress) roots.
+// Graph.v2 workflow roots are promoted to in_progress at launch
+// (internal/sling/sling.go PromoteWorkflowLaunchBead), so an open-only candidate
+// query would make a stale in_progress graph root with terminal descendants
+// invisible to the sweep — the exact lost-finalize leak this sweep exists to
+// close. The root carries type=task with gc.kind=workflow + gc.formula_contract
+// =graph.v2, matching what internal/formula/compile.go emits for graph workflows.
+func TestWispGC_ClosesAbandonedInProgressGraphRootWhenAllDescendantsTerminal(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "graph-root",
+			Status:    "in_progress",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+			},
+		},
+		{
+			ID:        "graph-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "graph-root",
+		},
+		{
+			ID:        "graph-root.2",
+			Status:    "tombstone",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "graph-root",
+		},
+	})
+	if err := store.DepAdd("graph-root.1", "graph-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(graph-root.1->graph-root): %v", err)
+	}
+	if err := store.DepAdd("graph-root.2", "graph-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(graph-root.2->graph-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("graph-root")
+	if err != nil {
+		t.Fatalf("Get(graph-root): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("graph-root status = %q, want closed (in_progress graph root must be swept)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+// TestWispGC_CollectsClosedGraphWorkflowRoot proves the closed-root purge
+// enumerates closed graph.v2 workflow roots. These compile as type=task carrying
+// gc.kind=workflow and gc.formula_contract=graph.v2 (NOT type=molecule — see
+// internal/formula/compile.go), so the prior molecule/wisp-only enumeration left
+// a graph workflow root the abandoned-root sweep can close as permanent closed
+// residue. The purge must collect the same root universe the sweep can close.
+func TestWispGC_CollectsClosedGraphWorkflowRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "graph-root",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+			},
+		},
+		{
+			ID:        "graph-root.step",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "graph-root",
+			Metadata:  map[string]string{"gc.root_bead_id": "graph-root"},
+		},
+	})
+	if err := store.DepAdd("graph-root.step", "graph-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(graph-root.step->graph-root): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged < 1 {
+		t.Fatalf("purged = %d, want >= 1; closed graph.v2 workflow root must be collected", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "graph-root", "graph-root.step")
+	if _, err := store.Get("graph-root"); err == nil {
+		t.Fatal("graph-root should have been collected by the closed-root purge")
+	}
+}
+
+// TestWispGC_ClosurePurgeHonorsBatchCap is the post-merge regression for the
+// finding that the closed-root closure purge had no per-tick bound. The selector
+// expansion (adding graph.v2/workflow roots) made a never-before-collected class
+// of closed roots eligible, so the first GC tick after deploy could delete the
+// whole accumulated backlog's ownership closures in one uncapped pass. With the
+// cap shrunk to 1 a single sweep purges at most one root closure and the rest
+// drain on later ticks; a second sweep collects the next root, proving the
+// backlog clears across ticks rather than being dropped.
+func TestWispGC_ClosurePurgeHonorsBatchCap(t *testing.T) {
+	withClosurePurgeBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-a", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBead("mol-b", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBead("mol-c", now.Add(-2*time.Hour), "closed", "molecule"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (closure purge batch cap bounds roots per tick)", purged)
+	}
+	if len(store.deletedIDs) != 1 {
+		t.Fatalf("deleted = %v, want exactly 1 root closure per capped sweep", store.deletedIDs)
+	}
+
+	purged2, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC second sweep: %v", err)
+	}
+	if purged2 != 1 {
+		t.Fatalf("second sweep purged = %d, want 1 (backlog drains across ticks)", purged2)
+	}
+	if len(store.deletedIDs) != 2 {
+		t.Fatalf("after two sweeps deleted = %v, want 2 distinct root closures", store.deletedIDs)
 	}
 }
 
@@ -1124,7 +1399,12 @@ type gcTestStore struct {
 	*beads.MemStore
 	listErrors   map[gcQueryKey]error
 	deleteErrors map[string]error
+	getErrors    map[string]error
 	deletedIDs   []string
+	// deleteAttempts records every Delete call, success or failure, so tests can
+	// assert that a batch cap bounds delete ATTEMPTS and not merely successful
+	// deletes (a failed delete leaves no trace in deletedIDs).
+	deleteAttempts []string
 }
 
 func newGCStore(existing []beads.Bead) *gcTestStore {
@@ -1132,6 +1412,7 @@ func newGCStore(existing []beads.Bead) *gcTestStore {
 		MemStore:     beads.NewMemStoreFrom(0, existing, nil),
 		listErrors:   map[gcQueryKey]error{},
 		deleteErrors: map[string]error{},
+		getErrors:    map[string]error{},
 	}
 }
 
@@ -1142,7 +1423,15 @@ func (s *gcTestStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.MemStore.List(query)
 }
 
+func (s *gcTestStore) Get(id string) (beads.Bead, error) {
+	if err := s.getErrors[id]; err != nil {
+		return beads.Bead{}, err
+	}
+	return s.MemStore.Get(id)
+}
+
 func (s *gcTestStore) Delete(id string) error {
+	s.deleteAttempts = append(s.deleteAttempts, id)
 	if err := s.deleteErrors[id]; err != nil {
 		return err
 	}
@@ -1223,6 +1512,15 @@ func withReapOrphanBatchCap(t *testing.T, batchCap int) {
 	prev := wispGCReapOrphanBatchCap
 	wispGCReapOrphanBatchCap = batchCap
 	t.Cleanup(func() { wispGCReapOrphanBatchCap = prev })
+}
+
+// withClosurePurgeBatchCap overrides the per-sweep closed-root closure purge cap
+// for the duration of a test, restoring the prior value on cleanup.
+func withClosurePurgeBatchCap(t *testing.T, batchCap int) {
+	t.Helper()
+	prev := wispGCClosurePurgeBatchCap
+	wispGCClosurePurgeBatchCap = batchCap
+	t.Cleanup(func() { wispGCClosurePurgeBatchCap = prev })
 }
 
 func captureWispGCLog(t *testing.T, fn func()) string {

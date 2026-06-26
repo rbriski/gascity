@@ -1730,8 +1730,8 @@ func TestFindCodexSessionFileByIDUsesSessionMetaID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := FindCodexSessionFileByID([]string{sessDir}, workDir, targetID); got != targetFile {
-		t.Fatalf("FindCodexSessionFileByID() = %q, want %q", got, targetFile)
+	if got := FindCodexSessionFileByIDFromCandidates([]string{sessDir}, workDir, targetID); got != targetFile {
+		t.Fatalf("FindCodexSessionFileByIDFromCandidates() = %q, want %q", got, targetFile)
 	}
 }
 

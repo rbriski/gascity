@@ -312,7 +312,6 @@ func (s *SQLiteStore) CloseStore() error {
 	return err
 }
 
-// Create persists a new bead.
 // isMetadataOnlyNoop reports whether opts is a pure-metadata update whose every
 // key already matches current — a re-stamp. Skipping these mirrors CachingStore's
 // idempotence (caching_store_writes.go SetMetadata) and avoids the no-op event
@@ -341,6 +340,7 @@ func (s *SQLiteStore) emitRowChange(rc RowChange) {
 	}
 }
 
+// Create persists a new bead.
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	var stored Bead
 	autoID := b.ID == ""

@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
-	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -937,6 +936,32 @@ func TestOrderRun(t *testing.T) {
 	}
 }
 
+func TestOrderRunFormulaRecordsTrackingBead(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	if code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	tracking, err := store.ListByLabel(labelOrderTracking, 0, beads.IncludeClosed, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(%s): %v", labelOrderTracking, err)
+	}
+	if len(tracking) != 1 {
+		t.Fatalf("order-tracking beads = %d, want 1 (%#v)", len(tracking), tracking)
+	}
+	if !beadLabelsContain(tracking[0].Labels, "order-run:digest") {
+		t.Fatalf("tracking bead labels = %v, want order-run:digest", tracking[0].Labels)
+	}
+	if tracking[0].Status != "closed" {
+		t.Fatalf("tracking bead status = %q, want closed", tracking[0].Status)
+	}
+}
+
 func TestOrderRunJSONFormulaSummary(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
@@ -959,7 +984,7 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 
 func TestOrderRunHonorsFormulaV2DisabledCity(t *testing.T) {
 	t.Cleanup(func() {
-		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)}})
 	})
 
 	cityDir := t.TempDir()
@@ -983,8 +1008,13 @@ formula = "graph-work"
 formula_compiler = ">=2.0.0"
 
 [[steps]]
+id = "prepare"
+title = "Prepare workflow"
+
+[[steps]]
 id = "step"
 title = "Do work"
+depends_on = ["prepare"]
 `
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
 		t.Fatal(err)
@@ -2158,37 +2188,34 @@ title = "Do work"
 		t.Fatalf("store.ListOpen(): %v", err)
 	}
 
+	foundRoot := false
 	foundWorker := false
-	foundControl := false
 	for _, bead := range all {
 		switch bead.Title {
-		case "Do work":
-			if bead.Assignee != "quinn" {
-				t.Fatalf("worker assignee = %q, want quinn", bead.Assignee)
+		case "graph-work":
+			if bead.Assignee != "" {
+				t.Fatalf("workflow root assignee = %q, want empty routed pool queue", bead.Assignee)
+			}
+			if bead.Metadata["gc.kind"] != "workflow" {
+				t.Fatalf("workflow root gc.kind = %q, want workflow", bead.Metadata["gc.kind"])
 			}
 			if bead.Metadata["gc.routed_to"] != "quinn" {
-				t.Fatalf("worker gc.routed_to = %q, want quinn", bead.Metadata["gc.routed_to"])
+				t.Fatalf("workflow root gc.routed_to = %q, want quinn", bead.Metadata["gc.routed_to"])
+			}
+			foundRoot = true
+		case "Do work":
+			if bead.Assignee != "" {
+				t.Fatalf("worker assignee = %q, want empty child under routed workflow root", bead.Assignee)
 			}
 			foundWorker = true
-		case "Finalize workflow":
-			if bead.Assignee != config.ControlDispatcherAgentName {
-				t.Fatalf("finalizer assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
-			}
-			if bead.Metadata["gc.routed_to"] != "" {
-				t.Fatalf("finalizer gc.routed_to = %q, want empty for concrete control dispatcher assignee", bead.Metadata["gc.routed_to"])
-			}
-			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "quinn" {
-				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
-			}
-			foundControl = true
 		}
 	}
 
-	if !foundWorker {
-		t.Fatal("missing routed worker step")
+	if !foundRoot {
+		t.Fatal("missing routed workflow root")
 	}
-	if !foundControl {
-		t.Fatal("missing routed workflow finalizer")
+	if !foundWorker {
+		t.Fatal("missing workflow child step")
 	}
 }
 

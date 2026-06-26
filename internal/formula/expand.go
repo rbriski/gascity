@@ -712,8 +712,8 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 				return nil, err
 			}
 
-			// Merge formula default vars with step overrides resolved from the
-			// parent formula vars, matching compose expansion behavior.
+			// Merge formula default vars with step's ExpandVars overrides
+			// resolved against the parent invocation vars.
 			expansionVars := mergeVars(expFormula, resolveOverrideVars(step.ExpandVars, vars))
 
 			// Expand the step using the template (reuse existing expandStep)

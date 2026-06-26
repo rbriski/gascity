@@ -10,11 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -40,8 +43,35 @@ const (
 	defaultNudgePollQuiescence      = 3 * time.Second
 	// A controller wake can legitimately take a couple of minutes when the
 	// session has to rematerialize a worktree and complete startup dialog.
-	defaultNudgePollStartGrace  = 5 * time.Minute
-	defaultNudgeWaitIdleTimeout = 30 * time.Second
+	defaultNudgePollStartGrace = 5 * time.Minute
+
+	// defaultNudgePollMemLimitMB is the soft Go runtime memory limit
+	// (debug.SetMemoryLimit) installed for the long-lived `gc nudge poll`
+	// sidecar. The sidecar re-parses the whole-file city bead store on every
+	// poll tick that sees a changed file; on the file backend a large city
+	// beads.json (100MB+) inflates the heap to several hundred MB per parse and
+	// the runtime otherwise retains ~2x that as unreturned arena, so RSS
+	// plateaus near 1GB per sidecar (gc-3ftcq). With one sidecar per active
+	// session, the fleet-wide total dominates host memory and drives OOM. The
+	// limit caps that arena growth without starving a single live parse (~400MB
+	// for a 124MB file). Override with nudgePollMemLimitEnv; an operator-set
+	// GOMEMLIMIT takes precedence and disables this default.
+	defaultNudgePollMemLimitMB = 512
+
+	// nudgePollMemLimitEnv overrides defaultNudgePollMemLimitMB (in MiB). Set to
+	// "0" to disable the soft limit entirely.
+	nudgePollMemLimitEnv = "GC_NUDGE_POLL_MEMLIMIT_MB"
+
+	// nudgePollPprofAddrEnv sets the listen address for the sidecar's pprof
+	// endpoint. The endpoint only starts when GC_PPROF=1 (see api.StartPprof);
+	// pass a distinct address per sidecar to avoid colliding with the
+	// supervisor's pprof server on the default 127.0.0.1:6060.
+	nudgePollPprofAddrEnv = "GC_NUDGE_POLL_PPROF_ADDR"
+
+	// nudgePollFreeOSInterval throttles debug.FreeOSMemory in the poll loop so
+	// transient per-parse garbage is returned to the OS without paying a full
+	// GC + scavenge on every short idle tick.
+	nudgePollFreeOSInterval = 30 * time.Second
 )
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
@@ -499,6 +529,58 @@ func queuedNudgeOptionsFromTarget(target nudgeTarget) queuedNudgeOptions {
 	}
 }
 
+// configureNudgePollRuntime bounds the long-lived nudge-poll sidecar's memory
+// footprint and, when GC_PPROF=1, exposes a pprof endpoint for diagnosing it.
+//
+// Root cause (gc-3ftcq): each poll tick that observes a changed city beads.json
+// re-parses the entire whole-file store. On the file backend a 100MB+ beads.json
+// parses to ~400MB of live heap, and across reparses the Go runtime retains the
+// arena (default GOGC headroom), so RSS plateaus near 1GB per sidecar. One
+// sidecar runs per active session, so the fleet total is the dominant host-OOM
+// driver. A soft memory limit makes the GC return freed arena to the OS instead
+// of holding ~2x headroom; the per-parse working set itself is irreducible
+// without a query-capable read path (tracked as follow-up).
+//
+// It returns a cleanup func the caller must defer.
+func configureNudgePollRuntime(stderr io.Writer) func() {
+	// Respect an operator-provided GOMEMLIMIT; debug.SetMemoryLimit would
+	// otherwise silently override it. Only install our default when none is set.
+	if strings.TrimSpace(os.Getenv("GOMEMLIMIT")) == "" {
+		limitMB := defaultNudgePollMemLimitMB
+		if raw := strings.TrimSpace(os.Getenv(nudgePollMemLimitEnv)); raw != "" {
+			switch v, err := strconv.Atoi(raw); {
+			case err != nil || v < 0:
+				// An unparseable or negative override is almost certainly an
+				// operator typo (e.g. "512mb"). Warn instead of silently
+				// falling back so the misconfiguration is visible; "0" remains
+				// a valid, intentional disable handled by the v>0 check below.
+				fmt.Fprintf(stderr, "gc nudge poll: ignoring invalid %s=%q; using default %dMiB\n", //nolint:errcheck
+					nudgePollMemLimitEnv, raw, defaultNudgePollMemLimitMB)
+			default:
+				limitMB = v
+			}
+		}
+		if limitMB > 0 {
+			debug.SetMemoryLimit(int64(limitMB) * 1024 * 1024)
+		}
+	}
+
+	srv, err := api.StartPprof(strings.TrimSpace(os.Getenv(nudgePollPprofAddrEnv)))
+	if err != nil {
+		// pprof is a diagnostic nicety; a bind failure (e.g. address already in
+		// use by another sidecar) must not stop the poller from delivering.
+		fmt.Fprintf(stderr, "gc nudge poll: pprof: %v\n", err) //nolint:errcheck
+	}
+	if srv == nil {
+		return func() {}
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx) //nolint:errcheck // best-effort shutdown on exit
+	}
+}
+
 func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, _ io.Writer, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
@@ -534,6 +616,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	}
 	defer release()
 
+	stopRuntime := configureNudgePollRuntime(stderr)
+	defer stopRuntime()
+
 	sp := newSessionProvider()
 	store := openNudgeBeadStore(target.cityPath)
 	if store == nil {
@@ -542,7 +627,17 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	}
 	nudgeStore := resolveNudgesStore(store, target.cfg, target.cityPath, nil)
 	var missingSince time.Time
+	var lastFreeOS time.Time
 	for {
+		// Each tick that observes a changed beads.json re-parses the whole-file
+		// store, leaving several hundred MB of transient garbage. The soft
+		// memory limit caps live arena, but proactively returning freed pages to
+		// the OS on a throttled cadence keeps steady-state RSS near the live
+		// working set rather than the GC's high-water mark.
+		if now := time.Now(); now.Sub(lastFreeOS) >= nudgePollFreeOSInterval {
+			debug.FreeOSMemory()
+			lastFreeOS = now
+		}
 		obs, err := nudgeObserveTarget(target, store, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
@@ -618,6 +713,28 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store, nudgeStore beads.S
 	if queueManagedWake {
 		return queueManagedSessionNudgeWake(target, store, nudgeStore, message, mode, jsonOutput, stdout, stderr)
 	}
+	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
+	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
+	// the session never reports idle for the whole window, so the caller stalls
+	// ~30s while the city store's Dolt connection sits idle in scope and gets
+	// reaped server-side ("[mysql] unexpected EOF"). Detect "busy" without
+	// blocking (LastActivity, the same quiescence signal the nudge poller uses)
+	// and queue immediately instead — the supervisor dispatcher (or the
+	// per-session poller in legacy mode) delivers at the next idle boundary, off
+	// the caller's critical path. An idle target still delivers live below (its
+	// WaitForIdle returns promptly); an unknown LastActivity is treated as
+	// not-busy so untracked sessions keep the existing behavior.
+	//
+	// Restrict this to the claude, non-ACP transport — the ONLY case
+	// RuntimeHandle.nudgeWaitIdle actually blocks on WaitForIdle. ACP delivers
+	// live in-process and non-claude returns immediately (see
+	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
+	// those would needlessly downgrade live delivery to queued. (gco-90ui)
+	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
+		if obs, obsErr := nudgeObserveTarget(target, store, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
+			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+		}
+	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
 	if !ok {
 		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
@@ -674,6 +791,25 @@ func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runti
 		return false, fmt.Errorf("observing managed session before wake routing: %w", err)
 	}
 	return !obs.Running, nil
+}
+
+// nudgeObservationBusy reports, WITHOUT blocking, whether the observed session
+// is actively busy right now. It uses the LastActivity timestamp — the same
+// quiescence signal the nudge poller relies on (defaultNudgePollQuiescence). An
+// unknown (nil/zero) LastActivity returns false (treat as not-busy) so callers
+// fall back to the existing wait-idle path rather than queue a session whose
+// activity cannot be observed.
+//
+// This is the near-inverse of pollerSessionIdleEnough's LastActivity branch
+// (idle when time-since >= quiescence); they intentionally differ on the
+// unknown-LastActivity case — the poller falls back to a blocking WaitForIdle,
+// whereas this non-blocking caller-side check must not, so it defaults to
+// not-busy.
+func nudgeObservationBusy(obs worker.LiveObservation) bool {
+	if obs.LastActivity == nil || obs.LastActivity.IsZero() {
+		return false
+	}
+	return time.Since(*obs.LastActivity) < defaultNudgePollQuiescence
 }
 
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
@@ -1154,6 +1290,9 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	if obs.LastActivity != nil && !obs.LastActivity.IsZero() {
 		return time.Since(*obs.LastActivity) >= quiescence
 	}
+	if pollerCanDeliverWithoutActivitySignal(target, sp) {
+		return true
+	}
 	if target.sessionName == "" {
 		return false
 	}
@@ -1168,15 +1307,31 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
 }
 
+func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {
+	if sp == nil || target.sessionName == "" {
+		return false
+	}
+	if sp.Capabilities().CanReportActivity {
+		return false
+	}
+	sleeper, ok := sp.(runtime.SleepCapabilityProvider)
+	if !ok {
+		return false
+	}
+	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
+}
+
 func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionName == "" {
 		return
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning
 	// processes only remove their PID file via the release closure, so any
-	// poller that is killed/crashes/os.Exit's leaves the .pid (and orphan
-	// .pid.lock) behind forever. This low-frequency hook keeps the pollers
-	// directory from growing without bound. Best-effort: never block a spawn.
+	// poller that is killed/crashes/os.Exit's leaves the .pid behind forever.
+	// This low-frequency hook keeps the pollers directory from growing without
+	// bound. The sibling .pid.lock is intentionally left in place (removing it
+	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
+	// never block a spawn.
 	_ = reapStaleNudgePollers(target.cityPath)
 	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
 	// per-session poller would race with it and reintroduce the bd-shellout
@@ -2073,13 +2228,14 @@ func nudgePollerPIDPath(cityPath, sessionName, agentName string) string {
 
 // reapStaleNudgePollers removes orphaned nudge poller PID files left behind by
 // pollers that were killed, crashed, or os.Exit'd without running their release
-// closure. The sibling .pid.lock files are intentionally left in place (they are
-// the stable per-key mutex inode). A *.pid file is stale
-// when its contents are unparseable or its PID is no longer alive. The work is
-// done under the same per-file lock the lease path uses so a concurrently
-// starting poller is never raced. It is best-effort: a missing pollers
-// directory is a no-op and per-file errors are accumulated and returned
-// without aborting the sweep.
+// closure. A *.pid file is stale when its contents are unparseable or its PID
+// is no longer alive. The sibling .pid.lock file is deliberately NOT removed —
+// it is the stable per-key flock mutex inode and removing it under the lock
+// would race concurrent acquirers (see reapStaleNudgePoller). The work is done
+// under the same per-file lock the lease path uses so a concurrently starting
+// poller is never raced. It is best-effort: a missing pollers directory is a
+// no-op and per-file errors are accumulated and returned without aborting the
+// sweep.
 func reapStaleNudgePollers(cityPath string) error {
 	pollersDir := citylayout.RuntimePath(cityPath, "nudges", "pollers")
 	entries, err := os.ReadDir(pollersDir)

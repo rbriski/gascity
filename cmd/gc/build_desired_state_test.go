@@ -1613,6 +1613,36 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}
 }
 
+func TestCollectAssignedWorkBeads_ExcludesUnassignedInProgressWorkflowRoot(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow",
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("mark workflow root in_progress: %v", err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "worker",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(2),
+	}}}
+
+	got, _ := collectAssignedWorkBeads(cfg, store)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want unassigned workflow root ignored", got)
+	}
+}
+
 // TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork pins the
 // fix for issue #2793: an open step bead carrying both gc.routed_to and a
 // stale (dead-session) assignee must enter assignedWorkBeads so the
@@ -2061,7 +2091,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil)
+	}, nil, nil, nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2078,52 +2108,6 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	}
 	if !foundNamed {
 		t.Fatalf("ready assignees = %#v, want on-demand named-session identity", got)
-	}
-}
-
-func TestReadyAssignedWorkAssigneesIncludesSanitizedSessionNameForm(t *testing.T) {
-	// Routed control/work beads are assigned in sanitized session-name form
-	// ("repo--named-worker"), so the readiness probe must enumerate that form
-	// even when no live session bead contributes it. Regression for the gastown
-	// control-dispatcher freeze: the graph store held 273 beads assigned
-	// "gastown--control-dispatcher" and 0 assigned "gastown/control-dispatcher",
-	// so the slash-only probe found no demand and the dispatcher never respawned.
-	got := readyAssignedWorkAssignees(&config.City{
-		NamedSessions: []config.NamedSession{
-			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
-		},
-	}, nil, nil)
-
-	want := map[string]bool{"repo/named-worker": false, "repo--named-worker": false}
-	for _, value := range got {
-		if _, ok := want[value]; ok {
-			want[value] = true
-		}
-	}
-	for form, found := range want {
-		if !found {
-			t.Fatalf("ready assignees = %#v, want it to include %q", got, form)
-		}
-	}
-}
-
-func TestAssigneeMatchesNamedIdentityAcceptsSanitizedForm(t *testing.T) {
-	cases := []struct {
-		assignee string
-		identity string
-		want     bool
-	}{
-		{"gastown/control-dispatcher", "gastown/control-dispatcher", true},
-		{"gastown--control-dispatcher", "gastown/control-dispatcher", true},
-		{" gastown--control-dispatcher ", "gastown/control-dispatcher", true},
-		{"other--thing", "gastown/control-dispatcher", false},
-		{"", "gastown/control-dispatcher", false},
-		{"gastown--control-dispatcher", "", false},
-	}
-	for _, tc := range cases {
-		if got := assigneeMatchesNamedIdentity(tc.assignee, tc.identity); got != tc.want {
-			t.Errorf("assigneeMatchesNamedIdentity(%q, %q) = %v, want %v", tc.assignee, tc.identity, got, tc.want)
-		}
 	}
 }
 
@@ -5585,6 +5569,61 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 	if !found {
 		t.Fatal("direct assignee should materialize on-demand named session")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_RuntimeAssigneeDoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "control-dispatcher",
+			Dir:               "fixture",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "control-dispatcher",
+			Dir:      "fixture",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "runtime-assigned control work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: runtimeName,
+	}); err != nil {
+		t.Fatalf("create rig work: %v", err)
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), cityStore, map[string]beads.Store{"fixture": rigStore}, nil, nil, io.Discard,
+	)
+
+	if dsResult.NamedSessionDemand[identity] {
+		t.Fatalf("NamedSessionDemand[%s] = true for future runtime assignee %q", identity, runtimeName)
+	}
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.ConfiguredNamedIdentity == identity {
+			found = true
+			break
+		}
+	}
+	if found {
+		t.Fatalf("future runtime assignee %q should not materialize on-demand named session %q", runtimeName, identity)
 	}
 }
 
@@ -10265,4 +10304,305 @@ func TestBuildDesiredState_NamedSessionWorkQueryDoesNotDriveControllerDemand(t *
 	if dsResult.NamedSessionDemand["alpha/dog"] {
 		t.Fatal("NamedSessionDemand[alpha/dog] came from controller-side work_query")
 	}
+}
+
+func TestBuildDesiredState_OpenBlockedControlDispatcherWorkRetainsDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocking worker attempt",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title:  "Finalize cleanup",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": "core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city",
+		cityPath,
+		time.Now().UTC(),
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		newSessionBeadSnapshot(nil),
+		nil,
+		io.Discard,
+	)
+
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[core.control-dispatcher] = %d, want 1", got)
+	}
+	if len(result.State) != 1 {
+		t.Fatalf("desired state count = %d, want 1; state=%v", len(result.State), mapKeys(result.State))
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName != "core.control-dispatcher" {
+			t.Fatalf("desired TemplateName = %q, want core.control-dispatcher", desired.TemplateName)
+		}
+	}
+}
+
+// TestOpenControlDispatcherDemandHonorsBareLegacyRoute guards the upgrade gap:
+// control beads created by pre-1.3 builds route to the binding-stripped bare
+// name ("control-dispatcher"), not the qualified "core.control-dispatcher".
+// In-flight work persisted across the upgrade must still scale the qualified
+// dispatcher, and demand must be keyed by its qualified template name so the
+// scaler matches it.
+func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	work := []beads.Bead{{
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": config.ControlDispatcherAgentName, // bare, pre-1.3 route
+		},
+	}}
+	demand := openControlDispatcherDemand(cfg, work)
+	if !demand["core.control-dispatcher"] {
+		t.Fatalf("openControlDispatcherDemand = %v, want demand keyed by qualified name from bare route", demand)
+	}
+}
+
+func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {
+	cityStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	rigStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: "/repo"}},
+		NamedSessions: []config.NamedSession{{
+			Dir:      "repo",
+			Name:     "control-dispatcher",
+			Template: "control-dispatcher",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "ready control work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: runtimeName,
+	}); err != nil {
+		t.Fatalf("create ready work bead: %v", err)
+	}
+
+	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
+		cfg,
+		cityStore,
+		map[string]beads.Store{"repo": rigStore},
+		nil,
+		nil,
+	)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if len(got) != 0 {
+		t.Fatalf("got = %#v, want no future-runtime-assigned named-session work", got)
+	}
+	if len(stores) != 0 {
+		t.Fatalf("stores = %#v, want none", stores)
+	}
+	if len(storeRefs) != 0 {
+		t.Fatalf("storeRefs = %#v, want none", storeRefs)
+	}
+	queried := make(map[string]bool)
+	for _, query := range rigStore.readyQueries {
+		queried[query.Assignee] = true
+	}
+	if queried[runtimeName] {
+		t.Fatalf("rig Ready queries = %#v, must not include future runtime assignee %q", rigStore.readyQueries, runtimeName)
+	}
+	if !queried[identity] {
+		t.Fatalf("rig Ready queries = %#v, want canonical named-session assignee %q", rigStore.readyQueries, identity)
+	}
+}
+
+func TestReadyAssignedWorkAssigneesIncludesSanitizedSessionNameForm(t *testing.T) {
+	// Routed control/work beads are assigned in sanitized session-name form
+	// ("repo--named-worker"), so the readiness probe must enumerate that form
+	// when collected work carries routing evidence for it. Regression for the
+	// gastown control-dispatcher freeze: the graph store held 273 beads assigned
+	// "gastown--control-dispatcher" and 0 assigned "gastown/control-dispatcher",
+	// so the slash-only probe found no demand and the dispatcher never respawned.
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{
+			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
+		},
+	}
+	// Routing evidence: an open bead assigned in the sanitized form that carries
+	// a gc.routed_to marker. Without this, the sanitized form is intentionally
+	// withheld so a future session's runtime name is not probed into existence.
+	routed := routedSanitizedNamedIdentities([]beads.Bead{{
+		Assignee: "repo--named-worker",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "repo/named-worker"},
+	}})
+	got := readyAssignedWorkAssignees(cfg, nil, nil, routed)
+
+	want := map[string]bool{"repo/named-worker": false, "repo--named-worker": false}
+	for _, value := range got {
+		if _, ok := want[value]; ok {
+			want[value] = true
+		}
+	}
+	for form, found := range want {
+		if !found {
+			t.Fatalf("ready assignees = %#v, want it to include %q", got, form)
+		}
+	}
+}
+
+func TestAssigneeMatchesNamedIdentityAcceptsSanitizedForm(t *testing.T) {
+	cases := []struct {
+		assignee string
+		identity string
+		want     bool
+	}{
+		{"gastown/control-dispatcher", "gastown/control-dispatcher", true},
+		{"gastown--control-dispatcher", "gastown/control-dispatcher", true},
+		{" gastown--control-dispatcher ", "gastown/control-dispatcher", true},
+		{"other--thing", "gastown/control-dispatcher", false},
+		{"", "gastown/control-dispatcher", false},
+		{"gastown--control-dispatcher", "", false},
+	}
+	for _, tc := range cases {
+		if got := assigneeMatchesNamedIdentity(tc.assignee, tc.identity); got != tc.want {
+			t.Errorf("assigneeMatchesNamedIdentity(%q, %q) = %v, want %v", tc.assignee, tc.identity, got, tc.want)
+		}
+	}
+}
+
+// TestBuildDesiredState_OnDemandNamedSession_SanitizedRouteRespawnsVsFutureName
+// is the reconciliation guard. Under graph_store=sqlite, work routed to a
+// single-session/pool target is assigned in sanitized session-name form
+// (config.NamedSessionRuntimeName == agent.SanitizeQualifiedNameForSession under
+// the default template) AND stamped with gc.routed_to (see
+// internal/dispatch/control.go applyAttemptStepRoute). A drained on_demand
+// session with such genuinely-routed work MUST respawn. By contrast, a bead that
+// merely names a future session's runtime — sanitized assignee, NO gc.routed_to —
+// must NOT materialize that session (main's invariant in
+// TestBuildDesiredState_OnDemandNamedSession_RuntimeAssigneeDoesNotMaterialize).
+// The two beads carry the SAME assignee string, so only the routing marker can
+// distinguish them.
+func TestBuildDesiredState_OnDemandNamedSession_SanitizedRouteRespawnsVsFutureName(t *testing.T) {
+	newCfg := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "fixture", Path: ""}},
+			Agents: []config.Agent{{
+				Name:              "run-operator",
+				Dir:               "fixture",
+				StartCommand:      "true",
+				MaxActiveSessions: intPtr(1),
+				WorkQuery:         "printf ''",
+			}},
+			NamedSessions: []config.NamedSession{{
+				Template: "run-operator",
+				Dir:      "fixture",
+				Mode:     "on_demand",
+			}},
+		}
+	}
+
+	materializes := func(t *testing.T, routed bool) (bool, bool) {
+		t.Helper()
+		cityPath := t.TempDir()
+		rigPath := filepath.Join(cityPath, "fixture")
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatalf("create rig dir: %v", err)
+		}
+		cfg := newCfg()
+		cfg.Rigs[0].Path = rigPath
+		identity := cfg.NamedSessions[0].QualifiedName()
+		runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+		if runtimeName == identity {
+			t.Fatalf("test requires sanitized runtime name to differ from identity %q", identity)
+		}
+		var metadata map[string]string
+		if routed {
+			metadata = map[string]string{"gc.routed_to": identity}
+		}
+		cityStore := beads.NewMemStore()
+		rigStore := beads.NewMemStore()
+		if _, err := rigStore.Create(beads.Bead{
+			Title:    "routed control work",
+			Type:     "task",
+			Status:   "open",
+			Assignee: runtimeName,
+			Metadata: metadata,
+		}); err != nil {
+			t.Fatalf("create rig work: %v", err)
+		}
+
+		dsResult := buildDesiredStateWithSessionBeads(
+			cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg,
+			runtime.NewFake(), cityStore, map[string]beads.Store{"fixture": rigStore}, nil, nil, io.Discard,
+		)
+		demand := dsResult.NamedSessionDemand[identity]
+		found := false
+		for _, tp := range dsResult.State {
+			if tp.ConfiguredNamedIdentity == identity {
+				found = true
+				break
+			}
+		}
+		return demand, found
+	}
+
+	t.Run("genuinely routed sanitized assignee respawns", func(t *testing.T) {
+		demand, found := materializes(t, true)
+		if !demand {
+			t.Fatal("NamedSessionDemand = false for genuinely-routed sanitized assignee; drained session would never respawn")
+		}
+		if !found {
+			t.Fatal("genuinely-routed sanitized assignee should materialize the on-demand named session")
+		}
+	})
+
+	t.Run("future runtime name without route does not materialize", func(t *testing.T) {
+		demand, found := materializes(t, false)
+		if demand {
+			t.Fatal("NamedSessionDemand = true for future runtime assignee with no route marker")
+		}
+		if found {
+			t.Fatal("future runtime assignee with no route marker should not materialize the named session")
+		}
+	})
 }

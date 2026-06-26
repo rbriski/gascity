@@ -4329,7 +4329,6 @@ func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cfg.Daemon.FormulaV2 = true
 	applyFeatureFlags(cfg)
 	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
@@ -4353,6 +4352,7 @@ title = "Do work"
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 	opts.ScopeKind = "city"
@@ -4449,11 +4449,11 @@ title = "Do work"
 				t.Fatalf("latch bead %s assignee = %q, want empty", bead.ID, bead.Assignee)
 			}
 		case "workflow-finalize":
-			if bead.Assignee != config.ControlDispatcherAgentName {
-				t.Fatalf("workflow-finalize assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
+			if bead.Assignee != "" {
+				t.Fatalf("workflow-finalize assignee = %q, want empty routed control-dispatcher queue", bead.Assignee)
 			}
-			if got := bead.Metadata["gc.routed_to"]; got != "" {
-				t.Fatalf("workflow-finalize gc.routed_to = %q, want empty direct dispatcher assignee", got)
+			if got := bead.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
 			}
 			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
@@ -4481,7 +4481,6 @@ func TestDoSlingGraphWorkflowConflictReturnsExit3(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cfg.Daemon.FormulaV2 = true
 	applyFeatureFlags(cfg)
 	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
@@ -4516,6 +4515,7 @@ title = "Do work"
 		},
 	}, nil)
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -4532,7 +4532,6 @@ func TestBatchOnGraphWorkflowStartsWorkflowWithoutRoutingChild(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cfg.Daemon.FormulaV2 = true
 	applyFeatureFlags(cfg)
 	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
@@ -4561,6 +4560,7 @@ title = "Do work"
 		{ID: "BL-1", Title: "Child", Type: "task", Status: "open"},
 	}, nil)
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "graph-work"
 	opts.ScopeKind = "city"
@@ -4600,7 +4600,6 @@ func TestBatchOnGraphWorkflowConflictLeavesExistingRootInPlace(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cfg.Daemon.FormulaV2 = true
 	applyFeatureFlags(cfg)
 	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
@@ -4640,6 +4639,7 @@ title = "Do work"
 		},
 	}, nil)
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "graph-work"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -4876,12 +4876,12 @@ func TestResolveGraphDirectSessionBindingMaterializesNamedSessionAliasShadow(t *
 		}},
 	}
 
-	binding, ok, err := resolveGraphDirectSessionBinding(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
+	binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cfg.Workspace.Name, cfg, "claude", "", cliGraphrouteDeps(t.TempDir()))
 	if err != nil {
-		t.Fatalf("resolveGraphDirectSessionBinding: %v", err)
+		t.Fatalf("ResolveGraphDirectSessionBinding: %v", err)
 	}
 	if !ok || binding.DirectSessionID == "" {
-		t.Fatalf("resolveGraphDirectSessionBinding did not materialize named-session alias shadow: binding=%+v ok=%v", binding, ok)
+		t.Fatalf("ResolveGraphDirectSessionBinding did not materialize named-session alias shadow: binding=%+v ok=%v", binding, ok)
 	}
 	bead, err := store.Get(binding.DirectSessionID)
 	if err != nil {
@@ -4929,10 +4929,10 @@ func TestOnFormulaGraphWorkflowPokesOnce(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cfg.Daemon.FormulaV2 = true
 	applyFeatureFlags(cfg)
 	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 

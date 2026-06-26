@@ -298,7 +298,7 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bo
 		return "", true, fmt.Errorf("resolving global repo cache root: %w", err)
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
-	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit) == nil {
 		return cacheDir, true, nil
 	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
@@ -398,10 +398,51 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		return validateInstalledRemoteCache(source, cacheDir, commit)
 	}); err != nil {
+		// A locked bundled source pinned at its canonical commit is served from
+		// the running binary's embedded content. A freshly installed/upgraded
+		// binary resolves a new content-hash cache dir (RepoCacheKey folds the
+		// embedded-content hash) that does not exist yet — rebuild it OFFLINE
+		// instead of forcing "gc import install", mirroring the no-lock fallback
+		// in resolveBundledSourceWithoutLock. Strictly scoped to the ABSENT-cache
+		// case so a present-but-invalid cache (content drift, tampering, bad
+		// marker) still fails loudly per its security contract. The read lock
+		// above is already released here, so taking the write lock is safe.
+		if rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit) {
+			remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
+			return nil
+		}
 		return err
 	}
 	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
 	return nil
+}
+
+// rematerializeAbsentBundledCache rebuilds the synthetic cache for a bundled
+// source pinned at its canonical commit when the cache directory is ABSENT —
+// the situation a freshly installed or upgraded binary hits, since the cache
+// dir name folds the binary's embedded-content hash. It materializes offline
+// from the embedded packs (no network) under the repo-cache write lock and
+// reports success only if the rebuilt cache validates. It deliberately leaves
+// a present-but-invalid cache untouched, so content-drift / tampering /
+// bad-marker rejection in validateInstalledRemoteCache keeps failing loudly.
+func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string) bool {
+	if !IsBundledSourceAtCanonicalPin(source, commit) {
+		return false
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		// Present (possibly drifted/tampered) or unstattable: do not auto-heal.
+		return false
+	}
+	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+		// Re-check under the lock: another writer may have materialized it.
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+			return cacheDir, nil
+		}
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+	}); err != nil {
+		return false
+	}
+	return builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil
 }
 
 // ResetRemoteCacheValidationCache clears memoized remote-cache validations
@@ -417,7 +458,7 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
 	if IsBundledSourceAtCanonicalPin(source, commit) {
-		err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit)
+		err := builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit)
 		if err == nil {
 			return nil
 		}

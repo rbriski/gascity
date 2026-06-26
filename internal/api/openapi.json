@@ -479,6 +479,12 @@
               "null"
             ]
           },
+          "Upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "WakeMode": {
             "type": [
               "string",
@@ -506,6 +512,7 @@
           "PromptTemplate",
           "Session",
           "Provider",
+          "Upstream",
           "Args",
           "StartCommand",
           "Lifecycle",
@@ -935,6 +942,26 @@
         },
         "type": "object"
       },
+      "BeadClaimRejectedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_claimant": {
+            "type": "string"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "existing_claimant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "existing_claimant",
+          "attempted_claimant"
+        ],
+        "type": "object"
+      },
       "BeadClaimResult": {
         "additionalProperties": false,
         "properties": {
@@ -1231,6 +1258,9 @@
       "BoundEventPayload": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "type": "string"
+          },
           "conversation_id": {
             "type": "string"
           },
@@ -2197,6 +2227,9 @@
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
           {
+            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
+          },
+          {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
           {
@@ -2228,6 +2261,9 @@
           },
           {
             "$ref": "#/components/schemas/NoPayload"
+          },
+          {
+            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
           },
           {
             "$ref": "#/components/schemas/OutboundEventPayload"
@@ -2515,6 +2551,10 @@
       "ExtMsgBindInputBody": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).",
+            "type": "string"
+          },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef",
             "description": "Conversation to bind."
@@ -2527,14 +2567,10 @@
             "type": "object"
           },
           "session_id": {
-            "description": "Session ID to bind.",
-            "minLength": 1,
+            "description": "Session ID to bind (mutually exclusive with agent_name).",
             "type": "string"
           }
         },
-        "required": [
-          "session_id"
-        ],
         "type": "object"
       },
       "ExtMsgGroupEnsureInputBody": {
@@ -2717,19 +2753,19 @@
       "ExtMsgUnbindInputBody": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Configured agent identity to unbind.",
+            "type": "string"
+          },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef",
-            "description": "Conversation to unbind (nil = all)."
+            "description": "Conversation to unbind (nil = filter by session_id/agent_name)."
           },
           "session_id": {
             "description": "Session ID to unbind.",
-            "minLength": 1,
             "type": "string"
           }
         },
-        "required": [
-          "session_id"
-        ],
         "type": "object"
       },
       "ExternalActor": {
@@ -3389,6 +3425,9 @@
           "provider": {
             "type": "string"
           },
+          "target_agent": {
+            "type": "string"
+          },
           "target_session": {
             "type": "string"
           }
@@ -3413,6 +3452,9 @@
           "Message": {
             "$ref": "#/components/schemas/ExternalInboundMessage"
           },
+          "TargetAgentName": {
+            "type": "string"
+          },
           "TargetSessionID": {
             "type": "string"
           },
@@ -3425,7 +3467,8 @@
           "Binding",
           "GroupRoute",
           "TranscriptEntry",
-          "TargetSessionID"
+          "TargetSessionID",
+          "TargetAgentName"
         ],
         "type": "object"
       },
@@ -4772,6 +4815,30 @@
         "required": [
           "items",
           "partial"
+        ],
+        "type": "object"
+      },
+      "OutboundChannelMismatchPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "type": "string"
+          },
+          "owner_session": {
+            "type": "string"
+          },
+          "posting_session": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "posting_session",
+          "owner_session"
         ],
         "type": "object"
       },
@@ -6227,6 +6294,9 @@
       "SessionBindingRecord": {
         "additionalProperties": false,
         "properties": {
+          "AgentName": {
+            "type": "string"
+          },
           "BindingGeneration": {
             "format": "int64",
             "type": "integer"
@@ -6274,6 +6344,7 @@
           "Conversation",
           "SessionID",
           "SessionName",
+          "AgentName",
           "Status",
           "BoundAt",
           "ExpiresAt",
@@ -7948,6 +8019,7 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
+            "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
@@ -7971,6 +8043,7 @@
             "extmsg.group_created": "#/components/schemas/TypedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
+            "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
@@ -8019,6 +8092,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
+          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed"
           },
@@ -8087,6 +8163,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
@@ -8225,6 +8304,48 @@
           }
         ],
         "title": "Typed city event stream envelope"
+      },
+      "TypedEventStreamEnvelopeBeadClaimRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_rejected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClosed": {
         "additionalProperties": false,
@@ -8860,6 +8981,7 @@
                 "bead.updated",
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
+                "bead.claim_rejected",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -8898,6 +9020,7 @@
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
                 "extmsg.outbound",
+                "extmsg.outbound_channel_mismatch",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -9300,6 +9423,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.outbound",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.outbound_channel_mismatch",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope extmsg.outbound_channel_mismatch",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgUnbound": {
@@ -11154,6 +11319,7 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
+            "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
@@ -11177,6 +11343,7 @@
             "extmsg.group_created": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
+            "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
@@ -11225,6 +11392,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
+          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed"
           },
@@ -11293,6 +11463,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
@@ -11431,6 +11604,52 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadClaimRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_rejected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClosed": {
         "additionalProperties": false,
@@ -12125,6 +12344,7 @@
                 "bead.updated",
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
+                "bead.claim_rejected",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -12163,6 +12383,7 @@
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
                 "extmsg.outbound",
+                "extmsg.outbound_channel_mismatch",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -12602,6 +12823,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.outbound",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.outbound_channel_mismatch",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgUnbound": {
@@ -14727,6 +14994,10 @@
           "result": {
             "type": "string"
           },
+          "run_id": {
+            "description": "Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).",
+            "type": "string"
+          },
           "session_id": {
             "type": "string"
           },
@@ -14742,6 +15013,10 @@
           },
           "transport": {
             "type": "string"
+          },
+          "unpriced": {
+            "description": "True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).",
+            "type": "boolean"
           }
         },
         "required": [

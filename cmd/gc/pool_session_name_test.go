@@ -286,6 +286,54 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_SkipsUnassignedWorkflowRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow",
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create workflow root: %v", err)
+	}
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set workflow root status: %v", err)
+	}
+	root, err = store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Reload workflow root: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{root},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want workflow root preserved", released)
+	}
+
+	got, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get workflow root: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_ReopensEphemeralPoolAssignee(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
@@ -1693,6 +1741,82 @@ func TestReleaseOrphanedPoolAssignments_ReleasesRigWorkAssignedToUnreachableOpen
 	}
 }
 
+// A live, cross-store-eligible (city-scoped, Scope="city") open session
+// legitimately owns rig-routed work whose bead lives in a rig store — city
+// agents federate across every store (vp-kvp). The release path must recognize
+// that ownership and NOT reopen the bead. This is the exact inverse of
+// ReleasesRigWorkAssignedToUnreachableOpenSession, where the holder is
+// rig-scoped and genuinely cannot reach the work; here the holder can. Reopening
+// a live city holder's claim is the #3453 root cause: openSessionOwnsWork
+// returns false on a store-ref mismatch, demand reappears, and a backup worker
+// is minted on the same in_progress bead (duplicate token burn + double-write).
+func TestReleaseOrphanedPoolAssignments_KeepsCrossStoreEligibleHolderRigWork(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	session, err := cityStore.Create(beads.Bead{
+		Title:  "city worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":         "worker-live",
+			"template":             "worker",
+			"agent_name":           "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create city session bead: %v", err)
+	}
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "rig pool work owned by a live city session",
+		Assignee: "worker-live",
+		Metadata: map[string]string{"gc.routed_to": "repo/worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		&config.City{
+			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				// The session's "worker" template resolves to this city-scoped
+				// agent (cross-store eligible). The rig agent below exists only so
+				// the work's routed "repo/worker" template resolves and the bead
+				// reaches the ownership gate instead of being skipped earlier.
+				{Name: "worker", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "worker", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		},
+		cityPath,
+		[]beads.Bead{session},
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+		[]string{"repo"}, // work store-ref "repo" != city agent ref "" — the mismatch the fix must federate over
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — a live city-scoped session owns rig-routed work across stores (vp-kvp)", released)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-live" {
+		t.Fatalf("rig work = status %q assignee %q, want in_progress/worker-live (claim preserved)", got.Status, got.Assignee)
+	}
+}
+
 func TestStoreForPoolAssignment_UsesConfiguredHyphenatedIDPrefix(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -1917,6 +2041,68 @@ func TestReleaseOrphanedPoolAssignments_ReleasesNamedIdentityForUnreachableStore
 	}
 }
 
+// A live, cross-store-eligible (city-scoped, Scope="city") NAMED session
+// legitimately owns rig-routed work whose bead lives in a rig store (vp-kvp).
+// assigneePreservesNamedSessionRoute must preserve that claim instead of letting
+// the bead be released — the named-route analog of the pool-worker
+// openSessionOwnsWork cross-store fix (#3453). Without it a backup worker is
+// minted on the same in_progress bead. Contrast
+// ReleasesNamedIdentityForUnreachableStore, where the named agent is rig-scoped
+// and genuinely cannot reach the work, so release is still correct.
+func TestReleaseOrphanedPoolAssignments_PreservesCrossStoreEligibleNamedIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "rig work owned by a city-scoped named session",
+		Assignee: "reviewer",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "repo", Path: t.TempDir()}},
+		Agents: []config.Agent{{Name: "worker", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "reviewer",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+		ResolvedWorkspaceName: "test-city",
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		cfg,
+		cityPath,
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+		[]string{"repo"}, // rig store-ref != city named agent ref "" — the mismatch the fix must federate over
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — a live city-scoped named session owns rig-routed work across stores (vp-kvp)", released)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "reviewer" {
+		t.Fatalf("rig work = status %q assignee %q, want in_progress/reviewer (claim preserved)", got.Status, got.Assignee)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -1969,5 +2155,114 @@ func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *te
 	}
 	if got.Assignee != "reviewer" {
 		t.Fatalf("assignee = %q, want reviewer", got.Assignee)
+	}
+}
+
+// graphFederatingStore models the production primary store under graph_store=sqlite:
+// List/Get/Update federate the ClassGraph (gcg-) leg on top of the embedded work
+// (rig/Dolt analog) store, and the graph-only handle exposes the same graph beads
+// with the "gcg" id prefix. This is the store shape the orphan-release fix must
+// route graph-resident beads to (the rig store leg never sees the gcg- bead).
+type graphFederatingStore struct {
+	beads.Store
+	graph []beads.Bead
+}
+
+func (s *graphFederatingStore) graphIndex(id string) int {
+	for i := range s.graph {
+		if s.graph[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *graphFederatingStore) Get(id string) (beads.Bead, error) {
+	if i := s.graphIndex(id); i >= 0 {
+		return s.graph[i], nil
+	}
+	return s.Store.Get(id)
+}
+
+func (s *graphFederatingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	base, err := s.Store.List(q)
+	if err != nil {
+		return nil, err
+	}
+	// Graph step beads carry no labels, so label-scoped queries (e.g. the
+	// session-bead liveness probe) never federate them.
+	if q.Label != "" {
+		return base, nil
+	}
+	for _, b := range s.graph {
+		if q.Status == "" || b.Status == q.Status {
+			base = append(base, b)
+		}
+	}
+	return base, nil
+}
+
+func (s *graphFederatingStore) Update(id string, opts beads.UpdateOpts) error {
+	if i := s.graphIndex(id); i >= 0 {
+		if opts.Status != nil {
+			s.graph[i].Status = *opts.Status
+		}
+		if opts.Assignee != nil {
+			s.graph[i].Assignee = *opts.Assignee
+		}
+		return nil
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s *graphFederatingStore) ListGraphOnlyHandle() (beads.GraphOnlyListStore, bool) {
+	return graphOnlyAssignedReader{graph: s.graph}, true
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesGraphResidentBeadBoundToRigStore is
+// the graph_store=sqlite strand-heal regression. A graph-resident step bead
+// (gcg-…) physically lives in the primary graph store, but its collection binds it
+// to the rig store (gc.root_store_ref=rig:…), so the index-aligned ownerStore is
+// the rig (Dolt) store — whose List never returns the graph bead. Before the fix,
+// liveWorkAssignmentStillReleasable therefore failed and the orphan was never
+// released (the untreated analog of the close-check graph-only fix). The fix routes
+// graph-resident beads to the store that physically holds them.
+func TestReleaseOrphanedPoolAssignments_ReleasesGraphResidentBeadBoundToRigStore(t *testing.T) {
+	work := beads.Bead{
+		ID:       "gcg-9001",
+		Title:    "orphaned graph step",
+		Status:   "in_progress",
+		Assignee: "run-operator-dead",
+		Metadata: map[string]string{"gc.routed_to": "run-operator", "gc.root_store_ref": "rig:gascity"},
+	}
+	graphStore := &graphFederatingStore{Store: beads.NewMemStore(), graph: []beads.Bead{work}}
+
+	// The rig store does NOT hold the graph bead. assignedWorkStores binds the bead
+	// to it (the bug trigger): before the fix ownerStore would be this rig store,
+	// whose List never returns gcg-9001 -> skip -> orphan stranded forever.
+	rigStore := beads.NewMemStore()
+
+	released := releaseOrphanedPoolAssignments(
+		graphStore,
+		&config.City{Agents: []config.Agent{{Name: "run-operator", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+		[]string{"gascity"},
+		map[string]beads.Store{"gascity": rigStore},
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s] — graph-resident orphan must release despite rig store-ref binding", released, work.ID)
+	}
+	got, err := graphStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty (reopened for re-dispatch)", got.Assignee)
 	}
 }

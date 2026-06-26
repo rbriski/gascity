@@ -109,6 +109,7 @@ export type AgentPatch = {
     StartCommand: string | null;
     Suspended: boolean | null;
     TmuxAlias: string | null;
+    Upstream: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
 };
@@ -286,22 +287,10 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
-export type BeadClaimInputBody = {
-    /**
-     * Agent to claim the bead for. The claim is atomic (rejected if the bead is already assigned to a different agent).
-     */
-    assignee?: string;
-};
-
-export type BeadClaimResult = {
-    /**
-     * The claimed bead, populated when claimed=true.
-     */
-    bead?: Bead;
-    /**
-     * Whether the claim succeeded (false if the bead was not claimable, e.g. already assigned).
-     */
-    claimed: boolean;
+export type BeadClaimRejectedPayload = {
+    attempted_claimant: string;
+    bead_id: string;
+    existing_claimant: string;
 };
 
 export type BeadCreateInputBody = {
@@ -361,13 +350,6 @@ export type BeadGraphResponse = {
     beads: Array<Bead> | null;
     deps: Array<WorkflowDepResponse> | null;
     root: Bead;
-};
-
-export type BeadReleaseIfCurrentInputBody = {
-    /**
-     * Release the assignment only if the bead is currently assigned to this agent (compare-and-swap).
-     */
-    expected_assignee?: string;
 };
 
 export type BeadUpdateBody = {
@@ -442,6 +424,7 @@ export type BeadsDiagnostic = {
 export type BindingStatus = 'active' | 'ended';
 
 export type BoundEventPayload = {
+    agent_name?: string;
     conversation_id: string;
     provider: string;
     session_id: string;
@@ -827,7 +810,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -948,6 +931,10 @@ export type ExtMsgAdapterUnregisterInputBody = {
 
 export type ExtMsgBindInputBody = {
     /**
+     * Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).
+     */
+    agent_name?: string;
+    /**
      * Conversation to bind.
      */
     conversation?: ConversationRef;
@@ -958,9 +945,9 @@ export type ExtMsgBindInputBody = {
         [key: string]: string;
     };
     /**
-     * Session ID to bind.
+     * Session ID to bind (mutually exclusive with agent_name).
      */
-    session_id: string;
+    session_id?: string;
 };
 
 export type ExtMsgGroupEnsureInputBody = {
@@ -1086,13 +1073,17 @@ export type ExtMsgUnbindBody = {
 
 export type ExtMsgUnbindInputBody = {
     /**
-     * Conversation to unbind (nil = all).
+     * Configured agent identity to unbind.
+     */
+    agent_name?: string;
+    /**
+     * Conversation to unbind (nil = filter by session_id/agent_name).
      */
     conversation?: ConversationRef;
     /**
      * Session ID to unbind.
      */
-    session_id: string;
+    session_id?: string;
 };
 
 export type ExternalActor = {
@@ -1306,6 +1297,7 @@ export type InboundEventPayload = {
     actor: string;
     conversation_id: string;
     provider: string;
+    target_agent?: string;
     target_session: string;
 };
 
@@ -1313,6 +1305,7 @@ export type InboundResult = {
     Binding: SessionBindingRecord;
     GroupRoute: GroupRouteDecision;
     Message: ExternalInboundMessage;
+    TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry: ConversationTranscriptRecord;
 };
@@ -1961,6 +1954,13 @@ export type OrdersFeedBody = {
     partial_errors?: Array<string> | null;
 };
 
+export type OutboundChannelMismatchPayload = {
+    conversation_id: string;
+    owner_session: string;
+    posting_session: string;
+    provider: string;
+};
+
 export type OutboundEventPayload = {
     conversation_id: string;
     message_id: string;
@@ -2559,6 +2559,7 @@ export type SessionAgentListResponse = {
 };
 
 export type SessionBindingRecord = {
+    AgentName: string;
     BindingGeneration: number;
     BoundAt: string;
     Conversation: ConversationRef;
@@ -3467,6 +3468,8 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
+    type: 'bead.claim_rejected';
+} & TypedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
 } & TypedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
@@ -3513,6 +3516,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgInbound) | ({
     type: 'extmsg.outbound';
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
+    type: 'extmsg.outbound_channel_mismatch';
+} & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'gc.store.disk_critical';
@@ -3603,6 +3608,20 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
+
+/**
+ * TypedEventStreamEnvelope bead.claim_rejected
+ */
+export type TypedEventStreamEnvelopeBeadClaimRejected = {
+    actor: string;
+    message?: string;
+    payload: BeadClaimRejectedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_rejected';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedEventStreamEnvelope bead.closed
@@ -3937,6 +3956,20 @@ export type TypedEventStreamEnvelopeExtmsgOutbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.outbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope extmsg.outbound_channel_mismatch
+ */
+export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
+    actor: string;
+    message?: string;
+    payload: OutboundChannelMismatchPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.outbound_channel_mismatch';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4562,6 +4595,8 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
+    type: 'bead.claim_rejected';
+} & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
 } & TypedTaggedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
@@ -4608,6 +4643,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgInbound) | ({
     type: 'extmsg.outbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
+    type: 'extmsg.outbound_channel_mismatch';
+} & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'gc.store.disk_critical';
@@ -4698,6 +4735,21 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_rejected
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadClaimRejectedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_rejected';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedTaggedEventStreamEnvelope bead.closed
@@ -5056,6 +5108,21 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.outbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch
+ */
+export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: OutboundChannelMismatchPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.outbound_channel_mismatch';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5778,11 +5845,19 @@ export type WorkerOperationEventPayload = {
     provider?: string;
     queued?: boolean;
     result: string;
+    /**
+     * Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).
+     */
+    run_id?: string;
     session_id?: string;
     session_name?: string;
     started_at: string;
     template?: string;
     transport?: string;
+    /**
+     * True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).
+     */
+    unpriced?: boolean;
 };
 
 export type WorkflowAttemptSummary = {
@@ -6831,46 +6906,6 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
-export type PostV0CityByCityNameBeadByIdClaimData = {
-    body: BeadClaimInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Bead ID.
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/bead/{id}/claim';
-};
-
-export type PostV0CityByCityNameBeadByIdClaimErrors = {
-    /**
-     * Error
-     */
-    default: ErrorModel;
-};
-
-export type PostV0CityByCityNameBeadByIdClaimError = PostV0CityByCityNameBeadByIdClaimErrors[keyof PostV0CityByCityNameBeadByIdClaimErrors];
-
-export type PostV0CityByCityNameBeadByIdClaimResponses = {
-    /**
-     * OK
-     */
-    200: BeadClaimResult;
-};
-
-export type PostV0CityByCityNameBeadByIdClaimResponse = PostV0CityByCityNameBeadByIdClaimResponses[keyof PostV0CityByCityNameBeadByIdClaimResponses];
-
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;
     headers: {
@@ -6944,48 +6979,6 @@ export type GetV0CityByCityNameBeadByIdDepsResponses = {
 };
 
 export type GetV0CityByCityNameBeadByIdDepsResponse = GetV0CityByCityNameBeadByIdDepsResponses[keyof GetV0CityByCityNameBeadByIdDepsResponses];
-
-export type PostV0CityByCityNameBeadByIdReleaseIfCurrentData = {
-    body: BeadReleaseIfCurrentInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Bead ID.
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/bead/{id}/release-if-current';
-};
-
-export type PostV0CityByCityNameBeadByIdReleaseIfCurrentErrors = {
-    /**
-     * Error
-     */
-    default: ErrorModel;
-};
-
-export type PostV0CityByCityNameBeadByIdReleaseIfCurrentError = PostV0CityByCityNameBeadByIdReleaseIfCurrentErrors[keyof PostV0CityByCityNameBeadByIdReleaseIfCurrentErrors];
-
-export type PostV0CityByCityNameBeadByIdReleaseIfCurrentResponses = {
-    /**
-     * OK
-     */
-    200: {
-        [key: string]: string;
-    };
-};
-
-export type PostV0CityByCityNameBeadByIdReleaseIfCurrentResponse = PostV0CityByCityNameBeadByIdReleaseIfCurrentResponses[keyof PostV0CityByCityNameBeadByIdReleaseIfCurrentResponses];
 
 export type PostV0CityByCityNameBeadByIdReopenData = {
     body?: never;
@@ -7177,65 +7170,6 @@ export type CreateBeadResponses = {
 };
 
 export type CreateBeadResponse = CreateBeadResponses[keyof CreateBeadResponses];
-
-export type GetV0CityByCityNameBeadsEphemeralData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * Filter by status.
-         */
-        status?: string;
-        /**
-         * Filter by bead type.
-         */
-        type?: string;
-        /**
-         * Filter by label.
-         */
-        label?: string;
-        /**
-         * Filter by assignee.
-         */
-        assignee?: string;
-        /**
-         * Filter by parent bead id.
-         */
-        parent?: string;
-        /**
-         * Include closed ephemeral beads.
-         */
-        all?: boolean;
-        /**
-         * Max rows (0 = unbounded).
-         */
-        limit?: number;
-    };
-    url: '/v0/city/{cityName}/beads/ephemeral';
-};
-
-export type GetV0CityByCityNameBeadsEphemeralErrors = {
-    /**
-     * Error
-     */
-    default: ErrorModel;
-};
-
-export type GetV0CityByCityNameBeadsEphemeralError = GetV0CityByCityNameBeadsEphemeralErrors[keyof GetV0CityByCityNameBeadsEphemeralErrors];
-
-export type GetV0CityByCityNameBeadsEphemeralResponses = {
-    /**
-     * OK
-     */
-    200: ListBodyBead;
-};
-
-export type GetV0CityByCityNameBeadsEphemeralResponse = GetV0CityByCityNameBeadsEphemeralResponses[keyof GetV0CityByCityNameBeadsEphemeralResponses];
 
 export type GetV0CityByCityNameBeadsGraphByRootIdData = {
     body?: never;

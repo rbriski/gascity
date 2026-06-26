@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -51,6 +52,7 @@ type controllerState struct {
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
+	usageSink              usage.Sink
 	editor                 *configedit.Editor
 	cityName               string
 	cityPath               string
@@ -129,6 +131,7 @@ func newControllerState(
 		sp:                sp,
 		cacheCtx:          ctx,
 		eventProv:         ep,
+		usageSink:         usageSinkForCity(cfg, cityPath),
 		editor:            configedit.NewEditor(fsys.OSFS{}, tomlPath),
 		cityName:          cityName,
 		cityPath:          cityPath,
@@ -173,13 +176,16 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID string, payload json.RawMessage) {
+	onChange := func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
 		if recorder != nil {
 			recorder.Record(events.Event{
-				Type:    eventType,
-				Actor:   "cache-reconcile",
-				Subject: beadID,
-				Payload: payload,
+				Type:      eventType,
+				Actor:     "cache-reconcile",
+				Subject:   beadID,
+				RunID:     runID,
+				SessionID: sessionID,
+				StepID:    stepID,
+				Payload:   payload,
 			})
 		}
 	}
@@ -652,12 +658,22 @@ func maintenanceStartupLine(interval time.Duration, active bool) string {
 	return fmt.Sprintf("store-maintenance: loop started interval=%s mode=%s", interval, mode)
 }
 
+// beadCloseAutocloseDispatch controls how convoy/wisp/molecule autoclose are
+// dispatched after a bead.closed event. Default launches a background goroutine
+// (best-effort, non-blocking). Tests swap to a synchronous call for
+// deterministic assertions.
+var beadCloseAutocloseDispatch = func(fn func()) { go fn() }
+
 func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
+	var storeRef string
+	if evt.Type == events.BeadClosed {
+		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
+	}
 	cs.mu.RUnlock()
 
 	for _, store := range stores {
@@ -668,6 +684,47 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
 	}
+	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
+		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+	}
+}
+
+// autocloseStoreRefLocked returns the storeRef string for the store that owns
+// beadID. Called under cs.mu read lock.
+func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
+	if cs.cfg == nil {
+		return ""
+	}
+	cityPath := cs.cityPath
+	cityName := loadedCityName(cs.cfg, cityPath)
+	if prefix := config.EffectiveHQPrefix(cs.cfg); prefix != "" && strings.HasPrefix(beadID, prefix+"-") {
+		return workflowStoreRefForDir(cityPath, cityPath, cityName, cs.cfg)
+	}
+	for _, rig := range cs.cfg.Rigs {
+		if prefix := rig.EffectivePrefix(); prefix != "" && strings.HasPrefix(beadID, prefix+"-") {
+			rigPath := rig.Path
+			if !filepath.IsAbs(rigPath) {
+				rigPath = filepath.Join(cityPath, rigPath)
+			}
+			return workflowStoreRefForDir(rigPath, cityPath, cityName, cs.cfg)
+		}
+	}
+	return ""
+}
+
+// runBeadCloseAutoclose dispatches convoy/wisp/molecule autoclose for a closed
+// bead via the controller's store. Replaces the shell on_close hook chain that
+// spawned gc subprocesses per bead write (gastownhall/gascity#3248).
+func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
+	rec := events.Discard
+	if cs.eventProv != nil {
+		rec = cs.eventProv
+	}
+	beadCloseAutocloseDispatch(func() {
+		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+		doWispAutocloseWith(store, beadID, os.Stderr)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr)
+	})
 }
 
 func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store {
@@ -731,6 +788,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
+	// Recompute the usage sink so a changed [usage].provider takes effect on
+	// reload instead of writing to the old sink until the controller restarts.
+	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	// Reopen city-level store for session beads and mail.
 	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath)
 	if err != nil {
@@ -753,6 +813,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.mu.Lock()
 	cs.cfg = cfg
 	cs.sp = sp
+	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
 	if cityStore != nil {
@@ -884,9 +945,13 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
+	// Recompute the usage sink so a changed [usage].provider takes effect even on
+	// the store-reuse reload path.
+	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	cs.mu.Lock()
 	cs.cfg = cfg
 	cs.sp = sp
+	cs.usageSink = usageSink
 	cs.mu.Unlock()
 }
 
@@ -1177,6 +1242,17 @@ func (cs *controllerState) EventProvider() events.Provider {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.eventProv
+}
+
+// UsageSink returns the usage-fact sink. Never nil: usage.Discard when usage is
+// disabled or unset.
+func (cs *controllerState) UsageSink() usage.Sink {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.usageSink == nil {
+		return usage.Discard
+	}
+	return cs.usageSink
 }
 
 // CityName returns the city name.

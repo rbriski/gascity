@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +26,7 @@ const rigDeferredStoreInitWait = 30 * time.Second
 var (
 	rigReloadControllerConfig = reloadControllerConfig
 	rigWaitForStoreAccessible = waitForRigStoreAccessible
+	rigListSessionProvider    = newSessionProvider
 )
 
 func newRigCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1240,8 +1242,16 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running: hqRunning,
 			Beads:   rigBeadsStatus(fs, cityPath),
 		})
+		// Build the session provider once and share it across rigs:
+		// constructing it per rig reopened the session store and re-forked
+		// tmux probes, making --json scale O(rigs) in subprocesses (~7x
+		// slower than the text path, which skips running-status detection).
+		var sp runtime.Provider
+		if len(cfg.Rigs) > 0 {
+			sp = rigListSessionProvider()
+		}
 		for i := range cfg.Rigs {
-			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name)
+			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 			result.Rigs = append(result.Rigs, RigListItem{
 				Name:               cfg.Rigs[i].Name,
 				Path:               cfg.Rigs[i].Path,
@@ -1301,12 +1311,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	return 0
 }
 
-func rigHasRunningAgent(cfg *config.City, rigName string) bool {
-	if cfg == nil || rigName == "" {
+// rigHasRunningAgent reports whether any agent scoped to rigName has a live
+// session. The caller supplies the session provider so a single provider can
+// be reused across rigs instead of reconstructed per rig (see doRigList).
+func rigHasRunningAgent(cfg *config.City, rigName string, sp runtime.Provider) bool {
+	if cfg == nil || rigName == "" || sp == nil {
 		return false
 	}
 	cityName := cfg.EffectiveCityName()
-	sp := newSessionProvider()
 	for i := range cfg.Agents {
 		a := cfg.Agents[i]
 		if a.Dir != rigName {
@@ -1639,6 +1651,37 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cfg.Rigs = filtered
+
+	// Drop config blocks that reference the removed rig; left dangling they
+	// break a later load of the city (#3666). The three [[patches.*]] kinds and
+	// a [[github.pr_monitor]] hard-fail config.LoadWithIncludes once their
+	// now-absent rig can no longer be resolved (ApplyPatches "not found in
+	// merged config" / ValidateGitHubPRMonitors "rig is not declared"); an
+	// [[orders.overrides]] instead dangles at order-scan time. The issue named
+	// [[patches.agent]] and [[orders.overrides]]; the rest fail the same way on
+	// rig removal, so sweep them all.
+	cfg.Patches.Agents = slices.DeleteFunc(cfg.Patches.Agents,
+		func(p config.AgentPatch) bool { return p.Dir == rigName })
+	cfg.Patches.NamedSessions = slices.DeleteFunc(cfg.Patches.NamedSessions,
+		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
+	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
+		func(p config.RigPatch) bool { return p.Name == rigName })
+	// Capture rig-scoped PR monitor names before deleting them so we can also
+	// drop any [[patches.github_pr_monitor]] that targets them by name —
+	// otherwise the patch dangles and ApplyPatches fails ("github pr monitor
+	// %q not found in merged config") on the next compose, the same #3666 class.
+	removedMonitors := map[string]bool{}
+	for _, m := range cfg.GitHub.PRMonitors {
+		if m.Rig == rigName {
+			removedMonitors[m.Name] = true
+		}
+	}
+	cfg.GitHub.PRMonitors = slices.DeleteFunc(cfg.GitHub.PRMonitors,
+		func(m config.GitHubPRMonitor) bool { return m.Rig == rigName })
+	cfg.Patches.GitHubPRMonitors = slices.DeleteFunc(cfg.Patches.GitHubPRMonitors,
+		func(p config.GitHubPRMonitorPatch) bool { return removedMonitors[p.Name] })
+	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
+		func(o config.OrderOverride) bool { return o.Rig == rigName })
 
 	// Write updated config.
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {

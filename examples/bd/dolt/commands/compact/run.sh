@@ -223,6 +223,7 @@ compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
+compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
     bare_gc=0
@@ -650,6 +651,25 @@ committed_tables() {
   rm -f "$out_tmp" "$err_tmp"
 }
 
+# dolt_ignore_patterns — emit one pattern per line from dolt_ignore WHERE ignored=1.
+# Fails open (returns 0 with empty output) when dolt_ignore does not exist or the
+# query fails: older stores and bare servers may lack this table. The ignored=1
+# filter matches only explicit ignore entries; negative entries (ignored=0) that
+# un-ignore sub-patterns of a broader glob are deliberately excluded.
+dolt_ignore_patterns() {
+  db="$1"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" \
+    "SELECT pattern FROM dolt_ignore WHERE ignored = 1" \
+    > "$out_tmp" 2>"$err_tmp"; then
+    rm -f "$out_tmp" "$err_tmp"
+    return 0
+  fi
+  awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 # row_count — COUNT(*) for one table. Returns "" on error.
 row_count() {
   db="$1"
@@ -778,15 +798,24 @@ push_remote_refspec() {
 }
 
 # preflight_counts — write "<table> <count> <value-hash>" lines for the user
-# tables present in the committed root at <at_head>. Tables outside that root
-# (dolt_ignore'd working-set-only tables, not-yet-committed new tables) are
-# excluded: the flatten's soft-reset+commit cannot stage or touch them, their
-# concurrent churn is indistinguishable from the gain+drift corruption signal,
-# and the Option A DOLT_DIFF preservation probe structurally fails on a table
-# that exists in no commit — a guaranteed false quarantine on a busy db
-# (observed on hq with bd's wisp tier). The excluded names are recorded in the
-# preflight_excluded_tables global so verify_counts can skip them in the
-# post-flatten table-list comparison symmetrically.
+# tables present in the committed root at <at_head>. Two categories are excluded:
+#
+# 1. Tables absent from the committed root (dolt_ignore'd working-set-only tables,
+#    not-yet-committed new tables): the flatten's soft-reset+commit cannot stage or
+#    touch them, their concurrent churn is indistinguishable from the gain+drift
+#    corruption signal, and the Option A DOLT_DIFF preservation probe structurally
+#    fails on a table that exists in no commit — a guaranteed false quarantine.
+#
+# 2. Tables present in the committed root that are dolt_ignore'd (#3541): a
+#    force-healed store (dolt#11131) can inline a dolt_ignore'd table into HEAD
+#    via DOLT_ADD('--force',...)+commit, so SHOW TABLES AS OF HEAD returns it.
+#    But -Am still cannot stage dolt_ignore'd tables, so their live count/hash
+#    drifts freely under concurrent writers and would false-quarantine identically
+#    to category 1. Querying dolt_ignore and removing matching tables from the
+#    committed-root set catches this case before the per-table verification loop.
+#
+# Excluded names are recorded in preflight_excluded_tables so verify_counts can
+# skip them in the post-flatten table-list comparison symmetrically.
 preflight_counts() {
   db="$1"
   out="$2"
@@ -803,6 +832,36 @@ preflight_counts() {
     rm -f "$tables_tmp" "$committed_tmp"
     return 1
   fi
+  # Remove dolt_ignore'd tables from the committed-root set even if they appear
+  # in HEAD (see category 2 in the function comment above for why).
+  ignored_patterns_tmp=$(mktemp)
+  dolt_ignore_patterns "$db" > "$ignored_patterns_tmp" || true
+  if [ -s "$ignored_patterns_tmp" ]; then
+    filtered_committed_tmp=$(mktemp)
+    preflight_dolt_ignored_tables=""
+    while IFS= read -r ct; do
+      [ -n "$ct" ] || continue
+      ct_matched=0
+      while IFS= read -r pat; do
+        [ -n "$pat" ] || continue
+        case "$ct" in
+          $pat) ct_matched=1; break ;;
+        esac
+      done < "$ignored_patterns_tmp"
+      if [ "$ct_matched" = "1" ]; then
+        preflight_dolt_ignored_tables="$preflight_dolt_ignored_tables $ct"
+      else
+        printf '%s\n' "$ct" >> "$filtered_committed_tmp"
+      fi
+    done < "$committed_tmp"
+    rm -f "$committed_tmp"
+    committed_tmp="$filtered_committed_tmp"
+    if [ -n "$preflight_dolt_ignored_tables" ]; then
+      printf 'compact: db=%s excluding dolt_ignored committed table(s) from flatten verification (force-inlined into HEAD but -Am cannot stage them):%s\n' \
+        "$db" "$preflight_dolt_ignored_tables"
+    fi
+  fi
+  rm -f "$ignored_patterns_tmp"
   preflight_failed=0
   while IFS= read -r t; do
     [ -n "$t" ] || continue
@@ -1123,7 +1182,21 @@ write_compact_marker() {
     printf 'compact: db=%s unable to install marker in %s\n' "$db" "$dir" >&2
     return 1
   fi
+  if [ "$dir" = "$quarantine_dir" ]; then
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at" || true
+  fi
   return 0
+}
+
+send_compact_quarantine_alert() {
+  _ca_db="$1"
+  _ca_type="$2"
+  _ca_path="$3"
+  _ca_reason="$4"
+  _ca_created_at="${5:-<unknown>}"
+  _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
+  gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
+  gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
 }
 
 ensure_compact_marker_writable() {
@@ -1248,6 +1321,7 @@ ensure_remote_push_retry_fresh() {
   if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
     printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
+    send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" || true
     return 1
   fi
   return 0
@@ -1618,6 +1692,7 @@ flatten_database() {
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
     printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
       "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
     return 1
   fi
 
@@ -2295,6 +2370,7 @@ bare_gc_database() {
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
     printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
       "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
     return 1
   fi
 

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -21,16 +20,6 @@ const (
 	// raw token value so subscribe can resolve by the Authorization header.
 	labelClientTokenValuePrefix = "extmsg:client:token:lookup:v1:"
 )
-
-// ClientTokenRecord represents an issued client token bead.
-type ClientTokenRecord struct {
-	ID              string
-	CredentialHash  string
-	TokenValue      string // raw base64url token; empty after first retrieval
-	AllowedSessions []string
-	CreatedAt       time.Time
-	LastUsedAt      time.Time
-}
 
 // RegisterClientInput is the input for registering or re-issuing a client token.
 type RegisterClientInput struct {
@@ -52,6 +41,13 @@ type RegisterClientResult struct {
 // is only returned on initial issuance).
 //
 // If AllowNoCredential is false and Credential is empty, an error is returned.
+//
+// Anonymous mode (AllowNoCredential=true with an empty Credential) maps every
+// anonymous registration to the same credential hash, so a city supports
+// exactly one anonymous client: the first call creates it and returns the
+// token; subsequent anonymous calls are idempotent re-issuances that return
+// the existing client ID with Created=false and an empty Token. Callers that
+// need distinct client identities must supply distinct credentials.
 func RegisterClient(ctx context.Context, store beads.Store, input RegisterClientInput) (RegisterClientResult, error) {
 	if err := checkContext(ctx); err != nil {
 		return RegisterClientResult{}, err
@@ -99,12 +95,13 @@ func RegisterClient(ctx context.Context, store beads.Store, input RegisterClient
 			label,
 			labelClientTokenValuePrefix + tokenHash,
 		},
+		// The raw token is never persisted: ResolveClientToken looks the bead
+		// up by the sha256(token) label below, so storing the plaintext value
+		// would put a bearer credential at rest for no functional reason.
 		Metadata: map[string]string{
 			"credential_hash":  credHash,
-			"token_value":      tokenValue,
 			"allowed_sessions": string(sessionsJSON),
 			"created_at":       formatTime(now),
-			"last_used_at":     "",
 		},
 	})
 	if err != nil {

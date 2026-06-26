@@ -287,10 +287,28 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
+export type BeadClaimInputBody = {
+    /**
+     * Agent to claim the bead for. The claim is atomic (rejected if the bead is already assigned to a different agent).
+     */
+    assignee?: string;
+};
+
 export type BeadClaimRejectedPayload = {
     attempted_claimant: string;
     bead_id: string;
     existing_claimant: string;
+};
+
+export type BeadClaimResult = {
+    /**
+     * The claimed bead, populated when claimed=true.
+     */
+    bead?: Bead;
+    /**
+     * Whether the claim succeeded (false if the bead was not claimable, e.g. already assigned).
+     */
+    claimed: boolean;
 };
 
 export type BeadCreateInputBody = {
@@ -350,6 +368,13 @@ export type BeadGraphResponse = {
     beads: Array<Bead> | null;
     deps: Array<WorkflowDepResponse> | null;
     root: Bead;
+};
+
+export type BeadReleaseIfCurrentInputBody = {
+    /**
+     * Release the assignment only if the bead is currently assigned to this agent (compare-and-swap).
+     */
+    expected_assignee?: string;
 };
 
 export type BeadUpdateBody = {
@@ -6906,6 +6931,46 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
+export type PostV0CityByCityNameBeadByIdClaimData = {
+    body: BeadClaimInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/claim';
+};
+
+export type PostV0CityByCityNameBeadByIdClaimErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0CityByCityNameBeadByIdClaimError = PostV0CityByCityNameBeadByIdClaimErrors[keyof PostV0CityByCityNameBeadByIdClaimErrors];
+
+export type PostV0CityByCityNameBeadByIdClaimResponses = {
+    /**
+     * OK
+     */
+    200: BeadClaimResult;
+};
+
+export type PostV0CityByCityNameBeadByIdClaimResponse = PostV0CityByCityNameBeadByIdClaimResponses[keyof PostV0CityByCityNameBeadByIdClaimResponses];
+
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;
     headers: {
@@ -6979,6 +7044,48 @@ export type GetV0CityByCityNameBeadByIdDepsResponses = {
 };
 
 export type GetV0CityByCityNameBeadByIdDepsResponse = GetV0CityByCityNameBeadByIdDepsResponses[keyof GetV0CityByCityNameBeadByIdDepsResponses];
+
+export type PostV0CityByCityNameBeadByIdReleaseIfCurrentData = {
+    body: BeadReleaseIfCurrentInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/release-if-current';
+};
+
+export type PostV0CityByCityNameBeadByIdReleaseIfCurrentErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0CityByCityNameBeadByIdReleaseIfCurrentError = PostV0CityByCityNameBeadByIdReleaseIfCurrentErrors[keyof PostV0CityByCityNameBeadByIdReleaseIfCurrentErrors];
+
+export type PostV0CityByCityNameBeadByIdReleaseIfCurrentResponses = {
+    /**
+     * OK
+     */
+    200: {
+        [key: string]: string;
+    };
+};
+
+export type PostV0CityByCityNameBeadByIdReleaseIfCurrentResponse = PostV0CityByCityNameBeadByIdReleaseIfCurrentResponses[keyof PostV0CityByCityNameBeadByIdReleaseIfCurrentResponses];
 
 export type PostV0CityByCityNameBeadByIdReopenData = {
     body?: never;
@@ -7170,6 +7277,65 @@ export type CreateBeadResponses = {
 };
 
 export type CreateBeadResponse = CreateBeadResponses[keyof CreateBeadResponses];
+
+export type GetV0CityByCityNameBeadsEphemeralData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Filter by status.
+         */
+        status?: string;
+        /**
+         * Filter by bead type.
+         */
+        type?: string;
+        /**
+         * Filter by label.
+         */
+        label?: string;
+        /**
+         * Filter by assignee.
+         */
+        assignee?: string;
+        /**
+         * Filter by parent bead id.
+         */
+        parent?: string;
+        /**
+         * Include closed ephemeral beads.
+         */
+        all?: boolean;
+        /**
+         * Max rows (0 = unbounded).
+         */
+        limit?: number;
+    };
+    url: '/v0/city/{cityName}/beads/ephemeral';
+};
+
+export type GetV0CityByCityNameBeadsEphemeralErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadsEphemeralError = GetV0CityByCityNameBeadsEphemeralErrors[keyof GetV0CityByCityNameBeadsEphemeralErrors];
+
+export type GetV0CityByCityNameBeadsEphemeralResponses = {
+    /**
+     * OK
+     */
+    200: ListBodyBead;
+};
+
+export type GetV0CityByCityNameBeadsEphemeralResponse = GetV0CityByCityNameBeadsEphemeralResponses[keyof GetV0CityByCityNameBeadsEphemeralResponses];
 
 export type GetV0CityByCityNameBeadsGraphByRootIdData = {
     body?: never;

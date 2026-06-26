@@ -91,12 +91,19 @@ is unchanged EXCEPT:
    controller's recorder in the api_state.go existingRouter branch — note the cache-baking
    order constraint in class_store.go:88-93).
 
-## 6. Remaining owner-gated steps (unchanged, DESTRUCTIVE — confirm each)
+## 6. Remaining owner-gated steps (DESTRUCTIVE — confirm each)
 
-Rebase onto the live branch (`deploy/sqlite-b36-probe-attribution`, re-confirm tmux window 3)
-→ build + install the `dev-2a83e20bd` way → **stop maintainer-city** → `gc beads postgres init`
-+ optimize → set the infra-class backends (incl. sessions now) → `gc beads postgres migrate`
-→ fixup refs if needed → bring up + babysit → tune PG. See `FINISH-AND-MIGRATE.md §5` + the
+**INTEGRATION DONE (2026-06-26, merge `90ab0506c`):** the live deploy branch advanced to
+`dev-314ed82ac` (from `2a83e20bd`); per the owner it was integrated via **merge** (not a
+158-commit rebase) — 28 .go conflicts resolved (take-HEAD for the initiative graph/session/store
+superset, merge-both for deploy's 377-commit feature surface), regenerated spec/client, GREEN
+(build, vet, cmd/gc sharded, internal/api). Backup ref `backup/decouple-infra-beads-pre-rebase-20260626`.
+NB the deploy line is actively moving (tmux window 3) — re-merge if it advances before install.
+
+**STILL TO DO (PAUSED here):** build + install the binary the `dev-*` way → **stop
+maintainer-city** → `gc beads postgres init` + optimize → set the infra-class backends (incl.
+sessions now) → `gc beads postgres migrate` → fixup refs if needed → bring up + babysit → tune
+PG. Also run `make dashboard-check` before install. See `FINISH-AND-MIGRATE.md §5` + the
 HANDOFF for the full mechanics and constraints (commit `--no-verify`; Dolt local-only; never
 force-migrate rig DBs; never `tmux kill-server`; never `go clean -cache`).
 

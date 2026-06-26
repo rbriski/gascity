@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/bead/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post v0 city by city name bead by ID claim */
+        post: operations["post-v0-city-by-city-name-bead-by-id-claim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/bead/{id}/close": {
         parameters: {
             query?: never;
@@ -304,6 +321,23 @@ export interface paths {
         get: operations["get-v0-city-by-city-name-bead-by-id-deps"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v0/city/{cityName}/bead/{id}/release-if-current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post v0 city by city name bead by ID release if current */
+        post: operations["post-v0-city-by-city-name-bead-by-id-release-if-current"];
         delete?: never;
         options?: never;
         head?: never;
@@ -356,6 +390,23 @@ export interface paths {
         put?: never;
         /** Create a bead */
         post: operations["create-bead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v0/city/{cityName}/beads/ephemeral": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get v0 city by city name beads ephemeral */
+        get: operations["get-v0-city-by-city-name-beads-ephemeral"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2252,10 +2303,20 @@ export interface components {
             /** @description Assignee name. */
             assignee?: string;
         };
+        BeadClaimInputBody: {
+            /** @description Agent to claim the bead for. The claim is atomic (rejected if the bead is already assigned to a different agent). */
+            assignee?: string;
+        };
         BeadClaimRejectedPayload: {
             attempted_claimant: string;
             bead_id: string;
             existing_claimant: string;
+        };
+        BeadClaimResult: {
+            /** @description The claimed bead, populated when claimed=true. */
+            bead?: components["schemas"]["Bead"];
+            /** @description Whether the claim succeeded (false if the bead was not claimable, e.g. already assigned). */
+            claimed: boolean;
         };
         BeadCreateInputBody: {
             /** @description Assigned agent. */
@@ -2297,6 +2358,10 @@ export interface components {
             beads: components["schemas"]["Bead"][] | null;
             deps: components["schemas"]["WorkflowDepResponse"][] | null;
             root: components["schemas"]["Bead"];
+        };
+        BeadReleaseIfCurrentInputBody: {
+            /** @description Release the assignment only if the bead is currently assigned to this agent (compare-and-swap). */
+            expected_assignee?: string;
         };
         BeadUpdateBody: {
             /** @description Assigned agent. */
@@ -8234,6 +8299,51 @@ export interface operations {
             };
         };
     };
+    "post-v0-city-by-city-name-bead-by-id-claim": {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path: {
+                /** @description City name. */
+                cityName: string;
+                /** @description Bead ID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BeadClaimInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Cache-Age-S"?: number;
+                    "X-GC-Index"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BeadClaimResult"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "post-v0-city-by-city-name-bead-by-id-close": {
         parameters: {
             query?: never;
@@ -8297,6 +8407,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BeadDepsResponse"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "post-v0-city-by-city-name-bead-by-id-release-if-current": {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path: {
+                /** @description City name. */
+                cityName: string;
+                /** @description Bead ID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BeadReleaseIfCurrentInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Cache-Age-S"?: number;
+                    "X-GC-Index"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
                 };
             };
             /** @description Error */
@@ -8481,6 +8638,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Bead"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-v0-city-by-city-name-beads-ephemeral": {
+        parameters: {
+            query?: {
+                /** @description Filter by status. */
+                status?: string;
+                /** @description Filter by bead type. */
+                type?: string;
+                /** @description Filter by label. */
+                label?: string;
+                /** @description Filter by assignee. */
+                assignee?: string;
+                /** @description Filter by parent bead id. */
+                parent?: string;
+                /** @description Include closed ephemeral beads. */
+                all?: boolean;
+                /** @description Max rows (0 = unbounded). */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Cache-Age-S"?: number;
+                    "X-GC-Index"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListBodyBead"];
                 };
             };
             /** @description Error */

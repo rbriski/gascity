@@ -2193,9 +2193,10 @@ func sweepProcessTableOrphans(
 	return reaped
 }
 
+// Store pair ordered (sessionStore, workStore) to match the close-family.
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
-	store beads.Store,
 	sessionStore beads.Store,
+	workStore beads.Store,
 	rigStores map[string]beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -2209,10 +2210,10 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 		stderr = io.Discard
 	}
 	// Work-assignment guards read the WORK store(s); the session-close legs
-	// target sessionStore. stopRuntimeBeforeSessionBeadMutation stays on store
-	// for now (a session op threaded in a later phase) — byte-identical at the
-	// default bd backend where the two stores are identical.
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+	// target sessionStore. stopRuntimeBeforeSessionBeadMutation stays on the
+	// work store for now (a session op threaded in a later phase) — byte-
+	// identical at the default bd backend where the two stores are identical.
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(workStore, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
@@ -2220,10 +2221,10 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if hasAssignedWork {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(workStore, sp, cfg, b, stopReason, stderr) {
 		return false
 	}
-	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(workStore, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
@@ -2232,9 +2233,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(b) {
-		return closeFailedCreateBead(sessionStore, store, b.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, workStore, b.ID, now, stderr)
 	}
-	return closeBead(sessionStore, store, b.ID, closeReason, now, stderr)
+	return closeBead(sessionStore, workStore, b.ID, closeReason, now, stderr)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(

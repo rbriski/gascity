@@ -21,9 +21,13 @@ import (
 // earlier in the tick (see the PR that retired the snapshot-based variant).
 // Live-query failures fail closed: the bead stays open until assignment can be
 // re-verified.
+// The store pair is ordered (sessionStore, workStore) to match the close-family
+// (closeBead/closeFailedCreateBead); the work-assignment guard reads the WORK
+// store(s), the session-close legs target sessionStore. Keeping one order across
+// the whole family removes the transposition hazard once the stores diverge.
 func closeSessionBeadIfUnassigned(
-	store beads.Store,
 	sessionStore beads.Store,
+	workStore beads.Store,
 	rigStores map[string]beads.Store,
 	cfg *config.City,
 	session beads.Bead,
@@ -37,7 +41,7 @@ func closeSessionBeadIfUnassigned(
 	// The work-assignment guard reads the WORK store(s) — never the session
 	// store. The session-close legs target sessionStore. At the default bd
 	// backend the two stores are identical, so this is byte-identical.
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, session, cfg)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(workStore, rigStores, session, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
 		return false
@@ -46,9 +50,9 @@ func closeSessionBeadIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionStore, store, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, workStore, session.ID, now, stderr)
 	}
-	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
+	return closeBead(sessionStore, workStore, session.ID, reason, now, stderr)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -58,8 +62,8 @@ func closeSessionBeadIfUnassigned(
 func closeSessionBeadIfReachableStoreUnassigned(
 	cityPath string,
 	cfg *config.City,
-	store beads.Store,
 	sessionStore beads.Store,
+	workStore beads.Store,
 	rigStores map[string]beads.Store,
 	session beads.Bead,
 	reason string,
@@ -71,7 +75,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	}
 	// The reachable-store work guard reads the WORK store(s); the session-close
 	// legs target sessionStore. Byte-identical at the default bd backend.
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, workStore, rigStores, session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
 		return false
@@ -80,7 +84,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionStore, store, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, workStore, session.ID, now, stderr)
 	}
-	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
+	return closeBead(sessionStore, workStore, session.ID, reason, now, stderr)
 }

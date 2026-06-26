@@ -20,6 +20,14 @@ epic: ga-pd6tcg
   ops keep `store`/`rigStores`. A missed session op = benign leak; a misrouted work op =
   mass-closure outage.
 - ≤5 files/phase; each phase ends green (build, vet, cmd/gc shards); commit `--no-verify`.
+- **Convention (locked in):** two-store functions take `(sessionStore, workStore, ...)` — session
+  FIRST, work SECOND — uniformly. The adversarial review flagged inconsistent order as the exact
+  transposition foot-gun; keep this order for every new two-store signature. Pure-session helpers
+  keep a single store param (callers pass the session store); pure-work fns are left untouched.
+- **Misclassification is invisible to byte-identity tests** (at default both stores are the same
+  handle), so run an adversarial review workflow per landmine-prone phase — do not trust green
+  tests alone to prove the session/work split. Pattern: `raw/retire-router-phase-review` (the
+  P1-3a run `wf_f745a537` returned SAFE-TO-PROCEED).
 
 ## Track S — phases
 - [x] **P1 — `closeBead` two-store-aware** (`043ac2d7a`). 7 call sites pass `(store, store)`.
@@ -33,13 +41,26 @@ epic: ga-pd6tcg
   + `reassignStateAssignedToRetiredSessionBead` + `closeFailedCreateBead` now take
   `(sessionStore, workStore)`: waits→session, extmsg→work (no relocation seam). Byte-identical.
   Targeted tests green. Broad suite + adversarial review (wf_f745a537) running.
-- [ ] **P3b — session_beads.go body** (`syncSessionBeadsWithSnapshotAndRigStores` :826 + closures,
-  `retireDuplicate*`/`retireRemoved*`, `reapStaleSessionBeads`, `cleanupDeadRuntimeSessionCorpses`,
-  `reapRuntimesBoundToClosedBeads`, `sweepProcessTableOrphans`, `stopRuntimeBeforeSessionBeadMutation`).
-  Mixed fns get `sessionStore`; pure-session helpers (`loadSessionBeads`, `reopen*`, `setMeta*`,
-  `configuredSessionNames`) keep one param but callers pass session store. Callers in
-  city_runtime.go/cmd_start.go pass `(store, store)` until P6. ⚠ Q1 gate: audit
-  `sweepProcessTableOrphans` `ErrNotFound`-vs-transient before relying on it post-relocation.
+- [x] **P3b-1 — retire-named functions** (`350089dbb`). `retireDuplicateConfiguredNamedSessionBeads`
+  + `retireRemovedConfiguredNamedSessionBead` take `(sessionStore, workStore, rigStores, ...)`:
+  archive/wait legs→session, work reassign/unclaim + deferred runtime-stop→work. Callers
+  (syncSessionBeads, reconciler heal-retire, 3 tests) pass `(store, store)`. Byte-identical.
+- [ ] **P3b-2 — session_beads.go remaining body** (NEXT). Two coherent bites:
+  - **reapers** `reapStaleSessionBeads`, `cleanupDeadRuntimeSessionCorpses`,
+    `reapRuntimesBoundToClosedBeads`, `sweepProcessTableOrphans` — each is session reads +
+    `closeBead`(already two-store); add `sessionStore`, callers in city_runtime.go pass
+    `(store, store)`. ⚠ **Q1 audit before relying post-relocation:** `sweepProcessTableOrphans`
+    `store.Get(live.SessionID)` treats `ErrNotFound` as "absent → terminate runtime"; confirm
+    the relocated session-store Get returns `ErrNotFound` only on true absence (not transient),
+    else fail-closed. (At default it's the same bd store, so no behavior change yet.)
+  - **`syncSessionBeadsWithSnapshotAndRigStores` :826 (~900 lines, many closures)** — the big
+    mixed fn. Add `sessionStore`; route the session create/update/close/alias/setMeta closures
+    + the pure-session helper calls (`loadSessionBeads`, `findOpenSessionBeadBySessionName`,
+    `reopenClosedConfiguredNamedSessionBead`, `configuredSessionNames`, `snapshotOrLoadSessionBeads`)
+    to sessionStore; keep work guards/release on store/rigStores. **Pure-session helpers keep
+    ONE param** (callers pass the session store); only mixed fns get the 2nd. Also thread
+    `stopRuntimeBeforeSessionBeadMutation` (session op, currently deferred on workStore).
+    Callers: city_runtime.go + cmd_start.go pass `(store, store)` until P6.
 - [ ] **P4 — session_reconciler.go + session_wake.go + session_lifecycle_parallel.go +
   session_reconcile.go + session_sleep.go** (session-write surfaces).
 - [ ] **P5 — build_desired_state.go + agent_build_params.go + pool_session_name.go**
@@ -69,3 +90,8 @@ epic: ga-pd6tcg
 ## Log
 - 2026-06-26: recon `wf_ed2319fa` (13 agents) → plan + inventory persisted to raw/. Build
   baseline green @ 2ea60d7a9.
+- 2026-06-26: landed the full close/cleanup/retire family — S1 `043ac2d7a`, S2 `a8b096d92`,
+  S3a `58072d1a3`, order-fixup `ab5ae0424`, S3b-1 `350089dbb`. Adversarial review of S1-3a
+  (`wf_f745a537`) = SAFE-TO-PROCEED, zero blockers, mass-closure landmine confirmed absent.
+  All byte-identical at default; broad cmd/gc session suites green at each phase. NEXT: P3b-2
+  (reapers + the big syncSessionBeads). Run a fresh adversarial review after P3b-2/P4/P6.

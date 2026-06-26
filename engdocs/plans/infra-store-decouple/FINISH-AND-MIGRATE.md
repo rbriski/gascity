@@ -17,26 +17,26 @@ epic: ga-pd6tcg
 > `NEXT-SESSION.md` (the per-class untangle mechanics + verified file:lines), and
 > `HANDOFF.md`. The companion `NEXT-SESSION-PROMPT.md` is the copy-paste pickup.
 
-## 0. Where we are (HEAD `4d77288b9`, 6 commits)
+## 0. Where we are (HEAD `a91782188`, 8 commits)
 
 | Commit | What |
 |---|---|
-| `d722e45b9` | nudges class-store seam (`resolveNudgesStore` + `openNudgesClassStore`) |
-| `1d45620f8` | nudges shadow fully relocated (the all-or-nothing untangle, ~12 files) |
-| `1bf1cd3a5` | graph P6 **Step-0** config-conflict guard (`ValidateBeadsClasses` rejects `graph=postgres`) |
-| `0dbd57f36` | docs: nudges + graph step-0 marked done |
 | `1ac4e0113` | **API fix**: route session close/wake wait-nudge withdrawal to the nudges store |
-| `4d77288b9` | graph P6 **Step 1** (re-scoped): `*beads.PostgresStore` graph-apply parity (`ApplyGraphPlan`) — unblocks the graph PG backend; six interface methods deferred to Step 4 |
+| `4d77288b9` | graph **Step 1** (re-scoped): `*beads.PostgresStore` graph-apply parity (`ApplyGraphPlan`) |
+| `bd9cefaf2` | graph **Path A**: wire the PG graph backend behind the Router; `graphRelocated` gate unify (7 consumers) |
+| `a91782188` | graph **Path A**: relax guard to allow graph=postgres; `TestRoutedGraphStorePostgresRoutesAndConverges` |
+
+(Earlier: `d722e45b9`/`1d45620f8` nudges relocation, `1bf1cd3a5` graph Step-0 guard, `0dbd57f36` docs.)
 
 **Relocation readiness by class (this is the load-bearing status):**
 
 | Class | Routes via | Ready to migrate to PG? |
 |---|---|---|
-| nudges | `resolveClassStore` (done this session) | ✅ |
+| nudges | `resolveClassStore` | ✅ |
 | mail | `resolveMailMessagesStore` (flip-ready) | ✅ |
 | orders | `resolveOrderStore` (flipped, O2) | ✅ |
-| **sessions** | **work store — NO seam yet (P5 unbuilt)** | ❌ migrating now **orphans** session beads |
-| **graph** | **`coordrouter.Router` under `graph_store=sqlite` — NOT `resolveClassStore` (P6 Steps 2–5 unbuilt)** | ❌ guard **rejects** `graph=postgres` — but the PG *pour capability* now exists (`4d77288b9`); routing + guard relax remain |
+| **graph** | **`coordrouter.Router` — PG backend wired (Path A), guard relaxed** | ✅ `graph=postgres` works; data migration sqlite→pg at cutover |
+| **sessions** | **work store — NO seam yet (P5a unbuilt)** | ❌ seam needed; live-adopt likely UNNEEDED (goal stops city first) |
 
 The exhaustive 75-agent desync review (this session) confirmed the relocation is
 correct on the CLI surface + byte-identical at default; the one real bug (the API
@@ -57,10 +57,28 @@ true work (issue-tier beads) ──▶ stays in Dolt
 ```
 `[beads.classes.<c>].backend = "postgres"` for the five infra classes; work stays `bd`.
 
-## 2. Phase A — GRAPH P6 (do FIRST; the guard blocks graph=postgres until its last step)
+## 2. Phase A — GRAPH ON POSTGRES ✅ DONE via PATH A (Router KEPT; retirement deferred)
 
-Full mechanics: `NEXT-SESSION.md §5` and `DESIGN.md §5/§8`. Strictly ordered,
-revertible until Step 5 (the irreversible Router deletion — DESIGN §8 point-of-no-return).
+> **OUTCOME (owner reversed Path B → Path A):** graph=postgres is reachable WITHOUT
+> retiring the Router. The Router is the irreducible by-id/cross-class graph dispatcher
+> (a worker's `bd close gcg-N` has only an id; class-agnostic callers can't "open the
+> right store"). Deleting it (Path B) means re-implementing it as a 2-backend
+> `graphRoutedStore` — same topology, irreversible, ~8 hidden couplings — purely to
+> remove a fork-owned package. **Path A keeps the Router and adds a PG graph backend.**
+> Steps 2–5 below are SUPERSEDED; coordrouter retirement is a separate later cleanup.
+>
+> **Shipped (`bd9cefaf2` + `a91782188`):** (1) Step 1 PostgresStore graph-apply parity
+> (`4d77288b9`); (2) gate unify — `graphStoreSQLiteEnabled`→`graphRelocated` =
+> `NormalizedClassBackend(graph)!=bd` across all 7 legacy-knob consumers; (3)
+> `registerGraphStoreBackend` switches backend — SQLite keeps the EXACT legacy
+> `.gc/beads.sqlite` location (`registerGraphStoreSQLite`), Postgres opens `gcg` via
+> `openClassPostgresStore` (event-silent); (4) relaxed the guard to allow graph=postgres.
+> Proven by `TestRoutedGraphStorePostgresRoutesAndConverges` (graph beads physically in
+> `gcg.beads`; by-id close lands on PG). Byte-identical at default + graph_store="sqlite".
+> Graph DATA migration (maintainer-city `.gc/beads.sqlite` → PG `gcg`) is sqlite→pg, at cutover.
+
+The original strictly-ordered Step 1–5 plan (retire the Router) is retained below for
+the eventual coordrouter-removal cleanup, but is NOT on the critical path to the migration:
 
 1. **`*beads.PostgresStore` graph-apply parity ✅ DONE (`4d77288b9`, re-scoped).** The plan's
    literal "promote six `GraphStore` read/finalize methods" was rejected — it is not additive

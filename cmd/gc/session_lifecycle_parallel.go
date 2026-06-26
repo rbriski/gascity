@@ -2078,7 +2078,7 @@ func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, 
 			session.Metadata["session_name"] = ""
 		}
 	}
-	if !closeFailedCreateBead(store, session.ID, now, stderr) {
+	if !closeFailedCreateBead(store, store, session.ID, now, stderr) {
 		return
 	}
 	if session.Metadata == nil {

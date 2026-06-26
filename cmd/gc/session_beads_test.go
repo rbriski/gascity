@@ -2783,7 +2783,7 @@ func TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if closeFailedCreateBead(store, b.ID, now, ioDiscard{}) {
+	if closeFailedCreateBead(store, store, b.ID, now, ioDiscard{}) {
 		t.Fatal("closeFailedCreateBead returned true, want false when Close fails")
 	}
 	got, err := store.Get(b.ID)
@@ -7791,7 +7791,7 @@ func TestReassignStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 5, 15, 9, 30, 0, 0, time.UTC)
-	reassignStateAssignedToRetiredSessionBead(store, oldSessionID, newSessionID, now, &stderr)
+	reassignStateAssignedToRetiredSessionBead(store, store, oldSessionID, newSessionID, now, &stderr)
 	if strings.Contains(stderr.String(), "reassigning waits") {
 		t.Fatalf("stderr = %q, want converged reassign without cap error", stderr.String())
 	}
@@ -7846,7 +7846,7 @@ func TestCancelStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(t 
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
-	cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, now, &stderr)
+	cancelStateAssignedToRetiredSessionBead(store, store, sessionBead.ID, now, &stderr)
 	if strings.Contains(stderr.String(), "canceling waits") {
 		t.Fatalf("stderr = %q, want converged cleanup without cap error", stderr.String())
 	}
@@ -7910,7 +7910,7 @@ func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
-	if !closeFailedCreateBead(store, sessionBead.ID, now, &stderr) {
+	if !closeFailedCreateBead(store, store, sessionBead.ID, now, &stderr) {
 		t.Fatalf("closeFailedCreateBead returned false; want true: stderr=%s", stderr.String())
 	}
 

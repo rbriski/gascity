@@ -461,7 +461,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				continue
 			}
 			reassignWorkAssignedToRetiredSessionBead(store, rigStores, b, openBeads[winner].ID, stderr)
-			reassignStateAssignedToRetiredSessionBead(store, b.ID, openBeads[winner].ID, now, stderr)
+			reassignStateAssignedToRetiredSessionBead(store, store, b.ID, openBeads[winner].ID, now, stderr)
 			if b.Metadata == nil {
 				b.Metadata = make(map[string]string, len(batch))
 			}
@@ -531,7 +531,7 @@ func retireRemovedConfiguredNamedSessionBead(
 		return false
 	}
 	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, b, retiredSessionFallbackRoute(b), stderr)
-	cancelStateAssignedToRetiredSessionBead(store, b.ID, now, stderr)
+	cancelStateAssignedToRetiredSessionBead(store, store, b.ID, now, stderr)
 	return true
 }
 
@@ -736,38 +736,48 @@ func reassignWorkAssignedToRetiredSessionBead(
 	}
 }
 
-func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
-	if store == nil || strings.TrimSpace(oldSessionID) == "" || strings.TrimSpace(newSessionID) == "" {
+// reassignStateAssignedToRetiredSessionBead moves a retired session's durable
+// waits AND its external-message state to the successor session. Waits relocate
+// with the session class, so they use sessionStore; external-message bindings
+// and participants have NO relocation seam (extmsg stays on the work store), so
+// they use workStore. At the default bd backend the two stores are identical, so
+// this is byte-identical.
+func reassignStateAssignedToRetiredSessionBead(sessionStore, workStore beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
+	if sessionStore == nil || workStore == nil || strings.TrimSpace(oldSessionID) == "" || strings.TrimSpace(newSessionID) == "" {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if err := session.ReassignWaits(store, oldSessionID, newSessionID); err != nil {
+	if err := session.ReassignWaits(sessionStore, oldSessionID, newSessionID); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning waits from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.ReassignSessionBindings(context.Background(), store, oldSessionID, newSessionID, now); err != nil {
+	if err := extmsg.ReassignSessionBindings(context.Background(), workStore, oldSessionID, newSessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning external message bindings from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.ReassignSessionParticipants(context.Background(), store, oldSessionID, newSessionID); err != nil {
+	if err := extmsg.ReassignSessionParticipants(context.Background(), workStore, oldSessionID, newSessionID); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning external message participants from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
 }
 
-func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+// cancelStateAssignedToRetiredSessionBead cancels a retired session's durable
+// waits (session class -> sessionStore) and closes its external-message bindings
+// (work-resident, no relocation seam -> workStore). Byte-identical at the default
+// bd backend.
+func cancelStateAssignedToRetiredSessionBead(sessionStore, workStore beads.Store, sessionID string, now time.Time, stderr io.Writer) {
+	if sessionStore == nil || workStore == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if _, err := session.ListSessionWaitBeads(store, sessionID); beads.IsLookupLimitError(err) {
-		stampWaitLookupCapDiagnostic(store, sessionID, err, now, "retired-session-cleanup")
+	if _, err := session.ListSessionWaitBeads(sessionStore, sessionID); beads.IsLookupLimitError(err) {
+		stampWaitLookupCapDiagnostic(sessionStore, sessionID, err, now, "retired-session-cleanup")
 	}
-	if err := session.CancelWaits(store, sessionID, now); err != nil {
+	if err := session.CancelWaits(sessionStore, sessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
+	if err := extmsg.CloseSessionBindings(context.Background(), workStore, sessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }
@@ -877,7 +887,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
 			continue
 		}
-		if closeFailedCreateBead(store, b.ID, now, stderr) {
+		if closeFailedCreateBead(store, store, b.ID, now, stderr) {
 			openBeads[i].Status = "closed"
 		}
 	}
@@ -1156,7 +1166,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
-						closeFailedCreateBead(store, newBead.ID, now, stderr)
+						closeFailedCreateBead(store, store, newBead.ID, now, stderr)
 						return
 					}
 					if newBead.Metadata == nil {
@@ -1782,22 +1792,26 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 	return nil
 }
 
-func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
+// closeFailedCreateBead closes a session bead stuck in failed-create. The
+// session-bead legs (ClosePatch, Close) use sessionStore; it carries workStore
+// only to forward to cancelStateAssignedToRetiredSessionBead (whose extmsg leg
+// is work-resident). Byte-identical at the default bd backend.
+func closeFailedCreateBead(sessionStore, workStore beads.Store, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	patch["sleep_intent"] = ""
-	if setMetaBatch(store, id, patch, stderr) != nil {
+	if setMetaBatch(sessionStore, id, patch, stderr) != nil {
 		return false
 	}
-	if err := store.Close(id); err != nil {
+	if err := sessionStore.Close(id); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
 	// bind could leave participant records behind. Cleanup helpers no-op
 	// when the session has no labeled state.
-	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
+	cancelStateAssignedToRetiredSessionBead(sessionStore, workStore, id, now, stderr)
 	return true
 }
 
@@ -2218,7 +2232,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(b) {
-		return closeFailedCreateBead(sessionStore, b.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, store, b.ID, now, stderr)
 	}
 	return closeBead(sessionStore, store, b.ID, closeReason, now, stderr)
 }
@@ -2316,7 +2330,7 @@ func closeBead(sessionStore, workStore beads.Store, id, reason string, now time.
 		return false
 	}
 	if reason == string(session.StateFailedCreate) {
-		return closeFailedCreateBead(sessionStore, id, now, stderr)
+		return closeFailedCreateBead(sessionStore, workStore, id, now, stderr)
 	}
 	if setMetaBatch(sessionStore, id, session.ClosePatch(now, reason), stderr) != nil {
 		return false
@@ -2332,7 +2346,7 @@ func closeBead(sessionStore, workStore beads.Store, id, reason string, now time.
 	// slack (#1939). The wait cancel inside is session-class; the extmsg
 	// cancel is work-class — that internal split lands in a later phase (the
 	// stores are identical at the default backend, so it is byte-identical now).
-	cancelStateAssignedToRetiredSessionBead(sessionStore, id, now, stderr)
+	cancelStateAssignedToRetiredSessionBead(sessionStore, workStore, id, now, stderr)
 	if snapshotErr == nil {
 		releaseWorkFromClosedSessionBead(workStore, snapshot, stderr)
 	}

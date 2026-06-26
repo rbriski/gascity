@@ -46,7 +46,7 @@ func closeSessionBeadIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionStore, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, store, session.ID, now, stderr)
 	}
 	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
 }
@@ -80,7 +80,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionStore, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionStore, store, session.ID, now, stderr)
 	}
 	return closeBead(sessionStore, store, session.ID, reason, now, stderr)
 }

@@ -34,6 +34,12 @@ type nudgeReference = nudgequeue.Reference
 // cmd_nudge.go) so tests can substitute a fake beads.Store and assert that
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
+//
+// NOTE: this returns the work store, NOT a class-relocated nudge store, on purpose.
+// Its result is used as a general store across the nudge subsystem — including session
+// reads (resolveNudgeTarget) and worker observation — so it cannot be relocated wholesale.
+// Relocating the nudge SHADOW must thread a nudge store (resolveNudgesStore) only into the
+// leaf nudge-bead operations, leaving session ops on the work store.
 var openNudgeBeadStore = func(cityPath string) beads.Store {
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {

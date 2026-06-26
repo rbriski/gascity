@@ -101,6 +101,49 @@ func TestBeadsMigrate_ToPostgres(t *testing.T) {
 	}
 }
 
+// TestOpenClassPostgresStore_CloseSafe proves the cached Postgres handle survives a
+// close-after-use caller: openClassPostgresStore returns a noClosePostgresStore whose
+// CloseStore is a no-op, so one consumer closing its handle (closeBeadStoreHandle)
+// cannot pull the shared connection pool out from under the others. SKIPPED unless
+// GC_TEST_POSTGRES_DSN is set.
+func TestOpenClassPostgresStore_CloseSafe(t *testing.T) {
+	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set GC_TEST_POSTGRES_DSN to a disposable Postgres")
+	}
+	cfg := postgresCfgFromDSN(t, dsn, config.BeadClassOrders)
+	schema, _ := config.ReservedClassPrefix(config.BeadClassOrders)
+	if err := beads.ProvisionPostgres(dsn, schema); err != nil {
+		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
+	}
+	cityPath := t.TempDir()
+	store, ok := openClassPostgresStore(cfg, cityPath, config.BeadClassOrders, nil)
+	if !ok {
+		t.Fatal("openClassPostgresStore returned (_, false)")
+	}
+	created, err := store.Create(beads.Bead{Title: "close-safe", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A close-after-use caller closes its handle — this MUST be a no-op on the shared
+	// cached pool (without the noClosePostgresStore wrapper it would close the pool).
+	if err := closeBeadStoreHandle(store); err != nil {
+		t.Fatalf("closeBeadStoreHandle: %v", err)
+	}
+	// The shared pool must still serve reads after that close.
+	if _, err := store.Get(created.ID); err != nil {
+		t.Fatalf("Get after closeBeadStoreHandle: %v (the shared pool was closed)", err)
+	}
+	// And a re-resolve returns a working handle (same cached pool).
+	again, ok := openClassPostgresStore(cfg, cityPath, config.BeadClassOrders, nil)
+	if !ok {
+		t.Fatal("re-resolve returned (_, false)")
+	}
+	if _, err := again.Create(beads.Bead{Title: "close-safe-2", Type: "task"}); err != nil {
+		t.Fatalf("Create on re-resolved handle: %v (the shared pool was closed)", err)
+	}
+}
+
 func TestBuildPostgresDSN_RequiresDatabase(t *testing.T) {
 	if _, err := buildPostgresDSN(config.BeadsPostgresConfig{Host: "h"}, t.TempDir()); err == nil {
 		t.Fatal("buildPostgresDSN without a database should error")

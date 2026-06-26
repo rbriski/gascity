@@ -17,7 +17,7 @@ epic: ga-pd6tcg
 > `NEXT-SESSION.md` (the per-class untangle mechanics + verified file:lines), and
 > `HANDOFF.md`. The companion `NEXT-SESSION-PROMPT.md` is the copy-paste pickup.
 
-## 0. Where we are (this session, HEAD `1ac4e0113`, 5 commits)
+## 0. Where we are (HEAD `4d77288b9`, 6 commits)
 
 | Commit | What |
 |---|---|
@@ -26,6 +26,7 @@ epic: ga-pd6tcg
 | `1bf1cd3a5` | graph P6 **Step-0** config-conflict guard (`ValidateBeadsClasses` rejects `graph=postgres`) |
 | `0dbd57f36` | docs: nudges + graph step-0 marked done |
 | `1ac4e0113` | **API fix**: route session close/wake wait-nudge withdrawal to the nudges store |
+| `4d77288b9` | graph P6 **Step 1** (re-scoped): `*beads.PostgresStore` graph-apply parity (`ApplyGraphPlan`) — unblocks the graph PG backend; six interface methods deferred to Step 4 |
 
 **Relocation readiness by class (this is the load-bearing status):**
 
@@ -35,7 +36,7 @@ epic: ga-pd6tcg
 | mail | `resolveMailMessagesStore` (flip-ready) | ✅ |
 | orders | `resolveOrderStore` (flipped, O2) | ✅ |
 | **sessions** | **work store — NO seam yet (P5 unbuilt)** | ❌ migrating now **orphans** session beads |
-| **graph** | **`coordrouter.Router` under `graph_store=sqlite` — NOT `resolveClassStore` (P6 unbuilt)** | ❌ guard **rejects** `graph=postgres` |
+| **graph** | **`coordrouter.Router` under `graph_store=sqlite` — NOT `resolveClassStore` (P6 Steps 2–5 unbuilt)** | ❌ guard **rejects** `graph=postgres` — but the PG *pour capability* now exists (`4d77288b9`); routing + guard relax remain |
 
 The exhaustive 75-agent desync review (this session) confirmed the relocation is
 correct on the CLI surface + byte-identical at default; the one real bug (the API
@@ -61,11 +62,17 @@ true work (issue-tier beads) ──▶ stays in Dolt
 Full mechanics: `NEXT-SESSION.md §5` and `DESIGN.md §5/§8`. Strictly ordered,
 revertible until Step 5 (the irreversible Router deletion — DESIGN §8 point-of-no-return).
 
-1. **Promote the `GraphStore` read/finalize surface** (additive): add `GetNode`/
-   `ListNodesByRoot`/`ListNodeEdges`/`CloseSubtree`/`ReadyCandidates`/`FindOrCreateByKey`
-   to `internal/coordrouter/stores.go`, implement on `BdGraphStore` + `*beads.SQLiteStore`
-   (and **`*beads.PostgresStore`** — new for this migration), fill the skipped conformance
-   skeleton (`coordtest/conformance.go`). No call-site rewiring.
+1. **`*beads.PostgresStore` graph-apply parity ✅ DONE (`4d77288b9`, re-scoped).** The plan's
+   literal "promote six `GraphStore` read/finalize methods" was rejected — it is not additive
+   (breaks `*BdGraphStore`/`*fakeGraphStore`/`fakeGraph`) and violates `stores.go`'s written
+   "never ahead of a caller" invariant. The real, caller-independent slice that unblocks
+   `graph=postgres` was the missing `ApplyGraphPlan` on `*PostgresStore`; it is now implemented
+   (`internal/beads/postgres_store_graph_apply.go`, in-tx `nextval` minting, SQLite-identical
+   tier mapping) with DSN-gated shared conformance + white-box parity tests. **The six
+   read/finalize methods move to Step 4** (promoted one-per-real-caller with the `?type=molecule`
+   augment + order gate). GraphStore interface unchanged → default `bd` byte-identical, guard
+   still rejects `graph=postgres` until Step 5. See `NEXT-SESSION.md §5 Step 1` for the full
+   re-scope rationale.
 2. **MOVE `ClassifyGraphPlan`** (+ helpers) from `internal/coordclass/classify.go` into a
    NEW `internal/graphstore` package; update Router call sites; grep-sweep.
 3. **Provider-aware `ResolveStoreRef`** — re-point the `(storeRef,id)` resolver

@@ -2,13 +2,15 @@
 
 Branch `plan/decouple-infra-beads` @ `1bf1cd3a5` · worktree `/data/projects/gascity/.claude/worktrees/infra-store-plan`
 
-> **STATUS 2026-06-26 (later session): §4 NUDGES ✅ DONE, §5 graph Step-0 guard ✅ DONE.**
+> **STATUS 2026-06-26 (later session): §4 NUDGES ✅ DONE, §5 graph Step-0 guard ✅ DONE,
+> §5 graph P6 Step 1 ✅ DONE (re-scoped → PostgresStore graph-apply parity, `4d77288b9`).**
 > Nudges fully relocated (`d722e45b9` seam + `1d45620f8` untangle) and the graph
 > config-conflict guard landed (`1bf1cd3a5`) — both byte-identical at the default
 > backend, verified by the Nudge/Wait/Sweep/Sling/Dispatch suites + the sharded
-> `make test-cmd-gc-process-parallel` guard. **Pick up at §5 graph P6 Step 1**
-> (promote the GraphStore read/finalize surface — additive, reversible), then the
-> ordered P6 steps, then §6 sessions P5. NOTE: §4's mixed-fn list was incomplete —
+> `make test-cmd-gc-process-parallel` guard. Graph P6 Step 1 landed as PostgresStore
+> graph-apply parity (see the re-scope note under §5 Step 1) — the GraphStore interface
+> is unchanged. **Pick up at §5 graph P6 Step 2** (MOVE `ClassifyGraphPlan` into a new
+> `internal/graphstore`), then the ordered P6 steps, then §6 sessions P5. NOTE: §4's mixed-fn list was incomplete —
 > the executed untangle also split `finalizeReadyWaitFromNudge` /
 > `prepareWaitWakeStateForCityWithSnapshot` / `nextWaitDeliveryAttempt`
 > (+`cmdWaitSetStateResult`/`retryClosedWait`); always grep EVERY nudge-bead op,
@@ -199,13 +201,40 @@ Extract the lowercasing inlined in `NormalizedClassBackend` (`config.go:1365`) i
 
 ### Ordered P6 execution (strictly in order)
 
-**Step 1 — Promote the `GraphStore` read/finalize surface (additive).** Add `GetNode` / `ListNodesByRoot` / `ListNodeEdges` / `CloseSubtree` / `ReadyCandidates` / `FindOrCreateByKey` to `GraphStore` (`internal/coordrouter/stores.go:65`); implement on `BdGraphStore` (`internal/coordrouter/bdgraphstore.go:25`) and `*beads.SQLiteStore` (`internal/beads/sqlite_store_graph_apply.go`). Verify: extend the `RunGraphStoreTests` conformance suite (`internal/coordrouter/coordtest/conformance.go:172-181`, currently a skipped skeleton — `graphStoreSkipReason` `:46`) to cover the six methods; run bd-impl and sqlite-impl. No call-site rewiring.
+**Step 1 — Give `*beads.PostgresStore` graph-apply parity with SQLite ✅ DONE (`4d77288b9`, re-scoped 2026-06-26).**
+
+> **RE-SCOPE (owner-approved).** The plan's literal Step 1 — "promote `GetNode` /
+> `ListNodesByRoot` / `ListNodeEdges` / `CloseSubtree` / `ReadyCandidates` /
+> `FindOrCreateByKey` onto the `GraphStore` interface" — was **rejected as written**: it is
+> NOT additive (it breaks three implementors that satisfy `GraphStore` today via the single
+> `ApplyGraphPlan` — `*BdGraphStore`, `*fakeGraphStore` `stores_test.go:57`, `fakeGraph`
+> `conformance_test.go:15`) and it directly violates the interface's OWN written contract
+> (`stores.go:21-25,52-64`: these six are a growth path promoted "only as a consumer is
+> migrated behind the seam … **never ahead of a caller**"). Several also have no atomic backing
+> and live above the beads layer (`CloseSubtree`/`ListNodesByRoot` in `internal/molecule`).
+>
+> The genuine, caller-independent, design-compliant slice — the real intent behind the plan's
+> "(and `*beads.PostgresStore` — new for this migration)" — was the only thing actually
+> blocking `graph=postgres`: **`*PostgresStore` had no `ApplyGraphPlan` at all** (no method, no
+> compile-time assertion, unlike `*SQLiteStore`). That is now implemented
+> (`internal/beads/postgres_store_graph_apply.go`): `ApplyGraphPlan` +
+> `ApplyGraphPlanWithStorage`, mirroring the SQLite three-pass shape but minting final ids in-tx
+> via `nextval('bead_seq')` (no mint-then-remap retry; tier mapping identical). Proven by the
+> DSN-gated shared `RunGraphStoreTests` conformance for PostgresStore plus white-box parity
+> tests (edge→dep wiring, parent linkage, atomic rollback, ephemeral tier). The `GraphStore`
+> **interface is unchanged**, so default (`bd`) is byte-identical and the Step-0 guard still
+> rejects `graph=postgres` until Step 5.
+>
+> **The six read/finalize methods move to Step 4**, where the `?type=molecule` augment + order
+> gate become their real callers (honoring "never ahead of a caller"). Use `beads.Bead` for
+> nodes, `beads.Dep` for edges, `beads.ReadyQuery` for candidates — there are no bespoke
+> node/edge/candidate types in `stores.go` to invent.
 
 **Step 2 — MOVE `ClassifyGraphPlan` into `internal/graphstore` (net-new package; does not exist yet).** Move `ClassifyGraphPlan` + `classifyFields`/`isWispMetadata` from `internal/coordclass/classify.go:88`; update the two Router call sites (`internal/coordrouter/router.go:151,167`) and test imports. Grep-sweep `ClassifyGraphPlan` and `coordclass.ClassGraph` (No-Semantic-Search rule). Verify: `go test ./internal/graphstore/ ./internal/coordrouter/ ./internal/coordclass/`; `TestClassifyGraphPlan` moves with it (`classify_test.go:77`).
 
 **Step 3 — Provider-aware `ResolveStoreRef`.** Re-point the `(storeRef,id)` prefix resolver (`internal/dispatch/runtime.go:48-63`; template `api_state.go:630`) onto the existing `internal/storeref` package (`internal/storeref/storeref.go` — already exists, the P3.5 F3 resolver), extending the prefix switch for the class prefixes (`gcm-`/`gco-`/`gcn-`/`gcs-` alongside `gcg-`→graph, `gc-`/`ga-`→work; DESIGN §9, `:286`). Live callers to keep green: `cmd/gc/cmd_convoy_dispatch.go:205`, `internal/dispatch/runtime.go:796-802`. Verify: `go test ./internal/storeref/ ./internal/dispatch/`.
 
-**Step 4 — Rewire the `?type=molecule` augment AND the order gate to `GraphStore` (BEFORE any Router deletion).** This is the load-bearing step: both read paths must stop relying on Router federation *while federation still exists as a fallback*, so a defect surfaces under the safety net. `?type=molecule` + `gc.kind=workflow` augment: `internal/api/huma_handlers_beads.go:113-181` and the `ReadyGraphOnly` hot loop `:341-342` → read the promoted `GraphStore` directly. Order gate `storesForGate` assembly: `cmd/gc/order_dispatch.go:512-532` → source the graph-read store from `GraphStore`, not the Router-wrapped `store`. Verify: split-topology `is_blocked` conformance test (DESIGN §9.2/§10 gate, `:284`, `:315`) proves `GraphStore` forbids ready-blocking deps identically to federation; order-gate conformance (the P4 hard-prereq) stays green; `make test-cmd-gc-process-parallel`.
+**Step 4 — Promote ONLY the read methods a migrated caller needs, then rewire the `?type=molecule` augment AND the order gate to `GraphStore` (BEFORE any Router deletion).** This is where the deferred interface promotion lands, one method per real caller: add `GetNode`/`ListNodesByRoot`/`ListNodeEdges`/`ReadyCandidates` (the READ subset the two paths actually use) to `GraphStore`, and in the SAME commit add their implementations to `*BdGraphStore` + the test fakes (`*fakeGraphStore`, `fakeGraph`) so the build stays green — `*beads.SQLiteStore`/`*beads.PostgresStore` get them for free where a 1:1 leaf exists (`Get`, `DepList`). Defer `CloseSubtree`/`FindOrCreateByKey` further still (finalize/idempotency — no read-path caller here; they live above the beads layer in `internal/molecule`). This is the load-bearing step: both read paths must stop relying on Router federation *while federation still exists as a fallback*, so a defect surfaces under the safety net. `?type=molecule` + `gc.kind=workflow` augment: `internal/api/huma_handlers_beads.go:113-181` and the `ReadyGraphOnly` hot loop `:341-342` → read the promoted `GraphStore` directly. Order gate `storesForGate` assembly: `cmd/gc/order_dispatch.go:512-532` → source the graph-read store from `GraphStore`, not the Router-wrapped `store`. Verify: split-topology `is_blocked` conformance test (DESIGN §9.2/§10 gate, `:284`, `:315`) proves `GraphStore` forbids ready-blocking deps identically to federation; order-gate conformance (the P4 hard-prereq) stays green; `make test-cmd-gc-process-parallel`.
 
 **Step 5 — Delete `coordrouter` (final point-of-no-return).** Confirm zero non-test callers of all three mechanisms — create-time classify (`router.go:113`), by-id probing (`router_mutation.go:21`), read federation (`router_federation.go:242`) — and the sole `coordrouter.New` site (`api_state.go:240-244`). Demote `coordclass.Classify` to test/audit-only (DESIGN §2, `:83-85`). Delete `internal/coordrouter` + `internal/coordclass` (both fork-owned → grep-provable, zero merge cost). Retire `graphStoreSQLiteEnabled` and fold graph into `resolveClassStore` so the seven legacy-knob consumers and `NormalizedClassBackend(graph)` finally read one source of truth. Verify: grep-guard for `coordrouter.New` / `coordclass.` in non-test files returns zero; full `make test-cmd-gc-process-parallel` + integration shards; the Step-0 guard can now relax to *allow* `graph=postgres` (it routes through `resolveClassStore`).
 

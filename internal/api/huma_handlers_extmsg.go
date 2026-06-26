@@ -648,7 +648,10 @@ func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscrib
 		if errors.Is(err, extmsg.ErrClientTokenNotFound) || errors.Is(err, extmsg.ErrInvalidInput) {
 			return huma.Error401Unauthorized("unauthorized")
 		}
-		return huma.Error503ServiceUnavailable("token resolution failed: " + err.Error())
+		// Log the underlying cause server-side; return a generic message so a
+		// store error detail does not leak to the caller.
+		slog.ErrorContext(ctx, "extmsg: client token resolution failed", "error", err)
+		return huma.Error503ServiceUnavailable("token resolution unavailable")
 	}
 
 	if input.ClientID != clientID {
@@ -656,8 +659,13 @@ func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscrib
 	}
 
 	cfg := s.state.Config()
-	heartbeat, err := time.ParseDuration(cfg.ExtMsg.ConnectedClients.HeartbeatIntervalOrDefault())
+	heartbeatStr := cfg.ExtMsg.ConnectedClients.HeartbeatIntervalOrDefault()
+	heartbeat, err := time.ParseDuration(heartbeatStr)
 	if err != nil || heartbeat <= 0 {
+		if err != nil {
+			// Surface an invalid operator value instead of silently dropping it.
+			slog.WarnContext(ctx, "extmsg: invalid connected_clients.heartbeat_interval; falling back to 30s", "value", heartbeatStr, "error", err)
+		}
 		heartbeat = 30 * time.Second
 	}
 
@@ -677,10 +685,15 @@ func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscrib
 
 	if len(allowedSessions) > 0 {
 		binding, bindErr := svc.Bindings.ResolveByConversation(ctx, input.resolved.convRef)
-		if bindErr == nil && binding != nil {
-			if !slices.Contains(allowedSessions, binding.SessionID) {
-				return huma.Error403Forbidden("session_forbidden: session is not permitted by this client token")
-			}
+		if bindErr != nil {
+			// Fail closed: a transient binding-store fault must not bypass the
+			// allow-list. A missing binding (nil, nil) still proceeds — the
+			// allow-list is re-checked at stream time once a binding resolves.
+			slog.ErrorContext(ctx, "extmsg: binding lookup failed during subscribe precheck", "error", bindErr)
+			return huma.Error503ServiceUnavailable("binding lookup unavailable")
+		}
+		if binding != nil && !slices.Contains(allowedSessions, binding.SessionID) {
+			return huma.Error403Forbidden("session_forbidden: session is not permitted by this client token")
 		}
 	}
 
@@ -714,21 +727,38 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 		return
 	}
 
-	// Step a: Register an LLMClientAdapter keyed by ("llm-client", client_id).
-	// A dedicated SubscriberRegistry bridges this adapter to the event channel below.
+	// Step a: Subscribe to the per-connection registry for this ConversationRef
+	// FIRST, so the subscriber channel exists before the adapter becomes
+	// discoverable. If the adapter were registered first, an outbound publish
+	// that resolves it in the window before Subscribe runs would find no
+	// subscriber and be dropped from live delivery (the subscribe contract
+	// requires subscriber-channel-first).
 	registry := extmsg.NewSubscriberRegistry()
+	eventChan, cancelSub := registry.Subscribe(state.convRef, state.bufferSize)
+	defer cancelSub()
+
+	// Step b: Register an LLMClientAdapter keyed by ("llm-client", client_id);
+	// the SubscriberRegistry above bridges it to the event channel.
 	adapter := extmsg.NewLLMClientAdapter(state.clientID, registry)
 	adapterKey := extmsg.AdapterKey{Provider: extmsg.ProviderLLMClient, AccountID: state.clientID}
 	reg.Register(adapterKey, adapter)
 	defer reg.Unregister(adapterKey)
 
-	// Step b: Subscribe to the per-connection registry for this ConversationRef.
-	eventChan, cancelSub := registry.Subscribe(state.convRef, state.bufferSize)
-	defer cancelSub()
-
 	// Steps c + d (conditional on binding existence): EnsureMembership + backfill replay.
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api-subscribe"}
-	if binding, lookupErr := svc.Bindings.ResolveByConversation(reqCtx, state.convRef); lookupErr == nil && binding != nil {
+	binding, lookupErr := svc.Bindings.ResolveByConversation(reqCtx, state.convRef)
+	if lookupErr != nil && len(state.allowedSessions) > 0 {
+		// Fail closed: with an active allow-list we cannot confirm the bound
+		// session is permitted, so disconnect rather than stream past it.
+		slog.ErrorContext(reqCtx, "extmsg: stream-time binding lookup failed with active allow-list; disconnecting", "client", state.clientID, "error", lookupErr)
+		return
+	}
+	if lookupErr != nil {
+		// No allow-list in play: a binding lookup error only costs membership
+		// and backfill, so log and fall through to live delivery.
+		slog.WarnContext(reqCtx, "extmsg: stream-time binding lookup failed; streaming without backfill", "client", state.clientID, "error", lookupErr)
+	}
+	if lookupErr == nil && binding != nil {
 		if len(state.allowedSessions) > 0 && !slices.Contains(state.allowedSessions, binding.SessionID) {
 			slog.WarnContext(reqCtx, "extmsg: stream-time session_forbidden; disconnecting", "client", state.clientID)
 			return
@@ -742,11 +772,21 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 
 		if input.LastEventID != "" {
 			if afterSeq, parseErr := strconv.ParseInt(input.LastEventID, 10, 64); parseErr == nil {
-				records, _ := svc.Transcript.List(reqCtx, extmsg.ListTranscriptInput{
+				// List (cursor-based) is deliberate over ListBackfill
+				// (membership/ack-based): Last-Event-ID replay must resume from
+				// the client's own cursor, not the membership's last-read
+				// sequence.
+				records, listErr := svc.Transcript.List(reqCtx, extmsg.ListTranscriptInput{
 					Caller:        caller,
 					Conversation:  state.convRef,
 					AfterSequence: afterSeq,
 				})
+				if listErr != nil {
+					// Don't fail the stream on a backfill read error: log and
+					// fall through to live delivery (the client keeps its
+					// Last-Event-ID and can retry).
+					slog.WarnContext(reqCtx, "extmsg: transcript backfill read failed", "client", state.clientID, "error", listErr)
+				}
 				for _, r := range records {
 					ev := extmsg.NewSSEMessageEvent(r.Text, binding.SessionID, state.convRef, r.Sequence, r.CreatedAt)
 					if sendErr := send(StringIDMessage{ID: strconv.FormatInt(r.Sequence, 10), Data: ev}); sendErr != nil {
@@ -786,14 +826,17 @@ func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribe
 			if !ok {
 				return
 			}
-			switch e := event.(type) {
-			case extmsg.SSEMessageEvent:
-				if err := safeSend(StringIDMessage{ID: strconv.FormatInt(e.Sequence, 10), Data: e}); err != nil {
+			// Only message events are published to the per-connection registry
+			// today. Error events (SSEErrorEvent) remain in the wire contract
+			// (§4.3/§5.2) and the OpenAPI schema for clients, but have no
+			// in-stream producer yet: a server_shutdown emitter needs a server
+			// shutdown context (see internal/api/server.go), so the dispatch
+			// branch is omitted until a real producer exists rather than left
+			// dead.
+			if msg, ok := event.(extmsg.SSEMessageEvent); ok {
+				if err := safeSend(StringIDMessage{ID: strconv.FormatInt(msg.Sequence, 10), Data: msg}); err != nil {
 					return
 				}
-			case extmsg.SSEErrorEvent:
-				_ = send(StringIDMessage{ID: "error", Data: e})
-				return
 			}
 		}
 	}

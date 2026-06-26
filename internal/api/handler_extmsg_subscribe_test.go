@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -328,5 +329,98 @@ func TestSubscribeHandler_AdapterUnregisteredOnDisconnect(t *testing.T) {
 	// Adapter must be unregistered after disconnect.
 	if fs.adapterReg.Lookup(adapterKey) != nil {
 		t.Error("LLMClientAdapter still registered after disconnect")
+	}
+}
+
+// TestSubscribeHandler_LastEventIDReplaysOnlyMissedMessages validates that a
+// reconnect with Last-Event-ID backfills only transcript entries after the
+// cursor — the behavior that was broken while live message events hardcoded
+// sequence 0 (every reconnect sent Last-Event-ID: 0 and replayed everything).
+func TestSubscribeHandler_LastEventIDReplaysOnlyMissedMessages(t *testing.T) {
+	fs, srv, clientID, token, convRef := newExtMsgSubscribeFixture(t)
+	fs.cfg.ExtMsg.ConnectedClients.HeartbeatInterval = "10s"
+
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	// A binding makes the stream run EnsureMembership + backfill replay.
+	if _, err := fs.extmsgSvc.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: convRef,
+		SessionID:    "sess-1",
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	// Three outbound entries → sequences 1, 2, 3.
+	for _, txt := range []string{"m1", "m2", "m3"} {
+		if _, err := fs.extmsgSvc.Transcript.Append(context.Background(), extmsg.AppendTranscriptInput{
+			Caller:       caller,
+			Conversation: convRef,
+			Kind:         extmsg.TranscriptMessageOutbound,
+			Provenance:   extmsg.TranscriptProvenanceLive,
+			Text:         txt,
+			CreatedAt:    time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("Append %s: %v", txt, err)
+		}
+	}
+
+	h := newTestCityHandlerWith(t, fs, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", subscribeURL(fs, clientID, convRef.ConversationID), nil).WithContext(ctx)
+	req.Header.Set("X-GC-Client-Token", token)
+	req.Header.Set("Last-Event-ID", "2") // client last saw sequence 2
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+	<-done
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "m3") {
+		t.Errorf("backfill missing m3 (the only message after the cursor); body: %s", body)
+	}
+	if strings.Contains(body, "m1") || strings.Contains(body, "m2") {
+		t.Errorf("backfill replayed already-seen messages (m1/m2); body: %s", body)
+	}
+}
+
+// erroringBindings forces ResolveByConversation to fail, simulating a transient
+// binding-store fault.
+type erroringBindings struct {
+	extmsg.BindingService
+}
+
+func (erroringBindings) ResolveByConversation(_ context.Context, _ extmsg.ConversationRef) (*extmsg.SessionBindingRecord, error) {
+	return nil, errors.New("simulated binding store fault")
+}
+
+// TestSubscribeHandler_BindingStoreErrorFailsClosed validates that a binding
+// lookup error during the precheck fails closed (503) instead of bypassing the
+// token's allowed_sessions list.
+func TestSubscribeHandler_BindingStoreErrorFailsClosed(t *testing.T) {
+	fs, srv, _, _, _ := newExtMsgSubscribeFixture(t)
+
+	// A client WITH an allow-list, so the precheck consults the binding store.
+	result, err := extmsg.RegisterClient(context.Background(), fs.cityBeadStore, extmsg.RegisterClientInput{
+		Credential:      "cred-failclosed",
+		AllowedSessions: []string{"session-A"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+	fs.extmsgSvc.Bindings = erroringBindings{BindingService: fs.extmsgSvc.Bindings}
+
+	h := newTestCityHandlerWith(t, fs, srv)
+	req := httptest.NewRequest("GET", subscribeURL(fs, result.ClientID, "conv-failclosed"), nil)
+	req.Header.Set("X-GC-Client-Token", result.Token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (fail closed on binding store error); body: %s", rec.Code, rec.Body.String())
 	}
 }

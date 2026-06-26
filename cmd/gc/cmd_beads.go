@@ -36,6 +36,7 @@ fallback to direct bd reads.`,
 		newBeadsListCmd(stdout, stderr),
 		newBeadsShowCmd(stdout, stderr),
 		newBeadsMigrateSQLiteCmd(stdout, stderr),
+		newBeadsPostgresCmd(stdout, stderr),
 	)
 	return cmd
 }

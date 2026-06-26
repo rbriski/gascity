@@ -301,6 +301,7 @@ gc beads
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads migrate-sqlite](#gc-beads-migrate-sqlite) | Copy dolt-backed infra beads into their SQLite stores |
+| [gc beads postgres](#gc-beads-postgres) | Provision and migrate the Postgres internal-beads backend |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
@@ -416,6 +417,58 @@ gc beads migrate-sqlite [class...]
 ```
 gc beads migrate-sqlite
 gc beads migrate-sqlite messaging orders
+```
+
+## gc beads postgres
+
+Create, initialize, and migrate the Postgres database that backs the infra
+coordination classes ([beads.classes.&lt;class&gt;].backend = "postgres").
+
+Connection details come from [beads.postgres] in city.toml; the password resolves
+through the pgauth chain (GC_POSTGRES_PASSWORD / BEADS_POSTGRES_PASSWORD env,
+&lt;scope&gt;/.beads/.env, or ~/.config/beads/credentials). Each relocated class lives in
+its own schema (named for the class's reserved id prefix) in one shared database.
+
+```
+gc beads postgres
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads postgres health](#gc-beads-postgres-health) | Check Postgres connectivity and per-class schema provisioning |
+| [gc beads postgres init](#gc-beads-postgres-init) | Create the database (if missing) and provision per-class schemas |
+| [gc beads postgres migrate](#gc-beads-postgres-migrate) | Copy dolt-backed infra beads into their Postgres schemas |
+
+## gc beads postgres health
+
+Open each configured class's Postgres schema, which verifies connectivity and
+that the schema is provisioned (it runs no DDL). Reports per-class status; exits
+non-zero if any class is unreachable or unprovisioned.
+
+```
+gc beads postgres health [class...]
+```
+
+## gc beads postgres init
+
+Create the [beads.postgres].database if it does not exist, then provision a
+schema (named for the class's reserved id prefix) with its tables, indexes, and id
+sequence for each class. Idempotent and advisory-locked, so it is safe to re-run and
+to run from multiple hosts. With no args, provisions every class whose backend is
+"postgres".
+
+```
+gc beads postgres init [class...]
+```
+
+## gc beads postgres migrate
+
+Copy each class's beads from the bd/Dolt work store into its Postgres schema,
+ID-preserving and idempotent (already-migrated beads are skipped). Run after init.
+With no args, migrates every class whose backend is "postgres".
+
+```
+gc beads postgres migrate [class...]
 ```
 
 ## gc beads show

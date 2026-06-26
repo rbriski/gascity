@@ -75,11 +75,21 @@ func openClassPostgresStore(cfg *config.City, cityPath, class string, rec events
 	return store, true
 }
 
-// buildPostgresDSN assembles a lib/pq DSN from the non-secret [beads.postgres]
-// config plus the password resolved through the pgauth chain for scopeRoot (env /
-// <scope>/.beads/.env / credentials file). The database is required; host, port,
-// user, and sslmode have sensible defaults.
+// buildPostgresDSN assembles a lib/pq DSN for the configured [beads.postgres]
+// database. The database is required; host, port, user, and sslmode have defaults.
 func buildPostgresDSN(pg config.BeadsPostgresConfig, scopeRoot string) (string, error) {
+	database := strings.TrimSpace(pg.Database)
+	if database == "" {
+		return "", fmt.Errorf("beads.postgres.database is required for the postgres backend")
+	}
+	return buildPostgresDSNTo(pg, scopeRoot, database)
+}
+
+// buildPostgresDSNTo assembles a lib/pq DSN to an explicit database, sharing the
+// non-secret [beads.postgres] connection details and the pgauth-resolved password.
+// `gc beads postgres init` uses it with the "postgres" maintenance database to
+// CREATE DATABASE before provisioning the per-class schemas.
+func buildPostgresDSNTo(pg config.BeadsPostgresConfig, scopeRoot, database string) (string, error) {
 	host := strings.TrimSpace(pg.Host)
 	if host == "" {
 		host = "localhost"
@@ -87,10 +97,6 @@ func buildPostgresDSN(pg config.BeadsPostgresConfig, scopeRoot string) (string, 
 	port := pg.Port
 	if port == 0 {
 		port = 5432
-	}
-	database := strings.TrimSpace(pg.Database)
-	if database == "" {
-		return "", fmt.Errorf("beads.postgres.database is required for the postgres backend")
 	}
 	user := strings.TrimSpace(pg.User)
 	if user == "" {
@@ -108,7 +114,7 @@ func buildPostgresDSN(pg config.BeadsPostgresConfig, scopeRoot string) (string, 
 		Scheme:   "postgres",
 		User:     url.UserPassword(resolved.User, resolved.Password),
 		Host:     net.JoinHostPort(host, strconv.Itoa(port)),
-		Path:     "/" + database,
+		Path:     "/" + strings.TrimSpace(database),
 		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
 	}
 	return u.String(), nil

@@ -2,22 +2,19 @@ package config
 
 import "fmt"
 
-// ValidateBeadsClasses rejects per-class beads backends the runtime cannot honor
-// yet, so a config that would be silently mis-routed fails fast at load instead.
+// ValidateBeadsClasses rejects per-class beads backends the runtime cannot honor,
+// so a config that would be silently mis-routed fails fast at load instead.
 //
-// The graph class is the only one not wired through resolveClassStore: it routes
-// through coordrouter.Router, which is gated on the legacy graph_store knob and
-// registers only a SQLite backend. So [beads.classes.graph] backend="postgres"
-// would make NormalizedClassBackend(graph) report "postgres" (and gc beads
-// postgres init graph would provision a PG schema) while the Router still serves
-// SQLite/Dolt — a silent wrong-store with no error and no log. Reject it until
-// graph routes through resolveClassStore (P6 Router retirement), at which point
-// this guard relaxes to allow postgres.
+// The graph class routes through coordrouter.Router (gated on graphRelocated),
+// whose registerGraphStoreBackend now opens a SQLite OR a Postgres graph backend.
+// So [beads.classes.graph] ∈ {"", "bd", "sqlite", "postgres"} are all honored:
+// NormalizedClassBackend(graph) selects the backend and the Router registers it.
+// An unknown value normalizes to "" → NormalizedClassBackend(graph)="bd", so it
+// stays on the work store rather than silently diverting.
 //
-// graph ∈ {"", "bd", "sqlite"} is allowed: "sqlite" is the future P6 spelling and
-// is a harmless no-op divert today (the Router still keys off graph_store), and an
-// unknown value normalizes to "" → NormalizedClassBackend(graph)="bd", so it never
-// diverts. Only an explicit "postgres" is dangerous.
+// NOTE: graph=postgres requires the gcg schema to be provisioned (`gc beads
+// postgres init`) BEFORE the city loads; an unprovisioned backend logs loudly and
+// falls back to the work store (openClassPostgresStore), so provision first.
 func ValidateBeadsClasses(cfg *City, source string) error {
 	if cfg == nil {
 		return nil
@@ -27,12 +24,12 @@ func ValidateBeadsClasses(cfg *City, source string) error {
 		return nil
 	}
 	switch normalizeBackend(c.Backend) {
-	case BeadsBackendBD, BeadsBackendSQLite, "":
+	case BeadsBackendBD, BeadsBackendSQLite, BeadsBackendPostgres, "":
 		return nil
 	default:
 		return fmt.Errorf(
-			"%s: [beads.classes.%s] backend=%q is not honored by the graph router "+
-				"(graph supports only %q or %q today); remove it or use graph_store=%q",
-			source, BeadClassGraph, c.Backend, BeadsBackendBD, BeadsBackendSQLite, BeadsBackendSQLite)
+			"%s: [beads.classes.%s] backend=%q is not a known beads backend "+
+				"(graph supports %q, %q, or %q)",
+			source, BeadClassGraph, c.Backend, BeadsBackendBD, BeadsBackendSQLite, BeadsBackendPostgres)
 	}
 }

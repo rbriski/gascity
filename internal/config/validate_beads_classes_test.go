@@ -22,8 +22,12 @@ func TestValidateBeadsClasses(t *testing.T) {
 		{"graph sqlite", graphClass("sqlite"), false},
 		{"graph sqlite case+space", graphClass("  SQLite "), false},
 		{"graph unknown normalizes to bd", graphClass("garbage"), false},
-		{"graph postgres rejected", graphClass("postgres"), true},
-		{"graph postgres case+space rejected", graphClass(" Postgres "), true},
+		// graph=postgres is now honored: the Router registers a Postgres graph
+		// backend (registerGraphStoreBackend). The reject branch is forward-defense
+		// for a future enum backend graph can't honor — unreachable while
+		// normalizeBackend's recognized set == graph's honored set.
+		{"graph postgres allowed", graphClass("postgres"), false},
+		{"graph postgres case+space allowed", graphClass(" Postgres "), false},
 		// Other classes route through resolveClassStore, so postgres is fine there.
 		{"orders postgres allowed", &City{Beads: BeadsConfig{Classes: map[string]BeadClassConfig{BeadClassOrders: {Backend: "postgres"}}}}, false},
 		{"nudges postgres allowed", &City{Beads: BeadsConfig{Classes: map[string]BeadClassConfig{BeadClassNudges: {Backend: "postgres"}}}}, false},

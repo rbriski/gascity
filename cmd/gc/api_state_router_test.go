@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -394,5 +396,115 @@ func TestRegisterGraphStoreBackendCachedHandleSurvivesConsumerClose(t *testing.T
 	// The shared handle must still be usable — not "sql: database is closed".
 	if _, err := g.Create(beads.Bead{Title: "after consumer close", Type: "task", Labels: []string{"gc:wisp"}}); err != nil {
 		t.Fatalf("cached graph store unusable after a consumer CloseStore (use-after-close regression): %v", err)
+	}
+}
+
+// graphPostgresCfg builds a graph=postgres city config from the test DSN (setting
+// the pgauth password env via postgresCfgFromDSN), and provisions + truncates the
+// gcg schema for a clean slate. SKIPs nothing — the caller gates on the DSN.
+func graphPostgresCfg(t *testing.T, dsn string) *config.City {
+	t.Helper()
+	cfg := postgresCfgFromDSN(t, dsn, config.BeadClassGraph)
+	schema, _ := config.ReservedClassPrefix(config.BeadClassGraph) // gcg
+	if err := beads.ProvisionPostgres(dsn, schema); err != nil {
+		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(fmt.Sprintf(`TRUNCATE %[1]s.beads, %[1]s.labels, %[1]s.metadata, %[1]s.deps, %[1]s.kv CASCADE`, schema)); err != nil {
+		t.Fatalf("truncate %q: %v", schema, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER SEQUENCE %s.bead_seq RESTART WITH 1`, schema)); err != nil {
+		t.Fatalf("reset seq for %q: %v", schema, err)
+	}
+	return cfg
+}
+
+// TestRoutedGraphStorePostgresRoutesAndConverges is the Path A end-to-end proof:
+// a graph=postgres city builds a *coordrouter.Router whose graph backend is the
+// Postgres gcg schema, graph-classified beads route there (work beads stay on the
+// work store), the graph bead is physically a row in the gcg schema, and the
+// convergence-critical by-id close of a graph step lands on Postgres — the
+// ga-y5pwx3 numeric-id-overlap regression, now over Postgres. This is the contract
+// that the existing Router gains nothing but a backend swap to reach graph=postgres
+// (no Router retirement). SKIPPED unless GC_TEST_POSTGRES_DSN points at a
+// disposable Postgres.
+func TestRoutedGraphStorePostgresRoutesAndConverges(t *testing.T) {
+	dsn := os.Getenv("GC_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set GC_TEST_POSTGRES_DSN to a disposable Postgres")
+	}
+	cfg := graphPostgresCfg(t, dsn)
+	gcg, _ := config.ReservedClassPrefix(config.BeadClassGraph) // gcg
+
+	work := beads.NewMemStore() // mints gc-N like the work store
+	store := routedPolicyStore(work, cfg, t.TempDir())
+	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+
+	// graph=postgres must insert a Router with a registered (non-work) graph backend.
+	base, _, ok := unwrapBeadPolicyStore(store)
+	if !ok {
+		t.Fatal("expected the graph=postgres result to be policy-wrapped")
+	}
+	router, ok := base.(*coordrouter.Router)
+	if !ok {
+		t.Fatalf("graph=postgres must insert a *coordrouter.Router, got %T", base)
+	}
+	if router.Backend(coordclass.ClassGraph) == router.Backend(coordclass.ClassWork) {
+		t.Fatal("graph backend == work backend: the Postgres graph backend was not registered")
+	}
+
+	// Graph-classified bead (gc:wisp) routes to Postgres (gcg prefix); the work bead
+	// stays on the work store with an overlapping numeric id (gc-N vs gcg-N).
+	gb, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	if !strings.HasPrefix(gb.ID, gcg+"-") {
+		t.Fatalf("graph bead id %q, want the %q- graph prefix", gb.ID, gcg)
+	}
+	wb, err := store.Create(beads.Bead{Title: "backlog", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if !strings.HasPrefix(wb.ID, "gc-") {
+		t.Fatalf("work bead id %q, want a gc- work id", wb.ID)
+	}
+
+	// Definitive: the graph bead is physically a row in the Postgres gcg schema.
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open pg: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var cnt int
+	if err := db.QueryRow(fmt.Sprintf(`SELECT count(*) FROM %s.beads WHERE id=$1`, gcg), gb.ID).Scan(&cnt); err != nil {
+		t.Fatalf("query gcg.beads: %v", err)
+	}
+	if cnt != 1 {
+		t.Fatalf("graph bead %q not found in the Postgres %s schema (count=%d)", gb.ID, gcg, cnt)
+	}
+
+	// Convergence-critical: a by-id close of the graph step lands on Postgres, not
+	// the work store. The work bead with the overlapping numeric id stays open.
+	if err := store.Close(gb.ID); err != nil {
+		t.Fatalf("close graph bead %q: %v", gb.ID, err)
+	}
+	got, err := store.Get(gb.ID)
+	if err != nil {
+		t.Fatalf("get graph bead after close: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("graph bead %q status = %q, want closed (close misrouted off Postgres)", gb.ID, got.Status)
+	}
+	gotWork, err := store.Get(wb.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Status == "closed" {
+		t.Fatalf("work bead %q was closed by a graph-step close — by-id routing misfired", wb.ID)
 	}
 }

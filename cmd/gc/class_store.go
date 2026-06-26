@@ -128,28 +128,48 @@ func openClassSQLiteStore(cityPath, class string, rec events.Recorder) (beads.St
 	return shared, true
 }
 
+// classBackendOpener opens the per-class internal-DB store for one configured
+// backend, returning (store, true) on success or (nil, false) to fall back to the
+// work store (logging its own diagnostic). It is the generic seam each in-process
+// internal-DB backend registers into, so resolveClassStore dispatches by backend
+// NAME instead of a hardcoded switch: a new in-process backend registers an opener
+// here and ships its provisioning/ops + config as a downloadable pack.
+//
+// The hot read/write path stays in-process Go by design — the infra/beads split
+// exists to escape per-op subprocess latency — so the pluggable surface is backend
+// SELECTION + ops, not the store implementation (which is compiled in).
+type classBackendOpener func(cfg *config.City, cityPath, class string, rec events.Recorder) (beads.Store, bool)
+
+// classBackendOpeners maps a [beads.classes.<class>].backend value to its opener.
+// "bd" is intentionally absent: it means "stay on the work store" and is handled
+// before lookup. Backends register here (postgres is added with its opener).
+var classBackendOpeners = map[string]classBackendOpener{
+	config.BeadsBackendSQLite: func(_ *config.City, cityPath, class string, rec events.Recorder) (beads.Store, bool) {
+		return openClassSQLiteStore(cityPath, class, rec)
+	},
+}
+
 // resolveClassStore returns the beads.Store backing a coordination class, honoring
 // [beads.classes.<class>].backend. It is the single dispatch point for per-class
-// backend selection, so a new backend plugs in here rather than at every consumer:
-//   - "bd" (default): the Provider/Dolt work store.
-//   - "sqlite": the embedded class store, emitting bead.* events via rec (falls
-//     back to the work store with a log if it cannot open).
-//   - "postgres": a reserved slot. Postgres is a server DB with native concurrent
-//     writers, so a relocated class needs no controller-mediated single-writer path
-//     (the SQLite-only constraint), and multi-process writers (nudges/sessions) flip
-//     directly. The backend is not yet implemented, so the class LOUDLY stays on the
-//     work store until the opener lands — never a silent divert.
+// backend selection: "bd" (default) stays on the Provider/Dolt work store; any
+// other backend is opened by its registered classBackendOpener, falling back to the
+// work store — never a silent divert — when the backend has no registered opener or
+// fails to open.
 func resolveClassStore(workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	if cfg == nil {
 		return workStore
 	}
-	switch cfg.Beads.NormalizedClassBackend(class) {
-	case config.BeadsBackendSQLite:
-		if sqliteStore, ok := openClassSQLiteStore(cityPath, class, rec); ok {
-			return sqliteStore
-		}
-	case config.BeadsBackendPostgres:
-		log.Printf("beads: class %q backend=postgres is configured but the Postgres backend is not yet implemented; the class stays on the work store", class)
+	backend := cfg.Beads.NormalizedClassBackend(class)
+	if backend == config.BeadsBackendBD {
+		return workStore
+	}
+	opener, ok := classBackendOpeners[backend]
+	if !ok {
+		log.Printf("beads: class %q backend=%q has no registered opener; the class stays on the work store", class, backend)
+		return workStore
+	}
+	if store, ok := opener(cfg, cityPath, class, rec); ok {
+		return store
 	}
 	return workStore
 }

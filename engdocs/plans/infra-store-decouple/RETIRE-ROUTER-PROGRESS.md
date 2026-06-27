@@ -67,7 +67,9 @@ epic: ga-pd6tcg
 - [ ] **P6 — ACTIVATION: derive the real `sessionStore` (with `cr.rec`) at entry points.** Until
   here every caller passes `(store, store)`, so at relocation session ops still ride the Router
   (federation); P6 makes the threaded ops go DIRECT to the session store. Split:
-  - **P6a (controller)**: add `func (cr *CityRuntime) sessionBeadStore() beads.Store { return
+  - [x] **P6a** (`275b2083a`) controller activation DONE (incl. reconcileSessionBeadsAtPathWithNamedDemand
+    wrapper threading; verified manually — every flip session-leg, work legs preserved; broad suite green).
+  - **P6a (controller, REF)**: add `func (cr *CityRuntime) sessionBeadStore() beads.Store { return
     resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec) }`; at each entry point
     (run ~537-580, tick ~1091-1216, beadReconcileTick ~2091, the watchdogs, nudge/control ticks,
     finalizeDrainAckStopPendingSessions caller ~1127, the buildDesiredState/refresh callers, the

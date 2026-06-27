@@ -8,8 +8,8 @@ import (
 )
 
 // Compile-time proof that the Postgres store provides the graph-apply capability
-// — i.e. it satisfies the GraphStore seam (coordrouter.GraphStore is
-// GraphApplyStore) and the optional tier-aware extension. This is the parity that
+// — i.e. it satisfies the graph-store seam (GraphApplyStore) and the optional
+// tier-aware extension. This is the parity that
 // lets a Postgres-backed ClassGraph pour a formula-v2 topology, unblocking
 // graph=postgres (the SQLite analog lives in sqlite_store_graph_apply.go).
 var (

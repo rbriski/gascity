@@ -7,11 +7,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
-// fakeGraph is a minimal coordrouter.GraphStore (beads.GraphApplyStore) that
-// resolves every node key, used to exercise RunGraphStoreTests non-vacuously.
+// fakeGraph is a minimal beads.GraphApplyStore that resolves every node key,
+// used to exercise RunGraphStoreTests non-vacuously.
 type fakeGraph struct{}
 
 func (fakeGraph) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
@@ -50,7 +49,7 @@ func TestClassedSuiteSkipsByDefault(t *testing.T) {
 // TestGraphSuiteRunsNonVacuously proves RunGraphStoreTests executes and passes
 // when run with Skip:false against a working GraphStore.
 func TestGraphSuiteRunsNonVacuously(t *testing.T) {
-	RunGraphStoreTestsWithOptions(t, func() coordrouter.GraphStore { return fakeGraph{} }, Options{Skip: false})
+	RunGraphStoreTestsWithOptions(t, func() beads.GraphApplyStore { return fakeGraph{} }, Options{Skip: false})
 }
 
 // TestGraphSuiteSkipsByDefault proves the P0 default skips before invoking the
@@ -58,7 +57,7 @@ func TestGraphSuiteRunsNonVacuously(t *testing.T) {
 func TestGraphSuiteSkipsByDefault(t *testing.T) {
 	called := 0
 	//nolint:unparam // skip-path probe: the default suite must skip before ever calling this factory, so its return is intentionally constant.
-	factory := func() coordrouter.GraphStore { called++; return fakeGraph{} }
+	factory := func() beads.GraphApplyStore { called++; return fakeGraph{} }
 	t.Run("default", func(t *testing.T) {
 		RunGraphStoreTests(t, factory)
 	})

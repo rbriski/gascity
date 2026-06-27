@@ -8,8 +8,8 @@ import (
 )
 
 // Compile-time proof that the recovered SQLite store provides the graph-apply
-// capability — i.e. it satisfies the GraphStore seam (coordrouter.GraphStore is
-// GraphApplyStore) and the optional tier-aware extension.
+// capability — i.e. it satisfies the graph-store seam (GraphApplyStore) and the
+// optional tier-aware extension.
 var (
 	_ GraphApplyStore        = (*SQLiteStore)(nil)
 	_ StorageGraphApplyStore = (*SQLiteStore)(nil)

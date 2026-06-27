@@ -20,8 +20,6 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -188,18 +186,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	// When opt-in graph routing already built a Router (the shared city/worker
-	// chokepoint in openStoreResultAtForCity), cache only its WORK backend and
-	// keep the one already-open graph backend: the cache reconciles work via a bd
-	// subprocess, so the graph backend must stay OUTSIDE the cache or its reads
-	// would go stale across the processes that share the graph file. Otherwise
-	// (rig stores, default cities) cache the bare backend and let routedPolicyStore
-	// add the Router iff the city opted in.
-	existingRouter, _ := baseStore.(*coordrouter.Router)
+	// The base store is the bare WORK backend (the per-class Router is gone in
+	// Phase GF — graph routing lives in the policy create-chokepoint and the
+	// class-aware resolvers, never under this cache, so a relocated graph backend
+	// is never cached here and never serves stale graph reads across processes).
 	workBackend := baseStore
-	if existingRouter != nil {
-		workBackend = existingRouter.Backend(coordclass.ClassWork)
-	}
 	cs := beads.NewCachingStore(workBackend, onChange)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
@@ -208,17 +199,12 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if err := cs.PrimeActive(); err != nil {
 		log.Printf("caching-store: pre-prime failed: %v", err)
 	}
-	// finish layers the policy wrapper over the cached store. For an incoming
-	// Router it swaps the work backend to the cache in place (keeping the graph
-	// backend); otherwise it delegates to routedPolicyStore, which inserts a Router
-	// only when the city opted in. A non-policy-wrapped store stays a bare cache.
+	// finish layers the policy wrapper over the cached store via routedPolicyStore
+	// (policy(cache); the create-chokepoint resolves the graph store inside it). A
+	// non-policy-wrapped store stays a bare cache.
 	finish := func() beads.Store {
 		if !policyWrapped {
 			return cs
-		}
-		if existingRouter != nil {
-			existingRouter.Register(coordclass.ClassWork, cs)
-			return wrapStoreWithBeadPolicies(existingRouter, policyStore.cfg, cityPath)
 		}
 		return routedPolicyStore(cs, policyStore.cfg, cityPath)
 	}
@@ -233,45 +219,39 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	return finish()
 }
 
-// routedPolicyStore wraps workBackend in the bead policies, inserting the
-// per-class Router with an opt-in graph backend ONLY when the city relocates the
-// graph class. Default cities get plain policy(workBackend) — no Router,
-// byte-identical and zero per-op overhead. When opted in it returns
-// policy(Router(workBackend + graph)): graph-class ops route to the graph backend
-// while work ops stay on workBackend. The Router sits ABOVE any cache wrapped
-// into workBackend so a relocated graph backend never lives under the cache (which
-// reconciles only the work backend via a bd subprocess, and would otherwise serve
-// stale graph reads across the processes that share the graph file).
+// routedPolicyStore wraps workBackend in the bead policies and returns
+// policy(workBackend) for EVERY city, relocated or not. The per-class Router that
+// used to federate a graph backend in here is gone (Phase GF): graph routing now
+// lives in the create-chokepoint (wrapStoreWithBeadPolicies resolves the dedicated
+// graph store via resolveGraphStore and routes graph-class Create/ApplyGraphPlan
+// there) and in the class-aware accessors / by-id resolvers
+// (cr.GraphBeadStore() / resolveGraphStore / storeref.Resolve over [graph, work]),
+// so a relocated graph backend needs no Router entry. cityPath lets
+// wrapStoreWithBeadPolicies resolve that graph store; default cities collapse it to
+// workBackend (byte-identical, zero per-op overhead).
 //
-// Sessions are NO LONGER routed here. The controller and CLI reach the session
-// class store directly through the class-aware accessors (cr.sessionBeadStore() /
-// resolveSessionStore), so a relocated session backend needs no Router entry — the
-// Router's session federation was retired once every session/wait op became
-// class-aware (the infra/beads decouple). Graph is the last class on the Router.
+// Sessions left the Router earlier (the infra/beads decouple) the same way:
+// resolveSessionStore / cr.SessionsBeadStore() reach the session class store
+// directly. With graph off too, the Router is fully retired.
 func routedPolicyStore(workBackend beads.Store, cfg *config.City, cityPath string) beads.Store {
-	if !graphRelocated(cfg) {
-		return wrapStoreWithBeadPolicies(workBackend, cfg, cityPath)
-	}
-	router := coordrouter.New(workBackend)
-	registerGraphStoreBackend(router, cfg, cityPath)
-	return wrapStoreWithBeadPolicies(router, cfg, cityPath)
+	return wrapStoreWithBeadPolicies(workBackend, cfg, cityPath)
 }
 
 // graphStoreIDPrefix is the bead-ID prefix the embedded SQLite graph store mints
 // with. It MUST differ from the work backend's prefix (the file store and the
-// native Dolt store both default to "gc"): the Router resolves by-id mutations
-// via Router.backendForID, which returns the first backend whose Get(id)
-// succeeds. If the two stores shared a prefix, their independent gc-N sequences
-// would overlap (work gc-2 and graph gc-2 are different beads), and a worker's
-// `bd close gc-2` on a graph step would land on the work store's gc-2 instead —
-// leaving the graph step open so the molecule never converges. Giving the graph
-// store a disjoint namespace makes backendForID unambiguous WITHIN a scope's
-// Router (graph "gcg" vs work "gc"/"ga"). The CROSS-scope collision — every
-// scope's graph store independently minting gcg-N from 1, so a bare gcg-4 claim
-// resolved to the wrong store's gcg-4 — is resolved structurally by the single
-// city-scope graph store (registerGraphStoreBackend keys on cityPath, not
-// scopeRoot): one store, one gcg-N sequence, globally unique graph ids. The
-// per-rig WORK store stays on Dolt; ownership rides the bead's routing metadata.
+// native Dolt store both default to "gc"): by-id graph mutations resolve via
+// storeref.Resolve over [graph, work], which routes on the static id prefix. If
+// the two stores shared a prefix, their independent gc-N sequences would overlap
+// (work gc-2 and graph gc-2 are different beads), and a worker's `bd close gc-2`
+// on a graph step would land on the work store's gc-2 instead — leaving the graph
+// step open so the molecule never converges. Giving the graph store a disjoint
+// namespace makes the prefix owner unambiguous (graph "gcg" vs work "gc"/"ga").
+// The CROSS-scope collision — every scope's graph store independently minting
+// gcg-N from 1, so a bare gcg-4 claim resolved to the wrong store's gcg-4 — is
+// resolved structurally by the single city-scope graph store (resolveGraphStore /
+// openGraphSQLiteStore key on cityPath, not scopeRoot): one store, one gcg-N
+// sequence, globally unique graph ids. The per-rig WORK store stays on Dolt;
+// ownership rides the bead's routing metadata.
 const graphStoreIDPrefix = "gcg"
 
 // graphRelocated reports whether the graph class is routed to a non-work backend —
@@ -288,25 +268,13 @@ func graphRelocated(cfg *config.City) bool {
 // class-aware accessors (resolveSessionStore / cr.sessionBeadStore()), which open
 // the session class store WITH the controller recorder so relocated session writes
 // emit bead.* — no Router federation and no event-silent chokepoint open.
+// registerGraphStoreBackend / registerGraphStoreSQLite were removed in Phase GF
+// when the Router was retired; the graph class now resolves through the class-aware
+// openGraphSQLiteStore / resolveGraphStore (cmd/gc/class_store.go) — the legacy
+// <cityPath>/.gc/beads.sqlite location, one city-scope store shared by every scope
+// so gcg-N ids are globally unique, retention disabled (the ga-2gap48 epic owns
+// controller-driven graph retention).
 
-// registerGraphStoreBackend registers the graph class's relocated backend on r,
-// dispatching on the configured backend: SQLite (the legacy embedded graph store)
-// or Postgres (the gcg schema). Callers gate on graphRelocated; the default arm is
-// defensive. A failed open is logged loudly and the graph class falls back to the
-// work backend rather than crashing — the loud log surfaces the misconfiguration.
-//
-// SQLite: the graph store lives at <cityPath>/.gc/beads.sqlite — a SINGLE
-// city-scope store shared by the city HQ scope AND every rig scope, isolating the
-// high-churn formula-v2 topology from the Dolt-backed work store. One store means
-// one gcg-N id sequence across all scopes, so graph-bead IDs are globally unique
-// (no cross-scope collision); the per-rig work store stays on Dolt and ownership
-// is carried by the bead's fully-qualified routing metadata (gc.routed_to,
-// gc.root_store_ref), not by physical store partitioning.
-//
-// Retention sweeping is disabled on these opens: under no-socket many short-lived
-// gc processes open this same file, and N concurrent sweepers deleting terminal
-// records is both wasteful and a write-contention source. Controller-owned
-// retention for the graph store is a follow-up (the ga-2gap48 epic).
 // graphStoreHandleCache reuses one embedded SQLite graph-store handle per graph
 // dir across store rebuilds and openers. The controller rebuilds its store map on
 // every config reload / desired-state pass, and short-lived control/claim opens
@@ -332,36 +300,6 @@ type noCloseSQLiteStore struct {
 
 // CloseStore is a no-op: the cache, not the caller, owns the shared handle.
 func (noCloseSQLiteStore) CloseStore() error { return nil }
-
-func registerGraphStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath string) {
-	switch cfg.Beads.NormalizedClassBackend(config.BeadClassGraph) {
-	case config.BeadsBackendSQLite:
-		registerGraphStoreSQLite(r, cfg, cityPath)
-	case config.BeadsBackendPostgres:
-		// Open the graph class's Postgres schema (gcg) via the shared class-store
-		// opener (cached, close-safe). No recorder: the graph store stays
-		// event-silent, matching the SQLite graph backend — the formula-v2 topology
-		// is high-churn and is not mirrored to the event bus. An unprovisioned or
-		// misconfigured backend logs loudly (openClassPostgresStore) and leaves
-		// graph on the work store; operators MUST `gc beads postgres init` first.
-		if store, ok := openClassPostgresStore(cfg, cityPath, config.BeadClassGraph, nil); ok {
-			r.Register(coordclass.ClassGraph, store)
-		}
-	}
-}
-
-// registerGraphStoreSQLite registers the embedded SQLite graph store at the legacy
-// <cityPath>/.gc/beads.sqlite location for the graph class. The open+cache logic now
-// lives in the Router-free openGraphSQLiteStore (cmd/gc/class_store.go), so the Router
-// and the class-aware resolveGraphStore share one legacy-location-preserving opener;
-// this is a thin shim that keeps the Router routing graph identically until it is
-// retired in a later phase. A failed open leaves the graph class on the work backend
-// (openGraphSQLiteStore logs the diagnostic).
-func registerGraphStoreSQLite(r *coordrouter.Router, _ *config.City, cityPath string) {
-	if s, ok := openGraphSQLiteStore(cityPath); ok {
-		r.Register(coordclass.ClassGraph, s)
-	}
-}
 
 // primeThenStartReconciler runs the async full prime and then arms the
 // watchdog reconciler. The reconciler starts even when the prime fails:
@@ -812,18 +750,6 @@ func closeBeadStoreHandle(store beads.Store) error {
 	}
 	if base, _, ok := unwrapBeadPolicyStore(store); ok {
 		return closeBeadStoreHandle(base)
-	}
-	if router, ok := store.(*coordrouter.Router); ok {
-		// Peel the Router to each distinct backend so StopReconciler + CloseStore
-		// reach the underlying CachingStore(s) — without this the reconciler
-		// goroutine leaks (the *CachingStore check below never matches a Router).
-		var firstErr error
-		for _, backend := range router.Backends() {
-			if err := closeBeadStoreHandle(backend); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {
 		cached.StopReconciler()

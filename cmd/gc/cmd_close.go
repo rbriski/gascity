@@ -6,22 +6,23 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
-// newCloseCmd builds `gc close <id>`: close a bead through the per-class Router so a
-// graph-class bead (a molecule step, wisp, control bead) is closed in the embedded
-// graph store while a work bead is closed in the work store — routed by id. It is
-// the in-process, graph-store-aware close a worker uses to finish a step it found
-// via `gc ready`, instead of a raw `bd close` that only reaches the Dolt work store.
-// The controller's reconcile reads the close back from the shared graph store
-// (graph reads bypass the work cache) and converges the molecule.
+// newCloseCmd builds `gc close <id>`: close a graph-class bead (a molecule step,
+// wisp, control bead) in the dedicated graph store and a work bead in the work
+// store — routed by id. It is the in-process, graph-store-aware close a worker uses
+// to finish a step it found via `gc ready`, instead of a raw `bd close` that only
+// reaches the Dolt work store. The controller's reconcile reads the close back from
+// the shared graph store (graph reads bypass the work cache) and converges the
+// molecule.
 func newCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	var outcome string
 	cmd := &cobra.Command{
 		Use:   "close <id>",
-		Short: "Close a bead through the Router (graph beads close in the graph store)",
-		Long: `Close a bead by id through the per-class Router.
+		Short: "Close a bead by id (graph beads close in the graph store)",
+		Long: `Close a bead by id, routing to its owning store.
 
 When a city sets [beads] graph_store, a graph-class bead is closed in the embedded
 graph store and a work bead in the work store — routed by id. Use --outcome to
@@ -39,14 +40,30 @@ finishing a step so the molecule's evaluation can converge.`,
 	return cmd
 }
 
-// doClose opens the city store and closes the bead through the Router.
+// doClose opens the city store and closes the bead, routing a graph-resident id to
+// the dedicated graph store via storeref.Resolve over [graph, work]. Post-GF the
+// per-class Router is gone, so the by-id close must resolve the owning store
+// explicitly (the work-store policy wrapper's own Close would miss a gcg- bead).
 func doClose(id, outcome string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc close")
+	store, cityPath, code := openCityStoreWithPath(stderr, "gc close")
 	if store == nil {
 		return code
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
-	if err := closeBeadThroughStore(store, id, outcome); err != nil {
+
+	target := store
+	if cfg, err := loadCityConfig(cityPath, stderr); err == nil && graphRelocated(cfg) {
+		if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
+			// A graph-resident id carries the disjoint gcg- prefix that the graph
+			// store owns; route its close there. A work id has no graph-prefix
+			// match (PrefixOwner returns nil) and stays on the work store.
+			if owner := storeref.PrefixOwner(id, []beads.Store{graph, store}); owner != nil {
+				target = owner
+			}
+		}
+	}
+
+	if err := closeBeadThroughStore(target, id, outcome); err != nil {
 		fmt.Fprintf(stderr, "gc close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -54,8 +71,9 @@ func doClose(id, outcome string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// closeBeadThroughStore stamps gc.outcome (when given) and closes the bead. Both
-// ops route by id through the Router to the bead's owning backend.
+// closeBeadThroughStore stamps gc.outcome (when given) and closes the bead on the
+// given store. The caller routes a graph-resident id to the graph store; this just
+// performs the SetMetadata + Close on whichever store owns the bead.
 func closeBeadThroughStore(store beads.Store, id, outcome string) error {
 	if outcome != "" {
 		if err := store.SetMetadata(id, beadmeta.OutcomeMetadataKey, outcome); err != nil {

@@ -177,9 +177,9 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	// id-prefix "gcg") in a dedicated graph store that is NOT reachable via a
 	// rig/HQ prefix or a routes.jsonl entry, so a graph-class id would otherwise
 	// fall through to the candidate scan and miss. Return [graph, work] —
-	// graph-first, mirroring coordrouter's prefix-owner-first by-id resolution —
-	// so the per-store Get-then-mutate loop in the by-id handlers federates exactly
-	// as the Router did and pins the graph store on the first probe. Skipped for a
+	// graph-first (prefix-owner first) — so the per-store Get-then-mutate loop in
+	// the by-id handlers federates the graph store ahead of work and pins it on the
+	// first probe. Skipped for a
 	// default (non-relocated) city, where GraphBeadStore() == CityBeadStore(): the
 	// arm never fires and this path stays byte-identical.
 	if graph := s.state.GraphBeadStore(); graph != nil {

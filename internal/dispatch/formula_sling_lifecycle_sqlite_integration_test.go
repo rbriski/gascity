@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -17,14 +15,14 @@ import (
 // TestFormulaSlingLifecycleKeepsGraphMutationsInSQLite is the end-to-end proof
 // for the work/graph store split: a real graph.v2 formula sling runs its WHOLE
 // lifecycle — instantiate (pour) → discover (Ready) → worker complete
-// (mutate + close) → controller converge (ProcessControl) → terminal — through a
-// Router{work: MemStore, graph: SQLite}, and EVERY graph create and mutation
-// lands in the embedded SQLite store, never the work backend.
+// (mutate + close) → controller converge (ProcessControl) → terminal — on the
+// dedicated SQLite graph store, and EVERY graph create and mutation lands in that
+// SQLite store, never the (separate) work backend.
 //
 // It fuses the two prior link-level proofs into one chained run with a real
 // molecule.Instantiate pour:
 //   - the pour half (TestInstantiateRoutesGraphMoleculeToSQLite), and
-//   - the convergence half (TestProcessControlConvergesGraphMoleculeThroughRouterToSQLite),
+//   - the convergence half (TestProcessControlConvergesGraphMoleculeOnSQLiteGraphStore),
 //
 // plus the worker's own discover/complete steps. This is the
 // "a simple formula sling runs through the entire process with graph metadata in
@@ -42,13 +40,14 @@ func TestFormulaSlingLifecycleKeepsGraphMutationsInSQLite(t *testing.T) {
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	store := coordrouter.New(work)
-	store.Register(coordclass.ClassGraph, graph)
+	// The graph store is the dispatcher primary; the work store is a separate
+	// backend never touched by graph-class ops (post-Router GE shape).
+	store := graph
 
 	// (1) SLING POUR. Instantiate a graph.v2 molecule — root + one actionable
-	// work step + the workflow-finalize control bead the compiler emits — into
-	// the Router. With graph-apply enabled the whole molecule pours atomically to
-	// the SQLite graph backend (the recipe mirrors formula.Compile's output:
+	// work step + the workflow-finalize control bead the compiler emits — onto
+	// the graph store. With graph-apply enabled the whole molecule pours atomically
+	// to the SQLite graph backend (the recipe mirrors formula.Compile's output:
 	// root --blocks--> workflow-finalize --blocks--> work).
 	recipe := &formula.Recipe{
 		Name: "wf",
@@ -94,8 +93,8 @@ func TestFormulaSlingLifecycleKeepsGraphMutationsInSQLite(t *testing.T) {
 		t.Fatalf("root bead %s surfaced in Ready() (it must close via the convergence engine)", rootID)
 	}
 
-	// (4) WORKER COMPLETE. Stamp the outcome and close the step through the
-	// Router; the mutation routes by id to the owning (SQLite) backend.
+	// (4) WORKER COMPLETE. Stamp the outcome and close the step on the graph
+	// store; the mutation lands directly on the owning (SQLite) backend.
 	if err := store.SetMetadata(stepID, "gc.outcome", "pass"); err != nil {
 		t.Fatalf("worker SetMetadata(gc.outcome): %v", err)
 	}
@@ -112,12 +111,12 @@ func TestFormulaSlingLifecycleKeepsGraphMutationsInSQLite(t *testing.T) {
 
 	// (5) CONVERGE. The controller's real engine drives the workflow-finalize
 	// control bead (now unblocked): it closes the root with gc.outcome=pass then
-	// closes itself — every closure routed through the Router to SQLite.
+	// closes itself — every closure landing directly on the SQLite graph store.
 	finalize, err := store.Get(finalizeID)
 	if err != nil {
 		t.Fatalf("get finalize control bead: %v", err)
 	}
-	res, err := ProcessControl(store, finalize, ProcessOptions{})
+	res, err := ProcessControl(store, finalize, ProcessOptions{WorkStore: work})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -152,10 +151,10 @@ func TestFormulaSlingLifecycleKeepsGraphMutationsInSQLite(t *testing.T) {
 // TestCookedFormulaSlingConvergesInSQLite is the gold-standard variant: it drives
 // the REAL formula compiler (molecule.Cook → formula.Compile → applyGraphControls)
 // so the workflow-finalize control bead is emitted by the compiler itself, not
-// hand-declared. A minimal graph.v2 formula is cooked into a Router{work:
-// MemStore, graph: SQLite}; the worker completes the discovered step and the
-// controller converges the molecule to terminal — every graph bead resident in
-// SQLite throughout. This proves the compiler's actual sling output (not just a
+// hand-declared. A minimal graph.v2 formula is cooked onto the dedicated SQLite
+// graph store; the worker completes the discovered step and the controller
+// converges the molecule to terminal — every graph bead resident in SQLite
+// throughout. This proves the compiler's actual sling output (not just a
 // hand-mirrored recipe) lives entirely in the new store.
 func TestCookedFormulaSlingConvergesInSQLite(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
@@ -185,11 +184,11 @@ title = "Work"
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	store := coordrouter.New(work)
-	store.Register(coordclass.ClassGraph, graph)
+	// The graph store is the dispatcher primary; the work store stays separate.
+	store := graph
 
 	// SLING via the real compiler: Cook = Compile (adds the workflow-finalize
-	// control bead) + Instantiate (pours through the Router into SQLite).
+	// control bead) + Instantiate (pours directly into the SQLite graph store).
 	result, err := molecule.Cook(context.Background(), store, "slingdemo", []string{dir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook (real-compiler sling): %v", err)
@@ -222,7 +221,7 @@ title = "Work"
 	if err != nil {
 		t.Fatalf("get finalize control bead: %v", err)
 	}
-	res, err := ProcessControl(store, finalize, ProcessOptions{})
+	res, err := ProcessControl(store, finalize, ProcessOptions{WorkStore: work})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}

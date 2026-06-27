@@ -472,19 +472,17 @@ func controlBdStoreForScope(scopeRoot, cityPath string, cfg *config.City) beads.
 	return controlBdStoreForRig(scopeRoot, cityPath, cfg)
 }
 
-// controlStoreWithGraphRouting wraps a bd-backed control store so the
-// control-dispatcher sees a molecule's graph-class beads (gcg-*) under
-// graph_store=sqlite. Default (non-relocated) cities return the bare bd store
-// unchanged — byte-identical, no policy wrapper. Relocated cities get the
-// routed policy store so the federated find/Get path (findBeadAcrossStores,
-// runControlDispatcherInStore) still resolves graph control beads while the
-// Router survives.
-//
-// The dispatcher itself no longer relies on this federated view for graph
-// visibility: dispatcherControlStores hands ProcessControl the graph store as its
-// primary plus the bd work store via opts.WorkStore (class-aware callers, the GE
-// shape). This wrapper remains the resolver for the surrounding open/find paths
-// until coordrouter is retired (GF).
+// controlStoreWithGraphRouting wraps a bd-backed control store in the policy
+// layer so callers that open a scope's control store get the create-chokepoint and
+// the policy capabilities. Default (non-relocated) cities return the bare bd store
+// unchanged — byte-identical, no policy wrapper. Relocated cities get
+// routedPolicyStore, which post-GF is policy(work): the per-class Router is gone,
+// so this no longer federates the graph store into by-id Get. The surrounding
+// open/find paths (findBeadAcrossStores, runControlDispatcherInStore) resolve a
+// graph-resident control bead via getControlBeadByID, which probes [graph, work]
+// with storeref.Resolve; the dispatcher gets its graph primary from
+// dispatcherControlStores (the GE shape: graph store as ProcessControl primary,
+// bd work store via opts.WorkStore).
 func controlStoreWithGraphRouting(store beads.Store, cfg *config.City, cityPath string) beads.Store {
 	if store == nil || !graphRelocated(cfg) {
 		return store

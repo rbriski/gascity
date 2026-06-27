@@ -1,6 +1,6 @@
 // Package coordtest provides conformance suites for the per-class store seams of
 // the work-vs-infrastructure split (engdocs/design/beads-work-infra-split.md). It
-// is the coordrouter analog of internal/beads/beadstest and
+// is the analog of internal/beads/beadstest and
 // internal/mail/mailtest: an exported Run* function takes a factory closure and
 // drives t.Run subtests, so every implementation behind a class seam — the
 // bd-delegating first impl AND any future faster backend — runs the IDENTICAL
@@ -22,7 +22,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
 // Options controls the conformance suites, modeled on beadstest.Options. P0
@@ -53,7 +52,7 @@ const graphStoreSkipReason = "coordtest: GraphStore conformance is a P0 seam ske
 //
 // The factory is func() beads.Store rather than a per-class interface type
 // because every non-graph class seam is a faithful subset of beads.Store
-// (coordrouter.WorkStore is the marker alias, the others are segregated subsets),
+// (the work class is beads.Store itself, the others are segregated subsets),
 // so one beads.Store factory exercises all of them; the class argument selects
 // which class's representative bead and routing identity to assert. Graph has its
 // own suite, RunGraphStoreTests, because its surface is the graph-apply
@@ -170,15 +169,15 @@ func RunClassedStoreTestsWithOptions(t *testing.T, class coordclass.Class, newSt
 }
 
 // RunGraphStoreTests runs the GraphStore conformance suite against a graph store
-// implementation. The factory must return a fresh GraphStore for each call. P0
-// default: skipped (see Options).
-func RunGraphStoreTests(t *testing.T, newStore func() coordrouter.GraphStore) {
+// implementation. The factory must return a fresh beads.GraphApplyStore for each
+// call. P0 default: skipped (see Options).
+func RunGraphStoreTests(t *testing.T, newStore func() beads.GraphApplyStore) {
 	RunGraphStoreTestsWithOptions(t, newStore, Options{Skip: true, Reason: graphStoreSkipReason})
 }
 
 // RunGraphStoreTestsWithOptions runs the GraphStore conformance suite with
 // explicit options.
-func RunGraphStoreTestsWithOptions(t *testing.T, newStore func() coordrouter.GraphStore, opts Options) {
+func RunGraphStoreTestsWithOptions(t *testing.T, newStore func() beads.GraphApplyStore, opts Options) {
 	t.Helper()
 	if opts.Skip {
 		t.Skip(opts.Reason)

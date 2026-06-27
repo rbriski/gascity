@@ -7,8 +7,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordrouter"
-	"github.com/gastownhall/gascity/internal/coordrouter/coordtest"
+	"github.com/gastownhall/gascity/internal/coordclass/coordtest"
 )
 
 // TestPostgresStoreSatisfiesGraphStoreConformance runs the SHARED GraphStore
@@ -31,7 +30,7 @@ func TestPostgresStoreSatisfiesGraphStoreConformance(t *testing.T) {
 		t.Fatalf("ProvisionPostgres(%q): %v", schema, err)
 	}
 	coordtest.RunGraphStoreTestsWithOptions(t,
-		func() coordrouter.GraphStore {
+		func() beads.GraphApplyStore {
 			truncatePostgresSchema(t, dsn, schema) // clean slate per factory call
 			s, err := beads.OpenPostgresStore(dsn, beads.WithPostgresStoreSchema(schema))
 			if err != nil {

@@ -18,8 +18,8 @@ import (
 
 // The bd shim (thin client) is a bd-CLI-compatible front end that routes a
 // worker's bead operations through the controller's HTTP API, so the controller
-// owns the store (the per-class coordrouter Router + the embedded SQLite graph
-// store under graph_store=sqlite) and every worker is a thin client. Installed as
+// owns the store (the work store plus the dedicated SQLite graph store under
+// graph_store=sqlite) and every worker is a thin client. Installed as
 // `bd` first on an agent's PATH, it makes both raw `bd` and `gc bd` route
 // transparently with no prompt changes (graph-store-rollout-plan.md §C2,
 // model A in graph-store-session-handoff.md; the pure-HTTP redirect is

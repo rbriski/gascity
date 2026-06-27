@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
 // listCountingStore wraps a MemStore, advertises a fixed IDPrefix, and counts the
@@ -31,12 +29,67 @@ func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.MemStore.List(query)
 }
 
-// twoBackendDispatchRouter builds a Router with a "mc" work backend and a "gcg"
-// graph backend, mirroring the live control-dispatcher topology.
-func twoBackendDispatchRouter(work, graph *listCountingStore) *coordrouter.Router {
-	r := coordrouter.New(work)
-	r.Register(coordclass.ClassGraph, graph)
-	return r
+// twoBackendGraphOnlyStore advertises the beads.GraphOnlyListStore capability
+// (ListGraphOnly + GraphIDPrefix) over a "gcg" graph backend and a "mc" work
+// backend, so liveListForRoot exercises its graph-only fast path exactly as it
+// did against the retired per-class Router. It mirrors the deleted Router's three
+// load-bearing methods for this test:
+//   - List federates both backends (dedup by id) — the reference set, and the
+//     fallback liveListForRoot takes for a non-graph-rooted (mc-) query;
+//   - ListGraphOnly reads the graph backend ALONE (the work leg never forked);
+//   - GraphIDPrefix reports the graph backend's id prefix so the caller gates the
+//     fast path to graph-rooted (gcg-) queries.
+//
+// It embeds the graph store to satisfy the rest of the beads.Store surface; only
+// the federation-sensitive methods are overridden.
+type twoBackendGraphOnlyStore struct {
+	*listCountingStore // graph backend (also the base beads.Store)
+	work               *listCountingStore
+}
+
+var _ beads.GraphOnlyListStore = (*twoBackendGraphOnlyStore)(nil)
+
+// twoBackendDispatchStore builds a graph-only-list store with a "mc" work backend
+// and a "gcg" graph backend, mirroring the live control-dispatcher topology.
+func twoBackendDispatchStore(work, graph *listCountingStore) *twoBackendGraphOnlyStore {
+	return &twoBackendGraphOnlyStore{listCountingStore: graph, work: work}
+}
+
+// List federates the work and graph backends, deduping by id — the same set a
+// single store spanning both backends would return (the Router's federated List).
+func (s *twoBackendGraphOnlyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	workRows, err := s.work.List(query)
+	if err != nil {
+		return nil, err
+	}
+	graphRows, err := s.listCountingStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(workRows)+len(graphRows))
+	merged := make([]beads.Bead, 0, len(workRows)+len(graphRows))
+	for _, rows := range [][]beads.Bead{workRows, graphRows} {
+		for _, b := range rows {
+			if seen[b.ID] {
+				continue
+			}
+			seen[b.ID] = true
+			merged = append(merged, b)
+		}
+	}
+	return merged, nil
+}
+
+// ListGraphOnly reads the graph backend alone — the work (Dolt) leg is never
+// forked for a wholly graph-resident molecule.
+func (s *twoBackendGraphOnlyStore) ListGraphOnly(query beads.ListQuery) ([]beads.Bead, error) {
+	return s.listCountingStore.List(query)
+}
+
+// GraphIDPrefix reports the graph backend's id prefix so liveListForRoot gates
+// its graph-only fast path to graph-rooted (gcg-) queries.
+func (s *twoBackendGraphOnlyStore) GraphIDPrefix() string {
+	return s.listCountingStore.IDPrefix()
 }
 
 func rootScopedQuery(rootID string) beads.ListQuery {
@@ -53,7 +106,7 @@ func TestLiveListForRootGraphRootedSkipsWorkLeg(t *testing.T) {
 	}
 	work := newListCountingStore("mc", nil)
 	graph := newListCountingStore("gcg", members)
-	r := twoBackendDispatchRouter(work, graph)
+	r := twoBackendDispatchStore(work, graph)
 
 	got, err := liveListForRoot(r, "gcg-1", rootScopedQuery("gcg-1"))
 	if err != nil {
@@ -75,7 +128,7 @@ func TestLiveListForRootWorkRootedFederates(t *testing.T) {
 		{ID: "mc-2", Title: "w2", Metadata: map[string]string{"gc.root_bead_id": "mc-1"}},
 	})
 	graph := newListCountingStore("gcg", nil)
-	r := twoBackendDispatchRouter(work, graph)
+	r := twoBackendDispatchStore(work, graph)
 
 	got, err := liveListForRoot(r, "mc-1", rootScopedQuery("mc-1"))
 	if err != nil {
@@ -106,7 +159,7 @@ func TestLiveListForRootEquivalentToFederatedList(t *testing.T) {
 	for _, root := range []string{"gcg-1", "mc-1"} {
 		work := newListCountingStore("mc", workSeed)
 		graph := newListCountingStore("gcg", graphSeed)
-		r := twoBackendDispatchRouter(work, graph)
+		r := twoBackendDispatchStore(work, graph)
 
 		fast, err := liveListForRoot(r, root, rootScopedQuery(root))
 		if err != nil {

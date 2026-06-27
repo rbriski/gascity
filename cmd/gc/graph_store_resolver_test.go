@@ -8,8 +8,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
 // graphSQLiteCfg (the graph=sqlite city config) is defined in
@@ -59,11 +57,14 @@ func TestOpenGraphSQLiteStore_UsesLegacyLocation(t *testing.T) {
 	}
 }
 
-// TestOpenGraphSQLiteStore_SharesCachedHandleWithRegister proves the opener and the
-// Router's legacy registrar return the SAME cached handle (graphStoreHandleCache):
-// a bead written via the opener is visible through the store registerGraphStoreSQLite
-// registers, and a second openGraphSQLiteStore call is pointer-identical (cache reuse).
-func TestOpenGraphSQLiteStore_SharesCachedHandleWithRegister(t *testing.T) {
+// TestOpenGraphSQLiteStore_SharesCachedHandleWithResolve proves the opener and the
+// class-aware resolveGraphStore return the SAME cached handle (graphStoreHandleCache):
+// a bead written via the opener is visible through the store resolveGraphStore
+// returns, and a second openGraphSQLiteStore call is pointer-identical (cache reuse).
+// This is the post-coordrouter wiring — resolveGraphStore replaces the Router's
+// ClassGraph leg and must reuse the one cached handle so no second SQLite handle is
+// opened against the same file.
+func TestOpenGraphSQLiteStore_SharesCachedHandleWithResolve(t *testing.T) {
 	cityPath := t.TempDir()
 
 	opened, ok := openGraphSQLiteStore(cityPath)
@@ -81,16 +82,14 @@ func TestOpenGraphSQLiteStore_SharesCachedHandleWithRegister(t *testing.T) {
 		t.Fatalf("create via opener: %v", err)
 	}
 
-	// The Router registrar must register the SAME cached handle, so the bead written
-	// via the opener is visible through the Router's graph backend.
-	r := coordrouter.New(beads.NewMemStore())
-	registerGraphStoreSQLite(r, graphSQLiteCfg(), cityPath)
-	registered := r.Backend(coordclass.ClassGraph)
-	if registered != opened {
-		t.Fatalf("registerGraphStoreSQLite registered a different handle than openGraphSQLiteStore (registered=%v opened=%v)", registered, opened)
+	// resolveGraphStore must return the SAME cached handle, so the bead written via
+	// the opener is visible through the resolved graph store.
+	resolved := resolveGraphStore(beads.NewMemStore(), graphSQLiteCfg(), cityPath, nil)
+	if resolved != opened {
+		t.Fatalf("resolveGraphStore returned a different handle than openGraphSQLiteStore (resolved=%v opened=%v)", resolved, opened)
 	}
-	if _, err := registered.Get(bead.ID); err != nil {
-		t.Fatalf("bead written via opener not visible through the registered graph store: %v", err)
+	if _, err := resolved.Get(bead.ID); err != nil {
+		t.Fatalf("bead written via opener not visible through the resolved graph store: %v", err)
 	}
 }
 

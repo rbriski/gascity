@@ -5,13 +5,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
-	"github.com/gastownhall/gascity/internal/coordrouter/coordtest"
+	"github.com/gastownhall/gascity/internal/coordclass/coordtest"
 )
 
 // newSQLiteForConformance returns a fresh, empty SQLite store with cleanup
 // registered. The factory closures below hand it to the shared conformance suites
-// as both a coordrouter.GraphStore (it implements ApplyGraphPlan) and a
+// as both a beads.GraphApplyStore (it implements ApplyGraphPlan) and a
 // beads.Store.
 func newSQLiteForConformance(t *testing.T) *beads.SQLiteStore {
 	t.Helper()
@@ -30,7 +29,7 @@ func newSQLiteForConformance(t *testing.T) *beads.SQLiteStore {
 // ApplyGraphPlan seam is conformant, not just its white-box behavior.
 func TestSQLiteStoreSatisfiesGraphStoreConformance(t *testing.T) {
 	coordtest.RunGraphStoreTestsWithOptions(t,
-		func() coordrouter.GraphStore { return newSQLiteForConformance(t) },
+		func() beads.GraphApplyStore { return newSQLiteForConformance(t) },
 		coordtest.Options{Skip: false})
 }
 

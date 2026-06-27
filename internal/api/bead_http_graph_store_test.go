@@ -8,16 +8,16 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
 // TestBeadEphemeralHandlerReachesSQLiteGraphBackend proves GET /beads/ephemeral
 // surfaces a wisp resident in the SQLite graph backend (the routed form of
-// `bd query 'ephemeral=true ...'`): with the city store a Router{work, graph},
-// an ephemeral graph-class bead created into SQLite's wisp tier is returned by
-// humaHandleBeadEphemeral via the TierWisps federation — which the work-only bd
-// cannot see.
+// `bd query 'ephemeral=true ...'`): with the dedicated graph store a SQLite
+// backend (the post-cutover wiring: cityBeadStore=work, graphBeadStore=graph),
+// an ephemeral graph-class bead resident in SQLite's wisp tier is returned by
+// humaHandleBeadEphemeral via the TierWisps federation over state.GraphBeadStore()
+// — which the work-only bd cannot see. (The post-cutover wiring sets
+// cityBeadStore=work and graphBeadStore=graph; no per-class router is involved.)
 func TestBeadEphemeralHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	work := beads.NewMemStore()
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
@@ -27,11 +27,8 @@ func TestBeadEphemeralHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	router := coordrouter.New(work)
-	router.Register(coordclass.ClassGraph, graph)
-
-	// An ephemeral graph-class wisp routes to SQLite's wisp tier.
-	wisp, err := router.Create(beads.Bead{Title: "heartbeat", Type: "task", Labels: []string{"gc:wisp"}, Ephemeral: true})
+	// An ephemeral graph-class wisp lands in SQLite's wisp tier.
+	wisp, err := graph.Create(beads.Bead{Title: "heartbeat", Type: "task", Labels: []string{"gc:wisp"}, Ephemeral: true})
 	if err != nil {
 		t.Fatalf("create wisp: %v", err)
 	}
@@ -40,8 +37,9 @@ func TestBeadEphemeralHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	}
 
 	state := newFakeState(t)
-	state.cityBeadStore = router
-	state.stores = nil // no rigs: federate the city Router only
+	state.cityBeadStore = work
+	state.graphBeadStore = graph
+	state.stores = nil // no rigs: federate the city + graph stores only
 	s := New(state)
 
 	out, err := s.humaHandleBeadEphemeral(context.Background(), &BeadEphemeralInput{})
@@ -60,12 +58,13 @@ func TestBeadEphemeralHandlerReachesSQLiteGraphBackend(t *testing.T) {
 }
 
 // TestBeadCloseHandlerReachesSQLiteGraphBackend is the viability guarantee for
-// routing the bd shim through the HTTP API under graph_store=sqlite: with the
-// controller's city store a Router{work: MemStore, graph: SQLite}, a bead close
-// routed through the HTTP handler lands on the SQLite graph backend (never the
-// work backend). It proves the API server operates on the per-class Router and
-// reaches the embedded graph store — so an HTTP `bd close <graph-id>` mutates the
-// SQLite bead, the precondition for the pure-HTTP shim.
+// routing the bd shim through the HTTP API under graph_store=sqlite: with a
+// dedicated graph store (cityBeadStore=work MemStore, graphBeadStore=SQLite), a
+// bead close routed through the HTTP handler lands on the SQLite graph backend
+// (never the work backend). It proves the API server resolves the graph id via
+// beadStoresForID ([graph, work]) and reaches the embedded graph store — so an
+// HTTP `bd close <graph-id>` mutates the SQLite bead, the precondition for the
+// pure-HTTP shim.
 func TestBeadCloseHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	work := beads.NewMemStore() // mints gc-N work ids
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
@@ -75,11 +74,8 @@ func TestBeadCloseHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	router := coordrouter.New(work)
-	router.Register(coordclass.ClassGraph, graph)
-
-	// A graph-classified bead routes to SQLite (gcg-N), disjoint from work gc-N.
-	gb, err := router.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	// A graph-classified bead lands in SQLite (gcg-N), disjoint from work gc-N.
+	gb, err := graph.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
 	}
@@ -88,8 +84,9 @@ func TestBeadCloseHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	}
 
 	state := newFakeState(t)
-	state.cityBeadStore = router
-	state.stores = nil // no rigs: beadStoresForID falls back to the city Router
+	state.cityBeadStore = work
+	state.graphBeadStore = graph
+	state.stores = nil // no rigs: beadStoresForID resolves [graph, work]
 	s := New(state)
 
 	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: gb.ID}); err != nil {
@@ -110,8 +107,9 @@ func TestBeadCloseHandlerReachesSQLiteGraphBackend(t *testing.T) {
 
 // TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend proves the atomic
 // compare-and-swap release endpoint operates on the SQLite graph backend via the
-// Router: a mismatched expected-assignee is skipped (assignment intact), a match
-// releases it — both reflected in the on-disk SQLite bead.
+// dedicated graph store (cityBeadStore=work, graphBeadStore=SQLite): a mismatched
+// expected-assignee is skipped (assignment intact), a match releases it — both
+// reflected in the on-disk SQLite bead.
 func TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	work := beads.NewMemStore()
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
@@ -121,22 +119,20 @@ func TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	router := coordrouter.New(work)
-	router.Register(coordclass.ClassGraph, graph)
-
-	gb, err := router.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	gb, err := graph.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
 	}
 	// ReleaseIfCurrent only releases an in_progress assignment, so claim it first.
 	assignee := "worker"
 	inProgress := "in_progress"
-	if err := router.Update(gb.ID, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress}); err != nil {
+	if err := graph.Update(gb.ID, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress}); err != nil {
 		t.Fatalf("claim graph bead: %v", err)
 	}
 
 	state := newFakeState(t)
-	state.cityBeadStore = router
+	state.cityBeadStore = work
+	state.graphBeadStore = graph
 	state.stores = nil
 	s := New(state)
 
@@ -170,9 +166,10 @@ func TestBeadReleaseIfCurrentHandlerReachesSQLiteGraphBackend(t *testing.T) {
 }
 
 // TestBeadClaimHandlerReachesSQLiteGraphBackend proves the atomic claim endpoint
-// operates on the SQLite graph backend via the Router: a graph-class bead is
-// claimed for the explicit assignee in the on-disk SQLite store (the C6 fix so a
-// worker's graph-step claim reaches SQLite rather than a work-only store).
+// operates on the SQLite graph backend via the dedicated graph store
+// (cityBeadStore=work, graphBeadStore=SQLite): a graph-class bead is claimed for
+// the explicit assignee in the on-disk SQLite store (the C6 fix so a worker's
+// graph-step claim reaches SQLite rather than a work-only store).
 func TestBeadClaimHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	work := beads.NewMemStore()
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
@@ -182,15 +179,14 @@ func TestBeadClaimHandlerReachesSQLiteGraphBackend(t *testing.T) {
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	router := coordrouter.New(work)
-	router.Register(coordclass.ClassGraph, graph)
-	gb, err := router.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	gb, err := graph.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
 	}
 
 	state := newFakeState(t)
-	state.cityBeadStore = router
+	state.cityBeadStore = work
+	state.graphBeadStore = graph
 	state.stores = nil
 	s := New(state)
 
@@ -248,10 +244,10 @@ func TestBeadReadyFederatesCityStore(t *testing.T) {
 // returns the dedicated graph store's ready set ALONE for the city leg and drops
 // the Dolt work leg, so a worker's `bd ready` and the control-dispatcher's
 // ListReadyBeads stop scanning the work backlog on every call. The class-aware
-// successor to coordrouter.Router's ReadyGraphOnly: the handler reads the graph
-// leg from state.GraphBeadStore() (resolveGraphStore in production) rather than
-// probing a Router capability. A plain MemStore city (GraphBeadStore() ==
-// CityBeadStore()) keeps the full federated ready set — covered by the test above.
+// graph-only ready path: the handler reads the graph leg from
+// state.GraphBeadStore() (resolveGraphStore in production) directly. A plain
+// MemStore city (GraphBeadStore() == CityBeadStore()) keeps the full federated
+// ready set — covered by the test above.
 func TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite(t *testing.T) {
 	work := beads.NewMemStore()
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
@@ -440,9 +436,9 @@ func TestClientBeadWriteMethodsIssueExpectedRequests(t *testing.T) {
 	}
 }
 
-// TestBeadStoresForIDClassAwareGraphArm proves the class-aware successor to the
-// Router for by-id resolution (Phase G2b): with the city store a plain work store
-// and a DISTINCT dedicated graph store — the post-coordrouter wiring — a graph-class
+// TestBeadStoresForIDClassAwareGraphArm proves the class-aware by-id resolution
+// (Phase G2b): with the city store a plain work store and a DISTINCT dedicated
+// graph store — the post-cutover wiring — a graph-class
 // id (reserved prefix "gcg") resolves to [graph, work] (graph-first), so the by-id
 // Get-then-mutate handler loop pins the SQLite graph store on the first probe and a
 // close lands there, never the work store. No Router is involved.

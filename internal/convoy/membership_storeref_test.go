@@ -9,9 +9,9 @@ import (
 // TestMembershipResolvesCrossStoreMemberViaTail proves the class-aware convoy seam:
 // a synthetic (graph-class) convoy whose tracks edge points at a member that
 // physically lives in a DIFFERENT store resolves that member via the memberStores
-// variadic tail (storeref) — exactly as coordrouter.Router's federated member read
-// did, with no Router. The convoy lives in a SQLite graph store (gcg- ids) and the
-// member in a work store (gc- ids), mirroring graph_store=sqlite.
+// variadic tail (storeref) — the standalone by-id member read that replaced the
+// retired per-class Router. The convoy lives in a SQLite graph store (gcg- ids) and
+// the member in a work store (gc- ids), mirroring graph_store=sqlite.
 func TestMembershipResolvesCrossStoreMemberViaTail(t *testing.T) {
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
 	if err != nil {

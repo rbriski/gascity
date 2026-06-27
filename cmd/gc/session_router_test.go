@@ -6,15 +6,13 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
 // sessionSQLiteCfg returns a city config that relocates ONLY the session class
-// onto the embedded SQLite backend (graph stays on the bd work store). After the
-// session class came off the coordrouter.Router, relocating sessions no longer
-// constructs a Router — sessions reach their store through the class-aware
-// accessors (resolveSessionStore / cr.sessionBeadStore()).
+// onto the embedded SQLite backend (graph stays on the bd work store). Sessions
+// reach their store through the class-aware accessors (resolveSessionStore /
+// cr.sessionBeadStore()), never a router.
 func sessionSQLiteCfg() *config.City {
 	cfg := &config.City{}
 	cfg.Beads.Classes = map[string]config.BeadClassConfig{
@@ -23,45 +21,57 @@ func sessionSQLiteCfg() *config.City {
 	return cfg
 }
 
-// TestRoutedPolicyStoreNoRouterForRelocatedSessions is the keystone guard for the
-// sessions-off-the-Router cutover. Relocating ONLY the session class must NOT
-// insert a coordrouter.Router: sessions are class-aware (resolveSessionStore), so
-// the city store stays a plain policy(workBackend). A Router here would mean the
-// session federation was not actually retired.
-func TestRoutedPolicyStoreNoRouterForRelocatedSessions(t *testing.T) {
+// TestRoutedPolicyStoreWrapsWorkBackendDirectly is the keystone guard for the
+// post-coordrouter cutover. routedPolicyStore returns policy(workBackend) for EVERY
+// city — relocating a class (sessions OR graph) never inserts a routing object
+// between the policy wrapper and the work backend. The base under the policy
+// wrapper is the exact work store handed in; class routing happens in the
+// create-chokepoint and the class-aware resolvers, not a Router.
+func TestRoutedPolicyStoreWrapsWorkBackendDirectly(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		cfg  *config.City
 	}{
 		{"default", &config.City{}},
 		{"sessions=sqlite", sessionSQLiteCfg()},
+		{"graph=sqlite", graphSQLiteCfg()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := routedPolicyStore(beads.NewMemStore(), tc.cfg, t.TempDir())
+			work := beads.NewMemStore()
+			store := routedPolicyStore(work, tc.cfg, t.TempDir())
 			t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
 			base, _, ok := unwrapBeadPolicyStore(store)
 			if !ok {
 				t.Fatal("expected the result to be policy-wrapped")
 			}
-			if _, isRouter := base.(*coordrouter.Router); isRouter {
-				t.Fatalf("%s must NOT insert a *coordrouter.Router — sessions are class-aware, not Router-routed", tc.name)
+			if base != beads.Store(work) {
+				t.Fatalf("%s: base under the policy wrapper = %T, want the work store directly (no routing object)", tc.name, base)
 			}
 		})
 	}
 }
 
-// TestRoutedPolicyStoreBuildsRouterForGraphRelocation confirms graph — the last
-// class on the Router — still inserts one, so retiring sessions did not regress
-// graph routing.
-func TestRoutedPolicyStoreBuildsRouterForGraphRelocation(t *testing.T) {
-	store := routedPolicyStore(beads.NewMemStore(), graphSQLiteCfg(), t.TempDir())
+// TestRoutedPolicyStoreGraphRelocationUsesDedicatedStore confirms graph relocation
+// is class-aware post-coordrouter: routedPolicyStore stays policy(work) (no Router),
+// and the graph class is reached through resolveGraphStore, which returns a DISTINCT
+// dedicated store (the legacy .gc/beads.sqlite handle), never the work store.
+func TestRoutedPolicyStoreGraphRelocationUsesDedicatedStore(t *testing.T) {
+	work := beads.NewMemStore()
+	cityPath := t.TempDir()
+	store := routedPolicyStore(work, graphSQLiteCfg(), cityPath)
 	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+
 	base, _, ok := unwrapBeadPolicyStore(store)
 	if !ok {
 		t.Fatal("expected the result to be policy-wrapped")
 	}
-	if _, isRouter := base.(*coordrouter.Router); !isRouter {
-		t.Fatalf("graph=sqlite must still insert a *coordrouter.Router, got %T", base)
+	if base != beads.Store(work) {
+		t.Fatalf("graph=sqlite: base under the policy wrapper = %T, want policy(work) — no Router", base)
+	}
+
+	graph := resolveGraphStore(work, graphSQLiteCfg(), cityPath, nil)
+	if graph == beads.Store(work) {
+		t.Fatal("graph=sqlite: resolveGraphStore must return a distinct dedicated store, got the work store")
 	}
 }
 

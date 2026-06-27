@@ -9,9 +9,10 @@ import (
 // a typo fails fast at load instead of silently normalizing to "bd" (the work
 // store) and diverting infra beads to the wrong place. Every relocatable class
 // (graph, sessions, messaging, orders, nudges) honors bd | sqlite | postgres:
-// graph routes through coordrouter.Router (registerGraphStoreBackend opens its
-// SQLite/Postgres backend), the rest route through resolveClassStore. An empty/
-// unset backend means "stay on the work store" and is allowed.
+// graph routes through resolveGraphStore (the dedicated SQLite/Postgres graph
+// store at the legacy .gc/beads.sqlite or the gcg schema), the rest route through
+// resolveClassStore. An empty/unset backend means "stay on the work store" and is
+// allowed.
 //
 // NOTE: a postgres backend requires its per-class schema to be provisioned
 // (`gc beads postgres init`) BEFORE the city loads; an unprovisioned backend logs

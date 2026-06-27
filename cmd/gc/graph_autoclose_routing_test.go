@@ -11,12 +11,12 @@ import (
 )
 
 // federatingReadStore is a minimal by-id read federation over [work, graph],
-// mirroring the single behavior of coordrouter.Router that the autoclose paths
-// rely on TODAY (graph_store=sqlite): a Get/List must find a graph-class bead in
+// mirroring the storeref-based member read the autoclose paths use under
+// graph_store=sqlite: a Get/List must find a graph-class bead in
 // the graph leg even though the just-closed parent lives in the work leg. It
 // embeds the work store for every other (write) op so attachment-pointer reads
 // resolve while the close itself is still routed by the autoclose core to the
-// owning store. It exists only to model the live Router read surface in a unit
+// owning store. It exists only to model that read surface in a unit
 // test; it is NOT the production store.
 type federatingReadStore struct {
 	beads.Store // work store: writes + the work leg of reads

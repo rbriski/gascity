@@ -12,16 +12,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newReadyCmd builds `gc ready`: list ready work as a JSON array of beads,
-// resolved through the per-class Router so a city that sets [beads] graph_store
-// reads the graph-class ready slice from the embedded graph store in-process —
-// PATH-independent, with no controller round-trip and no full Dolt ready scan.
-// It renders the same routed/unassigned/non-epic predicate as the canonical
-// `bd ready` work query (config.bdReadyPoolDemandShell), so `gc ready` is a
-// drop-in for the dispatch work_query: a worker discovers ready graph beads in
-// the embedded graph store, not just Dolt work beads. When a city does not opt
-// into a graph store the Router is in its identity phase and the result is
-// exactly the work store's ready set.
+// newReadyCmd builds `gc ready`: list ready work as a JSON array of beads. When a
+// city sets [beads] graph_store the ready set is read from the dedicated graph
+// store (resolveGraphStore) in-process — PATH-independent, with no controller
+// round-trip and no full Dolt ready scan. It renders the same
+// routed/unassigned/non-epic predicate as the canonical `bd ready` work query
+// (config.bdReadyPoolDemandShell), so `gc ready` is a drop-in for the dispatch
+// work_query: a worker discovers ready graph beads in the embedded graph store,
+// not just Dolt work beads. When a city does not opt into a graph store
+// resolveGraphStore returns the work store and the result is exactly the work
+// store's ready set (byte-identical default).
 func newReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		assignee         string
@@ -35,15 +35,15 @@ func newReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "ready",
-		Short: "List ready work as JSON, graph-store aware through the per-class Router",
+		Short: "List ready work as JSON, graph-store aware",
 		Long: `List ready (open, unblocked) work as a JSON array of beads.
 
-The store is opened through the per-class Router, so when a city sets
-[beads] graph_store the ready set comes from the embedded graph store (the
-graph-class slice), reached in-process without a controller round-trip. The
-output is the bead JSON a work_query consumer unmarshals, so 'gc ready' can
-stand in for a 'bd ready --json' work_query to make a worker's demand probe
-graph-store aware while 'bd ready' keeps its Dolt work-store semantics.`,
+When a city sets [beads] graph_store the ready set comes from the dedicated
+graph store (the graph-class slice), reached in-process without a controller
+round-trip. The output is the bead JSON a work_query consumer unmarshals, so
+'gc ready' can stand in for a 'bd ready --json' work_query to make a worker's
+demand probe graph-store aware while 'bd ready' keeps its Dolt work-store
+semantics.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			pred, err := readyPredicateFromFlags(metadataFields, excludeTypes, unassigned, includeEphemeral, sortOrder, limit)
@@ -177,13 +177,12 @@ func doReady(assignee string, pred readyPredicate, stdout, stderr io.Writer) int
 // readyStoreSet returns the graph-class ready slice when the graph class is
 // relocated (graph_store=sqlite/postgres), else the full ready set from the work
 // store. Reading the dedicated graph store directly is the class-aware successor
-// to the policy-wrapped Router's ReadyGraphOnly: it keeps the worker demand probe
+// to the policy store's ReadyGraphOnly forwarder: it keeps the worker demand probe
 // off the Dolt ready hot path and is the cheap "formula-step ready" slice. The
 // graph leg reads with TierMode upgraded TierIssues->TierBoth, replicating the
-// policy read-tier expansion the Router's forwarder (policyGraphOnlyReader ->
-// expandPolicyReadyQuery) applied, so graph wisps stay visible. At the default
-// `bd` backend resolveGraphStore returns the work store, so this is byte-identical
-// to store.Ready(query).
+// policy read-tier expansion (expandPolicyReadyQuery) so graph wisps stay visible.
+// At the default `bd` backend resolveGraphStore returns the work store, so this is
+// byte-identical to store.Ready(query).
 func readyStoreSet(store beads.Store, cfg *config.City, cityPath string, query beads.ReadyQuery) ([]beads.Bead, error) {
 	graph := resolveGraphStore(store, cfg, cityPath, nil)
 	if graph != store {

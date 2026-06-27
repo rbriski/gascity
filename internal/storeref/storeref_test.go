@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
 func openPrefixed(t *testing.T, prefix string) beads.Store {
@@ -78,65 +76,4 @@ func TestResolve_FederationFallback(t *testing.T) {
 	if _, err := Resolve("gcg-does-not-exist", stores); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("Resolve(absent) err = %v, want ErrNotFound", err)
 	}
-}
-
-// TestResolve_MatchesRouterGet pins storeref.Resolve to the behavior of the
-// coordrouter.Router.Get it replaces, over the exact same backend set. When the
-// Router is deleted, this differential test is deleted with it; storeref.go is
-// untouched.
-func TestResolve_MatchesRouterGet(t *testing.T) {
-	// assertParity checks Resolve(id, stores) against the Router's Get for the
-	// exact same backend set, on bead identity AND error identity (both the
-	// nil/non-nil split and whether the error wraps ErrNotFound).
-	assertParity := func(t *testing.T, stores []beads.Store, get func(string) (beads.Bead, error), ids []string) {
-		t.Helper()
-		for _, id := range ids {
-			wantBead, wantErr := get(id)
-			gotBead, gotErr := Resolve(id, stores)
-			if gotBead.ID != wantBead.ID {
-				t.Errorf("Resolve(%q).ID = %q, Router.Get = %q", id, gotBead.ID, wantBead.ID)
-			}
-			if (gotErr == nil) != (wantErr == nil) {
-				t.Errorf("Resolve(%q) err = %v, Router.Get err = %v", id, gotErr, wantErr)
-			}
-			if errors.Is(gotErr, beads.ErrNotFound) != errors.Is(wantErr, beads.ErrNotFound) {
-				t.Errorf("Resolve(%q) ErrNotFound=%v, Router.Get ErrNotFound=%v",
-					id, errors.Is(gotErr, beads.ErrNotFound), errors.Is(wantErr, beads.ErrNotFound))
-			}
-		}
-	}
-
-	t.Run("multi-backend", func(t *testing.T) {
-		work := beads.NewMemStore()
-		graph := openPrefixed(t, "gcg")
-		orders := openPrefixed(t, "gco")
-		r := coordrouter.New(work)
-		r.Register(coordclass.ClassGraph, graph)
-		r.Register(coordclass.ClassOrders, orders)
-
-		gb, _ := graph.Create(beads.Bead{Title: "g"})
-		ob, _ := orders.Create(beads.Bead{Title: "o"})
-		wb, _ := work.Create(beads.Bead{Title: "w"})
-
-		assertParity(t, r.Backends(), r.Get, []string{gb.ID, ob.ID, wb.ID, "gcg-absent", "zz-9", ""})
-	})
-
-	// soleBackend: Router.Get short-circuits to b.Get(id) for a single backend,
-	// while Resolve always runs PrefixOwner+probe. Pin that they still agree
-	// (the path differs, the result/error must not).
-	t.Run("sole-backend", func(t *testing.T) {
-		work := beads.NewMemStore()
-		r := coordrouter.New(work)
-		wb, _ := work.Create(beads.Bead{Title: "only"})
-		assertParity(t, r.Backends(), r.Get, []string{wb.ID, "absent-1", ""})
-	})
-
-	// A prefixed sole backend: the prefix owner IS the only store, exercising the
-	// owner-hit-then-no-fallback path against the Router's sole short-circuit.
-	t.Run("sole-prefixed-backend", func(t *testing.T) {
-		graph := openPrefixed(t, "gcg")
-		r := coordrouter.New(graph)
-		gb, _ := graph.Create(beads.Bead{Title: "g"})
-		assertParity(t, r.Backends(), r.Get, []string{gb.ID, "gcg-absent", "zz-1"})
-	})
 }

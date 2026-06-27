@@ -10,7 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter/coordtest"
+	"github.com/gastownhall/gascity/internal/coordclass/coordtest"
 )
 
 // TestPostgresStoreSatisfiesClassedStoreConformance runs the SHARED classed-store

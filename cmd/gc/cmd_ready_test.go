@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
 )
 
 // TestApplyReadyPredicateMatchesBdReadyWorkQuery proves gc ready renders the same
@@ -57,37 +55,37 @@ func TestReadyPredicateFromFlagsRejectsMalformedMetadataField(t *testing.T) {
 	}
 }
 
-// TestGcReadyFederatesAndRoundTrips proves the gc ready contract end to end: ready
-// work federated across a Router{work, graph: SQLite} renders to JSON that the
-// worker's own work_query parser (decodeHookClaimBeads) reads back — so a worker
-// using `gc ready` as its work_query discovers ready graph beads in SQLite, not
-// just Dolt work beads.
-func TestGcReadyFederatesAndRoundTrips(t *testing.T) {
+// TestGcReadyReadsGraphStoreAloneAndRoundTrips proves the gc ready contract end to
+// end under graph_store=sqlite: readyStoreSet reads the dedicated graph store ALONE
+// (the worker-readiness slice — the Dolt work leg is kept off the hot loop) and the
+// result renders to JSON that the worker's own work_query parser
+// (decodeHookClaimBeads) reads back. So a worker using `gc ready` as its work_query
+// discovers ready graph beads in SQLite, and the work backlog never leaks into the
+// readiness probe (the post-coordrouter class-aware behavior, stronger than the old
+// federated Router ready set).
+func TestGcReadyReadsGraphStoreAloneAndRoundTrips(t *testing.T) {
+	cityPath := t.TempDir()
 	// Offset the work MemStore so it occupies a distinct id namespace from the
 	// SQLite graph store (both otherwise mint gc-N — see ga-y5pwx3).
 	work := beads.NewMemStoreFrom(1000, nil, nil)
-	sqlite, err := beads.OpenSQLiteStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
+	graph, ok := openGraphSQLiteStore(cityPath) // dedicated .gc/beads.sqlite (gcg-)
+	if !ok {
+		t.Fatal("openGraphSQLiteStore failed")
 	}
-	graph := sqlite.(*beads.SQLiteStore)
-	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	r := coordrouter.New(work)
-	r.Register(coordclass.ClassGraph, graph)
-
-	wb, err := r.Create(beads.Bead{Title: "work item", Type: "task"})
+	wb, err := work.Create(beads.Bead{Title: "work item", Type: "task"})
 	if err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
-	gb, err := r.Create(beads.Bead{Title: "graph item", Type: "task", Labels: []string{"gc:wisp"}})
+	gb, err := graph.Create(beads.Bead{Title: "graph item", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
 	}
 
-	ready, err := r.Ready()
+	// readyStoreSet routes to the dedicated graph store when graph is relocated.
+	ready, err := readyStoreSet(work, graphClassSQLiteCfg(), cityPath, beads.ReadyQuery{TierMode: beads.TierBoth})
 	if err != nil {
-		t.Fatalf("Ready: %v", err)
+		t.Fatalf("readyStoreSet: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -103,11 +101,11 @@ func TestGcReadyFederatesAndRoundTrips(t *testing.T) {
 	for _, b := range parsed {
 		ids[b.ID] = true
 	}
-	if !ids[wb.ID] {
-		t.Errorf("gc ready output missing the work bead %s (have %v)", wb.ID, ids)
-	}
 	if !ids[gb.ID] {
 		t.Errorf("gc ready output missing the SQLite graph bead %s (have %v)", gb.ID, ids)
+	}
+	if ids[wb.ID] {
+		t.Errorf("gc ready leaked the Dolt work bead %s into the worker readiness slice (have %v)", wb.ID, ids)
 	}
 }
 

@@ -426,11 +426,13 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 // humaHandleBeadEphemeral is the Huma-typed handler for GET
 // /v0/beads/ephemeral. It returns ONLY the ephemeral/wisp tier (the issues tier
-// is excluded), federating the city store and every rig store with TierWisps so
-// that — under graph_store=sqlite — wisps resident in the SQLite graph backend
-// are surfaced through the controller's Router. This is the routed form of
-// `bd query 'ephemeral=true AND ...'`; the work-only bd cannot see SQLite wisps.
-// Live forces backing reads (the active cache is the issues tier, not wisps).
+// is excluded) with TierWisps. Under graph_store=sqlite/postgres the wisps live
+// in the dedicated graph store, so the handler reads state.GraphBeadStore() ALONE
+// — the class-aware path that surfaces SQLite-resident wisps the work-only bd
+// cannot see. At the default backend (GraphBeadStore() == CityBeadStore()) it
+// federates the city store and every rig store, byte-identical to before. This is
+// the routed form of `bd query 'ephemeral=true AND ...'`. Live forces backing
+// reads (the active cache is the issues tier, not wisps).
 func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeralInput) (*ListOutput[beads.Bead], error) {
 	query := beads.ListQuery{
 		Status:        input.Status,
@@ -451,19 +453,35 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
 
-	// Federation order is deterministic: the city store first (graph-class wisps
-	// in a single-HQ city live there, off the per-rig BeadStores()), then each
-	// rig sorted. The per-store List() calls run concurrently — a dolt-backed rig
-	// store can take seconds, and serial federation made the worker claim path
-	// (gc hook --claim hits this endpoint) scale with rig count and time out.
 	type federationTarget struct {
 		label string
 		store beads.Store
 	}
-	targets := make([]federationTarget, 0, len(rigNames)+1)
-	targets = append(targets, federationTarget{"city", s.state.CityBeadStore()})
-	for _, rigName := range rigNames {
-		targets = append(targets, federationTarget{"rig " + rigName, stores[rigName]})
+	var targets []federationTarget
+
+	// When the graph class is relocated (graph_store=sqlite/postgres) every wisp
+	// lives in the single shared graph store, so the ephemeral/wisp discovery set
+	// IS that store's TierWisps read — read it ALONE and skip the work legs. This
+	// mirrors the graph-only readiness path above and is the class-aware successor
+	// to reaching SQLite wisps through the controller's per-class store: with the
+	// city store now a plain work backend, federating it (and the rig work stores)
+	// would never surface the relocated wisps and would scan the work backlog.
+	cityStore := s.state.CityBeadStore()
+	graphStore := s.state.GraphBeadStore()
+	if graphStore != nil && graphStore != cityStore {
+		targets = append(targets, federationTarget{"city", graphStore})
+	} else {
+		// Not relocated: federation order is deterministic — the city store first
+		// (graph-class wisps in a single-HQ city live there, off the per-rig
+		// BeadStores()), then each rig sorted. The per-store List() calls run
+		// concurrently — a dolt-backed rig store can take seconds, and serial
+		// federation made the worker claim path (gc hook --claim hits this
+		// endpoint) scale with rig count and time out.
+		targets = make([]federationTarget, 0, len(rigNames)+1)
+		targets = append(targets, federationTarget{"city", cityStore})
+		for _, rigName := range rigNames {
+			targets = append(targets, federationTarget{"rig " + rigName, stores[rigName]})
+		}
 	}
 
 	type federationResult struct {

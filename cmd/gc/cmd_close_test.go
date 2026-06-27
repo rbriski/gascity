@@ -4,34 +4,39 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/coordrouter"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // TestGcCloseRoutesGraphBeadToSQLite proves `gc close` routes a graph bead's
-// close (and its gc.outcome stamp) to the embedded graph store, while a work bead
-// closes in the work store — routed by id through the Router. This is the worker's
+// close (and its gc.outcome stamp) to the dedicated graph store, while a work bead
+// closes in the work store — routed by id via storeref.PrefixOwner over [graph,
+// work] (the post-coordrouter wiring doClose uses). This is the worker's
 // graph-store-aware close that finishes a step found via `gc ready`.
 func TestGcCloseRoutesGraphBeadToSQLite(t *testing.T) {
+	cityPath := t.TempDir()
 	// Offset the work MemStore so it occupies a distinct id namespace from the
 	// SQLite graph store (both otherwise mint gc-N — see ga-y5pwx3).
 	work := beads.NewMemStoreFrom(1000, nil, nil)
-	sqlite, err := beads.OpenSQLiteStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
+	graph, ok := openGraphSQLiteStore(cityPath) // legacy .gc/beads.sqlite (gcg- prefix)
+	if !ok {
+		t.Fatal("openGraphSQLiteStore failed")
 	}
-	graph := sqlite.(*beads.SQLiteStore)
-	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	r := coordrouter.New(work)
-	r.Register(coordclass.ClassGraph, graph)
+	// route mirrors doClose's storeref.PrefixOwner([graph, work]) resolution: a
+	// gcg- id resolves to the graph store, everything else stays on work.
+	route := func(id string) beads.Store {
+		if owner := storeref.PrefixOwner(id, []beads.Store{graph, work}); owner != nil {
+			return owner
+		}
+		return work
+	}
 
 	// A graph bead closes (with outcome) in SQLite.
-	gb, err := r.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	gb, err := graph.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
 	}
-	if err := closeBeadThroughStore(r, gb.ID, "pass"); err != nil {
+	if err := closeBeadThroughStore(route(gb.ID), gb.ID, "pass"); err != nil {
 		t.Fatalf("closeBeadThroughStore(graph): %v", err)
 	}
 	stored, err := graph.Get(gb.ID)
@@ -43,11 +48,11 @@ func TestGcCloseRoutesGraphBeadToSQLite(t *testing.T) {
 	}
 
 	// A work bead closes in the work backend, not SQLite.
-	wb, err := r.Create(beads.Bead{Title: "work item", Type: "task"})
+	wb, err := work.Create(beads.Bead{Title: "work item", Type: "task"})
 	if err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
-	if err := closeBeadThroughStore(r, wb.ID, ""); err != nil {
+	if err := closeBeadThroughStore(route(wb.ID), wb.ID, ""); err != nil {
 		t.Fatalf("closeBeadThroughStore(work): %v", err)
 	}
 	wstored, err := work.Get(wb.ID)

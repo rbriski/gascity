@@ -160,26 +160,71 @@ func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	return handles
 }
 
-// ReadyGraphOnlyHandle forwards the graph-only-ready capability to the backing
-// store (the Router under graph_store=sqlite). The embedded Store interface does
-// not promote optional capabilities, so the delegation is explicit. ok is false
-// when the backing has no distinct ClassGraph backend, so capability presence
-// gates the worker/dispatcher readiness path on graph_store=sqlite without a
-// config lookup. Policy read-tier expansion is preserved.
+// graphOnlyReader returns the graph-only Ready/List reader over the dedicated graph
+// store, and whether the capability is advertised. It is advertised iff the graph
+// class is relocated (graphRelocated(s.cfg)) and a graph store is wired. This covers
+// BOTH wrapping shapes post-GF: the city store policy(work) (where s.graphStore is a
+// DISTINCT dedicated store) AND the dispatcher primary policy(graphStore) (where
+// resolveGraphStore folds s.Store onto itself, so s.graphStore == s.Store == the
+// graph store — and reading it IS the graph-only set). At graph=bd graphRelocated is
+// false, so ok=false and callers federate the full Ready/List (byte-identical).
+func (s *beadPolicyStore) graphOnlyReader() (policyGraphOnlyReader, bool) {
+	if s.graphStore == nil || !graphRelocated(s.cfg) {
+		return policyGraphOnlyReader{}, false
+	}
+	return policyGraphOnlyReader{graph: s.graphStore}, true
+}
+
+// ReadyGraphOnlyHandle advertises the graph-only-ready capability over the dedicated
+// graph store. Before Phase GF the inner store was the per-class Router and this
+// delegated through GraphOnlyReadyFor(s.Store); post-GF the Router is gone, so the
+// policy store IS the thing that advertises the capability. Policy read-tier
+// expansion is preserved (the GB TierBoth lesson lives in expandPolicyReadyQuery).
 func (s *beadPolicyStore) ReadyGraphOnlyHandle() (beads.GraphOnlyReadyStore, bool) {
-	inner, ok := beads.GraphOnlyReadyFor(s.Store)
+	r, ok := s.graphOnlyReader()
 	if !ok {
 		return nil, false
 	}
-	return policyGraphOnlyReader{inner: inner}, true
+	return r, true
 }
 
+// ListGraphOnlyHandle advertises the graph-only-List capability over the dedicated
+// graph store. It is the post-GF successor to the Router's GraphOnlyListStore (the
+// G2c forwarder, kept alive across the cutover): the dispatcher's root-scoped
+// scope-check (dispatch.liveListForRoot via beads.GraphOnlyListFor) gates on
+// GraphIDPrefix and lists the graph store ALONE for a graph-rooted molecule. ok is
+// false when graph is not relocated, so a default city federates exactly as before.
+func (s *beadPolicyStore) ListGraphOnlyHandle() (beads.GraphOnlyListStore, bool) {
+	r, ok := s.graphOnlyReader()
+	if !ok {
+		return nil, false
+	}
+	return r, true
+}
+
+// policyGraphOnlyReader reads the dedicated graph store ALONE for the graph-only
+// Ready/List capabilities, applying the policy read-tier expansion. graphIDPrefix
+// gates the List fast path to graph-rooted (gcg-) queries.
 type policyGraphOnlyReader struct {
-	inner beads.GraphOnlyReadyStore
+	graph beads.Store
 }
 
 func (r policyGraphOnlyReader) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	return r.inner.ReadyGraphOnly(expandPolicyReadyQuery(query...))
+	return r.graph.Ready(expandPolicyReadyQuery(query...))
+}
+
+func (r policyGraphOnlyReader) ListGraphOnly(query beads.ListQuery) ([]beads.Bead, error) {
+	return r.graph.List(expandPolicyReadTier(query))
+}
+
+// GraphIDPrefix reports the dedicated graph store's id prefix (gcg) when it exposes
+// one, so liveListForRoot routes a gcg-rooted query to ListGraphOnly. An empty
+// prefix means "no distinct graph backend" and the caller federates.
+func (r policyGraphOnlyReader) GraphIDPrefix() string {
+	if p, ok := r.graph.(interface{ IDPrefix() string }); ok {
+		return p.IDPrefix()
+	}
+	return ""
 }
 
 type beadPolicyCachedReader struct {
@@ -262,10 +307,11 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
 }
 
-// Claim forwards an atomic claim to the wrapped store's claim capability, so the
-// policy wrapper (the controller's city store = policy(Router(...))) is itself a
-// Claimer. For graph_store=sqlite the inner store is the Router, which routes a
-// graph-class claim to the SQLite backend with the explicit assignee.
+// Claim forwards an atomic claim to the wrapped (work) store's claim capability,
+// so the policy wrapper is itself a Claimer. A graph-class claim does NOT come
+// through here post-GF: by-id resolution (beadStoresForID / storeref over [graph,
+// work]) hands the caller the dedicated graph store handle, which claims the graph
+// step on SQLite with the explicit assignee directly.
 func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 	if c, ok := s.Store.(beads.Claimer); ok {
 		return c.Claim(id, assignee)

@@ -45,24 +45,11 @@ epic: ga-pd6tcg
   + `retireRemovedConfiguredNamedSessionBead` take `(sessionStore, workStore, rigStores, ...)`:
   archive/wait legs→session, work reassign/unclaim + deferred runtime-stop→work. Callers
   (syncSessionBeads, reconciler heal-retire, 3 tests) pass `(store, store)`. Byte-identical.
-- [ ] **P3b-2 — session_beads.go remaining body** (NEXT). Two coherent bites:
-  - **reapers** `reapStaleSessionBeads`, `cleanupDeadRuntimeSessionCorpses`,
-    `reapRuntimesBoundToClosedBeads`, `sweepProcessTableOrphans` — each is session reads +
-    `closeBead`(already two-store); add `sessionStore`, callers in city_runtime.go pass
-    `(store, store)`. ⚠ **Q1 audit before relying post-relocation:** `sweepProcessTableOrphans`
-    `store.Get(live.SessionID)` treats `ErrNotFound` as "absent → terminate runtime"; confirm
-    the relocated session-store Get returns `ErrNotFound` only on true absence (not transient),
-    else fail-closed. (At default it's the same bd store, so no behavior change yet.)
-  - **`syncSessionBeadsWithSnapshotAndRigStores` :826 (~900 lines, many closures)** — the big
-    mixed fn. Add `sessionStore`; route the session create/update/close/alias/setMeta closures
-    + the pure-session helper calls (`loadSessionBeads`, `findOpenSessionBeadBySessionName`,
-    `reopenClosedConfiguredNamedSessionBead`, `configuredSessionNames`, `snapshotOrLoadSessionBeads`)
-    to sessionStore; keep work guards/release on store/rigStores. **Pure-session helpers keep
-    ONE param** (callers pass the session store); only mixed fns get the 2nd. Also thread
-    `stopRuntimeBeforeSessionBeadMutation` (session op, currently deferred on workStore).
-    Callers: city_runtime.go + cmd_start.go pass `(store, store)` until P6.
 - [x] **P3b-2 — syncSessionBeads + reapers** (`6f4a6f568`). The big session_beads.go surface
-  class-aware; review `wf_63a72547` = SAFE-TO-PROCEED. session_beads.go DONE.
+  class-aware (reapers + sync mixed → two-store; reapRuntimesBoundToClosedBeads/
+  sweepProcessTableOrphans/stopRuntimeBeforeSessionBeadMutation pure-session). Q1 resolved:
+  sweepProcessTableOrphans preserves ErrNotFound-vs-transient exactly. review `wf_63a72547` =
+  SAFE-TO-PROCEED. **session_beads.go DONE.**
 - [x] **P4a** (`c0a309a9d`) session_wake.go/session_reconcile.go/session_sleep.go — pure `store`→`sessionStore`
   rename (24 fns, 69/69, no caller change). Byte-identical; no review needed (pure rename).
 - [x] **P4b** (`5ba9666c4`) session_lifecycle_parallel.go start path — review `wf_6f2e3102` SAFE-TO-PROCEED.

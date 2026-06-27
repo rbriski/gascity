@@ -52,10 +52,12 @@ between slices; a design workflow is spun up when a slice is ambiguous.
 ### Track A — UX (forge-web wizard) — no cross-cluster blocker
 | ID | Slice | Repo | Status | Depends |
 |----|-------|------|--------|---------|
-| A1 | Create-city API contract (request/response/status types) — the shared seam | forge-web | TODO | — |
-| A2 | Multi-step wizard view: name+workspace → beads(create-new) → pack selector → review | forge-web | TODO | A1 |
-| A3 | Async status view: poll (SSE later); per-step progress + minted-cred summary cards (reveal-toggle) | forge-web | TODO | A1 |
-| A4 | `createCity()` client → `/forge/api/org/{org}/cities` via `@gascity/auth` | forge-web | TODO | A1, B7 |
+| A1 | Create-city API contract (request/response/status types) — `api/createCity.ts` | forge-web | ✅ DONE | — |
+| A2 | Multi-step wizard view: name+workspace → beads(create-new) → pack → review — `views/CreateCity.tsx` | forge-web | ✅ DONE | A1 |
+| A3 | Async status view: poll status; per-step checklist (creds → beads → controller) + cred summary | forge-web | ✅ DONE | A1 |
+| A4 | `createCity()`/`getCityStatus()` client via `@gascity/auth` ApiClient (targets the B7 route) | forge-web | ◑ client done; real wiring needs B7 | A1, B7 |
+
+> A1–A3 committed `0b904ab` (branch `feat/forge-web-create-city`); typecheck + vite build clean; 13 logic unit tests green; red-team in flight (`w8znsgbln`).
 
 ### Track B — Backend (cross-cluster minting + orchestration + Model-B launch)
 | ID | Slice | Repo | Status | Depends |

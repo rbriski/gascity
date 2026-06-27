@@ -84,8 +84,23 @@ epic: ga-pd6tcg
    as "absent → terminate runtime". Confirm relocated-store Get semantics before P3.
 2. `runAdoptionBarrier` (`city_runtime.go:480`): session-only or reads work? Audit before P6.
 3. Sessions city-only (rig legs stay on work stores)? Decision gate for P5.
-4. Ship cutover with event-silent relocated session-row writes (restore in follow-up)? P7.
+4. ~~Ship cutover with event-silent relocated session-row writes?~~ **RESOLVED (owner 2026-06-27):
+   THREAD THE RECORDER.** Relocated session writes must emit `bead.*`. Implementation: at the
+   controller entry points P6 derives `resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath,
+   cr.rec)` WITH `cr.rec` → openClassSQLiteStore attaches the recorder. ⚠ cache-order gotcha
+   (class_store.go:88-93): the first opener of the session dir bakes the recorder; ensure the
+   recorder-ful controller open wins (the worker/Router event-silent opens must not pre-bake a
+   nil-recorder handle). Cleanest: after P7 unregisters ClassSessions, the Router no longer opens
+   the session dir, so only the recorder-ful entry-point open remains. Add a test asserting a
+   relocated session write emits bead.*.
 5. Phase-6 file overflow → split 6a (controller) / 6b (CLI). (Recommend: yes.)
+
+## Goal (owner 2026-06-27): drive to the END — Track S + Track G + recorder + all followups
+Followups in scope: Phase-C tier for sessions (off the policy-wrapped Router → resolveClassStore
+opens RAW, so the tier divergence REINTRODUCES for sessions — write no-history tier or prove
+exclusion); two-store wait/extmsg test; observability under-count (doctor/status); read-after-write
+PG visibility test; stopRuntimeBeforeSessionBeadMutation threading. Out of scope: destructive live
+maintainer-city migration (separate owner-gated); push (owner-gated).
 
 ## Log
 - 2026-06-26: recon `wf_ed2319fa` (13 agents) → plan + inventory persisted to raw/. Build

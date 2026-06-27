@@ -536,6 +536,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	startupComplete := false
 	if !retryStartupStep("startup", func() bool { return startupComplete }, func() {
 		cr.ensureManagedDoltPublishedForTick()
+		sessionStore := cr.sessionBeadStore()
 		sessionBeads := cr.loadSessionBeadSnapshot()
 		startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
 		completion := TraceCompletionAborted
@@ -545,17 +546,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			}
 		}()
 
-		cleanupDeadRuntimeSessionCorpses(cr.cityBeadStore(), cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+		cleanupDeadRuntimeSessionCorpses(sessionStore, cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 		// Reap live runtimes still bound to a closed bead (e.g. a named-session
 		// identity re-minted as a pool slot) so the name's current owner can
 		// rebind it and attach lands on the right runtime.
-		reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.cityPath, cr.stderr); swept > 0 {
+		reapRuntimesBoundToClosedBeads(sessionStore, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, sessionStore, cr.cityPath, cr.stderr); swept > 0 {
 			fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 		}
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
-		if reapStaleSessionBeads(cr.cityBeadStore(), cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		if reapStaleSessionBeads(sessionStore, cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
@@ -566,7 +567,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.cityPath,
 			cr.cfg,
 			cr.sp,
-			cr.cityBeadStore(),
+			sessionStore,
 			sessionBeads,
 			cr.stderr,
 		)
@@ -577,7 +578,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.cityPath,
 			cr.cfg,
 			cr.sp,
-			cr.cityBeadStore(),
+			sessionStore,
 			sessionBeads,
 			cr.stderr,
 		)
@@ -1072,6 +1073,7 @@ func (cr *CityRuntime) tick(
 	}
 
 	phaseStart = time.Now()
+	sessionStore := cr.sessionBeadStore()
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	if trace != nil && sessionBeads != nil {
@@ -1088,22 +1090,22 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.cityBeadStore(), cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+	cleanupDeadRuntimeSessionCorpses(sessionStore, cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind
 	// it and attach lands on the right runtime.
 	phaseStart = time.Now()
-	reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	reapRuntimesBoundToClosedBeads(sessionStore, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
 	phaseStart = time.Now()
-	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.cityPath, cr.stderr)
+	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, sessionStore, cr.cityPath, cr.stderr)
 	if swept > 0 {
 		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 	}
 	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
 	phaseStart = time.Now()
-	reaped := reapStaleSessionBeads(cr.cityBeadStore(), cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	reaped := reapStaleSessionBeads(sessionStore, cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
@@ -1128,7 +1130,7 @@ func (cr *CityRuntime) tick(
 			cr.cityPath,
 			cr.cfg,
 			cr.sp,
-			cr.cityBeadStore(),
+			sessionStore,
 			cr.cityBeadStore(),
 			cr.rigBeadStores(),
 			sessionBeads.Open(),
@@ -1168,7 +1170,7 @@ func (cr *CityRuntime) tick(
 		cr.cityPath,
 		cr.cfg,
 		cr.sp,
-		cr.cityBeadStore(),
+		sessionStore,
 		sessionBeads,
 		cr.stderr,
 	)
@@ -1202,7 +1204,7 @@ func (cr *CityRuntime) tick(
 		cr.cityPath,
 		cr.cfg,
 		cr.sp,
-		cr.cityBeadStore(),
+		sessionStore,
 		sessionBeads,
 		cr.stderr,
 	)
@@ -2093,6 +2095,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if store == nil {
 		return
 	}
+	sessionStore := cr.sessionBeadStore()
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
@@ -2220,7 +2223,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	})
 	phaseStart = time.Now()
 	reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store, store,
+		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, sessionStore, store,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
 		poolDesired,
@@ -2769,6 +2772,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	if store == nil || cr.sessionDrains == nil {
 		return
 	}
+	sessionStore := cr.sessionBeadStore()
 
 	filteredCfg := controlDispatcherOnlyConfig(cr.cfg)
 	if filteredCfg == nil {
@@ -2784,7 +2788,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		time.Now(),
 		filteredCfg,
 		cr.sp,
-		store, // P5: sessionStore == work store until P6 derives the real one
+		sessionStore,
 		store,
 		cr.rigBeadStores(),
 		sessionBeads,
@@ -2795,7 +2799,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	cfgNames := configuredSessionNamesWithSnapshot(filteredCfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cr.cityPath,
-		store,
+		sessionStore,
 		store,
 		cr.rigBeadStores(),
 		desiredState,
@@ -2828,6 +2832,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cfgNames,
 		filteredCfg,
 		cr.sp,
+		sessionStore,
 		store,
 		cr.dops,
 		nil,
@@ -2897,9 +2902,10 @@ func ensureManagedDoltPublishedForRuntime(
 // syncBeadsAndUpdateIndex runs syncSessionBeads.
 func (cr *CityRuntime) syncBeadsAndUpdateIndex(desiredState map[string]TemplateParams, sessionBeads *sessionBeadSnapshot) *sessionBeadSnapshot {
 	store := cr.cityBeadStore()
+	sessionStore := cr.sessionBeadStore()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
-		cr.cityPath, store, store, cr.rigBeadStores(), desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads,
+		cr.cityPath, sessionStore, store, cr.rigBeadStores(), desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads,
 	)
 	return updated
 }
@@ -2930,6 +2936,14 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 		return cr.cs.CityBeadStore()
 	}
 	return cr.standaloneCityStore
+}
+
+// sessionBeadStore returns the store backing session/wait beads: the configured
+// session class store (with the controller recorder so relocated session writes
+// emit bead.* events) when [beads.classes.sessions] relocates sessions, else the
+// work store. Byte-identical to cityBeadStore() at the default bd backend.
+func (cr *CityRuntime) sessionBeadStore() beads.Store {
+	return resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {

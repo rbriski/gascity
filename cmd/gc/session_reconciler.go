@@ -861,8 +861,10 @@ func reconcileSessionBeadsAtPath(
 	stdout, stderr io.Writer,
 	startOptions ...startExecutionOption,
 ) int {
+	// Compat wrapper keeps a single store param: pass it as both the session and
+	// work store (byte-identical). Class-aware callers use ...WithNamedDemand directly.
 	return reconcileSessionBeadsAtPathWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 		startOptions...,
 	)
@@ -876,6 +878,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	configuredNames map[string]bool,
 	cfg *config.City,
 	sp runtime.Provider,
+	sessionStore beads.Store,
 	store beads.Store,
 	dops drainOps,
 	assignedWorkBeads []beads.Bead,
@@ -896,10 +899,8 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	stdout, stderr io.Writer,
 	startOptions ...startExecutionOption,
 ) int {
-	// Byte-identical placeholder: pass store as both the session and work store
-	// until the controller derives a real sessionStore in a later phase.
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, sessionStore, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 		startOptions...,
 	)

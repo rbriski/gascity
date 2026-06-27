@@ -1135,10 +1135,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback", nil, nil, "")
 		}
 		if clearClaim {
-			rollbackPendingCreateClearingClaim(session, store, clk.Now().UTC(), stderr)
+			rollbackPendingCreateClearingClaim(session, store, store, clk.Now().UTC(), stderr)
 			return
 		}
-		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+		rollbackPendingCreate(session, store, store, clk.Now().UTC(), stderr)
 	}
 	phaseStart = time.Now()
 	for i := range ordered {
@@ -1832,7 +1832,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
-			if !recoverRunningPendingCreate(session, tp, cfg, store, clk, trace) {
+			if !recoverRunningPendingCreate(session, tp, cfg, store, store, clk, trace) {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
 		}
@@ -2597,7 +2597,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 	phaseStart = time.Now()
 	plannedWakes := executePlannedStartsTraced(
-		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
+		ctx, startCandidates, cfg, desiredState, sp, store, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
 		effectiveStartOptions...,

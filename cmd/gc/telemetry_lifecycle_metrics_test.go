@@ -165,7 +165,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !commitStartResult(successResult(&session), store, clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		if !commitStartResult(successResult(&session), store, store, clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
 			t.Fatal("commitStartResult returned false for successful start")
 		}
 		points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
@@ -186,7 +186,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if commitStartResult(successResult(&session), store, clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		if commitStartResult(successResult(&session), store, store, clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
 			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
 		}
 		if points := collectCounterDataPoints(t, reader, "gc.agent.starts.total"); len(points) != 0 {

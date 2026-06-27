@@ -78,7 +78,7 @@ func newOptionSessionWithWork(t *testing.T, rp *config.ResolvedProvider, baseCom
 func TestBuildPreparedStart_CodexDispatchEffortOptionPresent(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", map[string]string{"effort": "high"})
 
-	prepared, err := buildPreparedStart(candidate, cfg, store)
+	prepared, err := buildPreparedStart(candidate, cfg, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestBuildPreparedStart_CodexDispatchEffortOptionPresent(t *testing.T) {
 func TestBuildPreparedStart_ProviderEffortOptionUsesProviderSchema(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, claudeEffortResolvedProvider(), "claude", map[string]string{"effort": "high"})
 
-	prepared, err := buildPreparedStart(candidate, cfg, store)
+	prepared, err := buildPreparedStart(candidate, cfg, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestBuildPreparedStart_ExplicitEffortOverrideWinsOverDispatchOption(t *test
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", map[string]string{"effort": "high"})
 	candidate.session.Metadata["template_overrides"] = `{"effort":"low"}`
 
-	prepared, err := buildPreparedStart(candidate, cfg, store)
+	prepared, err := buildPreparedStart(candidate, cfg, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}

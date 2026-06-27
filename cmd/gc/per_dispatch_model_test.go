@@ -129,7 +129,7 @@ func TestBuildPreparedStart_ExplicitOverrideWinsPerKey(t *testing.T) {
 		map[string]string{"model": "sonnet"},
 	)
 
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestBuildPreparedStartAppliesWorkBeadOptionsToCommand(t *testing.T) {
 	store := beads.NewMemStore()
 	candidate := newOptionSessionCandidate(t, store, map[string]string{"model": "opus", "effort": "high"}, nil)
 
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestBuildPreparedStartInitialMessageOnlyMatchesDriftHash(t *testing.T) {
 	candidate.tp.ResolvedProvider = resolved
 	candidate.tp.Command = "claude " + shellquote.Join(defaultArgs) + " --settings /tmp/city/.gc/settings.json"
 
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}

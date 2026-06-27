@@ -203,7 +203,7 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 	}
 
 	candidate.session = &session
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}

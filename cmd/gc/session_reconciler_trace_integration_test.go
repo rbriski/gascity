@@ -344,6 +344,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		},
 		sp,
 		store,
+		store,
 		"trace-town",
 		"",
 		clock.Real{},

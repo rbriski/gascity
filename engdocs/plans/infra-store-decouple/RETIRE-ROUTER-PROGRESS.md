@@ -78,7 +78,9 @@ epic: ga-pd6tcg
     Byte-identical at default (resolveSessionStore returns the work store). **Recorder (Q4): cr.rec
     is passed → at relocation openClassSQLiteStore attaches the recorder. NOTE: takes effect only
     after P7 unregisters ClassSessions (else the Router's nil-recorder open wins the dir cache).**
-  - **P6b (CLI + leftovers)**: cmd_wait.go (cmdSessionWait, cmdWaitSetStateResult), cmd_nudge.go
+  - [x] **P6b-1** (`c6fa1cec7`) adoption/W1/stop-path + **P6b-2** (`8957cf4a1`) CLI session/wait + gracefulStopAll;
+    review wf_7366ba79 SAFE-TO-PROCEED (wait/dep boundary held). **Track-S threading DONE (controller+CLI).**
+  - **P6b (CLI + leftovers, REF)**: cmd_wait.go (cmdSessionWait, cmdWaitSetStateResult), cmd_nudge.go
     (per-entry openers), cmd_session_wake.go, cmd_stop.go (markCityStopSessionSleepReason) derive
     `resolveSessionStore(store, cfg, cityPath, rec)` locally and pass to the threaded fns. PLUS
     **W1**: route session lookups in session_name_lookup.go:343 + template_resolve.go:250/366 to

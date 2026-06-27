@@ -235,6 +235,17 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 			},
 		},
 		{
+			name: "provider health throttled",
+			cityPath: func(t *testing.T) string {
+				dir := t.TempDir()
+				// A throttled provider is also non-green: a stalled session must
+				// not be recycled, since the stall is the provider's rate limit,
+				// not the session's fault (#3279).
+				writeHealthCache(t, dir, "zai", "throttled", nowSecs())
+				return dir
+			},
+		},
+		{
 			name: "recent provider activity",
 			configure: func(_ *testing.T, env *restartRequestTestEnv, _ *beads.Bead, sessionName string) {
 				env.sp.SetActivity(sessionName, env.clk.Now().Add(-time.Minute))

@@ -66,8 +66,16 @@ func TestCheckStability_RateLimitScreen_DoesNotCountAsCrash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quarantined_until parse: %v", err)
 	}
-	if want := now.Add(defaultRateLimitQuarantineDuration); !qUntil.Equal(want) {
-		t.Errorf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	// #3279: the hold is the 30m floor plus a deterministic per-session
+	// full-jitter offset, so it must equal rateLimitQuarantineUntil and fall
+	// within [floor, floor+jitter).
+	if want := rateLimitQuarantineUntil(session.ID, now).Truncate(time.Second); !qUntil.Equal(want) {
+		t.Errorf("quarantined_until = %s, want %s (deterministic per-session jitter)", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	floor := now.Add(defaultRateLimitQuarantineDuration)
+	ceil := floor.Add(rateLimitQuarantineJitter)
+	if qUntil.Before(floor) || !qUntil.Before(ceil) {
+		t.Errorf("quarantined_until = %s, want in [%s, %s)", qUntil.Format(time.RFC3339), floor.Format(time.RFC3339), ceil.Format(time.RFC3339))
 	}
 
 	if gotLines != rateLimitPeekLines {

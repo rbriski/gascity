@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"strconv"
@@ -669,20 +670,65 @@ func clearLastWokeAt(session *beads.Bead, store beads.Store) {
 
 // recordRateLimitQuarantine backs off a session that exited into a provider
 // rate-limit screen without treating the exit as a crash or resetting its
-// conversation metadata.
+// conversation metadata. The hold is jittered per session so a herd that hit
+// the same provider limit on one tick does not wake in lockstep (#3279).
 func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock.Clock) error {
+	return writeRateLimitHold(session, store, rateLimitQuarantineUntil(session.ID, clk.Now()))
+}
+
+// recordProviderThrottlePace staggers a respawn when the provider-health
+// registry reports the provider as THROTTLED: the session is held for a short,
+// per-session jittered window (no rate-limit floor) so parked pool sessions
+// spread their respawns instead of flooding back on a single tick (#3279).
+func recordProviderThrottlePace(session *beads.Bead, store beads.Store, clk clock.Clock) error {
+	now := clk.Now()
+	return writeRateLimitHold(session, store, now.Add(deterministicFullJitter(session.ID, now, providerThrottlePaceSpread)))
+}
+
+// writeRateLimitHold persists a rate-limit hold (StateAsleep,
+// sleep_reason="rate_limit", quarantined_until=until) and mirrors the patch
+// onto the in-memory bead. Shared by the hard rate-limit and throttled-pace
+// paths; both keep the pool slot (rate_limit is not a freeable sleep reason).
+func writeRateLimitHold(session *beads.Bead, store beads.Store, until time.Time) error {
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
+	batch := sessionpkg.RateLimitQuarantinePatch(until)
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
-		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
+		fmt.Fprintf(os.Stderr, "writeRateLimitHold: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
 		return err
 	}
 	for k, v := range batch {
 		session.Metadata[k] = v
 	}
 	return nil
+}
+
+// rateLimitQuarantineUntil computes a rate-limited session's wake instant:
+// the defaultRateLimitQuarantineDuration floor plus a deterministic
+// per-session full-jitter offset in [0, rateLimitQuarantineJitter). Two
+// sessions quarantined on the same tick get distinct wake instants because the
+// offset is keyed on session ID, de-correlating the herd (#3279).
+func rateLimitQuarantineUntil(sessionID string, now time.Time) time.Time {
+	return now.Add(defaultRateLimitQuarantineDuration + deterministicFullJitter(sessionID, now, rateLimitQuarantineJitter))
+}
+
+// deterministicFullJitter returns a full-jitter duration uniformly in
+// [0, spread), derived from (key, now) via FNV-1a so the result is stable for
+// a given (session, tick) yet varies across sessions and across ticks — no
+// shared RNG, so it is free of the data races a process-wide math/rand would
+// invite (#3279 themes #16/#18). spread <= 0 disables jitter (returns 0),
+// preserving deterministic back-compat. Follows the same FNV+modulo idiom as
+// deterministicMaxSessionAgeOffset (which hashes its own template/session keys).
+func deterministicFullJitter(key string, now time.Time, spread time.Duration) time.Duration {
+	if spread <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(key))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(now.UTC().Format(time.RFC3339Nano)))
+	return time.Duration(h.Sum64() % uint64(spread))
 }
 
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.

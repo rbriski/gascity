@@ -278,12 +278,33 @@ const (
 	// after exceeding max wake failures.
 	defaultQuarantineDuration = 5 * time.Minute
 
-	// defaultRateLimitQuarantineDuration is how long to hold a session when
-	// the pane shows a provider rate-limit screen. This is intentionally
-	// longer than crash-loop quarantine because immediate retries cannot help;
-	// 30m limits noisy respawn cycles for common minute-scale provider limits
-	// while still re-detecting and re-quarantining during longer windows.
+	// defaultRateLimitQuarantineDuration is the floor of the hold applied to a
+	// session when the pane shows a provider rate-limit screen. This is
+	// intentionally longer than crash-loop quarantine because immediate retries
+	// cannot help; 30m limits noisy respawn cycles for common minute-scale
+	// provider limits while still re-detecting and re-quarantining during
+	// longer windows. The effective hold is this floor plus a per-session
+	// full-jitter offset (rateLimitQuarantineJitter) so a herd of sessions
+	// quarantined in the same tick does not wake in lockstep (#3279).
 	defaultRateLimitQuarantineDuration = 30 * time.Minute
+
+	// rateLimitQuarantineJitter is the full-jitter spread added on top of
+	// defaultRateLimitQuarantineDuration. Each rate-limited session's wake
+	// instant is randomized uniformly in [floor, floor+jitter) via a
+	// deterministic per-session offset (deterministicFullJitter), so a herd
+	// that hit the same provider limit on one tick de-correlates its respawns
+	// instead of re-saturating the next provider bucket in lockstep (#3279).
+	// The 30m spread is far wider than any per-minute/per-few-minute provider
+	// bucket while never retrying sooner than the established 30m floor.
+	rateLimitQuarantineJitter = 30 * time.Minute
+
+	// providerThrottlePaceSpread is the full-jitter window used to stagger
+	// respawns when the provider-health registry reports a provider as
+	// THROTTLED (rate-limited but usable). Unlike the rate-limit floor above,
+	// throttled respawns ARE allowed — they are merely spread uniformly across
+	// [0, spread) so parked pool sessions do not all respawn on the single
+	// tick the provider clears, which is the exact synchronization #3279 fixes.
+	providerThrottlePaceSpread = 10 * time.Minute
 
 	// defaultMaxWakeAttempts is how many consecutive wake failures before
 	// quarantine.

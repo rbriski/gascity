@@ -1750,11 +1750,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				providerHealthy := true
 				if !exempt && !holdsClaim && tp.ResolvedProvider != nil {
-					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
-					// (provider RED) takes precedence: never recycle a session whose
-					// provider is red. Fail-open — absent/stale registry → healthy.
-					if h, present := phSnap.check(tp.ResolvedProvider.Name); present {
-						providerHealthy = h
+					// Reuse the per-tick provider-health snapshot (#2962). A
+					// non-green provider (RED or THROTTLED) takes precedence: never
+					// recycle a session whose provider is rate-limited or down —
+					// recycling cannot make progress and only adds churn. Fail-open —
+					// absent/stale registry → healthy.
+					if status, present := phSnap.check(tp.ResolvedProvider.Name); present {
+						providerHealthy = status == providerStatusGreen
 					}
 				}
 				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
@@ -2497,19 +2499,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 			}
-			// Provider-health gate (ADR-0013 A1 M3a): skip respawn when the
-			// provider is red. Does NOT consume the wake budget (no append to
+			// Provider-health gate (ADR-0013 A1 M3a): RED skips respawn until the
+			// provider recovers; THROTTLED still respawns but paces (staggers)
+			// anonymous pool sessions so the herd does not re-saturate the next
+			// provider bucket in lockstep (#3279); GREEN respawns freely. The
+			// gate never consumes the wake budget on a skip/pace (no append to
 			// startCandidates). Episode tracking fires exactly one alert per
-			// red episode via emitProviderHealthGateAlert.
+			// red/throttled episode via emitProviderHealthGateAlert.
 			if gate != nil && target.tp.ResolvedProvider != nil {
 				phProvider := target.tp.ResolvedProvider.Name
-				phHealthy, phPresent := phSnap.check(phProvider)
-				if !phPresent {
+				phStatus, phPresent := phSnap.check(phProvider)
+				switch {
+				case !phPresent:
 					// Registry absent or no fresh entry — fail-open, log once per provider per tick.
 					fmt.Fprintf(stderr, "session reconciler: provider-health registry unavailable for %q; treating as green\n", phProvider) //nolint:errcheck
-				} else if !phHealthy {
+				case phStatus == providerStatusRed:
 					gate.recordRedSkip(phProvider, clk.Now().UTC(), func(p, epID string, since time.Time, count int) {
-						emitProviderHealthGateAlert(rec, stdout, p, epID, since, count)
+						emitProviderHealthGateAlert(rec, stdout, providerStatusRed, p, epID, since, count)
 					})
 					if trace != nil {
 						trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "respawn_skipped", traceRecordPayload{
@@ -2517,6 +2523,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}, nil, "")
 					}
 					continue // skip startCandidates; wake budget is NOT consumed
+				case phStatus == providerStatusThrottled && namedSessionIdentity(*target.session) == "":
+					// Throttled + anonymous pool session: pace the respawn with a
+					// short per-session jittered hold so parked pool siblings spread
+					// across ticks instead of flooding back together. Infrastructure
+					// and other named sessions are NOT paced (#3279 theme #4) — they
+					// hit the default case and respawn freely.
+					if err := recordProviderThrottlePace(target.session, store, clk); err != nil {
+						// Hold not written — do not record the episode/alert (it
+						// would claim a session was paced when none was); the
+						// continue still defers this tick and the write retries next.
+						fmt.Fprintf(stderr, "session reconciler: pacing throttled respawn for %s: %v\n", name, err) //nolint:errcheck
+					} else {
+						gate.recordThrottledTick(phProvider, clk.Now().UTC(), func(p, epID string, since time.Time, count int) {
+							emitProviderHealthGateAlert(rec, stdout, providerStatusThrottled, p, epID, since, count)
+						})
+						if trace != nil {
+							trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_throttled", "respawn_paced", traceRecordPayload{
+								"provider": phProvider,
+							}, nil, "")
+						}
+					}
+					continue // skip startCandidates this tick; the jittered hold reschedules it
+				default:
+					// GREEN, or THROTTLED for a named/infrastructure session:
+					// respawn freely. No-op here so the wake proceeds to
+					// startCandidates below; this default makes the fallthrough
+					// intentional (a future case must not silently swallow it).
 				}
 			}
 

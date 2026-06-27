@@ -3308,11 +3308,14 @@ func selectOrPlanPoolSessionBead(
 		return beads.Bead{}, 0, nil, errPoolSessionCreatePartial
 	}
 
-	// Provider-health gate: refuse new creates when the registry reports this
-	// agent's provider as red. Reuse paths above are unaffected (they return
-	// before reaching this point). loadProviderHealthSnapshot always returns a
-	// non-nil snapshot; check() fails-open when the registry is absent or stale.
-	// Symmetric with the respawn gate in session_reconciler.go:2424.
+	// Provider-health gate: refuse new creates only when the registry reports
+	// this agent's provider as RED. THROTTLED does not block creates — a create
+	// is not the storm amplifier the respawn path is (the synchronized herd is
+	// re-quarantined respawns, not fresh creates), so pacing creates would only
+	// add latency without de-correlating anything (#3279). Reuse paths above are
+	// unaffected (they return before reaching this point). loadProviderHealthSnapshot
+	// always returns a non-nil snapshot; check() fails-open when the registry is
+	// absent or stale. Symmetric with the respawn gate in session_reconciler.go.
 	provName := strings.TrimSpace(cfgAgent.Provider)
 	if provName == "" {
 		provName = strings.TrimSpace(cfgAgent.InheritedProvider)
@@ -3320,7 +3323,7 @@ func selectOrPlanPoolSessionBead(
 	if provName == "" && bp.workspace != nil {
 		provName = strings.TrimSpace(bp.workspace.Provider)
 	}
-	if healthy, present := bp.providerHealthSnapshot.check(provName); present && !healthy {
+	if status, present := bp.providerHealthSnapshot.check(provName); present && status == providerStatusRed {
 		delete(usedSlots, slot)
 		return beads.Bead{}, 0, nil, errPoolSessionCreateProviderRed
 	}

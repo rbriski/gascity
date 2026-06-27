@@ -4046,8 +4046,13 @@ func TestReconcileSessionBeads_RateLimitScreenQuarantinesBeforeHeal(t *testing.T
 	if err != nil {
 		t.Fatalf("quarantined_until parse: %v", err)
 	}
-	if want := env.clk.Now().Add(defaultRateLimitQuarantineDuration); !qUntil.Equal(want) {
-		t.Fatalf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	// #3279: jittered per-session hold (floor + deterministic full jitter).
+	if want := rateLimitQuarantineUntil(got.ID, env.clk.Now()).Truncate(time.Second); !qUntil.Equal(want) {
+		t.Fatalf("quarantined_until = %s, want %s (deterministic per-session jitter)", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	floor := env.clk.Now().Add(defaultRateLimitQuarantineDuration)
+	if qUntil.Before(floor) || !qUntil.Before(floor.Add(rateLimitQuarantineJitter)) {
+		t.Fatalf("quarantined_until = %s, want in [%s, %s)", qUntil.Format(time.RFC3339), floor.Format(time.RFC3339), floor.Add(rateLimitQuarantineJitter).Format(time.RFC3339))
 	}
 	if got.Metadata["session_key"] != "keep-session" {
 		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])

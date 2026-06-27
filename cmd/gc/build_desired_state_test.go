@@ -11271,6 +11271,31 @@ func TestBuildDesiredState_ProviderRedBlocksNewPoolSessionCreate(t *testing.T) {
 			t.Fatalf("expected exactly 1 worker entry (reused active); got %d; keys=%v stderr=%s", workerEntries, mapKeys(result.State), stderr.String())
 		}
 	})
+
+	// Scenario E: registry throttled — creates proceed (throttled is treated as
+	// green on the create path; only the respawn path paces, #3279).
+	t.Run("registry throttled allows create", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "throttled")
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		workerCreates := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerCreates++
+			}
+		}
+		if workerCreates == 0 {
+			t.Fatalf("expected worker creates when provider is throttled (create is not the storm amplifier); stderr=%s", stderr.String())
+		}
+	})
 }
 
 // TestBuildDesiredState_NamedAliasHolderSuppressesPoolStandby is the FAITHFUL

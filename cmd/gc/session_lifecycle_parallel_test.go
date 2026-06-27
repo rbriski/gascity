@@ -6022,8 +6022,13 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 	if err != nil {
 		t.Fatalf("quarantined_until parse: %v", err)
 	}
-	if want := clk.Now().Add(defaultRateLimitQuarantineDuration); !qUntil.Equal(want) {
-		t.Fatalf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	// #3279: jittered per-session hold (floor + deterministic full jitter).
+	if want := rateLimitQuarantineUntil(got.ID, clk.Now()).Truncate(time.Second); !qUntil.Equal(want) {
+		t.Fatalf("quarantined_until = %s, want %s (deterministic per-session jitter)", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	floor := clk.Now().Add(defaultRateLimitQuarantineDuration)
+	if qUntil.Before(floor) || !qUntil.Before(floor.Add(rateLimitQuarantineJitter)) {
+		t.Fatalf("quarantined_until = %s, want in [%s, %s)", qUntil.Format(time.RFC3339), floor.Format(time.RFC3339), floor.Add(rateLimitQuarantineJitter).Format(time.RFC3339))
 	}
 }
 

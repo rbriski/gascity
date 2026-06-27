@@ -1,0 +1,51 @@
+# Default-deny egress (ER-106) for the city-provisioner, with only the destinations it needs: DNS, the
+# in-cluster Accounts machine plane, and the cross-cluster crucible + beads + STS endpoints.
+#
+# REVIEW: the in-cluster rules (DNS, Accounts) are precise. The cross-cluster/public destinations
+# (works.gascity.com for crucible-api + STS, beads.ops.gascity.com) must be expressed the SAME way the
+# other identity-v0 apps reach off-cluster endpoints — likely an existing shared egress component
+# (e.g. allow the node's Caddy / a tailnet CIDR). Fill the ipBlock CIDRs from the live environment, or
+# attach the cluster's standard public-egress component, before applying.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: city-provisioner-egress
+  namespace: city-provisioner
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: city-provisioner
+  policyTypes:
+    - Egress
+  egress:
+    # CoreDNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    # Accounts machine plane (org-bound SP/key mint), pod :8090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: accounts
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: accounts
+      ports:
+        - {protocol: TCP, port: 8090}
+    # Cross-cluster / public HTTPS: works.gascity.com (crucible-api + STS machine/token) and
+    # beads.ops.gascity.com (ledger create). REVIEW: replace 0.0.0.0/0 with the real node-Caddy /
+    # tailnet CIDRs, or attach the standard identity-v0 public-egress component. Left broad here ONLY
+    # so the manifest is functional pre-review; do NOT ship 0.0.0.0/0 to production.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+              - 10.0.0.0/8
+      ports:
+        - {protocol: TCP, port: 443}

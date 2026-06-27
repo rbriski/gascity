@@ -1,0 +1,142 @@
+# city-provisioner — the autonomous Gas City provisioner (B3 INFRA 1).
+#
+# A CLIENT-ONLY daemon on identity-v0: it serves no traffic (no Service, no probes, no inbound). Each
+# pass it (1) mints a fresh ~90s platform discovery EIA from the durable platform key, (2) does the
+# ID-only cross-org discovery read on crucible, (3) per discovered org mints that org's per-pass
+# credentials under its B0 provisioningToken (Accounts machine path → STS), and (4) provisions each
+# city's beads ledger + Model-B controller and reports completion. Nothing cross-org is ever stored;
+# the DPoP keys are generated ephemerally in-process (no key to mount).
+#
+# Placement: identity-v0 (NEVER corp-public — that placement killed merged #25). It reaches Accounts +
+# STS in-cluster and crucible + beads-web over the allowed one-way egress (see the egress netpol).
+#
+# REVIEW BEFORE APPLY: the cross-cluster egress endpoints (CRUCIBLE_URL, BEADS_URL) and the
+# CONTROLLER_IMAGE (B6) are environment-specific — confirm against the live routes. Copy this dir to
+# _infra/identity-v0/flux/apps/city-provisioner/ and add it to the apps kustomization.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: city-provisioner
+  labels:
+    app.kubernetes.io/part-of: identity
+    identity.gasworks.io/app: city-provisioner
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: city-provisioner
+  namespace: city-provisioner
+  labels:
+    app.kubernetes.io/name: city-provisioner
+    app.kubernetes.io/part-of: identity
+# It authenticates to every backend with ESO-delivered secrets (the platform key + per-org tokens),
+# not a projected SA token, so the SA token need not mount.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: city-provisioner-runtime
+  namespace: city-provisioner
+spec:
+  hard:
+    requests.cpu: "60m"
+    requests.memory: 128Mi
+    limits.cpu: "1"
+    limits.memory: 512Mi
+    pods: "4"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: city-provisioner
+  namespace: city-provisioner
+  labels:
+    app.kubernetes.io/name: city-provisioner
+    app.kubernetes.io/part-of: identity
+    # Security baseline (runAsNonRoot/seccomp + container no-priv-esc/drop-ALL) via component.
+    gascity.io/security-baseline: "true"
+spec:
+  # Singleton: one poller. The pass is idempotent (resumable, dedup-by-state), so a brief overlap on
+  # a rolling update is safe, but a steady 2 replicas would double the mint churn for no gain.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: city-provisioner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: city-provisioner
+        app.kubernetes.io/part-of: identity
+    spec:
+      serviceAccountName: city-provisioner
+      automountServiceAccountToken: false
+      priorityClassName: identity-app
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: city-provisioner
+          # AUTO-DEPLOY target: CI must build cmd/city-provisioner from the crucible (forge) repo and
+          # publish it; pin via Flux image-automation like the other identity apps.
+          image: ghcr.io/gascity/crucible-city-provisioner:main # {"$imagepolicy": "flux-system:id-city-provisioner"}
+          imagePullPolicy: IfNotPresent
+          env:
+            # --- Backends (REVIEW: cross-cluster endpoints) ---
+            # Crucible API base (the cities surface: /v0/cities/pending/orgs, /pending, /complete,
+            # /v0/sandboxes). Reached over the allowed one-way egress — confirm this is the live
+            # machine edge for the cities routes.
+            - {name: CRUCIBLE_URL, value: "https://works.gascity.com/crucible-api"}
+            # beads-web origin (the adapter appends /beads/api/projects).
+            - {name: BEADS_URL, value: "https://beads.ops.gascity.com"}
+            # The Model-B controller workspace image launched as a Crucible sandbox (B6).
+            - {name: CONTROLLER_IMAGE, value: "ghcr.io/gascity/gascity-controller:main"}
+            # --- Identity plane (in-cluster) ---
+            # Accounts org-bound MACHINE path (B0 gateProvision): same service the STS resolves against.
+            - {name: ACCOUNTS_URL, value: "http://accounts.accounts.svc.cluster.local"}
+            # STS machine-login + token-exchange. These MUST equal the STS's configured htu
+            # (STS_MACHINE_URL / STS_TOKEN_URL on the sts app) — the DPoP proof binds htu and the STS
+            # checks it against its own config, NOT the dialed URL. (Dialing the in-cluster STS while
+            # signing the public htu is a later hairpin optimization; v1 dials the public URL.)
+            - {name: STS_MACHINE_URL, value: "https://works.gascity.com/sts/v0/machine"}
+            - {name: STS_TOKEN_URL, value: "https://works.gascity.com/sts/v0/token"}
+            # --- Credential mounts (ESO; see the externalsecret) ---
+            - {name: PLATFORM_DISCOVERY_KEY_FILE, value: "/etc/city-provisioner/platform/key"}
+            - {name: PROVISIONING_TOKENS_DIR, value: "/etc/city-provisioner/org-tokens"}
+            # --- Tunables ---
+            - {name: PROVISIONER_SP_NAME, value: "city-provisioner"}
+            # Faster than the ~90s EIA TTL so minted creds never go stale mid-pass.
+            - {name: PROVISION_INTERVAL, value: "60s"}
+          resources:
+            requests: {cpu: 20m, memory: 48Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          # allowPrivilegeEscalation/drop-ALL come from the security-baseline component.
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: platform-key, mountPath: /etc/city-provisioner/platform, readOnly: true}
+            - {name: org-tokens, mountPath: /etc/city-provisioner/org-tokens, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        # The durable platform discovery key (a crucible per-app key carrying ONLY city.provision),
+        # materialized as a file by ESO.
+        - name: platform-key
+          secret:
+            secretName: city-provisioner-platform-key
+            items:
+              - {key: key, path: key}
+        # One file per enrolled org (filename == org_id, content == that org's B0 provisioningToken),
+        # materialized by ESO dataFrom.find. FileProvisioningTokenStore reads Dir/<org_id>.
+        - name: org-tokens
+          secret:
+            secretName: city-provisioner-org-tokens
+        - name: tmp
+          emptyDir: {sizeLimit: 32Mi}

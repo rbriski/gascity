@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Proposed Flux app for the autonomous city-provisioner. Copy this dir to
+# _infra/identity-v0/flux/apps/city-provisioner/ and register it in the apps kustomization after the
+# review notes in city-provisioner.yaml / the egress netpol are resolved.
+resources:
+  - city-provisioner.yaml
+  - city-provisioner-externalsecret.yaml
+  - city-provisioner-egress-netpol.yaml
+components:
+  # Security baseline (runAsNonRoot/seccomp + container no-priv-esc/drop-ALL). No zero-downtime-lite:
+  # the provisioner serves no HTTP, so it has no /healthz readiness probe to graceful-drain.
+  - ../../components/security-baseline

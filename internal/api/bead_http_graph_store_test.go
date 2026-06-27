@@ -244,11 +244,14 @@ func TestBeadReadyFederatesCityStore(t *testing.T) {
 }
 
 // TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite proves the worker/dispatcher
-// readiness contract: GET /v0/beads/ready served from a graph_store=sqlite Router
-// returns the ClassGraph backend's ready set ALONE and drops the Dolt ClassWork
-// leg, so a worker's `bd ready` and the control-dispatcher's ListReadyBeads stop
-// scanning the work backlog on every call. A plain MemStore city (no graph
-// backend) keeps the full federated ready set — covered by the test above.
+// readiness contract: GET /v0/beads/ready served from a graph_store=sqlite city
+// returns the dedicated graph store's ready set ALONE for the city leg and drops
+// the Dolt work leg, so a worker's `bd ready` and the control-dispatcher's
+// ListReadyBeads stop scanning the work backlog on every call. The class-aware
+// successor to coordrouter.Router's ReadyGraphOnly: the handler reads the graph
+// leg from state.GraphBeadStore() (resolveGraphStore in production) rather than
+// probing a Router capability. A plain MemStore city (GraphBeadStore() ==
+// CityBeadStore()) keeps the full federated ready set — covered by the test above.
 func TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite(t *testing.T) {
 	work := beads.NewMemStore()
 	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
@@ -258,20 +261,18 @@ func TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite(t *testing.T) {
 	graph := sqlite.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = graph.CloseStore() })
 
-	router := coordrouter.New(work)
-	router.Register(coordclass.ClassGraph, graph)
-
-	workBead, err := router.Create(beads.Bead{Title: "backlog item", Type: "task"})
+	workBead, err := work.Create(beads.Bead{Title: "backlog item", Type: "task"})
 	if err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
-	graphBead, err := router.Create(beads.Bead{Title: "molecule step", Type: "task", Labels: []string{"gc:wisp"}})
+	graphBead, err := graph.Create(beads.Bead{Title: "molecule step", Type: "task", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatalf("create graph bead: %v", err)
 	}
 
 	state := newFakeState(t)
-	state.cityBeadStore = router
+	state.cityBeadStore = work
+	state.graphBeadStore = graph
 	state.stores = nil
 	s := New(state)
 
@@ -288,6 +289,75 @@ func TestBeadReadyGraphOnlyExcludesWorkLegUnderSQLite(t *testing.T) {
 	}
 	if ids[workBead.ID] {
 		t.Fatalf("ready leaked the Dolt work bead %s into the worker readiness hot loop under graph_store=sqlite", workBead.ID)
+	}
+}
+
+// TestBeadReadyGraphOnlyExcludesCityAndRigWorkLegsUnderSQLite is the realistic
+// regression guard for the worker-readiness contract under graph_store=sqlite on a
+// multi-rig city (maintainer-city: 6 rigs). It models the production BeadStores()
+// shape that controllerState produces — a cityName entry (the city WORK store) AND
+// one or more rig WORK stores — which the older guard (state.stores=nil) never
+// exercised. With the graph class relocated, GET /v0/beads/ready must return the
+// shared graph store's ready set ALONE: every rig's graph beads already live in
+// that single city-scope store, so the per-rig federation is skipped entirely.
+// Iterating the rig stores would read Router.Ready (rigWork∪graph) on each routed
+// leg and leak gc-N work beads from BOTH the city and every rig into the live
+// worker readiness set.
+func TestBeadReadyGraphOnlyExcludesCityAndRigWorkLegsUnderSQLite(t *testing.T) {
+	cityWork := beads.NewMemStore() // mints gc-N city work ids
+	rigWork := beads.NewMemStore()  // mints gc-N rig work ids
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+
+	cityBead, err := cityWork.Create(beads.Bead{Title: "city backlog item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create city work bead: %v", err)
+	}
+	rigBead, err := rigWork.Create(beads.Bead{Title: "rig backlog item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create rig work bead: %v", err)
+	}
+	graphBead, err := graph.Create(beads.Bead{Title: "molecule step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = cityWork
+	state.graphBeadStore = graph
+	// Mirror controllerState.BeadStores(): the city work store is injected under
+	// cityName, alongside each rig's WORK store. Under graph_store=sqlite both the
+	// city and rig stores are routed (Router.Ready = work∪graph in production), so
+	// federating them would leak work beads.
+	state.stores = map[string]beads.Store{
+		state.cityName: cityWork,
+		"myrig":        rigWork,
+	}
+	s := New(state)
+
+	out, err := s.humaHandleBeadReady(context.Background(), &BeadReadyInput{})
+	if err != nil {
+		t.Fatalf("humaHandleBeadReady: %v", err)
+	}
+	ids := make(map[string]bool, len(out.Body.Items))
+	for _, item := range out.Body.Items {
+		ids[item.ID] = true
+	}
+	if !ids[graphBead.ID] {
+		t.Fatalf("ready did not surface the graph step %s (items=%d)", graphBead.ID, len(out.Body.Items))
+	}
+	if ids[cityBead.ID] {
+		t.Fatalf("ready leaked the city work bead %s into the worker readiness set under graph_store=sqlite", cityBead.ID)
+	}
+	if ids[rigBead.ID] {
+		t.Fatalf("ready leaked the rig work bead %s into the worker readiness set under graph_store=sqlite", rigBead.ID)
+	}
+	if len(out.Body.Items) != 1 {
+		t.Fatalf("relocated ready must be the graph store ALONE (1 bead), got %d: %v", len(out.Body.Items), out.Body.Items)
 	}
 }
 

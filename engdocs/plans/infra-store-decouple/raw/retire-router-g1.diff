@@ -1,0 +1,239 @@
+diff --git a/cmd/gc/build_desired_state.go b/cmd/gc/build_desired_state.go
+index fb9931886..a57182f6c 100644
+--- a/cmd/gc/build_desired_state.go
++++ b/cmd/gc/build_desired_state.go
+@@ -667,7 +667,8 @@ func buildDesiredStateWithSessionBeads(
+ 	var scaleCheckPartialTemplates map[string]bool
+ 	var namedDefaultDemand map[string]bool
+ 	if store != nil {
+-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
++		graphStore := resolveGraphStore(store, cfg, cityPath, nil)
++		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, graphStore, rigStores, suspendedRigPaths, sessionBeads)
+ 		if storePartial {
+ 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
+ 		}
+@@ -1066,7 +1067,7 @@ func collectAssignedWorkBeads(
+ 	cfg *config.City,
+ 	cityStore beads.Store,
+ ) ([]beads.Bead, bool) {
+-	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil)
++	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil, nil)
+ 	return result, partial
+ }
+ 
+@@ -1080,6 +1081,7 @@ func collectAssignedWorkBeads(
+ func collectAssignedWorkBeadsWithStores(
+ 	cfg *config.City,
+ 	cityStore beads.Store,
++	graphStore beads.Store,
+ 	rigStores map[string]beads.Store,
+ 	suspendedRigPaths map[string]bool,
+ 	sessionBeads *sessionBeadSnapshot,
+@@ -1087,10 +1089,11 @@ func collectAssignedWorkBeadsWithStores(
+ 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
+ 	// spawns bd subprocesses on every tick, saturating dolt.
+ 	type workStore struct {
+-		store beads.Store
+-		ref   string
++		store      beads.Store
++		ref        string
++		graphStore beads.Store // dedicated graph store for the CITY leg only; nil elsewhere
+ 	}
+-	stores := []workStore{{store: cityStore}}
++	stores := []workStore{{store: cityStore, graphStore: graphStore}}
+ 	for _, rig := range cfg.Rigs {
+ 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
+ 			continue
+@@ -1202,13 +1205,13 @@ func collectAssignedWorkBeadsWithStores(
+ 			var err error
+ 			var errs []error
+ 			if len(assignees) == 0 {
+-				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
++				ready, err = liveReadyForControllerDemandQuery(source.store, source.graphStore, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+ 				if err != nil {
+ 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
+ 				}
+ 			} else {
+ 				for _, assignee := range assignees {
+-					part, partErr := liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
++					part, partErr := liveReadyForControllerDemandQuery(source.store, source.graphStore, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+ 					if partErr != nil {
+ 						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
+ 					}
+@@ -1764,18 +1767,21 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
+ 
+ // liveReadyForControllerDemandQuery returns the live ready set that feeds the
+ // controller-demand awake/readiness gate (readyAssignedIDs). Under
+-// graph_store=sqlite it prefers the graph-class ready slice (ReadyGraphOnly):
+-// a worker only executes graph nodes, and the full federated Router.Ready
+-// unions the Dolt work-leg backlog and truncates to the per-tick wake limit,
+-// which evicts genuinely-ready assigned graph wisps (routed cleanup/finalize
+-// steps) out of the window and leaves their sessions un-woken. This mirrors
+-// readyStoreSet (gc ready) and the dispatch/API read paths; default Dolt-only
+-// cities lack the capability and fall back to the federated Live.Ready
+-// byte-identically.
+-func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
++// graph_store=sqlite it prefers the graph-class ready slice: a worker only
++// executes graph nodes, and the full federated Ready unions the Dolt work-leg
++// backlog and truncates to the per-tick wake limit, which evicts genuinely-ready
++// assigned graph wisps (routed cleanup/finalize steps) out of the window and
++// leaves their sessions un-woken. graphStore is the dedicated graph store for the
++// CITY leg (the class-aware successor to the policy-wrapped Router's
++// ReadyGraphOnly); it is nil for rig legs and for the default `bd` backend, where
++// the full federated Live.Ready is read byte-identically. The query already
++// carries TierMode=TierBoth from the caller, matching the policy read-tier
++// expansion the Router's forwarder applied, so graph wisps stay visible. This
++// mirrors readyStoreSet (gc ready) and the dispatch/API read paths.
++func liveReadyForControllerDemandQuery(store, graphStore beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+ 	query.TierMode = beads.TierBoth
+-	if probe, ok := beads.GraphOnlyReadyFor(store); ok {
+-		return probe.ReadyGraphOnly(query)
++	if graphStore != nil && graphStore != store {
++		return graphStore.Ready(query)
+ 	}
+ 	handles := beads.HandlesFor(store)
+ 	return handles.Live.Ready(query)
+diff --git a/cmd/gc/cmd_ready.go b/cmd/gc/cmd_ready.go
+index 5b0f4a1bd..9eb9eb730 100644
+--- a/cmd/gc/cmd_ready.go
++++ b/cmd/gc/cmd_ready.go
+@@ -8,6 +8,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/gastownhall/gascity/internal/beads"
++	"github.com/gastownhall/gascity/internal/config"
+ 	"github.com/spf13/cobra"
+ )
+ 
+@@ -155,16 +156,17 @@ func applyReadyPredicate(in []beads.Bead, p readyPredicate) []beads.Bead {
+ // doReady opens the city store and prints its graph-store-aware ready set as
+ // JSON, after applying the work-query predicate.
+ func doReady(assignee string, pred readyPredicate, stdout, stderr io.Writer) int {
+-	store, code := openCityStore(stderr, "gc ready")
++	store, cityPath, code := openCityStoreWithPath(stderr, "gc ready")
+ 	if store == nil {
+ 		return code
+ 	}
+ 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
++	cfg, _ := loadCityConfig(cityPath, io.Discard)
+ 	query := beads.ReadyQuery{Assignee: assignee}
+ 	if pred.tierBoth {
+ 		query.TierMode = beads.TierBoth
+ 	}
+-	out, err := readyStoreSet(store, query)
++	out, err := readyStoreSet(store, cfg, cityPath, query)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
+ 		return 1
+@@ -172,14 +174,23 @@ func doReady(assignee string, pred readyPredicate, stdout, stderr io.Writer) int
+ 	return writeReadyJSON(applyReadyPredicate(out, pred), stdout, stderr)
+ }
+ 
+-// readyStoreSet returns the graph-class ready slice when the store exposes the
+-// graph-only capability (graph_store=sqlite), else the full federated ready set.
+-// Graph-only keeps the worker demand probe off the Dolt ready hot path (Change
+-// 1) and is the cheap "formula-step ready" slice; the identity-phase fallback
+-// keeps default cities byte-identical.
+-func readyStoreSet(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+-	if probe, ok := beads.GraphOnlyReadyFor(store); ok {
+-		return probe.ReadyGraphOnly(query)
++// readyStoreSet returns the graph-class ready slice when the graph class is
++// relocated (graph_store=sqlite/postgres), else the full ready set from the work
++// store. Reading the dedicated graph store directly is the class-aware successor
++// to the policy-wrapped Router's ReadyGraphOnly: it keeps the worker demand probe
++// off the Dolt ready hot path and is the cheap "formula-step ready" slice. The
++// graph leg reads with TierMode upgraded TierIssues->TierBoth, replicating the
++// policy read-tier expansion the Router's forwarder (policyGraphOnlyReader ->
++// expandPolicyReadyQuery) applied, so graph wisps stay visible. At the default
++// `bd` backend resolveGraphStore returns the work store, so this is byte-identical
++// to store.Ready(query).
++func readyStoreSet(store beads.Store, cfg *config.City, cityPath string, query beads.ReadyQuery) ([]beads.Bead, error) {
++	graph := resolveGraphStore(store, cfg, cityPath, nil)
++	if graph != store {
++		if query.TierMode == beads.TierIssues {
++			query.TierMode = beads.TierBoth
++		}
++		return graph.Ready(query)
+ 	}
+ 	return store.Ready(query)
+ }
+diff --git a/internal/api/huma_handlers_beads.go b/internal/api/huma_handlers_beads.go
+index e04e4427a..df66b61f2 100644
+--- a/internal/api/huma_handlers_beads.go
++++ b/internal/api/huma_handlers_beads.go
+@@ -332,25 +332,24 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
+ 	var all []beads.Bead
+ 	var pa partialAggregator
+ 	seen := make(map[string]bool)
+-	federate := func(label string, store beads.Store) {
+-		if store == nil {
+-			return
+-		}
+-		pa.attempt()
+-		// Under graph_store=sqlite a worker only ever executes graph nodes, so the
+-		// worker/dispatcher readiness hot loop reads the ClassGraph backend ALONE
+-		// and skips the Dolt ClassWork leg. Capability presence gates this: only a
+-		// graph_store=sqlite Router exposes ReadyGraphOnly; every other store falls
+-		// through to the full live Ready (byte-identical for default cities). The
+-		// human/diagnostic backlog view reads store.Ready() directly, not this
+-		// endpoint, so it is unaffected.
+-		var ready []beads.Bead
+-		var err error
+-		if g, ok := beads.GraphOnlyReadyFor(store); ok {
+-			ready, err = g.ReadyGraphOnly()
+-		} else {
+-			ready, err = beads.HandlesFor(store).Live.Ready()
+-		}
++	// Under graph_store=sqlite a worker only ever executes graph nodes, so the
++	// worker/dispatcher readiness hot loop reads the dedicated graph store ALONE
++	// for the city leg and skips the Dolt work leg. The graph store is a single
++	// city-scope store shared by every rig, so it is read ONCE (not per rig). The
++	// rig legs read their full live Ready as before. graphStore == cityStore (the
++	// default `bd` backend, resolveGraphStore returns the work store) means the
++	// graph class is not relocated, so the city leg reads its full live Ready and
++	// the whole endpoint is byte-identical to a plain federation. The
++	// human/diagnostic backlog view reads store.Ready() directly, not this
++	// endpoint, so it is unaffected.
++	cityStore := s.state.CityBeadStore()
++	graphStore := s.state.GraphBeadStore()
++	graphRelocated := graphStore != nil && graphStore != cityStore
++	// mergeReady folds one store's ready slice into the deduped result, mirroring
++	// the partial-result accounting the federate loop has always used: a partial
++	// error with rows still counts as a (partial) success and merges; a hard error
++	// records and contributes nothing.
++	mergeReady := func(label string, ready []beads.Bead, err error) {
+ 		if err != nil {
+ 			if beads.IsPartialResult(err) && len(ready) > 0 {
+ 				pa.record(label, err)
+@@ -370,10 +369,29 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
+ 			all = append(all, b)
+ 		}
+ 	}
++	federate := func(label string, store beads.Store) {
++		if store == nil {
++			return
++		}
++		pa.attempt()
++		ready, err := beads.HandlesFor(store).Live.Ready()
++		mergeReady(label, ready, err)
++	}
+ 	// The city store is NOT among the per-rig BeadStores(); city-scope ready work
+ 	// (graph.v2 molecules in a single-HQ city, control beads) lives there, so
+-	// federate it first or HTTP `bd ready` would never surface it.
+-	federate("city", s.state.CityBeadStore())
++	// federate it first or HTTP `bd ready` would never surface it. When the graph
++	// class is relocated, the city leg's ready work is graph-resident, so read the
++	// graph store's Ready ALONE for it — the class-aware successor to the policy-
++	// wrapped Router's ReadyGraphOnly, which read graph.Ready(TierBoth). TierBoth
++	// matches the policy read-tier expansion the Router's forwarder applied, so
++	// graph wisps (the ephemeral execution tier) stay visible.
++	if graphRelocated {
++		pa.attempt()
++		ready, err := graphStore.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
++		mergeReady("city", ready, err)
++	} else {
++		federate("city", cityStore)
++	}
+ 	for _, rigName := range rigNames {
+ 		federate("rig "+rigName, stores[rigName])
+ 	}

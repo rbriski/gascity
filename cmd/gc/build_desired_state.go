@@ -667,7 +667,8 @@ func buildDesiredStateWithSessionBeads(
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
 	if store != nil {
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
+		graphStore := resolveGraphStore(store, cfg, cityPath, nil)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, graphStore, rigStores, suspendedRigPaths, sessionBeads)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -1066,7 +1067,7 @@ func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
 ) ([]beads.Bead, bool) {
-	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil)
+	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil, nil)
 	return result, partial
 }
 
@@ -1080,6 +1081,7 @@ func collectAssignedWorkBeads(
 func collectAssignedWorkBeadsWithStores(
 	cfg *config.City,
 	cityStore beads.Store,
+	graphStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
@@ -1087,16 +1089,37 @@ func collectAssignedWorkBeadsWithStores(
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
 	type workStore struct {
-		store beads.Store
-		ref   string
+		store      beads.Store
+		ref        string
+		graphStore beads.Store // shared city-scope graph store, attached to every leg when relocated; nil otherwise
 	}
-	stores := []workStore{{store: cityStore}}
+	// The graph store is a single city-scope shared handle (registerGraphStoreBackend
+	// keys on cityPath). When the graph class is relocated (graph_store=sqlite/
+	// postgres) it is attached to EVERY leg — city and rig alike — because the entire
+	// readiness set is graph-resident: liveReadyForControllerDemandQuery then reads
+	// graphStore.Ready (graph-only) on every leg, reproducing the prior policy-wrapped
+	// Router's per-leg ReadyGraphOnly. Leaving the rig legs with graphStore=nil would
+	// make them read Router.Ready = rigWork∪graph and leak assigned rig-WORK beads
+	// into the controller-demand wake gate (readyAssignedIDs).
+	//
+	// For the default `bd` backend resolveGraphStore returns the work store, so
+	// graphStore == cityStore and relocatedGraph is false. The city leg passes that
+	// store (graphStore == store ⇒ liveReady falls through to Live.Ready); the rig
+	// legs pass nil and read their own federated Live.Ready. Both are byte-identical
+	// to the pre-rewire default. The city work store must NOT be attached to rig legs
+	// here — it is not the rig's graph store and would read the wrong backend.
+	relocatedGraph := graphStore != nil && graphStore != cityStore
+	stores := []workStore{{store: cityStore, graphStore: graphStore}}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
 		}
 		if s, ok := rigStores[rig.Name]; ok {
-			stores = append(stores, workStore{store: s, ref: rig.Name})
+			var rigGraph beads.Store
+			if relocatedGraph {
+				rigGraph = graphStore
+			}
+			stores = append(stores, workStore{store: s, ref: rig.Name, graphStore: rigGraph})
 		}
 	}
 
@@ -1202,13 +1225,13 @@ func collectAssignedWorkBeadsWithStores(
 			var err error
 			var errs []error
 			if len(assignees) == 0 {
-				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+				ready, err = liveReadyForControllerDemandQuery(source.store, source.graphStore, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
 			} else {
 				for _, assignee := range assignees {
-					part, partErr := liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+					part, partErr := liveReadyForControllerDemandQuery(source.store, source.graphStore, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
 					if partErr != nil {
 						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
 					}
@@ -1764,18 +1787,24 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 
 // liveReadyForControllerDemandQuery returns the live ready set that feeds the
 // controller-demand awake/readiness gate (readyAssignedIDs). Under
-// graph_store=sqlite it prefers the graph-class ready slice (ReadyGraphOnly):
-// a worker only executes graph nodes, and the full federated Router.Ready
-// unions the Dolt work-leg backlog and truncates to the per-tick wake limit,
-// which evicts genuinely-ready assigned graph wisps (routed cleanup/finalize
-// steps) out of the window and leaves their sessions un-woken. This mirrors
-// readyStoreSet (gc ready) and the dispatch/API read paths; default Dolt-only
-// cities lack the capability and fall back to the federated Live.Ready
-// byte-identically.
-func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+// graph_store=sqlite it prefers the graph-class ready slice: a worker only
+// executes graph nodes, and the full federated Ready unions the Dolt work-leg
+// backlog and truncates to the per-tick wake limit, which evicts genuinely-ready
+// assigned graph wisps (routed cleanup/finalize steps) out of the window and
+// leaves their sessions un-woken. graphStore is the shared city-scope graph store
+// (the class-aware successor to the policy-wrapped Router's ReadyGraphOnly); when
+// the graph class is relocated it is passed for EVERY leg — city and rig — so each
+// leg reads the graph-resident ready set ALONE (graphStore != that leg's work
+// store), never the leg's federated work∪graph union. It is nil for the default
+// `bd` backend (and for the city leg there, graphStore == store), where the full
+// federated Live.Ready is read byte-identically. The query already carries
+// TierMode=TierBoth from the caller, matching the policy read-tier expansion the
+// Router's forwarder applied, so graph wisps stay visible. This mirrors
+// readyStoreSet (gc ready) and the dispatch/API read paths.
+func liveReadyForControllerDemandQuery(store, graphStore beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
 	query.TierMode = beads.TierBoth
-	if probe, ok := beads.GraphOnlyReadyFor(store); ok {
-		return probe.ReadyGraphOnly(query)
+	if graphStore != nil && graphStore != store {
+		return graphStore.Ready(query)
 	}
 	handles := beads.HandlesFor(store)
 	return handles.Live.Ready(query)

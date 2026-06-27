@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -155,16 +156,17 @@ func applyReadyPredicate(in []beads.Bead, p readyPredicate) []beads.Bead {
 // doReady opens the city store and prints its graph-store-aware ready set as
 // JSON, after applying the work-query predicate.
 func doReady(assignee string, pred readyPredicate, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc ready")
+	store, cityPath, code := openCityStoreWithPath(stderr, "gc ready")
 	if store == nil {
 		return code
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	query := beads.ReadyQuery{Assignee: assignee}
 	if pred.tierBoth {
 		query.TierMode = beads.TierBoth
 	}
-	out, err := readyStoreSet(store, query)
+	out, err := readyStoreSet(store, cfg, cityPath, query)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -172,14 +174,23 @@ func doReady(assignee string, pred readyPredicate, stdout, stderr io.Writer) int
 	return writeReadyJSON(applyReadyPredicate(out, pred), stdout, stderr)
 }
 
-// readyStoreSet returns the graph-class ready slice when the store exposes the
-// graph-only capability (graph_store=sqlite), else the full federated ready set.
-// Graph-only keeps the worker demand probe off the Dolt ready hot path (Change
-// 1) and is the cheap "formula-step ready" slice; the identity-phase fallback
-// keeps default cities byte-identical.
-func readyStoreSet(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
-	if probe, ok := beads.GraphOnlyReadyFor(store); ok {
-		return probe.ReadyGraphOnly(query)
+// readyStoreSet returns the graph-class ready slice when the graph class is
+// relocated (graph_store=sqlite/postgres), else the full ready set from the work
+// store. Reading the dedicated graph store directly is the class-aware successor
+// to the policy-wrapped Router's ReadyGraphOnly: it keeps the worker demand probe
+// off the Dolt ready hot path and is the cheap "formula-step ready" slice. The
+// graph leg reads with TierMode upgraded TierIssues->TierBoth, replicating the
+// policy read-tier expansion the Router's forwarder (policyGraphOnlyReader ->
+// expandPolicyReadyQuery) applied, so graph wisps stay visible. At the default
+// `bd` backend resolveGraphStore returns the work store, so this is byte-identical
+// to store.Ready(query).
+func readyStoreSet(store beads.Store, cfg *config.City, cityPath string, query beads.ReadyQuery) ([]beads.Bead, error) {
+	graph := resolveGraphStore(store, cfg, cityPath, nil)
+	if graph != store {
+		if query.TierMode == beads.TierIssues {
+			query.TierMode = beads.TierBoth
+		}
+		return graph.Ready(query)
 	}
 	return store.Ready(query)
 }

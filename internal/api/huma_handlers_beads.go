@@ -328,29 +328,30 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 
 	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
 	var all []beads.Bead
 	var pa partialAggregator
 	seen := make(map[string]bool)
-	federate := func(label string, store beads.Store) {
-		if store == nil {
-			return
-		}
-		pa.attempt()
-		// Under graph_store=sqlite a worker only ever executes graph nodes, so the
-		// worker/dispatcher readiness hot loop reads the ClassGraph backend ALONE
-		// and skips the Dolt ClassWork leg. Capability presence gates this: only a
-		// graph_store=sqlite Router exposes ReadyGraphOnly; every other store falls
-		// through to the full live Ready (byte-identical for default cities). The
-		// human/diagnostic backlog view reads store.Ready() directly, not this
-		// endpoint, so it is unaffected.
-		var ready []beads.Bead
-		var err error
-		if g, ok := beads.GraphOnlyReadyFor(store); ok {
-			ready, err = g.ReadyGraphOnly()
-		} else {
-			ready, err = beads.HandlesFor(store).Live.Ready()
-		}
+	// Under graph_store=sqlite a worker only ever executes graph nodes, so the
+	// worker/dispatcher readiness hot loop reads the dedicated graph store ALONE
+	// and skips the Dolt work leg entirely. The graph store is a single
+	// city-scope store shared by every rig, so every rig's graph beads already
+	// live there: it is read ONCE and the per-rig federation is skipped (each
+	// rig store is policy(Router(rigWork+sharedGraph)), so iterating them would
+	// read Router.Ready = rigWork∪graph and leak gc-N work beads into the
+	// readiness set). graphStore == cityStore (the default `bd` backend, where
+	// resolveGraphStore returns the work store) means the graph class is not
+	// relocated, so the endpoint federates the city store and every rig store's
+	// full live Ready, byte-identical to the prior plain federation. The
+	// human/diagnostic backlog view reads store.Ready() directly, not this
+	// endpoint, so it is unaffected.
+	cityStore := s.state.CityBeadStore()
+	graphStore := s.state.GraphBeadStore()
+	graphRelocated := graphStore != nil && graphStore != cityStore
+	// mergeReady folds one store's ready slice into the deduped result, mirroring
+	// the partial-result accounting the federate loop has always used: a partial
+	// error with rows still counts as a (partial) success and merges; a hard error
+	// records and contributes nothing.
+	mergeReady := func(label string, ready []beads.Bead, err error) {
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -370,12 +371,38 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			all = append(all, b)
 		}
 	}
-	// The city store is NOT among the per-rig BeadStores(); city-scope ready work
-	// (graph.v2 molecules in a single-HQ city, control beads) lives there, so
-	// federate it first or HTTP `bd ready` would never surface it.
-	federate("city", s.state.CityBeadStore())
-	for _, rigName := range rigNames {
-		federate("rig "+rigName, stores[rigName])
+	federate := func(label string, store beads.Store) {
+		if store == nil {
+			return
+		}
+		pa.attempt()
+		ready, err := beads.HandlesFor(store).Live.Ready()
+		mergeReady(label, ready, err)
+	}
+	// When the graph class is relocated (graph_store=sqlite/postgres), the entire
+	// readiness set IS the shared graph store's Ready — read it ALONE, ONCE, and
+	// do NOT federate any rig: every rig's graph beads already live in the shared
+	// store, and iterating the rig stores would read Router.Ready (rigWork∪graph)
+	// and leak work beads. This is the class-aware successor to the policy-wrapped
+	// Router's ReadyGraphOnly, which read graph.Ready(TierBoth); TierBoth matches
+	// the policy read-tier expansion the Router's forwarder applied, so graph
+	// wisps (the ephemeral execution tier) stay visible.
+	//
+	// When NOT relocated, the city store is injected into BeadStores() under
+	// cityName by controllerState, but it is also addressed explicitly here so the
+	// federation order is deterministic and so a state that does NOT inject it
+	// still surfaces city-scope ready work (graph.v2 molecules in a single-HQ
+	// city, control beads). sortedRigNames dedups by store identity, so the
+	// cityName entry it returns is folded into the deduped result via `seen`.
+	if graphRelocated {
+		pa.attempt()
+		ready, err := graphStore.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		mergeReady("city", ready, err)
+	} else {
+		federate("city", cityStore)
+		for _, rigName := range sortedRigNames(stores) {
+			federate("rig "+rigName, stores[rigName])
+		}
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

@@ -454,7 +454,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutation(workStore, sp, cfg, b, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutation(sessionStore, sp, cfg, b, "duplicate named session", stderr) {
 				continue
 			}
 			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
@@ -528,7 +528,7 @@ func retireRemovedConfiguredNamedSessionBead(
 	if sessionStore == nil || workStore == nil {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(workStore, sp, nil, b, "removed named session", stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(sessionStore, sp, nil, b, "removed named session", stderr) {
 		return false
 	}
 	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
@@ -820,8 +820,11 @@ func syncSessionBeads(
 	stderr io.Writer,
 	skipClose bool,
 ) map[string]string {
+	// Byte-identical placeholder: the single-store wrapper passes its store as
+	// both the session and work store. The real sessionStore derivation lands at
+	// the controller entry points in a later phase.
 	openIndex, _ := syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, store, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
+		cityPath, store, store, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
 	)
 	return openIndex
 }
@@ -838,13 +841,23 @@ func syncSessionBeadsWithSnapshot(
 	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
+	// Byte-identical placeholder: pass store as both the session and work store
+	// until the controller derives a real sessionStore in a later phase.
 	return syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, store, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, sessionBeads,
+		cityPath, store, store, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, sessionBeads,
 	)
 }
 
+// syncSessionBeadsWithSnapshotAndRigStores is the big mixed sync. The store pair
+// is ordered (sessionStore, workStore) to match the close-family: every
+// session-bead op (snapshot/load, type repair, Create, alias/name guards,
+// session-name finalize, setMeta/setMetaBatch, reopen) targets sessionStore,
+// while the work-assignment legs inside the threaded close/retire delegates
+// (closeSessionBeadIf*, retire*) reach workStore/rigStores. Byte-identical at the
+// default bd backend where the two stores are identical.
 func syncSessionBeadsWithSnapshotAndRigStores(
 	cityPath string,
+	sessionStore beads.Store,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	desiredState map[string]TemplateParams,
@@ -856,14 +869,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
-	if store == nil {
+	if sessionStore == nil || store == nil {
 		return nil, nil
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
 
-	existing, err := snapshotOrLoadSessionBeads(store, sessionBeads)
+	existing, err := snapshotOrLoadSessionBeads(sessionStore, sessionBeads)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
 		return nil, sessionBeads
@@ -878,7 +891,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			continue
 		}
 		t := sessionBeadType
-		if err := store.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
+		if err := sessionStore.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
 			fmt.Fprintf(stderr, "session beads: repairing type for %s: %v\n", b.ID, err) //nolint:errcheck
 		} else {
 			existing[i].Type = sessionBeadType
@@ -897,7 +910,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
 			continue
 		}
-		if closeFailedCreateBead(store, store, b.ID, now, stderr) {
+		if closeFailedCreateBead(sessionStore, store, b.ID, now, stderr) {
 			openBeads[i].Status = "closed"
 		}
 	}
@@ -933,7 +946,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		canonical, ok := bySessionName[sn]
 		if ok && canonical.ID != b.ID {
-			if closeSessionBeadIfUnassigned(store, store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
+			if closeSessionBeadIfUnassigned(sessionStore, store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
 				openBeads[i].Status = "closed"
 			}
 		}
@@ -955,7 +968,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if visibleLoaded {
 			return visibleBySessionName, nil
 		}
-		open, err := loadSessionBeads(store)
+		open, err := loadSessionBeads(sessionStore)
 		if err != nil {
 			return nil, err
 		}
@@ -978,7 +991,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
 				continue
 			}
-			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(store, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
+			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(sessionStore, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
 				blockedReconfiguredNamedIdentities[identity] = true
 				continue
 			}
@@ -986,7 +999,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			openBeads[i].Status = "closed"
 		}
 		openBeads = retireDuplicateConfiguredNamedSessionBeads(
-			store, store, rigStores, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
+			sessionStore, store, rigStores, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
 		)
 	}
 
@@ -1019,7 +1032,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 
 		b, exists := bySessionName[sn]
 		if !exists && isConfiguredNamed {
-			if liveBead, ok, freshErr := findOpenSessionBeadBySessionName(store, sn); freshErr != nil {
+			if liveBead, ok, freshErr := findOpenSessionBeadBySessionName(sessionStore, sn); freshErr != nil {
 				fmt.Fprintf(stderr, "session beads: refreshing open bead for %s: %v\n", sn, freshErr) //nolint:errcheck
 			} else if ok {
 				b = liveBead
@@ -1045,7 +1058,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
 						continue
 					}
-					if closeSessionBeadIfUnassigned(store, store, rigStores, cfg, open, "duplicate", now, stderr) {
+					if closeSessionBeadIfUnassigned(sessionStore, store, rigStores, cfg, open, "duplicate", now, stderr) {
 						openBeads[i].Status = "closed"
 					}
 				}
@@ -1054,7 +1067,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
-			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
+			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, sessionStore, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
 				b = reopened
 				exists = true
 				state = syncSessionCachedState(sn, b, exists, sp)
@@ -1154,7 +1167,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 			createBead := func() (beads.Bead, error) {
-				return store.Create(beads.Bead{
+				return sessionStore.Create(beads.Bead{
 					Title:    agentName,
 					Type:     sessionBeadType,
 					Labels:   []string{sessionBeadLabel, "agent:" + agentName},
@@ -1173,10 +1186,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
 					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
-					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
+					if err := sessionStore.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
-						closeFailedCreateBead(store, store, newBead.ID, now, stderr)
+						closeFailedCreateBead(sessionStore, store, newBead.ID, now, stderr)
 						return
 					}
 					if newBead.Metadata == nil {
@@ -1190,7 +1203,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if managedAlias != "" {
 				lockFn := func() error {
-					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, "", managedAlias); err != nil {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(sessionStore, cfg, managedAlias, "", managedAlias); err != nil {
 						fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
 						if isConfiguredNamed {
 							createErr = err
@@ -1201,7 +1214,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						meta["alias"] = managedAlias
 					}
 					if isConfiguredNamed {
-						if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sn, "", managedAlias); err != nil {
+						if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessionStore, cfg, sn, "", managedAlias); err != nil {
 							fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable: %v\n", sn, agentName, err) //nolint:errcheck
 							createErr = err
 							blocked = true
@@ -1427,7 +1440,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		applyBatch := func() {
 			if len(batch) > 0 {
 				batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
-				if setMetaBatch(store, b.ID, batch, stderr) == nil {
+				if setMetaBatch(sessionStore, b.ID, batch, stderr) == nil {
 					if b.Metadata == nil {
 						b.Metadata = make(map[string]string, len(batch))
 					}
@@ -1448,7 +1461,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if changed {
 				// Defensive fallback; current callers should always have queued at
 				// least one metadata write when changed=true.
-				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
+				setMeta(sessionStore, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
 			}
 		}
 		clearAliasConflict := func() {
@@ -1504,11 +1517,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				var err error
 				switch {
 				case isConfiguredNamed:
-					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
+					err = session.EnsureAliasAvailableWithConfigForOwner(sessionStore, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
 				case isManagedPool && isPoolInstance:
-					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, managedAlias)
+					err = session.EnsureAliasAvailableWithConfigForOwner(sessionStore, cfg, managedAlias, b.ID, managedAlias)
 				default:
-					err = session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID)
+					err = session.EnsureAliasAvailableWithConfig(sessionStore, cfg, managedAlias, b.ID)
 				}
 				if err != nil {
 					recordAliasConflict()
@@ -1548,7 +1561,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		applyBatch()
 	}
-	openBeads = syncDesiredPoolSlots(store, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
+	openBeads = syncDesiredPoolSlots(sessionStore, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
 
 	// Classify and close beads with no matching desired entry.
 	if !skipClose {
@@ -1566,7 +1579,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if isNamedSessionBead(b) {
 				identity := namedSessionIdentity(b)
 				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
-					if retireRemovedConfiguredNamedSessionBead(store, store, rigStores, sp, b, now, stderr) {
+					if retireRemovedConfiguredNamedSessionBead(sessionStore, store, rigStores, sp, b, now, stderr) {
 						if idx, ok := indexBySessionName[sn]; ok {
 							openBeads[idx].Status = "open"
 							if openBeads[idx].Metadata == nil {
@@ -1590,7 +1603,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			if configuredNames[sn] {
-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
+				if closeSessionBeadIfRuntimeStoppedAndUnassigned(sessionStore, store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -1604,7 +1617,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 					}
 				}
-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
+				if closeSessionBeadIfRuntimeStoppedAndUnassigned(sessionStore, store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -1845,17 +1858,23 @@ func closeFailedCreateBead(sessionStore, workStore beads.Store, id string, now t
 // preserving claim continuity across tmux death+restart for active ones.
 //
 // Returns the number of beads reaped.
+//
+// Store pair ordered (sessionStore, workStore) to match the close-family: the
+// session read (loadSessionBeads) targets sessionStore, and closeBead carries
+// both stores so its work-release leg reaches workStore. Byte-identical at the
+// default bd backend where the two stores are identical.
 func reapStaleSessionBeads(
-	store beads.Store,
+	sessionStore beads.Store,
+	workStore beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
 	clk clock.Clock,
 	stderr io.Writer,
 ) int {
-	if store == nil || sp == nil {
+	if sessionStore == nil || sp == nil {
 		return 0
 	}
-	open, err := loadSessionBeads(store)
+	open, err := loadSessionBeads(sessionStore)
 	if err != nil {
 		fmt.Fprintf(stderr, "reapStaleSessionBeads: %v\n", err) //nolint:errcheck
 		return 0
@@ -1937,7 +1956,7 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
-		if closeBead(store, store, b.ID, "stale-session", now.UTC(), stderr) {
+		if closeBead(sessionStore, workStore, b.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -1945,8 +1964,15 @@ func reapStaleSessionBeads(
 	return reaped
 }
 
+// Store pair ordered (sessionStore, workStore) to match the close-family: the
+// dead-runtime corpse iteration is over an in-memory session snapshot, and
+// closeBead carries both stores so its work-release leg reaches workStore. A
+// dead session may hold in_progress work, but releasing it lives inside
+// closeBead's workStore leg, so the corpse cleanup only needs to forward the
+// pair. Byte-identical at the default bd backend.
 func cleanupDeadRuntimeSessionCorpses(
-	store beads.Store,
+	sessionStore beads.Store,
+	workStore beads.Store,
 	_ map[string]beads.Store,
 	_ *config.City,
 	sessionBeads *sessionBeadSnapshot,
@@ -2029,11 +2055,11 @@ func cleanupDeadRuntimeSessionCorpses(
 		// runtime has been confirmed dead and stopped cannot be resumed,
 		// so releasing its work is the correct action.
 		//
-		// The outer `if store != nil` guard tolerates a nil store so the
+		// The outer `if sessionStore != nil` guard tolerates a nil store so the
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
-		if store != nil {
-			closeBead(store, store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
+		if sessionStore != nil {
+			closeBead(sessionStore, workStore, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
 	}
@@ -2063,14 +2089,18 @@ func cleanupDeadRuntimeSessionCorpses(
 // confirms is closed. A runtime without a readable GC_SESSION_ID, or one whose
 // bead is still open or cannot be fetched (e.g. another rig, or a transient
 // store error), is left untouched. Active drains are left to the drainTracker.
+// reapRuntimesBoundToClosedBeads is a pure-session helper: it confirms a live
+// runtime's owning session bead is closed via a session-store Get before
+// reaping. It performs no work-assignment op, so it keeps a single store param
+// and the caller passes the SESSION store.
 func reapRuntimesBoundToClosedBeads(
-	store beads.Store,
+	sessionStore beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
 	stderr io.Writer,
 ) int {
-	if store == nil || sp == nil {
+	if sessionStore == nil || sp == nil {
 		return 0
 	}
 	if stderr == nil {
@@ -2117,7 +2147,7 @@ func reapRuntimesBoundToClosedBeads(
 
 		// The bead is not open. Confirm it is actually closed before reaping —
 		// a missing or unreadable record must not trigger a stop.
-		bead, err := store.Get(liveID)
+		bead, err := sessionStore.Get(liveID)
 		if err != nil {
 			continue
 		}
@@ -2143,14 +2173,18 @@ func reapRuntimesBoundToClosedBeads(
 	return reaped
 }
 
+// sweepProcessTableOrphans is a pure-session helper: it confirms a process-table
+// runtime's owning session bead is closed (or absent) via a session-store Get
+// before terminating it. It performs no work-assignment op, so it keeps a single
+// store param and the caller passes the SESSION store.
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
 	_ *sessionBeadSnapshot,
-	store beads.Store,
+	sessionStore beads.Store,
 	cityPath string,
 	stderr io.Writer,
 ) int {
-	if sp == nil || store == nil {
+	if sp == nil || sessionStore == nil {
 		return 0
 	}
 	if stderr == nil {
@@ -2173,8 +2207,8 @@ func sweepProcessTableOrphans(
 			continue
 		}
 		// The process-table scan is supervisor-wide: it walks all of /proc and
-		// returns every gc session on the host, across every city. But `store`
-		// here is this city's bead store and `sp` is this city's runtime
+		// returns every gc session on the host, across every city. But
+		// `sessionStore` here is this city's bead store and `sp` is this city's runtime
 		// provider, so a sibling city's live session is invisible to both —
 		// its bead lookup misses and IsTracked is false. Reaping on that basis
 		// SIGTERMs another city's healthy session. Only consider runtimes
@@ -2183,7 +2217,7 @@ func sweepProcessTableOrphans(
 		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
-		bead, err := store.Get(live.SessionID)
+		bead, err := sessionStore.Get(live.SessionID)
 		switch {
 		case err == nil && bead.Status != "closed":
 			continue // bead still open — leave the runtime alone
@@ -2220,9 +2254,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 		stderr = io.Discard
 	}
 	// Work-assignment guards read the WORK store(s); the session-close legs
-	// target sessionStore. stopRuntimeBeforeSessionBeadMutation stays on the
-	// work store for now (a session op threaded in a later phase) — byte-
-	// identical at the default bd backend where the two stores are identical.
+	// target sessionStore. stopRuntimeBeforeSessionBeadMutation is a pure-session
+	// op, so it now takes the SESSION store. Byte-identical at the default bd
+	// backend where the two stores are identical.
 	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(workStore, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
@@ -2231,7 +2265,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if hasAssignedWork {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(workStore, sp, cfg, b, stopReason, stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(sessionStore, sp, cfg, b, stopReason, stderr) {
 		return false
 	}
 	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(workStore, rigStores, b, cfg)
@@ -2248,8 +2282,12 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	return closeBead(sessionStore, workStore, b.ID, closeReason, now, stderr)
 }
 
+// stopRuntimeBeforeSessionBeadMutation is a pure-session helper: it reads the
+// session bead's session_name and kills the matching runtime via the session
+// target resolver. It performs no work-assignment op, so it keeps a single
+// store param and callers pass the SESSION store.
 func stopRuntimeBeforeSessionBeadMutation(
-	store beads.Store,
+	sessionStore beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	b beads.Bead,
@@ -2266,7 +2304,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 	if !sp.IsRunning(sessionName) {
 		return true
 	}
-	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
+	if err := workerKillSessionTargetWithConfig("", sessionStore, sp, cfg, sessionName); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, b.ID, err) //nolint:errcheck
 		return false
 	}

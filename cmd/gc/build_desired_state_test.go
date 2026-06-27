@@ -4286,6 +4286,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath,
 		store,
+		store,
 		nil,
 		firstTick.State,
 		sp,

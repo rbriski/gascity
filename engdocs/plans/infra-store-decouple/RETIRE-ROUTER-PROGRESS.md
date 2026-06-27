@@ -61,11 +61,28 @@ epic: ga-pd6tcg
 - [ ] **P4-followup** STOP-path session helpers in session_lifecycle_parallel.go (~2827-2861:
   stopTargetThroughWorkerBoundary / cityStopSessionMarked / markCityStopSessionAsAsleep) are still
   single-`store` session ops — thread to sessionStore (flagged by the P4b review).
-- [ ] **P5 — build_desired_state.go + agent_build_params.go + pool_session_name.go**
-  (desired-state dual-class; `bp.sessionStore`). ⚠ Q3 gate: sessions city-only?
-- [ ] **P6 — derive `sessionStore` at city_runtime.go entry points + CLI/sweep writers**
-  (mirror `resolveNudgesStore`; add `cr.sessionBeadStore()`). May split 6a/6b. ⚠ Q2 gate:
-  `runAdoptionBarrier` classification.
+- [x] **P5** (`bec4104fa`) build_desired_state.go + agent_build_params.go — `bp.sessionStore`; review
+  `wf_3a185f81` SAFE-TO-PROCEED. Q3 resolved: sessions city-only (rig legs work). **All controller
+  threading P1–P5 DONE.**
+- [ ] **P6 — ACTIVATION: derive the real `sessionStore` (with `cr.rec`) at entry points.** Until
+  here every caller passes `(store, store)`, so at relocation session ops still ride the Router
+  (federation); P6 makes the threaded ops go DIRECT to the session store. Split:
+  - **P6a (controller)**: add `func (cr *CityRuntime) sessionBeadStore() beads.Store { return
+    resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec) }`; at each entry point
+    (run ~537-580, tick ~1091-1216, beadReconcileTick ~2091, the watchdogs, nudge/control ticks,
+    finalizeDrainAckStopPendingSessions caller ~1127, the buildDesiredState/refresh callers, the
+    reconcile callers) derive `sessionStore := cr.sessionBeadStore()` once and pass it as the
+    FIRST arg where the placeholder `(store, store)` / `(cityBeadStore, cityBeadStore)` is now.
+    Byte-identical at default (resolveSessionStore returns the work store). **Recorder (Q4): cr.rec
+    is passed → at relocation openClassSQLiteStore attaches the recorder. NOTE: takes effect only
+    after P7 unregisters ClassSessions (else the Router's nil-recorder open wins the dir cache).**
+  - **P6b (CLI + leftovers)**: cmd_wait.go (cmdSessionWait, cmdWaitSetStateResult), cmd_nudge.go
+    (per-entry openers), cmd_session_wake.go, cmd_stop.go (markCityStopSessionSleepReason) derive
+    `resolveSessionStore(store, cfg, cityPath, rec)` locally and pass to the threaded fns. PLUS
+    **W1**: route session lookups in session_name_lookup.go:343 + template_resolve.go:250/366 to
+    bp.sessionStore. PLUS **P4-followup**: stop-path helpers (session_lifecycle_parallel.go
+    ~2827-2861) → sessionStore. ⚠ Q2 gate: audit `runAdoptionBarrier` (city_runtime.go:480) — does
+    it read WORK? (if session-only, route S; if it reads work, two-store).
 - [ ] **P7 — cutover: guard test + unregister ClassSessions** (`api_state.go`). The only
   phase with relocated-backend behavior change. ⚠ Q4: event emission policy.
 

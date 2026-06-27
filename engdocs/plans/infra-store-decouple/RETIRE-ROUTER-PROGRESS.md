@@ -121,6 +121,18 @@ graph store directly (resolveClassStore(graph)); the by-id-agnostic case uses st
   dies with the Router. Gate: relocated graph conformance (graph=sqlite by-id close lands on graph
   store; ReadyGraphOnly == graph store Ready) + adversarial review + whole-tree green.
 
+> 🛑 **TRACK-G LANDMINE (data-loss): the SQLite graph store is at the LEGACY `.gc/beads.sqlite`,
+> NOT `.gc/graph/`.** `registerGraphStoreSQLite` (api_state.go) opens `<cityPath>/.gc/beads.sqlite`
+> with the gcg prefix. `resolveClassStore(graph)`→`openClassSQLiteStore`→`.gc/graph/` is a
+> DIFFERENT (empty) location. Folding graph into resolveClassStore naively would point the live
+> city at an empty store and ORPHAN the live graph data (auto-memory: "do NOT route SQLite graph
+> through openClassSQLiteStore→.gc/graph/ or it orphans live graph files"). So G1/G3 MUST preserve
+> the legacy location for SQLite graph (a dedicated graph opener / special-case in resolveClassStore),
+> OR migrate `.gc/beads.sqlite`→`.gc/graph/` at the owner-gated cutover. **graph=sqlite is LIVE on
+> maintainer-city, so Track G changes ship live — needs a relocated-graph conformance harness +
+> adversarial review + owner awareness of the data risk. Do Track G with FRESH context; do not
+> rush it after the large Track-S session.**
+
 ## Followups (per /goal "all followups")
 - [x] Phase-C tier for SESSIONS — moot/resolved (session store is not a Ready source; guarded by
   TestRelocatedSessionBeadsExcludedFromWorkReady). NB nudge/mail/order classes still carry the

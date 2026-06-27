@@ -60,7 +60,7 @@ between slices; a design workflow is spun up when a slice is ambiguous.
 ### Track B — Backend (cross-cluster minting + orchestration + Model-B launch)
 | ID | Slice | Repo | Status | Depends |
 |----|-------|------|--------|---------|
-| **B0** | **Accounts `provisioningToken`** — DB-backed **per-org** token re-gating the 3 org-bound SP/key routes (drop `adminToken`); `created_by`=non-NULL system sentinel; `UNIQUE(org_id,name)`. Red-teamed spec: [B0-provisioning-token-spec.md](B0-provisioning-token-spec.md) | gasworks-platform | SPEC (red-teamed) | — (UNBLOCK) |
+| **B0** | **Accounts `provisioningToken`** — DB-backed **per-org** token re-gating the 3 org-bound SP/key routes; human path keeps `adminToken` (defense-in-depth), machine path = per-org token; `created_by`=non-NULL system sentinel; `UNIQUE(org_id,name)`. Spec: [B0-provisioning-token-spec.md](B0-provisioning-token-spec.md). Commits `e283527`+`6fb52d6` (branch `feat/accounts-provisioning-token`); 5 unit + full suite green; red-team **ship**. | gasworks-platform | ✅ DONE | — (UNBLOCK) |
 | B1 | crucible `/v0/cities` pull-intent rework: drop admin-token; mint eiasign intent (nonce+TTL); citystore pending→ready; `GET /v0/cities/pending` (mTLS) + `POST /v0/cities/{id}/complete` | forge | TODO | B0 |
 | B2 | identity-v0 provisioner binary: pull intents → verify → mint crucible+beads+manifold keys via provisioningToken → OpenBao → `/complete` | forge | TODO | B0, B1 |
 | B3 | Infra: provisioner Deployment/SA/netpol, ESO ExternalSecret (corp-public ← bao-product-eu), RWO PVC; remove admin-token env | _infra | TODO | B2 |
@@ -97,4 +97,6 @@ between slices; a design workflow is spun up when a slice is ambiguous.
 - Keep changes minimal-surface and upstream-friendly per `AGENTS.md`; ZERO hardcoded roles.
 
 ## Burn-down log
-- 2026-06-27: backlog created; auth path confirmed; starting **B0** + **A1/A2** in parallel.
+- 2026-06-27: backlog created; auth path confirmed (shell-BFF cities route).
+- 2026-06-27: **B0 DONE** — provisioningToken design+adversarial-security workflow → red-teamed spec; impl (schema 061/062 + gateProvision + ResolveProvisioningToken + CreateServicePrincipalAs + 3-handler re-gate); 5 unit tests + full accounts suite green; diff red-team verdict **ship** (strictly narrower than adminToken, no bypass, no NULL-created_by, no regression). Improvement over spec: human path keeps the admin-token wire check.
+- 2026-06-27: starting **A1/A2** (forge-web create-city wizard) — unblocked, parallel track.

@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // TrackingDepType is the dependency type used for convoy membership edges.
@@ -21,8 +22,16 @@ func IsTerminalStatus(status string) bool {
 
 // TrackItem records that convoyID tracks itemID without changing itemID's
 // parent-child relationship.
-func TrackItem(store beads.Store, convoyID, itemID string) error {
-	if _, err := store.Get(itemID); err != nil {
+//
+// A synthetic (graph-class) convoy can track a work-class member that physically
+// lives in a different store, so the itemID existence pre-check resolves across the
+// convoy's own store plus any memberStores the caller supplies — the class-aware
+// successor to coordrouter.Router's federated by-id read. The tracks DepAdd stays on
+// store (the convoy bead's home), where the edge belongs. memberStores is variadic
+// so same-class callers (convoy and members co-resident) pass nothing and are
+// byte-identical to the prior single-store behavior.
+func TrackItem(store beads.Store, convoyID, itemID string, memberStores ...beads.Store) error {
+	if _, err := storeref.Resolve(itemID, append([]beads.Store{store}, memberStores...)); err != nil {
 		return fmt.Errorf("getting tracked item %s: %w", itemID, err)
 	}
 	if err := store.DepAdd(convoyID, itemID, TrackingDepType); err != nil {
@@ -65,7 +74,15 @@ func UntrackItem(store beads.Store, convoyID, itemID string) error {
 // tracks dependency relation and legacy parent-child convoy membership.
 // Unresolved tracks dependencies are returned with unknown status so completion
 // paths never mistake missing dependency details for completed work.
-func Members(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
+//
+// A synthetic (graph-class) convoy can track work-class members in a different
+// store, so each tracked member is resolved across the convoy's own store plus any
+// memberStores the caller supplies (the class-aware successor to the Router's
+// federated member read). The convoy's own DepList/List stay on store (the convoy
+// bead's home). memberStores is variadic so same-class callers pass nothing and stay
+// byte-identical to the prior single-store behavior.
+func Members(store beads.Store, convoyID string, includeClosed bool, memberStores ...beads.Store) ([]beads.Bead, error) {
+	memberResolveStores := append([]beads.Store{store}, memberStores...)
 	legacyChildren, err := store.List(beads.ListQuery{
 		ParentID:      convoyID,
 		IncludeClosed: includeClosed,
@@ -99,7 +116,7 @@ func Members(store beads.Store, convoyID string, includeClosed bool) ([]beads.Be
 		if dep.Type != TrackingDepType {
 			continue
 		}
-		item, err := store.Get(dep.DependsOnID)
+		item, err := storeref.Resolve(dep.DependsOnID, memberResolveStores)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				add(unresolvedTrackedItem(dep.DependsOnID))

@@ -57,7 +57,16 @@ between slices; a design workflow is spun up when a slice is ambiguous.
 | A3 | Async status view: poll status; per-step checklist (creds → beads → controller) + cred summary | forge-web | ✅ DONE | A1 |
 | A4 | `createCity()`/`getCityStatus()` client via `@gascity/auth` ApiClient (targets the B7 route) | forge-web | ◑ client done; real wiring needs B7 | A1, B7 |
 
-> A1–A3 committed `0b904ab` (branch `feat/forge-web-create-city`); typecheck + vite build clean; 13 logic unit tests green; red-team in flight (`w8znsgbln`).
+> A1–A3 committed `0b904ab`+`cbe5f9e` (branch `feat/forge-web-create-city`); typecheck + vite build clean; 13 logic unit tests green; red-team **fix-then-ship** → must-fixes applied (bounded polling, org guard) + should-fixes (type guards, aria, Next disabled).
+
+### Backend contract (derived by the wizard red-team — what B7 + crucible MUST provide)
+The wizard's contract is the agreed target; the backend builds to it.
+1. **`GET /forge/api/org/{org}/cities/{city_id}/status`** must exist end-to-end (shell-BFF + a crucible per-city status handler — today crucible has only `POST`/`GET /v0/cities`). Returns `CityProvisionStatus`: `{city_id, status, status_detail?, beads?{database?,status?}, credentials?[{product,sp_id?,key_id?}], controller?{status?,sandbox_id?}}`.
+2. **`POST …/cities`** must accept + persist the full body `{name, workspace:{mode:new,name}|{mode:existing,workspace_id}, beads:{mode:create-new}, pack}` — crucible currently decodes only `{name}` (cities.go:136-147); extend `CityRecord` with `WorkspaceID` + `Pack`.
+3. **status enum** on the wire is only `pending|provisioning|ready|error` — crucible writes literal `active` today (cities.go:201); map create-time → `pending`/`provisioning`.
+4. **create returns 202** + minimal `{city_id, status}` (trim the internal cityView fields off the wire).
+5. **workspace_id authz** at the shell-BFF leg — validate the caller may sponsor a city in that workspace BEFORE crucible mints creds (tenant boundary; the wizard can't enforce it).
+6. **provisioning-state tracking** — populate `credentials[]` on mint, `beads.status=ready` when the ledger is up, `controller.status=ready`+`sandbox_id` on launch, to drive the 3-step checklist.
 
 ### Track B — Backend (cross-cluster minting + orchestration + Model-B launch)
 | ID | Slice | Repo | Status | Depends |
@@ -101,4 +110,5 @@ between slices; a design workflow is spun up when a slice is ambiguous.
 ## Burn-down log
 - 2026-06-27: backlog created; auth path confirmed (shell-BFF cities route).
 - 2026-06-27: **B0 DONE** — provisioningToken design+adversarial-security workflow → red-teamed spec; impl (schema 061/062 + gateProvision + ResolveProvisioningToken + CreateServicePrincipalAs + 3-handler re-gate); 5 unit tests + full accounts suite green; diff red-team verdict **ship** (strictly narrower than adminToken, no bypass, no NULL-created_by, no regression). Improvement over spec: human path keeps the admin-token wire check.
-- 2026-06-27: starting **A1/A2** (forge-web create-city wizard) — unblocked, parallel track.
+- 2026-06-27: **A1/A2/A3 DONE** — forge-web create-city wizard (contract + tested logic + multi-step view + async status); typecheck/build/13-tests green; red-team fix-then-ship → fixes applied (`0b904ab`+`cbe5f9e`). Derived the backend contract (above) for B7/crucible.
+- 2026-06-27: starting **B7** (shell-BFF `/api/org/{org}/cities` route → crucible) — makes the wizard's contract real via the confirmed browser→EIA→crucible path.

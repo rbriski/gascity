@@ -63,13 +63,17 @@ epic: ga-pd6tcg
     Callers: city_runtime.go + cmd_start.go pass `(store, store)` until P6.
 - [x] **P3b-2 — syncSessionBeads + reapers** (`6f4a6f568`). The big session_beads.go surface
   class-aware; review `wf_63a72547` = SAFE-TO-PROCEED. session_beads.go DONE.
-- [ ] **P4 — session-write surfaces** (split by landmine density):
-  - **P4a** session_wake.go (pure) + session_reconcile.go (pure metadata writers) +
-    session_sleep.go (pure writers) — ~0 work sites.
-  - **P4b** session_lifecycle_parallel.go (74 session / 4 work / 6 mixed).
-  - **P4c** session_reconciler.go (79 session / **34 work** / 9 mixed — the densest landmine;
-    the `sessionHas*AssignedWork*` family stays pure-work single-param; only the orchestrator
-    `reconcileSessionBeadsTracedWithNamedDemand` + drain-ack fns get sessionStore).
+- [x] **P4a** (`c0a309a9d`) session_wake.go/session_reconcile.go/session_sleep.go — pure `store`→`sessionStore`
+  rename (24 fns, 69/69, no caller change). Byte-identical; no review needed (pure rename).
+- [x] **P4b** (`5ba9666c4`) session_lifecycle_parallel.go start path — review `wf_6f2e3102` SAFE-TO-PROCEED.
+- [ ] **P4c** session_reconciler.go (79 session / **34 work** / 9 mixed — densest landmine). The
+  `sessionHas*AssignedWork*` family + `reachableStoresForSession` (the in-caller work federation)
+  stay pure-work single-param; only `reconcileSessionBeadsTracedWithNamedDemand` + the drain-ack
+  fns (finalizeDrainAckStoppedSession/reconcileDrainAckStopPending/finalizeDrainAckStopPendingSessions)
+  + emitSessionStrandedDiagnostic get sessionStore.
+- [ ] **P4-followup** STOP-path session helpers in session_lifecycle_parallel.go (~2827-2861:
+  stopTargetThroughWorkerBoundary / cityStopSessionMarked / markCityStopSessionAsAsleep) are still
+  single-`store` session ops — thread to sessionStore (flagged by the P4b review).
 - [ ] **P5 — build_desired_state.go + agent_build_params.go + pool_session_name.go**
   (desired-state dual-class; `bp.sessionStore`). ⚠ Q3 gate: sessions city-only?
 - [ ] **P6 — derive `sessionStore` at city_runtime.go entry points + CLI/sweep writers**

@@ -40,7 +40,23 @@ commit `--no-verify`.
 - `cmd/gc/molecule_autoclose.go`, `cmd/gc/wisp_autoclose.go`, wisp-GC `city_runtime.go:1236`
 - convoy seam: `internal/convoy/membership.go` + drain.go + graphv2/invocation.go → GC
 
-## Phases
+## Status (updated)
+- [x] **GA (G2b)** `d319316a5` — by-id `[graph, work]` arm.
+- [x] **GB** `743dc8e27` — class-aware graph-only reads (reconciler awake-probes + orphan-release).
+  Adversarial review `wf_8d0b4e67` caught a TIER BLOCKER (graph.List/Ready defaulted to
+  TierIssues → dropped ephemeral-wisp rows → would close a session out from under a ready/
+  in_progress cleanup wisp). FIXED with `TierMode: beads.TierBoth` (matches
+  liveReadyForControllerDemandQuery). LESSON: any graph-store List/Ready in a
+  close/wake/drain path MUST use TierBoth.
+- [x] **GC** `6f8c5bafa` — convoy seam variadic `memberStores ...beads.Store` + storeref.Resolve.
+- [x] **GD-a (G2a)** `5c2a4853a` — graph-class CREATE/apply chokepoint in the policy store
+  (createTarget by coordclass.Classify; beadPolicyGraphStore work+graph appliers routed by
+  ClassifyGraphPlan; getForPolicy via storeref). cityPath variadic (7 api_state.go sites pass
+  it; tests unchanged). Covers ALL graph create paths (orphan safety net). ClassifyGraphPlan
+  now survives via this chokepoint.
+
+## Remaining phases
+
 - [x] **GA (G2b)** `d319316a5` — `beadStoresForID` `[graph, work]` arm (API by-id class-aware).
 - [ ] **GB** — class-aware graph-only READS in cmd/gc: `session_reconciler.go` awake-probes
   (2748/2778 + helpers) + `pool_session_name.go:198` orphan-release, via `resolveGraphStore`

@@ -235,25 +235,26 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 }
 
 // routedPolicyStore wraps workBackend in the bead policies, inserting the
-// per-class Router with an opt-in graph backend ONLY when the city sets
-// [beads] graph_store. Default cities get plain policy(workBackend) — no Router,
+// per-class Router with an opt-in graph backend ONLY when the city relocates the
+// graph class. Default cities get plain policy(workBackend) — no Router,
 // byte-identical and zero per-op overhead. When opted in it returns
 // policy(Router(workBackend + graph)): graph-class ops route to the graph backend
 // while work ops stay on workBackend. The Router sits ABOVE any cache wrapped
 // into workBackend so a relocated graph backend never lives under the cache (which
 // reconciles only the work backend via a bd subprocess, and would otherwise serve
 // stale graph reads across the processes that share the graph file).
+//
+// Sessions are NO LONGER routed here. The controller and CLI reach the session
+// class store directly through the class-aware accessors (cr.sessionBeadStore() /
+// resolveSessionStore), so a relocated session backend needs no Router entry — the
+// Router's session federation was retired once every session/wait op became
+// class-aware (the infra/beads decouple). Graph is the last class on the Router.
 func routedPolicyStore(workBackend beads.Store, cfg *config.City, cityPath string) beads.Store {
-	if !graphRelocated(cfg) && !sessionRelocated(cfg) {
+	if !graphRelocated(cfg) {
 		return wrapStoreWithBeadPolicies(workBackend, cfg)
 	}
 	router := coordrouter.New(workBackend)
-	if graphRelocated(cfg) {
-		registerGraphStoreBackend(router, cfg, cityPath)
-	}
-	if sessionRelocated(cfg) {
-		registerSessionStoreBackend(router, cfg, cityPath)
-	}
+	registerGraphStoreBackend(router, cfg, cityPath)
 	return wrapStoreWithBeadPolicies(router, cfg)
 }
 
@@ -283,43 +284,11 @@ func graphRelocated(cfg *config.City) bool {
 	return cfg != nil && cfg.Beads.NormalizedClassBackend(config.BeadClassGraph) != config.BeadsBackendBD
 }
 
-// sessionRelocated reports whether the session class is routed to a non-work
-// backend (SQLite or Postgres via [beads.classes.sessions]). It mirrors
-// graphRelocated and folds onto NormalizedClassBackend so every session-routing
-// consumer agrees on one predicate; default cities (sessions on the bd work store)
-// report false and stay byte-identical (no Router constructed). Session and wait
-// beads classify to coordclass.ClassSessions, so registering the backend makes the
-// federating Router route session-bead Create/by-id ops to it and federate List
-// reads (the existing IsSessionBeadOrRepairable / hasNonSessionAssignedWork
-// post-filters keep the session/work split correct) — no per-call-site threading.
-func sessionRelocated(cfg *config.City) bool {
-	return cfg != nil && cfg.Beads.NormalizedClassBackend(config.BeadClassSessions) != config.BeadsBackendBD
-}
-
-// registerSessionStoreBackend registers the session class's relocated backend on
-// r, dispatching on the configured backend: the embedded SQLite class store
-// (.gc/sessions/, gcs prefix) or the Postgres gcs schema. Callers gate on
-// sessionRelocated. A failed open is logged loudly (by the class opener) and the
-// session class falls back to the work backend rather than crashing.
-//
-// The backend is opened event-silent (nil recorder), like the graph backend:
-// this is the shared controller+worker store chokepoint (no controller recorder
-// here), and the class-store handle is cached so the first opener bakes the
-// recorder. Restoring bead.* emission for relocated session writes (the generic
-// bead feed / cache observers) is a cutover follow-up — session LIFECYCLE events
-// are emitted by the reconciler independently of the bead-store row recorder.
-func registerSessionStoreBackend(r *coordrouter.Router, cfg *config.City, cityPath string) {
-	switch cfg.Beads.NormalizedClassBackend(config.BeadClassSessions) {
-	case config.BeadsBackendSQLite:
-		if store, ok := openClassSQLiteStore(cityPath, config.BeadClassSessions, nil); ok {
-			r.Register(coordclass.ClassSessions, store)
-		}
-	case config.BeadsBackendPostgres:
-		if store, ok := openClassPostgresStore(cfg, cityPath, config.BeadClassSessions, nil); ok {
-			r.Register(coordclass.ClassSessions, store)
-		}
-	}
-}
+// NOTE: sessionRelocated / registerSessionStoreBackend were removed when the
+// session class came off the Router. Sessions relocate purely through the
+// class-aware accessors (resolveSessionStore / cr.sessionBeadStore()), which open
+// the session class store WITH the controller recorder so relocated session writes
+// emit bead.* — no Router federation and no event-silent chokepoint open.
 
 // registerGraphStoreBackend registers the graph class's relocated backend on r,
 // dispatching on the configured backend: SQLite (the legacy embedded graph store)

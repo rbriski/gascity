@@ -30,7 +30,7 @@ var errTokenMismatch = errors.New("instance token mismatch")
 // Returns the new generation and instance token on success.
 func preWakeCommit(
 	session *beads.Bead,
-	store beads.Store,
+	sessionStore beads.Store,
 	clk clock.Clock,
 ) (newGen int, token string, err error) {
 	name := session.Metadata["session_name"]
@@ -65,7 +65,7 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
-	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
+	if writeErr := sessionStore.SetMetadataBatch(session.ID, batch); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
 	traceFreshWakeMetadataReset(name, session.Metadata, batch, freshWake)
@@ -392,7 +392,7 @@ func cancelRecoveredDrainForAssignedWork(session beads.Bead, sp runtime.Provider
 func advanceSessionDrains(
 	dt *drainTracker,
 	sp runtime.Provider,
-	store beads.Store,
+	sessionStore beads.Store,
 	sessionLookup func(id string) *beads.Bead,
 	cfg *config.City,
 	poolDesired map[string]int,
@@ -406,13 +406,13 @@ func advanceSessionDrains(
 			sessions = append(sessions, *session)
 		}
 	}
-	advanceSessionDrainsWithSessions(dt, sp, store, sessionLookup, sessions, nil, cfg, poolDesired, workSet, readyWaitSet, clk)
+	advanceSessionDrainsWithSessions(dt, sp, sessionStore, sessionLookup, sessions, nil, cfg, poolDesired, workSet, readyWaitSet, clk)
 }
 
 func advanceSessionDrainsWithSessions(
 	dt *drainTracker,
 	sp runtime.Provider,
-	store beads.Store,
+	sessionStore beads.Store,
 	sessionLookup func(id string) *beads.Bead,
 	sessions []beads.Bead,
 	wakeEvals map[string]wakeEvaluation,
@@ -422,13 +422,13 @@ func advanceSessionDrainsWithSessions(
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) {
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, sessionLookup, sessions, wakeEvals, cfg, poolDesired, workSet, readyWaitSet, clk, nil)
+	advanceSessionDrainsWithSessionsTraced(dt, sp, sessionStore, sessionLookup, sessions, wakeEvals, cfg, poolDesired, workSet, readyWaitSet, clk, nil)
 }
 
 func advanceSessionDrainsWithSessionsTraced(
 	dt *drainTracker,
 	sp runtime.Provider,
-	store beads.Store,
+	sessionStore beads.Store,
 	sessionLookup func(id string) *beads.Bead,
 	sessions []beads.Bead,
 	wakeEvals map[string]wakeEvaluation,
@@ -470,13 +470,13 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 
 		// Check if process exited.
-		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, session.ID)
+		running, err := workerSessionTargetRunningWithConfig("", sessionStore, sp, cfg, session.ID)
 		if err != nil {
 			running = false
 		}
 		if !running {
 			// Process exited — drain complete.
-			completeDrain(session, store, ds, clk)
+			completeDrain(session, sessionStore, ds, clk)
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
@@ -567,7 +567,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
 			// Drain timed out — force stop.
-			if err := verifiedStop(*session, store, sp, cfg); err != nil {
+			if err := verifiedStop(*session, sessionStore, sp, cfg); err != nil {
 				if errors.Is(err, errTokenMismatch) {
 					// Session was re-woken by a different incarnation.
 					// This drain is stale — cancel it.
@@ -585,12 +585,12 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			// Re-probe after stop to confirm process actually exited
 			// before marking metadata as asleep.
-			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, session.ID)
+			running, err := workerSessionTargetRunningWithConfig("", sessionStore, sp, cfg, session.ID)
 			if err != nil {
 				running = false
 			}
 			if !running {
-				completeDrain(session, store, ds, clk)
+				completeDrain(session, sessionStore, ds, clk)
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
@@ -605,10 +605,10 @@ func advanceSessionDrainsWithSessionsTraced(
 }
 
 // completeDrain writes drain-complete metadata to the bead.
-func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock) {
+func completeDrain(session *beads.Bead, sessionStore beads.Store, ds *drainState, clk clock.Clock) {
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
-	if store != nil {
-		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if sessionStore != nil {
+		if err := sessionStore.SetMetadataBatch(session.ID, batch); err != nil {
 			return
 		}
 	}
@@ -628,7 +628,7 @@ func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk c
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedStop(session beads.Bead, sessionStore beads.Store, sp runtime.Provider, cfg *config.City) error {
 	name := session.Metadata["session_name"]
 	expectedToken := session.Metadata["instance_token"]
 	if expectedToken != "" {
@@ -637,7 +637,7 @@ func verifiedStop(session beads.Bead, store beads.Store, sp runtime.Provider, cf
 			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
 		}
 	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
+	handle, err := workerHandleForSessionWithConfig("", sessionStore, sp, cfg, session.ID)
 	if err != nil {
 		return err
 	}
@@ -645,7 +645,7 @@ func verifiedStop(session beads.Bead, store beads.Store, sp runtime.Provider, cf
 }
 
 // verifiedInterrupt sends an interrupt signal after verifying instance_token.
-func verifiedInterrupt(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedInterrupt(session beads.Bead, sessionStore beads.Store, sp runtime.Provider, cfg *config.City) error {
 	name := session.Metadata["session_name"]
 	expectedToken := session.Metadata["instance_token"]
 	if expectedToken != "" {
@@ -654,7 +654,7 @@ func verifiedInterrupt(session beads.Bead, store beads.Store, sp runtime.Provide
 			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
 		}
 	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
+	handle, err := workerHandleForSessionWithConfig("", sessionStore, sp, cfg, session.ID)
 	if err != nil {
 		return err
 	}

@@ -2824,38 +2824,48 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 	return merged
 }
 
-func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+// stopTargetThroughWorkerBoundary stops (or city-stop-kills) a single session
+// target. PURE-SESSION: sessionStore feeds the session-bead Get/SetMetadataBatch
+// (via cityStopSessionMarked / markCityStopSessionAsAsleep) and the worker
+// stop/kill, which resolve and tear down the session target's runtime handle —
+// no work-assignment read. At the default backend sessionStore == workStore, so
+// callers that still carry a single work store stay byte-identical.
+func stopTargetThroughWorkerBoundary(target stopTarget, sessionStore beads.Store, sp runtime.Provider, cfg *config.City) error {
 	targetID := strings.TrimSpace(target.sessionID)
 	if targetID == "" {
 		targetID = strings.TrimSpace(target.name)
 	}
-	if cityStopSessionMarked(store, target.sessionID) {
-		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+	if cityStopSessionMarked(sessionStore, target.sessionID) {
+		if err := workerKillSessionTargetWithConfig("", sessionStore, sp, cfg, targetID); err != nil {
 			return err
 		}
-		markCityStopSessionAsAsleep(store, target.sessionID, nil)
+		markCityStopSessionAsAsleep(sessionStore, target.sessionID, nil)
 		return nil
 	}
-	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
+	return workerStopSessionTargetWithConfig("", sessionStore, sp, cfg, targetID)
 }
 
-func cityStopSessionMarked(store beads.Store, sessionID string) bool {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+// cityStopSessionMarked reports whether the session bead carries the city-stop
+// sleep_reason. PURE-SESSION: a single SESSION-bead Get.
+func cityStopSessionMarked(sessionStore beads.Store, sessionID string) bool {
+	if sessionStore == nil || strings.TrimSpace(sessionID) == "" {
 		return false
 	}
-	b, err := store.Get(sessionID)
+	b, err := sessionStore.Get(sessionID)
 	if err != nil {
 		return false
 	}
 	return strings.TrimSpace(b.Metadata["sleep_reason"]) == sleepReasonCityStop
 }
 
-func markCityStopSessionAsAsleep(store beads.Store, sessionID string, stderr io.Writer) {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+// markCityStopSessionAsAsleep records the asleep/city-stop sleep state on the
+// session bead. PURE-SESSION: a single SESSION-bead SetMetadataBatch.
+func markCityStopSessionAsAsleep(sessionStore beads.Store, sessionID string, stderr io.Writer) {
+	if sessionStore == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	batch := sessionpkg.SleepPatch(time.Now().UTC(), sleepReasonCityStop)
-	if err := store.SetMetadataBatch(sessionID, batch); err != nil && stderr != nil {
+	if err := sessionStore.SetMetadataBatch(sessionID, batch); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

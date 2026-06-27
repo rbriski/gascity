@@ -246,8 +246,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			}
 		}
 	}
-	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := session.ExactMetadataSessionCandidates(p.beadStore, false, map[string]string{"session_name": sessName}); err == nil {
+	if sessionBeadID == "" && p.sessionStore != nil {
+		if all, err := session.ExactMetadataSessionCandidates(p.sessionStore, false, map[string]string{"session_name": sessName}); err == nil {
 			for _, b := range all {
 				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue
@@ -363,7 +363,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderDisplayName:     providerDisplayName,
 		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
 		Env:                     cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
+	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.sessionStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)

@@ -339,8 +339,8 @@ func (p *agentBuildParams) resolveSessionName(qualifiedName, _ string) string {
 			return sn
 		}
 	}
-	if p.beadStore != nil {
-		sn := findSessionNameByTemplate(p.beadStore, qualifiedName)
+	if p.sessionStore != nil {
+		sn := findSessionNameByTemplate(p.sessionStore, qualifiedName)
 		if sn != "" {
 			p.beadNames[qualifiedName] = sn
 			return sn

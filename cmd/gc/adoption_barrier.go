@@ -52,6 +52,12 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 //
 // Returns the adoption result and whether the barrier passed (all running
 // sessions have beads).
+//
+// PURE-SESSION: every store op here is a SESSION-class read/write
+// (ListAllSessionBeads, openSessionBeadExists, Create of a session bead), so
+// store is fed the SESSION-class store by callers. The controller passes
+// cr.sessionBeadStore(); CLI/test callers pass the work store (byte-identical
+// at the default backend where sessionStore == workStore).
 func runAdoptionBarrier(
 	cityPath string,
 	store beads.Store,

@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -28,28 +31,64 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// graphStore is the dedicated graph-class store (resolveGraphStore, legacy
+	// .gc/beads.sqlite). When the graph class is not relocated it equals Store, so
+	// the class-aware create-chokepoint below is a no-op (byte-identical default).
+	graphStore beads.Store
 }
 
 type beadPolicyGraphStore struct {
 	*beadPolicyStore
-	applier beads.GraphApplyStore
+	applier      beads.GraphApplyStore // work-class plans (GraphApplyFor(Store))
+	graphApplier beads.GraphApplyStore // graph-class plans (GraphApplyFor(graphStore)); nil when graph not relocated
 }
 
 var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
 
-func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+// wrapStoreWithBeadPolicies wraps store in the bead-storage policy layer. cityPath
+// (optional, but ALWAYS passed by production callers) lets the policy store resolve
+// the dedicated graph store via resolveGraphStore — the legacy <cityPath>/.gc/beads.sqlite
+// location — so graph-class Create/ApplyGraphPlan route there with the correct storage
+// tier. This is the class-aware create-chokepoint that keeps graph beads off the work
+// (Dolt) store once coordrouter is retired: any graph bead created through a policy
+// store lands on the graph store, even from a caller that is not itself class-aware.
+//
+// When the graph class is not relocated, resolveGraphStore returns store, so graphStore
+// == Store and the chokepoint is a no-op (byte-identical default). The graph applier is
+// sourced from graphStore (not store) for the same reason. cityPath is variadic so the
+// many graph=bd unit tests stay unchanged; a graph-relocated city MUST pass it or the
+// chokepoint silently disables (the loud log flags that caller bug).
+func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City, cityPath ...string) beads.Store {
 	if store == nil {
 		return nil
 	}
+	graphStore := store
+	switch {
+	case len(cityPath) > 0 && strings.TrimSpace(cityPath[0]) != "":
+		graphStore = resolveGraphStore(store, cfg, cityPath[0], nil)
+	case graphRelocated(cfg):
+		log.Printf("beads: wrapStoreWithBeadPolicies called without cityPath for a graph-relocated city; graph-class creates stay on the work store (caller must pass cityPath)")
+	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:      store,
+		cfg:        cfg,
+		graphStore: graphStore,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
-		return &beadPolicyGraphStore{
+		gs := &beadPolicyGraphStore{
 			beadPolicyStore: policyStore,
 			applier:         applier,
 		}
+		// When graph is relocated, a graph-class plan applies to the graph store; a
+		// work-class plan (legacy recipe) stays on the work applier. Sourcing the
+		// graph applier from graphStore (not store) is what keeps graph pours off the
+		// work store once the Router — which used to route the plan by class — is gone.
+		if graphStore != store {
+			if graphApplier, ok := beads.GraphApplyFor(graphStore); ok {
+				gs.graphApplier = graphApplier
+			}
+		}
+		return gs
 	}
 	return policyStore
 }
@@ -67,7 +106,29 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	_, storage := s.policyForCreate(b)
-	return createWithStoragePolicy(s.Store, b, storage)
+	return createWithStoragePolicy(s.createTarget(b), b, storage)
+}
+
+// createTarget routes a graph-class bead to the dedicated graph store — the
+// create-chokepoint that prevents graph beads orphaning onto the work store once the
+// per-class Router is gone. When graph is not relocated graphStore == Store, so this
+// returns Store for every bead (byte-identical default).
+func (s *beadPolicyStore) createTarget(b beads.Bead) beads.Store {
+	if s.graphStore != nil && s.graphStore != s.Store && coordclass.Classify(b) == coordclass.ClassGraph {
+		return s.graphStore
+	}
+	return s.Store
+}
+
+// getForPolicy resolves a bead by id across the work and graph stores so a
+// graph-resident root (e.g. a wisp root, used to derive a child's storage tier) is
+// found even after the Router is gone. Byte-identical default: when graph is not
+// relocated the set is just Store.
+func (s *beadPolicyStore) getForPolicy(id string) (beads.Bead, error) {
+	if s.graphStore != nil && s.graphStore != s.Store {
+		return storeref.Resolve(id, []beads.Store{s.Store, s.graphStore})
+	}
+	return s.Store.Get(id)
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -217,7 +278,7 @@ func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
-		root, err := s.Get(rootID)
+		root, err := s.getForPolicy(rootID)
 		if err == nil && policyNameForBead(root) == beadPolicyWisp {
 			return beadPolicyWisp, storageFromPersistedWispRoot(root)
 		}
@@ -240,19 +301,32 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 	}
 }
 
+// applierForPlan picks the graph or work applier by plan class — the graph-apply half
+// of the create-chokepoint, so a graph.v2 pour lands on the graph store while a
+// legacy/work plan stays on the work store once the per-class Router (which used to
+// route the plan) is gone. nil graphApplier (graph not relocated) means every plan
+// uses the work applier — byte-identical default.
+func (s *beadPolicyGraphStore) applierForPlan(plan *beads.GraphApplyPlan) beads.GraphApplyStore {
+	if s.graphApplier != nil && coordclass.ClassifyGraphPlan(plan) == coordclass.ClassGraph {
+		return s.graphApplier
+	}
+	return s.applier
+}
+
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	applier := s.applierForPlan(plan)
 	if plan == nil {
-		return s.applier.ApplyGraphPlan(ctx, plan)
+		return applier.ApplyGraphPlan(ctx, plan)
 	}
 	policyName := policyNameForGraphPlan(plan)
 	if policyName == "" {
-		return s.applier.ApplyGraphPlan(ctx, plan)
+		return applier.ApplyGraphPlan(ctx, plan)
 	}
 	storage := effectiveBeadStorage(s.cfg, policyName)
-	if storageApplier, ok := s.applier.(beads.StorageGraphApplyStore); ok {
+	if storageApplier, ok := applier.(beads.StorageGraphApplyStore); ok {
 		return storageApplier.ApplyGraphPlanWithStorage(ctx, plan, beadStorageClass(storage))
 	}
-	return s.applier.ApplyGraphPlan(ctx, plan)
+	return applier.ApplyGraphPlan(ctx, plan)
 }
 
 func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {

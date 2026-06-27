@@ -218,7 +218,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		}
 		if existingRouter != nil {
 			existingRouter.Register(coordclass.ClassWork, cs)
-			return wrapStoreWithBeadPolicies(existingRouter, policyStore.cfg)
+			return wrapStoreWithBeadPolicies(existingRouter, policyStore.cfg, cityPath)
 		}
 		return routedPolicyStore(cs, policyStore.cfg, cityPath)
 	}
@@ -250,11 +250,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 // class-aware (the infra/beads decouple). Graph is the last class on the Router.
 func routedPolicyStore(workBackend beads.Store, cfg *config.City, cityPath string) beads.Store {
 	if !graphRelocated(cfg) {
-		return wrapStoreWithBeadPolicies(workBackend, cfg)
+		return wrapStoreWithBeadPolicies(workBackend, cfg, cityPath)
 	}
 	router := coordrouter.New(workBackend)
 	registerGraphStoreBackend(router, cfg, cityPath)
-	return wrapStoreWithBeadPolicies(router, cfg)
+	return wrapStoreWithBeadPolicies(router, cfg, cityPath)
 }
 
 // graphStoreIDPrefix is the bead-ID prefix the embedded SQLite graph store mints
@@ -398,7 +398,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	if cityProvider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
 		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
 		if err == nil {
-			sharedLegacyFileStore = wrapStoreWithBeadPolicies(store, cfg)
+			sharedLegacyFileStore = wrapStoreWithBeadPolicies(store, cfg, cs.cityPath)
 		}
 	}
 
@@ -474,14 +474,14 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		if err != nil {
 			return unavailableStore{err: fmt.Errorf("open exec rig store %s: %w", scopeRoot, err)}
 		}
-		return wrapStoreWithBeadPolicies(store, cfg)
+		return wrapStoreWithBeadPolicies(store, cfg, cs.cityPath)
 	}
 	if provider == "file" {
 		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 		if err != nil {
 			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
-		return wrapStoreWithBeadPolicies(store, cfg)
+		return wrapStoreWithBeadPolicies(store, cfg, cs.cityPath)
 	}
 	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:        scopeRoot,
@@ -510,7 +510,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	if err != nil {
 		return unavailableStore{err: fmt.Errorf("open rig store %s: %w", scopeRoot, err)}
 	}
-	return wrapStoreWithBeadPolicies(result.Store, cfg)
+	return wrapStoreWithBeadPolicies(result.Store, cfg, cs.cityPath)
 }
 
 // startBeadEventWatcher subscribes to the event bus and feeds bead events

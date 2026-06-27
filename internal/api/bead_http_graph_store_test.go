@@ -439,3 +439,63 @@ func TestClientBeadWriteMethodsIssueExpectedRequests(t *testing.T) {
 		t.Fatalf("ClaimBead body assignee = %v, want worker", gotBody["assignee"])
 	}
 }
+
+// TestBeadStoresForIDClassAwareGraphArm proves the class-aware successor to the
+// Router for by-id resolution (Phase G2b): with the city store a plain work store
+// and a DISTINCT dedicated graph store — the post-coordrouter wiring — a graph-class
+// id (reserved prefix "gcg") resolves to [graph, work] (graph-first), so the by-id
+// Get-then-mutate handler loop pins the SQLite graph store on the first probe and a
+// close lands there, never the work store. No Router is involved.
+func TestBeadStoresForIDClassAwareGraphArm(t *testing.T) {
+	work := beads.NewMemStore()
+	sqlite, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	graph := sqlite.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = graph.CloseStore() })
+
+	gb, err := graph.Create(beads.Bead{Title: "graph step", Type: "task", Labels: []string{"gc:wisp"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.cityBeadStore = work   // policy(work) post-cutover shape: no Router
+	state.graphBeadStore = graph // dedicated, distinct graph store
+	state.stores = nil
+	s := New(state)
+
+	got := s.beadStoresForID(gb.ID)
+	if len(got) != 2 || got[0] != s.state.GraphBeadStore() || got[1] != s.state.CityBeadStore() {
+		t.Fatalf("beadStoresForID(%s) = %v (len %d), want [graph, work]", gb.ID, got, len(got))
+	}
+
+	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: gb.ID}); err != nil {
+		t.Fatalf("humaHandleBeadClose(%s): %v", gb.ID, err)
+	}
+	if c, _ := graph.Get(gb.ID); c.Status != "closed" {
+		t.Fatalf("graph bead %s status = %q, want closed (close did not reach the graph store)", gb.ID, c.Status)
+	}
+	if _, err := work.Get(gb.ID); err == nil {
+		t.Fatalf("graph bead %s leaked into the work store", gb.ID)
+	}
+}
+
+// TestBeadStoresForIDGraphArmSkippedWhenNotRelocated proves byte-identity at the
+// default backend: when the graph class is not relocated GraphBeadStore() ==
+// CityBeadStore(), so the class-prefix arm never fires even for a "gcg"-shaped id —
+// resolution falls through to the legacy candidate scan exactly as before.
+func TestBeadStoresForIDGraphArmSkippedWhenNotRelocated(t *testing.T) {
+	work := beads.NewMemStore()
+	state := newFakeState(t)
+	state.cityBeadStore = work
+	state.graphBeadStore = nil // GraphBeadStore() falls back to the city store
+	state.stores = nil
+	s := New(state)
+
+	got := s.beadStoresForID("gcg-1")
+	if len(got) != 1 || got[0] != s.state.CityBeadStore() {
+		t.Fatalf("beadStoresForID(gcg-1) = %v (len %d), want the legacy [city] scan (arm skipped)", got, len(got))
+	}
+}

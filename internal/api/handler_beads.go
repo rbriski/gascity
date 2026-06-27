@@ -173,6 +173,26 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 		}
 	}
 
+	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
+	// id-prefix "gcg") in a dedicated graph store that is NOT reachable via a
+	// rig/HQ prefix or a routes.jsonl entry, so a graph-class id would otherwise
+	// fall through to the candidate scan and miss. Return [graph, work] —
+	// graph-first, mirroring coordrouter's prefix-owner-first by-id resolution —
+	// so the per-store Get-then-mutate loop in the by-id handlers federates exactly
+	// as the Router did and pins the graph store on the first probe. Skipped for a
+	// default (non-relocated) city, where GraphBeadStore() == CityBeadStore(): the
+	// arm never fires and this path stays byte-identical.
+	if graph := s.state.GraphBeadStore(); graph != nil {
+		if city := s.state.CityBeadStore(); graph != city {
+			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
+				if city != nil {
+					return []beads.Store{graph, city}
+				}
+				return []beads.Store{graph}
+			}
+		}
+	}
+
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
 	candidates := make([]beads.Store, 0, len(rigNames)+1)

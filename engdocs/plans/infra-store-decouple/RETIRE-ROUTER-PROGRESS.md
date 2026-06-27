@@ -87,16 +87,51 @@ epic: ga-pd6tcg
     bp.sessionStore. PLUS **P4-followup**: stop-path helpers (session_lifecycle_parallel.go
     ~2827-2861) → sessionStore. ⚠ Q2 gate: audit `runAdoptionBarrier` (city_runtime.go:480) — does
     it read WORK? (if session-only, route S; if it reads work, two-store).
-- [ ] **P7 — cutover: guard test + unregister ClassSessions** (`api_state.go`). The only
-  phase with relocated-backend behavior change. ⚠ Q4: event emission policy.
+- [x] **P7** (`28b9910bb`) — **SESSIONS OFF THE ROUTER (cutover).** routedPolicyStore is graph-only;
+  removed sessionRelocated + registerSessionStoreBackend. Byte-identical at maintainer-city
+  (graph=sqlite, sessions=bd → session block never hit). session_router_test.go rewritten to
+  the class-aware reality (no-Router-for-sessions, resolveSessionStore routing, recorder
+  emits bead.*, session/wait isolated from work Ready). Whole-tree build+vet, cmd/gc broad,
+  internal/api, coordrouter, coordclass green. **TRACK S COMPLETE.**
 
-## Track G — phases (small; graph reads ride interfaces, not Router asserts)
-- [ ] **G1 — wire `storeref.Resolve`/`PrefixOwner` into a by-id explicit-handles store**
-  (replaces `coordrouter.New`). Model on `order_dispatch.go storesForGate`.
-- [ ] **G2 — confirm the 2 graph read paths need no change** (GraphOnlyReadyFor/ListFor
-  interfaces; `?type=molecule` augment is a plain List).
-- [ ] **G3 — delete coordrouter; fold graph into `resolveClassStore`** (one prod file:
-  api_state.go). `coordclass` SURVIVES; `ClassifyGraphPlan` dies with the Router.
+## Track S — DONE ✅ (P1–P7, 25 commits). Every session/wait op is class-aware (controller+CLI+API).
+
+## Track G — graph off the Router → delete coordrouter (⚠ LIVE-RISKY: graph=sqlite is live on
+maintainer-city, so unlike sessions this is NOT inert — byte-identity bar is graph=bd, but the
+graph=sqlite path changes from Router-mediated to class-aware-direct; needs relocated conformance
++ adversarial review). The whole prod delete-surface is ONE file (api_state.go); graph read paths
+ride GraphOnlyReadyFor/ListFor INTERFACES; storeref (PrefixOwner+Resolve) is ready+dark.
+This is class-aware callers (NOT the rejected Path-B dispatcher): each graph caller opens the
+graph store directly (resolveClassStore(graph)); the by-id-agnostic case uses storeref.
+- [ ] **G1 — graph-only READ callers → class-aware.** The ~7 GraphOnlyReadyFor/GraphOnlyListFor
+  sites (huma_handlers_beads.go:349, dispatch/runtime.go:441, build_desired_state.go:1762,
+  cmd_ready.go:181, session_reconciler.go:2804/2853, pool_session_name.go:199) call
+  GraphOnlyReadyFor(cityStore) — post-Router cityStore=policy(work) doesn't implement it →
+  would fall through to work.Ready() (WRONG). Rewire each to open the graph store via
+  resolveClassStore(graph) (byte-identical at graph=bd). bead_policy_store forwarding wrapper stays.
+- [ ] **G2 — graph CREATE/apply + by-id → class-aware.** (a) molecule pour/ApplyGraphPlan: use
+  GraphApplyFor(resolveClassStore(graph)) instead of the Router. (b) by-id gcg-N (bd-shim/worker
+  close, cross-class Get): wire storeref.Resolve([work, graph], id) — the Router's backendForID
+  successor. ClassifyGraphPlan stays in coordclass until its last Router caller dies.
+- [ ] **G3 — delete coordrouter; fold graph into resolveClassStore.** api_state.go: drop the
+  import + coordrouter.New (:250) + the 2 *Router assertions (:199 caching-store builder, :860
+  closeBeadStoreHandle) + Register/Backend/Backends; registerGraphStoreBackend folds into
+  resolveClassStore(graph). Delete internal/coordrouter/router*.go,stores.go,bdgraphstore.go +
+  retarget storeref_test.go off Router.Get. coordclass SURVIVES (storemigrate); ClassifyGraphPlan
+  dies with the Router. Gate: relocated graph conformance (graph=sqlite by-id close lands on graph
+  store; ReadyGraphOnly == graph store Ready) + adversarial review + whole-tree green.
+
+## Followups (per /goal "all followups")
+- [x] Phase-C tier for SESSIONS — moot/resolved (session store is not a Ready source; guarded by
+  TestRelocatedSessionBeadsExcludedFromWorkReady). NB nudge/mail/order classes still carry the
+  RAW-tier divergence as a PRE-EXISTING followup (label-exclusion guarded today).
+- [ ] two-store wait/extmsg test — assert cancelState/reassignState route waits→session,
+  extmsg→work with distinct stores (P3a review suggestion). Additive, low-risk.
+- [ ] observability under-count — doctor backlog-depth / HTTP /status / storehealth read only the
+  work store → under-count relocated infra beads (cosmetic; union the class stores or confirm).
+- [ ] PG read-after-write — test a controller-terminalized shadow is visible to a fresh CLI PG
+  connection (Postgres-specific; needs GC_TEST_POSTGRES_DSN).
+- [ ] cmd_sling.go:1485 stampLastNudgeDeliveredAt → sessionStore when the sling seam is converted.
 
 ## Open questions for the owner (gates noted above)
 1. `sweepProcessTableOrphans` (`session_beads.go:2162`) treats session-store `ErrNotFound`

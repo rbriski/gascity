@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,5 +129,80 @@ func TestStoreHasOpenDescendantsSkipsTransientNotifications(t *testing.T) {
 		t.Fatal(err)
 	} else if !has {
 		t.Error("a real open work descendant must still count as open work")
+	}
+}
+
+// countingGateTimeoutStore wraps a Store and counts how many times the
+// hasOpenWorkStrict query shape (order-run: prefix, not IncludeClosed, no
+// Limit) is issued, while also introducing a configurable delay to force gate
+// timeouts in tests.
+type countingGateTimeoutStore struct {
+	beads.Store
+	delay     time.Duration
+	gateCount atomic.Int32
+}
+
+func (s *countingGateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0 {
+		s.gateCount.Add(1)
+		time.Sleep(s.delay)
+	}
+	return s.Store.List(query)
+}
+
+// TestOrderDispatchNonIdempotentBackoffOnGateTimeout is the #3688 regression
+// test: when a non-idempotent order's open-work gate times out, the dispatcher
+// must apply a temporary backoff (via rememberLastRun) so the same gate is not
+// retried on the very next tick. Without the fix the order is still "due" on
+// tick 2 and the 8-second gate runs again, thrashing dolt sql-server CPU.
+func TestOrderDispatchNonIdempotentBackoffOnGateTimeout(t *testing.T) {
+	prev := orderGateTimeout
+	orderGateTimeout = 20 * time.Millisecond
+	defer func() { orderGateTimeout = prev }()
+
+	// Gate goroutine sleeps 50ms > 20ms timeout, so gateOpenWorkBounded times
+	// out and leaves the goroutine behind. The goroutine finishes ~50ms later.
+	store := &countingGateTimeoutStore{Store: beads.NewMemStore(), delay: 50 * time.Millisecond}
+	now := time.Date(2026, 6, 23, 17, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		// 5-minute cooldown, non-idempotent — the reported order shape from #3688.
+		{Name: "cascade-nudge-on-blocker-close", Trigger: "cooldown", Interval: "5m", Exec: "true", Idempotent: false},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// cityPath must be the same for both ticks: the rememberLastRun cache key
+	// includes storeKey which is derived from cityPath, so different temp dirs
+	// would produce different keys and the backoff wouldn't transfer.
+	cityPath := t.TempDir()
+
+	// Tick 1: gate times out → order skipped (fail-closed); backoff must be applied.
+	ad.dispatch(context.Background(), cityPath, now)
+	ad.drain(context.Background())
+	if got := trackingBeads(t, store.Store, "order-run:cascade-nudge-on-blocker-close"); len(got) != 0 {
+		t.Fatalf("tick 1: non-idempotent order must be skipped on gate timeout; got %d tracking beads", len(got))
+	}
+
+	// Wait for the orphaned gate goroutine from tick 1 to finish (it sleeps
+	// 50ms; we wait 3× to be safe), then snapshot the gate-call count.
+	time.Sleep(150 * time.Millisecond)
+	countAfterTick1 := store.gateCount.Load()
+
+	// Tick 2: dispatched immediately after (well within the 5m cooldown).
+	// Without the fix the order is still "due" and the gate fires again.
+	// With the fix the backoff keeps the order out of the due-check.
+	ad.dispatch(context.Background(), cityPath, now.Add(time.Millisecond))
+	ad.drain(context.Background())
+	time.Sleep(150 * time.Millisecond) // let any tick-2 gate goroutine finish
+
+	if got := store.gateCount.Load(); got != countAfterTick1 {
+		t.Errorf("gate called again on tick 2 (backoff not applied): after tick 1 count=%d, after tick 2 count=%d; want no change",
+			countAfterTick1, got)
+	}
+	if got := trackingBeads(t, store.Store, "order-run:cascade-nudge-on-blocker-close"); len(got) != 0 {
+		t.Fatalf("tick 2: no tracking bead expected when order is backed off; got %d", len(got))
 	}
 }

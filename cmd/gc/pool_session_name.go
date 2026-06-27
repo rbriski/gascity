@@ -193,11 +193,14 @@ func releaseOrphanedPoolAssignments(
 		// forever (the graph_store=sqlite strand-heal regression: the untreated
 		// analog of the close-check graph-only fix). Validate and write against the
 		// store that physically holds it. Identity-phase Dolt cities have no
-		// distinct ClassGraph backend, so GraphOnlyListFor is absent and this is a
-		// no-op there (byte-identical default).
-		if gol, ok := beads.GraphOnlyListFor(store); ok {
-			if pfx := gol.GraphIDPrefix(); pfx != "" && strings.HasPrefix(wb.ID, pfx+"-") {
-				ownerStore = store
+		// distinct ClassGraph backend, so resolveGraphStore returns store unchanged
+		// and this is a no-op there (byte-identical default). The class-aware
+		// successor to the Router's GraphIDPrefix probe: route the release write to
+		// the dedicated graph store (legacy .gc/beads.sqlite) rather than to the
+		// Router that federated to it.
+		if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
+			if strings.HasPrefix(wb.ID, graphStoreIDPrefix+"-") {
+				ownerStore = graph
 			}
 		}
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {

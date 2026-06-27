@@ -624,39 +624,6 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 	}
 }
 
-// graphOnlyAssignedStore is a graph_store=sqlite-shaped test store: its graph-only
-// capability exposes the ClassGraph backend (graph nodes), while the embedded
-// MemStore stands in for the federated Dolt/work leg a graph-only worker never
-// executes.
-type graphOnlyAssignedStore struct {
-	beads.Store
-	graph []beads.Bead
-	ready []beads.Bead
-}
-
-func (s *graphOnlyAssignedStore) ListGraphOnlyHandle() (beads.GraphOnlyListStore, bool) {
-	return graphOnlyAssignedReader{graph: s.graph, ready: s.ready}, true
-}
-
-func (s *graphOnlyAssignedStore) ReadyGraphOnlyHandle() (beads.GraphOnlyReadyStore, bool) {
-	return graphOnlyAssignedReader{graph: s.graph, ready: s.ready}, true
-}
-
-type graphOnlyAssignedReader struct {
-	graph []beads.Bead
-	ready []beads.Bead
-}
-
-func (r graphOnlyAssignedReader) ListGraphOnly(beads.ListQuery) ([]beads.Bead, error) {
-	return append([]beads.Bead(nil), r.graph...), nil
-}
-
-func (r graphOnlyAssignedReader) GraphIDPrefix() string { return "gcg" }
-
-func (r graphOnlyAssignedReader) ReadyGraphOnly(...beads.ReadyQuery) ([]beads.Bead, error) {
-	return append([]beads.Bead(nil), r.ready...), nil
-}
-
 // TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope: under
 // graph_store=sqlite the close/recycle check consults the graph backend ALONE,
 // mirroring the worker's execution loop (a worker executes only graph nodes).
@@ -667,10 +634,12 @@ func (r graphOnlyAssignedReader) ReadyGraphOnly(...beads.ReadyQuery) ([]beads.Be
 func TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
-	cfg := &config.City{
-		Rigs:   []config.Rig{{Name: "riga", Path: rigPath}},
-		Agents: []config.Agent{{Name: "worker", Dir: "riga"}},
-	}
+	// Class-aware wiring (post-coordrouter): the graph step physically lives in the
+	// dedicated graph store at .gc/beads.sqlite, resolved via resolveGraphStore from
+	// the relocated graph class config — not in a capability-bearing store double.
+	cfg := graphClassSQLiteCfg()
+	cfg.Rigs = []config.Rig{{Name: "riga", Path: rigPath}}
+	cfg.Agents = []config.Agent{{Name: "worker", Dir: "riga"}}
 	session := beads.Bead{
 		ID:     "session-1",
 		Type:   sessionBeadType,
@@ -680,19 +649,25 @@ func TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope(t *testi
 			"session_name": "worker-session",
 		},
 	}
-	graphStore := &graphOnlyAssignedStore{
-		Store: beads.NewMemStore(),
-		graph: []beads.Bead{{ID: "gcg-1", Status: "open", Assignee: session.ID}},
+	graphStore, ok := openGraphSQLiteStore(cityPath)
+	if !ok {
+		t.Fatal("openGraphSQLiteStore failed")
 	}
-	// Dolt/rig work assigned to the same session — a graph-only worker can never
-	// execute it, so the recycle check must ignore it.
+	graphStep, err := graphStore.Create(beads.Bead{Title: "graph step", Assignee: session.ID})
+	if err != nil {
+		t.Fatalf("create graph step: %v", err)
+	}
+
+	// The primary store is the work leg; a graph-only worker never executes Dolt/rig
+	// work, so the recycle check must ignore rig work assigned to the same session.
+	workStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 	if _, err := rigStore.Create(beads.Bead{ID: "rig-work", Type: "task", Status: "open", Assignee: session.ID}); err != nil {
 		t.Fatalf("create rig work: %v", err)
 	}
 	rigStores := map[string]beads.Store{"riga": rigStore}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, graphStore, rigStores, session)
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, workStore, rigStores, session)
 	if err != nil {
 		t.Fatalf("check with graph work: %v", err)
 	}
@@ -700,13 +675,99 @@ func TestSessionHasOpenAssignedWorkGraphOnlyMatchesWorkerExecutionScope(t *testi
 		t.Fatal("graph-store assigned work must count — closing out from under it is the strand bug")
 	}
 
-	// Drop the graph step; only the unrunnable Dolt/rig work remains.
-	graphStore.graph = nil
-	has, err = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, graphStore, rigStores, session)
+	// Close the graph step; only the unrunnable Dolt/rig work remains.
+	closed := "closed"
+	if err := graphStore.Update(graphStep.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close graph step: %v", err)
+	}
+	has, err = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, workStore, rigStores, session)
 	if err != nil {
 		t.Fatalf("check without graph work: %v", err)
 	}
 	if has {
 		t.Fatal("Dolt/rig work a graph-only worker can't execute must NOT count — counting it livelocks the worker (kept alive, never works)")
+	}
+}
+
+// graphOnlyProbeSession builds a graph_store=sqlite city + a session and the
+// dedicated graph store at <cityPath>/.gc/beads.sqlite, shared by the graph-only
+// probe regressions below.
+func graphOnlyProbeSession(t *testing.T) (cityPath string, cfg *config.City, graph beads.Store, session beads.Bead) {
+	t.Helper()
+	cityPath = t.TempDir()
+	cfg = graphClassSQLiteCfg()
+	cfg.Rigs = []config.Rig{{Name: "riga", Path: filepath.Join(cityPath, "riga")}}
+	cfg.Agents = []config.Agent{{Name: "worker", Dir: "riga"}}
+	session = beads.Bead{
+		ID:       "session-1",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Metadata: map[string]string{"template": "riga/worker", "session_name": "worker-session"},
+	}
+	var ok bool
+	graph, ok = openGraphSQLiteStore(cityPath)
+	if !ok {
+		t.Fatal("openGraphSQLiteStore failed")
+	}
+	return cityPath, cfg, graph, session
+}
+
+// TestSessionGraphOnlyProbesCoverEphemeralWisp pins the tier coverage of the
+// graph-only close/wake probes: an EPHEMERAL (wisp-tier) ready graph step assigned to
+// the session must count for BOTH the open-work close gate and the awake/wake check.
+// The default ListQuery/ReadyQuery TierMode (TierIssues) filters Ephemeral rows, so
+// without TierBoth the session would be closed/recycled out from under a routed
+// cleanup/finalize wisp — stranding it. (Regression for the GB tier blocker.)
+func TestSessionGraphOnlyProbesCoverEphemeralWisp(t *testing.T) {
+	cityPath, cfg, graph, session := graphOnlyProbeSession(t)
+
+	step, err := graph.Create(beads.Bead{Title: "ephemeral cleanup wisp", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("create wisp: %v", err)
+	}
+	assignee := session.ID
+	if err := graph.Update(step.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("assign wisp: %v", err)
+	}
+
+	hasOpen, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, beads.NewMemStore(), nil, session)
+	if err != nil {
+		t.Fatalf("open-work check: %v", err)
+	}
+	if !hasOpen {
+		t.Fatal("an assigned ready ephemeral-wisp graph step must count as open assigned work (TierBoth) — else the close gate strands it")
+	}
+
+	hasAwake, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, beads.NewMemStore(), nil, session)
+	if err != nil {
+		t.Fatalf("awake check: %v", err)
+	}
+	if !hasAwake {
+		t.Fatal("a ready ephemeral-wisp graph step must keep the session awake (graph.Ready TierBoth) — else drain-cancel/recycle strands it")
+	}
+}
+
+// TestSessionGraphOnlyAwakeCoversInProgress pins the in_progress arm the OLD ready-only
+// path missed (SQLiteStore.Ready requires status=open, so an actively-running
+// in_progress graph node was invisible and the worker could be recycled mid-execution).
+// graphStoreHasAwakeAssignedWork now runs an in_progress List on top of Ready.
+func TestSessionGraphOnlyAwakeCoversInProgress(t *testing.T) {
+	cityPath, cfg, graph, session := graphOnlyProbeSession(t)
+
+	step, err := graph.Create(beads.Bead{Title: "running graph node"})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	inProgress, assignee := "in_progress", session.ID
+	if err := graph.Update(step.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("start step: %v", err)
+	}
+
+	hasAwake, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, beads.NewMemStore(), nil, session)
+	if err != nil {
+		t.Fatalf("awake check: %v", err)
+	}
+	if !hasAwake {
+		t.Fatal("an in_progress graph step must keep the session awake — recycling it mid-execution is the strand")
 	}
 }

@@ -2745,8 +2745,8 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	session beads.Bead,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
-	if gol, ok := beads.GraphOnlyListFor(store); ok {
-		return graphOnlyHasAssignedWork(gol, identifiers, []string{"open", "in_progress"})
+	if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
+		return graphStoreHasAssignedWork(graph, identifiers, []string{"open", "in_progress"})
 	}
 	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
 	if err != nil {
@@ -2775,8 +2775,8 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	session beads.Bead,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
-	if _, ok := beads.GraphOnlyReadyFor(store); ok {
-		return graphOnlyHasAwakeAssignedWork(store, identifiers)
+	if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
+		return graphStoreHasAwakeAssignedWork(graph, identifiers)
 	}
 	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
 	if err != nil {
@@ -2790,12 +2790,14 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	return false, nil
 }
 
-// graphOnlyHasAssignedWork reports whether the graph backend ALONE holds a bead in
-// one of statuses assigned to any of identifiers — the graph_store=sqlite execution
-// scope of a worker (ClassGraph only, the ClassWork/Dolt leg skipped). The query
-// hints Assignees for backend efficiency; results are filtered in memory so the
-// answer is correct even if a backend returns a superset.
-func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string, statuses []string) (bool, error) {
+// graphStoreHasAssignedWork reports whether the dedicated graph store ALONE holds a
+// bead in one of statuses assigned to any of identifiers — the graph_store=sqlite
+// execution scope of a worker (ClassGraph only, the ClassWork/Dolt leg skipped). The
+// caller resolves the graph store via resolveGraphStore (the class-aware successor to
+// the Router's ListGraphOnly), so the store's plain List IS the graph-only set; the
+// query hints Assignees for backend efficiency and results are filtered in memory so
+// the answer is correct even if a backend returns a superset.
+func graphStoreHasAssignedWork(graph beads.Store, identifiers []string, statuses []string) (bool, error) {
 	idset := make(map[string]struct{}, len(identifiers))
 	assignees := make([]string, 0, len(identifiers))
 	for _, id := range identifiers {
@@ -2811,7 +2813,11 @@ func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string
 	if len(assignees) == 0 {
 		return false, nil
 	}
-	list, err := gol.ListGraphOnly(beads.ListQuery{Assignees: assignees})
+	// TierBoth (not the default TierIssues, which filters out Ephemeral rows): a
+	// session's assigned graph work can be an ephemeral-wisp step (a routed
+	// cleanup/finalize node), and dropping it would close/recycle the session out
+	// from under that wisp — stranding it. Mirrors liveReadyForControllerDemandQuery.
+	list, err := graph.List(beads.ListQuery{Assignees: assignees, TierMode: beads.TierBoth})
 	if err != nil {
 		return false, err
 	}
@@ -2830,11 +2836,12 @@ func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string
 	return false, nil
 }
 
-// graphOnlyHasAwakeAssignedWork is the graph-only analog of
+// graphStoreHasAwakeAssignedWork is the dedicated-graph-store analog of
 // sessionHasAwakeAssignedWorkInStoreByIdentifiers: in-progress graph work always
 // keeps a worker awake, and ready (unblocked) open graph work counts via the same
-// ReadyGraphOnly set the dispatcher/worker execution loop consumes.
-func graphOnlyHasAwakeAssignedWork(store beads.Store, identifiers []string) (bool, error) {
+// Ready set the dispatcher/worker execution loop consumes. graph is the dedicated
+// graph store (resolveGraphStore), so its plain List/Ready ARE the graph-only set.
+func graphStoreHasAwakeAssignedWork(graph beads.Store, identifiers []string) (bool, error) {
 	idset := make(map[string]struct{}, len(identifiers))
 	assignees := make([]string, 0, len(identifiers))
 	for _, id := range identifiers {
@@ -2850,17 +2857,14 @@ func graphOnlyHasAwakeAssignedWork(store beads.Store, identifiers []string) (boo
 	if len(assignees) == 0 {
 		return false, nil
 	}
-	if gol, ok := beads.GraphOnlyListFor(store); ok {
-		if has, err := graphOnlyHasAssignedWork(gol, assignees, []string{"in_progress"}); err != nil || has {
-			return has, err
-		}
-	}
-	gor, ok := beads.GraphOnlyReadyFor(store)
-	if !ok {
-		return false, nil
+	if has, err := graphStoreHasAssignedWork(graph, assignees, []string{"in_progress"}); err != nil || has {
+		return has, err
 	}
 	for _, id := range assignees {
-		ready, err := gor.ReadyGraphOnly(beads.ReadyQuery{Assignee: id})
+		// TierBoth: the ready set must include ephemeral-wisp graph steps (the prior
+		// path read Ready through the policy forwarder, which expanded the tier);
+		// the default TierIssues would drop them and un-wake the session.
+		ready, err := graph.Ready(beads.ReadyQuery{Assignee: id, TierMode: beads.TierBoth})
 		if err != nil {
 			return false, err
 		}

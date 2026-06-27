@@ -1,0 +1,117 @@
+diff --git a/cmd/gc/pool_session_name.go b/cmd/gc/pool_session_name.go
+index 04554d7bc..b070e4402 100644
+--- a/cmd/gc/pool_session_name.go
++++ b/cmd/gc/pool_session_name.go
+@@ -193,11 +193,14 @@ func releaseOrphanedPoolAssignments(
+ 		// forever (the graph_store=sqlite strand-heal regression: the untreated
+ 		// analog of the close-check graph-only fix). Validate and write against the
+ 		// store that physically holds it. Identity-phase Dolt cities have no
+-		// distinct ClassGraph backend, so GraphOnlyListFor is absent and this is a
+-		// no-op there (byte-identical default).
+-		if gol, ok := beads.GraphOnlyListFor(store); ok {
+-			if pfx := gol.GraphIDPrefix(); pfx != "" && strings.HasPrefix(wb.ID, pfx+"-") {
+-				ownerStore = store
++		// distinct ClassGraph backend, so resolveGraphStore returns store unchanged
++		// and this is a no-op there (byte-identical default). The class-aware
++		// successor to the Router's GraphIDPrefix probe: route the release write to
++		// the dedicated graph store (legacy .gc/beads.sqlite) rather than to the
++		// Router that federated to it.
++		if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
++			if strings.HasPrefix(wb.ID, graphStoreIDPrefix+"-") {
++				ownerStore = graph
+ 			}
+ 		}
+ 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
+diff --git a/cmd/gc/session_reconciler.go b/cmd/gc/session_reconciler.go
+index 33467c2fd..808648635 100644
+--- a/cmd/gc/session_reconciler.go
++++ b/cmd/gc/session_reconciler.go
+@@ -2745,8 +2745,8 @@ func sessionHasOpenAssignedWorkForReachableStore(
+ 	session beads.Bead,
+ ) (bool, error) {
+ 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+-	if gol, ok := beads.GraphOnlyListFor(store); ok {
+-		return graphOnlyHasAssignedWork(gol, identifiers, []string{"open", "in_progress"})
++	if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
++		return graphStoreHasAssignedWork(graph, identifiers, []string{"open", "in_progress"})
+ 	}
+ 	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+ 	if err != nil {
+@@ -2775,8 +2775,8 @@ func sessionHasAwakeAssignedWorkForReachableStore(
+ 	session beads.Bead,
+ ) (bool, error) {
+ 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+-	if _, ok := beads.GraphOnlyReadyFor(store); ok {
+-		return graphOnlyHasAwakeAssignedWork(store, identifiers)
++	if graph := resolveGraphStore(store, cfg, cityPath, nil); graph != store {
++		return graphStoreHasAwakeAssignedWork(graph, identifiers)
+ 	}
+ 	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+ 	if err != nil {
+@@ -2790,12 +2790,14 @@ func sessionHasAwakeAssignedWorkForReachableStore(
+ 	return false, nil
+ }
+ 
+-// graphOnlyHasAssignedWork reports whether the graph backend ALONE holds a bead in
+-// one of statuses assigned to any of identifiers — the graph_store=sqlite execution
+-// scope of a worker (ClassGraph only, the ClassWork/Dolt leg skipped). The query
+-// hints Assignees for backend efficiency; results are filtered in memory so the
+-// answer is correct even if a backend returns a superset.
+-func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string, statuses []string) (bool, error) {
++// graphStoreHasAssignedWork reports whether the dedicated graph store ALONE holds a
++// bead in one of statuses assigned to any of identifiers — the graph_store=sqlite
++// execution scope of a worker (ClassGraph only, the ClassWork/Dolt leg skipped). The
++// caller resolves the graph store via resolveGraphStore (the class-aware successor to
++// the Router's ListGraphOnly), so the store's plain List IS the graph-only set; the
++// query hints Assignees for backend efficiency and results are filtered in memory so
++// the answer is correct even if a backend returns a superset.
++func graphStoreHasAssignedWork(graph beads.Store, identifiers []string, statuses []string) (bool, error) {
+ 	idset := make(map[string]struct{}, len(identifiers))
+ 	assignees := make([]string, 0, len(identifiers))
+ 	for _, id := range identifiers {
+@@ -2811,7 +2813,7 @@ func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string
+ 	if len(assignees) == 0 {
+ 		return false, nil
+ 	}
+-	list, err := gol.ListGraphOnly(beads.ListQuery{Assignees: assignees})
++	list, err := graph.List(beads.ListQuery{Assignees: assignees})
+ 	if err != nil {
+ 		return false, err
+ 	}
+@@ -2830,11 +2832,12 @@ func graphOnlyHasAssignedWork(gol beads.GraphOnlyListStore, identifiers []string
+ 	return false, nil
+ }
+ 
+-// graphOnlyHasAwakeAssignedWork is the graph-only analog of
++// graphStoreHasAwakeAssignedWork is the dedicated-graph-store analog of
+ // sessionHasAwakeAssignedWorkInStoreByIdentifiers: in-progress graph work always
+ // keeps a worker awake, and ready (unblocked) open graph work counts via the same
+-// ReadyGraphOnly set the dispatcher/worker execution loop consumes.
+-func graphOnlyHasAwakeAssignedWork(store beads.Store, identifiers []string) (bool, error) {
++// Ready set the dispatcher/worker execution loop consumes. graph is the dedicated
++// graph store (resolveGraphStore), so its plain List/Ready ARE the graph-only set.
++func graphStoreHasAwakeAssignedWork(graph beads.Store, identifiers []string) (bool, error) {
+ 	idset := make(map[string]struct{}, len(identifiers))
+ 	assignees := make([]string, 0, len(identifiers))
+ 	for _, id := range identifiers {
+@@ -2850,17 +2853,11 @@ func graphOnlyHasAwakeAssignedWork(store beads.Store, identifiers []string) (boo
+ 	if len(assignees) == 0 {
+ 		return false, nil
+ 	}
+-	if gol, ok := beads.GraphOnlyListFor(store); ok {
+-		if has, err := graphOnlyHasAssignedWork(gol, assignees, []string{"in_progress"}); err != nil || has {
+-			return has, err
+-		}
+-	}
+-	gor, ok := beads.GraphOnlyReadyFor(store)
+-	if !ok {
+-		return false, nil
++	if has, err := graphStoreHasAssignedWork(graph, assignees, []string{"in_progress"}); err != nil || has {
++		return has, err
+ 	}
+ 	for _, id := range assignees {
+-		ready, err := gor.ReadyGraphOnly(beads.ReadyQuery{Assignee: id})
++		ready, err := graph.Ready(beads.ReadyQuery{Assignee: id})
+ 		if err != nil {
+ 			return false, err
+ 		}

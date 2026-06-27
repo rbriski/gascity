@@ -39,6 +39,7 @@ type fakeState struct {
 	cityBeadStore     beads.Store // city-level store for session beads
 	nudgesBeadStore   beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
+	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -114,6 +115,12 @@ func (f *fakeState) NudgesBeadStore() beads.Store {
 func (f *fakeState) SessionsBeadStore() beads.Store {
 	if f.sessionsBeadStore != nil {
 		return f.sessionsBeadStore
+	}
+	return f.cityBeadStore
+}
+func (f *fakeState) GraphBeadStore() beads.Store {
+	if f.graphBeadStore != nil {
+		return f.graphBeadStore
 	}
 	return f.cityBeadStore
 }

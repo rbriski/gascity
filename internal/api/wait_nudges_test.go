@@ -85,3 +85,19 @@ func TestFakeStateSessionsBeadStoreFallsBackToCityStore(t *testing.T) {
 		t.Fatalf("relocated backend: SessionsBeadStore() must return the configured sessions store")
 	}
 }
+
+// TestFakeStateGraphBeadStoreFallsBackToCityStore documents the default-backend
+// equivalence for the graph seam: with no relocated graph store configured,
+// GraphBeadStore returns the work store, so the API path is byte-identical at the
+// default backend.
+func TestFakeStateGraphBeadStoreFallsBackToCityStore(t *testing.T) {
+	f := newFakeState(t)
+	if got := f.GraphBeadStore(); got != f.CityBeadStore() {
+		t.Fatalf("default backend: GraphBeadStore() must equal CityBeadStore(); got distinct stores")
+	}
+	relocated := beads.NewMemStore()
+	f.graphBeadStore = relocated
+	if got := f.GraphBeadStore(); got != relocated {
+		t.Fatalf("relocated backend: GraphBeadStore() must return the configured graph store")
+	}
+}

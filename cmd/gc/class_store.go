@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -212,6 +214,89 @@ func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string
 // identical to the work store at the default backend.
 func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+}
+
+// openGraphSQLiteStore opens (or returns the cached) embedded SQLite graph store at
+// the LEGACY <cityPath>/.gc/beads.sqlite location — filepath.Join(cityPath,
+// citylayout.RuntimeRoot), distinct from the .gc/<class>/ class-store convention
+// (openClassSQLiteStore / classSQLiteDir) — so it stays byte-identical for cities
+// already on graph_store="sqlite". It is a Router-free cut of registerGraphStoreSQLite's
+// body MINUS the r.Register call, reusing graphStoreHandleCache / noCloseSQLiteStore /
+// graphStoreIDPrefix verbatim. Returns (nil,false) on failure so resolveGraphStore
+// falls back to the work backend (never a silent divert to the wrong location).
+//
+// INVARIANT (the data-orphan landmine): this opener MUST use citylayout.RuntimeRoot,
+// NOT classSQLiteDir(cityPath, "graph"). Routing graph through .gc/graph/ would point
+// a live graph_store="sqlite" city at an empty store and orphan its graph data.
+func openGraphSQLiteStore(cityPath string) (beads.Store, bool) {
+	dir := filepath.Join(cityPath, citylayout.RuntimeRoot)
+	if cached, ok := graphStoreHandleCache.Load(dir); ok {
+		return cached.(beads.Store), true
+	}
+	store, err := beads.OpenSQLiteStore(dir,
+		beads.WithSQLiteStoreRetention(0, 0),
+		beads.WithSQLiteStoreIDPrefix(graphStoreIDPrefix))
+	if err != nil {
+		log.Printf("beads: graph_store=sqlite requested but opening the SQLite graph store at %s failed: %v; graph beads stay on the work backend", dir, err)
+		return nil, false
+	}
+	// Cache a never-closed wrapper so a consumer's closeBeadStoreHandle cannot close
+	// the handle out from under the other consumers of the cached store.
+	shared := store
+	if sq, ok := store.(*beads.SQLiteStore); ok {
+		shared = noCloseSQLiteStore{sq}
+	}
+	if actual, loaded := graphStoreHandleCache.LoadOrStore(dir, shared); loaded {
+		// Lost the open race: close OUR real handle, use the cached shared one.
+		if closer, ok := store.(interface{ CloseStore() error }); ok {
+			_ = closer.CloseStore() //nolint:errcheck // best-effort close of the losing duplicate
+		}
+		shared = actual.(beads.Store)
+	}
+	return shared, true
+}
+
+// resolveGraphStore returns the beads.Store backing the GRAPH coordination class.
+// It is the dedicated, class-aware successor to registerGraphStoreBackend +
+// coordrouter.Router's ClassGraph leg, mirroring resolveSessionStore's shape while
+// dispatching like registerGraphStoreBackend.
+//
+// It MUST NOT route through resolveClassStore / openClassSQLiteStore: the SQLite
+// graph store lives at the LEGACY <cityPath>/.gc/ (citylayout.RuntimeRoot, file
+// beads.sqlite), NOT the .gc/<class>/ class-store convention, so a live
+// graph_store="sqlite" city is never pointed at an empty .gc/graph/ and its graph
+// data is never orphaned. Postgres uses the canonical class path (gcg schema), which
+// is safe to share with openClassSQLiteStore's Postgres opener.
+//
+//	graph=bd       -> the work store (graphRelocated false; byte-identical default)
+//	graph=sqlite   -> the cached embedded SQLite store at .gc/beads.sqlite (gcg, retention 0,0)
+//	graph=postgres -> openClassPostgresStore(cfg, cityPath, BeadClassGraph, nil) (gcg schema)
+//
+// On open-failure it falls back to the work store rather than a silent wrong store.
+//
+// rec is accepted for signature parity with the other resolve*Store helpers but is
+// intentionally IGNORED: the graph store stays event-silent (matching the prior
+// registerGraphStoreSQLite / registerGraphStoreBackend opens, which passed no
+// recorder) because the formula-v2 topology is high-churn and is not mirrored to the
+// bus.
+func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string, _ events.Recorder) beads.Store {
+	if !graphRelocated(cfg) {
+		return workStore
+	}
+	switch cfg.Beads.NormalizedClassBackend(config.BeadClassGraph) {
+	case config.BeadsBackendSQLite:
+		if s, ok := openGraphSQLiteStore(cityPath); ok {
+			return s
+		}
+		return workStore
+	case config.BeadsBackendPostgres:
+		if s, ok := openClassPostgresStore(cfg, cityPath, config.BeadClassGraph, nil); ok {
+			return s
+		}
+		return workStore
+	default:
+		return workStore
+	}
 }
 
 // newCityMailProvider builds the controller's mail provider. Message persistence

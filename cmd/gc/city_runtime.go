@@ -2949,6 +2949,15 @@ func (cr *CityRuntime) sessionBeadStore() beads.Store {
 	return resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
+// graphBeadStore returns the store backing graph-class beads (the formula-v2
+// execution topology): the dedicated graph store at the legacy <cityPath>/.gc/
+// beads.sqlite when [beads.classes.graph] relocates graph (SQLite) or the gcg
+// Postgres schema, else the work store. The class-aware successor to the Router's
+// ClassGraph leg. Byte-identical to cityBeadStore() at the default bd backend.
+func (cr *CityRuntime) graphBeadStore() beads.Store {
+	return resolveGraphStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+}
+
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	if cr.cs != nil {
 		stores := cr.cs.BeadStores()

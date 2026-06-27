@@ -118,6 +118,17 @@ type State interface {
 	// CityBeadStore. Returns nil if no store is available.
 	SessionsBeadStore() beads.Store
 
+	// GraphBeadStore returns the store backing graph-class beads — the formula-v2
+	// execution topology and control lane (molecules, wisps, convoys, control
+	// steps). At the default backend this is the same store as CityBeadStore;
+	// when [beads.classes.graph] is relocated it is the dedicated graph store at
+	// the legacy <cityPath>/.gc/beads.sqlite (SQLite) or the gcg Postgres schema,
+	// so graph reads and writes reach the relocated beads instead of the work
+	// store. The class-aware successor to coordrouter.Router's ClassGraph leg;
+	// cross-class WORK-bead reads stay on CityBeadStore. Returns nil if no store
+	// is available.
+	GraphBeadStore() beads.Store
+
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order

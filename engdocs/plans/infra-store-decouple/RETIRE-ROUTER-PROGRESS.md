@@ -61,8 +61,15 @@ epic: ga-pd6tcg
     ONE param** (callers pass the session store); only mixed fns get the 2nd. Also thread
     `stopRuntimeBeforeSessionBeadMutation` (session op, currently deferred on workStore).
     Callers: city_runtime.go + cmd_start.go pass `(store, store)` until P6.
-- [ ] **P4 — session_reconciler.go + session_wake.go + session_lifecycle_parallel.go +
-  session_reconcile.go + session_sleep.go** (session-write surfaces).
+- [x] **P3b-2 — syncSessionBeads + reapers** (`6f4a6f568`). The big session_beads.go surface
+  class-aware; review `wf_63a72547` = SAFE-TO-PROCEED. session_beads.go DONE.
+- [ ] **P4 — session-write surfaces** (split by landmine density):
+  - **P4a** session_wake.go (pure) + session_reconcile.go (pure metadata writers) +
+    session_sleep.go (pure writers) — ~0 work sites.
+  - **P4b** session_lifecycle_parallel.go (74 session / 4 work / 6 mixed).
+  - **P4c** session_reconciler.go (79 session / **34 work** / 9 mixed — the densest landmine;
+    the `sessionHas*AssignedWork*` family stays pure-work single-param; only the orchestrator
+    `reconcileSessionBeadsTracedWithNamedDemand` + drain-ack fns get sessionStore).
 - [ ] **P5 — build_desired_state.go + agent_build_params.go + pool_session_name.go**
   (desired-state dual-class; `bp.sessionStore`). ⚠ Q3 gate: sessions city-only?
 - [ ] **P6 — derive `sessionStore` at city_runtime.go entry points + CLI/sweep writers**

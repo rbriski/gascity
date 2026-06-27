@@ -1,0 +1,133 @@
+{
+  "sites": [
+    {
+      "fileLine": "cmd/gc/cmd_bd_shim.go:373-420 (dispatchBdShimVerbViaAPI) + classifyBdShimVerb:245-300 + bdShimRoutedVerbs:75-83",
+      "what": "The worker/bd-shim by-id path. `bd close gcg-N` / `bd reopen|delete|update|show gcg-N` are classified bdRoute and served by dispatchBdShimVerbViaAPI -> client.CloseBead(id)/ReopenBead/DeleteBead/UpdateBead. CRITICAL CORRECTION to the task premise: this path does NOT touch the Router in-process. It is PURE-HTTP (ga-2gap48): the shim has no in-process Router fallback (comment lines 31-35, 1051-1062). The (id -> graph store) class-agnostic resolution happens SERVER-SIDE in the controller's HTTP bead handlers, not in the shim.",
+      "func": "dispatchBdShimVerbViaAPI / classifyBdShimVerb",
+      "op": "close/reopen/delete/update/show by-id on gcg- bead, over HTTP",
+      "currentRouting": "Shim -> controller HTTP API (client.CloseBead etc.). No Router in the worker process. Router routing (if any) is entirely on the server side.",
+      "classAwareReplacement": "NO CHANGE in the shim. The shim already delegates by-id resolution to the server. The replacement work is entirely in the server-side handlers below (beadStoresForID). Confirm the shim's pure-HTTP contract is preserved when the Router is retired."
+    },
+    {
+      "fileLine": "internal/api/handler_beads.go:165-186 (beadStoresForID)",
+      "what": "THE class-agnostic by-id resolver for the HTTP bead API. Every server-side by-id handler iterates `s.beadStoresForID(id)`. For a gcg- id, resolveStoreByConfiguredIDPrefix (HQ/rig configured prefixes) and resolveStoreByPrefix (routes.jsonl) both MISS — gcg is a CLASS prefix, not a rig/HQ prefix — so it falls through to the candidate scan: []beads.Store{cityBeadStore, rig stores...}. cityBeadStore IS the Router when graphRelocated(cfg) is true (maintainer-city graph_store=sqlite), so the handler's store.Get/Close/Update on gcg-N routes to the graph backend INSIDE the Router via backendForID (prefix gcg). This is the real graph by-id surface the task is about.",
+      "func": "(*Server).beadStoresForID",
+      "op": "resolves owning store(s) for any by-id op; returns [Router] for gcg- today",
+      "currentRouting": "Returns [cityBeadStore]; cityBeadStore == coordrouter.Router (from routedPolicyStore) which internally routes gcg- -> graph backend via backendForID.",
+      "classAwareReplacement": "Add a gcg-prefix (class-prefix) arm to beadStoresForID: when the id carries the graph store's IDPrefix (graphStoreIDPrefix=\"gcg\"), return the dedicated graph store directly (a new resolveGraphStore on controllerState), OR return []beads.Store{workStore, graphStore} and let the existing per-store Get-then-mutate loop (which already skips on ErrNotFound) pick the owner — i.e. storeref.PrefixOwner / storeref.Resolve over the explicit slice. The loop body in each handler is already storeref-shaped (probe Get, continue on ErrNotFound, mutate), so the only change is what beadStoresForID returns. Use internal/storeref.PrefixOwner([work, graph], id) to pick, falling back to the full slice."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:687-707 (humaHandleBeadClose)",
+      "what": "POST /v0/bead/{id}/close. store.Get(id) then store.Close(id) over beadStoresForID(id). For gcg-N this is the server endpoint the bd-shim's `bd close gcg-N` lands on. Today store==Router; Close routes via Router.backendForID -> graph backend (router_mutation.go:51).",
+      "func": "humaHandleBeadClose",
+      "op": "Close (by-id)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Close(id) -> backendForID(id).Close",
+      "classAwareReplacement": "No handler-body change. Fix is in beadStoresForID (return [work, graph] for gcg-); the existing Get-then-Close loop becomes storeref.Resolve-style federation over the explicit slice."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:710-732 (humaHandleBeadReopen)",
+      "what": "POST /v0/bead/{id}/reopen. store.Get(id) (also reads status) then store.Reopen(id) over beadStoresForID. Router.Reopen -> backendForID (router_mutation.go:54).",
+      "func": "humaHandleBeadReopen",
+      "op": "Reopen (by-id)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Reopen(id) -> backendForID(id).Reopen",
+      "classAwareReplacement": "No handler-body change. beadStoresForID returns [work, graph]; loop already federates."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:734-764 (humaHandleBeadAssign)",
+      "what": "POST /v0/bead/{id}/assign. store.Get(id) then store.Update(id, {Assignee}) over beadStoresForID. Note: once Get hits in a store, an Update ErrNotFound is treated as concurrent-delete (409), NOT 'try next store' (lines 748-755) — this anti-pattern guard must be preserved in any storeref rewrite. Router.Update -> backendForID (router_mutation.go:46).",
+      "func": "humaHandleBeadAssign",
+      "op": "Update/Assign (by-id)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Update -> backendForID",
+      "classAwareReplacement": "beadStoresForID returns [work, graph]. Preserve the 'Get-hit pins the store; Update-ErrNotFound = 409' semantics: storeref.PrefixOwner picks one owner deterministically, so the pin is automatic. Do NOT use a blind storeref.Resolve that re-probes on the mutation."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:777-842 (humaHandleBeadUpdate)",
+      "what": "POST /v0/bead/{id}/update and PATCH /v0/bead/{id}. store.Get(id) (current) then store.Update(id, opts) over beadStoresForID. This is the server endpoint for `bd update gcg-N <routable flags>` from the shim. Router.Update -> backendForID.",
+      "func": "humaHandleBeadUpdate",
+      "op": "Update (by-id)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Update -> backendForID",
+      "classAwareReplacement": "No handler-body change. beadStoresForID returns [work, graph]; same pin-on-Get semantics."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:551-582 (humaHandleBeadGet)",
+      "what": "GET /v0/bead/{id}. store.Get(id) over beadStoresForID. The cross-class by-id Get the task asks about — this is the server endpoint for `bd show gcg-N`. Router.Get federates (router_federation.go:57, prefixBackendForID then probe).",
+      "func": "humaHandleBeadGet",
+      "op": "Get (by-id)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Get -> prefixBackendForID(gcg)->graph, else probe",
+      "classAwareReplacement": "beadStoresForID returns [work, graph]; the existing Get-loop IS storeref.Resolve (try each, first hit wins). Direct map: storeref.Resolve(id, []beads.Store{work, graph})."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:584-612 (humaHandleBeadDeps)",
+      "what": "GET /v0/bead/{id}/deps. store.Get(id) (parent) + store.List(ParentID:id) + appendMetadataAttachedChildren(store, ...) over beadStoresForID. By-id read + a parent-scoped list that must run against the SAME store the parent resolved to. Router resolves via beadStoresForID/Get then List on that backend.",
+      "func": "humaHandleBeadDeps",
+      "op": "Get + parent-scoped List (by-id anchor)",
+      "currentRouting": "beadStoresForID -> [Router]; Get+List+children on the resolved backend",
+      "classAwareReplacement": "beadStoresForID returns [work, graph]; resolve the owning store via storeref.PrefixOwner, then run Get/List/appendMetadataAttachedChildren against THAT single store (children of a gcg- root live in the graph store). Preserve store-locality between the Get and the List."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:845-881 (humaHandleBeadReleaseIfCurrent)",
+      "what": "POST /v0/bead/{id}/release-if-current. store.Get(id) then store.(beads.ConditionalAssignmentReleaser).ReleaseIfCurrent(id, expected) over beadStoresForID. The doc comment (lines 848-850) explicitly says it 'routes to the owning store via beadStoresForID so a graph-class bead's release reaches the SQLite backend through the Router.' Router.ReleaseIfCurrent -> backendForID then capability assert (router_mutation.go:108).",
+      "func": "humaHandleBeadReleaseIfCurrent",
+      "op": "ReleaseIfCurrent / conditional release (by-id, capability)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.ReleaseIfCurrent -> backendForID(id).(ConditionalAssignmentReleaser)",
+      "classAwareReplacement": "beadStoresForID returns [work, graph]; resolve owner via storeref.PrefixOwner, type-assert beads.ConditionalAssignmentReleaser on the RESOLVED concrete store (SQLiteStore implements it). Update the comment to drop 'through the Router'. Capability is now asserted on the leaf store, not the Router."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:883-916 (humaHandleBeadClaim)",
+      "what": "POST /v0/bead/{id}/claim. store.Get(id) then store.(beads.Claimer).Claim(id, assignee) over beadStoresForID. Comment (lines 884-886) says it 'routes via beadStoresForID, so a graph-class bead's claim reaches the SQLite backend through the Router with the explicit assignee.' Router.Claim -> backendForID then Claimer/EnvActorClaimer bridge (router_mutation.go:138).",
+      "func": "humaHandleBeadClaim",
+      "op": "Claim (by-id, capability)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Claim -> backendForID(id).(Claimer|EnvActorClaimer)",
+      "classAwareReplacement": "beadStoresForID returns [work, graph]; resolve owner via storeref.PrefixOwner; assert beads.Claimer (SQLite graph store) on the leaf. NOTE: Router.Claim also bridges EnvActorClaimer (BdStore) — the handler only asserts beads.Claimer, so the work-store (Dolt) claim path differs. Preserve the SQLite-graph Claimer assertion on the resolved store; the EnvActorClaimer bridge was Router-only and is irrelevant once the graph leaf is resolved directly."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:918-940 (humaHandleBeadDelete)",
+      "what": "DELETE /v0/bead/{id} (soft-delete via store.Close). store.Get(id) then store.Close(id) over beadStoresForID. Server endpoint for `bd delete gcg-N`. Router.Close -> backendForID.",
+      "func": "humaHandleBeadDelete",
+      "op": "Delete->Close (by-id)",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Close -> backendForID",
+      "classAwareReplacement": "No handler-body change. beadStoresForID returns [work, graph]; existing loop federates."
+    },
+    {
+      "fileLine": "internal/api/huma_handlers_beads.go:512-540 + 660-687 (root/molecule Get) — humaHandleBeadGraph / create-augment Get",
+      "what": "store.Get(rootID) at :518 (BeadGraph root resolve) and store.Get(b.ID) at :675 (post-create read-back). Both iterate beadStoresForID — by-id resolution of a possibly-gcg root/created bead. Same Router federation today.",
+      "func": "humaHandleBeadGraph / create read-back",
+      "op": "Get (by-id) on graph root / created bead",
+      "currentRouting": "beadStoresForID -> [Router]; Router.Get federates",
+      "classAwareReplacement": "beadStoresForID returns [work, graph]; storeref.Resolve over the slice. For BeadGraph the whole subtree walk must stay on the resolved (graph) store."
+    },
+    {
+      "fileLine": "cmd/gc/cmd_convoy_dispatch.go:447-461 (controlStoreWithGraphRouting) -> routedPolicyStore -> coordrouter.New",
+      "what": "SECOND production Router construction site (the in-process control-dispatcher's by-id graph routing). openControlStoreAtForCity (cmd_convoy_dispatch.go:429/438/444) wraps the bd control store in controlStoreWithGraphRouting under graph_store=sqlite, inserting a Router so ProcessControl's by-id ops on gcg- molecule step/root beads route to the embedded SQLite backend. This is the in-process analog of the bd-shim's HTTP path: the control dispatcher closes/updates/sets-metadata on gcg- step beads through THIS Router, class-agnostically by-id.",
+      "func": "controlStoreWithGraphRouting / openControlStoreAtForCity",
+      "op": "constructs the Router that backs all dispatch by-id graph ops",
+      "currentRouting": "routedPolicyStore -> coordrouter.New(workBackend) + registerGraphStoreBackend",
+      "classAwareReplacement": "Replace with a store that carries an explicit graph handle for class-aware by-id resolution: build []beads.Store{controlWorkStore, resolveGraphStore(cfg, cityPath)} and have the dispatch by-id sites resolve via storeref. resolveGraphStore MUST mirror registerGraphStoreSQLite's LEGACY location (.gc/beads.sqlite via graphStoreHandleCache, gcg prefix) for sqlite, openClassPostgresStore(gcg) for postgres, and the work store for bd — NOT resolveClassStore (.gc/graph/), which would orphan live data."
+    },
+    {
+      "fileLine": "internal/dispatch/runtime.go:154,215,266,272,365,371,548,1081,1090,1101,1167,1186,1347,1375,1460,1509 (ProcessControl by-id ops)",
+      "what": "The control-dispatcher's class-agnostic by-id ops on the injected `store`: store.Get(rootID/subjectID/body.ID), store.SetMetadata/SetMetadataBatch (OutputJSON, workflow-finalize-error, batch), store.Update(bead.ID/id, opts), store.Get(beadID) for close-check, store.Get(dep.DependsOnID) for blocker reads. For a gcg- molecule these all hit graph step/root beads. `store` here is controlStoreWithGraphRouting's Router, so each op routes via backendForID. This is the largest by-id graph surface AFTER the API handlers — it is class-agnostic (the dispatcher does not know a step bead is gcg- vs gc-; the Router decides).",
+      "func": "dispatch.ProcessControl and helpers (processWorkflowFinalize, close-check, dep walk)",
+      "op": "Get/Update/SetMetadata/SetMetadataBatch (by-id) on gcg- step/root beads",
+      "currentRouting": "store == Router (from controlStoreWithGraphRouting); each by-id op -> Router.backendForID -> graph backend",
+      "classAwareReplacement": "Make the dispatcher class-aware: pass it both stores (work + graph) or a storeref resolver, and route each by-id op via storeref.PrefixOwner(id, [work, graph]).<op>. Because the dispatcher already threads a single `store beads.Store`, the lowest-churn drop-in is to keep handing it ONE store whose by-id methods federate over [work, graph] internally — i.e. a thin storeref-backed beads.Store shim replacing the Router — but the target end-state is the dispatcher holding an explicit []beads.Store and calling storeref directly. Either way the resolution moves from Router.backendForID to internal/storeref.PrefixOwner/Resolve over an explicit []beads.Store{work, graph}."
+    },
+    {
+      "fileLine": "cmd/gc/main.go:1190-1244 (openStoreResultAtForCity) -> routedPolicyStore (lines 1207, 1242) -> coordrouter.New",
+      "what": "THIRD and broadest production Router construction site — the SHARED store-open chokepoint every gc process uses (controller, workers, CLI). Comment (lines 1238-1242): 'every gc process — controller and workers alike — reaches the graph store in-process' via the Router it inserts. Any by-id op on a gcg- bead through a store opened here routes via backendForID. This is the root of why the by-id graph surface is class-agnostic everywhere: callers get a Router and never name the class.",
+      "func": "openStoreResultAtForCity / openStoreAtForCity",
+      "op": "constructs the Router backing all process-wide by-id graph routing",
+      "currentRouting": "routedPolicyStore(result.Store, cfg, cityPath) -> coordrouter.New + registerGraphStoreBackend when graphRelocated",
+      "classAwareReplacement": "Stop inserting the Router here. Return the plain work store (wrapStoreWithBeadPolicies) and expose the graph store via a dedicated resolveGraphStore(cfg, cityPath) the callers assemble into an explicit []beads.Store{work, graph} for storeref by-id ops. resolveGraphStore must preserve the LEGACY .gc/beads.sqlite location (registerGraphStoreSQLite via graphStoreHandleCache) for sqlite — NOT resolveClassStore's .gc/graph/ — else the LIVE city is pointed at an empty store and live graph data is orphaned."
+    },
+    {
+      "fileLine": "internal/coordrouter/router_mutation.go:21-43 (backendForID) + router_federation.go:41-80 (prefixBackendForID/Get)",
+      "what": "The ACTUAL by-id resolver being retired. backendForID: soleBackend short-circuit -> prefixBackendForID (static gcg prefix, owner.Get to confirm) -> full Get-probe -> primary fallback. Drives Update/Close/Reopen/Delete/SetMetadata/SetMetadataBatch/DepAdd/DepRemove/CloseAll/ReleaseIfCurrent/Claim. Get uses prefixBackendForID then federated probe. No PRODUCTION caller invokes backendForID directly — every consumer reaches it through the beads.Store interface (the three Router construction sites above).",
+      "func": "Router.backendForID / Router.prefixBackendForID / Router.Get",
+      "op": "the by-id (id -> owning store) resolution for ALL graph by-id mutations + Get",
+      "currentRouting": "this IS the current routing",
+      "classAwareReplacement": "internal/storeref.PrefixOwner (line 31, mirrors prefixBackendForID — static IDPrefix routing) + storeref.Resolve (line 51, mirrors Router.Get's prefix-then-probe body). storeref is implemented, conformance-pinned to Router.Get (storeref_test.go TestResolve_MatchesRouterGet), and has ZERO production callers. All store impls (BdStore/NativeDoltStore/PostgresStore/SQLiteStore/CachingStore) implement IDPrefix(), and graph 'gcg' is disjoint from work 'gc'/'ga', so storeref is a correct drop-in. Callers assemble the explicit []beads.Store{work, graph} themselves (no central Router)."
+    }
+  ],
+  "notes": "SCOPE / KEY FINDINGS for retiring the Router on the GRAPH by-id surface:\\n\\n1. THE BD-SHIM PATH IS PURE-HTTP, NOT IN-PROCESS ROUTER. The task's premise that `bd close gcg-N` (cmd_bd_shim) goes 'through the Router's backendForID' in the worker is WRONG for the worker process. dispatchBdShimVerbViaAPI routes close/reopen/delete/update/show over HTTP to the controller (client.CloseBead etc.; ga-2gap48, no in-process Router fallback — see cmd_bd_shim.go:31-35,1051-1062). The class-agnostic (id->graph store) resolution happens SERVER-SIDE.\\n\\n2. THE REAL SERVER-SIDE BY-ID RESOLVER IS internal/api/handler_beads.go:beadStoresForID (165-186), used by all 11+ by-id handlers in huma_handlers_beads.go (get/close/reopen/assign/update/deps/release-if-current/claim/delete/graph-root). For a gcg- id, the configured-prefix and routes.jsonl resolvers MISS (gcg is a class prefix, not rig/HQ), so it falls through to []beads.Store{cityBeadStore, rigs...}; cityBeadStore == the Router (graphRelocated), which routes gcg- internally via backendForID. The handler loop bodies are ALREADY storeref-shaped (probe Get, continue on ErrNotFound, mutate). The ONLY change needed in the API layer is what beadStoresForID returns: add a gcg/class-prefix arm returning [work, graph] (or the graph store directly) so the existing loop federates via internal/storeref instead of relying on the Router.\\n\\n3. THREE PRODUCTION ROUTER CONSTRUCTION SITES feed the by-id surface (all call routedPolicyStore -> coordrouter.New): (a) cmd/gc/api_state.go:224/256 (cityBeadStore, the API handlers' store); (b) cmd/gc/cmd_convoy_dispatch.go:457-461 controlStoreWithGraphRouting (the in-process control-dispatcher's store — backs ALL dispatch by-id graph ops at internal/dispatch/runtime.go:154..1509); (c) cmd/gc/main.go:1207/1242 openStoreResultAtForCity (the SHARED chokepoint every gc process opens through). Retiring the Router = replacing these three with a class-aware pattern: a dedicated resolveGraphStore + callers assembling explicit []beads.Store{work, graph} and resolving by-id via internal/storeref.\\n\\n4. THE DATA-ORPHAN LANDMINE IS REAL AND CONFIRMED. The live sqlite graph store is at the LEGACY <cityPath>/.gc/ (citylayout.RuntimeRoot, file beads.sqlite) opened by registerGraphStoreSQLite (api_state.go:358-383) via graphStoreHandleCache, prefix gcg. The class-store convention (openClassSQLiteStore/resolveClassStore, class_store.go) uses <cityPath>/.gc/<class>/ i.e. .gc/graph/ (classSQLiteDir, cmd_beads_migrate.go:26-28). A resolveGraphStore for the post-Router world MUST mirror registerGraphStoreSQLite's legacy .gc/beads.sqlite location, NOT resolveClassStore — routing graph through resolveClassStore points maintainer-city (graph_store=sqlite, LIVE) at an empty .gc/graph/ and orphans live graph data. (Side note worth flagging to the owner: even openClassMigrationDest at cmd_beads_migrate.go:94-105 writes graph=sqlite to .gc/graph/, which already disagrees with the live .gc/beads.sqlite read location — a latent migrate-vs-live mismatch, but graph=sqlite is live-resident not migrated, so it has not bitten yet.) graph=postgres uses openClassPostgresStore(gcg) (postgres_class_store.go:48). graph=bd -> the work store.\\n\\n5. ResolveStoreRef IS NOT A BY-ID RESOLVER. dispatch.ProcessOptions.ResolveStoreRef (internal/dispatch/runtime.go:55), populated by makeStoreRefResolver (cmd_convoy_dispatch.go:324-360, wired at :205), is a SCOPE-SCHEME resolver: it maps gc.source_store_ref strings 'city:<name>'/'rig:<name>' to a whole beads.Store via openStoreAtForCity/openControlStoreAtForCity. It uses NEITHER coordrouter.backendForID NOR storeref.Resolve, and is irrelevant to the graph by-id retirement except that the stores IT opens currently carry a Router (point 3c) — fixing openStoreResultAtForCity fixes that transitively.\\n\\n6. THE SUCCESSOR IS READY AND DARK. internal/storeref (PrefixOwner line 31 mirrors prefixBackendForID; Resolve line 51 mirrors Router.Get's prefix-then-probe body) is implemented, conformance-pinned to Router.Get (storeref_test.go TestResolve_MatchesRouterGet), and has ZERO production callers. All store impls implement IDPrefix() (caching/bd/native_dolt/postgres/sqlite), and gcg is disjoint from work gc/ga, so storeref is a verified drop-in over an explicit []beads.Store the caller assembles.\\n\\n7. SEMANTIC GUARDS TO PRESERVE in any storeref rewrite of the handlers: (a) the assign/update 'Get-hit pins the store; a subsequent Update-ErrNotFound = 409 concurrent-delete, NOT try-next-store' rule (huma_handlers_beads.go:748-755) — storeref.PrefixOwner gives a deterministic single owner so the pin is automatic; do not use a re-probing Resolve on the mutation. (b) claim/release assert beads.Claimer / beads.ConditionalAssignmentReleaser — assert on the RESOLVED leaf store (SQLiteStore implements both), and update the two comments that say 'through the Router'. (c) deps must keep the parent Get and the children List on the SAME resolved store. (d) Router.Claim's EnvActorClaimer bridge (router_mutation.go:143) was Router-only and is moot once the graph leaf is resolved directly.\\n\\nFiles (absolute): /data/projects/gascity/.claude/worktrees/infra-store-plan/cmd/gc/cmd_bd_shim.go, /internal/api/handler_beads.go, /internal/api/huma_handlers_beads.go, /cmd/gc/api_state.go, /cmd/gc/cmd_convoy_dispatch.go, /cmd/gc/main.go, /cmd/gc/class_store.go, /cmd/gc/cmd_beads_migrate.go, /internal/dispatch/runtime.go, /internal/storeref/storeref.go, /internal/coordrouter/router_mutation.go, /internal/coordrouter/router_federation.go."
+}

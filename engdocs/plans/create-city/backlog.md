@@ -189,3 +189,26 @@ within-org confused-deputy WITHOUT Accounts (a `crucible:city.read` scope the ed
 user but not orchestrator SPs, OR accept within-org reads — **the design decision needing review**);
 move the orchestrator-SP mint into the provisioner; rebase onto ER-410. Detail: crucible#30 comment
 4822729416. This is the auth-model design + review item that gates crucible#30's merge.
+
+## ✅ crucible#30 MERGED to production (aab15ac) — pull-model rework + ER-410 reconciled
+The architectural blocker is resolved. The reworked branch (commit `8e2385a` + the ER-410 merge
+`be7117e`) was reconciled and merged:
+- **create-city is now PULL MODEL**: `handleCreateCity` persists a PENDING city (no synchronous
+  Accounts mint, no OpenBao write, no `CRUCIBLE_ACCOUNTS_ADMIN_TOKEN`); it trusts the edge-minted EIA
+  scope. `requireOrgAdmin` removed (the 2nd forbidden Accounts call). `/complete` now records the
+  orchestrator credential the provisioner reports. `setupCityProvisioning` opens only the city store.
+  **The forbidden corp-public god-token is gone.**
+- **ER-410 workspace tier reconciled**: unified `CityRecord.WorkspaceID` (nullable/immutable) + my
+  `Pack`/`Provisioning`/`ListPendingOrgIDs`/discovery; both `discoverySubjects` + `enforceWorkspaceGate`;
+  `gateSandbox`-wrapped sandbox routes; the create workspace-gate logic fed from the wizard's nested
+  body via a flat-`workspace_id` bridge. Full crucible package green (incl. ER-410 `cities_workspace_test.go`,
+  reworked to pull-model semantics: gate-off→NULL, re-POST→200 idempotent).
+- Deploys inert until `CRUCIBLE_CITIES_DB` + `CRUCIBLE_CITY_DISCOVERY_SUBJECTS` are set on the crucible deployment.
+
+**Merged to production: accounts#203 (B0 + scopes) + crucible#30 (cities + provisioner + spine).**
+**Remaining to a live city:** (1) provisioner **Stage C** — the orchestrator-SP mint inside
+`cmd/city-provisioner` (it has the caller-less `AccountsProvisioner`; extend `ProvisionOne` to mint the
+SP + write OpenBao + report via `/complete`); (2) DEPLOY — set `CRUCIBLE_CITIES_DB`/discovery-subjects
+on crucible, apply the provisioner INFRA + run the RUNBOOK bootstrap (platform key, per-org tokens),
+**founder egress open-Q7**; (3) build/publish the provisioner + controller images; (4) merge wizard#234
+(after the crucible cities surface is configured-live) + live end-to-end verify.

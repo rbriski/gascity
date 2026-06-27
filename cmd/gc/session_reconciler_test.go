@@ -1117,7 +1117,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		"", env.cfg, env.sp, env.store, nil, []beads.Bead{session},
+		"", env.cfg, env.sp, env.store, env.store, nil, []beads.Bead{session},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
@@ -1864,6 +1864,7 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 	emitSessionStrandedDiagnostic(
 		"",
 		nil,
+		store, // sessionStore (byte-identical: same as work store)
 		store,
 		nil,
 		session,
@@ -2248,8 +2249,11 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 	session.Metadata = patch.Apply(session.Metadata)
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
+	// failingStore intercepts the session-bead SetMetadataBatch (the finalize
+	// write), so it must occupy the sessionStore position; the work read uses the
+	// plain store. Byte-identical at the default backend where both are env.store.
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, &session, "worker", false,
+		"", env.cfg, failingStore, env.store, nil, &session, "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -2275,8 +2279,11 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 	session.Metadata = patch.Apply(session.Metadata)
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
+	// racingStore intercepts the work-read List to inject assigned work mid-gate,
+	// so it must occupy the workStore position; the session-close legs use the
+	// plain store. Byte-identical at the default backend where both are env.store.
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, &session, "worker", true,
+		"", env.cfg, env.store, racingStore, nil, &session, "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 

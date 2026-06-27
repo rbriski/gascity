@@ -573,6 +573,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		nil,
 		&config.City{},
 		nil,
+		nil, // sessionStore (byte-identical: same as work store)
 		nil,
 		nil,
 		nil,

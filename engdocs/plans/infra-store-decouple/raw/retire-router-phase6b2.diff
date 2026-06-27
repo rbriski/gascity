@@ -1,0 +1,1377 @@
+diff --git a/cmd/gc/city_runtime.go b/cmd/gc/city_runtime.go
+index 5a0e9cbe5..ecd7b77e7 100644
+--- a/cmd/gc/city_runtime.go
++++ b/cmd/gc/city_runtime.go
+@@ -1891,7 +1891,7 @@ func (cr *CityRuntime) reloadConfigTraced(
+ 		if len(running) > 0 {
+ 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
+ 				providerSwapSummary, len(running))
+-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
++			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionBeadStore(), cr.stdout, cr.stderr)
+ 		}
+ 		cr.rec.Record(events.Event{
+ 			Type:    events.ProviderSwapped,
+@@ -2201,7 +2201,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
+ 	phaseStart = time.Now()
+ 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
+ 
+-	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, store, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), sessionBeads)
++	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessionStore, store, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), sessionBeads)
+ 	if err != nil {
+ 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
+ 		readyWaitSet = nil
+@@ -2252,10 +2252,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
+ 	cr.requestDeferredDrainFollowUpTick()
+ 	cr.recordReconcileTraceResults(trace, open, recordPhase)
+ 	phaseStart = time.Now()
+-	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
++	dispatchSessionBeads, err := loadSessionBeadSnapshot(sessionStore)
+ 	if err != nil {
+ 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
+-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), dispatchSessionBeads); err != nil {
++	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionStore, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), dispatchSessionBeads); err != nil {
+ 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
+ 	}
+ 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
+@@ -2765,7 +2765,7 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+ 		return
+ 	}
+ 	nudgeStore := resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec)
+-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store, nudgeStore, cr.sp, sessionBeads); err != nil {
++	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, cr.sessionBeadStore(), store, nudgeStore, cr.sp, sessionBeads); err != nil {
+ 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
+ 	}
+ }
+@@ -3295,9 +3295,9 @@ func (cr *CityRuntime) shutdown() {
+ 				fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+ 			}
+ 		}
+-		store := cr.cityBeadStore()
+-		markCityStopSessionSleepReason(store, cr.stderr)
+-		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
++		sessionStore := cr.sessionBeadStore()
++		markCityStopSessionSleepReason(sessionStore, cr.stderr)
++		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, sessionStore, cr.stdout, cr.stderr, cr.forceStopRequested)
+ 		if !asyncStartsDrained && cr.forceStopRequested() {
+ 			lateRunning, lateListErr := cr.sp.ListRunning("")
+ 			if lateListErr != nil {
+@@ -3308,8 +3308,8 @@ func (cr *CityRuntime) shutdown() {
+ 				}
+ 			}
+ 			if len(lateRunning) > 0 {
+-				markCityStopSessionSleepReason(store, cr.stderr)
+-				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
++				markCityStopSessionSleepReason(sessionStore, cr.stderr)
++				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, sessionStore, cr.stdout, cr.stderr, cr.forceStopRequested)
+ 			}
+ 		}
+ 	})
+diff --git a/cmd/gc/cmd_nudge.go b/cmd/gc/cmd_nudge.go
+index 6768c69fb..efdf8ab43 100644
+--- a/cmd/gc/cmd_nudge.go
++++ b/cmd/gc/cmd_nudge.go
+@@ -451,12 +451,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
+ 	}
+ 	workStore := openNudgeBeadStore(target.cityPath)
+ 	nudgeStore := resolveNudgesStore(workStore, target.cfg, target.cityPath, nil)
++	// The wait-bead validator + the last-nudge stamp are session class; route
++	// them to the session store (byte-identical to workStore at the default bd
++	// backend). nil recorder: relocated CLI writes are event-silent.
++	sessionStore := resolveSessionStore(workStore, target.cfg, target.cityPath, nil)
+ 	items, rejected := splitQueuedNudgesForTarget(target, items)
+ 	if len(rejected) > 0 {
+ 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, nudgeStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
+ 	}
+ 	candidates := items
+-	items, blocked, err := splitQueuedNudgesForDelivery(workStore, candidates)
++	items, blocked, err := splitQueuedNudgesForDelivery(sessionStore, candidates)
+ 	if err != nil {
+ 		// Release the claims so the next drain or poller pass retries
+ 		// promptly instead of waiting out the in-flight lease.
+@@ -511,14 +515,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
+ 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
+ 			return 0
+ 		}
+-		stampLastNudgeDeliveredAt(workStore, target.sessionID, time.Now())
++		stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
+ 		return 0
+ 	}
+ 	if err := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)); err != nil {
+ 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
+ 		return 1
+ 	}
+-	stampLastNudgeDeliveredAt(workStore, target.sessionID, time.Now())
++	stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
+ 	return 0
+ }
+ 
+@@ -626,6 +630,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
+ 		return 1
+ 	}
+ 	nudgeStore := resolveNudgesStore(store, target.cfg, target.cityPath, nil)
++	// store stays the work store for worker observation; the poller's session/wait
++	// ops (validator + last-nudge stamp inside tryDeliverQueuedNudgesByPoller) route
++	// to the session store. Byte-identical at the default bd backend.
++	sessionStore := resolveSessionStore(store, target.cfg, target.cityPath, nil)
+ 	var missingSince time.Time
+ 	var lastFreeOS time.Time
+ 	for {
+@@ -669,7 +677,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
+ 			return 0
+ 		}
+ 		missingSince = time.Time{}
+-		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, nudgeStore, sp, quiescence, obs)
++		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, sessionStore, store, nudgeStore, sp, quiescence, obs)
+ 		if pollErr != nil {
+ 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
+ 		}
+@@ -711,7 +719,11 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store, nudgeStore beads.S
+ 		return 1
+ 	}
+ 	if queueManagedWake {
+-		return queueManagedSessionNudgeWake(target, store, nudgeStore, message, mode, jsonOutput, stdout, stderr)
++		// store stays the work store for observation/worker handle above; the
++		// managed wake's session-bead ops route to the session store. Byte-
++		// identical at the default bd backend. nil recorder: event-silent.
++		sessionStore := resolveSessionStore(store, target.cfg, target.cityPath, nil)
++		return queueManagedSessionNudgeWake(target, sessionStore, nudgeStore, message, mode, jsonOutput, stdout, stderr)
+ 	}
+ 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
+ 	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
+@@ -819,9 +831,12 @@ func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
+ 		nudgeCityUsesManagedReconciler(target.cityPath)
+ }
+ 
+-func queueManagedSessionNudgeWake(target nudgeTarget, store, nudgeStore beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
++// queueManagedSessionNudgeWake enqueues a session nudge and wakes the session.
++// sessionStore feeds the managed wake (session class); nudgeStore feeds the
++// queue enqueue. Byte-identical at the default bd backend.
++func queueManagedSessionNudgeWake(target nudgeTarget, sessionStore, nudgeStore beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+ 	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+-	if err := enqueueManagedNudgeThenWake(target, store, nudgeStore, item); err != nil {
++	if err := enqueueManagedNudgeThenWake(target, sessionStore, nudgeStore, item); err != nil {
+ 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+ 		return 1
+ 	}
+@@ -831,11 +846,14 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store, nudgeStore beads.St
+ 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+ }
+ 
+-func enqueueManagedNudgeThenWake(target nudgeTarget, store, nudgeStore beads.Store, item queuedNudge) error {
++// enqueueManagedNudgeThenWake enqueues then wakes. sessionStore feeds the managed
++// wake (requestManagedNudgeWake → session-bead Get + WakeSession); nudgeStore
++// feeds the queue enqueue/rollback.
++func enqueueManagedNudgeThenWake(target nudgeTarget, sessionStore, nudgeStore beads.Store, item queuedNudge) error {
+ 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudgeStore, item); err != nil {
+ 		return err
+ 	}
+-	if err := requestManagedNudgeWake(target, store); err != nil {
++	if err := requestManagedNudgeWake(target, sessionStore); err != nil {
+ 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeStore, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
+ 			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
+ 		}
+@@ -844,15 +862,18 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store, nudgeStore beads.Sto
+ 	return nil
+ }
+ 
+-func requestManagedNudgeWake(target nudgeTarget, store beads.Store) error {
+-	if store == nil || target.sessionID == "" {
++// requestManagedNudgeWake wakes an asleep session for a queued nudge.
++// PURE-SESSION: sessionStore feeds the session-bead Get and WakeSession (its
++// session-bead update + durable wait cancellation are all session class).
++func requestManagedNudgeWake(target nudgeTarget, sessionStore beads.Store) error {
++	if sessionStore == nil || target.sessionID == "" {
+ 		return nil
+ 	}
+-	b, err := store.Get(target.sessionID)
++	b, err := sessionStore.Get(target.sessionID)
+ 	if err != nil {
+ 		return err
+ 	}
+-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
++	nudgeIDs, err := session.WakeSession(sessionStore, b, time.Now().UTC())
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -1026,6 +1047,14 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
+ func sendMailNotifyWithWorker(target nudgeTarget, store, nudgeStore beads.Store, sp runtime.Provider, sender string) error {
+ 	msg := fmt.Sprintf("You have mail from %s", sender)
+ 	now := time.Now()
++	// store stays the work store for worker observation/handle + the
++	// managed-wake gate; the session-bead ops (last-nudge stamp + managed wake)
++	// route to the session store. A nil store (sendMailNotifyWithProvider) keeps
++	// sessionStore nil so those ops stay no-ops, byte-identical to before.
++	sessionStore := store
++	if store != nil {
++		sessionStore = resolveSessionStore(store, target.cfg, target.cityPath, nil)
++	}
+ 	obs, err := workerObserveNudgeTarget(target, store, sp)
+ 	if err != nil {
+ 		return err
+@@ -1041,14 +1070,14 @@ func sendMailNotifyWithWorker(target nudgeTarget, store, nudgeStore beads.Store,
+ 			})
+ 			if nudgeErr == nil && result.Delivered {
+ 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
+-				stampLastNudgeDeliveredAt(store, target.sessionID, time.Now())
++				stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
+ 				return nil
+ 			}
+ 		}
+ 	}
+ 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
+ 		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))
+-		if err := enqueueManagedNudgeThenWake(target, store, nudgeStore, item); err != nil {
++		if err := enqueueManagedNudgeThenWake(target, sessionStore, nudgeStore, item); err != nil {
+ 			return err
+ 		}
+ 		if err := nudgePokeController(target.cityPath); err != nil {
+@@ -1076,11 +1105,15 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
+ 	if err != nil {
+ 		return nudgeTarget{}, err
+ 	}
+-	store := openNudgeBeadStore(cityPath)
+-	if store != nil {
+-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
++	// openNudgeBeadStore returns the work store; this function uses it ONLY for
++	// session resolution + the session-bead Get, so route both to the session
++	// class store (byte-identical to the work store at the default bd backend).
++	// nil recorder: relocated CLI writes are event-silent.
++	sessionStore := resolveSessionStore(openNudgeBeadStore(cityPath), cfg, cityPath, nil)
++	if sessionStore != nil {
++		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessionStore, identifier)
+ 		if err == nil {
+-			b, getErr := store.Get(sessionID)
++			b, getErr := sessionStore.Get(sessionID)
+ 			if getErr != nil {
+ 				return nudgeTarget{}, getErr
+ 			}
+@@ -1189,7 +1222,12 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
+ 	}
+ }
+ 
+-func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
++// tryDeliverQueuedNudgesByPoller delivers due queued nudges through the worker.
++// MIXED: sessionStore feeds the wait-bead validator (splitQueuedNudgesForDelivery)
++// and the last-nudge stamp (session class); workStore feeds the worker handle
++// (work/runtime resolution); nudgeStore feeds the nudge-shadow bookkeeping. At
++// the default bd backend all three are the work store, so byte-identical.
++func tryDeliverQueuedNudgesByPoller(target nudgeTarget, sessionStore, workStore, nudgeStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+ 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
+ 	if err != nil || !matches {
+ 		return false, err
+@@ -1204,6 +1242,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore be
+ 	if workStore == nil {
+ 		workStore = openNudgeBeadStore(target.cityPath)
+ 	}
++	if sessionStore == nil {
++		sessionStore = resolveSessionStore(workStore, target.cfg, target.cityPath, nil)
++	}
+ 	if nudgeStore == nil {
+ 		nudgeStore = openNudgesClassStore(target.cityPath)
+ 	}
+@@ -1219,7 +1260,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore be
+ 		}
+ 	}
+ 	candidates := items
+-	items, blocked, err := splitQueuedNudgesForDelivery(workStore, candidates)
++	items, blocked, err := splitQueuedNudgesForDelivery(sessionStore, candidates)
+ 	if err != nil {
+ 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
+ 		return false, errors.Join(bookkeepErr, err, relErr)
+@@ -1270,17 +1311,19 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore be
+ 		return false, errors.Join(bookkeepErr, relErr)
+ 	}
+ 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
+-	stampLastNudgeDeliveredAt(workStore, target.sessionID, time.Now())
++	stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
+ 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+ }
+ 
+-func stampLastNudgeDeliveredAt(store beads.Store, sessionID string, t time.Time) {
+-	if store == nil || sessionID == "" {
++// stampLastNudgeDeliveredAt records the delivery timestamp on the session bead.
++// PURE-SESSION: the SetMetadata targets a session ID.
++func stampLastNudgeDeliveredAt(sessionStore beads.Store, sessionID string, t time.Time) {
++	if sessionStore == nil || sessionID == "" {
+ 		return
+ 	}
+ 	// Best-effort stamp. Delivery already succeeded, so a metadata write
+ 	// failure here must not bubble back to the caller and force a redelivery.
+-	_ = store.SetMetadata(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
++	_ = sessionStore.SetMetadata(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
+ }
+ 
+ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+@@ -1353,17 +1396,19 @@ func maybeStartNudgePoller(target nudgeTarget) {
+ 	}
+ }
+ 
+-func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
++// withNudgeTargetFence fills the target's sessionID/epoch from session beads.
++// PURE-SESSION: sessionStore feeds loadSessionBeads (the gc:session list).
++func withNudgeTargetFence(sessionStore beads.Store, target nudgeTarget) nudgeTarget {
+ 	if target.sessionName == "" {
+ 		return target
+ 	}
+ 	if target.sessionID != "" && target.continuationEpoch != "" {
+ 		return target
+ 	}
+-	if store == nil {
++	if sessionStore == nil {
+ 		return target
+ 	}
+-	open, err := loadSessionBeads(store)
++	open, err := loadSessionBeads(sessionStore)
+ 	if err != nil {
+ 		return target
+ 	}
+@@ -1410,14 +1455,18 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
+ 	return deliverable, rejected
+ }
+ 
+-func splitQueuedNudgesForDelivery(store beads.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
++// splitQueuedNudgesForDelivery partitions queued nudges into deliverable and
++// blocked. The validator reads durable WAIT beads (session class) — sessionStore
++// MUST hold the wait beads; an empty store would block every wait-sourced nudge
++// as wait-missing and dead-letter it.
++func splitQueuedNudgesForDelivery(sessionStore beads.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
+ 	if len(items) == 0 {
+ 		return nil, nil, nil
+ 	}
+ 	deliverable := make([]queuedNudge, 0, len(items))
+ 	blocked := make(map[string][]queuedNudge)
+ 	for _, item := range items {
+-		reason, shouldBlock, err := blockedQueuedNudgeReason(store, item)
++		reason, shouldBlock, err := blockedQueuedNudgeReason(sessionStore, item)
+ 		if err != nil {
+ 			return nil, nil, err
+ 		}
+@@ -1430,11 +1479,13 @@ func splitQueuedNudgesForDelivery(store beads.Store, items []queuedNudge) ([]que
+ 	return deliverable, blocked, nil
+ }
+ 
+-func blockedQueuedNudgeReason(store beads.Store, item queuedNudge) (string, bool, error) {
+-	if store == nil || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
++// blockedQueuedNudgeReason reads the durable WAIT bead a queued nudge references.
++// PURE-SESSION: wait beads are session class; sessionStore MUST hold them.
++func blockedQueuedNudgeReason(sessionStore beads.Store, item queuedNudge) (string, bool, error) {
++	if sessionStore == nil || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
+ 		return "", false, nil
+ 	}
+-	wait, err := store.Get(item.Reference.ID)
++	wait, err := sessionStore.Get(item.Reference.ID)
+ 	if err != nil {
+ 		if errors.Is(err, beads.ErrNotFound) {
+ 			return "wait-missing", true, nil
+diff --git a/cmd/gc/cmd_session_wake.go b/cmd/gc/cmd_session_wake.go
+index 35662a6da..0d9ab8fbf 100644
+--- a/cmd/gc/cmd_session_wake.go
++++ b/cmd/gc/cmd_session_wake.go
+@@ -53,13 +53,19 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
+ 	if cityErr == nil {
+ 		cfg, _ = loadCityConfig(cityPath, stderr)
+ 	}
+-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
++	// Every store op in this command is session-class (resolution,
++	// materialization, Get, RepairEmptyType, WakeSession's wait-cancel +
++	// session-bead update, the asleep stamp). Route them all to the session
++	// class store; byte-identical to store at the default bd backend. nil
++	// recorder: relocated CLI writes are event-silent.
++	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
++	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessionStore, args[0])
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+ 		return 1
+ 	}
+ 
+-	b, err := store.Get(id)
++	b, err := sessionStore.Get(id)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+ 		return 1
+@@ -69,8 +75,8 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
+ 		return 1
+ 	}
+ 	hasRunnableTemplate := sessionWakeHasRunnableTemplate(b, cfg)
+-	session.RepairEmptyType(store, &b)
+-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
++	session.RepairEmptyType(sessionStore, &b)
++	nudgeIDs, err := session.WakeSession(sessionStore, b, time.Now().UTC())
+ 	if err != nil {
+ 		if state, conflict := session.WakeConflictState(err); conflict {
+ 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
+@@ -80,7 +86,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
+ 		return 1
+ 	}
+ 	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
+-		if err := store.SetMetadataBatch(id, map[string]string{
++		if err := sessionStore.SetMetadataBatch(id, map[string]string{
+ 			"state":                     string(session.StateAsleep),
+ 			"state_reason":              "",
+ 			"pending_create_claim":      "",
+diff --git a/cmd/gc/cmd_stop.go b/cmd/gc/cmd_stop.go
+index bc633280e..064c60815 100644
+--- a/cmd/gc/cmd_stop.go
++++ b/cmd/gc/cmd_stop.go
+@@ -269,7 +269,11 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
+ 	cityName := loadedCityName(cfg, cityPath)
+ 
+ 	store, _ := openCityStoreAt(cityPath)
+-	markCityStopSessionSleepReason(store, stderr)
++	// Session/wait lifecycle ops route to the session class store (byte-identical
++	// to store at the default bd backend); session-name lookup + pool resolution
++	// stay on the work store. nil recorder: relocated CLI writes are event-silent.
++	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
++	markCityStopSessionSleepReason(sessionStore, stderr)
+ 
+ 	// If a controller is running, ask it to shut down (it stops agents).
+ 	if tryStopControllerWithForce(cityPath, stdout, force) {
+@@ -317,11 +321,11 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
+ 		graceTimeout = 0
+ 	}
+ 
+-	code := doStop(sessionNames, sp, cfg, store, graceTimeout, recorder, stdout, stderr)
++	code := doStop(sessionNames, sp, cfg, sessionStore, graceTimeout, recorder, stdout, stderr)
+ 
+ 	// Clean up orphan sessions (sessions with the city prefix that are
+ 	// not in the current config).
+-	stopOrphans(sp, desired, cfg, store, graceTimeout, recorder, stdout, stderr)
++	stopOrphans(sp, desired, cfg, sessionStore, graceTimeout, recorder, stdout, stderr)
+ 
+ 	teardownServerForStop(sp, stderr)
+ 
+@@ -344,11 +348,15 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
+ 	}
+ }
+ 
+-func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
+-	if store == nil {
++// markCityStopSessionSleepReason stamps the city-stop sleep_reason on every
++// active session bead before shutdown. PURE-SESSION: sessionStore feeds the
++// gc:session list and the session-bead SetMetadata — no work-assignment op.
++// Byte-identical at the default backend (sessionStore == workStore).
++func markCityStopSessionSleepReason(sessionStore beads.Store, stderr io.Writer) {
++	if sessionStore == nil {
+ 		return
+ 	}
+-	sessions, err := store.ListByLabel("gc:session", 0)
++	sessions, err := sessionStore.ListByLabel("gc:session", 0)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
+ 		return
+@@ -361,7 +369,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
+ 		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {
+ 			continue
+ 		}
+-		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
++		if err := sessionStore.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+ 			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
+ 		}
+ 	}
+@@ -442,7 +450,10 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
+ // stopOrphans stops sessions that are not in the desired set. Used by gc stop
+ // to clean up orphans after stopping config agents. With per-city socket
+ // isolation, all sessions on the socket belong to this city.
+-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, store beads.Store,
++// stopOrphans force-stops running sessions absent from the desired set.
++// PURE-SESSION: sessionStore only feeds gracefulStopAll (the session stop
++// chain). Byte-identical at the default backend (sessionStore == workStore).
++func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessionStore beads.Store,
+ 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
+ ) {
+ 	running, err := sp.ListRunning("")
+@@ -461,7 +472,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
+ 		}
+ 		orphans = append(orphans, name)
+ 	}
+-	gracefulStopAll(orphans, sp, timeout, rec, cfg, store, stdout, stderr)
++	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessionStore, stdout, stderr)
+ }
+ 
+ // tryStopController connects to the controller socket and sends "stop".
+@@ -522,8 +533,11 @@ func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) err
+ 
+ // doStop is the pure logic for "gc stop". Filters to running sessions and
+ // performs graceful shutdown (interrupt → wait → kill). Accepts session names,
+-// provider, timeout, and recorder for testability.
+-func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
++// provider, timeout, and recorder for testability. PURE-SESSION: sessionStore
++// feeds workerSessionTargetRunningWithConfig (session runtime-handle probe) and
++// gracefulStopAll (the session stop chain) — no work-assignment op. Byte-
++// identical at the default backend (sessionStore == workStore).
++func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, sessionStore beads.Store, timeout time.Duration,
+ 	rec events.Recorder, stdout, stderr io.Writer,
+ ) int {
+ 	visible := map[string]bool{}
+@@ -549,7 +563,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store
+ 		if sn == "" {
+ 			continue
+ 		}
+-		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
++		if alive, err := workerSessionTargetRunningWithConfig("", sessionStore, sp, cfg, sn); err == nil && alive {
+ 			running = append(running, sn)
+ 			continue
+ 		}
+@@ -557,7 +571,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store
+ 			running = append(running, sn)
+ 		}
+ 	}
+-	gracefulStopAll(running, sp, timeout, rec, cfg, store, stdout, stderr)
++	gracefulStopAll(running, sp, timeout, rec, cfg, sessionStore, stdout, stderr)
+ 	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+ 	return 0
+ }
+diff --git a/cmd/gc/cmd_wait.go b/cmd/gc/cmd_wait.go
+index 0af598454..cc7db9326 100644
+--- a/cmd/gc/cmd_wait.go
++++ b/cmd/gc/cmd_wait.go
+@@ -220,12 +220,17 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
+ 	if cityErr == nil {
+ 		cfg, _ = loadCityConfig(cityPath, stderr)
+ 	}
+-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
++	// Session resolution + the wait-bead create/update + session-bead writes are
++	// session class; the dep-bead reads (loadWaitDependencyBead /
++	// depsWaitReadyDetailedForCity below) are WORK/issue beads and MUST stay on
++	// store. nil recorder: relocated CLI writes are event-silent.
++	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
++	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessionStore, target)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+ 		return 1
+ 	}
+-	sb, err := store.Get(sessionID)
++	sb, err := sessionStore.Get(sessionID)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+ 		return 1
+@@ -253,7 +258,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
+ 	if matchAny {
+ 		meta["dep_mode"] = "any"
+ 	}
+-	waitBead, err := store.Create(beads.Bead{
++	waitBead, err := sessionStore.Create(beads.Bead{
+ 		Title:       "wait:" + sb.Title,
+ 		Type:        waitBeadType,
+ 		Description: note,
+@@ -267,9 +272,10 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
+ 		fmt.Fprintf(stderr, "gc session wait: creating wait: %v\n", err) //nolint:errcheck
+ 		return 1
+ 	}
++	// LANDMINE: dep readiness reads WORK/issue beads — keep on store.
+ 	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, waitBead)
+ 	if depErr != nil {
+-		if err := setWaitTerminalState(store, waitBead.ID, map[string]string{
++		if err := setWaitTerminalState(sessionStore, waitBead.ID, map[string]string{
+ 			"state":      waitStateFailed,
+ 			"failed_at":  now.Format(time.RFC3339),
+ 			"last_error": depErr.Error(),
+@@ -280,7 +286,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
+ 		return 1
+ 	}
+ 	if ready {
+-		if err := store.SetMetadataBatch(waitBead.ID, map[string]string{
++		if err := sessionStore.SetMetadataBatch(waitBead.ID, map[string]string{
+ 			"state":    waitStateReady,
+ 			"ready_at": now.Format(time.RFC3339),
+ 		}); err != nil {
+@@ -291,7 +297,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
+ 		return 0
+ 	}
+ 	if sleep {
+-		if err := store.SetMetadataBatch(sessionID, map[string]string{
++		if err := sessionStore.SetMetadataBatch(sessionID, map[string]string{
+ 			"wait_hold":    "true",
+ 			"sleep_intent": "wait-hold",
+ 		}); err != nil {
+@@ -399,11 +405,15 @@ func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput
+ 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+ 		return 1
+ 	}
++	// Wait beads are session class; route the listing reads to the session store
++	// (byte-identical to store at the default bd backend). nil recorder: read-only.
++	cfg, _ := loadCityConfig(cityPath, io.Discard)
++	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
+ 	var items []beads.Bead
+ 	if sessionFilter != "" {
+-		items, err = loadSessionWaitBeads(store, sessionFilter)
++		items, err = loadSessionWaitBeads(sessionStore, sessionFilter)
+ 	} else {
+-		items, err = loadWaitBeads(store)
++		items, err = loadWaitBeads(sessionStore)
+ 	}
+ 	if err != nil {
+ 		if !isWaitLookupLimitError(err) {
+@@ -514,7 +524,11 @@ func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, std
+ 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+ 		return 1
+ 	}
+-	b, err := store.Get(waitID)
++	// The wait bead is session class; route the Get to the session store
++	// (byte-identical to store at the default bd backend). nil recorder: read-only.
++	cfg, _ := loadCityConfig(cityPath, io.Discard)
++	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
++	b, err := sessionStore.Get(waitID)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
+ 		return 1
+@@ -643,17 +657,20 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
+ 	if store == nil {
+ 		return result, code
+ 	}
+-	// The nudge SHADOW reads below (retryClosedWait/nextWaitDeliveryAttempt) must
+-	// target the relocated nudge store when nudges are relocated; everything else
+-	// here is a session/wait op on the work store. At the default backend
+-	// resolveNudgesStore returns the work store, so nudgeStore == store.
++	// Three seams: the nudge SHADOW reads (retryClosedWait/nextWaitDeliveryAttempt)
++	// target the relocated nudge store; the wait/session ops target the session
++	// store; dep reads (none here) would stay on the work store. At the default
++	// backend both resolvers return the work store, so all three == store. nil
++	// recorder: relocated CLI writes are event-silent.
+ 	nudgeStore := store
++	sessionStore := store
+ 	if cityPath, cityErr := resolveCity(); cityErr == nil {
+ 		if cfg, cfgErr := loadCityConfig(cityPath, io.Discard); cfgErr == nil {
+ 			nudgeStore = resolveNudgesStore(store, cfg, cityPath, nil)
++			sessionStore = resolveSessionStore(store, cfg, cityPath, nil)
+ 		}
+ 	}
+-	b, err := store.Get(waitID)
++	b, err := sessionStore.Get(waitID)
+ 	if err != nil {
+ 		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+ 		return result, 1
+@@ -670,7 +687,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
+ 	}
+ 	now := time.Now().UTC().Format(time.RFC3339)
+ 	if state == waitStateReady && b.Status == "closed" {
+-		retried, err := retryClosedWait(store, nudgeStore, b, now)
++		retried, err := retryClosedWait(sessionStore, nudgeStore, b, now)
+ 		if err != nil {
+ 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+ 			return result, 1
+@@ -704,10 +721,10 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
+ 	case waitStateCanceled:
+ 		batch["canceled_at"] = now
+ 	}
+-	apply := store.SetMetadataBatch
++	apply := sessionStore.SetMetadataBatch
+ 	if state == waitStateCanceled {
+ 		apply = func(id string, kv map[string]string) error {
+-			return setWaitTerminalState(store, id, kv)
++			return setWaitTerminalState(sessionStore, id, kv)
+ 		}
+ 	}
+ 	if err := apply(waitID, batch); err != nil {
+@@ -721,7 +738,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
+ 				return result, 1
+ 			}
+ 		}
+-		if err := clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"]); err != nil {
++		if err := clearSessionWaitHoldIfIdle(sessionStore, b.Metadata["session_id"]); err != nil {
+ 			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
+ 			return result, 1
+ 		}
+@@ -730,15 +747,18 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
+ 	return result, 0
+ }
+ 
+-func loadWaitBeads(store beads.Store) ([]beads.Bead, error) {
+-	if store == nil {
++// loadWaitBeads lists every open wait bead (gc:wait). PURE-SESSION: wait beads
++// are session class. Byte-identical at the default backend.
++func loadWaitBeads(sessionStore beads.Store) ([]beads.Bead, error) {
++	if sessionStore == nil {
+ 		return nil, nil
+ 	}
+-	return loadWaitBeadsByLabel(store)
++	return loadWaitBeadsByLabel(sessionStore)
+ }
+ 
+-func loadSessionWaitBeads(store beads.Store, sessionID string) ([]beads.Bead, error) {
+-	return sessionpkg.ListSessionWaitBeads(store, sessionID)
++// loadSessionWaitBeads lists the wait beads for one session. PURE-SESSION.
++func loadSessionWaitBeads(sessionStore beads.Store, sessionID string) ([]beads.Bead, error) {
++	return sessionpkg.ListSessionWaitBeads(sessionStore, sessionID)
+ }
+ 
+ const waitLookupLimit = sessionpkg.SessionWaitLookupLimit
+@@ -747,8 +767,10 @@ func isWaitLookupLimitError(err error) bool {
+ 	return beads.IsLookupLimitError(err)
+ }
+ 
+-func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error, now time.Time, source string) {
+-	if store == nil || strings.TrimSpace(sessionID) == "" {
++// stampWaitLookupCapDiagnostic records a wait-lookup cap diagnostic on the
++// session bead. PURE-SESSION: the SetMetadataBatch targets a session ID.
++func stampWaitLookupCapDiagnostic(sessionStore beads.Store, sessionID string, err error, now time.Time, source string) {
++	if sessionStore == nil || strings.TrimSpace(sessionID) == "" {
+ 		return
+ 	}
+ 	var limitErr beads.LookupLimitError
+@@ -764,19 +786,20 @@ func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error
+ 	}
+ 	batch := map[string]string{}
+ 	sessionpkg.StampWaitLookupCapMetadata(batch, label, limitErr.Limit, now, source)
+-	if err := store.SetMetadataBatch(sessionID, batch); err != nil {
++	if err := sessionStore.SetMetadataBatch(sessionID, batch); err != nil {
+ 		log.Printf("gc wait: recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
+ 	}
+ }
+ 
+-func stampGlobalWaitLookupCapDiagnostics(store beads.Store, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
++func stampGlobalWaitLookupCapDiagnostics(sessionStore beads.Store, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
+ 	for _, sessionBead := range sessionBeads.Open() {
+-		stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, now, "wake-state-global")
++		stampWaitLookupCapDiagnostic(sessionStore, sessionBead.ID, err, now, "wake-state-global")
+ 	}
+ }
+ 
+-func loadWaitBeadsByLabel(store beads.Store) ([]beads.Bead, error) {
+-	all, err := store.List(beads.ListQuery{
++// loadWaitBeadsByLabel scans every gc:wait bead. PURE-SESSION (wait class).
++func loadWaitBeadsByLabel(sessionStore beads.Store) ([]beads.Bead, error) {
++	all, err := sessionStore.List(beads.ListQuery{
+ 		Label: waitBeadLabel,
+ 		Limit: waitLookupLimit + 1,
+ 		Sort:  beads.SortCreatedDesc,
+@@ -804,20 +827,22 @@ func loadWaitBeadsByLabel(store beads.Store) ([]beads.Bead, error) {
+ 	return result, nil
+ }
+ 
+-func loadWaitBeadsForWakeState(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
++// loadWaitBeadsForWakeState collects the wait beads relevant to wake-state.
++// PURE-SESSION: every read/diagnostic write here is wait/session class.
++func loadWaitBeadsForWakeState(sessionStore beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
+ 	// Open sessions get per-session coverage; waits tied only to closed
+ 	// sessions can fall outside the newest global capped window under
+ 	// saturation, with cap diagnostics as the operator signal.
+-	waits, seen, err := loadWaitBeadsForOpenSessionsWithSeen(store, sessionBeads)
++	waits, seen, err := loadWaitBeadsForOpenSessionsWithSeen(sessionStore, sessionBeads)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	globalWaits, err := loadWaitBeads(store)
++	globalWaits, err := loadWaitBeads(sessionStore)
+ 	if err != nil {
+ 		if !isWaitLookupLimitError(err) {
+ 			return nil, err
+ 		}
+-		stampGlobalWaitLookupCapDiagnostics(store, sessionBeads, err, time.Now().UTC())
++		stampGlobalWaitLookupCapDiagnostics(sessionStore, sessionBeads, err, time.Now().UTC())
+ 		log.Printf("gc wait: global wake-state wait lookup failed; continuing with open-session waits: %v", err)
+ 	}
+ 	for _, wait := range globalWaits {
+@@ -830,24 +855,24 @@ func loadWaitBeadsForWakeState(store beads.Store, sessionBeads *sessionBeadSnaps
+ 	return waits, nil
+ }
+ 
+-func loadWaitBeadsForOpenSessions(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
+-	waits, _, err := loadWaitBeadsForOpenSessionsWithSeen(store, sessionBeads)
++func loadWaitBeadsForOpenSessions(sessionStore beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
++	waits, _, err := loadWaitBeadsForOpenSessionsWithSeen(sessionStore, sessionBeads)
+ 	return waits, err
+ }
+ 
+-func loadWaitBeadsForOpenSessionsWithSeen(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, map[string]bool, error) {
++func loadWaitBeadsForOpenSessionsWithSeen(sessionStore beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, map[string]bool, error) {
+ 	seen := map[string]bool{}
+-	if store == nil || sessionBeads == nil {
++	if sessionStore == nil || sessionBeads == nil {
+ 		return nil, seen, nil
+ 	}
+ 	waits := []beads.Bead(nil)
+ 	for _, sessionBead := range sessionBeads.Open() {
+-		sessionWaits, err := loadSessionWaitBeads(store, sessionBead.ID)
++		sessionWaits, err := loadSessionWaitBeads(sessionStore, sessionBead.ID)
+ 		if err != nil {
+ 			if !isWaitLookupLimitError(err) {
+ 				return nil, seen, err
+ 			}
+-			stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, time.Now().UTC(), "wake-state-session")
++			stampWaitLookupCapDiagnostic(sessionStore, sessionBead.ID, err, time.Now().UTC(), "wake-state-session")
+ 			log.Printf("gc wait: session %s wait lookup capped; continuing with filtered partial waits: %v", sessionBead.ID, err)
+ 		}
+ 		for _, wait := range sessionWaits {
+@@ -991,18 +1016,25 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
+ }
+ 
+ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
+-	return prepareWaitWakeStateForCityWithSnapshot(cityPath, store, store, now, nil)
++	return prepareWaitWakeStateForCityWithSnapshot(cityPath, store, store, store, now, nil)
+ }
+ 
+-func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
++// prepareWaitWakeStateForCityWithSnapshot evaluates wake-state for every open
++// wait. MIXED: sessionStore feeds the wait/session reads and the terminal/hold
++// writes (wait + session class); workStore feeds depsWaitReadyDetailedForCity,
++// whose dep reads are WORK/issue beads (the mass-failure landmine — an empty
++// session store would report every dep not-found and fail every wait);
++// nudgeStore feeds the queued-nudge finalize. Byte-identical at the default
++// backend (all three are the work store).
++func prepareWaitWakeStateForCityWithSnapshot(cityPath string, sessionStore, workStore, nudgeStore beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+ 	if sessionBeads == nil {
+ 		var err error
+-		sessionBeads, err = loadSessionBeadSnapshot(store)
++		sessionBeads, err = loadSessionBeadSnapshot(sessionStore)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 	}
+-	waits, err := loadWaitBeadsForWakeState(store, sessionBeads)
++	waits, err := loadWaitBeadsForWakeState(sessionStore, sessionBeads)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -1020,7 +1052,7 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore
+ 		if !ok {
+ 			if wait.Metadata["registered_epoch"] != "" {
+ 				var found bool
+-				sessionBead, found, err = lookupSessionBeadByID(store, sessionID)
++				sessionBead, found, err = lookupSessionBeadByID(sessionStore, sessionID)
+ 				if err != nil {
+ 					return nil, err
+ 				}
+@@ -1032,20 +1064,20 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore
+ 			}
+ 		}
+ 		if epoch := wait.Metadata["registered_epoch"]; epoch != "" && sessionBead.Metadata["continuation_epoch"] != "" && epoch != sessionBead.Metadata["continuation_epoch"] {
+-			if err := setWaitTerminalState(store, wait.ID, map[string]string{
++			if err := setWaitTerminalState(sessionStore, wait.ID, map[string]string{
+ 				"state":       waitStateCanceled,
+ 				"canceled_at": now.UTC().Format(time.RFC3339),
+ 				"last_error":  "continuation-stale",
+ 			}); err != nil {
+ 				return nil, err
+ 			}
+-			if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
++			if err := clearSessionWaitHoldIfIdle(sessionStore, sessionID); err != nil {
+ 				return nil, err
+ 			}
+ 			continue
+ 		}
+ 		if sessionBead.Status == "closed" {
+-			if err := setWaitTerminalState(store, wait.ID, map[string]string{
++			if err := setWaitTerminalState(sessionStore, wait.ID, map[string]string{
+ 				"state":       waitStateCanceled,
+ 				"canceled_at": now.UTC().Format(time.RFC3339),
+ 				"last_error":  "session-closed",
+@@ -1059,25 +1091,25 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore
+ 		}
+ 		if expiresAt := wait.Metadata["expires_at"]; expiresAt != "" {
+ 			if ts, err := time.Parse(time.RFC3339, expiresAt); err == nil && !ts.After(now) {
+-				if err := setWaitTerminalState(store, wait.ID, map[string]string{
++				if err := setWaitTerminalState(sessionStore, wait.ID, map[string]string{
+ 					"state":      waitStateExpired,
+ 					"expired_at": now.UTC().Format(time.RFC3339),
+ 				}); err != nil {
+ 					return nil, err
+ 				}
+-				if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
++				if err := clearSessionWaitHoldIfIdle(sessionStore, sessionID); err != nil {
+ 					return nil, err
+ 				}
+ 				continue
+ 			}
+ 		}
+ 		if state == waitStateReady {
+-			done, err := finalizeReadyWaitFromNudge(store, nudgeStore, wait, now)
++			done, err := finalizeReadyWaitFromNudge(sessionStore, nudgeStore, wait, now)
+ 			if err != nil {
+ 				return nil, err
+ 			}
+ 			if done {
+-				if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
++				if err := clearSessionWaitHoldIfIdle(sessionStore, sessionID); err != nil {
+ 					return nil, err
+ 				}
+ 				continue
+@@ -1088,17 +1120,20 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore
+ 		if wait.Metadata["kind"] != "deps" {
+ 			continue
+ 		}
+-		ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, wait)
++		// LANDMINE: dep beads are WORK/issue beads — the readiness check MUST
++		// read the work store. An empty session store here would report every
++		// dependency not-found and fail every wait.
++		ready, depErr := depsWaitReadyDetailedForCity(cityPath, workStore, wait)
+ 		if depErr != nil {
+ 			if errors.Is(depErr, beads.ErrNotFound) {
+-				if err := setWaitTerminalState(store, wait.ID, map[string]string{
++				if err := setWaitTerminalState(sessionStore, wait.ID, map[string]string{
+ 					"state":      waitStateFailed,
+ 					"failed_at":  now.UTC().Format(time.RFC3339),
+ 					"last_error": depErr.Error(),
+ 				}); err != nil {
+ 					return nil, err
+ 				}
+-				if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
++				if err := clearSessionWaitHoldIfIdle(sessionStore, sessionID); err != nil {
+ 					return nil, err
+ 				}
+ 				continue
+@@ -1106,7 +1141,7 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore
+ 			return nil, depErr
+ 		}
+ 		if ready {
+-			if err := store.SetMetadataBatch(wait.ID, map[string]string{
++			if err := sessionStore.SetMetadataBatch(wait.ID, map[string]string{
+ 				"state":    waitStateReady,
+ 				"ready_at": now.UTC().Format(time.RFC3339),
+ 			}); err != nil {
+@@ -1118,11 +1153,12 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store, nudgeStore
+ 	return readyWaitSet, nil
+ }
+ 
+-func lookupSessionBeadByID(store beads.Store, id string) (beads.Bead, bool, error) {
+-	if store == nil || strings.TrimSpace(id) == "" {
++// lookupSessionBeadByID resolves a session bead by ID. PURE-SESSION.
++func lookupSessionBeadByID(sessionStore beads.Store, id string) (beads.Bead, bool, error) {
++	if sessionStore == nil || strings.TrimSpace(id) == "" {
+ 		return beads.Bead{}, false, nil
+ 	}
+-	bead, err := store.Get(id)
++	bead, err := sessionStore.Get(id)
+ 	if err != nil {
+ 		if errors.Is(err, beads.ErrNotFound) {
+ 			return beads.Bead{}, false, nil
+@@ -1139,15 +1175,19 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
+ 	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, store, store, now, nil)
+ }
+ 
+-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store, nudgeStore beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
++// dispatchReadyWaitNudgesWithSnapshot enqueues nudges for ready waits.
++// PURE-SESSION + nudge: sessionStore feeds the wait/session reads and the
++// wait nudge_id stamp; nudgeStore feeds the queued-nudge lookup/enqueue. No
++// work-assignment op (no dep read here). Byte-identical at the default backend.
++func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessionStore, nudgeStore beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+ 	if sessionBeads == nil {
+ 		var err error
+-		sessionBeads, err = loadSessionBeadSnapshot(store)
++		sessionBeads, err = loadSessionBeadSnapshot(sessionStore)
+ 		if err != nil {
+ 			return err
+ 		}
+ 	}
+-	waits, err := loadWaitBeadsForOpenSessions(store, sessionBeads)
++	waits, err := loadWaitBeadsForOpenSessions(sessionStore, sessionBeads)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -1173,7 +1213,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
+ 		_, ok, err := findQueuedNudgeBead(nudgeStore, nudgeID)
+ 		if err != nil {
+ 			if beads.IsLookupLimitError(err) {
+-				stampWaitLookupCapDiagnostic(store, sessionID, err, now, "ready-wait-nudge")
++				stampWaitLookupCapDiagnostic(sessionStore, sessionID, err, now, "ready-wait-nudge")
+ 				continue
+ 			}
+ 			return err
+@@ -1195,7 +1235,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
+ 		if err := enqueueQueuedNudgeWithStore(cityPath, nudgeStore, item); err != nil {
+ 			return err
+ 		}
+-		if err := store.SetMetadata(wait.ID, "nudge_id", nudgeID); err != nil {
++		if err := sessionStore.SetMetadata(wait.ID, "nudge_id", nudgeID); err != nil {
+ 			return fmt.Errorf("setting wait nudge_id: %w", err)
+ 		}
+ 		// provider_kind is stamped from ResolvedProvider.Kind /
+@@ -1229,7 +1269,10 @@ func cachedSessionCanReceiveWaitNudge(sessionBead beads.Bead) bool {
+ 	}
+ }
+ 
+-func finalizeReadyWaitFromNudge(store, nudgeStore beads.Store, wait beads.Bead, now time.Time) (bool, error) {
++// finalizeReadyWaitFromNudge closes/fails a ready wait from its nudge outcome.
++// PURE-SESSION + nudge: sessionStore feeds the wait terminal write + diagnostic;
++// nudgeStore feeds the queued-nudge lookup.
++func finalizeReadyWaitFromNudge(sessionStore, nudgeStore beads.Store, wait beads.Bead, now time.Time) (bool, error) {
+ 	nudgeID := wait.Metadata["nudge_id"]
+ 	if nudgeID == "" {
+ 		nudgeID = waitNudgeID(wait)
+@@ -1240,7 +1283,7 @@ func finalizeReadyWaitFromNudge(store, nudgeStore beads.Store, wait beads.Bead,
+ 	nudge, ok, err := findAnyQueuedNudgeBead(nudgeStore, nudgeID)
+ 	if err != nil {
+ 		if beads.IsLookupLimitError(err) {
+-			stampWaitLookupCapDiagnostic(store, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
++			stampWaitLookupCapDiagnostic(sessionStore, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
+ 			return false, nil
+ 		}
+ 		return false, err
+@@ -1250,14 +1293,14 @@ func finalizeReadyWaitFromNudge(store, nudgeStore beads.Store, wait beads.Bead,
+ 	}
+ 	switch nudge.Metadata["state"] {
+ 	case "injected", "accepted_for_injection":
+-		return true, setWaitTerminalState(store, wait.ID, map[string]string{
++		return true, setWaitTerminalState(sessionStore, wait.ID, map[string]string{
+ 			"state":           waitStateClosed,
+ 			"closed_at":       now.UTC().Format(time.RFC3339),
+ 			"nudge_id":        nudgeID,
+ 			"commit_boundary": nudge.Metadata["commit_boundary"],
+ 		})
+ 	case "expired", "failed":
+-		return true, setWaitTerminalState(store, wait.ID, map[string]string{
++		return true, setWaitTerminalState(sessionStore, wait.ID, map[string]string{
+ 			"state":           waitStateFailed,
+ 			"failed_at":       now.UTC().Format(time.RFC3339),
+ 			"nudge_id":        nudgeID,
+@@ -1269,11 +1312,15 @@ func finalizeReadyWaitFromNudge(store, nudgeStore beads.Store, wait beads.Bead,
+ 	}
+ }
+ 
+-func cancelWaitsForSession(store beads.Store, sessionID string) error {
+-	if store == nil || sessionID == "" {
++// cancelWaitsForSession bulk-cancels a session's waits and withdraws their
++// queued nudges. PURE-SESSION: sessionStore feeds CancelWaitsAndCollectNudgeIDs
++// (session-wait list + close); the nudge withdrawal opens the nudge class store
++// from cityPath internally.
++func cancelWaitsForSession(sessionStore beads.Store, sessionID string) error {
++	if sessionStore == nil || sessionID == "" {
+ 		return nil
+ 	}
+-	nudgeIDs, _, err := sessionpkg.CancelWaitsAndCollectNudgeIDs(store, sessionID, time.Now().UTC())
++	nudgeIDs, _, err := sessionpkg.CancelWaitsAndCollectNudgeIDs(sessionStore, sessionID, time.Now().UTC())
+ 	if err != nil {
+ 		if !isWaitLookupLimitError(err) {
+ 			return err
+@@ -1287,7 +1334,9 @@ func cancelWaitsForSession(store beads.Store, sessionID string) error {
+ 	return err
+ }
+ 
+-func clearSessionWaitHold(store beads.Store, sessionID string) error {
++// clearSessionWaitHold clears the wait-hold marker on a session bead.
++// PURE-SESSION (session-bead Get + SetMetadataBatch).
++func clearSessionWaitHold(sessionStore beads.Store, sessionID string) error {
+ 	if sessionID == "" {
+ 		return nil
+ 	}
+@@ -1295,27 +1344,29 @@ func clearSessionWaitHold(store beads.Store, sessionID string) error {
+ 		"wait_hold":    "",
+ 		"sleep_intent": "",
+ 	}
+-	if store != nil {
+-		if sessionBead, err := store.Get(sessionID); err == nil && sessionBead.Metadata["sleep_reason"] == "wait-hold" {
++	if sessionStore != nil {
++		if sessionBead, err := sessionStore.Get(sessionID); err == nil && sessionBead.Metadata["sleep_reason"] == "wait-hold" {
+ 			batch["sleep_reason"] = ""
+ 		}
+ 	}
+-	return store.SetMetadataBatch(sessionID, batch)
++	return sessionStore.SetMetadataBatch(sessionID, batch)
+ }
+ 
+-func clearSessionWaitHoldIfIdle(store beads.Store, sessionID string) error {
+-	hasWaits, err := hasNonTerminalWaits(store, sessionID)
++func clearSessionWaitHoldIfIdle(sessionStore beads.Store, sessionID string) error {
++	hasWaits, err := hasNonTerminalWaits(sessionStore, sessionID)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	if hasWaits {
+ 		return nil
+ 	}
+-	return clearSessionWaitHold(store, sessionID)
++	return clearSessionWaitHold(sessionStore, sessionID)
+ }
+ 
+-func hasNonTerminalWaits(store beads.Store, sessionID string) (bool, error) {
+-	waits, err := loadSessionWaitBeads(store, sessionID)
++// hasNonTerminalWaits reports whether a session still has open waits.
++// PURE-SESSION (session-wait list).
++func hasNonTerminalWaits(sessionStore beads.Store, sessionID string) (bool, error) {
++	waits, err := loadSessionWaitBeads(sessionStore, sessionID)
+ 	if err != nil && !isWaitLookupLimitError(err) {
+ 		return false, err
+ 	}
+@@ -1364,14 +1415,19 @@ func sessionProviderFamily(sessionBead beads.Bead) string {
+ 	return sessionpkg.ProviderFamilyFromMetadata(sessionBead.Metadata, "")
+ }
+ 
+-func setWaitTerminalState(store beads.Store, waitID string, batch map[string]string) error {
+-	if err := store.SetMetadataBatch(waitID, batch); err != nil {
++// setWaitTerminalState writes a wait bead's terminal metadata and closes it.
++// PURE-SESSION (wait class).
++func setWaitTerminalState(sessionStore beads.Store, waitID string, batch map[string]string) error {
++	if err := sessionStore.SetMetadataBatch(waitID, batch); err != nil {
+ 		return err
+ 	}
+-	return store.Close(waitID)
++	return sessionStore.Close(waitID)
+ }
+ 
+-func retryClosedWait(store, nudgeStore beads.Store, wait beads.Bead, now string) (beads.Bead, error) {
++// retryClosedWait recreates a fresh ready wait from a closed one. PURE-SESSION +
++// nudge: sessionStore feeds the session-bead epoch read and the new wait Create;
++// nudgeStore feeds the next-attempt computation.
++func retryClosedWait(sessionStore, nudgeStore beads.Store, wait beads.Bead, now string) (beads.Bead, error) {
+ 	nextAttempt, err := nextWaitDeliveryAttempt(nudgeStore, wait)
+ 	if err != nil {
+ 		return beads.Bead{}, err
+@@ -1395,8 +1451,8 @@ func retryClosedWait(store, nudgeStore beads.Store, wait beads.Bead, now string)
+ 	meta["canceled_at"] = ""
+ 	meta["created_at"] = now
+ 	meta["retried_from_wait"] = wait.ID
+-	if sessionID := wait.Metadata["session_id"]; sessionID != "" && store != nil {
+-		if sessionBead, err := store.Get(sessionID); err == nil {
++	if sessionID := wait.Metadata["session_id"]; sessionID != "" && sessionStore != nil {
++		if sessionBead, err := sessionStore.Get(sessionID); err == nil {
+ 			if epoch := sessionBead.Metadata["continuation_epoch"]; epoch != "" {
+ 				meta["registered_epoch"] = epoch
+ 			}
+@@ -1405,7 +1461,7 @@ func retryClosedWait(store, nudgeStore beads.Store, wait beads.Bead, now string)
+ 			}
+ 		}
+ 	}
+-	return store.Create(beads.Bead{
++	return sessionStore.Create(beads.Bead{
+ 		Title:       wait.Title,
+ 		Type:        wait.Type,
+ 		Description: wait.Description,
+diff --git a/cmd/gc/controller.go b/cmd/gc/controller.go
+index 4049cc7e4..2249f93e2 100644
+--- a/cmd/gc/controller.go
++++ b/cmd/gc/controller.go
+@@ -966,16 +966,22 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
+ //  1. Send Interrupt (Ctrl-C) to all sessions
+ //  2. Wait shutdown_timeout
+ //  3. Stop (force-kill) any survivors
++//
++// PURE-SESSION: sessionStore only feeds the stop chain (stopTargetsForNames,
++// interruptTargetsBoundedWithForceSignal, stopTargetsBounded) and the
++// cityStopSessionMarked/markCityStopSessionAsAsleep marks — session-bead reads
++// and session runtime-handle teardown, no work-assignment op. At the default
++// backend sessionStore == workStore, so callers stay byte-identical.
+ func gracefulStopAll(
+ 	names []string,
+ 	sp runtime.Provider,
+ 	timeout time.Duration,
+ 	rec events.Recorder,
+ 	cfg *config.City,
+-	store beads.Store,
++	sessionStore beads.Store,
+ 	stdout, stderr io.Writer,
+ ) {
+-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
++	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, sessionStore, stdout, stderr, nil)
+ }
+ 
+ func gracefulStopAllWithForceSignal(
+@@ -984,16 +990,16 @@ func gracefulStopAllWithForceSignal(
+ 	timeout time.Duration,
+ 	rec events.Recorder,
+ 	cfg *config.City,
+-	store beads.Store,
++	sessionStore beads.Store,
+ 	stdout, stderr io.Writer,
+ 	forceStopRequested func() bool,
+ ) {
+ 	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
+ 		// Immediate kill (no grace period).
+-		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
++		stopTargetsBounded(stopTargetsForNames(names, cfg, sessionStore, stderr), cfg, sessionStore, sp, rec, "gc", stdout, stderr)
+ 		return
+ 	}
+-	targets := stopTargetsForNames(names, cfg, store, stderr)
++	targets := stopTargetsForNames(names, cfg, sessionStore, stderr)
+ 	targetByName := make(map[string]stopTarget, len(targets))
+ 	for _, target := range targets {
+ 		targetByName[target.name] = target
+@@ -1005,7 +1011,7 @@ func gracefulStopAllWithForceSignal(
+ 	// The configured timeout is the post-dispatch grace window; dispatch
+ 	// latency is intentionally outside that budget so every interrupted
+ 	// session still gets the full graceful-exit wait once nudged.
+-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, forceStopRequested)
++	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, sessionStore, sp, stderr, forceStopRequested)
+ 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
+ 		sent, len(names), timeout)
+ 
+@@ -1077,8 +1083,8 @@ func gracefulStopAllWithForceSignal(
+ 				}
+ 				template = target.template
+ 				agentIdentity = target.agentName
+-				if cityStopSessionMarked(store, target.sessionID) {
+-					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
++				if cityStopSessionMarked(sessionStore, target.sessionID) {
++					markCityStopSessionAsAsleep(sessionStore, target.sessionID, stderr)
+ 				}
+ 			}
+ 			rec.Record(events.Event{
+@@ -1090,7 +1096,7 @@ func gracefulStopAllWithForceSignal(
+ 		}
+ 		survivors = append(survivors, name)
+ 	}
+-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
++	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, sessionStore, sp, rec, "gc", stdout, stderr)
+ }
+ 
+ func stopForceRequested(forceStopRequested func() bool) bool {
+diff --git a/cmd/gc/nudge_dispatcher.go b/cmd/gc/nudge_dispatcher.go
+index 20289c815..8b48ae501 100644
+--- a/cmd/gc/nudge_dispatcher.go
++++ b/cmd/gc/nudge_dispatcher.go
+@@ -112,7 +112,7 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<-
+ //
+ // This is a no-op when the dispatcher is configured for "legacy" mode —
+ // the per-session `gc nudge poll` processes own delivery in that case.
+-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, workStore, nudgeStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
++func dispatchAllQueuedNudges(cityPath string, cfg *config.City, sessionStore, workStore, nudgeStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+ 	if cfg == nil || sessionBeads == nil || cityPath == "" {
+ 		return 0, nil
+ 	}
+@@ -186,7 +186,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, workStore, nudge
+ 		if !obs.Running {
+ 			continue
+ 		}
+-		ok, err := tryDeliverQueuedNudgesByPoller(target, workStore, nudgeStore, sp, defaultNudgePollQuiescence, obs)
++		ok, err := tryDeliverQueuedNudgesByPoller(target, sessionStore, workStore, nudgeStore, sp, defaultNudgePollQuiescence, obs)
+ 		if err != nil && firstErr == nil {
+ 			firstErr = err
+ 		}
+diff --git a/cmd/gc/session_lifecycle_parallel.go b/cmd/gc/session_lifecycle_parallel.go
+index f73983e94..b3a6093cf 100644
+--- a/cmd/gc/session_lifecycle_parallel.go
++++ b/cmd/gc/session_lifecycle_parallel.go
+@@ -2680,14 +2680,18 @@ func lifecycleStopRequested(stopCh <-chan struct{}) bool {
+ 	}
+ }
+ 
+-func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
++// stopTargetsForNames resolves stop targets from session names. PURE-SESSION:
++// sessionStore feeds loadSessionBeads (the gc:session list) to fill each
++// target's sessionID/template/subject — no work-assignment read. At the default
++// backend sessionStore == workStore, so callers stay byte-identical.
++func stopTargetsForNames(names []string, cfg *config.City, sessionStore beads.Store, stderr io.Writer) []stopTarget {
+ 	sessionTemplates := make(map[string]string)
+ 	sessionAgentNames := make(map[string]string)
+ 	sessionSubjects := make(map[string]string)
+ 	sessionPoolManaged := make(map[string]bool)
+ 	sessionIDs := make(map[string]string)
+-	if store != nil {
+-		if sessionBeads, err := loadSessionBeads(store); err == nil {
++	if sessionStore != nil {
++		if sessionBeads, err := loadSessionBeads(sessionStore); err == nil {
+ 			for _, bead := range sessionBeads {
+ 				name := bead.Metadata["session_name"]
+ 				template := normalizedSessionTemplate(bead, cfg)
+@@ -2778,8 +2782,11 @@ func filterStopTargets(targets []stopTarget, names []string) []stopTarget {
+ 	return filtered
+ }
+ 
+-func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
+-	if store == nil || len(targets) == 0 {
++// hydrateStopTargets backfills missing target fields from session beads.
++// PURE-SESSION: sessionStore only feeds stopTargetsForNames (the gc:session
++// list). Byte-identical at the default backend (sessionStore == workStore).
++func hydrateStopTargets(targets []stopTarget, cfg *config.City, sessionStore beads.Store, stderr io.Writer) []stopTarget {
++	if sessionStore == nil || len(targets) == 0 {
+ 		return targets
+ 	}
+ 	names := make([]string, 0, len(targets))
+@@ -2792,7 +2799,7 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
+ 	if len(names) == 0 {
+ 		return targets
+ 	}
+-	hydrated := stopTargetsForNames(names, cfg, store, stderr)
++	hydrated := stopTargetsForNames(names, cfg, sessionStore, stderr)
+ 	byName := make(map[string]stopTarget, len(hydrated))
+ 	for _, target := range hydrated {
+ 		byName[target.name] = target
+@@ -2885,12 +2892,16 @@ func interruptPerTargetTimeout(cfg *config.City) time.Duration {
+ 	return base + interruptPerTargetTimeoutMargin
+ }
+ 
+-func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
+-	return interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, nil)
++func interruptTargetsBounded(targets []stopTarget, cfg *config.City, sessionStore beads.Store, sp runtime.Provider, stderr io.Writer) int {
++	return interruptTargetsBoundedWithForceSignal(targets, cfg, sessionStore, sp, stderr, nil)
+ }
+ 
+-func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
+-	targets = hydrateStopTargets(targets, cfg, store, stderr)
++// interruptTargetsBoundedWithForceSignal interrupts (or pool-stops) the targets.
++// PURE-SESSION: sessionStore feeds hydrateStopTargets, stopTargetThroughWorkerBoundary,
++// and workerInterruptSessionTargetWithConfig — all session-bead reads / session
++// runtime-handle resolution, no work-assignment op. Byte-identical at default.
++func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, sessionStore beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
++	targets = hydrateStopTargets(targets, cfg, sessionStore, stderr)
+ 	// Pool-managed sessions have no human user, so Claude Code's
+ 	// interactive "What should Claude do instead?" prompt would hang
+ 	// them forever. Stop them immediately instead of interrupting —
+@@ -2908,7 +2919,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
+ 	if len(poolManaged) > 0 {
+ 		waveStarted := time.Now()
+ 		results := executeTargetWave(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+-			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
++			return stopTargetThroughWorkerBoundary(target, sessionStore, sp, cfg)
+ 		})
+ 		for _, result := range results {
+ 			outcome := result.outcome
+@@ -2930,7 +2941,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
+ 		if targetID == "" {
+ 			targetID = strings.TrimSpace(target.name)
+ 		}
+-		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID)
++		return workerInterruptSessionTargetWithConfig("", sessionStore, sp, cfg, targetID)
+ 	})
+ 	for _, result := range results {
+ 		logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
+@@ -2942,20 +2953,24 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
+ 	return sent
+ }
+ 
+-func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
+-	return interruptTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, stderr)
++func interruptSessionsBounded(names []string, cfg *config.City, sessionStore beads.Store, sp runtime.Provider, stderr io.Writer) int {
++	return interruptTargetsBounded(stopTargetsForNames(names, cfg, sessionStore, stderr), cfg, sessionStore, sp, stderr)
+ }
+ 
++// stopTargetsBounded force-stops the targets in dependency-ordered waves.
++// PURE-SESSION: sessionStore feeds hydrateStopTargets and stopTargetThroughWorkerBoundary
++// — session-bead reads and session runtime-handle teardown only, no work-assignment
++// op. Byte-identical at the default backend (sessionStore == workStore).
+ func stopTargetsBounded(
+ 	targets []stopTarget,
+ 	cfg *config.City,
+-	store beads.Store,
++	sessionStore beads.Store,
+ 	sp runtime.Provider,
+ 	rec events.Recorder,
+ 	actor string,
+ 	stdout, stderr io.Writer,
+ ) int {
+-	targets = hydrateStopTargets(targets, cfg, store, stderr)
++	targets = hydrateStopTargets(targets, cfg, sessionStore, stderr)
+ 	for _, target := range targets {
+ 		if !target.resolved {
+ 			if cfg != nil {
+@@ -2965,7 +2980,7 @@ func stopTargetsBounded(
+ 			for wave, target := range targets {
+ 				waveStarted := time.Now()
+ 				results := executeTargetWave([]stopTarget{target}, 1, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+-					return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
++					return stopTargetThroughWorkerBoundary(target, sessionStore, sp, cfg)
+ 				})
+ 				for _, result := range results {
+ 					if shouldLogStopOutcome(result.target, cfg) {
+@@ -3010,7 +3025,7 @@ func stopTargetsBounded(
+ 			}
+ 		}
+ 		results := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+-			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
++			return stopTargetThroughWorkerBoundary(target, sessionStore, sp, cfg)
+ 		})
+ 		for _, result := range results {
+ 			if shouldLogStopOutcome(result.target, cfg) {
+@@ -3037,11 +3052,11 @@ func stopTargetsBounded(
+ func stopSessionsBounded(
+ 	names []string,
+ 	cfg *config.City,
+-	store beads.Store,
++	sessionStore beads.Store,
+ 	sp runtime.Provider,
+ 	rec events.Recorder,
+ 	actor string,
+ 	stdout, stderr io.Writer,
+ ) int {
+-	return stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, actor, stdout, stderr)
++	return stopTargetsBounded(stopTargetsForNames(names, cfg, sessionStore, stderr), cfg, sessionStore, sp, rec, actor, stdout, stderr)
+ }

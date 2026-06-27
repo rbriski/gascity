@@ -1891,7 +1891,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
 				providerSwapSummary, len(running))
-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
+			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionBeadStore(), cr.stdout, cr.stderr)
 		}
 		cr.rec.Record(events.Event{
 			Type:    events.ProviderSwapped,
@@ -2201,7 +2201,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, store, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), sessionBeads)
+	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessionStore, store, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -2252,10 +2252,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.requestDeferredDrainFollowUpTick()
 	cr.recordReconcileTraceResults(trace, open, recordPhase)
 	phaseStart = time.Now()
-	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
+	dispatchSessionBeads, err := loadSessionBeadSnapshot(sessionStore)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), dispatchSessionBeads); err != nil {
+	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionStore, resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec), time.Now(), dispatchSessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
@@ -2765,7 +2765,7 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 		return
 	}
 	nudgeStore := resolveNudgesStore(store, cr.cfg, cr.cityPath, cr.rec)
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store, nudgeStore, cr.sp, sessionBeads); err != nil {
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, cr.sessionBeadStore(), store, nudgeStore, cr.sp, sessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }
@@ -3295,9 +3295,9 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 			}
 		}
-		store := cr.cityBeadStore()
-		markCityStopSessionSleepReason(store, cr.stderr)
-		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+		sessionStore := cr.sessionBeadStore()
+		markCityStopSessionSleepReason(sessionStore, cr.stderr)
+		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, sessionStore, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {
 			lateRunning, lateListErr := cr.sp.ListRunning("")
 			if lateListErr != nil {
@@ -3308,8 +3308,8 @@ func (cr *CityRuntime) shutdown() {
 				}
 			}
 			if len(lateRunning) > 0 {
-				markCityStopSessionSleepReason(store, cr.stderr)
-				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+				markCityStopSessionSleepReason(sessionStore, cr.stderr)
+				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, sessionStore, cr.stdout, cr.stderr, cr.forceStopRequested)
 			}
 		}
 	})

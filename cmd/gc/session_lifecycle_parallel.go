@@ -2680,14 +2680,18 @@ func lifecycleStopRequested(stopCh <-chan struct{}) bool {
 	}
 }
 
-func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
+// stopTargetsForNames resolves stop targets from session names. PURE-SESSION:
+// sessionStore feeds loadSessionBeads (the gc:session list) to fill each
+// target's sessionID/template/subject — no work-assignment read. At the default
+// backend sessionStore == workStore, so callers stay byte-identical.
+func stopTargetsForNames(names []string, cfg *config.City, sessionStore beads.Store, stderr io.Writer) []stopTarget {
 	sessionTemplates := make(map[string]string)
 	sessionAgentNames := make(map[string]string)
 	sessionSubjects := make(map[string]string)
 	sessionPoolManaged := make(map[string]bool)
 	sessionIDs := make(map[string]string)
-	if store != nil {
-		if sessionBeads, err := loadSessionBeads(store); err == nil {
+	if sessionStore != nil {
+		if sessionBeads, err := loadSessionBeads(sessionStore); err == nil {
 			for _, bead := range sessionBeads {
 				name := bead.Metadata["session_name"]
 				template := normalizedSessionTemplate(bead, cfg)
@@ -2778,8 +2782,11 @@ func filterStopTargets(targets []stopTarget, names []string) []stopTarget {
 	return filtered
 }
 
-func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
-	if store == nil || len(targets) == 0 {
+// hydrateStopTargets backfills missing target fields from session beads.
+// PURE-SESSION: sessionStore only feeds stopTargetsForNames (the gc:session
+// list). Byte-identical at the default backend (sessionStore == workStore).
+func hydrateStopTargets(targets []stopTarget, cfg *config.City, sessionStore beads.Store, stderr io.Writer) []stopTarget {
+	if sessionStore == nil || len(targets) == 0 {
 		return targets
 	}
 	names := make([]string, 0, len(targets))
@@ -2792,7 +2799,7 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 	if len(names) == 0 {
 		return targets
 	}
-	hydrated := stopTargetsForNames(names, cfg, store, stderr)
+	hydrated := stopTargetsForNames(names, cfg, sessionStore, stderr)
 	byName := make(map[string]stopTarget, len(hydrated))
 	for _, target := range hydrated {
 		byName[target.name] = target
@@ -2885,12 +2892,16 @@ func interruptPerTargetTimeout(cfg *config.City) time.Duration {
 	return base + interruptPerTargetTimeoutMargin
 }
 
-func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
-	return interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, nil)
+func interruptTargetsBounded(targets []stopTarget, cfg *config.City, sessionStore beads.Store, sp runtime.Provider, stderr io.Writer) int {
+	return interruptTargetsBoundedWithForceSignal(targets, cfg, sessionStore, sp, stderr, nil)
 }
 
-func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
-	targets = hydrateStopTargets(targets, cfg, store, stderr)
+// interruptTargetsBoundedWithForceSignal interrupts (or pool-stops) the targets.
+// PURE-SESSION: sessionStore feeds hydrateStopTargets, stopTargetThroughWorkerBoundary,
+// and workerInterruptSessionTargetWithConfig — all session-bead reads / session
+// runtime-handle resolution, no work-assignment op. Byte-identical at default.
+func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, sessionStore beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
+	targets = hydrateStopTargets(targets, cfg, sessionStore, stderr)
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
 	// them forever. Stop them immediately instead of interrupting —
@@ -2908,7 +2919,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 	if len(poolManaged) > 0 {
 		waveStarted := time.Now()
 		results := executeTargetWave(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
-			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+			return stopTargetThroughWorkerBoundary(target, sessionStore, sp, cfg)
 		})
 		for _, result := range results {
 			outcome := result.outcome
@@ -2930,7 +2941,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 		if targetID == "" {
 			targetID = strings.TrimSpace(target.name)
 		}
-		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID)
+		return workerInterruptSessionTargetWithConfig("", sessionStore, sp, cfg, targetID)
 	})
 	for _, result := range results {
 		logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
@@ -2942,20 +2953,24 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 	return sent
 }
 
-func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
-	return interruptTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, stderr)
+func interruptSessionsBounded(names []string, cfg *config.City, sessionStore beads.Store, sp runtime.Provider, stderr io.Writer) int {
+	return interruptTargetsBounded(stopTargetsForNames(names, cfg, sessionStore, stderr), cfg, sessionStore, sp, stderr)
 }
 
+// stopTargetsBounded force-stops the targets in dependency-ordered waves.
+// PURE-SESSION: sessionStore feeds hydrateStopTargets and stopTargetThroughWorkerBoundary
+// — session-bead reads and session runtime-handle teardown only, no work-assignment
+// op. Byte-identical at the default backend (sessionStore == workStore).
 func stopTargetsBounded(
 	targets []stopTarget,
 	cfg *config.City,
-	store beads.Store,
+	sessionStore beads.Store,
 	sp runtime.Provider,
 	rec events.Recorder,
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
-	targets = hydrateStopTargets(targets, cfg, store, stderr)
+	targets = hydrateStopTargets(targets, cfg, sessionStore, stderr)
 	for _, target := range targets {
 		if !target.resolved {
 			if cfg != nil {
@@ -2965,7 +2980,7 @@ func stopTargetsBounded(
 			for wave, target := range targets {
 				waveStarted := time.Now()
 				results := executeTargetWave([]stopTarget{target}, 1, stopPerTargetTimeoutDefault, func(target stopTarget) error {
-					return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+					return stopTargetThroughWorkerBoundary(target, sessionStore, sp, cfg)
 				})
 				for _, result := range results {
 					if shouldLogStopOutcome(result.target, cfg) {
@@ -3010,7 +3025,7 @@ func stopTargetsBounded(
 			}
 		}
 		results := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
-			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+			return stopTargetThroughWorkerBoundary(target, sessionStore, sp, cfg)
 		})
 		for _, result := range results {
 			if shouldLogStopOutcome(result.target, cfg) {
@@ -3037,11 +3052,11 @@ func stopTargetsBounded(
 func stopSessionsBounded(
 	names []string,
 	cfg *config.City,
-	store beads.Store,
+	sessionStore beads.Store,
 	sp runtime.Provider,
 	rec events.Recorder,
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
-	return stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, actor, stdout, stderr)
+	return stopTargetsBounded(stopTargetsForNames(names, cfg, sessionStore, stderr), cfg, sessionStore, sp, rec, actor, stdout, stderr)
 }

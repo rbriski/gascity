@@ -53,13 +53,19 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	if cityErr == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
+	// Every store op in this command is session-class (resolution,
+	// materialization, Get, RepairEmptyType, WakeSession's wait-cancel +
+	// session-bead update, the asleep stamp). Route them all to the session
+	// class store; byte-identical to store at the default bd backend. nil
+	// recorder: relocated CLI writes are event-silent.
+	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessionStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
-	b, err := store.Get(id)
+	b, err := sessionStore.Get(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
@@ -69,8 +75,8 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 	hasRunnableTemplate := sessionWakeHasRunnableTemplate(b, cfg)
-	session.RepairEmptyType(store, &b)
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	session.RepairEmptyType(sessionStore, &b)
+	nudgeIDs, err := session.WakeSession(sessionStore, b, time.Now().UTC())
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
@@ -80,7 +86,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
-		if err := store.SetMetadataBatch(id, map[string]string{
+		if err := sessionStore.SetMetadataBatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
 			"pending_create_claim":      "",

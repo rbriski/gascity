@@ -451,12 +451,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	workStore := openNudgeBeadStore(target.cityPath)
 	nudgeStore := resolveNudgesStore(workStore, target.cfg, target.cityPath, nil)
+	// The wait-bead validator + the last-nudge stamp are session class; route
+	// them to the session store (byte-identical to workStore at the default bd
+	// backend). nil recorder: relocated CLI writes are event-silent.
+	sessionStore := resolveSessionStore(workStore, target.cfg, target.cityPath, nil)
 	items, rejected := splitQueuedNudgesForTarget(target, items)
 	if len(rejected) > 0 {
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, nudgeStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(workStore, candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(sessionStore, candidates)
 	if err != nil {
 		// Release the claims so the next drain or poller pass retries
 		// promptly instead of waiting out the in-flight lease.
@@ -511,14 +515,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
 			return 0
 		}
-		stampLastNudgeDeliveredAt(workStore, target.sessionID, time.Now())
+		stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
 		return 0
 	}
 	if err := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)); err != nil {
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	stampLastNudgeDeliveredAt(workStore, target.sessionID, time.Now())
+	stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
 	return 0
 }
 
@@ -626,6 +630,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		return 1
 	}
 	nudgeStore := resolveNudgesStore(store, target.cfg, target.cityPath, nil)
+	// store stays the work store for worker observation; the poller's session/wait
+	// ops (validator + last-nudge stamp inside tryDeliverQueuedNudgesByPoller) route
+	// to the session store. Byte-identical at the default bd backend.
+	sessionStore := resolveSessionStore(store, target.cfg, target.cityPath, nil)
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	for {
@@ -669,7 +677,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			return 0
 		}
 		missingSince = time.Time{}
-		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, nudgeStore, sp, quiescence, obs)
+		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, sessionStore, store, nudgeStore, sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -711,7 +719,11 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store, nudgeStore beads.S
 		return 1
 	}
 	if queueManagedWake {
-		return queueManagedSessionNudgeWake(target, store, nudgeStore, message, mode, jsonOutput, stdout, stderr)
+		// store stays the work store for observation/worker handle above; the
+		// managed wake's session-bead ops route to the session store. Byte-
+		// identical at the default bd backend. nil recorder: event-silent.
+		sessionStore := resolveSessionStore(store, target.cfg, target.cityPath, nil)
+		return queueManagedSessionNudgeWake(target, sessionStore, nudgeStore, message, mode, jsonOutput, stdout, stderr)
 	}
 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
 	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
@@ -819,9 +831,12 @@ func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
 		nudgeCityUsesManagedReconciler(target.cityPath)
 }
 
-func queueManagedSessionNudgeWake(target nudgeTarget, store, nudgeStore beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+// queueManagedSessionNudgeWake enqueues a session nudge and wakes the session.
+// sessionStore feeds the managed wake (session class); nudgeStore feeds the
+// queue enqueue. Byte-identical at the default bd backend.
+func queueManagedSessionNudgeWake(target nudgeTarget, sessionStore, nudgeStore beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
-	if err := enqueueManagedNudgeThenWake(target, store, nudgeStore, item); err != nil {
+	if err := enqueueManagedNudgeThenWake(target, sessionStore, nudgeStore, item); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -831,11 +846,14 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store, nudgeStore beads.St
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
 }
 
-func enqueueManagedNudgeThenWake(target nudgeTarget, store, nudgeStore beads.Store, item queuedNudge) error {
+// enqueueManagedNudgeThenWake enqueues then wakes. sessionStore feeds the managed
+// wake (requestManagedNudgeWake → session-bead Get + WakeSession); nudgeStore
+// feeds the queue enqueue/rollback.
+func enqueueManagedNudgeThenWake(target nudgeTarget, sessionStore, nudgeStore beads.Store, item queuedNudge) error {
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudgeStore, item); err != nil {
 		return err
 	}
-	if err := requestManagedNudgeWake(target, store); err != nil {
+	if err := requestManagedNudgeWake(target, sessionStore); err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeStore, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
@@ -844,15 +862,18 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store, nudgeStore beads.Sto
 	return nil
 }
 
-func requestManagedNudgeWake(target nudgeTarget, store beads.Store) error {
-	if store == nil || target.sessionID == "" {
+// requestManagedNudgeWake wakes an asleep session for a queued nudge.
+// PURE-SESSION: sessionStore feeds the session-bead Get and WakeSession (its
+// session-bead update + durable wait cancellation are all session class).
+func requestManagedNudgeWake(target nudgeTarget, sessionStore beads.Store) error {
+	if sessionStore == nil || target.sessionID == "" {
 		return nil
 	}
-	b, err := store.Get(target.sessionID)
+	b, err := sessionStore.Get(target.sessionID)
 	if err != nil {
 		return err
 	}
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	nudgeIDs, err := session.WakeSession(sessionStore, b, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -1026,6 +1047,14 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
 func sendMailNotifyWithWorker(target nudgeTarget, store, nudgeStore beads.Store, sp runtime.Provider, sender string) error {
 	msg := fmt.Sprintf("You have mail from %s", sender)
 	now := time.Now()
+	// store stays the work store for worker observation/handle + the
+	// managed-wake gate; the session-bead ops (last-nudge stamp + managed wake)
+	// route to the session store. A nil store (sendMailNotifyWithProvider) keeps
+	// sessionStore nil so those ops stay no-ops, byte-identical to before.
+	sessionStore := store
+	if store != nil {
+		sessionStore = resolveSessionStore(store, target.cfg, target.cityPath, nil)
+	}
 	obs, err := workerObserveNudgeTarget(target, store, sp)
 	if err != nil {
 		return err
@@ -1041,14 +1070,14 @@ func sendMailNotifyWithWorker(target nudgeTarget, store, nudgeStore beads.Store,
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-				stampLastNudgeDeliveredAt(store, target.sessionID, time.Now())
+				stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
 				return nil
 			}
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
 		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))
-		if err := enqueueManagedNudgeThenWake(target, store, nudgeStore, item); err != nil {
+		if err := enqueueManagedNudgeThenWake(target, sessionStore, nudgeStore, item); err != nil {
 			return err
 		}
 		if err := nudgePokeController(target.cityPath); err != nil {
@@ -1076,11 +1105,15 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	store := openNudgeBeadStore(cityPath)
-	if store != nil {
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
+	// openNudgeBeadStore returns the work store; this function uses it ONLY for
+	// session resolution + the session-bead Get, so route both to the session
+	// class store (byte-identical to the work store at the default bd backend).
+	// nil recorder: relocated CLI writes are event-silent.
+	sessionStore := resolveSessionStore(openNudgeBeadStore(cityPath), cfg, cityPath, nil)
+	if sessionStore != nil {
+		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessionStore, identifier)
 		if err == nil {
-			b, getErr := store.Get(sessionID)
+			b, getErr := sessionStore.Get(sessionID)
 			if getErr != nil {
 				return nudgeTarget{}, getErr
 			}
@@ -1189,7 +1222,12 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 	}
 }
 
-func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+// tryDeliverQueuedNudgesByPoller delivers due queued nudges through the worker.
+// MIXED: sessionStore feeds the wait-bead validator (splitQueuedNudgesForDelivery)
+// and the last-nudge stamp (session class); workStore feeds the worker handle
+// (work/runtime resolution); nudgeStore feeds the nudge-shadow bookkeeping. At
+// the default bd backend all three are the work store, so byte-identical.
+func tryDeliverQueuedNudgesByPoller(target nudgeTarget, sessionStore, workStore, nudgeStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err
@@ -1203,6 +1241,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore be
 	}
 	if workStore == nil {
 		workStore = openNudgeBeadStore(target.cityPath)
+	}
+	if sessionStore == nil {
+		sessionStore = resolveSessionStore(workStore, target.cfg, target.cityPath, nil)
 	}
 	if nudgeStore == nil {
 		nudgeStore = openNudgesClassStore(target.cityPath)
@@ -1219,7 +1260,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore be
 		}
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(workStore, candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(sessionStore, candidates)
 	if err != nil {
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
 		return false, errors.Join(bookkeepErr, err, relErr)
@@ -1270,17 +1311,19 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, workStore, nudgeStore be
 		return false, errors.Join(bookkeepErr, relErr)
 	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-	stampLastNudgeDeliveredAt(workStore, target.sessionID, time.Now())
+	stampLastNudgeDeliveredAt(sessionStore, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
 }
 
-func stampLastNudgeDeliveredAt(store beads.Store, sessionID string, t time.Time) {
-	if store == nil || sessionID == "" {
+// stampLastNudgeDeliveredAt records the delivery timestamp on the session bead.
+// PURE-SESSION: the SetMetadata targets a session ID.
+func stampLastNudgeDeliveredAt(sessionStore beads.Store, sessionID string, t time.Time) {
+	if sessionStore == nil || sessionID == "" {
 		return
 	}
 	// Best-effort stamp. Delivery already succeeded, so a metadata write
 	// failure here must not bubble back to the caller and force a redelivery.
-	_ = store.SetMetadata(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
+	_ = sessionStore.SetMetadata(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
 }
 
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
@@ -1353,17 +1396,19 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	}
 }
 
-func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
+// withNudgeTargetFence fills the target's sessionID/epoch from session beads.
+// PURE-SESSION: sessionStore feeds loadSessionBeads (the gc:session list).
+func withNudgeTargetFence(sessionStore beads.Store, target nudgeTarget) nudgeTarget {
 	if target.sessionName == "" {
 		return target
 	}
 	if target.sessionID != "" && target.continuationEpoch != "" {
 		return target
 	}
-	if store == nil {
+	if sessionStore == nil {
 		return target
 	}
-	open, err := loadSessionBeads(store)
+	open, err := loadSessionBeads(sessionStore)
 	if err != nil {
 		return target
 	}
@@ -1410,14 +1455,18 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 	return deliverable, rejected
 }
 
-func splitQueuedNudgesForDelivery(store beads.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
+// splitQueuedNudgesForDelivery partitions queued nudges into deliverable and
+// blocked. The validator reads durable WAIT beads (session class) — sessionStore
+// MUST hold the wait beads; an empty store would block every wait-sourced nudge
+// as wait-missing and dead-letter it.
+func splitQueuedNudgesForDelivery(sessionStore beads.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
 	if len(items) == 0 {
 		return nil, nil, nil
 	}
 	deliverable := make([]queuedNudge, 0, len(items))
 	blocked := make(map[string][]queuedNudge)
 	for _, item := range items {
-		reason, shouldBlock, err := blockedQueuedNudgeReason(store, item)
+		reason, shouldBlock, err := blockedQueuedNudgeReason(sessionStore, item)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1430,11 +1479,13 @@ func splitQueuedNudgesForDelivery(store beads.Store, items []queuedNudge) ([]que
 	return deliverable, blocked, nil
 }
 
-func blockedQueuedNudgeReason(store beads.Store, item queuedNudge) (string, bool, error) {
-	if store == nil || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
+// blockedQueuedNudgeReason reads the durable WAIT bead a queued nudge references.
+// PURE-SESSION: wait beads are session class; sessionStore MUST hold them.
+func blockedQueuedNudgeReason(sessionStore beads.Store, item queuedNudge) (string, bool, error) {
+	if sessionStore == nil || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
 		return "", false, nil
 	}
-	wait, err := store.Get(item.Reference.ID)
+	wait, err := sessionStore.Get(item.Reference.ID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return "wait-missing", true, nil

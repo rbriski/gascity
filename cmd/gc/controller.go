@@ -966,16 +966,22 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  1. Send Interrupt (Ctrl-C) to all sessions
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
+//
+// PURE-SESSION: sessionStore only feeds the stop chain (stopTargetsForNames,
+// interruptTargetsBoundedWithForceSignal, stopTargetsBounded) and the
+// cityStopSessionMarked/markCityStopSessionAsAsleep marks — session-bead reads
+// and session runtime-handle teardown, no work-assignment op. At the default
+// backend sessionStore == workStore, so callers stay byte-identical.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
 	timeout time.Duration,
 	rec events.Recorder,
 	cfg *config.City,
-	store beads.Store,
+	sessionStore beads.Store,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, sessionStore, stdout, stderr, nil)
 }
 
 func gracefulStopAllWithForceSignal(
@@ -984,16 +990,16 @@ func gracefulStopAllWithForceSignal(
 	timeout time.Duration,
 	rec events.Recorder,
 	cfg *config.City,
-	store beads.Store,
+	sessionStore beads.Store,
 	stdout, stderr io.Writer,
 	forceStopRequested func() bool,
 ) {
 	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
 		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
+		stopTargetsBounded(stopTargetsForNames(names, cfg, sessionStore, stderr), cfg, sessionStore, sp, rec, "gc", stdout, stderr)
 		return
 	}
-	targets := stopTargetsForNames(names, cfg, store, stderr)
+	targets := stopTargetsForNames(names, cfg, sessionStore, stderr)
 	targetByName := make(map[string]stopTarget, len(targets))
 	for _, target := range targets {
 		targetByName[target.name] = target
@@ -1005,7 +1011,7 @@ func gracefulStopAllWithForceSignal(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, forceStopRequested)
+	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, sessionStore, sp, stderr, forceStopRequested)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
@@ -1077,8 +1083,8 @@ func gracefulStopAllWithForceSignal(
 				}
 				template = target.template
 				agentIdentity = target.agentName
-				if cityStopSessionMarked(store, target.sessionID) {
-					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+				if cityStopSessionMarked(sessionStore, target.sessionID) {
+					markCityStopSessionAsAsleep(sessionStore, target.sessionID, stderr)
 				}
 			}
 			rec.Record(events.Event{
@@ -1090,7 +1096,7 @@ func gracefulStopAllWithForceSignal(
 		}
 		survivors = append(survivors, name)
 	}
-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
+	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, sessionStore, sp, rec, "gc", stdout, stderr)
 }
 
 func stopForceRequested(forceStopRequested func() bool) bool {

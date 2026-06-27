@@ -269,7 +269,11 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	cityName := loadedCityName(cfg, cityPath)
 
 	store, _ := openCityStoreAt(cityPath)
-	markCityStopSessionSleepReason(store, stderr)
+	// Session/wait lifecycle ops route to the session class store (byte-identical
+	// to store at the default bd backend); session-name lookup + pool resolution
+	// stay on the work store. nil recorder: relocated CLI writes are event-silent.
+	sessionStore := resolveSessionStore(store, cfg, cityPath, nil)
+	markCityStopSessionSleepReason(sessionStore, stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopControllerWithForce(cityPath, stdout, force) {
@@ -317,11 +321,11 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		graceTimeout = 0
 	}
 
-	code := doStop(sessionNames, sp, cfg, store, graceTimeout, recorder, stdout, stderr)
+	code := doStop(sessionNames, sp, cfg, sessionStore, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, store, graceTimeout, recorder, stdout, stderr)
+	stopOrphans(sp, desired, cfg, sessionStore, graceTimeout, recorder, stdout, stderr)
 
 	teardownServerForStop(sp, stderr)
 
@@ -344,11 +348,15 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
 	}
 }
 
-func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
-	if store == nil {
+// markCityStopSessionSleepReason stamps the city-stop sleep_reason on every
+// active session bead before shutdown. PURE-SESSION: sessionStore feeds the
+// gc:session list and the session-bead SetMetadata — no work-assignment op.
+// Byte-identical at the default backend (sessionStore == workStore).
+func markCityStopSessionSleepReason(sessionStore beads.Store, stderr io.Writer) {
+	if sessionStore == nil {
 		return
 	}
-	sessions, err := store.ListByLabel("gc:session", 0)
+	sessions, err := sessionStore.ListByLabel("gc:session", 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
 		return
@@ -361,7 +369,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {
 			continue
 		}
-		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+		if err := sessionStore.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
 			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
@@ -442,7 +450,10 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, store beads.Store,
+// stopOrphans force-stops running sessions absent from the desired set.
+// PURE-SESSION: sessionStore only feeds gracefulStopAll (the session stop
+// chain). Byte-identical at the default backend (sessionStore == workStore).
+func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessionStore beads.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) {
 	running, err := sp.ListRunning("")
@@ -461,7 +472,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		}
 		orphans = append(orphans, name)
 	}
-	gracefulStopAll(orphans, sp, timeout, rec, cfg, store, stdout, stderr)
+	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessionStore, stdout, stderr)
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -522,8 +533,11 @@ func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) err
 
 // doStop is the pure logic for "gc stop". Filters to running sessions and
 // performs graceful shutdown (interrupt → wait → kill). Accepts session names,
-// provider, timeout, and recorder for testability.
-func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
+// provider, timeout, and recorder for testability. PURE-SESSION: sessionStore
+// feeds workerSessionTargetRunningWithConfig (session runtime-handle probe) and
+// gracefulStopAll (the session stop chain) — no work-assignment op. Byte-
+// identical at the default backend (sessionStore == workStore).
+func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, sessionStore beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
@@ -549,7 +563,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 		if sn == "" {
 			continue
 		}
-		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+		if alive, err := workerSessionTargetRunningWithConfig("", sessionStore, sp, cfg, sn); err == nil && alive {
 			running = append(running, sn)
 			continue
 		}
@@ -557,7 +571,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 			running = append(running, sn)
 		}
 	}
-	gracefulStopAll(running, sp, timeout, rec, cfg, store, stdout, stderr)
+	gracefulStopAll(running, sp, timeout, rec, cfg, sessionStore, stdout, stderr)
 	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	return 0
 }

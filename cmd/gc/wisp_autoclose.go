@@ -83,7 +83,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	for _, attached := range attachments {
 		seen[attached.ID] = true
 	}
-	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, parent, seen)...)
+	attachments = append(attachments, collectInputConvoyWorkflowRoots(graph, store, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
 			owner := autocloseOwningStore(attached.ID, storeSet, store)
@@ -153,14 +153,23 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
 // attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
 // are still in flight stays open and closes later via its workflow-finalize
 // control instead.
-func collectInputConvoyWorkflowRoots(store beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
-	convoys, err := convoycore.TrackingConvoysForItem(store, parent.ID)
+//
+// The synthetic tracking convoy, its tracks dep edge, and the graph.v2 root are
+// all ClassGraph, so once the graph class is relocated they live on the dedicated
+// graph store, not the just-closed parent's work store. Discovery therefore runs
+// against graph (cr.graphBeadStore / autocloseGraphStore). At graph=bd graph ==
+// store, so this is byte-identical to the prior single-store discovery.
+func collectInputConvoyWorkflowRoots(graph beads.Store, store beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+	if graph == nil {
+		graph = store
+	}
+	convoys, err := convoycore.TrackingConvoysForItem(graph, parent.ID)
 	if err != nil {
 		return nil
 	}
 	var roots []beads.Bead
 	for _, convoy := range convoys {
-		matches, err := store.ListByMetadata(
+		matches, err := graph.ListByMetadata(
 			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID},
 			0, beads.WithBothTiers,
 		)

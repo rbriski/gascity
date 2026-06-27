@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -156,7 +157,7 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
-	bead, err := store.Get(beadID)
+	bead, err := getControlBeadByID(store, beadID, storePath, cityPath, cfg)
 	if err != nil {
 		return fmt.Errorf("loading bead %s from scoped control store %q: %w", beadID, storePath, err)
 	}
@@ -525,6 +526,30 @@ func dispatcherControlStores(storePath, cityPath string, cfg *config.City) (prim
 	return graphPrimary, bdWork, nil
 }
 
+// getControlBeadByID resolves a control bead by id, federating the dedicated
+// graph store ahead of the scope's (work-backed) control store when the graph
+// class is relocated. Control beads — check/drain/fanout/retry/workflow-finalize
+// and the unit-convoy/item-root molecules they live in — are graph-resident
+// (gcg-* prefix), so once routedPolicyStore returns policy(work) the scope
+// store's Get would miss them. storeref.Resolve over [graph, work] mirrors the
+// by-id federation in internal/api/handler_beads.go beadStoresForID's [graph,
+// work] arm (and the Router's prefix-owner-first Get): the graph store is
+// probed first because it owns the gcg- prefix, then the work store. At graph=bd
+// resolveGraphStore returns the work-backed store, so the set collapses to a
+// single store and this is byte-identical to the prior store.Get(beadID).
+func getControlBeadByID(store beads.Store, beadID, storePath, cityPath string, cfg *config.City) (beads.Bead, error) {
+	if !graphRelocated(cfg) {
+		return store.Get(beadID)
+	}
+	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
+	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider == "file" || strings.HasPrefix(provider, "exec:") {
+		return store.Get(beadID)
+	}
+	graph := resolveGraphStore(controlBdStoreForScope(scopeRoot, cityPath, cfg), cfg, cityPath, nil)
+	return storeref.Resolve(beadID, []beads.Store{graph, store})
+}
+
 // findBeadAcrossStores tries the city store first, then all rig stores,
 // returning the store and bead on first match.
 func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, string, error) {
@@ -550,7 +575,15 @@ func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (bea
 		if err != nil {
 			return nil, beads.Bead{}, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
-		bead, err := store.Get(beadID)
+		// Federate the dedicated graph store ahead of the (work-backed) rig
+		// control store: a graph-resident control bead (gcg-* prefix) is invisible
+		// to the rig work store once routedPolicyStore returns policy(work). The
+		// graph store is city-scoped (resolveGraphStore keyed on cityPath, the same
+		// cached handle the Router's graph leg used), so the first rig iteration
+		// finds the bead via the graph store and returns this rig's path — matching
+		// the Router-present resolution. Byte-identical at graph=bd (the set
+		// collapses to the single rig store).
+		bead, err := getControlBeadByID(store, beadID, rig.Path, cityPath, cfg)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue

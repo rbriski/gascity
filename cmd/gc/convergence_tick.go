@@ -95,12 +95,33 @@ func (cr *CityRuntime) initConvergenceHandler() {
 // newConvergenceScope wires a store adapter and convergence handler for a
 // single bead store. Each rig scope resolves formulas through that rig's
 // formula search paths so rig-local formulas are honored.
+//
+// Convergence roots are type=convergence => ClassGraph (internal/coordclass),
+// so the create-chokepoint lands them on the dedicated graph store and the
+// adapter's convergence-class reads/mutates (List Type:convergence, Get,
+// SetMetadata, Close, the active index, FindByIdempotencyKey, deferred-assignee
+// activation) MUST hit that same store or they miss the loop entirely once the
+// graph class is relocated. The graph store is a SINGLE city-scope handle
+// (resolveGraphStore keyed on cityPath), shared by the city scope AND every rig
+// scope — so when graph is relocated, ALL convergence scopes bind that one graph
+// store for convergence ops; the per-scope work `store` argument then supplies
+// only the formula-resolution context via storePath.
+//
+// Gate on relocation: at graph=bd graphBeadStore is not consulted and the scope
+// keeps the per-scope work store it was handed, so a rig convergence loop stays
+// physically on its rig work store and city-scope behavior is byte-identical.
 func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string) *convergenceScope {
-	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
+	convStore := store
+	if graphRelocated(cr.cfg) {
+		if graph := cr.graphBeadStore(); graph != nil {
+			convStore = graph
+		}
+	}
+	adapter := newConvergenceStoreAdapter(convStore, formulaSearchPaths)
 	return &convergenceScope{
 		rig:       rig,
 		storePath: storePath,
-		store:     store,
+		store:     convStore,
 		adapter:   adapter,
 		handler: &convergence.Handler{
 			Store:     adapter,

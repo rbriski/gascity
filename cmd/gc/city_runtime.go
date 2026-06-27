@@ -1230,9 +1230,24 @@ func (cr *CityRuntime) tick(
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
 
-	// Wisp GC: purge expired closed molecules.
-	if store := cr.cityBeadStore(); cr.wg != nil && store != nil && cr.wg.shouldRun(time.Now()) {
+	// Wisp GC: purge expired closed molecules. The root-GC universe (molecule /
+	// wisp / graph.v2 / workflow roots and their closures) is ClassGraph, so it runs
+	// against the dedicated graph store; cr.graphBeadStore() returns the work store
+	// at graph=bd, so this is byte-identical for default cities. The mail-retention
+	// leg inside runGC targets the messaging store the wisp GC resolved at
+	// construction (newWispGCForConfig). nil graph store falls back to the city store.
+	if store := cr.graphBeadStore(); cr.wg != nil && store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
+		// Point the mail-retention leg at the messaging store (ClassMessaging), since
+		// runGC now receives the graph store (ClassGraph) for the root universe. At
+		// messaging=bd the resolved store IS the work store, so this is a no-op and
+		// the mail leg stays byte-identical. rec is nil: when messaging is relocated
+		// the shared cached handle already carries the controller recorder (opened by
+		// newCityMailProvider), so a second open returns that same recorder-bearing
+		// handle and retention deletes still emit bead.* exactly once.
+		if m, ok := cr.wg.(*memoryWispGC); ok {
+			m.setMessagingStore(resolveClassStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, config.BeadClassMessaging, nil))
+		}
 		purged, gcErr := cr.wg.runGC(store, time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {

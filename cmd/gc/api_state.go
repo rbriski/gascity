@@ -670,10 +670,16 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	if cs.eventProv != nil {
 		rec = cs.eventProv
 	}
+	// Graph store for the wisp/molecule subtree closes: wisp/workflow attachments
+	// and graph.v2 roots are ClassGraph, so a graph-relocated city must close their
+	// subtrees on the dedicated graph store, not on the just-closed work bead's
+	// store. resolveGraphStore returns store at graph=bd, so this is byte-identical
+	// for default cities. The convoy autoclose stays on store (convoys are ClassWork).
+	graph := resolveGraphStore(store, cs.cfg, cs.cityPath, nil)
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr)
+		doWispAutocloseWith(store, beadID, os.Stderr, graph)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graph)
 	})
 }
 

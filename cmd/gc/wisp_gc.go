@@ -113,6 +113,13 @@ type memoryWispGC struct {
 	ttl              time.Duration
 	mailRetentionTTL time.Duration
 	lastRun          time.Time
+	// messagingStore is the dedicated messaging-class store for the mail-retention
+	// sweep. The controller passes the GRAPH store to runGC (the root-GC universe is
+	// ClassGraph), but read-message retention operates on ClassMessaging beads, an
+	// independently-relocatable class. nil means "use the store passed to runGC",
+	// which is the byte-identical default: at graph=bd + messaging=bd both resolve to
+	// the work store, so the mail leg runs exactly as before.
+	messagingStore beads.Store
 }
 
 // newWispGC creates a wisp GC tracker. Returns nil if disabled. The tracker
@@ -138,6 +145,16 @@ func newWispGCForConfig(cfg *config.City) wispGC {
 		mailRetentionTTL = 0
 	}
 	return newWispGC(cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration(), mailRetentionTTL)
+}
+
+// setMessagingStore records the dedicated messaging-class store for the
+// mail-retention leg. The controller calls it from the (single-writer) tick
+// before runGC because runGC now receives the GRAPH store for the ClassGraph
+// root universe, and read-message retention must instead target the messaging
+// store. A nil or work-equal store is a no-op, leaving the mail leg on the store
+// passed to runGC — the byte-identical default at messaging=bd.
+func (m *memoryWispGC) setMessagingStore(store beads.Store) {
+	m.messagingStore = store
 }
 
 func (m *memoryWispGC) shouldRun(now time.Time) bool {
@@ -191,9 +208,18 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	}
 
 	if m.mailRetentionTTL > 0 {
-		mailEntries, mailErr := readMessageWispGCEntries(store)
+		// Read messages are ClassMessaging, not ClassGraph: when the controller hands
+		// us the relocated graph store, the mail-retention sweep must target the
+		// messaging store instead (else it queries the wrong store and silently stops
+		// purging). messagingStore is nil at the default backends, so this is the
+		// passed store — byte-identical.
+		mailStore := store
+		if m.messagingStore != nil {
+			mailStore = m.messagingStore
+		}
+		mailEntries, mailErr := readMessageWispGCEntries(mailStore)
 		if mailErr == nil {
-			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(store, mailEntries, now.Add(-m.mailRetentionTTL))
+			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(mailStore, mailEntries, now.Add(-m.mailRetentionTTL))
 			purged += mailPurged
 			deleteErr = errors.Join(deleteErr, mailDeleteErr)
 			if mailPurged > 0 {

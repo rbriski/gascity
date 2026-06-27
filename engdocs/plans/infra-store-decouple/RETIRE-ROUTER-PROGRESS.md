@@ -103,16 +103,40 @@ graph=sqlite path changes from Router-mediated to class-aware-direct; needs relo
 ride GraphOnlyReadyFor/ListFor INTERFACES; storeref (PrefixOwner+Resolve) is ready+dark.
 This is class-aware callers (NOT the rejected Path-B dispatcher): each graph caller opens the
 graph store directly (resolveClassStore(graph)); the by-id-agnostic case uses storeref.
-- [ ] **G1 — graph-only READ callers → class-aware.** The ~7 GraphOnlyReadyFor/GraphOnlyListFor
+- [x] **G0** (`4d7641378`) resolveGraphStore (legacy `.gc/beads.sqlite` preserved) + cr.graphBeadStore()
+  + api.State.GraphBeadStore() + landmine test. Additive, byte-identical.
+- [x] **G1** (`e3a7b036c`) graph-only READ readers class-aware (Ready sites). Review wf_23e8aef2 caught
+  **2 LIVE blockers** (work leak into the worker ready set under graph=sqlite because ALL stores
+  are policy(Router) and the OLD code read graph-only on every leg) — FIXED: graphRelocated →
+  read the shared graph store's Ready ALONE (skip rig work federation); attach graph store to every
+  demand leg. New realistic-BeadStores() guard tests. internal/api full + cmd/gc green.
+  **⚠ KEY FINDING for G2/G3: the 3 graph-only LIST sites still rely on Router.List federation for
+  graph visibility (their GraphOnlyListFor branch is dead — beadPolicyStore has no ListGraphOnly
+  forwarder). After the Router is deleted they'd see work-only → graph List visibility LOST. G2
+  MUST restore graph List for them (add a ListGraphOnly forwarder to beadPolicyStore, OR make the 3
+  sites class-aware via cr.graphBeadStore()/storeref) BEFORE G3.**
+- [ ] **G1-REF — graph-only READ callers (original plan):** The ~7 GraphOnlyReadyFor/GraphOnlyListFor
   sites (huma_handlers_beads.go:349, dispatch/runtime.go:441, build_desired_state.go:1762,
   cmd_ready.go:181, session_reconciler.go:2804/2853, pool_session_name.go:199) call
   GraphOnlyReadyFor(cityStore) — post-Router cityStore=policy(work) doesn't implement it →
   would fall through to work.Ready() (WRONG). Rewire each to open the graph store via
   resolveClassStore(graph) (byte-identical at graph=bd). bead_policy_store forwarding wrapper stays.
-- [ ] **G2 — graph CREATE/apply + by-id → class-aware.** (a) molecule pour/ApplyGraphPlan: use
-  GraphApplyFor(resolveClassStore(graph)) instead of the Router. (b) by-id gcg-N (bd-shim/worker
-  close, cross-class Get): wire storeref.Resolve([work, graph], id) — the Router's backendForID
-  successor. ClassifyGraphPlan stays in coordclass until its last Router caller dies.
+- [ ] **G2 — graph CREATE/apply + by-id + List-restore → class-aware** (Router still present as
+  safety net; byte-identical-ish since everything points at the SAME shared graph store). Per the
+  Track-G design (`raw/track-g-design.md`) + create/by-id surface maps (`raw/track-g-*-surface.json`):
+  - (a) **CREATE/apply ORPHAN-LANDMINE chokepoint:** `bead_policy_store.go:48` (wrapStoreWithBeadPolicies)
+    sources its graph applier from `beads.GraphApplyFor(inner)`. Today inner=Router → graph store.
+    After G3 (no Router) GraphApplyFor(work) → graph plans land on WORK = ORPHAN. Fix: source the
+    applier from `resolveGraphStore(workBackend, cfg, cityPath, rec)` (legacy loc). Covers BOTH the
+    graph-apply path AND molecule.go's sequential-fallback store.Create (when graph-apply disabled,
+    the caller must pass the graph store). Sites: molecule.Instantiate/InstantiateFragment,
+    sling.go:1287, order_dispatch dispatchWisp.
+  - (b) **by-id gcg-N:** `internal/api/handler_beads.go beadStoresForID` — add a class-prefix arm
+    returning [work, graph] for gcg- ids (the existing per-store Get-then-mutate loop federates like
+    the Router). bd-shim is pure-HTTP (no change). storeref.PrefixOwner/Resolve is the model.
+  - (c) **List-restore** (the G1 finding): add ListGraphOnly forwarding to beadPolicyStore OR make
+    the 3 List sites class-aware — so graph List survives G3.
+  - ClassifyGraphPlan stays in coordclass until its last Router caller dies (G3).
 - [ ] **G3 — delete coordrouter; fold graph into resolveClassStore.** api_state.go: drop the
   import + coordrouter.New (:250) + the 2 *Router assertions (:199 caching-store builder, :860
   closeBeadStoreHandle) + Register/Backend/Backends; registerGraphStoreBackend folds into

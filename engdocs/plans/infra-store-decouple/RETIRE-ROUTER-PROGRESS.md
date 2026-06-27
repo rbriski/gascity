@@ -53,7 +53,7 @@ epic: ga-pd6tcg
 - [x] **P4a** (`c0a309a9d`) session_wake.go/session_reconcile.go/session_sleep.go — pure `store`→`sessionStore`
   rename (24 fns, 69/69, no caller change). Byte-identical; no review needed (pure rename).
 - [x] **P4b** (`5ba9666c4`) session_lifecycle_parallel.go start path — review `wf_6f2e3102` SAFE-TO-PROCEED.
-- [ ] **P4c** session_reconciler.go (79 session / **34 work** / 9 mixed — densest landmine). The
+- [x] **P4c** (`f4ab04955`) session_reconciler.go — review `wf_0a636cc1` SAFE-TO-PROCEED (no work-read method ever on sessionStore). **All Phase-4 session-write surfaces DONE.** The
   `sessionHas*AssignedWork*` family + `reachableStoresForSession` (the in-caller work federation)
   stay pure-work single-param; only `reconcileSessionBeadsTracedWithNamedDemand` + the drain-ack
   fns (finalizeDrainAckStoppedSession/reconcileDrainAckStopPending/finalizeDrainAckStopPendingSessions)

@@ -395,6 +395,7 @@ func TestResolveTemplatePreservesLogicalAgentNameWhenSessionBeadExists(t *testin
 		fs:           fsys.OSFS{},
 		beaconTime:   time.Unix(0, 0),
 		beadStore:    store,
+		sessionStore: store,
 		sessionBeads: snapshot,
 		beadNames:    make(map[string]string),
 		stderr:       io.Discard,

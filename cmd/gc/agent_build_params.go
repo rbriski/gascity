@@ -36,10 +36,18 @@ type agentBuildParams struct {
 	appendFragments []string // V2: city-level [agents].append_fragments / [agent_defaults].append_fragments
 	stderr          io.Writer
 
-	// beadStore is the city-level bead store for session bead lookups.
-	// When non-nil, session names are derived from bead IDs ("s-{beadID}")
-	// instead of the legacy SessionNameFor function.
+	// beadStore is the city-level bead store. It is retained for work-class
+	// reads/writes the builder performs through bp and for the "bead-backed
+	// mode" gate (nil ⇒ legacy SessionNameFor naming, non-nil ⇒ bead-derived
+	// "s-{beadID}" session names with auto-created session beads).
 	beadStore beads.Store
+
+	// sessionStore is the city-level SESSION-class bead store. Session-bead
+	// lookups, creates, and updates the builder performs through bp route here.
+	// At the default `bd` backend it is the same handle as beadStore; once the
+	// session class is relocated it points at the city session store while
+	// beadStore/work stores keep the work-assignment ops.
+	sessionStore beads.Store
 
 	// sessionBeads caches the open session-bead snapshot for the current
 	// desired-state build so per-agent resolution does not rescan the store.
@@ -90,7 +98,10 @@ type agentBuildParams struct {
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
-func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
+// sessionStore is the SESSION-class store (session-bead lookups/creates/updates);
+// store is the work-class store. At the default `bd` backend the two are the same
+// handle. Per the two-store convention sessionStore comes first relative to store.
+func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, sessionStore, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := &agentBuildParams{
 		city:            cfg,
 		cityName:        cityName,
@@ -110,6 +121,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		globalFragments: cfg.Workspace.GlobalFragments,
 		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
 		beadStore:       store,
+		sessionStore:    sessionStore,
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,

@@ -2241,7 +2241,7 @@ func TestSyncSessionBeads_KeepsDiscoveredPlainTemplateSessionOpen(t *testing.T) 
 		t.Fatalf("creating plain template bead: %v", err)
 	}
 
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, clk.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, clk.Now(), store, store, io.Discard)
 	desired := make(map[string]TemplateParams)
 	discoverSessionBeads(bp, cfg, desired, io.Discard)
 	if _, ok := desired["s-gc-plain"]; !ok {
@@ -2295,7 +2295,7 @@ func TestSyncSessionBeads_PreservesManualSessionExplicitAlias(t *testing.T) {
 		t.Fatalf("creating manual helper bead: %v", err)
 	}
 
-	bp := newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, store, io.Discard)
 	desired := make(map[string]TemplateParams)
 	discoverSessionBeads(bp, cfg, desired, io.Discard)
 

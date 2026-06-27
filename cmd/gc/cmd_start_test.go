@@ -1505,7 +1505,7 @@ func TestAgentBuildParams_FPExtraStableAcrossCatalogTransients(t *testing.T) {
 	}
 
 	// Tick N: catalog loads fully.
-	bpGood := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	bpGood.lookPath = func(string) (string, error) { return "/bin/echo", nil }
 	tpN, err := resolveTemplate(bpGood, agent, agent.QualifiedName(), buildFingerprintExtra(agent))
 	if err != nil {
@@ -1518,7 +1518,7 @@ func TestAgentBuildParams_FPExtraStableAcrossCatalogTransients(t *testing.T) {
 	// Tick N+1: catalog discovery fails from a transient filesystem error.
 	// The cache must kick in.
 	replaceWithSelfSymlink(t, emptyImportLink)
-	bpDegraded := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, io.Discard)
+	bpDegraded := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	bpDegraded.lookPath = func(string) (string, error) { return "/bin/echo", nil }
 	tpN1, err := resolveTemplate(bpDegraded, agent, agent.QualifiedName(), buildFingerprintExtra(agent))
 	if err != nil {
@@ -1579,7 +1579,7 @@ func TestNewAgentBuildParams_CachesLastGoodCatalog(t *testing.T) {
 		}},
 	}
 	// First call: real load succeeds and caches the catalog.
-	bpGood := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGood.skillCatalog == nil {
 		t.Fatalf("baseline: skillCatalog is nil despite successful load")
 	}
@@ -1592,7 +1592,7 @@ func TestNewAgentBuildParams_CachesLastGoodCatalog(t *testing.T) {
 	// transient filesystem error. The cache must kick in and restore the
 	// catalog so FingerprintExtra stays byte-identical across ticks.
 	replaceWithSelfSymlink(t, emptyImportLink)
-	bpDegraded := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, io.Discard)
+	bpDegraded := newAgentBuildParams("city", cityPath, cfgGood, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpDegraded.skillCatalog == nil {
 		t.Fatalf("cache miss: skillCatalog is nil after LoadCityCatalog failure — the last-good catalog cache is not kicking in; this is the config-drift drain-storm reproducer")
 	}
@@ -1617,18 +1617,18 @@ func TestNewAgentBuildParams_SharedCatalogErrorReusesLastGoodCatalogAcrossRepeat
 			PackName:    "helper",
 		}},
 	}
-	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGood.skillCatalog == nil || len(bpGood.skillCatalog.Entries) == 0 {
 		t.Fatalf("baseline: expected non-empty imported catalog, got %+v", bpGood.skillCatalog)
 	}
 
 	replaceWithSelfSymlink(t, importLink)
-	bpGrace := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGrace := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGrace.skillCatalog == nil || len(bpGrace.skillCatalog.Entries) == 0 {
 		t.Fatalf("first repeated root failure should reuse cached catalog, got %+v", bpGrace.skillCatalog)
 	}
 
-	bpRepeated := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpRepeated := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpRepeated.skillCatalog == nil || len(bpRepeated.skillCatalog.Entries) == 0 {
 		t.Fatalf("second repeated root failure should still reuse cached catalog, got %+v", bpRepeated.skillCatalog)
 	}
@@ -1647,7 +1647,7 @@ func TestNewAgentBuildParams_EmptyCatalogClearsLastGoodCatalog(t *testing.T) {
 	}
 
 	cfg := &config.City{PackSkillsDir: filepath.Join(cityPath, "skills")}
-	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGood.skillCatalog == nil || len(bpGood.skillCatalog.Entries) == 0 {
 		t.Fatalf("baseline: expected non-empty catalog, got %+v", bpGood.skillCatalog)
 	}
@@ -1655,7 +1655,7 @@ func TestNewAgentBuildParams_EmptyCatalogClearsLastGoodCatalog(t *testing.T) {
 	if err := os.RemoveAll(skillDir); err != nil {
 		t.Fatal(err)
 	}
-	bpEmpty := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpEmpty := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpEmpty.skillCatalog == nil {
 		t.Fatal("empty successful catalog should be represented as an empty catalog, not nil")
 	}
@@ -1682,7 +1682,7 @@ func TestNewAgentBuildParams_EmptyBootstrapCatalogReusesLastGoodCatalogOnceThenC
 	}
 
 	cfg := &config.City{}
-	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGood.skillCatalog == nil || len(bpGood.skillCatalog.Entries) == 0 {
 		t.Fatalf("baseline: expected non-empty bootstrap-backed catalog, got %+v", bpGood.skillCatalog)
 	}
@@ -1690,7 +1690,7 @@ func TestNewAgentBuildParams_EmptyBootstrapCatalogReusesLastGoodCatalogOnceThenC
 	if err := os.RemoveAll(filepath.Join(cacheDir, "skills")); err != nil {
 		t.Fatal(err)
 	}
-	bpEmpty := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpEmpty := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpEmpty.skillCatalog == nil {
 		t.Fatal("missing bootstrap skills dir should reuse cached catalog, got nil")
 	}
@@ -1698,7 +1698,7 @@ func TestNewAgentBuildParams_EmptyBootstrapCatalogReusesLastGoodCatalogOnceThenC
 		t.Fatalf("bootstrap empty-success should reuse cached catalog: got %d entries want %d", got, len(bpGood.skillCatalog.Entries))
 	}
 
-	bpCleared := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpCleared := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpCleared.skillCatalog == nil {
 		t.Fatal("second bootstrap empty-success should clear to an empty catalog, not nil")
 	}
@@ -1725,7 +1725,7 @@ func TestNewAgentBuildParams_ImplicitImportReadFailureReusesLastGoodCatalog(t *t
 	}
 
 	cfg := &config.City{}
-	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGood.skillCatalog == nil || len(bpGood.skillCatalog.Entries) == 0 {
 		t.Fatalf("baseline: expected non-empty bootstrap-backed catalog, got %+v", bpGood.skillCatalog)
 	}
@@ -1737,7 +1737,7 @@ func TestNewAgentBuildParams_ImplicitImportReadFailureReusesLastGoodCatalog(t *t
 		t.Fatal(err)
 	}
 
-	bpError := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpError := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpError.skillCatalog == nil {
 		t.Fatal("implicit-import read failure should reuse cached catalog, got nil")
 	}
@@ -1768,13 +1768,13 @@ func TestNewAgentBuildParams_BootstrapCommitChangeReusesCacheOnceThenClears(t *t
 
 	writeImplicit(commitA)
 	cfg := &config.City{}
-	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGood := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGood.skillCatalog == nil || len(bpGood.skillCatalog.Entries) == 0 {
 		t.Fatalf("baseline: expected non-empty bootstrap-backed catalog, got %+v", bpGood.skillCatalog)
 	}
 
 	writeImplicit(bootstrapName + "-commit-b")
-	bpGrace := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpGrace := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpGrace.skillCatalog == nil {
 		t.Fatal("bootstrap commit change should grace once with cached catalog, got nil")
 	}
@@ -1782,7 +1782,7 @@ func TestNewAgentBuildParams_BootstrapCommitChangeReusesCacheOnceThenClears(t *t
 		t.Fatalf("bootstrap commit change grace tick should reuse cached catalog: got %d entries want %d", got, len(bpGood.skillCatalog.Entries))
 	}
 
-	bpCleared := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, io.Discard)
+	bpCleared := newAgentBuildParams("city", cityPath, cfg, nil, time.Unix(0, 0), nil, nil, io.Discard)
 	if bpCleared.skillCatalog == nil {
 		t.Fatal("second bootstrap commit-change tick should clear to an empty catalog, not nil")
 	}

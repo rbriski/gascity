@@ -68,6 +68,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_CrossStore_NamedPath(t *te
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -99,6 +100,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NamedPath_OwnRigStillWakes
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -118,6 +120,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NamedPath_NoDemandNoWake(t
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -147,6 +150,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NamedPath_MissingRigStoreN
 	// Rig store absent (nil map): the own-rig target is unavailable.
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, nil, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -175,6 +179,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NamedPath_AliasedRigStoreN
 	aliased := map[string]beads.Store{"rig-A": cityStore}
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, aliased, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 

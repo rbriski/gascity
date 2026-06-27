@@ -1273,16 +1273,17 @@ func TestResolveTemplateSessionBeadIDUsesTargetedLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	params := &agentBuildParams{
-		cityName:   "phase0-city",
-		cityPath:   t.TempDir(),
-		workspace:  &config.Workspace{Provider: "test-agent"},
-		providers:  map[string]config.ProviderSpec{"test-agent": {DisplayName: "Test Agent", Command: "true"}},
-		lookPath:   func(string) (string, error) { return filepath.Join("/usr/bin", "true"), nil },
-		fs:         fsys.OSFS{},
-		beaconTime: time.Unix(0, 0),
-		beadNames:  make(map[string]string),
-		beadStore:  store,
-		stderr:     io.Discard,
+		cityName:     "phase0-city",
+		cityPath:     t.TempDir(),
+		workspace:    &config.Workspace{Provider: "test-agent"},
+		providers:    map[string]config.ProviderSpec{"test-agent": {DisplayName: "Test Agent", Command: "true"}},
+		lookPath:     func(string) (string, error) { return filepath.Join("/usr/bin", "true"), nil },
+		fs:           fsys.OSFS{},
+		beaconTime:   time.Unix(0, 0),
+		beadNames:    make(map[string]string),
+		beadStore:    store,
+		sessionStore: store,
+		stderr:       io.Discard,
 	}
 	agentCfg := &config.Agent{
 		Name:     "worker",
@@ -1414,7 +1415,7 @@ func TestDiscoverSessionBeads_IncludesBeadCreatedSessions(t *testing.T) {
 		},
 	}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	desired := make(map[string]TemplateParams)
 	discoverSessionBeads(bp, cfg, desired, io.Discard)
@@ -1447,7 +1448,7 @@ func TestDiscoverSessionBeads_SkipsAlreadyDesired(t *testing.T) {
 		},
 	}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	// Pre-populate desired state — bead should be skipped.
 	desired := map[string]TemplateParams{
@@ -1480,7 +1481,7 @@ func TestDiscoverSessionBeads_SkipsNoTemplate(t *testing.T) {
 
 	cfg := &config.City{}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	desired := make(map[string]TemplateParams)
 	discoverSessionBeads(bp, cfg, desired, io.Discard)
@@ -1519,7 +1520,7 @@ func TestDiscoverSessionBeads_SkipsPoolAgentWithZeroDesired(t *testing.T) {
 		},
 	}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	// Empty desired = pool eval returned 0 (no work).
 	desired := make(map[string]TemplateParams)
@@ -1562,7 +1563,7 @@ func TestDiscoverSessionBeads_IncludesPoolAgentWithDesired(t *testing.T) {
 		},
 	}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	// Simulate pool eval returning 1 — slot 1 is in desired.
 	desired := map[string]TemplateParams{
@@ -2586,7 +2587,7 @@ func TestDiscoverSessionBeads_RigQualifiedTemplate(t *testing.T) {
 		},
 	}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	desired := make(map[string]TemplateParams)
 	discoverSessionBeads(bp, cfg, desired, io.Discard)
@@ -2637,7 +2638,7 @@ func TestDiscoverSessionBeads_ForkGetsOwnSessionNameInEnv(t *testing.T) {
 		},
 	}
 	sp := runtime.NewFake()
-	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, store, io.Discard)
 
 	// Phase 1: the primary should be selected by resolveSessionName.
 	desired := make(map[string]TemplateParams)

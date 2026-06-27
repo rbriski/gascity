@@ -59,6 +59,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_CrossStore(t *testing.T) {
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -86,6 +87,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_OwnRigStillWakes(t *testin
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -102,6 +104,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NoDemandNoWake(t *testing.
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -135,6 +138,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_ScalesToCrossStoreWant(t *
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -164,6 +168,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_MissingRigStoreNoCrossWake
 	// Rig store absent (nil map): the own-rig target is unavailable.
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, nil, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 
@@ -196,6 +201,7 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_AliasedRigStoreNoDoubleCou
 	aliased := map[string]beads.Store{"rig-A": cityStore}
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, aliased, &sessionBeadSnapshot{}, nil, os.Stderr,
 	)
 

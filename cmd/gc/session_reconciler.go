@@ -2686,7 +2686,8 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	if !ok || spec.Agent == nil {
 		return TemplateParams{}, fmt.Errorf("configured named session %q not found", identity)
 	}
-	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, clk.Now().UTC(), store, stderr)
+	// P5: sessionStore == store until P6 derives the real session store here.
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, clk.Now().UTC(), store, store, stderr)
 	bp.sessionBeads = newSessionBeadSnapshot(openSessions)
 	fpExtra := buildFingerprintExtra(spec.Agent)
 	tp, err := resolveTemplateForSessionBead(bp, spec.Agent, identity, fpExtra, session)

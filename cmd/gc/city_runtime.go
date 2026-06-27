@@ -2784,6 +2784,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		time.Now(),
 		filteredCfg,
 		cr.sp,
+		store, // P5: sessionStore == work store until P6 derives the real one
 		store,
 		cr.rigBeadStores(),
 		sessionBeads,

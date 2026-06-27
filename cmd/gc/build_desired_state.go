@@ -433,16 +433,23 @@ func buildDesiredState(
 			sessionQueryPartial = true
 		}
 	}
-	result := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
+	result := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, store, nil, sessionBeads, nil, stderr)
 	result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	return result
 }
 
+// sessionStore is the SESSION-class store the builder uses for the session-bead
+// snapshot loads and pool/dependency session-bead creates/updates. store and
+// rigStores remain the WORK-class stores for all work-demand reads and work-bead
+// writes (run-identity stamps, legacy-bound canonicalization). At the default
+// `bd` backend sessionStore == store, so this is byte-identical until P6 derives
+// the real session store at the city-runtime entry points.
 func buildDesiredStateWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
 	cfg *config.City,
 	sp runtime.Provider,
+	sessionStore beads.Store,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
@@ -454,7 +461,7 @@ func buildDesiredStateWithSessionBeads(
 		return DesiredStateResult{}
 	}
 
-	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, sessionStore, store, stderr)
 	bp.sessionBeads = sessionBeads
 
 	// Pre-compute suspended rig paths (config + runtime state).
@@ -464,7 +471,10 @@ func buildDesiredStateWithSessionBeads(
 	// running sessions for each pool. A partial/failed collection is logged,
 	// not swallowed: undercounting running sessions can misclassify a pool as
 	// cold and trigger a spurious scale-from-zero probe.
-	allOpenSessionBeads, openSessionBeadsErr := collectAllOpenSessionBeads(cfg, store, rigStores, suspendedRigPaths)
+	// Session beads are city-only (Q3): the city leg reads the SESSION store;
+	// the rig legs stay on the work stores (no session beads at a relocated
+	// backend, byte-identical at the default `bd` backend).
+	allOpenSessionBeads, openSessionBeadsErr := collectAllOpenSessionBeads(cfg, sessionStore, rigStores, suspendedRigPaths)
 	if openSessionBeadsErr != nil {
 		fmt.Fprintf(stderr, "collectAllOpenSessionBeads: PARTIAL — %v (cold-pool detection may undercount running sessions)\n", openSessionBeadsErr) //nolint:errcheck
 	}
@@ -1014,12 +1024,16 @@ func applySessionBeadDesiredOverlay(
 	realizeDependencyFloors(bp, cfg, desired, realizedRoots, suspendedRigPaths, stderr)
 }
 
+// refreshDesiredStateWithSessionBeads re-runs only the session-bead overlay
+// (discoverSessionBeads + dependency floors) against a fresher snapshot. Every
+// store op it drives is session-class, so it takes only the SESSION store; the
+// work stores play no part here. sessionStore == store at the default backend.
 func refreshDesiredStateWithSessionBeads(
 	result DesiredStateResult,
 	cityName, cityPath string,
 	cfg *config.City,
 	sp runtime.Provider,
-	store beads.Store,
+	sessionStore beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	stderr io.Writer,
 ) DesiredStateResult {
@@ -1037,7 +1051,7 @@ func refreshDesiredStateWithSessionBeads(
 		refreshed.State = make(map[string]TemplateParams)
 	}
 
-	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, sessionStore, sessionStore, stderr)
 	bp.sessionBeads = sessionBeads
 	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), result.PoolScaleCheckPartialTemplates, result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
@@ -1970,9 +1984,10 @@ func discoverSessionBeadsWithRoots(
 	stderr io.Writer,
 ) map[string]bool {
 	sessionBeads := bp.sessionBeads
-	if sessionBeads == nil && bp.beadStore != nil {
+	if sessionBeads == nil && bp.sessionStore != nil {
 		var err error
-		sessionBeads, err = loadSessionBeadSnapshot(bp.beadStore)
+		// Session-bead snapshot load — SESSION class.
+		sessionBeads, err = loadSessionBeadSnapshot(bp.sessionStore)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: listing session beads: %v\n", err) //nolint:errcheck
 			return nil
@@ -2181,7 +2196,9 @@ func ensureDependencyOnlyTemplate(
 		return
 	}
 
-	if bp.beadStore == nil {
+	// No session store ⇒ legacy no-bead dependency floor; the bead-backed
+	// branch below creates/reuses a SESSION bead on bp.sessionStore.
+	if bp.sessionStore == nil {
 		resolveAgent, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, 1)
 		fpExtra := buildFingerprintExtra(resolveAgent)
 		tp, err := resolveTemplatePrepared(bp, resolveAgent, qualifiedInstance, fpExtra)
@@ -2534,7 +2551,7 @@ func normalizeNonExpandingPoolSessionBead(
 	// rather than re-reading bp.sessionBeads for this ID in the same tick.
 	// If alias acquisition collides, this helper records the deferred state;
 	// syncSessionBeads owns the retry once the canonical alias holder closes.
-	if bp == nil || bp.beadStore == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() || isManualSessionBeadForAgent(sessionBead, cfgAgent) || isNamedSessionBead(sessionBead) || sessionBead.ID == "" {
+	if bp == nil || bp.sessionStore == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() || isManualSessionBeadForAgent(sessionBead, cfgAgent) || isNamedSessionBead(sessionBead) || sessionBead.ID == "" {
 		return sessionBead, nil
 	}
 	canonical := cfgAgent.QualifiedName()
@@ -2585,7 +2602,7 @@ func normalizeNonExpandingPoolSessionBead(
 	}
 
 	apply := func() error {
-		return bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{
+		return bp.sessionStore.Update(sessionBead.ID, beads.UpdateOpts{
 			Title:        title,
 			Metadata:     metadata,
 			Labels:       addLabels,
@@ -2594,7 +2611,7 @@ func normalizeNonExpandingPoolSessionBead(
 	}
 	if aliasNeedsUpdate {
 		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, canonical, sessionBead.ID); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(bp.sessionStore, bp.city, canonical, sessionBead.ID); err != nil {
 				return err
 			}
 			return apply()
@@ -3260,8 +3277,8 @@ func recordDeferredNonExpandingPoolAliasConflict(
 	metadata[poolAliasConflictMetadataKey] = canonical
 	metadata[poolAliasConflictCountMetadataKey] = strconv.Itoa(count + 1)
 	metadata[poolAliasConflictAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
-	if bp != nil && bp.beadStore != nil && sessionBead.ID != "" {
-		if err := bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+	if bp != nil && bp.sessionStore != nil && sessionBead.ID != "" {
+		if err := bp.sessionStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
 			return sessionBead, fmt.Errorf("recording deferred singleton pool alias conflict for bead %s: %w", sessionBead.ID, err)
 		}
 	}
@@ -3316,8 +3333,9 @@ func createPoolSessionBeadWithGuardedAlias(
 		Slot:      slot,
 	}
 	alias := strings.TrimSpace(qualifiedInstance)
-	if bp.beadStore == nil {
-		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
+	// SESSION-bead creates route to the session store.
+	if bp.sessionStore == nil {
+		return createPoolSessionBeadWithAlias(bp.sessionStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
 	}
 	lockIDs := []string{}
 	if alias != "" {
@@ -3327,7 +3345,7 @@ func createPoolSessionBeadWithGuardedAlias(
 		lockIDs = append(lockIDs, resolvedTmuxAlias)
 	}
 	if len(lockIDs) == 0 {
-		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
+		return createPoolSessionBeadWithAlias(bp.sessionStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
 	}
 
 	var bead beads.Bead
@@ -3335,12 +3353,12 @@ func createPoolSessionBeadWithGuardedAlias(
 	lockErr := session.WithCitySessionIdentifierLocks(bp.cityPath, lockIDs, func() error {
 		createIdentity := identity
 		if alias != "" {
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, ""); err == nil {
+			if err := session.EnsureAliasAvailableWithConfig(bp.sessionStore, bp.city, alias, ""); err == nil {
 				createIdentity.Alias = alias
 			}
 		}
 		var err error
-		bead, err = createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity, resolvedTmuxAlias)
+		bead, err = createPoolSessionBeadWithAlias(bp.sessionStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity, resolvedTmuxAlias)
 		createdWithLock = true
 		return err
 	})
@@ -3350,7 +3368,7 @@ func createPoolSessionBeadWithGuardedAlias(
 	if lockErr != nil && bp.stderr != nil {
 		fmt.Fprintf(bp.stderr, "createPoolSessionBeadWithGuardedAlias: locking alias %q for %s: %v; creating without alias\n", alias, template, lockErr) //nolint:errcheck
 	}
-	return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, "")
+	return createPoolSessionBeadWithAlias(bp.sessionStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, "")
 }
 
 func isFailedCreateSessionBead(bead beads.Bead) bool {

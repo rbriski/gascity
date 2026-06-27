@@ -1109,7 +1109,7 @@ func TestResolveTemplateScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 		PromptTemplate: "agents/bravo-worker/prompt.template.md",
 	}
 
-	params := newAgentBuildParams("test", cityPath, cfg, nil, testBeaconTime, nil, io.Discard)
+	params := newAgentBuildParams("test", cityPath, cfg, nil, testBeaconTime, nil, nil, io.Discard)
 	alpha, err := resolveTemplate(params, &alphaAgent, alphaAgent.QualifiedName(), nil)
 	if err != nil {
 		t.Fatalf("resolveTemplate(alpha): %v", err)

@@ -80,6 +80,7 @@ func TestBuildDesiredState_ScaleFromZero_CrossRig(t *testing.T) {
 	// 5. Materialize a new session bead.
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, sessionBeads, nil, os.Stderr,
 	)
 
@@ -154,6 +155,7 @@ func TestBuildDesiredState_ScaleFromZero_ClampsWakeDemandToOne(t *testing.T) {
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, sessionBeads, nil, os.Stderr,
 	)
 
@@ -247,6 +249,7 @@ func TestBuildDesiredState_ScaleFromZero_IncludesRigSessions(t *testing.T) {
 	// 5. Resulting demand should be 0.
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, sessionBeads, nil, os.Stderr,
 	)
 
@@ -333,6 +336,7 @@ func TestBuildDesiredState_ScaleFromZero_UnqualifiedTemplateDoesNotSuppressCold(
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, sessionBeads, nil, os.Stderr,
 	)
 
@@ -423,6 +427,7 @@ func TestBuildDesiredState_ScaleFromZero_LegacyBoundTemplateSuppressesCold(t *te
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, sessionBeads, nil, os.Stderr,
 	)
 
@@ -499,6 +504,7 @@ func TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCan
 
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore,
 		cityStore, rigStores, sessionBeads, nil, os.Stderr,
 	)
 

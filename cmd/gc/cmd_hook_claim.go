@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -476,6 +478,14 @@ func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops 
 	// work has no formula step (ad-hoc/manual) — which clears any prior step.
 	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionBeadID)
 	stepID := strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey])
+	// Publish a session→run-id map file so external tools can correlate this
+	// session's activity to its run. Independent of and best-effort like the
+	// pointer write below. The session may be addressed by any of these keys, so
+	// the map is written under each.
+	writeRunMap(runID, bead.ID,
+		hookClaimEnvValue(opts.Env, "GC_SESSION_NAME"),
+		sessionBeadID,
+		hookClaimEnvValue(opts.Env, "BEADS_ACTOR"))
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	if err := ops.RecordSessionPointers(ctx, dir, opts.Env, opts.Assignee, sessionBeadID, runID, stepID); err != nil {
@@ -495,13 +505,73 @@ func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, env [
 // env, the override-sanitized value the rest of the claim path uses; it is empty
 // for a non-session run (cmd_hook.go blanks GC_SESSION_ID outside a session).
 func hookClaimSessionID(env []string) string {
-	sessionID := ""
+	return hookClaimEnvValue(env, "GC_SESSION_ID")
+}
+
+// hookClaimEnvValue returns the last value of key in the claim env (trimmed),
+// the same KEY=VALUE scan the rest of the claim path uses.
+func hookClaimEnvValue(env []string, key string) string {
+	val := ""
 	for _, entry := range env {
-		if k, v, ok := strings.Cut(entry, "="); ok && k == "GC_SESSION_ID" {
-			sessionID = v
+		if k, v, ok := strings.Cut(entry, "="); ok && k == key {
+			val = v
 		}
 	}
-	return strings.TrimSpace(sessionID)
+	return strings.TrimSpace(val)
+}
+
+// sanitizeRunMapKey maps a session key to its run-map filename stem: keep
+// [A-Za-z0-9._-], replace every other rune with '_'. A consumer that reads these
+// files to look one up by session must apply the identical transform.
+func sanitizeRunMapKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, s)
+}
+
+// writeRunMap publishes a session→run-id map file,
+// ${GC_RUNMAP_DIR:-/run/gc-runmap}/<sanitizeRunMapKey(session)>.json =
+// {"run_id":...,"bead_id":...,"ts":...}, so an external tool can correlate a
+// session's activity to the run it is working. One file is written per distinct
+// non-empty session key (the session may be addressed as GC_SESSION_NAME,
+// GC_SESSION_ID, or BEADS_ACTOR). Best-effort and atomic (tmp + rename); it
+// never blocks or fails the claim.
+func writeRunMap(runID, beadID string, sessionKeys ...string) {
+	if strings.TrimSpace(runID) == "" {
+		return
+	}
+	dir := os.Getenv("GC_RUNMAP_DIR")
+	if dir == "" {
+		dir = "/run/gc-runmap"
+	}
+	if err := os.MkdirAll(dir, 0o1777); err != nil {
+		return
+	}
+	body, err := json.Marshal(map[string]any{"run_id": runID, "bead_id": beadID, "ts": time.Now().Unix()})
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, k := range sessionKeys {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		name := sanitizeRunMapKey(k)
+		if name == "" || name == "." || name == ".." || seen[name] {
+			continue
+		}
+		seen[name] = true
+		tmp := filepath.Join(dir, name+".json.tmp")
+		if os.WriteFile(tmp, body, 0o644) == nil {
+			_ = os.Rename(tmp, filepath.Join(dir, name+".json"))
+		}
+	}
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir

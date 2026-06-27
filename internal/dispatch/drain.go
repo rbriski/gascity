@@ -80,7 +80,11 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	if itemFormula == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.drain_formula", bead.ID)
 	}
-	manifest, members, err := loadOrBuildDrainManifest(store, bead, parentConvoyID, itemFormula)
+	// The dispatcher primary store is the ClassGraph store. A drain's members are
+	// work-class beads, so member reads/reservations/dep-probes route to workStore;
+	// at graph=bd workStore == store and every split is a no-op.
+	workStore := opts.workStore(store)
+	manifest, members, err := loadOrBuildDrainManifest(store, workStore, bead, parentConvoyID, itemFormula)
 	if err != nil {
 		if errors.Is(err, errDrainLimitExceeded) {
 			return ControlResult{Processed: true, Action: "drain-limit-exceeded"}, nil
@@ -94,10 +98,10 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		return ControlResult{}, fmt.Errorf("%s: recording drain manifest: %w", bead.ID, err)
 	}
 	if manifest.Context == "shared" {
-		return advanceSharedDrain(store, bead, manifest, members, itemFormula, parentVars, opts)
+		return advanceSharedDrain(store, workStore, bead, manifest, members, itemFormula, parentVars, opts)
 	}
-	if err := reserveDrainMembers(store, bead, members); err != nil {
-		return closeDrainReservationFailure(store, bead, manifest, err)
+	if err := reserveDrainMembers(workStore, bead, members); err != nil {
+		return closeDrainReservationFailure(store, workStore, bead, manifest, err)
 	}
 
 	totalCreated := 0
@@ -108,7 +112,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		if row.UnitConvoyID == "" {
 			var created bool
 			var err error
-			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member)
+			unit, created, err = ensureDrainUnitConvoy(store, workStore, bead, parentConvoyID, len(members), *row, member)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -126,14 +130,14 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		}
 
 		if row.ItemRootID == "" {
-			blockerIDs, err := drainProjectedBlockerIDs(store, member.ID, manifest)
+			blockerIDs, err := drainProjectedBlockerIDs(workStore, member.ID, manifest)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: listing source dependencies for member %s: %w", bead.ID, member.ID, err)
 			}
 			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, blockerIDs, opts)
 			if err != nil {
 				if errors.Is(err, errDrainInvalidItemFormula) {
-					return closeDrainItemFormulaFailure(store, bead, manifest, err)
+					return closeDrainItemFormulaFailure(store, workStore, bead, manifest, err)
 				}
 				return ControlResult{}, err
 			}
@@ -149,7 +153,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			}
 			return ControlResult{}, fmt.Errorf("%s: wiring drain item root %s: %w", bead.ID, row.ItemRootID, err)
 		}
-		if err := ensureDrainRowDependencyProjection(store, bead, manifest, member.ID, row.ItemRootID); err != nil {
+		if err := ensureDrainRowDependencyProjection(store, workStore, bead, manifest, member.ID, row.ItemRootID); err != nil {
 			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
@@ -160,7 +164,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			return ControlResult{}, fmt.Errorf("%s: recording drain progress: %w", bead.ID, err)
 		}
 	}
-	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+	if err := ensureDrainDependencyProjection(store, workStore, bead, manifest); err != nil {
 		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 			return ControlResult{}, ErrControlPending
 		}
@@ -179,19 +183,22 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	return ControlResult{Processed: true, Action: "drain-expanded", Created: totalCreated}, nil
 }
 
-func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID, itemFormula string) (drainManifest, []beads.Bead, error) {
+func loadOrBuildDrainManifest(store, workStore beads.Store, bead beads.Bead, parentConvoyID, itemFormula string) (drainManifest, []beads.Bead, error) {
 	if strings.TrimSpace(bead.Metadata[drainManifestMetadataKey]) != "" {
 		manifest, err := parseDrainManifest(bead.Metadata[drainManifestMetadataKey])
 		if err != nil {
 			return drainManifest{}, nil, fmt.Errorf("%s: parsing persisted drain manifest: %w", bead.ID, err)
 		}
-		members, err := loadDrainManifestMembers(store, bead.ID, manifest)
+		members, err := loadDrainManifestMembers(workStore, bead.ID, manifest)
 		if err != nil {
 			return drainManifest{}, nil, err
 		}
 		return manifest, members, nil
 	}
-	members, err := convoycore.Members(store, parentConvoyID, false)
+	// The parent convoy bead is graph-resident (its DepList/List stay on store), but
+	// its members are work-class; pass workStore as the storeref memberStores tail so
+	// each tracked member Get resolves to the work store.
+	members, err := convoycore.Members(store, parentConvoyID, false, workStore)
 	if err != nil {
 		return drainManifest{}, nil, fmt.Errorf("%s: loading convoy members for %s: %w", bead.ID, parentConvoyID, err)
 	}
@@ -236,7 +243,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return drainManifest{}, nil, errDrainLimitExceeded
 	}
-	orderedMembers, err := orderDrainMembersByDependencies(store, members)
+	orderedMembers, err := orderDrainMembersByDependencies(workStore, members)
 	if err != nil {
 		return drainManifest{}, nil, fmt.Errorf("%s: ordering drain members for %s: %w", bead.ID, parentConvoyID, err)
 	}
@@ -263,10 +270,13 @@ func (e drainUnresolvedMemberError) Unwrap() error {
 	return errDrainUnresolvedMember
 }
 
-func loadDrainManifestMembers(store beads.Store, controlID string, manifest drainManifest) ([]beads.Bead, error) {
+// loadDrainManifestMembers re-reads each manifest member by id. Members are
+// work-class beads, so callers pass the work store (opts.workStore); at graph=bd
+// that is the primary store and this is byte-identical to the prior behavior.
+func loadDrainManifestMembers(workStore beads.Store, controlID string, manifest drainManifest) ([]beads.Bead, error) {
 	members := make([]beads.Bead, 0, len(manifest.Rows))
 	for _, row := range manifest.Rows {
-		member, err := store.Get(row.MemberID)
+		member, err := workStore.Get(row.MemberID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) && strings.TrimSpace(row.MemberID) != "" {
 				members = append(members, beads.Bead{ID: row.MemberID, Title: row.MemberID, Type: "task", Status: "unknown"})
@@ -289,6 +299,7 @@ func rejectUnresolvedDrainMembers(controlID, parentConvoyID string, members []be
 }
 
 func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+	workStore := opts.workStore(store)
 	manifest, err := parseDrainManifest(bead.Metadata[drainManifestMetadataKey])
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: parsing drain manifest: %w", bead.ID, err)
@@ -306,16 +317,16 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: parsing formulas v2 runtime vars on root %s: %w", bead.ID, rootID, err)
 		}
-		members, err := loadDrainManifestMembers(store, bead.ID, manifest)
+		members, err := loadDrainManifestMembers(workStore, bead.ID, manifest)
 		if err != nil {
 			return ControlResult{}, err
 		}
-		return advanceSharedDrain(store, bead, manifest, members, manifest.Formula, parentVars, opts)
+		return advanceSharedDrain(store, workStore, bead, manifest, members, manifest.Formula, parentVars, opts)
 	}
 	// Re-running the projection here lets manifests whose item workflows were
 	// wired to source members by earlier builds heal while the drain waits on
 	// open item roots; expansion never revisits an expanded drain.
-	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+	if err := ensureDrainDependencyProjection(store, workStore, bead, manifest); err != nil {
 		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 			return ControlResult{}, ErrControlPending
 		}
@@ -379,7 +390,7 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		return ControlResult{}, err
 	}
 	metadata[drainManifestMetadataKey] = string(data)
-	if err := releaseDrainReservations(store, bead.ID, manifest); err != nil {
+	if err := releaseDrainReservations(workStore, bead.ID, manifest); err != nil {
 		return ControlResult{}, err
 	}
 	if err := updateMetadataAndClose(store, bead.ID, metadata); err != nil {
@@ -388,15 +399,15 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	return ControlResult{Processed: true, Action: action}, nil
 }
 
-func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManifest, members []beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (ControlResult, error) {
+func advanceSharedDrain(store, workStore beads.Store, bead beads.Bead, manifest drainManifest, members []beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (ControlResult, error) {
 	if len(manifest.Rows) == 0 {
-		return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", "pass", "drain-succeeded")
+		return closeDrainWithManifest(store, workStore, bead.ID, manifest, "succeeded", "pass", "drain-succeeded")
 	}
 	// Repair materialized rows before waiting on them: a row wired to a
 	// source member by an earlier build never closes (drains do not close
 	// source members), and in shared mode its blocker row is not even
 	// materialized until this row's root closes.
-	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+	if err := ensureDrainDependencyProjection(store, workStore, bead, manifest); err != nil {
 		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 			return ControlResult{}, ErrControlPending
 		}
@@ -419,7 +430,7 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			if !recordDrainRowOutcome(row, root) {
 				if onItemFailure == "skip_remaining" {
 					markRemainingSharedRowsSkipped(&manifest, i+1)
-					return closeDrainWithManifest(store, bead.ID, manifest, "failed", "fail", "drain-failed")
+					return closeDrainWithManifest(store, workStore, bead.ID, manifest, "failed", "fail", "drain-failed")
 				}
 			}
 			continue
@@ -428,17 +439,17 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			return ControlResult{}, fmt.Errorf("%s: shared drain manifest/member length mismatch", bead.ID)
 		}
 		member := members[i]
-		if err := reserveDrainMember(store, bead, member); err != nil {
-			return closeDrainReservationFailure(store, bead, manifest, err)
+		if err := reserveDrainMember(workStore, bead, member); err != nil {
+			return closeDrainReservationFailure(store, workStore, bead, manifest, err)
 		}
-		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
+		created, err := materializeDrainRow(store, workStore, bead, manifest, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
 			if errors.Is(err, errDrainInvalidItemFormula) {
-				return closeDrainItemFormulaFailure(store, bead, manifest, err)
+				return closeDrainItemFormulaFailure(store, workStore, bead, manifest, err)
 			}
 			return ControlResult{}, err
 		}
-		if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+		if err := ensureDrainDependencyProjection(store, workStore, bead, manifest); err != nil {
 			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
@@ -454,16 +465,16 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		return ControlResult{Processed: true, Action: "drain-shared-advanced", Created: created}, nil
 	}
 	if drainManifestHasFailedRows(manifest) {
-		return closeDrainWithManifest(store, bead.ID, manifest, "failed", "fail", "drain-failed")
+		return closeDrainWithManifest(store, workStore, bead.ID, manifest, "failed", "fail", "drain-failed")
 	}
-	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", "pass", "drain-succeeded")
+	return closeDrainWithManifest(store, workStore, bead.ID, manifest, "succeeded", "pass", "drain-succeeded")
 }
 
-func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
+func materializeDrainRow(store, workStore beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
 	createdCount := 0
 	var unit beads.Bead
 	if row.UnitConvoyID == "" {
-		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member)
+		createdUnit, created, err := ensureDrainUnitConvoy(store, workStore, control, manifest.ParentConvoyID, len(members), *row, member)
 		if err != nil {
 			return 0, err
 		}
@@ -481,7 +492,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 		unit = reloaded
 	}
 	if row.ItemRootID == "" {
-		blockerIDs, err := drainProjectedBlockerIDs(store, member.ID, manifest)
+		blockerIDs, err := drainProjectedBlockerIDs(workStore, member.ID, manifest)
 		if err != nil {
 			return 0, fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, member.ID, err)
 		}
@@ -501,7 +512,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 		}
 		return 0, fmt.Errorf("%s: wiring drain item root %s: %w", control.ID, row.ItemRootID, err)
 	}
-	if err := ensureDrainRowDependencyProjection(store, control, manifest, member.ID, row.ItemRootID); err != nil {
+	if err := ensureDrainRowDependencyProjection(store, workStore, control, manifest, member.ID, row.ItemRootID); err != nil {
 		if controllerSpawnBoundaryPending(store, control.ID, err, opts) {
 			return 0, ErrControlPending
 		}
@@ -511,22 +522,26 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 	return createdCount, nil
 }
 
-func ensureDrainDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest) error {
+func ensureDrainDependencyProjection(store, workStore beads.Store, control beads.Bead, manifest drainManifest) error {
 	for _, row := range manifest.Rows {
 		memberID := strings.TrimSpace(row.MemberID)
 		rootID := strings.TrimSpace(row.ItemRootID)
 		if memberID == "" || rootID == "" {
 			continue
 		}
-		if err := ensureDrainRowDependencyProjection(store, control, manifest, memberID, rootID); err != nil {
+		if err := ensureDrainRowDependencyProjection(store, workStore, control, manifest, memberID, rootID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func ensureDrainRowDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest, memberID, rootID string) error {
-	blockerIDs, err := drainProjectedBlockerIDs(store, memberID, manifest)
+// ensureDrainRowDependencyProjection wires the graph item-root workflow (rootID,
+// graph-resident) to its projected blockers. The member's source dependencies are
+// read from workStore (the member is work-class), while every DepAdd/DepRemove
+// lands on store, the home of the graph workflow beads being wired.
+func ensureDrainRowDependencyProjection(store, workStore beads.Store, control beads.Bead, manifest drainManifest, memberID, rootID string) error {
+	blockerIDs, err := drainProjectedBlockerIDs(workStore, memberID, manifest)
 	if err != nil {
 		return fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, memberID, err)
 	}
@@ -569,10 +584,13 @@ func drainManifestMemberIDs(manifest drainManifest) map[string]bool {
 	return memberIDs
 }
 
-func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drainManifest) ([]string, error) {
+// drainProjectedBlockerIDs reads the work-class member's source dependencies
+// (from workStore) and projects each onto the in-manifest item-root id when one
+// exists. Only the member DepList touches a store; the projection is in-memory.
+func drainProjectedBlockerIDs(workStore beads.Store, memberID string, manifest drainManifest) ([]string, error) {
 	rootByMember := drainRootByMember(manifest)
 	manifestMembers := drainManifestMemberIDs(manifest)
-	deps, err := store.DepList(memberID, "down")
+	deps, err := workStore.DepList(memberID, "down")
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +732,7 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 	}
 }
 
-func closeDrainWithManifest(store beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string) (ControlResult, error) {
+func closeDrainWithManifest(store, workStore beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string) (ControlResult, error) {
 	metadata := map[string]string{
 		beadmeta.DrainStateMetadataKey: closeState,
 		beadmeta.OutcomeMetadataKey:    outcome,
@@ -724,7 +742,7 @@ func closeDrainWithManifest(store beads.Store, beadID string, manifest drainMani
 		return ControlResult{}, err
 	}
 	metadata[drainManifestMetadataKey] = string(data)
-	if err := releaseDrainReservations(store, beadID, manifest); err != nil {
+	if err := releaseDrainReservations(workStore, beadID, manifest); err != nil {
 		return ControlResult{}, err
 	}
 	if err := updateMetadataAndClose(store, beadID, metadata); err != nil {
@@ -752,7 +770,10 @@ func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, mem
 	return drainManifest{Version: 1, Context: context, ParentConvoyID: parentConvoyID, Formula: itemFormula, Rows: rows}
 }
 
-func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead) ([]beads.Bead, error) {
+// orderDrainMembersByDependencies topologically orders members by their source
+// dependencies, read from workStore (members are work-class). At graph=bd this is
+// the primary store and the ordering is byte-identical to the prior behavior.
+func orderDrainMembersByDependencies(workStore beads.Store, members []beads.Bead) ([]beads.Bead, error) {
 	if len(members) < 2 {
 		return members, nil
 	}
@@ -770,7 +791,7 @@ func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead) ([
 		if memberID == "" {
 			continue
 		}
-		deps, err := store.DepList(memberID, "down")
+		deps, err := workStore.DepList(memberID, "down")
 		if err != nil {
 			return nil, fmt.Errorf("listing source dependencies for member %s: %w", memberID, err)
 		}
@@ -828,7 +849,12 @@ func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead) ([
 	return ordered, nil
 }
 
-func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
+// ensureDrainUnitConvoy creates (or reuses) the synthetic ClassGraph drain-unit
+// convoy on the graph primary store — CREATE, ListByMetadata, and the tracks
+// DepAdd all belong on store, the convoy's home. Only the member-existence
+// precondition behind the tracks edge resolves against workStore (the member is
+// work-class), threaded through to ensureDrainUnitTrack/trackDrainMember.
+func ensureDrainUnitConvoy(store, workStore beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
 	unlock := graphv2.LockKey(row.UnitKey)
 	defer unlock()
 	existing, err := store.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: row.UnitKey}, 1, beads.WithBothTiers)
@@ -836,7 +862,7 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 		return beads.Bead{}, false, fmt.Errorf("%s: looking up unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
 	if len(existing) > 0 {
-		if err := ensureDrainUnitTrack(store, control.ID, existing[0].ID, member); err != nil {
+		if err := ensureDrainUnitTrack(store, workStore, control.ID, existing[0].ID, member); err != nil {
 			return beads.Bead{}, false, err
 		}
 		return existing[0], false, nil
@@ -861,13 +887,13 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: creating unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
-	if err := trackDrainMember(store, created.ID, member); err != nil {
+	if err := trackDrainMember(store, workStore, created.ID, member); err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: tracking member %s from unit convoy %s: %w", control.ID, member.ID, created.ID, err)
 	}
 	return created, true, nil
 }
 
-func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, member beads.Bead) error {
+func ensureDrainUnitTrack(store, workStore beads.Store, controlID, unitConvoyID string, member beads.Bead) error {
 	memberID := strings.TrimSpace(member.ID)
 	hasTrack, err := convoycore.HasTrack(store, unitConvoyID, memberID)
 	if err != nil {
@@ -876,17 +902,21 @@ func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, mem
 	if hasTrack {
 		return nil
 	}
-	if err := trackDrainMember(store, unitConvoyID, member); err != nil {
+	if err := trackDrainMember(store, workStore, unitConvoyID, member); err != nil {
 		return fmt.Errorf("%s: repairing unit convoy %s track for member %s: %w", controlID, unitConvoyID, memberID, err)
 	}
 	return nil
 }
 
-func trackDrainMember(store beads.Store, unitConvoyID string, member beads.Bead) error {
+// trackDrainMember records the tracks edge from the graph-class unit convoy
+// (unitConvoyID, on store) to the work-class member. The DepAdd lands on store
+// (the convoy's home); workStore is passed as the convoy seam's memberStores tail
+// so TrackItem's member-existence precondition resolves to the work store.
+func trackDrainMember(store, workStore beads.Store, unitConvoyID string, member beads.Bead) error {
 	if convoycore.IsUnresolvedTrackedItem(member) {
 		return store.SetMetadata(unitConvoyID, beadmeta.DrainMemberUnresolvedMetadataKey, "true")
 	}
-	return convoycore.TrackItem(store, unitConvoyID, member.ID)
+	return convoycore.TrackItem(store, unitConvoyID, member.ID, workStore)
 }
 
 func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, blockerIDs []string, opts ProcessOptions) (string, bool, error) {
@@ -1100,11 +1130,16 @@ func (e drainReservationError) Error() string {
 	return fmt.Sprintf("%s: member %s already reserved by drain %s", e.ControlID, e.MemberID, e.Owner)
 }
 
-func reserveDrainMember(store beads.Store, control, member beads.Bead) error {
+// reserveDrainMember claims the exclusive-drain reservation on a work-class
+// member. The Get and SetMetadata MUST target workStore: writing the reservation
+// to the graph store would silently no-op (the member is absent there), breaking
+// the exclusive-drain mutex and allowing concurrent drains to double-process a
+// member. At graph=bd workStore is the primary store, byte-identical.
+func reserveDrainMember(workStore beads.Store, control, member beads.Bead) error {
 	if drainMemberAccess(control) != "exclusive" {
 		return nil
 	}
-	current, err := store.Get(member.ID)
+	current, err := workStore.Get(member.ID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil
@@ -1118,21 +1153,24 @@ func reserveDrainMember(store beads.Store, control, member beads.Bead) error {
 	if owner == control.ID {
 		return nil
 	}
-	return store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, control.ID)
+	return workStore.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, control.ID)
 }
 
-func reserveDrainMembers(store beads.Store, control beads.Bead, members []beads.Bead) error {
+func reserveDrainMembers(workStore beads.Store, control beads.Bead, members []beads.Bead) error {
 	for _, member := range members {
-		if err := reserveDrainMember(store, control, member); err != nil {
+		if err := reserveDrainMember(workStore, control, member); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func releaseDrainReservations(store beads.Store, controlID string, manifest drainManifest) error {
+// releaseDrainReservations clears the exclusive-drain reservation from each
+// work-class member. Like reserveDrainMember, the Get/SetMetadata MUST target
+// workStore so the release lands on the same store that holds the reservation.
+func releaseDrainReservations(workStore beads.Store, controlID string, manifest drainManifest) error {
 	controlID = strings.TrimSpace(controlID)
-	if store == nil || controlID == "" {
+	if workStore == nil || controlID == "" {
 		return nil
 	}
 	seen := make(map[string]bool, len(manifest.Rows))
@@ -1142,7 +1180,7 @@ func releaseDrainReservations(store beads.Store, controlID string, manifest drai
 			continue
 		}
 		seen[memberID] = true
-		member, err := store.Get(memberID)
+		member, err := workStore.Get(memberID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -1152,14 +1190,14 @@ func releaseDrainReservations(store beads.Store, controlID string, manifest drai
 		if strings.TrimSpace(member.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]) != controlID {
 			continue
 		}
-		if err := store.SetMetadata(memberID, beadmeta.ExclusiveDrainReservationMetadataKey, ""); err != nil {
+		if err := workStore.SetMetadata(memberID, beadmeta.ExclusiveDrainReservationMetadataKey, ""); err != nil {
 			return fmt.Errorf("%s: releasing drain reservation on %s: %w", controlID, memberID, err)
 		}
 	}
 	return nil
 }
 
-func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
+func closeDrainReservationFailure(store, workStore beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
 	var reservationErr drainReservationError
 	failureReason := "exclusive_reservation_failed"
 	metadata := map[string]string{
@@ -1182,7 +1220,7 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 		return ControlResult{}, marshalErr
 	}
 	metadata[drainManifestMetadataKey] = string(data)
-	if releaseErr := releaseDrainReservations(store, bead.ID, manifest); releaseErr != nil {
+	if releaseErr := releaseDrainReservations(workStore, bead.ID, manifest); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
 	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {
@@ -1191,7 +1229,7 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 	return ControlResult{Processed: true, Action: "drain-reservation-failed"}, nil
 }
 
-func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
+func closeDrainItemFormulaFailure(store, workStore beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
 	const failureReason = "invalid_drain_item_formula"
 	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
@@ -1211,7 +1249,7 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 	if manifest.Formula != "" {
 		metadata[beadmeta.FailureSubjectMetadataKey] = manifest.Formula
 	}
-	if releaseErr := releaseDrainReservations(store, bead.ID, manifest); releaseErr != nil {
+	if releaseErr := releaseDrainReservations(workStore, bead.ID, manifest); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
 	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {

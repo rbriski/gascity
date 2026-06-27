@@ -186,6 +186,23 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
+
+	// The dispatcher primary is the GRAPH store (control beads, unit convoys, and
+	// item-root molecules are graph-resident); drain's work-class members resolve
+	// via opts.WorkStore. At graph=bd both collapse to the incoming bd store, so
+	// this is byte-identical to the prior single-store behavior. The surrounding
+	// federated `store` still backs the recipe-decoration and session-recycle
+	// closures (session/route lookups) unchanged.
+	dispatchPrimary := store
+	if graphRelocated(cfg) {
+		graphPrimary, bdWork, storesErr := dispatcherControlStores(storePath, cityPath, cfg)
+		if storesErr != nil {
+			return fmt.Errorf("opening dispatcher graph store for %q: %w", storePath, storesErr)
+		}
+		dispatchPrimary = graphPrimary
+		opts.WorkStore = bdWork
+	}
+
 	loadCfg := false
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
 	case "check", "drain", "fanout", "retry-eval", "retry", "ralph":
@@ -240,7 +257,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		}
 	}
 
-	result, err := dispatch.ProcessControl(store, bead, opts)
+	result, err := dispatch.ProcessControl(dispatchPrimary, bead, opts)
 	if err != nil {
 		if errors.Is(err, dispatch.ErrControlPending) {
 			return err
@@ -248,7 +265,9 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		if dispatch.IsTransientControllerError(err) {
 			return err
 		}
-		if quarantineErr := quarantineControlFailureBead(store, beadID, err); quarantineErr != nil {
+		// Quarantine on the primary that processed the bead: the control bead is
+		// graph-resident, so its close must land on the graph store.
+		if quarantineErr := quarantineControlFailureBead(dispatchPrimary, beadID, err); quarantineErr != nil {
 			return errors.Join(err, quarantineErr)
 		}
 		_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
@@ -425,8 +444,18 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	if provider == "file" || strings.HasPrefix(provider, "exec:") {
 		return openStoreAtForCity(storePath, cityPath)
 	}
+	return controlStoreWithGraphRouting(controlBdStoreForScope(scopeRoot, cityPath, cfg), cfg, cityPath), nil
+}
+
+// controlBdStoreForScope returns the bare bd-backed control store for a scope
+// root, dispatching to the city or rig builder exactly as openControlStoreAtForCity
+// does. A bd-backed scope can outlive its rig entry in city.toml, so an unmatched
+// scope still falls back to the rig builder (write-capable bd commands with
+// auto-export suppressed). Callers handle the file/exec provider before reaching
+// here.
+func controlBdStoreForScope(scopeRoot, cityPath string, cfg *config.City) beads.Store {
 	if samePath(scopeRoot, cityPath) {
-		return controlStoreWithGraphRouting(controlBdStoreForCity(scopeRoot, cityPath, cfg), cfg, cityPath), nil
+		return controlBdStoreForCity(scopeRoot, cityPath, cfg)
 	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -435,30 +464,65 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
 			if samePath(rigPath, scopeRoot) {
-				return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, cityPath), nil
+				return controlBdStoreForRig(scopeRoot, cityPath, cfg)
 			}
 		}
 	}
-	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
-	// still need write-capable bd commands with auto-export suppressed.
-	return controlStoreWithGraphRouting(controlBdStoreForRig(scopeRoot, cityPath, cfg), cfg, cityPath), nil
+	return controlBdStoreForRig(scopeRoot, cityPath, cfg)
 }
 
-// controlStoreWithGraphRouting inserts the per-class Router over a bd-backed
-// control store under graph_store=sqlite, so the control-dispatcher's
-// ProcessControl reads and routes a molecule's graph-class beads (gcg-*) to the
-// embedded SQLite backend while work ops stay on Dolt. Without it ProcessControl
-// reads the Dolt work store alone and never sees a sqlite-resident molecule's
-// control beads, so graph workflows never dispatch (the E0 mediation). Default
-// (non-sqlite) cities return the bare bd store unchanged — byte-identical, no
-// Router and no policy wrapper. Wrapping here (not inside controlBdStoreForRig)
-// keeps the blast radius to the dispatcher open path and preserves the bd store's
-// auto-export suppression, which the Router/policy wrappers delegate through.
+// controlStoreWithGraphRouting wraps a bd-backed control store so the
+// control-dispatcher sees a molecule's graph-class beads (gcg-*) under
+// graph_store=sqlite. Default (non-relocated) cities return the bare bd store
+// unchanged — byte-identical, no policy wrapper. Relocated cities get the
+// routed policy store so the federated find/Get path (findBeadAcrossStores,
+// runControlDispatcherInStore) still resolves graph control beads while the
+// Router survives.
+//
+// The dispatcher itself no longer relies on this federated view for graph
+// visibility: dispatcherControlStores hands ProcessControl the graph store as its
+// primary plus the bd work store via opts.WorkStore (class-aware callers, the GE
+// shape). This wrapper remains the resolver for the surrounding open/find paths
+// until coordrouter is retired (GF).
 func controlStoreWithGraphRouting(store beads.Store, cfg *config.City, cityPath string) beads.Store {
 	if store == nil || !graphRelocated(cfg) {
 		return store
 	}
 	return routedPolicyStore(store, cfg, cityPath)
+}
+
+// dispatcherControlStores returns the stores the control-dispatcher hands to
+// dispatch.ProcessControl: the PRIMARY store (graph-resident control beads, unit
+// convoys, item-root molecules) and the ClassWork store for cross-class drain
+// member access (opts.WorkStore).
+//
+//	graph=bd      -> primary == workStore == the bare bd store (byte-identical default)
+//	graph=relocated -> primary = policy(resolveGraphStore(...)) over the cached
+//	                   .gc/beads.sqlite handle; workStore = the bare bd store
+//
+// resolveGraphStore reuses graphStoreHandleCache, so the graph primary shares the
+// SAME embedded SQLite handle the Router's graph leg uses while the Router still
+// exists — no double-open, and byte-identical at BOTH backends. The work store is
+// the bare bd store, matching the Router's ClassWork backend, so drain members
+// resolve to the same Dolt store the Router routed work to.
+func dispatcherControlStores(storePath, cityPath string, cfg *config.City) (primary, workStore beads.Store, err error) {
+	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
+	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider == "file" || strings.HasPrefix(provider, "exec:") {
+		store, openErr := openStoreAtForCity(storePath, cityPath)
+		if openErr != nil {
+			return nil, nil, openErr
+		}
+		return store, store, nil
+	}
+	bdWork := controlBdStoreForScope(scopeRoot, cityPath, cfg)
+	if !graphRelocated(cfg) {
+		// Byte-identical default: ProcessControl gets the bare bd store and
+		// opts.WorkStore falls back to it (workStore == primary).
+		return bdWork, bdWork, nil
+	}
+	graphPrimary := wrapStoreWithBeadPolicies(resolveGraphStore(bdWork, cfg, cityPath, nil), cfg, cityPath)
+	return graphPrimary, bdWork, nil
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,

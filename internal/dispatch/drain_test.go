@@ -1200,7 +1200,7 @@ func TestEnsureDrainUnitConvoyRepairsExistingTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unit, created, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member)
+	unit, created, err := ensureDrainUnitConvoy(store, store, control, parent.ID, 1, row, member)
 	if err != nil {
 		t.Fatalf("ensureDrainUnitConvoy: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestEnsureDrainUnitConvoyLooksAcrossBothTiers(t *testing.T) {
 		UnitKey:  "drain-unit:test:0:" + member.ID,
 	}
 
-	if _, _, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member); err != nil {
+	if _, _, err := ensureDrainUnitConvoy(store, store, control, parent.ID, 1, row, member); err != nil {
 		t.Fatalf("ensureDrainUnitConvoy: %v", err)
 	}
 	if len(store.listMetadataOpts) == 0 {

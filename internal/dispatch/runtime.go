@@ -61,7 +61,14 @@ type ProcessOptions struct {
 	// roots. When set, workflow-finalize uses it to avoid closing a source bead
 	// while any live root in another store still references that source.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	Tracef               func(format string, args ...any)
+	// WorkStore is the ClassWork store for cross-class drain member access. The
+	// dispatcher primary store is the ClassGraph store (control beads, unit
+	// convoys, and item-root molecules are all graph-resident), but a drain's
+	// MEMBERS are work-class beads that physically live in the work store. Drain
+	// member reads, reservations, and dependency probes route here. nil means use
+	// the primary store, byte-identical at graph=bd where work == graph.
+	WorkStore beads.Store
+	Tracef    func(format string, args ...any)
 }
 
 var (
@@ -178,6 +185,17 @@ func (opts ProcessOptions) tracef(format string, args ...any) {
 		return
 	}
 	opts.Tracef(format, args...)
+}
+
+// workStore returns the ClassWork store for drain member access. When
+// opts.WorkStore is nil (graph=bd, or any single-store caller) it falls back to
+// the primary store, so every drain work-touch site is byte-identical to the
+// pre-split single-store behavior.
+func (opts ProcessOptions) workStore(primary beads.Store) beads.Store {
+	if opts.WorkStore != nil {
+		return opts.WorkStore
+	}
+	return primary
 }
 
 func tracePhase[T any](opts ProcessOptions, beadID, phase string, fn func() (T, error)) (T, error) {

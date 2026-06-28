@@ -222,11 +222,34 @@ on crucible, apply the provisioner INFRA + run the RUNBOOK bootstrap (platform k
   wizard → crucible persists PENDING → provisioner discovers (ID-only) → mints per-org creds + the
   city's orchestrator SP + beads ledger + Model-B controller → `/complete` → `ready` → wizard renders.
 
-**REMAINING is operational only (needs cluster/OpenBao/founder — no more code):**
+**Provisioner image — DONE + PUBLISHED (`crucible#33`, merged `6a454d7`, 2026-06-28).**
+Added `deploy/docker/Dockerfile.city-provisioner` (mirrors `Dockerfile.crucible`: static binary,
+private-module deploy keys as BuildKit secrets, slim non-root, client-only/no EXPOSE) + a second
+`build-push` step in `image.yml`. Published to GHCR as **`ghcr.io/gascity/crucible-city-provisioner`**
+(tags `main`, `main-1782604855`, `<sha>`) — the name matches the city-provisioner Flux Deployment's
+`$imagepolicy` pin, so image-automation selects the newest `main-<epoch>` tag. The same PR folded a
+2-file `gofmt` fix (`beads_adapter.go`, `cities_discovery_test.go`) that had landed dirty via #30/#32
+and turned `build-test` red on `main` — main is green again for all crucible PRs.
+
+**Controller image — ARCHITECTURE RESOLVED, build belongs in `gasworks-internal` (not gascity CI).**
+gascity does NOT publish container images from its own CI; on push to main it fires a
+`repository_dispatch (runtime-dep-updated)` to **`gascity/gasworks-internal`**, whose
+`runtime-image.yaml` cross-repo-checks-out gascity + bd + gui and builds/publishes
+`ghcr.io/gascity/gc-runtime`. The B6 `Dockerfile.controller-crucible` is a *different* image shape
+(Model-B controller-in-Crucible) that (a) extends the `gc-agent` base chain (which is NOT published —
+gascity's `container-scan.yml` only builds it ephemerally to scan) and (b) COPYs in the cross-repo
+`cmd/eia-helper` binary from crucible. Publishing it = a **new published image in the production
+control-plane repo** that bakes a credential-bootstrap helper → owner-review boundary, not an
+autonomous force-land. Plan when greenlit: add a `controller-image.yaml` to `gasworks-internal`
+mirroring `runtime-image.yaml` (checkout gascity for the Dockerfile/entrypoint/`gc`; checkout crucible
++ `go build ./cmd/eia-helper` via the existing `GASCITY_HOSTED_TOKEN` GOPRIVATE flow; restructure the
+B6 Dockerfile into a self-contained multi-stage build, or publish `gc-agent` as a base first).
+
+**REMAINING is operational only (needs cluster/OpenBao/founder — no more *provisioner* code):**
 1. **Deploy config:** set `CRUCIBLE_CITIES_DB` + `CRUCIBLE_CITY_DISCOVERY_SUBJECTS` on the crucible
    deployment (flips the cities surface from inert→live).
-2. **Build/publish images:** `cmd/city-provisioner` + the controller image (`Dockerfile.controller-crucible`,
-   bakes the `cmd/eia-helper`) — no CI builds them yet; add to image pipelines or build+push.
+2. **Controller image:** land the `gasworks-internal` `controller-image.yaml` (above) — owner-review
+   gated (new published control-plane image). Provisioner image is DONE.
 3. **Apply provisioner INFRA + RUNBOOK bootstrap** (`engdocs/plans/create-city/infra/`): Deployment/ESO/netpol;
    seed the platform `city.provision` key + per-org provisioningTokens; allow-list the platform subject.
    **Gated on founder open-Q7 (per-cell egress).**

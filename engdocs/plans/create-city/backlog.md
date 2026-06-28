@@ -280,6 +280,20 @@ city scope) + `dolt.host`/`dolt.port` in `.beads/config.yaml`, which `gc beads c
 (beads `feat/dolt-credential-command` cb252c4be) in the released line + bake into the controller image; (3) persist the
 `city_canonical` + `dolt.host`/`dolt.port` HQ-scope config. These are the active integration's final pieces.
 
+**Update (2026-06-28) — first integration fix LANDED + remaining piece refined.** Committed `193e7421e`
+(`fix(beads-lifecycle): skip local-dolt management when the city dolt endpoint is external`): `startBeadsLifecycle` now sets
+`skipLocalDolt` when `isExternalDolt()` (a `backend=dolt` city pinned to a `city_canonical`/explicit external endpoint no
+longer spawns/adopts a local managed Dolt). Built a patched gc + tested live (isolated `city-e2e` ns). Refined finding:
+**the HQ-scope `city_canonical` config + `dolt.host`/`dolt.port` DOES resolve the external host** (validation passes), so #3
+is essentially a hand-writable config; the true remaining blocker is **bd init's "inspect existing store" sub-step not
+applying the HostedGateway credential** — gc's `bd init` reaches the external gateway but without the credential command
+(error "managed Dolt server unreachable while inspecting existing store", i.e. non-HostedGateway), so the gateway preflight
+rejects it. A *direct* `bd ready` with the cred env connects + lists the city's beads. So the precise last code item is:
+ensure the credential-command/HostedGateway path is applied to **`bd init`'s inspect** (beads `feat/dolt-credential-command`
+side) AND that gc propagates `BEADS_DOLT_CREDENTIAL_COMMAND` to that bd invocation — then ship that bd in the release + bake
+it into the controller image. Everything else (data plane, credential spine, ledger, controller init, external-endpoint
+resolution, skip-local-dolt) is proven/landed.
+
 **REMAINING is operational only (needs cluster/OpenBao/founder — no more code, images DONE):**
 1. **Deploy config:** set `CRUCIBLE_CITIES_DB` + `CRUCIBLE_CITY_DISCOVERY_SUBJECTS` on the crucible
    deployment (flips the cities surface from inert→live). In a Flux-managed cluster this is a GitOps

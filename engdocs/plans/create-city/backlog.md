@@ -280,6 +280,22 @@ city scope) + `dolt.host`/`dolt.port` in `.beads/config.yaml`, which `gc beads c
 (beads `feat/dolt-credential-command` cb252c4be) in the released line + bake into the controller image; (3) persist the
 `city_canonical` + `dolt.host`/`dolt.port` HQ-scope config. These are the active integration's final pieces.
 
+**✅ SUCCESS (2026-06-28) — a Model-B controller RUNS on a hosted beads ledger, live on production.**
+Pod `city-controller` (corp-public ns city-e2e) ran `1/1 Running`, `restarts=0`, ~9+ min sustained (past the ~90s EIA TTL),
+with its beads-reconcile loop **reading AND writing** the provisioner-created hosted ledger `bd_prj_47890a40d5bee1d9` via the
+gateway: `beads cache: reconciled rig=ec1 beads=4 adds=1 updates=3 removes=2`. `bd ready` in-pod lists the city's beads.
+FOUR landed gascity fixes (`193e7421e` skip-local-dolt, `df4198a21` gc-beads-bd hosted branch, `31b6e4944` bd_env credential
+passthrough, `d68d47245` skip managed-catalog post-init verify for external) + the credential-command bd (beads
+`feat/dolt-credential-command` cb252c4be) + the config recipe (external at BOTH layers: `.beads/config.yaml`
+`gc.endpoint_origin: city_canonical`+dolt.host/port AND city.toml `[dolt]` host/port — consistent, else
+validateCanonicalCompatDoltDrift aborts; metadata backend=dolt dolt_database=bd_prj_<id>; env TLS+credential-command+eia/STS;
+gateway CA from secret beads/beads-router-client-tls). FRESH-EYES UNLOCK: probing the gateway showed it serves `USE bd_prj_<id>`
+(real schema) but DENIES `SHOW DATABASES` (per-tenant) — so every gc failure was a managed-path assumption, not a broken data
+plane. **One non-fatal follow-up:** the `dolt-health` ORDER assumes a managed local Dolt (port 3306) and logs a benign error
+for external endpoints (controller keeps running) — adapt it to check the gateway or skip for external. To productize the FULL
+wizard→provisioner→controller automation: ship these 4 fixes + the credcmd bd in the released beads line/controller image, and
+have the controller entrypoint write the config recipe (today it only sets GC_DOLT_HOST/DATABASE env, which the resolver masks).
+
 **Update 2 (2026-06-28) — THREE hosted-beads integration fixes LANDED; connection advances through multiple layers.**
 Committed + pushed: `193e7421e` (skip-local-dolt for external endpoint), `df4198a21` (`gc-beads-bd` hosted-gateway
 branch — defer to bd), `31b6e4944` (`bd_env` preserves the hosted credential env past the sensitive-key filter). With these

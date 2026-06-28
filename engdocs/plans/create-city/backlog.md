@@ -280,6 +280,20 @@ city scope) + `dolt.host`/`dolt.port` in `.beads/config.yaml`, which `gc beads c
 (beads `feat/dolt-credential-command` cb252c4be) in the released line + bake into the controller image; (3) persist the
 `city_canonical` + `dolt.host`/`dolt.port` HQ-scope config. These are the active integration's final pieces.
 
+**Update 2 (2026-06-28) — THREE hosted-beads integration fixes LANDED; connection advances through multiple layers.**
+Committed + pushed: `193e7421e` (skip-local-dolt for external endpoint), `df4198a21` (`gc-beads-bd` hosted-gateway
+branch — defer to bd), `31b6e4944` (`bd_env` preserves the hosted credential env past the sensitive-key filter). With these
++ the credential-command bd (built from beads `feat/dolt-credential-command`) + the city configured external at BOTH layers
+(scope `.beads/config.yaml` `gc.endpoint_origin: city_canonical` + dolt.host/port AND city.toml `[dolt]` host/port, which
+must be CONSISTENT or `validateCanonicalCompatDoltDrift` aborts), `gc start` now: passes the drift check, resolves the
+external endpoint, activates **HostedGateway**, and **bd init runs against a server**. It then fails on the NEXT managed-path
+assumption: a post-init verify against the *managed* Dolt catalog (`verifying canonical scope database after init: database
+"bd_prj_…" not found ... server-visible: [hq]`). So the hosted-beads-controller path has SEVERAL managed-path checks that
+each need hosted-awareness (resolution ✓fixed, drift, post-init catalog verify, DB naming/routing) — a holistic integration
+audit + tests, not a single remaining fix. Each fix landed advances the connection one layer; the data plane underneath is
+fully proven (bd reads the hosted ledger directly). **Recommendation: complete this as a focused beads/gc PR that audits all
+gc-managed-dolt-lifecycle assumptions for an external/hosted endpoint, with integration tests, rather than live layer-peeling.**
+
 **Update (2026-06-28) — first integration fix LANDED + remaining piece refined.** Committed `193e7421e`
 (`fix(beads-lifecycle): skip local-dolt management when the city dolt endpoint is external`): `startBeadsLifecycle` now sets
 `skipLocalDolt` when `isExternalDolt()` (a `backend=dolt` city pinned to a `city_canonical`/explicit external endpoint no

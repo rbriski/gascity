@@ -231,26 +231,31 @@ private-module deploy keys as BuildKit secrets, slim non-root, client-only/no EX
 2-file `gofmt` fix (`beads_adapter.go`, `cities_discovery_test.go`) that had landed dirty via #30/#32
 and turned `build-test` red on `main` — main is green again for all crucible PRs.
 
-**Controller image — ARCHITECTURE RESOLVED, build belongs in `gasworks-internal` (not gascity CI).**
-gascity does NOT publish container images from its own CI; on push to main it fires a
-`repository_dispatch (runtime-dep-updated)` to **`gascity/gasworks-internal`**, whose
-`runtime-image.yaml` cross-repo-checks-out gascity + bd + gui and builds/publishes
-`ghcr.io/gascity/gc-runtime`. The B6 `Dockerfile.controller-crucible` is a *different* image shape
-(Model-B controller-in-Crucible) that (a) extends the `gc-agent` base chain (which is NOT published —
-gascity's `container-scan.yml` only builds it ephemerally to scan) and (b) COPYs in the cross-repo
-`cmd/eia-helper` binary from crucible. Publishing it = a **new published image in the production
-control-plane repo** that bakes a credential-bootstrap helper → owner-review boundary, not an
-autonomous force-land. Plan when greenlit: add a `controller-image.yaml` to `gasworks-internal`
-mirroring `runtime-image.yaml` (checkout gascity for the Dockerfile/entrypoint/`gc`; checkout crucible
-+ `go build ./cmd/eia-helper` via the existing `GASCITY_HOSTED_TOKEN` GOPRIVATE flow; restructure the
-B6 Dockerfile into a self-contained multi-stage build, or publish `gc-agent` as a base first).
+**Controller image — DONE + PUBLISHED (`crucible` `controller-image.yml`, #34/#35/#36/#37, 2026-06-28).**
+Built in **crucible CI** (not gasworks-internal): the first gasworks-internal attempt (#108, closed)
+hit a hard credential gate — gasworks-internal's `GASCITY_HOSTED_TOKEN` can't read private
+`gascity/crucible`. Crucible CI has no such gap: the `eia-helper` source is local, the private-module
+deploy keys are already configured, and **`gastownhall/gascity` is PUBLIC** so it checks out with no
+cross-org token. The workflow builds `eia-helper` (deploy keys) + checks out public gascity + builds
+`gc` + downloads `bd`/`br` + runs the gascity **base→agent→controller-crucible** chain, smoke-tests
+`gc`/`bd`/`eia-helper`, and pushes **`ghcr.io/gascity/gascity-controller`** (tags `main`,
+`main-1782607321`, `sha-…`, `<desc>`). Two real bugs surfaced + fixed via CI: (1) `gc` must build
+`CGO_ENABLED=0` — ICU is a transitive Dolt/`go-icu-regex` CGO dep and the agent base lacks libicu
+(`container-scan.yml` never caught it because it only trivy-scans, never runs gc); (2) gascity
+`deps.env` pins **bd v1.0.5, a DRAFT** on gastownhall/beads → added `bd_version`/`br_version` dispatch
+overrides (built+verified with v1.0.4). Workflow is **dispatch-only** for now (the B6 Dockerfile/
+entrypoint live on the create-city branch, not gascity main).
+*Follow-ups:* land `contrib/k8s/Dockerfile.controller-crucible` + `gc-controller-crucible-entrypoint.sh`
+on gastownhall/gascity main → re-add the `push` auto-trigger (or repoint default `gascity_ref`); and
+un-draft bd v1.0.5 (or repin deps.env) so builds honor `deps.env` without the override.
 
-**REMAINING is operational only (needs cluster/OpenBao/founder — no more *provisioner* code):**
+**Both create-city images are now LIVE in GHCR: `crucible-city-provisioner` + `gascity-controller`.**
+
+**REMAINING is operational only (needs cluster/OpenBao/founder — no more code, images DONE):**
 1. **Deploy config:** set `CRUCIBLE_CITIES_DB` + `CRUCIBLE_CITY_DISCOVERY_SUBJECTS` on the crucible
-   deployment (flips the cities surface from inert→live).
-2. **Controller image:** land the `gasworks-internal` `controller-image.yaml` (above) — owner-review
-   gated (new published control-plane image). Provisioner image is DONE.
-3. **Apply provisioner INFRA + RUNBOOK bootstrap** (`engdocs/plans/create-city/infra/`): Deployment/ESO/netpol;
+   deployment (flips the cities surface from inert→live). In a Flux-managed cluster this is a GitOps
+   PR to the crucible Deployment, not a `kubectl edit` (Flux would revert direct edits).
+2. **Apply provisioner INFRA + RUNBOOK bootstrap** (`engdocs/plans/create-city/infra/`): Deployment/ESO/netpol;
    seed the platform `city.provision` key + per-org provisioningTokens; allow-list the platform subject.
    **Gated on founder open-Q7 (per-cell egress).**
 4. **Merge wizard#234** once the crucible cities surface is configured-live; **live end-to-end verify**.

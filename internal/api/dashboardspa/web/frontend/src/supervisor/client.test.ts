@@ -1098,6 +1098,85 @@ describe('supervisor client wrapper', () => {
     );
   });
 
+  it('calls supervisor formulas list through the generated SDK', async () => {
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL) =>
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                name: 'code-review',
+                description: 'Review a change, synthesize a fix, apply it, and publish.',
+                version: 'v2',
+                run_count: 12,
+                recent_runs: [
+                  {
+                    workflow_id: 'wf_9a1c',
+                    status: 'done',
+                    target: 'reviewer',
+                    started_at: '2026-06-01T00:00:00Z',
+                    updated_at: '2026-06-01T01:00:00Z',
+                  },
+                ],
+                var_defs: [{ name: 'repo', type: 'string', required: true }],
+              },
+            ],
+            total: 1,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.formulas('test-city')).resolves.toMatchObject({
+      items: [{ name: 'code-review', run_count: 12 }],
+      total: 1,
+    });
+    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/formulas',
+    );
+  });
+
+  it('calls supervisor formula runs through the generated SDK', async () => {
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL) =>
+        new Response(
+          JSON.stringify({
+            formula: 'code-review',
+            run_count: 2,
+            recent_runs: [
+              {
+                workflow_id: 'wf_9a1c',
+                status: 'done',
+                target: 'reviewer',
+                started_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T01:00:00Z',
+              },
+            ],
+            partial: false,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.formulaRuns('test-city', 'code-review')).resolves.toMatchObject({
+      formula: 'code-review',
+      recent_runs: [{ workflow_id: 'wf_9a1c' }],
+    });
+    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/formulas/code-review/runs',
+    );
+  });
+
   it('normalizes supervisor error responses', async () => {
     const fetchSpy = vi.fn(
       async () =>
@@ -1268,6 +1347,8 @@ describe('supervisor client wrapper', () => {
       mutationHeaders: vi.fn(() => GC_MUTATION_HEADERS),
       sessionTranscript: vi.fn(),
       workflowRun: vi.fn(),
+      formulas: vi.fn(),
+      formulaRuns: vi.fn(),
       formulaDetail: vi.fn(),
     };
 

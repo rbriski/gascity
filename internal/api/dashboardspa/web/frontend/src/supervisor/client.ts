@@ -9,7 +9,9 @@ import {
   getV0CityByCityNameBeadById,
   getV0CityByCityNameBeads,
   getV0CityByCityNameEvents,
+  getV0CityByCityNameFormulas,
   getV0CityByCityNameFormulasByName,
+  getV0CityByCityNameFormulasByNameRuns,
   getV0CityByCityNameFormulasFeed,
   getV0CityByCityNameHealth,
   getV0CityByCityNameMail,
@@ -39,8 +41,12 @@ import type {
   BeadUpdateBody,
   AgentPrimeBody,
   FormulaFeedBody,
+  FormulaListBody,
+  FormulaRunsResponse,
   GetV0CityByCityNameBeadsData,
   GetV0CityByCityNameEventsData,
+  GetV0CityByCityNameFormulasData,
+  GetV0CityByCityNameFormulasByNameRunsData,
   GetV0CityByCityNameFormulasFeedData,
   GetV0CityByCityNameFormulasByNameData,
   GetHealthResponse,
@@ -161,6 +167,15 @@ export interface SupervisorApi {
     name: string,
     query: GetV0CityByCityNameFormulasByNameData['query'],
   ): Promise<FormulaDetailResponse>;
+  formulas(
+    cityName: string,
+    query?: NonNullable<GetV0CityByCityNameFormulasData['query']>,
+  ): Promise<FormulaListBody>;
+  formulaRuns(
+    cityName: string,
+    name: string,
+    query?: NonNullable<GetV0CityByCityNameFormulasByNameRunsData['query']>,
+  ): Promise<FormulaRunsResponse>;
   mutationHeaders(): Record<keyof typeof GC_MUTATION_HEADERS, string>;
 }
 
@@ -513,6 +528,26 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           query,
         }) as Promise<SupervisorResult<FormulaDetailResponse>>,
         'gc supervisor formula detail response was empty',
+      );
+    },
+    formulas(cityName, query) {
+      return unwrapSupervisorResult<FormulaListBody>(
+        getV0CityByCityNameFormulas({
+          client,
+          path: { cityName },
+          ...(query === undefined ? {} : { query }),
+        }) as Promise<SupervisorResult<FormulaListBody>>,
+        'gc supervisor formulas response was empty',
+      );
+    },
+    formulaRuns(cityName, name, query) {
+      return unwrapSupervisorResult<FormulaRunsResponse>(
+        getV0CityByCityNameFormulasByNameRuns({
+          client,
+          path: { cityName, name },
+          ...(query === undefined ? {} : { query }),
+        }) as Promise<SupervisorResult<FormulaRunsResponse>>,
+        'gc supervisor formula runs response was empty',
       );
     },
     mutationHeaders() {

@@ -926,6 +926,24 @@ Every requirement gets a stable code, for example:
 - `WC-TX-004`
 - `WC-INT-003`
 
+The `WC-STRUCT-*` family covers the structured-transcript contract that
+`format=structured` projects (see `structured-stream-format.md`):
+
+- `WC-STRUCT-001` — provider-native tool results normalize into typed
+  `StructuredToolResult` carriers in worker history.
+- `WC-STRUCT-002` — the typed structured carriers expose no provider-native
+  keys; provider-native shape stays on the preserved raw frame, never on the
+  neutral structured data (enforced with the shared `worker.ScanForbiddenTokens`
+  denylist plus the schema-derived `worker.UnexpectedWireKeys` allowlist).
+- `WC-STRUCT-003` — an edit result carries a patch only when the provider
+  result supplied patch evidence; it is never fabricated from tool input.
+
+The `WC-STRUCT-*` evaluators are provider-neutral (they run over any normalized
+`HistorySnapshot`). The `claude/tmux-cli` profile is validated against them
+today via a provider-native structured fixture; `codex/tmux-cli` and
+`gemini/tmux-cli` graduate to the family as their native structured fixtures
+land, using the same evaluators.
+
 The catalog is:
 
 - JSON-first

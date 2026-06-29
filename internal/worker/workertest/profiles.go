@@ -93,6 +93,10 @@ func Phase1Profiles() []Profile {
 				DefaultCostPriced: true,
 			},
 		},
+		// codex and gemini below are covered by the Phase 1 transcript/
+		// continuation requirements. They do not yet have a WC-STRUCT-* loader
+		// in structured_conformance_test.go; they graduate to the structured
+		// family once their provider-native structured fixtures land.
 		{
 			ID:       ProfileCodexTmuxCLI,
 			Provider: "codex/tmux-cli",

@@ -45,7 +45,9 @@ export function FormulaDetailPage() {
     data: runs,
     error: runsError,
     refresh: refreshRuns,
-  } = useCachedData(`formulas:runs:${cityName ?? ''}:${name}`, () => getSupervisorFormulaRuns(name));
+  } = useCachedData(`formulas:runs:${cityName ?? ''}:${name}`, () =>
+    getSupervisorFormulaRuns(name),
+  );
 
   const formula = formulas?.find((f) => f.name === name) ?? null;
 
@@ -156,7 +158,8 @@ function detailSynopsis(formula: SupervisorFormula): string {
 function varTypeLine(v: FormulaVarDefResponse): string {
   const parts = [v.type];
   if (v.required) parts.push('required');
-  if (v.default !== undefined && v.default !== null) parts.push(`default ${formatDefault(v.default)}`);
+  if (v.default !== undefined && v.default !== null)
+    parts.push(`default ${formatDefault(v.default)}`);
   if (v.enum && v.enum.length > 0) parts.push(`one of ${v.enum.join(', ')}`);
   return parts.join(' · ');
 }

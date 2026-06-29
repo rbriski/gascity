@@ -42,7 +42,9 @@ export function FormulasPage() {
           <Link to={formulaDetailHref(f.name)} className="text-fg hover:text-accent focus-mark">
             {f.name}
           </Link>
-          {f.description && <div className="text-label text-fg-muted normal-case">{f.description}</div>}
+          {f.description && (
+            <div className="text-label text-fg-muted normal-case">{f.description}</div>
+          )}
         </div>
       ),
     },

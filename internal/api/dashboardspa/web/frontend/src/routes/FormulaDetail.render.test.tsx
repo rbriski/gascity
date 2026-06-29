@@ -44,7 +44,9 @@ const FORMULA = {
   ],
 };
 
-function stubFetch(opts: { formulas?: unknown[]; runs?: unknown[]; runsStatus?: number } = {}): void {
+function stubFetch(
+  opts: { formulas?: unknown[]; runs?: unknown[]; runsStatus?: number } = {},
+): void {
   const formulas = opts.formulas ?? [FORMULA];
   const runs = opts.runs ?? [];
   fetchCalls.length = 0;

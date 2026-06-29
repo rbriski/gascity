@@ -11,10 +11,7 @@ export function FormulaSteps({ steps }: { steps: ReadonlyArray<SupervisorFormula
   return (
     <ol className="m-0 p-0">
       {steps.map((step, index) => (
-        <li
-          key={step.id}
-          className="flex gap-3 py-2 border-b border-rule last:border-b-0"
-        >
+        <li key={step.id} className="flex gap-3 py-2 border-b border-rule last:border-b-0">
           <span className="text-label text-fg-faint tnum w-5 shrink-0 pt-0.5">{index + 1}</span>
           <div className="min-w-0">
             <div className="text-body text-fg">{step.title || step.id}</div>

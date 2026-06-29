@@ -57,8 +57,22 @@ function stubFetch(opts: { slingStatus?: number; slingBody?: unknown } = {}): vo
       if (AGENTS_PATH.test(url.pathname)) {
         return jsonResponse({
           items: [
-            { name: 'reviewer', available: true, running: true, suspended: false, state: 'idle', provider: 'claude' },
-            { name: 'fixer', available: true, running: false, suspended: false, state: 'idle', provider: 'codex' },
+            {
+              name: 'reviewer',
+              available: true,
+              running: true,
+              suspended: false,
+              state: 'idle',
+              provider: 'claude',
+            },
+            {
+              name: 'fixer',
+              available: true,
+              running: false,
+              suspended: false,
+              state: 'idle',
+              provider: 'codex',
+            },
           ],
           total: 2,
         });
@@ -71,7 +85,9 @@ function stubFetch(opts: { slingStatus?: number; slingBody?: unknown } = {}): vo
           preview: { nodes: [], edges: [] },
           deps: null,
           var_defs: null,
-          steps: [{ id: 'review', kind: 'agent', title: 'Review the change', assignee: 'reviewer' }],
+          steps: [
+            { id: 'review', kind: 'agent', title: 'Review the change', assignee: 'reviewer' },
+          ],
         });
       }
       return jsonResponse({ error: `unexpected ${url.pathname}` }, 404);

@@ -8,7 +8,13 @@ afterEach(cleanup);
 describe('FormulaSteps', () => {
   it('renders steps in order with kind, id, assignee, and labels', () => {
     const steps: SupervisorFormulaStep[] = [
-      { id: 'review', kind: 'agent', title: 'Review the change', assignee: 'reviewer', labels: ['ci'] },
+      {
+        id: 'review',
+        kind: 'agent',
+        title: 'Review the change',
+        assignee: 'reviewer',
+        labels: ['ci'],
+      },
       { id: 'publish', kind: 'agent', title: 'Publish' },
     ];
     render(<FormulaSteps steps={steps} />);

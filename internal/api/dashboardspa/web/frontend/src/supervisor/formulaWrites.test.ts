@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
-import {
-  type SupervisorApi,
-  resetSupervisorApiForTests,
-  setSupervisorApiForTests,
-} from './client';
+import { type SupervisorApi, resetSupervisorApiForTests, setSupervisorApiForTests } from './client';
 import { slingFormula } from './formulaWrites';
 
 function stubSling(sling: ReturnType<typeof vi.fn>): void {

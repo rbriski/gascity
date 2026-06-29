@@ -4,7 +4,11 @@ import type { FormulaVarDefResponse } from 'gas-city-dashboard-shared/gc-supervi
 import { getActiveCity } from '../../api/cityBase';
 import { Button } from '../Button';
 import { Field } from '../Field';
-import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../../contexts/ReadOnlyContext';
+import {
+  READ_ONLY_CONTROL_TITLE,
+  ReadOnlyBadge,
+  useReadOnly,
+} from '../../contexts/ReadOnlyContext';
 import { useCachedData } from '../../hooks/useCachedData';
 import { listSupervisorAgents } from '../../supervisor/agentReads';
 import { getSupervisorFormulaSteps } from '../../supervisor/formulaReads';
@@ -29,7 +33,9 @@ export function FormulaLauncher({ name, varDefs, onLaunched }: FormulaLauncherPr
   const cityName = getActiveCity();
   const readOnly = useReadOnly();
   const { data: agents } = useCachedData(`agents:${cityName ?? ''}`, () => listSupervisorAgents());
-  const agentNames = (agents?.items ?? []).map((a) => a.name).filter((n): n is string => Boolean(n));
+  const agentNames = (agents?.items ?? [])
+    .map((a) => a.name)
+    .filter((n): n is string => Boolean(n));
 
   const [target, setTarget] = useState('');
   const [vars, setVars] = useState<Record<string, string>>(() => initialVars(varDefs));

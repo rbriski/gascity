@@ -412,6 +412,25 @@ export const postV0CityByCityNameExtmsgBind = <ThrowOnError extends boolean = fa
 export const getV0CityByCityNameExtmsgBindings = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameExtmsgBindingsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameExtmsgBindingsResponses, GetV0CityByCityNameExtmsgBindingsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/extmsg/bindings', ...options });
 
 /**
+ * Register an external messaging client and issue a token
+ */
+export const registerExtmsgClient = <ThrowOnError extends boolean = false>(options: Options<RegisterExtmsgClientData, ThrowOnError>) => (options.client ?? client).post<RegisterExtmsgClientResponses, RegisterExtmsgClientErrors, ThrowOnError>({
+    url: '/v0/city/{cityName}/extmsg/clients',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Subscribe to external messaging events via SSE
+ *
+ * Opens a Server-Sent Events stream delivering replies for the given conversation. The stream emits message events when a session replies, heartbeat events on idle, and error events on terminal failures. Reconnect with Last-Event-ID to replay missed messages.
+ */
+export const subscribeExtmsgClient = <ThrowOnError extends boolean = false>(options: Options<SubscribeExtmsgClientData, ThrowOnError, SubscribeExtmsgClientResponse>) => (options.client ?? client).sse.get<SubscribeExtmsgClientResponses, SubscribeExtmsgClientErrors, ThrowOnError>({ url: '/v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe', ...options });
+
+/**
  * Get v0 city by city name extmsg groups
  */
 export const getV0CityByCityNameExtmsgGroups = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameExtmsgGroupsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameExtmsgGroupsResponses, GetV0CityByCityNameExtmsgGroupsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/extmsg/groups', ...options });

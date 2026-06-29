@@ -8,7 +8,7 @@
 | Issue | ga-31gfwg, ga-lyikvt |
 | Supersedes | — |
 
-This document specifies the wire contract for the `GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe` endpoint: pre-stream HTTP error responses, post-stream SSE event schema, replay semantics, and cursor advancement rules. It is the normative reference for both the Go implementation in `internal/api` and consuming clients (e.g., tincan-iris).
+This document specifies the wire contract for the `GET /v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe` endpoint: pre-stream HTTP error responses, post-stream SSE event schema, replay semantics, and cursor advancement rules. It is the normative reference for both the Go implementation in `internal/api` and consuming clients (e.g., tincan-iris).
 
 For the full feature architecture — token issuance model, subscriber registry design, `gc extmsg reply` command, and trade-off analysis — see bead `ga-31gfwg`.
 
@@ -26,7 +26,7 @@ This document specifies the receive leg. The send leg (`POST /v0/extmsg/inbound`
 ## Endpoint
 
 ```
-GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe
+GET /v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe
 ```
 
 **Path parameters:**
@@ -168,6 +168,8 @@ After writing the error event, the server closes the HTTP response body. The cli
 
 ## Error code catalog
 
+> **v1 status:** SSE `error` frame production is schema-reserved in v1. The event type, fields, and error codes below are in the OpenAPI schema and client SDK for forward compatibility, but the server does not yet emit any `error` frames in-stream. When a session stops or the controller shuts down the stream closes silently (HTTP body closed). See the companion wire contract §4.3 note.
+
 ### Retryable errors (reconnect is safe)
 
 | Code | Retry hint (ms) | Trigger |
@@ -202,7 +204,7 @@ These rules determine what value the client sends as `Last-Event-ID` on reconnec
 When the client reconnects and supplies `Last-Event-ID: <sequence>`:
 
 1. The server registers the new adapter and subscriber channel **first**, before reading backfill. This prevents a race where a live reply arrives during replay and is dropped.
-2. The server calls `TranscriptService.ListBackfill(ConvRef, sessionID, afterSequence)` to retrieve transcript entries with `sequence > Last-Event-ID`.
+2. The server calls `TranscriptService.List(ConvRef, afterSequence: Last-Event-ID)` (cursor-based) to retrieve transcript entries with `sequence > Last-Event-ID`. `List` is deliberate over `ListBackfill` (membership/ack-based): `Last-Event-ID` replay must resume from the client's own cursor, not the membership window.
 3. The server emits each backfill entry as a `message` event in ascending sequence order.
 4. After exhausting backfill, the server switches to the live channel (events buffered in step 1 are drained immediately).
 

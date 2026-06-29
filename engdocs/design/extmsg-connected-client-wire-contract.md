@@ -32,7 +32,7 @@ Related design docs:
 ## 1. Endpoint
 
 ```
-GET /v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe
+GET /v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe
 ```
 
 **Required header:** `X-GC-Client-Token: <token>`
@@ -40,7 +40,7 @@ GET /v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe
 The `Authorization: Bearer` header is NOT used for this endpoint. The
 client presents the token obtained from `POST /v0/extmsg/clients` via the
 `X-GC-Client-Token` header. The server derives `client_id` from this token
-and asserts it equals the `account_id` URL path segment.
+and asserts it equals the `client_id` URL path segment.
 
 **Optional header:** `Last-Event-ID: <sequence>` — decimal sequence number
 of the last successfully received `message` event. Triggers transcript
@@ -246,13 +246,16 @@ Returned before the server writes `Content-Type: text/event-stream`.
 | HTTP | `code` | Condition |
 |------|--------|-----------|
 | 401 | `unauthorized` | `X-GC-Client-Token` header missing, malformed, or token not found in token store. |
-| 403 | `session_forbidden` | Token valid; `account_id` matches `client_id`; but the token's `allowed_sessions` list does not include the target session. |
-| 403 | `account_mismatch` | Token valid; but `account_id` URL path segment ≠ `client_id` derived from token. Programming error on client side. |
+| 403 | `session_forbidden` | Token valid; `client_id` matches token; but the token's `allowed_sessions` list does not include the target session. |
+| 403 | `account_mismatch` | Token valid; but `client_id` URL path segment ≠ `client_id` derived from token. Programming error on client side. |
 | 404 | `session_not_found` | Target session name not in city's active config at subscribe time. |
-| 404 | `binding_not_found` | No binding exists for this `ConversationRef`. Client must send a first inbound turn to create the binding. |
 | 503 | `extmsg_unavailable` | External messaging not enabled in city config, or controller not ready. |
 
+> **Missing binding is not a pre-stream error.** When no binding exists for the `ConversationRef`, the server opens the SSE stream and begins sending heartbeats. A binding is established on the first `gc extmsg reply`; live `message` events follow. Clients that subscribe before any reply are expected to wait on the open heartbeat stream.
+
 ### 5.2 Post-stream SSE error events
+
+> **v1 status:** SSE `error` frame production is schema-reserved in v1. The `SSEErrorEvent` type, fields, and codes below are present in the OpenAPI schema and generated client SDK for forward compatibility. The server does not yet emit any `error` frames in-stream: when a session stops or the controller shuts down the HTTP response body is closed silently. A `server_shutdown` emitter requires a server-shutdown context (see `internal/api/server.go`) and is deferred.
 
 | `code` | `retryable` | `retry_after_ms` | Trigger |
 |--------|-------------|-----------------|---------|
@@ -347,9 +350,9 @@ These are explicitly deferred from v1 scope. File follow-up beads as needed:
 |----------|---------------|
 | Missing/invalid token | 401 HTTP (no stream) |
 | Token not allowed for session | 403 HTTP (no stream) |
-| AccountID path ≠ client_id | 403 HTTP (no stream) |
+| client_id path ≠ token client_id | 403 HTTP (no stream) |
 | Session not in config | 404 HTTP (no stream) |
-| No binding for conversation | 404 HTTP (no stream) |
+| No binding for conversation | 200 + open stream, heartbeats until binding established |
 | extmsg not enabled | 503 HTTP (no stream) |
 | Stream open, session replies | `event: message`, `id: <sequence>` |
 | Stream idle ≥ 30 s | `event: heartbeat`, no `id:` |

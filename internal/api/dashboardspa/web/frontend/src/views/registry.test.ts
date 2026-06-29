@@ -22,8 +22,8 @@ describe('views/registry', () => {
     expect(formulas?.kind).toBe('core');
     expect(formulas?.path).toBe('/formulas');
     expect(formulas?.nav?.label).toBe('Formulas');
-    // Order 35 sits strictly between Beads (explicit nav 30) and Runs (40), so
-    // the merged masthead places Formulas between them.
+    // Order 35 reserves a slot between the conventional Beads (30) and Runs (40)
+    // masthead positions; this test pins only the numeric bounds.
     expect(formulas?.nav?.order).toBe(35);
     expect(formulas?.nav?.order).toBeGreaterThan(30);
     expect(formulas?.nav?.order).toBeLessThan(40);

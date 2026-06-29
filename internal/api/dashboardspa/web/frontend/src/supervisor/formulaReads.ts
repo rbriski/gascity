@@ -9,7 +9,8 @@ import type { StatusTone } from '../components/StatusBadge';
 import { supervisorApi } from './client';
 
 // Read adapter for the Formulas tab. Routes import ONLY from here (never the
-// supervisor client or generated SDK directly), mirroring beadReads. Two jobs:
+// supervisor client or generated SDK directly), mirroring the stable
+// read-adapter pattern used by beadReads. Two jobs:
 //   - normalize the wire's `T[] | null` arrays (items / recent_runs) to [], so
 //     callers map/length without guards;
 //   - depend only on STABLE supervisor DTOs (FormulaListBody / FormulaRunsResponse),

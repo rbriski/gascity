@@ -84,11 +84,7 @@ func TestStructuredConformance(t *testing.T) {
 // normalizes it through the real worker adapter.
 func loadClaudeStructuredHistory(t *testing.T) *worker.HistorySnapshot {
 	t.Helper()
-	lines := []string{
-		`{"uuid":"u1","type":"user","message":{"role":"user","content":"Edit README.md."},"timestamp":"2026-06-01T00:00:00Z","sessionId":"struct-1"}`,
-		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","id":"m1","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"call-edit","name":"Edit","input":{"file_path":"README.md","old_string":"old line","new_string":"new line"}}]},"timestamp":"2026-06-01T00:00:01Z","sessionId":"struct-1"}`,
-		`{"uuid":"r1","parentUuid":"a1","type":"tool_result","toolUseID":"call-edit","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-edit","content":"The file README.md has been updated successfully."}]},"toolUseResult":{"filePath":"README.md","oldString":"old line","newString":"new line","originalFile":"export const message = \"old line\";\n","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-export const message = \"old line\";","+export const message = \"new line\";"]}],"userModified":false,"replaceAll":false},"timestamp":"2026-06-01T00:00:02Z","sessionId":"struct-1"}`,
-	}
+	lines := claudeStructuredFixtureLines()
 	path := filepath.Join(t.TempDir(), "session-struct.jsonl")
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
@@ -102,4 +98,15 @@ func loadClaudeStructuredHistory(t *testing.T) *worker.HistorySnapshot {
 		t.Fatalf("LoadHistory: %v", err)
 	}
 	return history
+}
+
+// claudeStructuredFixtureLines returns a Claude JSONL transcript whose Edit tool
+// result carries provider-side structuredPatch evidence. Shared by the synthetic
+// conformance test and the corpus-loader test.
+func claudeStructuredFixtureLines() []string {
+	return []string{
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"Edit README.md."},"timestamp":"2026-06-01T00:00:00Z","sessionId":"struct-1"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","id":"m1","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"call-edit","name":"Edit","input":{"file_path":"README.md","old_string":"old line","new_string":"new line"}}]},"timestamp":"2026-06-01T00:00:01Z","sessionId":"struct-1"}`,
+		`{"uuid":"r1","parentUuid":"a1","type":"tool_result","toolUseID":"call-edit","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-edit","content":"The file README.md has been updated successfully."}]},"toolUseResult":{"filePath":"README.md","oldString":"old line","newString":"new line","originalFile":"export const message = \"old line\";\n","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-export const message = \"old line\";","+export const message = \"new line\";"]}],"userModified":false,"replaceAll":false},"timestamp":"2026-06-01T00:00:02Z","sessionId":"struct-1"}`,
+	}
 }

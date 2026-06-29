@@ -519,7 +519,7 @@ func newSessionStoredMCPMetadata(
 // Short-lived CLI paths (e.g. --no-attach) should block on it before
 // exiting to ensure the model-refined title is persisted.
 func maybeAutoTitle(sessFront *session.InfoStore, beadID, userTitle, titleHint string, provider *config.ResolvedProvider, workDir string, stderr io.Writer) <-chan struct{} {
-	return api.MaybeGenerateTitleAsync(sessFront.Store().Store, beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
+	return api.MaybeGenerateTitleAsync(sessFront.Store(), beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "session %s: "+format+"\n", append([]any{beadID}, args...)...) //nolint:errcheck // best-effort stderr
 	})
 }

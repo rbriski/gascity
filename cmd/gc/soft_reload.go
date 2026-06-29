@@ -89,7 +89,7 @@ func acceptConfigDriftAcrossSessions(
 	stderr io.Writer,
 ) softReloadAcceptanceResult {
 	result := softReloadAcceptanceResult{DesiredEmpty: len(desired) == 0}
-	if sessFront == nil || sessFront.Store().Store == nil {
+	if !sessFront.Backed() {
 		return result
 	}
 	if sessionBeads == nil {

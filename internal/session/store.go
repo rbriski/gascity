@@ -132,6 +132,17 @@ func (s *InfoStore) CloseWithoutReason(id string) error {
 	return s.store.Close(id)
 }
 
+// Backed reports whether this front door wraps a usable (non-nil) underlying
+// store. It is the typed probe for the `sessFront == nil || sessFront.Store().Store == nil`
+// guard at the controller/CLI roots: a front door constructed over a nil store
+// (the documented typed-nil pattern, where construction yields a real nil
+// *InfoStore when the store is nil) reports false, and so does a nil receiver.
+// Callers use `if !sessFront.Backed() { return }` instead of reaching for the
+// raw embedded store to nil-check it.
+func (s *InfoStore) Backed() bool {
+	return s != nil && s.store.Store != nil
+}
+
 // CircuitResetGeneration returns the persisted session-circuit-breaker reset
 // generation metadata value for id, verbatim (the raw string; "" when unset).
 //

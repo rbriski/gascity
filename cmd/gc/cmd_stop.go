@@ -346,7 +346,7 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
 }
 
 func markCityStopSessionSleepReason(sessFront *session.InfoStore, stderr io.Writer) {
-	if sessFront == nil || sessFront.Store().Store == nil {
+	if !sessFront.Backed() {
 		return
 	}
 	sessions, err := sessFront.Store().ListByLabel("gc:session", 0)

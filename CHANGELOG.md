@@ -12,10 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pool graph.v2 sessions no longer idle after claiming a workflow root.**
   `gc hook --claim` now enqueues a queued nudge to the concrete claiming session
   (e.g. `pool-worker/slot-0`) when it newly claims a workflow root and
-  pre-assigns at least one continuation sibling. Previously the sling-time nudge
-  targeted the pool template name, which is pruned as undeliverable once the
-  concrete session exists, leaving the session idle until manual operator
-  intervention via `gc session nudge`.
+  pre-assigns at least one continuation sibling, and starts a sidecar poller for
+  that concrete session. Previously the only propulsion nudge was the sling-time
+  nudge, whose poller was keyed to the pool template session that never runs, so
+  the concrete slot was never polled and idled until manual operator
+  intervention via `gc session nudge`. The hook-claim nudge is fenced to the
+  claiming session generation (session id + continuation epoch), so a recycled
+  slot that reuses the runtime session name cannot pick up a stale nudge. If a
+  residual template-targeted sling nudge is still pending, the concrete slot's
+  poller claims it alongside the continuation nudge and the two are coalesced
+  into a single hook re-entry — one redundant line, not a second propulsion.
 
   **ACP operator note:** in default (non-supervisor) dispatcher mode, the
   hook-claim nudge is delivered by a sidecar poller for tmux/subprocess sessions.

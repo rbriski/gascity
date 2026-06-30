@@ -356,11 +356,11 @@ func openSessionNameTaken(snapshot *sessionBeadSnapshot, name, selfID string) bo
 	if snapshot == nil || strings.TrimSpace(name) == "" {
 		return false
 	}
-	for _, b := range snapshot.Open() {
+	for _, b := range snapshot.OpenInfos() {
 		if b.ID == selfID {
 			continue
 		}
-		if strings.TrimSpace(b.Metadata["session_name"]) == name {
+		if strings.TrimSpace(b.SessionNameMetadata) == name {
 			return true
 		}
 	}

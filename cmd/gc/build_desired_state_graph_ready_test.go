@@ -108,3 +108,41 @@ func TestControllerDemandReadyFallsBackWithoutGraphCapability(t *testing.T) {
 		t.Fatalf("graph-only wisp must NOT appear when the graph capability is absent")
 	}
 }
+
+// TestDefaultScaleCheckCountsSeesGraphResidentRoutedWork is the routed-UNASSIGNED
+// pool-demand regression for the wake-from-sleep bug: on a graph_store=sqlite city
+// the federated Ready read unions the Dolt work-leg backlog and truncates the
+// genuinely-ready graph-resident (gcg-) routed-unassigned bead out of the per-tick
+// window, so defaultScaleCheckCounts saw 0 demand and the asleep pool worker was
+// never woken to self-claim. The probe must read the graph-only ready slice
+// (mirroring the assigned-work path) so the routed bead drives pool demand. The
+// pre-fix probe read the federated slice; this asserts counts==1, so it fails
+// until readyForControllerDemand prefers the graph-only ready slice.
+func TestDefaultScaleCheckCountsSeesGraphResidentRoutedWork(t *testing.T) {
+	const template = "gascity/gc.run-operator"
+	store := &graphDemandStore{
+		// Federated read: only the Dolt work-leg backlog survived the per-tick
+		// window; the routed graph bead was evicted.
+		federated: []beads.Bead{{ID: "work-1", Status: "open"}, {ID: "work-2", Status: "open"}},
+		// Graph-only read: the routed-unassigned graph bead is present.
+		graphOnly: []beads.Bead{{
+			ID:       "gcg-2024",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": template},
+		}},
+		hasGraph: true,
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (graph-resident routed-unassigned work must drive pool demand)", template, got)
+	}
+}

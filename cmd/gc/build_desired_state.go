@@ -1708,6 +1708,18 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
+	// Prefer the graph-only ready slice under graph_store=sqlite, mirroring the
+	// assigned-work readiness path (liveReadyForControllerDemandQuery). A worker
+	// only executes graph nodes, and the full federated Ready unions the Dolt
+	// work-leg backlog and truncates to the per-tick wake limit, evicting
+	// genuinely-ready graph-resident (gcg-) routed-unassigned beads out of the
+	// window. That made routed pool demand read 0 and left asleep pool workers
+	// un-woken. Default Dolt-only cities have no distinct ClassGraph backend, so
+	// the capability is absent and the federated cached+live freshness read is
+	// used byte-identically.
+	if probe, ok := beads.GraphOnlyReadyFor(store); ok {
+		return probe.ReadyGraphOnly(beads.ReadyQuery{})
+	}
 	return readyForControllerDemandQuery(store, beads.ReadyQuery{})
 }
 

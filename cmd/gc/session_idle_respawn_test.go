@@ -151,3 +151,85 @@ func TestBeginIdleRespawnDrainIfIdle_SkipsNonInteractive(t *testing.T) {
 		t.Fatal("a non-interactive assigned-work session must not be idle-respawn-drained")
 	}
 }
+
+// idleRespawnEligible gates BOTH the idle-respawn sleep path and (as its
+// complement) the awake-maintenance block. Only a pool interactive
+// assigned-work-only session qualifies; a named or non-interactive session does
+// not, even when awake solely for assigned work — those must keep running the
+// maintenance block (recordCurrentBeadIDOnWake / cancelSessionDrain /
+// clearCompletedIdleProbe / sleep_intent clear). A named session CAN present
+// Reason=="assigned-work" because ComputeAwakeSet's assigned-work pass
+// overwrites the earlier named reason when the session owns a ready bead (#3554
+// review).
+func TestIdleRespawnEligible(t *testing.T) {
+	pool := &beads.Bead{ID: "p", Metadata: map[string]string{"session_name": "worker-1"}}
+	named := &beads.Bead{ID: "n", Metadata: map[string]string{"session_name": "run-operator", "configured_named_session": "true"}}
+	interactive := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume}
+	nonInteractive := resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}
+	assignedWork := func(p resolvedSessionSleepPolicy) wakeEvaluation {
+		return wakeEvaluation{Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: p}
+	}
+
+	if !idleRespawnEligible(pool, assignedWork(interactive)) {
+		t.Fatal("pool interactive assigned-work-only session must be idle-respawn-eligible")
+	}
+	if idleRespawnEligible(named, assignedWork(interactive)) {
+		t.Fatal("named assigned-work-only session must NOT be eligible (it keeps the maintenance block)")
+	}
+	if idleRespawnEligible(pool, assignedWork(nonInteractive)) {
+		t.Fatal("non-interactive assigned-work-only session must NOT be eligible")
+	}
+	if idleRespawnEligible(pool, wakeEvaluation{Reason: "min-active", Reasons: []WakeReason{WakeConfig}, Policy: interactive}) {
+		t.Fatal("non-assigned-work session must NOT be eligible")
+	}
+	if idleRespawnEligible(nil, assignedWork(interactive)) {
+		t.Fatal("nil session must NOT be eligible")
+	}
+}
+
+// A named session awake solely for assigned work must be excluded from idle
+// probing: it can never sleep-and-respawn, so probing it only churns (the probe
+// completes, beginIdleRespawnDrainIfIdle declines, the maintenance block clears
+// it next tick).
+func TestSelectIdleProbeTargets_SkipsNamedSession(t *testing.T) {
+	policy := resolvedSessionSleepPolicy{
+		Class:      config.SessionSleepInteractiveResume,
+		Effective:  "60s",
+		Capability: runtime.SessionSleepCapabilityFull,
+	}
+	target := wakeTarget{
+		session: &beads.Bead{ID: "s1", Metadata: map[string]string{"session_name": "run-operator", "configured_named_session": "true"}},
+		alive:   true,
+	}
+	wakeEvals := map[string]wakeEvaluation{
+		"s1": {Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy},
+	}
+	got := selectIdleProbeTargets([]wakeTarget{target}, wakeEvals, newDrainTracker())
+	if got["s1"] {
+		t.Fatalf("a named assigned-work session must not be idle-probe-eligible, got %v", got)
+	}
+}
+
+// A named session awake solely for assigned work must not begin an idle-respawn
+// drain even with a completed idle probe — named sessions are materialized by
+// the named-session loop, not pool respawn.
+func TestBeginIdleRespawnDrainIfIdle_SkipsNamedSession(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now().UTC()}
+	sp := runtime.NewFake()
+	name := "run-operator"
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := &beads.Bead{ID: "s1", Metadata: map[string]string{"session_name": name, "generation": "1", "configured_named_session": "true"}}
+	eval := wakeEvaluation{
+		Reason:  "assigned-work",
+		Reasons: []WakeReason{WakeWork},
+		Policy:  resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull},
+	}
+	dt := newDrainTracker()
+	probe := dt.startIdleProbe(session.ID)
+	dt.finishIdleProbe(session.ID, probe, true, clk.Now().Add(-time.Second))
+	if beginIdleRespawnDrainIfIdle(session, eval, dt, sp, clk) {
+		t.Fatal("a named assigned-work session must not be idle-respawn-drained")
+	}
+}

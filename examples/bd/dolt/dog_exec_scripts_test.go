@@ -5019,6 +5019,7 @@ func TestCompactScriptSkipFetchFlagBypassesFetch(t *testing.T) {
 		})
 	}
 }
+
 func TestCompactScriptAutoClearsKnownSameCountQuarantineWhenPreservationProven(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	const reason = "post-flatten table value hash changed without row-count increase"
@@ -5226,6 +5227,7 @@ func TestCompactScriptSkipFetchRejectsInvalidValue(t *testing.T) {
 		}
 	}
 }
+
 func TestCompactScriptDiskPreflightSufficientProceedsNormally(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success")

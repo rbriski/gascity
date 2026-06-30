@@ -26,6 +26,10 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// CityPath is the city root directory, threaded to the continuation nudge
+	// enqueue seam so the production implementation can locate the nudge store.
+	// Empty in tests that inject a fake EnqueueContinuationNudge.
+	CityPath string
 }
 
 type hookClaimOps struct {
@@ -47,18 +51,26 @@ type hookClaimOps struct {
 	// AND gc.active_work_bead (the claimed work bead's gc.step_id) — in ONE update, so
 	// the (run, step) tuple stays atomically consistent. Best-effort.
 	RecordSessionPointers hookRecordSessionPointersFunc
-	Now                   func() time.Time
+	// EnqueueContinuationNudge enqueues the hook-claim-continuation nudge that
+	// propels a pool graph.v2 session from root-claim into step 1 without
+	// operator intervention. Called when a new workflow root is claimed and at
+	// least one continuation sibling was pre-assigned. Best-effort; enqueue
+	// failure is logged but never blocks the claim. See ga-7n7vth.2 for the
+	// call site that activates this seam in production.
+	EnqueueContinuationNudge hookEnqueueContinuationNudgeFunc
+	Now                      func() time.Time
 }
 
 type (
-	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc              func(io.Writer) error
-	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc     func(dir string) string
-	hookStampWorkBranchFunc       func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
-	hookRecordSessionPointersFunc func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
+	hookClaimFunc                    func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc         func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc       func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc                 func(io.Writer) error
+	hookEmitClaimRejectedFunc        func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc        func(dir string) string
+	hookStampWorkBranchFunc          func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
+	hookEnqueueContinuationNudgeFunc func(cityPath string, item queuedNudge) error
+	hookRecordSessionPointersFunc    func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
 )
 
 type hookClaimJSONResult struct {
@@ -181,6 +193,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.RecordSessionPointers == nil {
 		ops.RecordSessionPointers = hookRecordSessionPointersWithBdStore
+	}
+	if ops.EnqueueContinuationNudge == nil {
+		ops.EnqueueContinuationNudge = enqueueQueuedNudge
 	}
 }
 

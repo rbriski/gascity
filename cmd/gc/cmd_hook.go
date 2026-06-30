@@ -379,6 +379,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:          queryEnv,
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
+			CityPath:     cityPath,
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}

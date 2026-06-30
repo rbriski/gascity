@@ -1,0 +1,1 @@
+import{v as e,w as i}from"./index-Gw5W1XBT.js";async function n(){const r=await e().listAgents(i("list supervisor agents"));return{...r,items:r.items??[]}}async function a(r){const t=r.trim();if(t.length===0)throw new Error("agent alias is required");return e().agentPrime(i("fetch supervisor agent prime"),t)}export{a as f,n as l};

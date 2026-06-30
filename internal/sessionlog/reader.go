@@ -152,8 +152,20 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 // ReadProviderFile reads a provider-specific transcript file.
 func ReadProviderFile(provider, path string, tailCompactions int) (*Session, error) {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return ReadAuggieFile(path, tailCompactions)
+	case "amp":
+		return ReadAmpFile(path, tailCompactions)
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
+	case "copilot":
+		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
+	case "grok":
+		return ReadGrokFile(path, tailCompactions)
+	case "kiro":
+		return ReadKiroFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
 	case "kimi":
@@ -209,8 +221,20 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 // conversation views.
 func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, error) {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return ReadAuggieFile(path, tailCompactions)
+	case "amp":
+		return ReadAmpFile(path, tailCompactions)
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
+	case "copilot":
+		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
+	case "grok":
+		return ReadGrokFile(path, tailCompactions)
+	case "kiro":
+		return ReadKiroFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
 	case "kimi":
@@ -290,8 +314,20 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 // transcript.
 func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return ReadAuggieFile(path, tailCompactions)
+	case "amp":
+		return ReadAmpFile(path, tailCompactions)
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
+	case "copilot":
+		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
+	case "grok":
+		return ReadGrokFile(path, tailCompactions)
+	case "kiro":
+		return ReadKiroFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
 	case "kimi":
@@ -314,8 +350,20 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 // provider transcript.
 func ReadProviderFileRawOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return ReadAuggieFile(path, tailCompactions)
+	case "amp":
+		return ReadAmpFile(path, tailCompactions)
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
+	case "copilot":
+		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
+	case "grok":
+		return ReadGrokFile(path, tailCompactions)
+	case "kiro":
+		return ReadKiroFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
 	case "kimi":
@@ -394,8 +442,20 @@ func ReadFileRawNewer(path string, tailCompactions int, afterMessageID string) (
 // transcript.
 func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return ReadAuggieFile(path, tailCompactions)
+	case "amp":
+		return ReadAmpFile(path, tailCompactions)
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
+	case "copilot":
+		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
+	case "grok":
+		return ReadGrokFile(path, tailCompactions)
+	case "kiro":
+		return ReadKiroFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
 	case "kimi":
@@ -418,8 +478,20 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 // provider transcript.
 func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return ReadAuggieFile(path, tailCompactions)
+	case "amp":
+		return ReadAmpFile(path, tailCompactions)
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
+	case "copilot":
+		return ReadCopilotFile(path, tailCompactions)
+	case "cursor":
+		return ReadCursorFile(path, tailCompactions)
+	case "grok":
+		return ReadGrokFile(path, tailCompactions)
+	case "kiro":
+		return ReadKiroFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
 	case "kimi":
@@ -581,8 +653,20 @@ func FindSessionFile(searchPaths []string, workDir string) string {
 // specific provider.
 func FindSessionFileForProvider(searchPaths []string, provider, workDir string) string {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return FindAuggieSessionFile(searchPaths, workDir)
+	case "amp":
+		return FindAmpSessionFile(searchPaths, workDir)
 	case "codex":
 		return FindCodexSessionFile(searchPaths, workDir)
+	case "copilot":
+		return FindCopilotSessionFile(searchPaths, workDir)
+	case "cursor":
+		return FindCursorSessionFile(searchPaths, workDir)
+	case "grok":
+		return FindGrokSessionFile(searchPaths, workDir)
+	case "kiro":
+		return FindKiroSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
 	case "kimi":
@@ -608,8 +692,20 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 // workdir while still allowing canonical provider fallback files.
 func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir string) string {
 	switch ProviderFamily(provider) {
+	case "auggie":
+		return FindAuggieSessionFile(searchPaths, workDir)
+	case "amp":
+		return FindAmpSessionFile(searchPaths, workDir)
 	case "codex":
 		return FindCodexSessionFile(searchPaths, workDir)
+	case "copilot":
+		return FindCopilotSessionFile(searchPaths, workDir)
+	case "cursor":
+		return FindCursorSessionFile(searchPaths, workDir)
+	case "grok":
+		return FindGrokSessionFile(searchPaths, workDir)
+	case "kiro":
+		return FindKiroSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
 	case "kimi":
@@ -869,7 +965,7 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 				continue
 			}
 			path := filepath.Join(dayDir, e.Name())
-			if codexSessionCWD(path) == workDir {
+			if codexSessionCWDMatches(path, workDir) {
 				appendCodexRolloutMatch(path, seen, matches)
 				if len(*matches) > 1 {
 					return
@@ -946,7 +1042,7 @@ func FindCodexSessionFileByID(searchPaths []string, workDir, sessionID string, n
 	if len(matches) != 1 {
 		return ""
 	}
-	if codexSessionCWD(matches[0]) != workDir {
+	if !codexSessionCWDMatches(matches[0], workDir) {
 		return ""
 	}
 	return matches[0]
@@ -1129,7 +1225,7 @@ func findCodexSessionInDir(dir, workDir string) string {
 	})
 
 	for _, f := range files {
-		if codexSessionCWD(f.path) == workDir {
+		if codexSessionCWDMatches(f.path, workDir) {
 			return f.path
 		}
 	}
@@ -1164,6 +1260,14 @@ func codexSessionCWD(path string) string {
 		return ""
 	}
 	return meta.Payload.CWD
+}
+
+func codexSessionCWDMatches(path, workDir string) bool {
+	cwd := codexSessionCWD(path)
+	if cwd == "" || workDir == "" {
+		return false
+	}
+	return pathutil.SamePath(cwd, workDir)
 }
 
 // listDirsReverse returns directory names sorted in reverse lexicographic
@@ -1283,23 +1387,53 @@ func mergePaths(defaults, extras []string) []string {
 func ProviderFamily(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	switch {
+	case p == "auggie" || strings.HasPrefix(p, "auggie/") || strings.HasSuffix(p, "/auggie") || strings.HasSuffix(p, "-auggie"):
+		return "auggie"
+	case p == "amp" || strings.HasPrefix(p, "amp/") || strings.HasSuffix(p, "/amp") || strings.HasSuffix(p, "-amp") || strings.Contains(p, "sourcegraph-amp"):
+		return "amp"
 	case strings.Contains(p, "codex"):
 		return "codex"
+	case strings.Contains(p, "copilot"):
+		return "copilot"
+	case p == "cursor" || strings.HasPrefix(p, "cursor/") || strings.HasSuffix(p, "/cursor") || strings.HasSuffix(p, "-cursor") || p == "cursor-agent":
+		return "cursor"
+	case p == "grok" || strings.HasPrefix(p, "grok/") || strings.HasSuffix(p, "/grok") || strings.HasSuffix(p, "-grok"):
+		return "grok"
+	case strings.Contains(p, "kiro"):
+		return "kiro"
 	case strings.Contains(p, "gemini"):
 		return "gemini"
 	case strings.Contains(p, "kimi"):
 		return "kimi"
 	case strings.Contains(p, "mimocode"):
 		return "mimocode"
-	case strings.Contains(p, "opencode"):
+	case strings.Contains(p, "opencode") || providerComponent(p, "groq") || providerComponent(p, "cerebras"):
 		return "opencode"
 	case strings.Contains(p, "antigravity"):
 		return "antigravity"
-	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/"):
+	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/") ||
+		p == "omp" || strings.HasPrefix(p, "omp/") || strings.HasSuffix(p, "/omp") || strings.Contains(p, "oh-my-pi"):
 		return "pi"
 	default:
 		return p
 	}
+}
+
+func providerComponent(provider, component string) bool {
+	provider = strings.ReplaceAll(strings.TrimSpace(provider), "_", "-")
+	component = strings.TrimSpace(component)
+	if provider == "" || component == "" {
+		return false
+	}
+	parts := strings.FieldsFunc(provider, func(r rune) bool {
+		return r == '/' || r == ':' || r == '@'
+	})
+	for _, part := range parts {
+		if part == component {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeProjectSlugCandidates(workDir string) []string {

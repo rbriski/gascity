@@ -16,7 +16,7 @@ func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
 		`{"role":"user","content":"read the file"}`,
 		`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}`,
-		`{"role":"tool","content":[{"type":"text","text":"file data"}],"tool_call_id":"call-1"}`,
+		`{"role":"tool","content":[{"type":"text","text":"file data"}],"tool_call_id":"call-1","status":"failed"}`,
 		`{"role":"assistant","content":"done"}`,
 	})
 
@@ -36,13 +36,13 @@ func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 		t.Fatalf("tool use block = %#v, want call-1 Read tool_use", toolUseBlocks[0])
 	}
 	var toolInput struct {
-		Path string `json:"path"`
+		FilePath string `json:"file_path"`
 	}
 	if err := json.Unmarshal(toolUseBlocks[0].Input, &toolInput); err != nil {
 		t.Fatalf("unmarshal tool input: %v", err)
 	}
-	if toolInput.Path != "README.md" {
-		t.Fatalf("tool input path = %q, want README.md", toolInput.Path)
+	if toolInput.FilePath != "README.md" {
+		t.Fatalf("tool input file_path = %q, want README.md", toolInput.FilePath)
 	}
 	toolResult := sess.Messages[2]
 	if toolResult.Type != "result" {
@@ -57,6 +57,57 @@ func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 	}
 	if blocks[0].Type != "tool_result" || blocks[0].ToolUseID != "call-1" {
 		t.Fatalf("tool result block = %#v, want call-1 tool_result", blocks[0])
+	}
+	if !blocks[0].IsError {
+		t.Fatalf("tool result IsError = false, want true from failed status: %#v", blocks[0])
+	}
+}
+
+func TestReadKimiFileNormalizesToolObjectsToNeutralKeys(t *testing.T) {
+	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
+		`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Edit","arguments":"{\"filePath\":\"README.md\",\"oldString\":\"old\",\"newString\":\"new\"}"}}]}`,
+		`{"role":"tool","content":{"output":"Edited README.md","filePath":"README.md","patch":"--- README.md\n+++ README.md\n@@\n-old\n+new","exitCode":0},"tool_call_id":"call-1"}`,
+	})
+
+	sess, err := ReadKimiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadKimiFile: %v", err)
+	}
+	toolUseBlocks := sess.Messages[0].ContentBlocks()
+	if len(toolUseBlocks) != 1 {
+		t.Fatalf("tool use blocks = %d, want 1", len(toolUseBlocks))
+	}
+	var input struct {
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+	}
+	if err := json.Unmarshal(toolUseBlocks[0].Input, &input); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	if input.FilePath != "README.md" || input.OldString != "old" || input.NewString != "new" {
+		t.Fatalf("neutral input = %+v, want README.md old/new", input)
+	}
+	toolResultBlocks := sess.Messages[1].ContentBlocks()
+	if len(toolResultBlocks) != 1 {
+		t.Fatalf("tool result blocks = %d, want 1", len(toolResultBlocks))
+	}
+	var output struct {
+		Output   string `json:"output"`
+		FilePath string `json:"file_path"`
+		Patch    string `json:"patch"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal(toolResultBlocks[0].Content, &output); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if output.Output != "Edited README.md" || output.FilePath != "README.md" || !strings.Contains(output.Patch, "+new") || output.ExitCode != 0 {
+		t.Fatalf("neutral output = %+v, want patch result", output)
+	}
+	for _, forbidden := range []string{"filePath", "oldString", "newString", "exitCode"} {
+		if strings.Contains(string(toolUseBlocks[0].Input), forbidden) || strings.Contains(string(toolResultBlocks[0].Content), forbidden) {
+			t.Fatalf("Kimi normalized blocks leaked %s: input=%s content=%s", forbidden, toolUseBlocks[0].Input, toolResultBlocks[0].Content)
+		}
 	}
 }
 
@@ -99,7 +150,7 @@ func TestReadKimiFileNativeToolCallArgumentShapes(t *testing.T) {
 		{
 			name:      "raw object",
 			arguments: `{"path":"README.md"}`,
-			want:      map[string]any{"path": "README.md"},
+			want:      map[string]any{"file_path": "README.md"},
 		},
 		{
 			name:      "invalid json string",

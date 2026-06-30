@@ -102,6 +102,8 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		GCSessionID:           gcSessionID,
 		LogicalConversationID: strings.TrimSpace(req.LogicalID),
 		TailCompactions:       req.TailCompactions,
+		BeforeEntryID:         req.BeforeEntryID,
+		AfterEntryID:          req.AfterEntryID,
 	})
 	if err != nil {
 		return nil, err
@@ -289,6 +291,7 @@ func historyEntrySignature(entry HistoryEntry) string {
 		parts = append(parts,
 			string(block.Kind),
 			strings.TrimSpace(block.Text),
+			strings.TrimSpace(block.Signature),
 			strings.TrimSpace(block.ToolUseID),
 			strings.TrimSpace(block.Name),
 		)
@@ -304,7 +307,16 @@ func cloneHistorySnapshot(snapshot *HistorySnapshot) *HistorySnapshot {
 	cloned.Diagnostics = append([]HistoryDiagnostic(nil), snapshot.Diagnostics...)
 	cloned.TailState.OpenToolUseIDs = append([]string(nil), snapshot.TailState.OpenToolUseIDs...)
 	cloned.TailState.PendingInteractionIDs = append([]string(nil), snapshot.TailState.PendingInteractionIDs...)
+	cloned.Pagination = cloneTranscriptPagination(snapshot.Pagination)
 	cloned.Entries = cloneHistoryEntries(snapshot.Entries)
+	return &cloned
+}
+
+func cloneTranscriptPagination(pagination *TranscriptPagination) *TranscriptPagination {
+	if pagination == nil {
+		return nil
+	}
+	cloned := *pagination
 	return &cloned
 }
 
@@ -318,6 +330,10 @@ func cloneHistoryEntries(entries []HistoryEntry) []HistoryEntry {
 		if entry.Timestamp != nil {
 			ts := entry.Timestamp.UTC()
 			cloned[idx].Timestamp = &ts
+		}
+		if entry.Usage != nil {
+			usage := *entry.Usage
+			cloned[idx].Usage = &usage
 		}
 		cloned[idx].Blocks = cloneHistoryBlocks(entry.Blocks)
 		cloned[idx].Provenance.Raw = cloneHistoryRaw(entry.Provenance.Raw)
@@ -334,12 +350,59 @@ func cloneHistoryBlocks(blocks []HistoryBlock) []HistoryBlock {
 		cloned[idx] = block
 		cloned[idx].Input = cloneHistoryRaw(block.Input)
 		cloned[idx].Content = cloneHistoryRaw(block.Content)
+		if block.StructuredInput != nil {
+			input := *block.StructuredInput
+			input.Arguments = append([]StructuredArgument(nil), block.StructuredInput.Arguments...)
+			input.Options = append([]string(nil), block.StructuredInput.Options...)
+			input.Steps = append([]StructuredPlanStep(nil), block.StructuredInput.Steps...)
+			input.Todos = append([]StructuredTodoItem(nil), block.StructuredInput.Todos...)
+			cloned[idx].StructuredInput = &input
+		}
+		if block.StructuredResult != nil {
+			result := *block.StructuredResult
+			result.Filenames = append([]string(nil), block.StructuredResult.Filenames...)
+			result.FilePaths = append([]string(nil), block.StructuredResult.FilePaths...)
+			result.ResultItems = append([]StructuredSearchResultItem(nil), block.StructuredResult.ResultItems...)
+			result.Questions = cloneStructuredQuestions(block.StructuredResult.Questions)
+			result.Options = append([]string(nil), block.StructuredResult.Options...)
+			result.Answers = append([]StructuredArgument(nil), block.StructuredResult.Answers...)
+			result.Counts = append([]StructuredArgument(nil), block.StructuredResult.Counts...)
+			result.PatchHunks = cloneStructuredPatchHunks(block.StructuredResult.PatchHunks)
+			result.Steps = append([]StructuredPlanStep(nil), block.StructuredResult.Steps...)
+			result.OldTodos = append([]StructuredTodoItem(nil), block.StructuredResult.OldTodos...)
+			result.NewTodos = append([]StructuredTodoItem(nil), block.StructuredResult.NewTodos...)
+			cloned[idx].StructuredResult = &result
+		}
 		if block.Interaction != nil {
 			interaction := *block.Interaction
 			interaction.Options = append([]string(nil), block.Interaction.Options...)
 			interaction.Metadata = cloneStringMap(block.Interaction.Metadata)
 			cloned[idx].Interaction = &interaction
 		}
+	}
+	return cloned
+}
+
+func cloneStructuredQuestions(questions []StructuredQuestion) []StructuredQuestion {
+	if len(questions) == 0 {
+		return nil
+	}
+	out := make([]StructuredQuestion, len(questions))
+	for idx, question := range questions {
+		out[idx] = question
+		out[idx].Options = append([]StructuredQuestionOption(nil), question.Options...)
+	}
+	return out
+}
+
+func cloneStructuredPatchHunks(hunks []StructuredPatchHunk) []StructuredPatchHunk {
+	if len(hunks) == 0 {
+		return nil
+	}
+	cloned := make([]StructuredPatchHunk, len(hunks))
+	for idx, hunk := range hunks {
+		cloned[idx] = hunk
+		cloned[idx].Lines = append([]string(nil), hunk.Lines...)
 	}
 	return cloned
 }

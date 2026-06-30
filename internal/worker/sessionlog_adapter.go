@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
@@ -19,6 +20,8 @@ type LoadRequest struct {
 	GCSessionID           string
 	LogicalConversationID string
 	TailCompactions       int
+	BeforeEntryID         string
+	AfterEntryID          string
 }
 
 // TranscriptRequest scopes provider-native transcript reads that preserve raw
@@ -206,7 +209,22 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		return nil, fmt.Errorf("transcript path is required")
 	}
 
-	session, err := sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+	var (
+		session *sessionlog.Session
+		err     error
+	)
+	beforeID := strings.TrimSpace(req.BeforeEntryID)
+	afterID := strings.TrimSpace(req.AfterEntryID)
+	switch {
+	case beforeID != "" && afterID != "":
+		return nil, fmt.Errorf("before and after entry IDs are mutually exclusive")
+	case afterID != "":
+		session, err = sessionlog.ReadProviderFileRawNewer(req.Provider, path, req.TailCompactions, afterID)
+	case beforeID != "":
+		session, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, beforeID)
+	default:
+		session, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +246,11 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 			compactionCount++
 		}
 		entries = append(entries, normalized)
+	}
+	entries = attachStructuredToolData(entries)
+	entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
+	if err != nil {
+		return nil, err
 	}
 
 	tailMeta, err := sessionlog.ExtractTailMeta(path)
@@ -286,6 +309,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 			DegradedReason:        tailDegradedReason,
 		},
 		Diagnostics: diagnostics,
+		Pagination:  session.Pagination,
 		Entries:     entries,
 	}, nil
 }
@@ -315,13 +339,321 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		ts := entry.Timestamp.UTC()
 		normalized.Timestamp = &ts
 	}
+	normalized.Model, normalized.StopReason, normalized.Usage = historyEntryMetadata(entry)
+	normalized.SystemEvent = historySystemEventFromSessionLog(entry.SystemEvent)
 
 	blocks := normalizeBlocks(entry)
 	normalized.Blocks = blocks
 	if normalized.Text == "" {
 		normalized.Text = firstText(blocks)
 	}
+	if normalized.Kind == "user" && normalized.Actor == ActorUser {
+		normalized.UserPrompt = parseHistoryUserPrompt(normalized.Text)
+	}
 	return normalized
+}
+
+func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySystemEvent {
+	if event == nil {
+		return nil
+	}
+	return &HistorySystemEvent{
+		Kind:     event.Kind,
+		Category: event.Category,
+		Code:     event.Code,
+		Message:  event.Message,
+	}
+}
+
+func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
+	family, supported := InvocationUsageFamily(provider)
+	if !supported || family != "codex" {
+		return entries, nil
+	}
+	usages, err := sessionlog.ExtractCodexTailUsage(path)
+	if err != nil {
+		return nil, fmt.Errorf("extract codex tail usage: %w", err)
+	}
+	return attachTailUsageToAssistantEntries(entries, usages), nil
+}
+
+func attachTailUsageToAssistantEntries(entries []HistoryEntry, usages []sessionlog.TailUsage) []HistoryEntry {
+	if len(entries) == 0 || len(usages) == 0 {
+		return entries
+	}
+	nextStart := 0
+	for _, usage := range usages {
+		usageTime, ok := tailUsageTimestamp(usage)
+		if !ok {
+			continue
+		}
+		target := latestAssistantEntryBefore(entries, nextStart, usageTime)
+		if target < 0 {
+			target = latestAssistantEntryBefore(entries, 0, usageTime)
+		}
+		if target < 0 {
+			continue
+		}
+		if entries[target].Model == "" {
+			entries[target].Model = usage.Model
+		}
+		if entries[target].Usage == nil {
+			entries[target].Usage = historyUsageFromTailUsage(usage)
+			enrichUsageContext(entries[target].Usage, entries[target].Model)
+		}
+		nextStart = target + 1
+	}
+	return entries
+}
+
+func latestAssistantEntryBefore(entries []HistoryEntry, start int, usageTime time.Time) int {
+	target := -1
+	for idx := start; idx < len(entries); idx++ {
+		entry := entries[idx]
+		if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
+			break
+		}
+		if entry.Actor != ActorAssistant || entry.Timestamp == nil {
+			continue
+		}
+		if entry.Usage == nil || entry.Model == "" {
+			target = idx
+		}
+	}
+	return target
+}
+
+func tailUsageTimestamp(usage sessionlog.TailUsage) (time.Time, bool) {
+	if strings.TrimSpace(usage.EntryUUID) == "" {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, usage.EntryUUID)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts.UTC(), true
+}
+
+func historyUsageFromTailUsage(usage sessionlog.TailUsage) *HistoryUsage {
+	out := &HistoryUsage{
+		InputTokens:         usage.InputTokens,
+		OutputTokens:        usage.OutputTokens,
+		ReasoningTokens:     usage.ReasoningTokens,
+		CacheReadTokens:     usage.CacheReadTokens,
+		CacheCreationTokens: usage.CacheCreationTokens,
+		ContextWindowTokens: usage.ContextWindowTokens,
+	}
+	if out.InputTokens == 0 && out.OutputTokens == 0 && out.ReasoningTokens == 0 && out.CacheReadTokens == 0 && out.CacheCreationTokens == 0 && out.ContextWindowTokens == 0 {
+		return nil
+	}
+	return out
+}
+
+func historyEntryMetadata(entry *sessionlog.Entry) (string, string, *HistoryUsage) {
+	if entry == nil {
+		return "", "", nil
+	}
+	messageMeta := historyMetadataFromRaw(entry.Message)
+	rawMeta := historyMetadataFromRaw(entry.Raw)
+	if len(entry.Raw) > 0 {
+		var rawEntry struct {
+			Message json.RawMessage `json:"message"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(entry.Raw, &rawEntry) == nil {
+			rawMessageMeta := historyMetadataFromRaw(rawEntry.Message)
+			rawPayloadMeta := historyMetadataFromRaw(rawEntry.Payload)
+			rawMeta.Model = firstNonEmpty(rawMeta.Model, rawMessageMeta.Model, rawPayloadMeta.Model)
+			rawMeta.StopReason = firstNonEmpty(rawMeta.StopReason, rawMessageMeta.StopReason, rawPayloadMeta.StopReason)
+			rawMeta.Usage = firstNonNilUsage(rawMeta.Usage, rawMessageMeta.Usage, rawPayloadMeta.Usage)
+		}
+	}
+	model := firstNonEmpty(messageMeta.Model, rawMeta.Model)
+	stopReason := firstNonEmpty(messageMeta.StopReason, rawMeta.StopReason)
+	usage := firstNonNilUsage(messageMeta.Usage, rawMeta.Usage)
+	if usage != nil {
+		enrichUsageContext(usage, model)
+	}
+	return model, stopReason, usage
+}
+
+type historyMetadata struct {
+	Model      string
+	StopReason string
+	Usage      *HistoryUsage
+}
+
+func historyMetadataFromRaw(raw json.RawMessage) historyMetadata {
+	return historyMetadataFromRawDepth(raw, 0)
+}
+
+func historyMetadataFromRawDepth(raw json.RawMessage, depth int) historyMetadata {
+	if len(raw) == 0 {
+		return historyMetadata{}
+	}
+	if depth > 4 {
+		return historyMetadata{}
+	}
+	raw = unwrapJSONStringRaw(raw)
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) == 0 {
+		return historyMetadata{}
+	}
+	metadata := historyMetadata{
+		Model:      firstNonEmpty(jsonLiteralString(object, "model", "model_id", "modelID"), historyModelFromObjectField(object, "model")),
+		StopReason: jsonLiteralString(object, "stop_reason", "stopReason"),
+	}
+	metadata.Usage = historyUsageFromObjectField(object, "usage", "tokens")
+	for _, field := range []string{"info"} {
+		if nested, ok := object[field]; ok {
+			nestedMeta := historyMetadataFromRawDepth(nested, depth+1)
+			metadata.Model = firstNonEmpty(metadata.Model, nestedMeta.Model)
+			metadata.StopReason = firstNonEmpty(metadata.StopReason, nestedMeta.StopReason)
+			metadata.Usage = firstNonNilUsage(metadata.Usage, nestedMeta.Usage)
+		}
+	}
+	return metadata
+}
+
+func historyModelFromObjectField(object map[string]json.RawMessage, names ...string) string {
+	for _, name := range names {
+		raw, ok := object[name]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		raw = unwrapJSONStringRaw(raw)
+		var modelObject map[string]json.RawMessage
+		if json.Unmarshal(raw, &modelObject) != nil || len(modelObject) == 0 {
+			continue
+		}
+		if model := jsonLiteralString(modelObject, "model_id", "modelID", "id", "name"); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+func historyUsageFromObjectField(object map[string]json.RawMessage, names ...string) *HistoryUsage {
+	for _, name := range names {
+		raw, ok := object[name]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		if usage := historyUsageFromRaw(raw); usage != nil {
+			return usage
+		}
+	}
+	return nil
+}
+
+func historyUsageFromRaw(raw json.RawMessage) *HistoryUsage {
+	raw = unwrapJSONStringRaw(raw)
+	var usage struct {
+		InputTokens              int `json:"input_tokens"`
+		Input                    int `json:"input"`
+		PromptTokens             int `json:"prompt_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		Output                   int `json:"output"`
+		CompletionTokens         int `json:"completion_tokens"`
+		ReasoningTokens          int `json:"reasoning_tokens"`
+		ReasoningOutputTokens    int `json:"reasoning_output_tokens"`
+		Reasoning                int `json:"reasoning"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		CachedInputTokens        int `json:"cached_input_tokens"`
+		CacheReadTokens          int `json:"cache_read_tokens"`
+		CacheRead                int `json:"cacheRead"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheCreationTokens      int `json:"cache_creation_tokens"`
+		CacheWrite               int `json:"cacheWrite"`
+		ContextWindowTokens      int `json:"context_window_tokens"`
+		ContextWindow            int `json:"contextWindow"`
+		ContextUsedTokens        int `json:"context_used_tokens"`
+		ContextUsed              int `json:"contextUsed"`
+		ContextPercent           int `json:"context_percent"`
+		ContextPercentage        int `json:"contextPercentage"`
+		Percentage               int `json:"percentage"`
+		Cache                    struct {
+			Read  int `json:"read"`
+			Write int `json:"write"`
+		} `json:"cache"`
+	}
+	if json.Unmarshal(raw, &usage) != nil {
+		return nil
+	}
+	out := &HistoryUsage{
+		InputTokens:         firstPositiveInt(usage.InputTokens, usage.Input, usage.PromptTokens),
+		OutputTokens:        firstPositiveInt(usage.OutputTokens, usage.Output, usage.CompletionTokens),
+		ReasoningTokens:     firstPositiveInt(usage.ReasoningTokens, usage.ReasoningOutputTokens, usage.Reasoning),
+		CacheReadTokens:     firstPositiveInt(usage.CacheReadInputTokens, usage.CachedInputTokens, usage.CacheReadTokens, usage.CacheRead, usage.Cache.Read),
+		CacheCreationTokens: firstPositiveInt(usage.CacheCreationInputTokens, usage.CacheCreationTokens, usage.CacheWrite, usage.Cache.Write),
+		ContextWindowTokens: firstPositiveInt(usage.ContextWindowTokens, usage.ContextWindow),
+		ContextUsedTokens:   firstPositiveInt(usage.ContextUsedTokens, usage.ContextUsed),
+		ContextPercent:      firstPositiveInt(usage.ContextPercent, usage.ContextPercentage, usage.Percentage),
+	}
+	if out.InputTokens == 0 && out.OutputTokens == 0 && out.ReasoningTokens == 0 && out.CacheReadTokens == 0 && out.CacheCreationTokens == 0 && out.ContextWindowTokens == 0 && out.ContextUsedTokens == 0 && out.ContextPercent == 0 {
+		return nil
+	}
+	return out
+}
+
+func enrichUsageContext(usage *HistoryUsage, model string) {
+	if usage == nil {
+		return
+	}
+	if usage.ContextUsedTokens == 0 {
+		usage.ContextUsedTokens = usage.InputTokens + usage.CacheReadTokens + usage.CacheCreationTokens
+	}
+	if usage.ContextWindowTokens == 0 {
+		usage.ContextWindowTokens = sessionlog.ModelContextWindow(model)
+	}
+	if usage.ContextPercent == 0 && usage.ContextWindowTokens > 0 && usage.ContextUsedTokens > 0 {
+		usage.ContextPercent = usage.ContextUsedTokens * 100 / usage.ContextWindowTokens
+		if usage.ContextPercent > 100 {
+			usage.ContextPercent = 100
+		}
+	}
+}
+
+func firstNonNilUsage(values ...*HistoryUsage) *HistoryUsage {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func unwrapJSONStringRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) > 0 && raw[0] == '"' {
+		var value string
+		if json.Unmarshal(raw, &value) == nil {
+			return json.RawMessage(value)
+		}
+	}
+	return raw
+}
+
+func jsonLiteralString(object map[string]json.RawMessage, names ...string) string {
+	for _, name := range names {
+		raw, ok := object[name]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) == nil {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func firstPositiveInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
@@ -330,6 +662,12 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 		result := make([]HistoryBlock, 0, len(blocks))
 		for _, block := range blocks {
 			kind := normalizeBlockKind(block.Type)
+			text := block.Text
+			signature := ""
+			if kind == BlockKindThinking {
+				text = firstNonEmpty(block.Thinking, block.Text)
+				signature = strings.TrimSpace(block.Signature)
+			}
 			var interaction *HistoryInteraction
 			if kind == BlockKindInteraction {
 				interaction = normalizeInteractionBlock(block)
@@ -338,13 +676,23 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 			if kind == BlockKindInteraction {
 				toolUseID = ""
 			}
+			content := cloneRaw(block.Content)
+			if kind == BlockKindToolResult {
+				content = toolResultContentWithEvidence(entry, content)
+			}
+			contentText := structuredJSONText(content)
 			result = append(result, HistoryBlock{
 				Kind:        kind,
-				Text:        block.Text,
+				Text:        text,
+				Signature:   signature,
 				ToolUseID:   toolUseID,
 				Name:        block.Name,
+				FilePath:    strings.TrimSpace(block.FilePath),
+				ImageURL:    strings.TrimSpace(block.ImageURL),
+				MIMEType:    strings.TrimSpace(block.MIMEType),
 				Input:       cloneRaw(block.Input),
-				Content:     cloneRaw(block.Content),
+				Content:     content,
+				ContentText: contentText,
 				IsError:     block.IsError,
 				Interaction: interaction,
 			})
@@ -365,6 +713,29 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 	}
 
 	return nil
+}
+
+func toolResultContentWithEvidence(entry *sessionlog.Entry, content json.RawMessage) json.RawMessage {
+	evidence := toolResultEvidence(entry)
+	if len(evidence) == 0 {
+		return cloneRaw(content)
+	}
+	payload := struct {
+		Content    json.RawMessage `json:"content,omitempty"`
+		ToolResult json.RawMessage `json:"tool_result,omitempty"`
+	}{
+		Content:    cloneRaw(content),
+		ToolResult: evidence,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return cloneRaw(content)
+	}
+	return raw
+}
+
+func toolResultEvidence(entry *sessionlog.Entry) json.RawMessage {
+	return cloneRaw(entry.ToolResultEvidence())
 }
 
 func actorForEntry(entry *sessionlog.Entry) Actor {

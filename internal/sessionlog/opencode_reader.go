@@ -213,9 +213,9 @@ func openCodeToolBlocks(part openCodePart, orphanedToolUseIDs map[string]bool) [
 	toolName := strings.TrimSpace(part.Tool)
 	state := decodeOpenCodeToolState(part.State)
 	status := strings.ToLower(strings.TrimSpace(state.Status))
-	input := cloneRawJSON(state.Input)
+	input := openCodeToolInputContent(state.Input)
 	if len(input) == 0 {
-		input = cloneRawJSON(part.Input)
+		input = openCodeToolInputContent(part.Input)
 	}
 
 	blocks := []ContentBlock{{
@@ -242,14 +242,72 @@ func openCodeToolBlocks(part openCodePart, orphanedToolUseIDs map[string]bool) [
 	return blocks
 }
 
+func openCodeToolInputContent(raw json.RawMessage) json.RawMessage {
+	return openCodeNeutralToolObject(raw)
+}
+
 func openCodeToolResultContent(state openCodeToolState) json.RawMessage {
 	if len(state.Output) != 0 {
-		return cloneRawJSON(state.Output)
+		return openCodeNeutralToolObject(state.Output)
 	}
 	if len(state.Error) != 0 {
-		return cloneRawJSON(state.Error)
+		return openCodeNeutralToolObject(state.Error)
 	}
 	return nil
+}
+
+func openCodeNeutralToolObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return cloneRawJSON(raw)
+	}
+	neutral := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		neutral[openCodeNeutralToolKey(key)] = cloneRawJSON(value)
+	}
+	return mustMarshal(neutral)
+}
+
+func openCodeNeutralToolKey(key string) string {
+	switch strings.TrimSpace(key) {
+	case "filePath", "filepath", "path", "file":
+		return "file_path"
+	case "oldString", "oldStr":
+		return "old_string"
+	case "newString", "newStr":
+		return "new_string"
+	case "exitCode":
+		return "exit_code"
+	case "statusCode", "code":
+		return "status_code"
+	case "codeText", "statusText":
+		return "status_text"
+	case "durationMs":
+		return "duration_ms"
+	case "numFiles":
+		return "num_files"
+	case "numResults":
+		return "num_results"
+	case "isImage":
+		return "is_image"
+	case "taskId", "backgroundTaskId", "bashId", "agentId":
+		return "task_id"
+	case "taskType", "taskKind", "subagentType", "agentType":
+		return "task_type"
+	case "taskStatus":
+		return "task_status"
+	case "oldTodos":
+		return "old_todos"
+	case "newTodos":
+		return "new_todos"
+	case "answerMap":
+		return "answer_map"
+	default:
+		return key
+	}
 }
 
 func openCodeInteractionBlock(part openCodePart) ContentBlock {

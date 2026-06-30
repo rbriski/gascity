@@ -1,8 +1,10 @@
 package sessionlog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,6 +87,59 @@ func TestReadOpenCodeFileNormalizesTools(t *testing.T) {
 	}
 	if len(sess.OrphanedToolUseIDs) != 0 {
 		t.Fatalf("OrphanedToolUseIDs = %#v, want none", sess.OrphanedToolUseIDs)
+	}
+}
+
+func TestReadOpenCodeFileNormalizesToolObjectsToNeutralKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session_export.json")
+	body := `{
+  "info": {"id": "ses_tool", "directory": "/tmp/gascity/phase2/opencode"},
+  "messages": [
+    {
+      "info": {"id":"msg_assistant_1","sessionID":"ses_tool","role":"assistant","time":{"created":1770000001000}},
+      "parts": [{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Edit","state":{"status":"completed","input":{"filePath":"README.md","oldString":"old","newString":"new"},"output":{"filePath":"README.md","patch":"--- README.md\n+++ README.md\n@@\n-old\n+new","exitCode":0,"durationMs":12}}}]
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write export fixture: %v", err)
+	}
+
+	sess, err := ReadOpenCodeFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadOpenCodeFile: %v", err)
+	}
+	blocks := sess.Messages[0].ContentBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("tool blocks = %d, want 2", len(blocks))
+	}
+	var input struct {
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+	}
+	if err := json.Unmarshal(blocks[0].Input, &input); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	if input.FilePath != "README.md" || input.OldString != "old" || input.NewString != "new" {
+		t.Fatalf("neutral input = %+v, want README.md old/new", input)
+	}
+	var output struct {
+		FilePath   string `json:"file_path"`
+		Patch      string `json:"patch"`
+		ExitCode   int    `json:"exit_code"`
+		DurationMs int    `json:"duration_ms"`
+	}
+	if err := json.Unmarshal(blocks[1].Content, &output); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if output.FilePath != "README.md" || !strings.Contains(output.Patch, "+new") || output.ExitCode != 0 || output.DurationMs != 12 {
+		t.Fatalf("neutral output = %+v, want patch/exit/duration", output)
+	}
+	for _, forbidden := range []string{"filePath", "oldString", "newString", "exitCode", "durationMs"} {
+		if strings.Contains(string(blocks[0].Input), forbidden) || strings.Contains(string(blocks[1].Content), forbidden) {
+			t.Fatalf("OpenCode normalized blocks leaked %s: input=%s content=%s", forbidden, blocks[0].Input, blocks[1].Content)
+		}
 	}
 }
 

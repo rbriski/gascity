@@ -23,8 +23,9 @@ type codexUsagePayload struct {
 	Type  string `json:"type"`
 	Model string `json:"model"` // turn_context payloads only
 	Info  *struct {
-		TotalTokenUsage codexTokenUsage `json:"total_token_usage"`
-		LastTokenUsage  codexTokenUsage `json:"last_token_usage"`
+		TotalTokenUsage    codexTokenUsage `json:"total_token_usage"`
+		LastTokenUsage     codexTokenUsage `json:"last_token_usage"`
+		ModelContextWindow int             `json:"model_context_window"`
 	} `json:"info"`
 }
 
@@ -40,6 +41,7 @@ type codexUsagePayload struct {
 //   - CacheReadTokens = last cached_input_tokens
 //   - OutputTokens = last output_tokens (reasoning_output_tokens is a subset
 //     of output_tokens and must not be added)
+//   - ReasoningTokens = last reasoning_output_tokens
 //   - CacheCreationTokens = 0 (codex reports no cache-write tokens)
 //
 // Model comes from the latest preceding turn_context payload.model — empty
@@ -95,14 +97,16 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 			input = 0
 		}
 		u := TailUsage{
-			EntryUUID:       entry.Timestamp,
-			MessageID:       fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
-			Model:           turnModel,
-			InputTokens:     input,
-			OutputTokens:    last.OutputTokens,
-			CacheReadTokens: last.CachedInputTokens,
+			EntryUUID:           entry.Timestamp,
+			MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
+			Model:               turnModel,
+			InputTokens:         input,
+			OutputTokens:        last.OutputTokens,
+			ReasoningTokens:     last.ReasoningOutputTokens,
+			CacheReadTokens:     last.CachedInputTokens,
+			ContextWindowTokens: payload.Info.ModelContextWindow,
 		}
-		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.CacheReadTokens <= 0 {
+		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
 			continue
 		}
 		if i, seen := byMessageID[u.MessageID]; seen {

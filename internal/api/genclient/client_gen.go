@@ -3698,37 +3698,6 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
-type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskCriticalPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedEventStreamEnvelopeGcStoreDiskWarn.
-type TypedEventStreamEnvelopeGcStoreDiskWarn struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskWarnPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-
 // TypedEventStreamEnvelopeMailArchived defines model for TypedEventStreamEnvelopeMailArchived.
 type TypedEventStreamEnvelopeMailArchived struct {
 	Actor     string                   `json:"actor"`
@@ -4765,39 +4734,6 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
-
-// TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
-type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskCriticalPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskWarn.
-type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskWarnPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
 
 // TypedTaggedEventStreamEnvelopeMailArchived defines model for TypedTaggedEventStreamEnvelopeMailArchived.
 type TypedTaggedEventStreamEnvelopeMailArchived struct {

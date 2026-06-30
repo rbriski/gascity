@@ -1,10 +1,11 @@
 package api
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -22,7 +23,7 @@ type sessionRawTranscriptResponse struct {
 	ID         string                       `json:"id"`
 	Template   string                       `json:"template"`
 	Format     string                       `json:"format"`
-	Messages   []json.RawMessage            `json:"messages"`
+	Messages   []SessionRawMessageFrame     `json:"messages"`
 	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
@@ -60,7 +61,9 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	wantRaw := r.URL.Query().Get("format") == "raw"
+	format := r.URL.Query().Get("format")
+	wantRaw := format == "raw"
+	wantStructured := format == "structured"
 
 	if path != "" {
 		tail := 0
@@ -74,6 +77,34 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 
 		if before != "" && after != "" {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_params", "before and after are mutually exclusive")
+			return
+		}
+
+		if wantStructured {
+			history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), worker.HistoryRequest{
+				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
+			})
+			if historyErr != nil {
+				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+					writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle))
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
+				return
+			}
+			messages, _ := historySnapshotStructuredMessages(history, queryBoolParam(r, "include_thinking"))
+			writeJSON(w, http.StatusOK, sessionTranscriptGetResponse{
+				ID:                 info.ID,
+				Template:           info.Template,
+				Provider:           info.Provider,
+				Format:             "structured",
+				SchemaVersion:      sessionStructuredSchemaVersion,
+				History:            structuredHistoryFromSnapshot(history),
+				StructuredMessages: messages,
+				Pagination:         history.Pagination,
+			})
 			return
 		}
 
@@ -92,7 +123,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 				ID:         info.ID,
 				Template:   info.Template,
 				Format:     "raw",
-				Messages:   transcript.RawMessages,
+				Messages:   wrapRawFrameBytes(transcript.RawMessages),
 				Pagination: transcript.Session.Pagination,
 			})
 			return
@@ -132,8 +163,13 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
-			Messages: []json.RawMessage{},
+			Messages: []SessionRawMessageFrame{},
 		})
+		return
+	}
+
+	if wantStructured {
+		writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle))
 		return
 	}
 
@@ -162,4 +198,28 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		Format:   "conversation",
 		Turns:    []outputTurn{},
 	})
+}
+
+func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info session.Info, handle worker.PeekHandle) sessionTranscriptGetResponse {
+	activity := string(worker.TailActivityIdle)
+	output := ""
+	peekOutput, peekErr := handle.Peek(ctx, 100)
+	if peekErr == nil {
+		activity = string(worker.TailActivityInTurn)
+		output = peekOutput
+	}
+	return sessionTranscriptGetResponse{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+	}
+}
+
+func queryBoolParam(r *http.Request, name string) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }

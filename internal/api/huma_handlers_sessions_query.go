@@ -127,7 +127,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 
 // humaHandleSessionCreate is the Huma-typed handler for POST /v0/sessions.
 
-func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
+func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -150,6 +150,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 	}
 
 	wantRaw := input.Format == "raw"
+	wantStructured := input.Format == "structured"
 
 	if path != "" {
 		// Compactions() returns (n, provided). When the client omitted
@@ -162,6 +163,38 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 
 		if before != "" && after != "" {
 			return nil, apierr.ValidationFailed.Msg("before and after are mutually exclusive")
+		}
+
+		if wantStructured {
+			handle, handleErr := s.workerHandleForSession(store.Store, id)
+			if handleErr != nil {
+				return nil, humaSessionManagerError(handleErr)
+			}
+			history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{
+				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
+			})
+			if historyErr != nil {
+				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+					return s.structuredTranscriptFallback(info)
+				}
+				return nil, apierr.Internal.Msg("reading session history: " + historyErr.Error())
+			}
+			messages, _ := historySnapshotStructuredMessages(history, input.IncludeThinking)
+			return &IndexOutput[sessionTranscriptGetResponse]{
+				Index: s.latestIndex(),
+				Body: sessionTranscriptGetResponse{
+					ID:                 info.ID,
+					Template:           info.Template,
+					Provider:           info.Provider,
+					Format:             "structured",
+					SchemaVersion:      sessionStructuredSchemaVersion,
+					History:            structuredHistoryFromSnapshot(history),
+					StructuredMessages: messages,
+					Pagination:         history.Pagination,
+				},
+			}, nil
 		}
 
 		if wantRaw {
@@ -224,6 +257,10 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		}, nil
 	}
 
+	if wantStructured {
+		return s.structuredTranscriptFallback(info)
+	}
+
 	if wantRaw {
 		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),
@@ -266,6 +303,31 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			Provider: info.Provider,
 			Format:   "conversation",
 			Turns:    []outputTurn{},
+		},
+	}, nil
+}
+
+func (s *Server) structuredTranscriptFallback(info session.Info) (*IndexOutput[sessionTranscriptGetResponse], error) {
+	activity := string(worker.TailActivityIdle)
+	output := ""
+	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
+		activity = string(worker.TailActivityInTurn)
+		peekOutput, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
+		if peekErr != nil {
+			return nil, apierr.Internal.Msg("peeking session: " + peekErr.Error())
+		}
+		output = peekOutput
+	}
+	return &IndexOutput[sessionTranscriptGetResponse]{
+		Index: s.latestIndex(),
+		Body: sessionTranscriptGetResponse{
+			ID:                 info.ID,
+			Template:           info.Template,
+			Provider:           info.Provider,
+			Format:             "structured",
+			SchemaVersion:      sessionStructuredSchemaVersion,
+			History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		},
 	}, nil
 }

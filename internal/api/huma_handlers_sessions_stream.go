@@ -114,9 +114,12 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	flushSSEHeaders(hctx)
 
 	if info.Closed {
-		if format == "raw" {
+		switch format {
+		case "raw":
 			s.emitClosedSessionSnapshotRawHuma(send, info, history)
-		} else {
+		case "structured":
+			s.emitClosedSessionSnapshotStructuredHuma(send, info, history, input.IncludeThinking)
+		default:
 			s.emitClosedSessionSnapshotHuma(send, info, history)
 		}
 		return
@@ -132,11 +135,16 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	}
 	switch {
 	case hasHistory:
-		if format == "raw" {
+		switch format {
+		case "raw":
 			s.streamSessionTranscriptLogRawHuma(reqCtx, send, info, handle, history, historyReq)
-		} else {
+		case "structured":
+			s.streamSessionTranscriptLogStructuredHuma(reqCtx, send, info, handle, history, input.IncludeThinking)
+		default:
 			s.streamSessionTranscriptLogHuma(reqCtx, send, info, handle, history)
 		}
+	case format == "structured":
+		s.streamSessionPeekStructuredHuma(reqCtx, send, info)
 	case format == "raw":
 		s.streamSessionPeekRawHuma(reqCtx, send, info)
 	default:
@@ -178,6 +186,27 @@ func (s *Server) emitClosedSessionSnapshotRawHuma(send sse.Sender, info session.
 		Provider: info.Provider,
 		Format:   "raw",
 		Messages: wrapRawFrameBytes(rawMessages),
+	}})
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
+}
+
+func (s *Server) emitClosedSessionSnapshotStructuredHuma(send sse.Sender, info session.Info, history *worker.HistorySnapshot, includeThinking bool) {
+	if history == nil {
+		return
+	}
+	messages, _ := historySnapshotStructuredMessages(history, includeThinking)
+	if len(messages) == 0 {
+		return
+	}
+
+	_ = send(sse.Message{ID: 1, Data: SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredHistoryFromSnapshot(history),
+		StructuredMessages: messages,
 	}})
 	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }

@@ -334,8 +334,8 @@ func namedSessionStatusForCity(
 		return status
 	}
 	if statusSnapshot != nil {
-		if bead, ok := statusSnapshot.FindSessionBeadByNamedIdentity(identity); ok {
-			if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+		if info, ok := statusSnapshot.FindInfoByNamedIdentity(identity); ok {
+			if state := strings.TrimSpace(info.MetadataState); state != "" {
 				return state
 			}
 			return "materialized"

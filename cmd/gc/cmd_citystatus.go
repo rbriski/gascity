@@ -427,21 +427,21 @@ func statusObservationTargetForIdentity(
 	sessionTemplate string,
 ) statusObservationTarget {
 	if snapshot != nil {
-		if bead, ok := snapshot.FindSessionBeadByTemplate(identity); ok {
-			if sessionName := strings.TrimSpace(bead.Metadata["session_name"]); sessionName != "" {
+		if info, ok := snapshot.FindInfoByTemplate(identity); ok {
+			if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" {
 				return statusObservationTarget{
 					runtimeSessionName: sessionName,
-					sessionID:          bead.ID,
-					suspended:          sessionMetadataState(bead) == string(session.StateSuspended),
+					sessionID:          info.ID,
+					suspended:          sessionMetadataStateInfo(info) == string(session.StateSuspended),
 				}
 			}
 		}
-		if bead, ok := snapshot.FindSessionBeadByNamedIdentity(identity); ok {
-			if sessionName := strings.TrimSpace(bead.Metadata["session_name"]); sessionName != "" {
+		if info, ok := snapshot.FindInfoByNamedIdentity(identity); ok {
+			if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" {
 				return statusObservationTarget{
 					runtimeSessionName: sessionName,
-					sessionID:          bead.ID,
-					suspended:          sessionMetadataState(bead) == string(session.StateSuspended),
+					sessionID:          info.ID,
+					suspended:          sessionMetadataStateInfo(info) == string(session.StateSuspended),
 				}
 			}
 		}

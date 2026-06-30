@@ -81,6 +81,14 @@ const (
 // contract — the single most-branched-on metadata value in the engine.
 const FormulaContractGraphV2 = "graph.v2"
 
+// PoolWorkflowContinuationGroup is the value of ContinuationGroupMetadataKey
+// ("gc.continuation_group") stamped on pool-routed graph.v2 steps so that
+// preassignHookContinuationGroup keeps every step of a molecule on the same
+// pool slot (fixes #2978). It is the discriminator between a pool graph.v2
+// workflow root and a named-session workflow root: named-session steps bind a
+// concrete session and never carry this group.
+const PoolWorkflowContinuationGroup = "pool-workflow"
+
 // Values of ScopeRoleMetadataKey ("gc.scope_role"): the role a bead plays
 // inside a scope. The scope reconciler in internal/dispatch/runtime.go branches
 // on exact agreement between writers (dispatch, formula, cmd/gc) and readers.

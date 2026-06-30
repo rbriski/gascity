@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -318,6 +319,17 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 	return hookClaimJSONResult{}, beads.Bead{}, false
 }
 
+// isPoolGraphV2WorkflowRoot reports whether bead is a pool-routed graph.v2
+// workflow root that needs an initial continuation nudge at claim time. All
+// three conditions must hold so the nudge fires only for the case it targets —
+// a named-session workflow root binds a concrete session and never carries the
+// pool continuation group, so it is correctly excluded (#3554).
+func isPoolGraphV2WorkflowRoot(bead beads.Bead) bool {
+	return strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow &&
+		strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == beadmeta.FormulaContractGraphV2 &&
+		strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey]) == beadmeta.PoolWorkflowContinuationGroup
+}
+
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
 	stampHookWorkBranch(bead, opts, ops, dir, stderr)
 	recordHookClaimSessionPointers(bead, opts, ops, dir, stderr)
@@ -327,7 +339,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		return 1
 	}
 	result.ContinuationAssigned = assigned
-	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+	if len(assigned) > 0 && isPoolGraphV2WorkflowRoot(bead) {
 		ops.EnqueueContinuationNudge(opts.Assignee)
 	}
 	if opts.JSON {
@@ -576,11 +588,31 @@ func hookContinuationNudgeEnqueue(assignee string) {
 	if err := enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{}, item); err != nil {
 		return
 	}
-	maybeStartNudgePoller(nudgeTarget{
-		cityPath:    cityPath,
-		sessionName: assignee,
-	})
+	// Resolve config so the poller-spawn decision honors supervisor mode and ACP
+	// transport. Skipping the builtin-pack refresh keeps this hot claim path
+	// cheap; the daemon mode and agent transport live in already-materialized
+	// config. Warnings are discarded — a claim must not emit config noise.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	maybeStartNudgePoller(hookContinuationNudgeTarget(cityPath, assignee, cfg))
 	_ = pokeController(cityPath)
+}
+
+// hookContinuationNudgeTarget builds the nudge target used to decide whether a
+// per-session poller must be spawned. Populating cfg (and the resolved agent,
+// for its transport) is load-bearing: maybeStartNudgePoller only short-circuits
+// supervisor-mode cities via nudgeDispatcherIsSupervisor(target.cfg), and a nil
+// cfg defaults to legacy mode — so a bare {cityPath, sessionName} target spawns
+// a sidecar `gc nudge poll` that races the supervisor dispatcher and reinstates
+// the bd-shellout load supervisor mode exists to remove. Best-effort: falls
+// back to a cfg-only or bare target when the agent can't be resolved.
+func hookContinuationNudgeTarget(cityPath, assignee string, cfg *config.City) nudgeTarget {
+	if cfg == nil {
+		return nudgeTarget{cityPath: cityPath, sessionName: assignee}
+	}
+	if agent, ok := resolveAgentIdentity(cfg, assignee, currentRigContext(cfg)); ok {
+		return buildSlingNudgeTarget(agent, loadedCityName(cfg, cityPath), cityPath, cfg, nil, assignee)
+	}
+	return nudgeTarget{cityPath: cityPath, cfg: cfg, sessionName: assignee}
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {

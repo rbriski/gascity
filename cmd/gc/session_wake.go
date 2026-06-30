@@ -187,7 +187,7 @@ func beginSessionDrain(
 }
 
 func drainReasonCancelable(reason string) bool {
-	return reason != "config-drift" && reason != "orphaned" && reason != "suspended"
+	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" && reason != idleRespawnDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {

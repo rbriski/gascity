@@ -67,3 +67,59 @@ func TestFrontDoorStoreFreeFilesStayStoreFree(t *testing.T) {
 		}
 	}
 }
+
+// snapshotInfoOnlyFiles are the cmd/gc source files whose every session-bead
+// snapshot read was converted to the typed session.Info front door
+// (snapshot.OpenInfos() / FindInfoBy*) by the P4 non-work field-door cleanup
+// (engdocs/plans/infra-store-decouple/NONWORK-BEAD-FIELDDOOR-PLAN.md). They must
+// never regress to the raw-bead accessors: a raw session bead escaping the
+// snapshot is exactly the leak this migration closes — the field would then be
+// read straight off bead metadata instead of through the one codec edge.
+//
+// Add a file here once it calls NONE of the raw snapshot accessors below — i.e.
+// every session bead it consumes from the snapshot arrives as a session.Info.
+// Files still mid-conversion (build_desired_state.go, city_runtime.go,
+// session_reconciler.go, the pool-demand cascade, …) are intentionally absent.
+var snapshotInfoOnlyFiles = []string{
+	"template_resolve.go",
+	"session_name_lookup.go",
+	"cmd_citystatus.go",
+	"session_reconciler_trace_cycle.go",
+}
+
+// forbiddenRawSnapshotAccessors are the *sessionBeadSnapshot methods that return
+// a raw beads.Bead (or []beads.Bead). The typed mirrors OpenInfos()/FindInfoByID/
+// FindInfoByTemplate/FindInfoByNamedIdentity do not contain these substrings, so
+// a converted file matching one of these has reintroduced a raw session-bead read.
+var forbiddenRawSnapshotAccessors = []string{
+	".Open()",
+	".FindByID(",
+	".FindSessionBeadByTemplate(",
+	".FindSessionBeadByNamedIdentity(",
+}
+
+// TestSnapshotInfoOnlyFilesStayOnInfoAccessors pins the read half of the
+// non-work field-door boundary: the converted snapshot consumers must keep
+// reading session beads through session.Info (OpenInfos/FindInfo*), never the
+// raw-bead accessors. Mirrors TestFrontDoorStoreFreeFilesStayStoreFree for the
+// read surface.
+func TestSnapshotInfoOnlyFilesStayOnInfoAccessors(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	for _, name := range snapshotInfoOnlyFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		content := string(data)
+		for _, needle := range forbiddenRawSnapshotAccessors {
+			if strings.Contains(content, needle) {
+				t.Errorf("%s contains forbidden raw snapshot accessor %q — this file was converted to the session.Info front door; read session beads via snapshot.OpenInfos()/FindInfoByID/FindInfoByTemplate/FindInfoByNamedIdentity instead of the raw-bead accessor", name, needle)
+			}
+		}
+	}
+}

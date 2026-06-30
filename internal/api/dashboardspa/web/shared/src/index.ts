@@ -44,6 +44,7 @@ export * from './operator-mail.js';
 export * from './alert.js';
 export * from './pending.js';
 export * from './structured-transcript.js';
+export * from './structured-render.js';
 export * from './context-window.js';
 export type * from './lists.js';
 export type * from './transcript.js';

@@ -939,10 +939,16 @@ The `WC-STRUCT-*` family covers the structured-transcript contract that
   result supplied patch evidence; it is never fabricated from tool input.
 
 The `WC-STRUCT-*` evaluators are provider-neutral (they run over any normalized
-`HistorySnapshot`). The `claude/tmux-cli` profile is validated against them
-today via a provider-native structured fixture; `codex/tmux-cli` and
-`gemini/tmux-cli` graduate to the family as their native structured fixtures
-land, using the same evaluators.
+`HistorySnapshot`). All three canonical profiles — `claude/tmux-cli`,
+`codex/tmux-cli`, and `gemini/tmux-cli` — are validated against them today. The
+deterministic conformance test runs **synthetic** fixtures whose frame shapes
+mirror real provider output; a **real** broker-captured transcript is
+additionally exercised through the golden corpus (`testdata/corpus/`, currently
+seeded for claude). Claude and Codex exercise all three requirements (their
+edits carry result-side patch evidence). Gemini's `write_file` result has no
+edit-patch evidence, so `WC-STRUCT-003` is reported out of scope for it while
+`WC-STRUCT-001`/`002` apply. Coverage extends to more profiles, and to more
+real captures, as their fixtures land — using the same evaluators.
 
 The catalog is:
 

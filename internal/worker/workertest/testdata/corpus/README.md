@@ -35,10 +35,17 @@ copy the native transcript it writes. On a maintainer host:
 /data/projects/maintainer-city/scripts/manifold-claude \
   -p 'Create README-sample.txt with one line, then change that line with Edit.'
 
-# Codex — writes ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+# Codex — writes $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl
 /data/projects/maintainer-city/scripts/manifold-codex \
-  exec 'Create a file then edit one line in it.'
+  exec --skip-git-repo-check -C <throwaway-dir> 'Edit one line in note.txt.'
 ```
+
+On broker hosts `CODEX_HOME` is **shared across the fleet**, so its `sessions/`
+tree mixes your capture with many real internal sessions. Identify your rollout
+by the `session id` the run prints (and by its `session_meta.cwd`), and never
+grab an arbitrary rollout. Codex applies edits through `apply_patch`; only a
+`patch_apply_end` event carries a result-side diff (so `WC-STRUCT-003` applies),
+whereas plain shell edits normalize as command results.
 
 (`gasworks-launch` is the per-session-proxy alternative; CI uses an
 Ollama-backed Anthropic endpoint — see the `gascity-real-provider-test-creds`

@@ -51,6 +51,18 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 
 		ContinuationEpoch: b.Metadata["continuation_epoch"],
 		SleepReason:       b.Metadata["sleep_reason"],
+
+		// identity / pool / named-session cluster
+		ConfiguredNamedIdentity: b.Metadata[NamedSessionIdentityMetadata],
+		ConfiguredNamedSession:  strings.TrimSpace(b.Metadata[NamedSessionMetadataKey]) == "true",
+		ConfiguredNamedMode:     b.Metadata[NamedSessionModeMetadata],
+		CommonName:              b.Metadata["common_name"],
+		PoolSlot:                b.Metadata["pool_slot"],
+		PoolManaged:             strings.TrimSpace(b.Metadata["pool_managed"]) == "true",
+		SessionOrigin:           b.Metadata["session_origin"],
+		DependencyOnly:          strings.TrimSpace(b.Metadata["dependency_only"]) == "true",
+		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
+		Labels:                  b.Labels,
 	}
 	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
 		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {

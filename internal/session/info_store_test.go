@@ -1,6 +1,7 @@
 package session
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -59,7 +60,7 @@ func TestInfoStoreGetSpeaksInfo(t *testing.T) {
 	}
 
 	want := InfoFromPersistedBead(b)
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Get returned Info mismatch:\n got = %+v\nwant = %+v", got, want)
 	}
 	if got.ID != "s-get-1" || got.Title != "My Session" || got.Alias != "pc-1" {
@@ -160,11 +161,11 @@ func TestInfoFromPersistedBeadProjectionDeterminism(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get B: %v", err)
 	}
-	if infoA != infoB {
+	if !reflect.DeepEqual(infoA, infoB) {
 		t.Fatalf("projection not deterministic across store instances:\n A = %+v\n B = %+v", infoA, infoB)
 	}
 	// And the direct codec matches the stored projection.
-	if direct := InfoFromPersistedBead(b); direct != infoA {
+	if direct := InfoFromPersistedBead(b); !reflect.DeepEqual(direct, infoA) {
 		t.Fatalf("direct codec disagrees with store projection:\n codec = %+v\n store = %+v", direct, infoA)
 	}
 }
@@ -191,6 +192,48 @@ func TestInfoFromPersistedBeadProjectsContinuationAndSleepReason(t *testing.T) {
 	bare := sessionBeadFixture("s-bare", "open", map[string]string{"state": "active"})
 	if got := InfoFromPersistedBead(bare); got.ContinuationEpoch != "" || got.SleepReason != "" {
 		t.Errorf("unset markers projected non-empty: epoch=%q reason=%q", got.ContinuationEpoch, got.SleepReason)
+	}
+}
+
+func TestInfoFromPersistedBeadProjectsIdentityPoolNamedCluster(t *testing.T) {
+	b := sessionBeadFixture("s-cluster", "open", map[string]string{
+		"state":                      "active",
+		NamedSessionIdentityMetadata: "worker#3",
+		NamedSessionMetadataKey:      "true",
+		NamedSessionModeMetadata:     "sticky",
+		"common_name":                "worker",
+		"pool_slot":                  "3",
+		"pool_managed":               "true",
+		"session_origin":             "ephemeral",
+		"dependency_only":            "true",
+		"manual_session":             "true",
+	})
+	info := InfoFromPersistedBead(b)
+	for _, c := range []struct{ name, got, want string }{
+		{"ConfiguredNamedIdentity", info.ConfiguredNamedIdentity, "worker#3"},
+		{"ConfiguredNamedMode", info.ConfiguredNamedMode, "sticky"},
+		{"CommonName", info.CommonName, "worker"},
+		{"PoolSlot", info.PoolSlot, "3"},
+		{"SessionOrigin", info.SessionOrigin, "ephemeral"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+	if !info.ConfiguredNamedSession || !info.PoolManaged || !info.DependencyOnly || !info.ManualSession {
+		t.Errorf("bool cluster: named=%v pool=%v dep=%v manual=%v, want all true",
+			info.ConfiguredNamedSession, info.PoolManaged, info.DependencyOnly, info.ManualSession)
+	}
+	if len(info.Labels) != 1 || info.Labels[0] != LabelSession {
+		t.Errorf("Labels = %v, want [%q]", info.Labels, LabelSession)
+	}
+
+	// Bare bead: the whole cluster projects to its zero value (no defaults).
+	bare := InfoFromPersistedBead(sessionBeadFixture("s-bare", "open", map[string]string{"state": "active"}))
+	if bare.ConfiguredNamedSession || bare.PoolManaged || bare.DependencyOnly || bare.ManualSession ||
+		bare.ConfiguredNamedIdentity != "" || bare.ConfiguredNamedMode != "" || bare.CommonName != "" ||
+		bare.PoolSlot != "" || bare.SessionOrigin != "" {
+		t.Errorf("unset cluster projected non-zero: %+v", bare)
 	}
 }
 

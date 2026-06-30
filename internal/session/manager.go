@@ -106,6 +106,25 @@ type Info struct {
 	// clear path to decide whether to clear sleep_reason. Additive,
 	// internal-only: NOT emitted on the HTTP session-response wire.
 	SleepReason string
+
+	// --- identity / pool / named-session cluster (controller read surface) ---
+	//
+	// These complete the codec so the session reconciler, the bead snapshot,
+	// and the classifier predicates read typed Info fields instead of raw bead
+	// metadata/labels. Additive, internal-only (absent from the HTTP wire).
+	// Each is the raw projected value; the *semantics* (is-pool-managed,
+	// resolved origin, agent identity with the agent:<name> label fallback) are
+	// predicate methods on Info, not these fields.
+	ConfiguredNamedIdentity string   // configured_named_identity
+	ConfiguredNamedSession  bool     // configured_named_session == "true"
+	ConfiguredNamedMode     string   // configured_named_mode
+	CommonName              string   // common_name
+	PoolSlot                string   // pool_slot (raw; pool helpers parse it)
+	PoolManaged             bool     // pool_managed == "true"
+	SessionOrigin           string   // session_origin (raw; resolved origin is a method)
+	DependencyOnly          bool     // dependency_only == "true"
+	ManualSession           bool     // manual_session == "true"
+	Labels                  []string // bead labels (agent:<name> identity fallback + canonical checks)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a

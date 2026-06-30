@@ -21,6 +21,12 @@ func (r graphDemandReadyReader) Ready(...beads.ReadyQuery) ([]beads.Bead, error)
 	return append([]beads.Bead(nil), r.ready...), nil
 }
 
+// ReadyCacheOnly satisfies beads.CachedReader for this plain test double: like a
+// non-caching store, the cache-only read delegates to the same fixed Ready slice.
+func (r graphDemandReadyReader) ReadyCacheOnly(...beads.ReadyQuery) ([]beads.Bead, error) {
+	return append([]beads.Bead(nil), r.ready...), nil
+}
+
 // graphDemandGraphOnlyReader returns the ClassGraph ready slice alone, where the
 // assigned wisp survives the per-tick limit because the Dolt work leg is excluded.
 type graphDemandGraphOnlyReader struct {

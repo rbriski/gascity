@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -2968,6 +2973,7 @@ func TestControlDispatcherBareRoute(t *testing.T) {
 }
 
 func TestFilterWorkflowServeControlReadyBeadsPreservesPriorityAndPredicates(t *testing.T) {
+	clearGCEnv(t)
 	spec := workflowServeControlReadySpec{
 		Target:             "gascity/control-dispatcher",
 		ControlSessionName: "gascity--control-dispatcher",
@@ -3006,6 +3012,7 @@ func TestFilterWorkflowServeControlReadyBeadsPreservesPriorityAndPredicates(t *t
 }
 
 func TestWorkflowServeControlReadyAssigneesPrioritizeConfiguredRuntimeName(t *testing.T) {
+	clearGCEnv(t)
 	spec := workflowServeControlReadySpec{
 		Target:             "gascity/control-dispatcher",
 		ControlSessionName: "gascity--control-dispatcher",
@@ -3022,11 +3029,262 @@ func TestWorkflowServeControlReadyAssigneesPrioritizeConfiguredRuntimeName(t *te
 }
 
 func TestNextWorkflowServeBeadsRejectsControlReadyWithoutSupervisorAPI(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 	_, err := nextWorkflowServeBeads(query, cityDir, map[string]string{"GC_CITY_PATH": cityDir})
 	if err == nil || !strings.Contains(err.Error(), "requires supervisor API") {
 		t.Fatalf("nextWorkflowServeBeads err = %v, want supervisor API requirement", err)
+	}
+	// A down/restarting controller API must be transient so the --follow serve
+	// loop backs off and retries instead of exiting and crash-looping the
+	// long-running dispatcher (the cache-backed scan has no direct-store fallback).
+	if !dispatch.IsTransientControllerError(err) {
+		t.Fatalf("nextWorkflowServeBeads err = %v, want transient classification", err)
+	}
+}
+
+func TestNextWorkflowServeBeadsControlReadyTransientWhenNoAPIEscapeHatch(t *testing.T) {
+	clearGCEnv(t)
+	// GC_NO_API is the documented direct-bd escape hatch, but graph control
+	// dispatch reads control-ready work from the supervisor API and has no
+	// direct-store fallback. The scan must classify the disabled API as transient
+	// so the serve loop retries rather than crash-looping the dispatcher process.
+	t.Setenv("GC_NO_API", "1")
+	cityDir := t.TempDir()
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+	_, err := nextWorkflowServeBeads(query, cityDir, map[string]string{"GC_CITY_PATH": cityDir})
+	if err == nil || !strings.Contains(err.Error(), "requires supervisor API") {
+		t.Fatalf("nextWorkflowServeBeads err = %v, want supervisor API requirement", err)
+	}
+	if !dispatch.IsTransientControllerError(err) {
+		t.Fatalf("nextWorkflowServeBeads err = %v, want transient classification under GC_NO_API", err)
+	}
+}
+
+// TestNextWorkflowServeControlReadyTransientOnInCallReadFailure pins the
+// in-call failure path: once a supervisor client exists, a transient ready read
+// (cache priming, store slow, generic 5xx, or a dropped connection) must be
+// classified transient so the --follow serve loop backs off and retries instead
+// of exiting and crash-looping the long-running dispatcher. A genuinely
+// unexpected error (e.g. a 4xx) must stay fatal so it surfaces loudly. The seam
+// drives the real api.Client decode path against an httptest server.
+func TestNextWorkflowServeControlReadyTransientOnInCallReadFailure(t *testing.T) {
+	clearGCEnv(t)
+	prev := workflowServeControlReadyList
+	t.Cleanup(func() { workflowServeControlReadyList = prev })
+
+	problem := func(status int, detail string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"title":  http.StatusText(status),
+				"status": status,
+				"detail": detail,
+			})
+		}
+	}
+	cases := []struct {
+		name          string
+		handler       http.HandlerFunc
+		closeServer   bool
+		wantTransient bool
+	}{
+		{name: "cache_not_live", handler: problem(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"), wantTransient: true},
+		{name: "store_slow", handler: problem(http.StatusServiceUnavailable, "store_slow: ready read timed out"), wantTransient: true},
+		{name: "server_5xx", handler: problem(http.StatusInternalServerError, "boom"), wantTransient: true},
+		{name: "conn_error", handler: func(http.ResponseWriter, *http.Request) {}, closeServer: true, wantTransient: true},
+		{name: "bad_request_stays_fatal", handler: problem(http.StatusBadRequest, "malformed control ready query"), wantTransient: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(tc.handler)
+			if tc.closeServer {
+				ts.Close()
+			} else {
+				defer ts.Close()
+			}
+			client := api.NewCityScopedClient(ts.URL, "test-city")
+			workflowServeControlReadyList = func(_ string, filter beads.ControlReadyFilter) (api.ReadyBeads, error) {
+				return client.ListReadyBeads(filter)
+			}
+
+			cityDir := t.TempDir()
+			query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+			_, err := nextWorkflowServeBeads(query, cityDir, map[string]string{"GC_CITY_PATH": cityDir})
+			if err == nil {
+				t.Fatalf("nextWorkflowServeBeads err = nil, want error for in-call %s", tc.name)
+			}
+			if got := dispatch.IsTransientControllerError(err); got != tc.wantTransient {
+				t.Fatalf("IsTransientControllerError(%v) = %v, want %v for in-call %s", err, got, tc.wantTransient, tc.name)
+			}
+		})
+	}
+}
+
+// TestNextWorkflowServeControlReadyPartialCityReadIsTransient pins that a
+// partial federated ready read that omitted the city store (where graph control
+// beads live) is treated as a transient, non-authoritative read: acting on it
+// would mistake hidden control work for an idle queue.
+func TestNextWorkflowServeControlReadyPartialCityReadIsTransient(t *testing.T) {
+	clearGCEnv(t)
+	prev := workflowServeControlReadyList
+	t.Cleanup(func() { workflowServeControlReadyList = prev })
+	workflowServeControlReadyList = func(string, beads.ControlReadyFilter) (api.ReadyBeads, error) {
+		return api.ReadyBeads{
+			Partial:       true,
+			PartialErrors: []string{"city: read ready: store slow"},
+		}, nil
+	}
+
+	cityDir := t.TempDir()
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+	_, err := nextWorkflowServeBeads(query, cityDir, map[string]string{"GC_CITY_PATH": cityDir})
+	if err == nil {
+		t.Fatalf("nextWorkflowServeBeads err = nil, want transient error for city-store partial read")
+	}
+	if !dispatch.IsTransientControllerError(err) {
+		t.Fatalf("IsTransientControllerError(%v) = false, want transient for city-store partial read", err)
+	}
+}
+
+// TestNextWorkflowServeControlReadyPartialRigOnlyStillAuthoritative pins that a
+// partial read that lost only an unrelated rig store still dispatches the
+// present control work: the city store remains authoritative for control beads,
+// so an unrelated rig hiccup must not stall control dispatch.
+func TestNextWorkflowServeControlReadyPartialRigOnlyStillAuthoritative(t *testing.T) {
+	clearGCEnv(t)
+	prev := workflowServeControlReadyList
+	t.Cleanup(func() { workflowServeControlReadyList = prev })
+	workflowServeControlReadyList = func(string, beads.ControlReadyFilter) (api.ReadyBeads, error) {
+		return api.ReadyBeads{
+			Body: []beads.Bead{
+				{ID: "ga-control-ready", Assignee: "gascity/control-dispatcher", Metadata: map[string]string{"gc.kind": "scope-check"}},
+			},
+			Partial:       true,
+			PartialErrors: []string{"rig alpha: read ready: store slow"},
+		}, nil
+	}
+
+	cityDir := t.TempDir()
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+	got, err := nextWorkflowServeBeads(query, cityDir, map[string]string{
+		"GC_CITY_PATH": cityDir,
+		"GC_ALIAS":     "gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("nextWorkflowServeBeads err = %v, want authoritative read for rig-only partial", err)
+	}
+	var ids []string
+	for _, b := range got {
+		ids = append(ids, b.ID)
+	}
+	if !slices.Contains(ids, "ga-control-ready") {
+		t.Fatalf("filtered ids = %#v, want ga-control-ready dispatched despite rig-only partial", ids)
+	}
+}
+
+// TestFilterWorkflowServeControlReadyBeadsMatchesExecutionRoutedTo pins the
+// intended route-match broadening: a graph-routed control bead carrying only
+// gc.execution_routed_to (no gc.run_target/gc.routed_to) is claimed by the
+// control dispatcher rather than stranded, while one routed to another target is
+// ignored.
+func TestFilterWorkflowServeControlReadyBeadsMatchesExecutionRoutedTo(t *testing.T) {
+	clearGCEnv(t)
+	spec := workflowServeControlReadySpec{Target: "gascity/control-dispatcher"}
+	ready := []beads.Bead{
+		{ID: "ga-exec-routed", Metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "gascity/control-dispatcher", "gc.kind": "scope-check"}},
+		{ID: "ga-exec-routed-other", Metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "other/control-dispatcher", "gc.kind": "scope-check"}},
+		{ID: "ga-exec-routed-assigned", Assignee: "someone-else", Metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "gascity/control-dispatcher", "gc.kind": "scope-check"}},
+	}
+	got := filterWorkflowServeControlReadyBeads(ready, spec, map[string]string{})
+	var ids []string
+	for _, b := range got {
+		ids = append(ids, b.ID)
+	}
+	if !slices.Contains(ids, "ga-exec-routed") {
+		t.Fatalf("filtered ids = %#v, want execution_routed_to-only control bead claimed", ids)
+	}
+	if slices.Contains(ids, "ga-exec-routed-other") {
+		t.Fatalf("filtered ids = %#v, want execution_routed_to bead for another target ignored", ids)
+	}
+	// The route predicate only matches unassigned beads; an already-assigned bead
+	// is claimed by the assignee scan, not broadened in via execution_routed_to.
+	if slices.Contains(ids, "ga-exec-routed-assigned") {
+		t.Fatalf("filtered ids = %#v, want assigned bead excluded from the route predicate", ids)
+	}
+}
+
+// TestControllerWorkQueryEnvIdentityRecoveredByControlReadyScan exercises the
+// production serve-env wiring: controllerWorkQueryEnv builds the control
+// dispatcher's work-query env from store/bd coordinates only and does not carry
+// the live session identity. The cache-backed control-ready assignee scan must
+// recover GC_SESSION_NAME/GC_ALIAS/GC_SESSION_ID from the process environment
+// (as the pre-cache shell scan did) or a control bead assigned to the live
+// session name/alias/id is stranded.
+func TestControllerWorkQueryEnvIdentityRecoveredByControlReadyScan(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_SESSION_NAME", "s-live")
+	t.Setenv("GC_ALIAS", "alias-live")
+	t.Setenv("GC_SESSION_ID", "mc-live")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	agentCfg, ok := resolveAgentIdentity(cfg, config.ControlDispatcherAgentName, currentRigContext(cfg))
+	if !ok {
+		t.Fatalf("resolveAgentIdentity(control-dispatcher) not found")
+	}
+	workEnv, err := controllerWorkQueryEnv(cityDir, cfg, &agentCfg)
+	if err != nil {
+		t.Fatalf("controllerWorkQueryEnv: %v", err)
+	}
+	// Pin the production gap: the serve env builder must not carry session
+	// identity. If this ever changes, the os.Getenv recovery becomes redundant
+	// and this test should be revisited rather than silently masking a wiring bug.
+	for _, key := range []string{"GC_SESSION_NAME", "GC_ALIAS", "GC_SESSION_ID"} {
+		if v := workEnv[key]; v != "" {
+			t.Fatalf("controllerWorkQueryEnv populated %s=%q; production identity gap no longer exists", key, v)
+		}
+	}
+
+	spec := workflowServeControlReadySpec{Target: "gascity/control-dispatcher"}
+	got := workflowServeControlReadyAssignees(spec, workEnv)
+	for _, want := range []string{"s-live", "alias-live", "mc-live"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("assignees = %#v, want live identity %q recovered from process env", got, want)
+		}
+	}
+}
+
+// TestFilterWorkflowServeControlReadyBeadsExcludesInstantiating pins the
+// defense-in-depth guard that keeps fenced/instantiating control beads out of
+// dispatch even if the upstream ready projection ever returns one.
+func TestFilterWorkflowServeControlReadyBeadsExcludesInstantiating(t *testing.T) {
+	clearGCEnv(t)
+	spec := workflowServeControlReadySpec{Target: "gascity/control-dispatcher"}
+	ready := []beads.Bead{
+		{ID: "ga-instantiating-assigned", Assignee: "gascity/control-dispatcher", Metadata: map[string]string{"gc.kind": "scope-check", beadmeta.InstantiatingMetadataKey: "true"}},
+		{ID: "ga-instantiating-routed", Metadata: map[string]string{"gc.run_target": "gascity/control-dispatcher", "gc.kind": "scope-check", beadmeta.InstantiatingMetadataKey: "true"}},
+		{ID: "ga-ready", Assignee: "gascity/control-dispatcher", Metadata: map[string]string{"gc.kind": "scope-check"}},
+	}
+	got := filterWorkflowServeControlReadyBeads(ready, spec, map[string]string{})
+	var ids []string
+	for _, b := range got {
+		ids = append(ids, b.ID)
+	}
+	if slices.Contains(ids, "ga-instantiating-assigned") || slices.Contains(ids, "ga-instantiating-routed") {
+		t.Fatalf("filtered ids = %#v, want fenced/instantiating control beads excluded", ids)
+	}
+	if !slices.Contains(ids, "ga-ready") {
+		t.Fatalf("filtered ids = %#v, want non-instantiating control bead retained", ids)
 	}
 }
 

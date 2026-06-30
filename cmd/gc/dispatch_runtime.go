@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -723,6 +724,15 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 		strings.HasSuffix(qualified, "."+config.ControlDispatcherAgentName)
 }
 
+// workflowServeControlReadyQuery builds the internal control-ready spec the
+// supervisor-cache consumer (api.Client.ListReadyBeads) filters client-side.
+// It relies on an invariant: graph.v2 control beads are always durable
+// (main-tier), never ephemeral/wisp-tier. The /beads/ready cache read this spec
+// drives is a default-tier (TierIssues) read, which excludes ephemeral rows, so
+// every control bead is reachable only because no dispatch/sling/formula/graph
+// creation path materializes control beads in the ephemeral tier. If that ever
+// changes, this scan would silently miss them and tier selection must be plumbed
+// through here.
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
@@ -869,6 +879,33 @@ func parseWorkflowServeControlReadyQuery(workQuery string) (workflowServeControl
 	return spec, true, nil
 }
 
+// errControlReadyNoSupervisorClient signals that the control-ready reader could
+// not build a supervisor API client (GC_NO_API escape hatch, or the supervisor
+// process is down/restarting). The cache-backed scan has no direct-store
+// fallback, so the caller maps it to a transient ErrControllerAPIUnavailable and
+// the --follow loop retries instead of crash-looping.
+var errControlReadyNoSupervisorClient = errors.New("control ready: no supervisor API client")
+
+// workflowServeControlReadyList obtains the federated ready set the control-ready
+// scan filters, reading through the supervisor API client. The filter is pushed
+// into the request so the supervisor returns only this dispatcher's control work
+// instead of the full federated ready set. It is a package var so tests can
+// inject transient or partial cache responses without standing up the
+// supervisor; production wiring reads through apiClient and returns
+// errControlReadyNoSupervisorClient when no client can be built.
+var workflowServeControlReadyList = func(cityPath string, filter beads.ControlReadyFilter) (api.ReadyBeads, error) {
+	client := apiClient(cityPath)
+	if client == nil {
+		if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled && apiRouteControllerAliveHook(cityPath) != 0 {
+			client = apiRouteSupervisorClientHook(cityPath)
+		}
+	}
+	if client == nil {
+		return api.ReadyBeads{}, errControlReadyNoSupervisorClient
+	}
+	return client.ListReadyBeads(filter)
+}
+
 func nextWorkflowServeControlReadyBeads(spec workflowServeControlReadySpec, env map[string]string) ([]hookBead, error) {
 	cityPath := strings.TrimSpace(env["GC_CITY_PATH"])
 	if cityPath == "" {
@@ -880,65 +917,92 @@ func nextWorkflowServeControlReadyBeads(spec workflowServeControlReadySpec, env 
 	if cityPath == "" {
 		return nil, fmt.Errorf("control ready query missing city path")
 	}
-	client := apiClient(cityPath)
-	if client == nil {
-		if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled && apiRouteControllerAliveHook(cityPath) != 0 {
-			client = apiRouteSupervisorClientHook(cityPath)
-		}
-	}
-	if client == nil {
-		return nil, fmt.Errorf("control ready query requires supervisor API: %s", apiClientFallbackReason(cityPath))
-	}
-	ready, err := client.ListReadyBeads()
+	filter := workflowServeControlReadyFilter(spec, env)
+	ready, err := workflowServeControlReadyList(cityPath, filter)
 	if err != nil {
+		if errors.Is(err, errControlReadyNoSupervisorClient) {
+			warnControlReadySupervisorAPIUnavailable()
+			// The cache-backed control-ready scan has no direct-store fallback, so a
+			// disabled (GC_NO_API escape hatch) or down/restarting controller API
+			// must not be fatal here. Wrap ErrControllerAPIUnavailable so the
+			// --follow serve loop classifies it transient and backs off/retries
+			// instead of exiting and crash-looping the long-running dispatcher.
+			return nil, fmt.Errorf("control ready query requires supervisor API (%s): %w", apiClientFallbackReason(cityPath), dispatch.ErrControllerAPIUnavailable)
+		}
+		// A non-nil supervisor client can still fail a ready read while the cache
+		// is priming/reconciling (cache_not_live), the store is briefly saturated
+		// (store_slow), the supervisor returns a generic 5xx, or the connection
+		// drops. These are all retryable and the scan has no direct-store fallback,
+		// so map them onto ErrControllerAPIUnavailable and let the --follow loop
+		// back off and retry instead of exiting. A genuinely unexpected error stays
+		// fatal so it surfaces loudly rather than spinning forever.
+		if api.ShouldFallbackForRead(err) || api.IsStoreSlowError(err) {
+			return nil, fmt.Errorf("list ready beads from supervisor cache (%w): %w", dispatch.ErrControllerAPIUnavailable, err)
+		}
 		return nil, fmt.Errorf("list ready beads from supervisor cache: %w", err)
+	}
+	if !ready.CityReadAuthoritative() {
+		// A partial federated read that omitted the city store can hide graph
+		// control beads (they live only in the city store) and make a non-idle
+		// queue look idle. Treat it as a transient controller-API condition so the
+		// follow loop retries instead of acting on an incomplete view. An unrelated
+		// rig-store failure leaves the city store authoritative and does not trip
+		// this.
+		return nil, fmt.Errorf("control ready query got a partial ready set omitting the city store (%s): %w", strings.Join(ready.PartialErrors, "; "), dispatch.ErrControllerAPIUnavailable)
 	}
 	return filterWorkflowServeControlReadyBeads(ready.Body, spec, env), nil
 }
 
-func filterWorkflowServeControlReadyBeads(ready []beads.Bead, spec workflowServeControlReadySpec, env map[string]string) []hookBead {
-	seen := map[string]struct{}{}
-	var out []hookBead
-	addMatches := func(match func(beads.Bead) bool) {
-		added := 0
-		for _, b := range ready {
-			if added >= workflowServeScanLimit {
-				return
-			}
-			if !match(b) || !workflowServeControlReadyBeadEligible(b) {
-				continue
-			}
-			if _, ok := seen[b.ID]; ok {
-				continue
-			}
-			seen[b.ID] = struct{}{}
-			out = append(out, hookBead{ID: b.ID, Metadata: hookBeadMetadata(b.Metadata)})
-			added++
-		}
+// warnControlReadySupervisorAPIUnavailable emits a one-time operator warning
+// when GC_NO_API disables the supervisor API that graph control dispatch now
+// reads control-ready work from. GC_NO_API is the documented direct-bd escape
+// hatch, but the cache-backed control-ready scan has no direct-store fallback,
+// so the dispatcher cannot make progress until the API is reachable. The
+// warning routes to the active serve stderr sink and dedupes per command
+// invocation so the retry loop does not spam it. A transient controller-down
+// blip is not warned (it self-heals on restart); only the persistent escape
+// hatch is surfaced.
+func warnControlReadySupervisorAPIUnavailable() {
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
+		return
 	}
-
-	for _, assignee := range workflowServeControlReadyAssignees(spec, env) {
-		assignee := assignee
-		addMatches(func(b beads.Bead) bool {
-			return b.Assignee == assignee
-		})
-	}
-	for _, route := range workflowServeControlReadyRoutes(spec) {
-		route := route
-		addMatches(func(b beads.Bead) bool {
-			if strings.TrimSpace(b.Assignee) != "" {
-				return false
-			}
-			return b.Metadata[beadmeta.RunTargetMetadataKey] == route ||
-				b.Metadata[beadmeta.RoutedToMetadataKey] == route ||
-				b.Metadata[graphroute.GraphExecutionRouteMetaKey] == route
-		})
-	}
-	return out
+	workflowTraceWarnings.mu.Lock()
+	writer := workflowTraceWarnings.writer
+	workflowTraceWarnings.mu.Unlock()
+	workflowTraceWarnf(
+		writer,
+		"control-ready-no-api",
+		"gc convoy control --serve: warning: GC_NO_API disables the supervisor API, but graph control dispatch reads control-ready work from it and has no direct-bd fallback; the control-dispatcher will retry until GC_NO_API is unset or the API is reachable.\n",
+	)
 }
 
-func workflowServeControlReadyBeadEligible(b beads.Bead) bool {
-	return strings.TrimSpace(b.ID) != "" && strings.TrimSpace(b.Type) != "epic"
+// workflowServeControlReadyFilter builds the control-ready filter from the serve
+// spec and live session identity: the assignees and routes this dispatcher
+// claims, bounded by the per-scan limit. It is shared by the supervisor request
+// (so the federated ready set is filtered server-side) and the client-side
+// re-filter below, so the two predicates cannot drift. The assignee priority
+// order, the control-dispatcher→workflow-control legacy alias, and the
+// bare/legacy routed targets all live in the assignee/route builders it calls.
+func workflowServeControlReadyFilter(spec workflowServeControlReadySpec, env map[string]string) beads.ControlReadyFilter {
+	return beads.ControlReadyFilter{
+		Assignees:     workflowServeControlReadyAssignees(spec, env),
+		Routes:        workflowServeControlReadyRoutes(spec),
+		PerGroupLimit: workflowServeScanLimit,
+	}
+}
+
+// filterWorkflowServeControlReadyBeads reduces a federated ready set to the
+// control beads this dispatcher should claim and converts them to hook beads.
+// The supervisor already applies the same ControlReadyFilter server-side; this
+// re-filter is idempotent (Apply(Apply(x)) == Apply(x)) and guards against an
+// older supervisor (mixed-version rollout) that ignores the new control_* params
+// and returns the full ready set.
+func filterWorkflowServeControlReadyBeads(ready []beads.Bead, spec workflowServeControlReadySpec, env map[string]string) []hookBead {
+	var out []hookBead
+	for _, b := range workflowServeControlReadyFilter(spec, env).Apply(ready) {
+		out = append(out, hookBead{ID: b.ID, Metadata: hookBeadMetadata(b.Metadata)})
+	}
+	return out
 }
 
 func workflowServeControlReadyAssignees(spec workflowServeControlReadySpec, env map[string]string) []string {
@@ -964,11 +1028,27 @@ func workflowServeControlReadyAssignees(spec workflowServeControlReadySpec, env 
 	}
 	addWithLegacy(spec.ControlSessionName)
 	for _, key := range []string{"GC_CONTROL_SESSION_NAME", "GC_SESSION_NAME", "GC_ALIAS"} {
-		addWithLegacy(env[key])
+		addWithLegacy(controlReadyEnvIdentity(env, key))
 	}
 	addWithLegacy(spec.Target)
-	addWithLegacy(env["GC_SESSION_ID"])
+	addWithLegacy(controlReadyEnvIdentity(env, "GC_SESSION_ID"))
 	return out
+}
+
+// controlReadyEnvIdentity resolves a live-session identity key for the
+// control-ready assignee scan, preferring an explicit value in the serve env map
+// and falling back to the live process environment. The pre-cache shell scan
+// read GC_SESSION_NAME/GC_ALIAS/GC_SESSION_ID from os.Environ (via
+// mergeRuntimeEnv), but the production controller serve env
+// (controllerWorkQueryEnv) carries only store/bd coordinates, so without this
+// fallback the live session identity is dropped and a control bead assigned to
+// the live session name/alias/id is stranded. Mirrors the existing os.Getenv
+// read of GC_NO_API in this path.
+func controlReadyEnvIdentity(env map[string]string, key string) string {
+	if v := strings.TrimSpace(env[key]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv(key))
 }
 
 func workflowServeControlReadyRoutes(spec workflowServeControlReadySpec) []string {

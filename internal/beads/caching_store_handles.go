@@ -13,10 +13,16 @@ import (
 // historical lookups. List reads across both bead tiers regardless of the
 // caller's TierMode; use the underlying Store directly for intentionally
 // tier-scoped list queries.
+//
+// Ready and the other read methods may perform a one-time synchronous prime
+// from the backing store when the projection is not yet live. ReadyCacheOnly is
+// the strict variant that never primes — see its doc — for hot-path callers
+// that must not block on the backing store.
 type CachedReader interface {
 	Get(id string) (Bead, error)
 	List(query ListQuery) ([]Bead, error)
 	Ready(query ...ReadyQuery) ([]Bead, error)
+	ReadyCacheOnly(query ...ReadyQuery) ([]Bead, error)
 	DepList(id, direction string) ([]Dep, error)
 }
 
@@ -96,6 +102,14 @@ func (r logicalCachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 	return r.store.Ready(query...)
 }
 
+// ReadyCacheOnly delegates to the store's Ready: a plain (non-caching) store has
+// no separate backing tier to prime, so its in-process read already cannot block
+// on a remote cache prime. A CachingStore overrides this through its explicit
+// Handles() implementation with a strictly non-priming projection read.
+func (r logicalCachedStoreReader) ReadyCacheOnly(query ...ReadyQuery) ([]Bead, error) {
+	return r.store.Ready(query...)
+}
+
 func (r logicalCachedStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.DepList(id, direction)
 }
@@ -148,6 +162,16 @@ func (r cachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if err := r.store.ensureFullPrime(context.Background()); err != nil {
 		return nil, err
 	}
+	return r.store.cachedReadyOnly(readyQueryFromArgs(query))
+}
+
+// ReadyCacheOnly reads ready beads strictly from the in-memory projection and
+// never triggers a backing-store prime. When the projection is not live enough
+// to answer it returns ErrCacheUnavailable instead of priming, so a hot-path
+// caller (the control dispatcher's GET /beads/ready?cached=true) cannot block or
+// fail on the backing store the control-ready cache exists to bypass. Use Ready
+// when a one-time synchronous prime is acceptable.
+func (r cachedStoreReader) ReadyCacheOnly(query ...ReadyQuery) ([]Bead, error) {
 	return r.store.cachedReadyOnly(readyQueryFromArgs(query))
 }
 

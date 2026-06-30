@@ -854,26 +854,55 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 }
 
 // ListReadyBeads fetches ready beads across all rigs via
-// GET /v0/city/{cityName}/beads/ready. The endpoint is served from the
-// supervisor cache projection so controller-side consumers can avoid direct
-// backing-store reads.
-func (c *Client) ListReadyBeads() (CachedRead[[]beads.Bead], error) {
+// GET /v0/city/{cityName}/beads/ready with cached=true, so the control
+// dispatcher reads from the supervisor cache projection and avoids the
+// blocking/failing backing-store scan the control-ready cache exists to avoid.
+// (The endpoint itself defaults to authoritative live readiness; this consumer
+// explicitly opts into the cache.) The result preserves the response's
+// partial-aggregation signal (Partial / PartialErrors) so callers can detect
+// when a backing store (such as the city store holding graph control beads)
+// failed and the ready set is incomplete rather than authoritatively empty.
+//
+// An optional ControlReadyFilter pushes the control dispatcher's assignee/route
+// predicate and per-group limit into the request, so the supervisor filters its
+// control work out of the federated ready set server-side, before serialization,
+// instead of returning every rig's ready beads for the dispatcher to filter
+// client-side. An inactive (zero) filter requests the full ready set.
+func (c *Client) ListReadyBeads(filter ...beads.ControlReadyFilter) (ReadyBeads, error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
+		return ReadyBeads{}, err
 	}
-	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameBeadsReadyParams{})
+	cached := true
+	params := &genclient.GetV0CityByCityNameBeadsReadyParams{Cached: &cached}
+	if len(filter) > 0 && filter[0].Active() {
+		f := filter[0]
+		if assignees := strings.Join(f.Assignees, ","); assignees != "" {
+			params.ControlAssignees = &assignees
+		}
+		if routes := strings.Join(f.Routes, ","); routes != "" {
+			params.ControlRoutes = &routes
+		}
+		if f.PerGroupLimit > 0 {
+			limit := int64(f.PerGroupLimit)
+			params.ControlLimit = &limit
+		}
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(context.Background(), c.cityName, params)
 	if err != nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		return ReadyBeads{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
 	if resp == nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+		return ReadyBeads{}, &connError{err: fmt.Errorf("nil response")}
 	}
 	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
+		return ReadyBeads{}, err
 	}
-	return CachedRead[[]beads.Bead]{
-		Body:       beadsFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	partial, partialErrs := readyPartialFromGen(resp.JSON200)
+	return ReadyBeads{
+		Body:          beadsFromGenList(resp.JSON200),
+		AgeSeconds:    cacheAgeFromResponse(resp.HTTPResponse),
+		Partial:       partial,
+		PartialErrors: partialErrs,
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -320,6 +321,13 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	return q
 }
 
+// CityReadyPartialLabel is the partialAggregator label the federated
+// /beads/ready handler records city-store failures under. ReadyBeads.
+// CityReadAuthoritative keys off it (partialAggregator records failures as
+// "<label>: <error>") to tell a partial read that omitted the city store —
+// where graph control beads live — apart from one that only lost a rig store.
+const CityReadyPartialLabel = "city"
+
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
@@ -337,19 +345,37 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		// Under graph_store=sqlite a worker only ever executes graph nodes, so the
-		// worker/dispatcher readiness hot loop reads the ClassGraph backend ALONE
-		// and skips the Dolt ClassWork leg. Capability presence gates this: only a
-		// graph_store=sqlite Router exposes ReadyGraphOnly; every other store falls
-		// through to the full live Ready (byte-identical for default cities). The
-		// human/diagnostic backlog view reads store.Ready() directly, not this
-		// endpoint, so it is unaffected.
+		// /beads/ready is authoritative live readiness by default: it reads the
+		// live backing store so no caller ever sees a closed or newly-blocked
+		// bead reported as ready (TestBeadReadyUsesLiveLookup). The control
+		// dispatcher (api.Client.ListReadyBeads) opts into cached=true to read
+		// the supervisor cache projection instead, so its tight serve loop
+		// avoids the blocking/failing backing-store scan the control-ready cache
+		// exists to avoid. For the supervisor's CachingStore the Cached handle's
+		// ReadyCacheOnly reads the in-memory projection and never primes the
+		// backing store (returning ErrCacheUnavailable when the projection is not
+		// live, which the federation surfaces as a partial/outage so the
+		// dispatcher backs off instead of hanging on a cold or dirty cache); for
+		// a plain store both handles delegate to the same Ready, so non-caching
+		// backends behave identically on either path.
+		//
+		// The default (non-cached) path additionally honors the
+		// graph_store=sqlite optimization: a worker only ever executes graph
+		// nodes, so the worker/dispatcher readiness hot loop reads the ClassGraph
+		// backend ALONE and skips the Dolt ClassWork leg. Capability presence
+		// gates this: only a graph_store=sqlite Router exposes ReadyGraphOnly;
+		// every other store falls through to the full live Ready (byte-identical
+		// for default cities). The human/diagnostic backlog view reads
+		// store.Ready() directly, not this endpoint, so it is unaffected.
+		handles := beads.HandlesFor(store)
 		var ready []beads.Bead
 		var err error
-		if g, ok := beads.GraphOnlyReadyFor(store); ok {
+		if input.Cached {
+			ready, err = handles.Cached.ReadyCacheOnly()
+		} else if g, ok := beads.GraphOnlyReadyFor(store); ok {
 			ready, err = g.ReadyGraphOnly()
 		} else {
-			ready, err = beads.HandlesFor(store).Live.Ready()
+			ready, err = handles.Live.Ready()
 		}
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
@@ -370,16 +396,30 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			all = append(all, b)
 		}
 	}
-	// The city store is NOT among the per-rig BeadStores(); city-scope ready work
-	// (graph.v2 molecules in a single-HQ city, control beads) lives there, so
-	// federate it first or HTTP `bd ready` would never surface it.
-	federate("city", s.state.CityBeadStore())
+	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
+	// beads) lives in the city store, so federate it explicitly first or HTTP
+	// `bd ready` would never surface it. In production BeadStores() also returns
+	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
+	// duplicate key in the rig loop below to avoid querying it twice.
+	federate(CityReadyPartialLabel, s.state.CityBeadStore())
+	cityName := s.state.CityName()
 	for _, rigName := range rigNames {
+		if rigName == cityName {
+			continue // city store already federated above under its own label
+		}
 		federate("rig "+rigName, stores[rigName])
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
+
+	// Apply the control-ready predicate and per-group limit server-side, before
+	// serialization, when the caller (the control dispatcher) supplied them. This
+	// keeps the dispatcher from pulling the full federated ready set across the
+	// API just to discard everything that is not its own control work. An
+	// inactive filter (no control params) returns the set unchanged, so generic
+	// callers keep the full ready list.
+	all = beadReadyControlFilter(input).Apply(all)
 
 	if all == nil {
 		all = []beads.Bead{}
@@ -505,6 +545,35 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 	}, nil
 }
 
+// beadReadyControlFilter builds the server-side control-ready filter from the
+// /beads/ready query params. It is inactive (a no-op over the federated set)
+// unless control_assignees or control_routes is set, so generic ready callers
+// (CLI, dashboard) are unaffected.
+func beadReadyControlFilter(input *BeadReadyInput) beads.ControlReadyFilter {
+	return beads.ControlReadyFilter{
+		Assignees:     splitControlReadyList(input.ControlAssignees),
+		Routes:        splitControlReadyList(input.ControlRoutes),
+		PerGroupLimit: input.ControlLimit,
+	}
+}
+
+// splitControlReadyList splits a comma-separated control-ready param into a
+// trimmed, empty-free slice. Control assignees and routes are session names and
+// template/route identifiers, which never contain commas.
+func splitControlReadyList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
 	rootID := input.RootID
@@ -596,7 +665,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			ParentID: id,
 			Sort:     beads.SortCreatedAsc,
 		})
-		if err != nil && !(beads.IsPartialResult(err) && len(children) > 0) {
+		if err != nil && (!beads.IsPartialResult(err) || len(children) <= 0) {
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
 		children = appendMetadataAttachedChildren(store, parent, children)

@@ -1,5 +1,76 @@
 # Handoff — finish the non-work field-door cleanup (P4–P6) + open PR #3839
 
+## SESSION UPDATE 2026-06-30 — corrected scope + progress (read this first)
+
+The original framing below ("P4 is a *safe mechanical migration*") is **only
+true for the localized sites**. The audit found, and this session confirmed, that
+the **bulk of P4 is a coupled type cascade**, not isolated field swaps:
+
+- The session snapshot is handed across function boundaries as **`[]beads.Bead`**
+  into the pool-demand / work-scope / desired-state engine. To stop the leak,
+  those signatures must flip to **`[]session.Info`** atomically (you cannot
+  half-change a signature). The connected component spans ~8 files:
+  `pool_desired_state.go` (`ComputePoolDesiredStates*`,
+  `canonicalSingletonAliasHeldTemplates`, `poolInFlightNewRequests`),
+  `assigned_work_scope.go` (`filterAssignedWorkBeadsForPoolDemand`,
+  `sessionAgentConfig`), `session_reconcile.go` (`capWakeConfigByDemand`,
+  `applyDependencyWakeReasons`, `preferredDependencySessions`, `topoOrder`),
+  `pool_session_name.go` (`GCSweepSessionBeads`), `usage_compute.go`
+  (`emitDueComputeFacts`), plus the `build_desired_state.go` / `city_runtime.go`
+  / `cmd_start.go` callers that pass `Open()` in.
+- The **reconciler threads `*beads.Bead session`** through dozens of helpers
+  (`healState`, `checkStability`, `checkChurn`, …). Converting
+  `isNamedSessionBead(*session)` → `isNamedSessionInfo(info)` means the reconciler
+  must carry the `Info` alongside/instead of the bead — another cascade.
+- Several sites need **new foundation first** (additive `Info` fields + a sibling
+  + an equivalence case): `started_config_hash` (soft_reload), the MCP-key
+  cluster + `beadUsesACPTransportInfo` (providers `observedACPSessionNames`),
+  `Status`/`Assignee`/raw-metadata-map for `sessionBeadSnapshotFingerprint`
+  (city_runtime), and `Info` forms of `sessionCoreConfigForHash`,
+  `lookupSessionBeadByID`, `IsSessionBeadOrRepairable`, the soft-reload drain
+  helpers, the wait-nudge helpers, and the `*ForAgent` family
+  (`isManualSessionBeadForAgent`/`isEphemeralSessionBeadForAgent`/
+  `isLegacyManualSessionBeadForAgent`), `sessionAgentMetricIdentity`,
+  `existingPoolSlot`, `namedSessionMode`/`Identity`/`ContinuityEligible`,
+  the wake helpers, `isRetiredSessionModelOwner`.
+
+**Foundation correction:** the original handoff undercounted the existing `*Info`
+siblings (the `session` vs `sessionpkg` import alias hid them). There are **23**
+siblings already; `isNamedSessionInfo`, `isFailedCreateSessionInfo`,
+`infoOwnsPoolSessionName`, `isPendingPoolCreateInfo`,
+`sessionBeadAssigneeIdentitiesInfo` all exist. The list above is what is *still*
+missing.
+
+**Done this session (all byte-identical, build+equivalence-green, committed,
+pushed):** the localized snapshot-consumer sites — trace open-counts,
+`template_resolve`, `city-status` Find* lookups, `cmd_wait` wait-diag loops,
+`city_runtime` `poolSweepWouldDrain`, `openSessionNameTaken`, the reaper
+`FindInfoByID`. **P6 read-guard landed:**
+`TestSnapshotInfoOnlyFilesStayOnInfoAccessors` (in `frontdoor_di_guard_test.go`)
+pins the 4 files that are now fully accessor-free (`template_resolve`,
+`session_name_lookup`, `cmd_citystatus`, `session_reconciler_trace_cycle`);
+add files to `snapshotInfoOnlyFiles` as each becomes accessor-free. Shared
+contract for the per-file work: `P4-CONVERSION-CONTRACT.md` (this directory).
+
+**Remaining raw-accessor surface (~33 uses):** `city_runtime.go` (10),
+`build_desired_state.go` (10), then `session_beads.go`, `named_sessions.go`
+(session-pkg `[]beads.Bead` API — needs an `Info`-returning
+`FindCanonicalNamedSession`/`FindNamedSessionConflict`), `cmd_wait.go` (2
+FindByID → wait-nudge cascade), `cmd_start.go`, `soft_reload.go`,
+`session_lifecycle_parallel.go`, `providers.go`, `nudge_dispatcher.go`,
+`city_status_snapshot.go` (1 each). Nearly all are the cascade or a
+foundation-gap above — **not** further free swaps.
+
+**Recommended next-session order:** (1) the providers MCP-key vertical slice as
+a worked example of the full add-field→sibling→equivalence→convert pattern; (2)
+the pool-demand `[]beads.Bead`→`[]session.Info` cascade (biggest unlock); (3) the
+reconciler `*session` Info-threading; (4) P5 `closeBead`; (5) finish P6 deletion
++ widen the guard. Each cascade is one atomic, carefully-reviewed change — do
+**not** fan parallel agents at a single connected component.
+
+---
+
+
 **Goal of the remaining work:** make direct reads of metadata/bead-fields on
 non-work objects (session/nudge/mail/order/graph) *impossible to compile*. Then
 mark **PR #3839** ready and label it `status/needs-review-auto`.

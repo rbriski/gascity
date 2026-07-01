@@ -420,6 +420,17 @@ func poolSessionConsumesNewDemand(session beads.Bead) bool {
 	return state == "creating" || state == string(sessionpkg.StateStartPending)
 }
 
+// poolSessionConsumesNewDemandInfo is the session.Info sibling of
+// poolSessionConsumesNewDemand, reading PendingCreateClaim and the raw
+// MetadataState instead of raw bead metadata. Equivalence-proven.
+func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
+	if info.PendingCreateClaim {
+		return true
+	}
+	state := strings.TrimSpace(info.MetadataState)
+	return state == "creating" || state == string(sessionpkg.StateStartPending)
+}
+
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {

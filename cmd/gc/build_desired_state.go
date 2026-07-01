@@ -3159,6 +3159,32 @@ func existingPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead) int {
 	return 0
 }
 
+// existingPoolSlotInfo is the session.Info sibling of existingPoolSlot, reading
+// typed Info fields (PoolSlot / Alias / SessionNameMetadata) and the Info
+// classifiers instead of raw bead metadata. Equivalence-proven.
+func existingPoolSlotInfo(cfgAgent *config.Agent, info session.Info) int {
+	if cfgAgent == nil {
+		return 0
+	}
+	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	if info.PoolSlot != "" {
+		if slot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); err == nil && slot > 0 {
+			return slot
+		}
+	}
+	if slot := resolvePersistedPoolIdentitySlot(cfgAgent, true, sessionBeadAgentNameInfo(info), info.Alias); slot > 0 {
+		return slot
+	}
+	if strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+		if slot := resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata); slot > 0 {
+			return slot
+		}
+	}
+	return 0
+}
+
 func resolvePersistedPoolIdentitySlot(cfgAgent *config.Agent, allowLocalIdentity bool, candidates ...string) int {
 	if cfgAgent == nil {
 		return 0

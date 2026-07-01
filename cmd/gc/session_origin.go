@@ -124,6 +124,22 @@ func isEphemeralSessionBeadForAgent(bead beads.Bead, cfgAgent *config.Agent) boo
 	return existingPoolSlot(cfgAgent, bead) > 0
 }
 
+// isEphemeralSessionInfoForAgent is the session.Info sibling of
+// isEphemeralSessionBeadForAgent, reading Info classifiers instead of raw beads.
+// Equivalence-proven.
+func isEphemeralSessionInfoForAgent(info sessionpkg.Info, cfgAgent *config.Agent) bool {
+	if isEphemeralSessionInfo(info) {
+		return true
+	}
+	if cfgAgent == nil || !cfgAgent.SupportsInstanceExpansion() {
+		return false
+	}
+	if isNamedSessionInfo(info) || isManualSessionInfo(info) {
+		return false
+	}
+	return existingPoolSlotInfo(cfgAgent, info) > 0
+}
+
 func templateParamsSessionOrigin(tp TemplateParams) string {
 	switch {
 	case strings.TrimSpace(tp.ConfiguredNamedIdentity) != "":

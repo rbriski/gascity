@@ -778,6 +778,18 @@ func sessionHasProviderTerminalError(session beads.Bead) bool {
 		strings.TrimSpace(session.Metadata[sessionHealthReasonMetadataKey]) != ""
 }
 
+// sessionHasProviderTerminalErrorInfo is the session.Info sibling of
+// sessionHasProviderTerminalError, reading the typed health/terminal-error
+// mirrors instead of raw bead metadata. Equivalence-proven.
+func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
+	if strings.TrimSpace(info.ProviderTerminalError) != "" {
+		return true
+	}
+	return strings.TrimSpace(info.HealthState) == "unhealthy" &&
+		info.Drainable &&
+		strings.TrimSpace(info.HealthReason) != ""
+}
+
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.
 // agentIdentity is the start-path-joinable agent label for gc.agent.quarantines.total,
 // resolved by the caller from its authoritative source (the cfg-aware metric

@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -362,6 +364,64 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"transport": "tmux",
 			},
 		},
+		"provider-terminal-error": {
+			ID:     "ga-provterm",
+			Type:   session.BeadType,
+			Title:  "term",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                "worker",
+				"provider_terminal_error": "boom",
+			},
+		},
+		"unhealthy-drainable-reasoned": {
+			ID:     "ga-unhealthy",
+			Type:   session.BeadType,
+			Title:  "unhealthy",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":              "worker",
+				"session_health":        "unhealthy",
+				"session_drainable":     "true",
+				"session_health_reason": "stuck",
+			},
+		},
+		"unhealthy-not-drainable": {
+			ID:     "ga-unhealthynd",
+			Type:   session.BeadType,
+			Title:  "unhealthy",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":              "worker",
+				"session_health":        "unhealthy",
+				"session_health_reason": "stuck",
+			},
+		},
+		"creating-consumes-demand": {
+			ID:     "ga-creating",
+			Type:   session.BeadType,
+			Title:  "creating",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template": "worker",
+				"state":    "creating",
+			},
+		},
+		"trigger-brain-marked": {
+			ID:     "ga-trigger",
+			Type:   session.BeadType,
+			Title:  "trigger",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                              "worker",
+				"pool_managed":                          "true",
+				"pool_slot":                             "1",
+				"state":                                 "creating",
+				beadmeta.TriggerBeadIDMetadataKey:       "tb-1",
+				beadmeta.TriggerBeadStoreRefMetadataKey: "riga",
+				beadmeta.BrainParentSIDMetadataKey:      "brain-1",
+			},
+		},
 	}
 
 	const tmpl = "worker"
@@ -370,17 +430,42 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
 	}{
-		"isPoolManagedSessionBead":  {isPoolManagedSessionBead, isPoolManagedSessionInfo},
-		"isEphemeralSessionBead":    {isEphemeralSessionBead, isEphemeralSessionInfo},
-		"isManualSessionBead":       {isManualSessionBead, isManualSessionInfo},
-		"isNamedSessionBead":        {isNamedSessionBead, isNamedSessionInfo},
-		"isDrainedSessionBead":      {isDrainedSessionBead, isDrainedSessionInfo},
-		"isFailedCreateSessionBead": {isFailedCreateSessionBead, isFailedCreateSessionInfo},
-		"isPendingPoolCreate":       {isPendingPoolCreate, isPendingPoolCreateInfo},
-		"isStaleCreating":           {isStaleCreating, isStaleCreatingInfo},
-		"isKnownState":              {isKnownState, isKnownStateInfo},
-		"isPoolSessionSlotFreeable": {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
-		"beadOwnsPoolSessionName":   {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
+		"isPoolManagedSessionBead":        {isPoolManagedSessionBead, isPoolManagedSessionInfo},
+		"isEphemeralSessionBead":          {isEphemeralSessionBead, isEphemeralSessionInfo},
+		"isManualSessionBead":             {isManualSessionBead, isManualSessionInfo},
+		"isNamedSessionBead":              {isNamedSessionBead, isNamedSessionInfo},
+		"isDrainedSessionBead":            {isDrainedSessionBead, isDrainedSessionInfo},
+		"isFailedCreateSessionBead":       {isFailedCreateSessionBead, isFailedCreateSessionInfo},
+		"isPendingPoolCreate":             {isPendingPoolCreate, isPendingPoolCreateInfo},
+		"isStaleCreating":                 {isStaleCreating, isStaleCreatingInfo},
+		"isKnownState":                    {isKnownState, isKnownStateInfo},
+		"isPoolSessionSlotFreeable":       {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
+		"beadOwnsPoolSessionName":         {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
+		"sessionHasProviderTerminalError": {sessionHasProviderTerminalError, sessionHasProviderTerminalErrorInfo},
+		"poolSessionConsumesNewDemand":    {poolSessionConsumesNewDemand, poolSessionConsumesNewDemandInfo},
+	}
+
+	// Agent-dependent classifiers. A bare pool agent (no instance-expansion, no
+	// canonical-singleton identity) exercises existingPoolSlot's slot parsing and
+	// isEphemeralSessionBeadForAgent's ephemeral-first branch.
+	agentFixture := &config.Agent{Name: "worker"}
+	agentBoolChecks := map[string]struct {
+		bead func(beads.Bead) bool
+		info func(session.Info) bool
+	}{
+		"isEphemeralSessionBeadForAgent": {
+			func(b beads.Bead) bool { return isEphemeralSessionBeadForAgent(b, agentFixture) },
+			func(i session.Info) bool { return isEphemeralSessionInfoForAgent(i, agentFixture) },
+		},
+	}
+	agentIntChecks := map[string]struct {
+		bead func(beads.Bead) int
+		info func(session.Info) int
+	}{
+		"existingPoolSlot": {
+			func(b beads.Bead) int { return existingPoolSlot(agentFixture, b) },
+			func(i session.Info) int { return existingPoolSlotInfo(agentFixture, i) },
+		},
 	}
 
 	stringChecks := map[string]struct {
@@ -456,6 +541,16 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			for name, c := range boolChecks {
 				if got, want := c.info(info), c.bead(b); got != want {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
+				}
+			}
+			for name, c := range agentBoolChecks {
+				if got, want := c.info(info), c.bead(b); got != want {
+					t.Errorf("%s: info=%v bead=%v", name, got, want)
+				}
+			}
+			for name, c := range agentIntChecks {
+				if got, want := c.info(info), c.bead(b); got != want {
+					t.Errorf("%s: info=%d bead=%d", name, got, want)
 				}
 			}
 			for name, c := range cfgBoolChecks {

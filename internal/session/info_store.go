@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -67,6 +68,19 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		Labels:                  b.Labels,
 		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
 		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
+
+		// health / provider-terminal-error cluster. The key literals mirror the
+		// cmd/gc session_reconcile constants (session_health, session_drainable,
+		// …); the classifier-equivalence test guards against drift.
+		ProviderTerminalError: b.Metadata["provider_terminal_error"],
+		HealthState:           b.Metadata["session_health"],
+		HealthReason:          b.Metadata["session_health_reason"],
+		Drainable:             strings.TrimSpace(b.Metadata["session_drainable"]) == "true",
+
+		// trigger / brain-parent cluster (canonical gc.* keys via beadmeta).
+		TriggerBeadID:       b.Metadata[beadmeta.TriggerBeadIDMetadataKey],
+		TriggerBeadStoreRef: b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey],
+		BrainParentSID:      b.Metadata[beadmeta.BrainParentSIDMetadataKey],
 
 		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
 		// kept verbatim so the reconciler classifiers read the same value the

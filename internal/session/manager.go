@@ -138,6 +138,27 @@ type Info struct {
 	MCPIdentity        string // mcp_identity (raw)
 	MCPServersSnapshot string // mcp_servers_snapshot (raw)
 
+	// --- health / provider-terminal-error cluster (controller read surface) ---
+	//
+	// The pool-demand and reconciler paths treat a session with a persisted
+	// provider terminal error (or an unhealthy+drainable+reasoned health record)
+	// as spent, excluding it from resume and in-flight demand. These mirror the
+	// raw markers so the Info form of that classifier stays byte-identical.
+	// Additive, internal-only (absent from the HTTP wire).
+	ProviderTerminalError string // provider_terminal_error (raw)
+	HealthState           string // session_health (raw)
+	HealthReason          string // session_health_reason (raw)
+	Drainable             bool   // session_drainable == "true"
+
+	// --- trigger / brain-parent cluster (controller read surface) ---
+	//
+	// poolInFlightNewRequests stamps these onto the new-tier SessionRequest it
+	// emits for a pool-managed creating session. Raw mirrors of the gc.* keys.
+	// Additive, internal-only (absent from the HTTP wire).
+	TriggerBeadID       string // gc.trigger_bead_id (raw)
+	TriggerBeadStoreRef string // gc.trigger_bead_store_ref (raw)
+	BrainParentSID      string // gc.brain_parent_sid (raw)
+
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//
 	// These complete the codec for the classifier predicates that read raw

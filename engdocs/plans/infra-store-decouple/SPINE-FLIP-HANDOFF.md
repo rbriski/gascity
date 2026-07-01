@@ -2,7 +2,7 @@
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`,
-**HEAD `6ccf9d698`** (pushed; Phase 2 + Phase-1 cluster 1 landed). Self-contained
+**HEAD `6c1e41d1b`** (pushed; Phase 2 + Phase-1 clusters 1+2 landed). Self-contained
 guide for finishing the reconciler spine flip. It supersedes the Fork-A material in
 `RECONCILER-CASCADE-HANDOFF.md` (kept only as background).
 
@@ -115,12 +115,40 @@ on the raw bead (accepted).** Therefore:
   `unknown_state` decision + template values) + all 205
   `TestReconcileSessionBeads*`.
 
+**DONE — Phase 1, cluster 2: pending-create rollback gate (`6c1e41d1b`):**
+- The pending-create rollback block in the `!desired` branch
+  (`session_reconciler.go:~1338–1357`) — the FIRST block inside `!desired`,
+  ending in `continue`. Converted the four pure decision reads:
+  `shouldRollbackPendingCreate`→`shouldRollbackPendingCreateInfo(info)`,
+  `pendingCreateLeaseExpiredForRollback`→`…Info(info,…)`,
+  `normalizedSessionTemplate`+`session.Metadata["template"]`→
+  `normalizedSessionTemplateInfo(info,cfg)`+`info.Template`,
+  `configuredNamedSessionBeadHasSpec`→`…Info(info,…)`.
+- **Pre-heal safety class (same as cluster 1, NO re-derive):** this whole block
+  is before the heal. The only mutations reachable here —
+  `checkRateLimitStability` (on its hit/err path) and `attemptRollbackPendingCreate`
+  — each `continue`, and `workerSessionTargetRunningWithConfig` (`~1331`) reads by
+  ID, so control only reaches the next decision read on the still-unmutated bead;
+  the top-of-loop `info` stays byte-identical. The two mutation calls keep the raw
+  `*session` pointer they write through.
+- New equivalence-proven Info siblings (each composes proven leaves):
+  `shouldRollbackPendingCreateInfo` (`session_lifecycle_parallel.go`),
+  `pendingCreateNeverStartedExpiredInfo` + `pendingCreateLeaseExpiredForRollbackInfo`
+  (`session_reconciler.go`), `namedSessionIdentityInfo` +
+  `configuredNamedSessionBeadHasSpecInfo` (`named_sessions.go`). Equivalence test
+  gained 5 cases + a real-cfg guard (`namedSpecCfg`) asserting the named fixture
+  hits the has-spec true branch (not a trivial both-false pass). Verified: build/
+  vet/lint clean; equivalence + 205 `TestReconcileSessionBeads*` + rollback/lease
+  chaos + trace-integration + pool/named suites.
+
 **Verified scope (at HEAD `6ccf9d698`):** 194 raw `.Metadata[` reads at the
 CONT-5 census — reconciler 123 / reconcile 50 / wake 21 — plus 6 `.Status`.
 Most are inside the raw machinery that stays. Only DECISION reads convert.
-Phase 2 + Phase-1-cluster-1 have converted the drain-advance loop and the
-reconciler loop preamble; the rest of the Phase-1 main loop (orphan/suspend,
-heal/stability, pool-demand) is the remaining bulk.
+Phase 2 + Phase-1 clusters 1+2 have converted the drain-advance loop, the
+reconciler loop preamble, and the pending-create rollback gate; the rest of the
+`!desired` pre-heal region (preserve-named, failed-create-close) is cluster 3,
+and the post-heal region (heal/stability, drain-ack, orphan-drain/close,
+pool-demand) is the remaining bulk (cluster 4+, first genuine re-derive).
 
 ## Field-gaps still needed (decision-reads only)
 
@@ -146,22 +174,50 @@ heal/stability, pool-demand) is the remaining bulk.
    as its cluster reaches it.
    - **DONE — cluster 1 (`6ccf9d698`): loop preamble (`~1246–1275`).** The
      mutation-free top of the per-session loop (see the Status "cluster 1" block).
-   - **NEXT — cluster 2: the `!desired` orphan/suspend branch (`~1277`+).** This
-     is where the FIRST mutations of the iteration occur — `attemptRollbackPendingCreate`,
-     the inline `session.Status = "closed"` (`~1369`), and
-     `healStateWithRollback` (`~1382`, which mutates `session.Metadata` in
-     lockstep via `sessFront`). So the top-of-loop `info` is stale after each of
-     these — **re-derive `info := sessionpkg.InfoFromPersistedBead(*session)`
-     after every mutation**, or keep the post-mutation reads raw and convert only
-     the pre-mutation decision reads in this branch. Audit each helper's mutation
-     behavior first (as cluster 1 audited `reconcileDrainAckStopPending`):
-     `checkRateLimitStability`, `isFailedCreateSessionBead`,
-     `preserveConfiguredNamedSessionBead`, `shouldRollbackPendingCreate`,
-     `pendingCreateLeaseExpiredForRollback` are the candidates; `stateBeforeHeal`/
-     `pendingCreateStartedAtBeforeHeal`/`lastWokeAtBeforeHeal` (`~1379–1381`) are
-     read-before-heal snapshots that MUST stay pre-mutation raw (or a pre-heal
-     `info`). Do this with fresh context — it is the first re-derive-after-mutation
-     cluster.
+   - **DONE — cluster 2 (`6c1e41d1b`): pending-create rollback gate (`~1338–1357`).**
+     The first block inside `!desired`. See the Status "cluster 2" block.
+
+   **KEY RE-FRAMING (corrects the earlier plan):** the `!desired` orphan/suspend
+   branch does NOT need re-derive until the heal. Everything from the top of
+   `!desired` (`~1330`) down to **`healStateWithRollback` (`session_reconciler.go:1441`)**
+   is the **pre-heal region**: every mutation reachable before the heal
+   (`checkRateLimitStability` on hit/err, `attemptRollbackPendingCreate`, the inline
+   `session.Status="closed"` at the failed-create close, `~1428`) is immediately
+   followed by `continue`, and `workerSessionTargetRunningWithConfig` reads by ID.
+   So control only reaches the next decision read on the still-unmutated bead, and
+   the **top-of-loop `info` stays byte-identical for the whole pre-heal region** —
+   same safety class as clusters 1–2, **NO re-derive**. The genuine
+   re-derive-after-mutation work is the **post-heal region** (after `1441`).
+
+   - **NEXT — cluster 3: the remaining pre-heal blocks (`~1367–1436`), still no
+     re-derive.** Two sub-blocks, both before the heal, both reusing the top-of-loop
+     `info`:
+     - **preserve-named + rate-limit (`~1367`):**
+       `preserveConfiguredNamedSessionBead(*session,cfg,cityName)`→ new
+       `preserveConfiguredNamedSessionBeadInfo(info,cfg,cityName)` (composes
+       `isNamedSessionInfo` + `namedSessionIdentityInfo` [now exists] +
+       `findNamedSessionSpec` + `info.SessionNameMetadata`/`info.MetadataState`/
+       `info.SleepReason`/`info.LastWokeAt` via `parseRFC3339Metadata`); trace
+       `normalizedSessionTemplate`→`normalizedSessionTemplateInfo(info,cfg)`
+       [exists]. `checkRateLimitStability` stays raw (mutation).
+     - **failed-create close (`~1405–1436`):**
+       `isFailedCreateSessionBead(*session)`→`isFailedCreateSessionInfo(info)`
+       [exists]; `pendingCreateSessionStillLeased(*session,cfg,clk)` (`~1410`,
+       PRE-heal)→ new `pendingCreateSessionStillLeasedInfo(info,cfg,clk)` (composes
+       `pendingCreateLeaseActiveInfo` [exists] + a new `sessionStartRequestedInfo` +
+       `normalizedSessionTemplateInfo` + `findAgentByTemplate`); template reads
+       [exists]. The inline `session.Status="closed"` write + the read-before-heal
+       snapshots (`stateBeforeHeal`/`pendingCreateStartedAtBeforeHeal`/
+       `lastWokeAtBeforeHeal`, `~1438–1440`) stay raw. Trace-payload raw-string
+       reads (`session.Metadata["pending_create_claim"]`, `["state"]`) may stay raw
+       or use `info.MetadataState` — the `pending_create_claim` one has no raw-string
+       Info mirror (`Info.PendingCreateClaim` is a bool), so keep it raw.
+   - **THEN — cluster 4+: the post-heal region (`1441`+), the first genuine
+     re-derive cluster.** After `healStateWithRollback` mutates `session.Metadata`,
+     **re-derive `info := sessionpkg.InfoFromPersistedBead(*session)`** and convert
+     the switch/`default` decision reads (post-heal `pendingCreateSessionStillLeased`
+     at `~1476`, the drain-ack block, the orphan-drain/suspend/close block). Do this
+     with fresh context — it is where the stale-`info` risk actually lives.
 3. **Leave raw:** the apply/write-back cluster (`healState*`, `checkStability`,
    `checkChurn`, `record*`/`clear*`, `markProviderTerminalError`, `healExpiredTimers`,
    `persistSessionCircuitBreakerMetadata`, the inline `session.Status="closed"` /

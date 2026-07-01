@@ -6,7 +6,7 @@ Paste the block below into a fresh session.
 
 Continue the **reconciler spine flip** on **PR #3839** (branch
 `upstream/object-front-doors-cleanup`, base `main`, DRAFT, worktree
-`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `6ccf9d698`).
+`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `6c1e41d1b`).
 
 **Read first:** `engdocs/plans/infra-store-decouple/SPINE-FLIP-HANDOFF.md` — the
 authoritative, self-contained guide (design = Fork B, verified scope, field-gap
@@ -43,34 +43,51 @@ git checkout go.sum
 - **Phase 1, cluster 1 (`6ccf9d698`):** the reconciler loop preamble
   (`session_reconciler.go:~1246–1275`) → `info` (name, reset-pending,
   known-state, unknown-state trace); proven mutation-free-prefix.
+- **Phase 1, cluster 2 (`6c1e41d1b`):** the pending-create rollback gate
+  (`session_reconciler.go:~1338–1357`, first block inside `!desired`) → `info`
+  (shouldRollback, leaseExpired, template, configuredNamedSpec). Added 5 Info
+  siblings (`shouldRollbackPendingCreateInfo`, `pendingCreateNeverStartedExpiredInfo`,
+  `pendingCreateLeaseExpiredForRollbackInfo`, `namedSessionIdentityInfo`,
+  `configuredNamedSessionBeadHasSpecInfo`) + 5 equivalence cases + a real-cfg guard.
+  **Key finding:** this block is PRE-heal, so it reuses the top-of-loop `info`
+  with NO re-derive (the block's mutations all `continue`).
 
-**First concrete increment (do this, as ONE verified commit): Phase 1, cluster 2
-— the `!desired` orphan/suspend branch (`session_reconciler.go:~1277`+).**
-This is the FIRST re-derive-after-mutation cluster (do it with fresh context):
-1. The branch mutates the session mid-iteration: `attemptRollbackPendingCreate`,
-   the inline `session.Status = "closed"` (`~1369`), and `healStateWithRollback`
-   (`~1382`, mutates `session.Metadata` in lockstep via `sessFront`). So the
-   top-of-loop `info` from cluster 1 is STALE after each mutation.
-2. Audit each helper's mutation behavior first (as cluster 1 audited
-   `reconcileDrainAckStopPending`): `checkRateLimitStability`,
-   `isFailedCreateSessionBead`, `preserveConfiguredNamedSessionBead`,
-   `shouldRollbackPendingCreate`, `pendingCreateLeaseExpiredForRollback`.
-   `stateBeforeHeal`/`pendingCreateStartedAtBeforeHeal`/`lastWokeAtBeforeHeal`
-   (`~1379–1381`) are read-before-heal snapshots — keep them pre-heal (raw or a
-   pre-heal `info`).
-3. Convert only the pre-mutation decision reads in this branch, and/or
-   **re-derive `info := sessionpkg.InfoFromPersistedBead(*session)` after each
-   mutation** for the reads that follow it. The template reads here still use
-   `normalizedSessionTemplate(*session, cfg)` — convert to
-   `normalizedSessionTemplateInfo(info, cfg)` only where `info` is current.
-4. Verify: build + vet + lint + equivalence + trace-integration + the full
-   `TestReconcileSessionBeads*` suite (205 tests; run with a ≥420s timeout — the
-   box overloads under `fork/exec`, split the run if it times out).
+**KEY RE-FRAMING (the earlier plan was wrong about this):** the `!desired` branch
+does NOT need re-derive until the heal. Everything from the top of `!desired`
+(`~1330`) down to **`healStateWithRollback` (`session_reconciler.go:1441`)** is the
+**pre-heal region** — same safety class as clusters 1–2, NO re-derive. The genuine
+re-derive-after-mutation work is the **post-heal region** (after `1441`).
 
-**Then:** the remaining Phase-1 clusters (heal/stability, pool-demand,
-named-identity), cluster by cluster, adding `Info.StartedConfigHash` (raw) and a
-`pin_awake` mirror as their sites are reached (see the handoff field-gap table).
-Leave the apply/write-back cluster + ProjectLifecycle + circuit breaker raw.
+**First concrete increment (do this, as ONE verified commit): Phase 1, cluster 3
+— the remaining pre-heal blocks (`session_reconciler.go:~1367–1436`).** Still NO
+re-derive — reuse the top-of-loop `info`. Two sub-blocks:
+1. **preserve-named + rate-limit (`~1367`):** `preserveConfiguredNamedSessionBead`
+   → new `preserveConfiguredNamedSessionBeadInfo` (composes `isNamedSessionInfo` +
+   `namedSessionIdentityInfo` [now exists] + `findNamedSessionSpec` +
+   `info.SessionNameMetadata`/`MetadataState`/`SleepReason`/`LastWokeAt`);
+   trace `normalizedSessionTemplate`→`normalizedSessionTemplateInfo(info,cfg)`
+   [exists]. `checkRateLimitStability` stays raw (mutation).
+2. **failed-create close (`~1405–1436`):** `isFailedCreateSessionBead`
+   →`isFailedCreateSessionInfo(info)` [exists]; `pendingCreateSessionStillLeased`
+   (`~1410`, PRE-heal)→ new `pendingCreateSessionStillLeasedInfo` (composes
+   `pendingCreateLeaseActiveInfo` [exists] + new `sessionStartRequestedInfo` +
+   `normalizedSessionTemplateInfo` + `findAgentByTemplate`); template reads [exists].
+   The inline `session.Status="closed"` write + the read-before-heal snapshots
+   (`~1438–1440`) stay raw. The `session.Metadata["pending_create_claim"]`
+   trace-payload read stays raw (`Info.PendingCreateClaim` is a bool, not the raw
+   string).
+3. Verify: build + vet + lint + equivalence + trace-integration + the full
+   `TestReconcileSessionBeads*` suite (205 tests; ≥420s timeout — the box overloads
+   under `fork/exec`, split the run if it times out) + rollback/lease chaos + pool/
+   named suites.
+
+**Then:** cluster 4+ — the **post-heal region** (`1441`+), the FIRST genuine
+re-derive cluster: after the heal, **re-derive
+`info := sessionpkg.InfoFromPersistedBead(*session)`** and convert the switch/
+`default` decision reads (post-heal `pendingCreateSessionStillLeased` at `~1476`,
+the drain-ack block, the orphan-drain/suspend/close block). Add `Info.StartedConfigHash`
+(raw) + a `pin_awake` mirror as later sites reach them (see the handoff field-gap
+table). Leave the apply/write-back cluster + ProjectLifecycle + circuit breaker raw.
 
 **Method:** keep original + ADD the `Info` field/sibling + ADD an equivalence case
 (byte-identical oracle) + THEN convert the decision read via the per-iteration

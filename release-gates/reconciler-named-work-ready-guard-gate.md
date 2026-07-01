@@ -19,7 +19,7 @@ the deployer release criteria and the repo testing guidance in TESTING.md.
 | 3 | Tests pass | PASS | Required repro tests passed. Broader desired-state/pool regression family passed. `make test-fast-parallel` passed all 8 fast shards. `go vet ./...` passed. |
 | 4 | No high-severity review findings open | PASS | Reviewer notes list no unresolved HIGH findings; the change is described as a defense-in-depth correctness guard with no new attack surface. |
 | 5 | Final branch is clean | PASS | No uncommitted changes before gate file creation; this gate file is committed as the branch tip. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` succeeded and produced tree 389a0345e96f58c5cb50aefeb6124ca2d57eaa67. |
+| 6 | Branch diverges cleanly from main | PASS | After refreshing `origin/main` to 87bbc7b36be171d6e2271eb0b887d547e0db0cf6, `git merge-tree --write-tree origin/main HEAD` succeeded and produced tree 9019c2a3caa1b79b95d8704aff3b136fb5826f43. |
 | 7 | Single feature theme | PASS | The commit set touches one subsystem: reconciler desired-state demand calculation for named sessions and tests for that behavior. |
 
 ## Acceptance Checks

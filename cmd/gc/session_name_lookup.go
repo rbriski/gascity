@@ -505,6 +505,39 @@ func pooledFallbackIdentity(bead beads.Bead, cfg *config.City) string {
 	return template + "-" + slot
 }
 
+// sessionAgentMetricIdentityInfo is the session.Info sibling of
+// sessionAgentMetricIdentity, reading typed Info fields instead of raw bead
+// metadata. Equivalence-proven.
+func sessionAgentMetricIdentityInfo(info sessionpkg.Info, cfg *config.City) string {
+	if identity := sessionBeadAgentNameInfo(info); identity != "" {
+		return identity
+	}
+	if pooled := pooledFallbackIdentityInfo(info, cfg); pooled != "" {
+		return pooled
+	}
+	return info.Template
+}
+
+// pooledFallbackIdentityInfo is the session.Info sibling of
+// pooledFallbackIdentity. Equivalence-proven.
+func pooledFallbackIdentityInfo(info sessionpkg.Info, cfg *config.City) string {
+	template := info.Template
+	slot := info.PoolSlot
+	if template == "" || slot == "" {
+		return ""
+	}
+	if cfg != nil {
+		if agent := findAgentByTemplate(cfg, template); agent != nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(slot)); err == nil {
+				if _, qualifiedInstance := poolInstanceIdentity(agent, n, nil); qualifiedInstance != "" {
+					return qualifiedInstance
+				}
+			}
+		}
+	}
+	return template + "-" + slot
+}
+
 // sessionAgentMetricIdentityByName resolves the gc.agent.* identity label for a
 // session referenced by its runtime session name, loading the session bead to
 // read its identity metadata. Returns "" when the store is unavailable or the

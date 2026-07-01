@@ -140,6 +140,34 @@ func isEphemeralSessionInfoForAgent(info sessionpkg.Info, cfgAgent *config.Agent
 	return existingPoolSlotInfo(cfgAgent, info) > 0
 }
 
+// isLegacyManualSessionInfoForAgent is the session.Info sibling of
+// isLegacyManualSessionBeadForAgent, reading typed Info fields instead of raw
+// bead metadata. Equivalence-proven.
+func isLegacyManualSessionInfoForAgent(info sessionpkg.Info, cfgAgent *config.Agent) bool {
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() {
+		return false
+	}
+	if strings.TrimSpace(info.SessionOrigin) != "ephemeral" {
+		return false
+	}
+	if isNamedSessionInfo(info) {
+		return false
+	}
+	if info.PoolManaged {
+		return false
+	}
+	if strings.TrimSpace(info.PoolSlot) != "" {
+		return false
+	}
+	return !info.DependencyOnly
+}
+
+// isManualSessionInfoForAgent is the session.Info sibling of
+// isManualSessionBeadForAgent. Equivalence-proven.
+func isManualSessionInfoForAgent(info sessionpkg.Info, cfgAgent *config.Agent) bool {
+	return isManualSessionInfo(info) || isLegacyManualSessionInfoForAgent(info, cfgAgent)
+}
+
 func templateParamsSessionOrigin(tp TemplateParams) string {
 	switch {
 	case strings.TrimSpace(tp.ConfiguredNamedIdentity) != "":

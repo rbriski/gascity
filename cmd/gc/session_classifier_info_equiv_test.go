@@ -458,6 +458,14 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) bool { return isEphemeralSessionBeadForAgent(b, agentFixture) },
 			func(i session.Info) bool { return isEphemeralSessionInfoForAgent(i, agentFixture) },
 		},
+		"isLegacyManualSessionBeadForAgent": {
+			func(b beads.Bead) bool { return isLegacyManualSessionBeadForAgent(b, agentFixture) },
+			func(i session.Info) bool { return isLegacyManualSessionInfoForAgent(i, agentFixture) },
+		},
+		"isManualSessionBeadForAgent": {
+			func(b beads.Bead) bool { return isManualSessionBeadForAgent(b, agentFixture) },
+			func(i session.Info) bool { return isManualSessionInfoForAgent(i, agentFixture) },
+		},
 	}
 	agentIntChecks := map[string]struct {
 		bead func(beads.Bead) int
@@ -522,6 +530,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"normalizedSessionTemplate": {
 			func(b beads.Bead) string { return normalizedSessionTemplate(b, nil) },
 			func(i session.Info) string { return normalizedSessionTemplateInfo(i, nil) },
+		},
+		"sessionAgentMetricIdentity": {
+			func(b beads.Bead) string { return sessionAgentMetricIdentity(b, nil) },
+			func(i session.Info) string { return sessionAgentMetricIdentityInfo(i, nil) },
 		},
 	}
 

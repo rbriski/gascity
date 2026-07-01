@@ -675,3 +675,75 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
 }
+
+// mockGraphOnlyReadyPolicyBacking is a beads.Store that also implements
+// beads.GraphOnlyReadyStore, capturing the query the policy wrapper sends.
+type mockGraphOnlyReadyPolicyBacking struct {
+	beads.Store
+	ready     []beads.Bead
+	capturedQ beads.ReadyQuery
+}
+
+func (m *mockGraphOnlyReadyPolicyBacking) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if len(query) > 0 {
+		m.capturedQ = query[0]
+	}
+	return append([]beads.Bead(nil), m.ready...), nil
+}
+
+// TestBeadPolicyStoreReadyGraphOnlyHandleWrapsAndDelegates pins the policy-store
+// GraphOnlyReadyStore contract: wrapStoreWithBeadPolicies propagates the
+// graph-only capability when the backing supports it, and the returned handle
+// applies expandPolicyReadyQuery before delegating to the backing.
+func TestBeadPolicyStoreReadyGraphOnlyHandleWrapsAndDelegates(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handle present when backing supports GraphOnlyReadyStore", func(t *testing.T) {
+		t.Parallel()
+		wisp := beads.Bead{ID: "gc-bp-wisp", Status: "open"}
+		backing := &mockGraphOnlyReadyPolicyBacking{
+			Store: beads.NewMemStore(),
+			ready: []beads.Bead{wisp},
+		}
+		wrapped := wrapStoreWithBeadPolicies(backing, nil)
+
+		handle, ok := beads.GraphOnlyReadyFor(wrapped)
+		if !ok {
+			t.Fatal("GraphOnlyReadyFor() ok = false, want true")
+		}
+		got, err := handle.ReadyGraphOnly()
+		if err != nil {
+			t.Fatalf("ReadyGraphOnly(): %v", err)
+		}
+		if len(got) != 1 || got[0].ID != "gc-bp-wisp" {
+			t.Fatalf("ReadyGraphOnly() = %v, want [gc-bp-wisp]", got)
+		}
+	})
+
+	t.Run("expandPolicyReadyQuery applied before delegation", func(t *testing.T) {
+		t.Parallel()
+		backing := &mockGraphOnlyReadyPolicyBacking{Store: beads.NewMemStore()}
+		wrapped := wrapStoreWithBeadPolicies(backing, nil)
+
+		handle, ok := beads.GraphOnlyReadyFor(wrapped)
+		if !ok {
+			t.Fatal("GraphOnlyReadyFor() ok = false, want true")
+		}
+		// Policy expands TierIssues → TierBoth; the backing receives TierBoth.
+		if _, err := handle.ReadyGraphOnly(beads.ReadyQuery{TierMode: beads.TierIssues}); err != nil {
+			t.Fatalf("ReadyGraphOnly: %v", err)
+		}
+		if backing.capturedQ.TierMode != beads.TierBoth {
+			t.Fatalf("backing received TierMode = %v, want TierBoth (policy expanded TierIssues)", backing.capturedQ.TierMode)
+		}
+	})
+
+	t.Run("handle absent when backing has no graph-only capability", func(t *testing.T) {
+		t.Parallel()
+		wrapped := wrapStoreWithBeadPolicies(beads.NewMemStore(), nil)
+		handle, ok := beads.GraphOnlyReadyFor(wrapped)
+		if ok || handle != nil {
+			t.Fatalf("GraphOnlyReadyFor() = (%v, %v), want (nil, false)", handle, ok)
+		}
+	})
+}

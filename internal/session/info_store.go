@@ -65,6 +65,8 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
 		ManualSessionMetadata:   b.Metadata["manual_session"],
 		Labels:                  b.Labels,
+		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
+		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
 
 		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
 		// kept verbatim so the reconciler classifiers read the same value the

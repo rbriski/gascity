@@ -130,6 +130,14 @@ type Info struct {
 	ManualSessionMetadata string
 	Labels                []string // bead labels (agent:<name> identity fallback + canonical checks)
 
+	// MCPIdentity / MCPServersSnapshot mirror the raw mcp_identity and
+	// mcp_servers_snapshot metadata (verbatim). The ACP-transport classifier
+	// treats a non-empty value on either key as evidence the session speaks ACP,
+	// so the Info form must carry them to stay byte-identical. Additive,
+	// internal-only (absent from the HTTP wire).
+	MCPIdentity        string // mcp_identity (raw)
+	MCPServersSnapshot string // mcp_servers_snapshot (raw)
+
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//
 	// These complete the codec for the classifier predicates that read raw

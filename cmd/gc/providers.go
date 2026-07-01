@@ -374,14 +374,14 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	if snapshot == nil {
 		return nil
 	}
-	open := snapshot.Open()
+	open := snapshot.OpenInfos()
 	names := make([]string, 0, len(open))
 	seen := make(map[string]bool, len(open))
-	for _, bead := range open {
-		if !beadUsesACPTransport(bead, cfg) {
+	for _, info := range open {
+		if !infoUsesACPTransport(info, cfg) {
 			continue
 		}
-		sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+		sessionName := strings.TrimSpace(info.SessionNameMetadata)
 		if sessionName == "" || seen[sessionName] {
 			continue
 		}
@@ -391,6 +391,9 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	return names
 }
 
+// beadUsesACPTransport is the raw-bead form retained as the byte-identical
+// oracle for infoUsesACPTransport (TestSessionClassifierInfoEquivalence). No
+// production caller reads it — observedACPSessionNames consumes the Info form.
 func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 	transport := strings.TrimSpace(bead.Metadata["transport"])
 	if transport != "" {
@@ -434,6 +437,55 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 		}
 		if strings.TrimSpace(bead.Metadata["command"]) == "" &&
 			strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+			return providerLegacyDefaultsToACP(cfg, providerName)
+		}
+	}
+	return false
+}
+
+func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
+	transport := strings.TrimSpace(info.Transport)
+	if transport != "" {
+		return transport == "acp"
+	}
+	providerName := strings.TrimSpace(info.Provider)
+	if providerName == "acp" {
+		return true
+	}
+	if strings.TrimSpace(info.MCPIdentity) != "" ||
+		strings.TrimSpace(info.MCPServersSnapshot) != "" {
+		return true
+	}
+	templateName := strings.TrimSpace(info.Template)
+	if cfg != nil {
+		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
+			if strings.TrimSpace(agentCfg.Session) != "" && agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if strings.TrimSpace(info.Command) == "" &&
+				info.PendingCreateClaim &&
+				agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if providerName == "" {
+				providerName = strings.TrimSpace(agentCfg.Provider)
+			}
+		}
+		if providerName == "" {
+			providerName = templateName
+		}
+		resolved := resolveProviderForACPTransport(cfg, providerName)
+		if resolved != nil {
+			acpCommand := strings.TrimSpace(resolved.ACPCommandString())
+			defaultCommand := strings.TrimSpace(resolved.CommandString())
+			storedCommand := strings.TrimSpace(info.Command)
+			if acpCommand != "" && acpCommand != defaultCommand &&
+				(storedCommand == acpCommand || strings.HasPrefix(storedCommand, acpCommand+" ")) {
+				return true
+			}
+		}
+		if strings.TrimSpace(info.Command) == "" &&
+			info.PendingCreateClaim {
 			return providerLegacyDefaultsToACP(cfg, providerName)
 		}
 	}

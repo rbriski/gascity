@@ -312,6 +312,56 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pool_slot":    "1",
 			},
 		},
+		"acp-transport": {
+			ID:     "ga-acptransport",
+			Type:   session.BeadType,
+			Title:  "acp",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":  "worker",
+				"transport": "acp",
+			},
+		},
+		"acp-provider": {
+			ID:     "ga-acpprovider",
+			Type:   session.BeadType,
+			Title:  "acp",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template": "worker",
+				"provider": "acp",
+			},
+		},
+		"acp-mcp-identity": {
+			ID:     "ga-acpmcpid",
+			Type:   session.BeadType,
+			Title:  "acp",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                     "worker",
+				session.MCPIdentityMetadataKey: "mayor",
+			},
+		},
+		"acp-mcp-snapshot": {
+			ID:     "ga-acpmcpsnap",
+			Type:   session.BeadType,
+			Title:  "acp",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                            "worker",
+				session.MCPServersSnapshotMetadataKey: "{}",
+			},
+		},
+		"non-acp-transport": {
+			ID:     "ga-nonacp",
+			Type:   session.BeadType,
+			Title:  "tmux",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":  "worker",
+				"transport": "tmux",
+			},
+		},
 	}
 
 	const tmpl = "worker"
@@ -366,6 +416,12 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"isCanonicalPoolManagedSessionBeadForTemplate": {
 			func(b beads.Bead) bool { return isCanonicalPoolManagedSessionBeadForTemplate(b, tmpl) },
 			func(i session.Info) bool { return isCanonicalPoolManagedSessionInfoForTemplate(i, tmpl) },
+		},
+		// nil cfg exercises the transport / provider=="acp" / MCP-key branches;
+		// the cfg-dependent agent/provider resolution is out of the codec's scope.
+		"beadUsesACPTransport": {
+			func(b beads.Bead) bool { return beadUsesACPTransport(b, nil) },
+			func(i session.Info) bool { return infoUsesACPTransport(i, nil) },
 		},
 	}
 

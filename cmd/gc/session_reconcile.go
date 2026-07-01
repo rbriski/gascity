@@ -1226,6 +1226,22 @@ func pendingCreateAttemptStale(session beads.Bead, clk clock.Clock) bool {
 	return !now.Before(session.CreatedAt.Add(staleCreatingStateTimeout))
 }
 
+// pendingCreateAttemptStaleInfo is the session.Info sibling of
+// pendingCreateAttemptStale. Equivalence-proven.
+func pendingCreateAttemptStaleInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	if clk == nil {
+		return false
+	}
+	now := clk.Now()
+	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
+		return !now.Before(started.Add(staleCreatingStateTimeout))
+	}
+	if i.CreatedAt.IsZero() {
+		return true
+	}
+	return !now.Before(i.CreatedAt.Add(staleCreatingStateTimeout))
+}
+
 // pendingCreateStartedAtNow returns the timestamp string to write into
 // metadata["pending_create_started_at"] when a bead transitions into
 // state=creating with pending_create_claim=true. Must match the format

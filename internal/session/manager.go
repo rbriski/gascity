@@ -200,6 +200,18 @@ type Info struct {
 	// would be non-empty even when no transport was persisted). Additive,
 	// internal-only (absent from the HTTP wire).
 	TransportMetadata string // transport (raw)
+	// LastWokeAt is the RAW last_woke_at metadata (RFC3339 or empty). The
+	// pending-create lease helpers branch on its emptiness (never-started vs
+	// start-in-flight) and parse it for the in-flight deadline, so the Info
+	// mirror keeps the raw value.
+	LastWokeAt string // last_woke_at (raw)
+	// StateReason is the RAW state_reason metadata. The pool sweep's
+	// post-create-protection window matches state_reason == "creation_complete".
+	StateReason string // state_reason (raw)
+	// CreationCompleteAt is the RAW creation_complete_at metadata (RFC3339 or
+	// empty). The pool sweep parses it to age out the post-create protection
+	// window; a missing/zero value is treated as stale (sweepable).
+	CreationCompleteAt string // creation_complete_at (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a

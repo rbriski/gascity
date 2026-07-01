@@ -94,6 +94,9 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		AliasHistory:           AliasHistory(b.Metadata),
 		ContinuityEligible:     b.Metadata["continuity_eligible"],
 		TransportMetadata:      b.Metadata["transport"],
+		LastWokeAt:             b.Metadata["last_woke_at"],
+		StateReason:            b.Metadata["state_reason"],
+		CreationCompleteAt:     b.Metadata["creation_complete_at"],
 	}
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n

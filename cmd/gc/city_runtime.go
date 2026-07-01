@@ -2772,6 +2772,12 @@ func pendingCreateClaimStillLeasedForSweep(bead beads.Bead, startupTimeout time.
 	return pendingCreateLeaseActive(bead, nil, startupTimeout)
 }
 
+// pendingCreateClaimStillLeasedForSweepInfo is the session.Info sibling of
+// pendingCreateClaimStillLeasedForSweep. Equivalence-proven.
+func pendingCreateClaimStillLeasedForSweepInfo(info sessionpkg.Info, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseActiveInfo(info, nil, startupTimeout)
+}
+
 // isStaleCreating mirrors staleCreatingState in session_reconcile.go without
 // requiring a clock.Clock dependency. It prefers the per-attempt
 // pending_create_started_at marker and falls back to CreatedAt for older beads

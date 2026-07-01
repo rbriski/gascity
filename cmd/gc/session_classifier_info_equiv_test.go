@@ -200,6 +200,39 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pending_create_claim": "true",
 			},
 		},
+		"pending-create-claim-old-markers": {
+			// Exercises the lease family's non-empty last_woke_at + past
+			// pending_create_started_at branches (attempt-stale / lease-active)
+			// with the fidelity fields LastWokeAt / PendingCreateStartedAt.
+			ID:        "ga-leasestale",
+			Type:      session.BeadType,
+			Title:     "leasestale",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: time.Now().Add(-90 * time.Minute),
+			Metadata: map[string]string{
+				"template":                  "worker",
+				"state":                     string(session.StateStartPending),
+				"pending_create_claim":      "true",
+				"pending_create_started_at": pastRFC3339,
+				"last_woke_at":              pastRFC3339,
+			},
+		},
+		"post-create-protected": {
+			// Exercises the StateReason / CreationCompleteAt fidelity fields via
+			// the sweep's post-create protection window (state_reason=creation_complete).
+			ID:     "ga-postcreate",
+			Type:   session.BeadType,
+			Title:  "postcreate",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":             "worker",
+				"state":                "active",
+				"state_reason":         "creation_complete",
+				"creation_complete_at": futureRFC3339,
+				"pool_managed":         "true",
+				"pool_slot":            "1",
+			},
+		},
 		"stale-creating-old-marker": {
 			ID:        "ga-stale",
 			Type:      session.BeadType,
@@ -537,6 +570,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		},
 	}
 
+	const leaseStartupTimeout = 90 * time.Second
 	clkBoolChecks := map[string]struct {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
@@ -544,6 +578,26 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionIsQuarantined": {
 			func(b beads.Bead) bool { return sessionIsQuarantined(b, clk) },
 			func(i session.Info) bool { return sessionIsQuarantinedInfo(i, clk) },
+		},
+		"pendingCreateAttemptStale": {
+			func(b beads.Bead) bool { return pendingCreateAttemptStale(b, clk) },
+			func(i session.Info) bool { return pendingCreateAttemptStaleInfo(i, clk) },
+		},
+		"pendingCreateNeverStartedLeaseExpired": {
+			func(b beads.Bead) bool { return pendingCreateNeverStartedLeaseExpired(b, clk) },
+			func(i session.Info) bool { return pendingCreateNeverStartedLeaseExpiredInfo(i, clk) },
+		},
+		"pendingCreateStartInFlight": {
+			func(b beads.Bead) bool { return pendingCreateStartInFlight(b, clk, leaseStartupTimeout) },
+			func(i session.Info) bool { return pendingCreateStartInFlightInfo(i, clk, leaseStartupTimeout) },
+		},
+		"pendingCreateLeaseActive": {
+			func(b beads.Bead) bool { return pendingCreateLeaseActive(b, clk, leaseStartupTimeout) },
+			func(i session.Info) bool { return pendingCreateLeaseActiveInfo(i, clk, leaseStartupTimeout) },
+		},
+		"pendingCreateClaimStillLeasedForSweep": {
+			func(b beads.Bead) bool { return pendingCreateClaimStillLeasedForSweep(b, leaseStartupTimeout) },
+			func(i session.Info) bool { return pendingCreateClaimStillLeasedForSweepInfo(i, leaseStartupTimeout) },
 		},
 	}
 

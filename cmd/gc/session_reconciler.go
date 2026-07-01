@@ -637,6 +637,31 @@ func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTime
 	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
+// pendingCreateStartInFlightInfo is the session.Info sibling of
+// pendingCreateStartInFlight. Equivalence-proven.
+func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
+	if !i.PendingCreateClaim &&
+		sessionpkg.State(strings.TrimSpace(i.MetadataState)) != sessionpkg.StateCreating {
+		return false
+	}
+	lastWoke := strings.TrimSpace(i.LastWokeAt)
+	if lastWoke == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	if startupTimeout <= 0 {
+		startupTimeout = time.Minute
+	}
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
+}
+
 func pendingCreateLeaseActive(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
 		return false
@@ -648,6 +673,21 @@ func pendingCreateLeaseActive(session beads.Bead, clk clock.Clock, startupTimeou
 		return !pendingCreateNeverStartedLeaseExpired(session, clk)
 	}
 	return !pendingCreateAttemptStale(session, clk)
+}
+
+// pendingCreateLeaseActiveInfo is the session.Info sibling of
+// pendingCreateLeaseActive. Equivalence-proven.
+func pendingCreateLeaseActiveInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
+	if !i.PendingCreateClaim {
+		return false
+	}
+	if pendingCreateStartInFlightInfo(i, clk, startupTimeout) {
+		return true
+	}
+	if strings.TrimSpace(i.LastWokeAt) == "" {
+		return !pendingCreateNeverStartedLeaseExpiredInfo(i, clk)
+	}
+	return !pendingCreateAttemptStaleInfo(i, clk)
 }
 
 // pendingCreateNeverStartedTimeout is the rollback floor for pending creates
@@ -680,6 +720,29 @@ func pendingCreateNeverStartedLeaseExpired(session beads.Bead, clk clock.Clock) 
 	}
 	anchor := session.CreatedAt
 	if started, ok := parseRFC3339Metadata(session.Metadata["pending_create_started_at"]); ok {
+		anchor = started
+	}
+	if anchor.IsZero() {
+		return true
+	}
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return now.After(anchor.Add(pendingCreateNeverStartedTimeout))
+}
+
+// pendingCreateNeverStartedLeaseExpiredInfo is the session.Info sibling of
+// pendingCreateNeverStartedLeaseExpired. Equivalence-proven.
+func pendingCreateNeverStartedLeaseExpiredInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	if !i.PendingCreateClaim {
+		return false
+	}
+	if strings.TrimSpace(i.LastWokeAt) != "" {
+		return false
+	}
+	anchor := i.CreatedAt
+	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		anchor = started
 	}
 	if anchor.IsZero() {

@@ -430,7 +430,7 @@ func advanceSessionDrainsWithSessionsTraced(
 	sp runtime.Provider,
 	store beads.Store,
 	sessionLookup func(id string) *beads.Bead,
-	sessions []beads.Bead,
+	sessionBeads []beads.Bead,
 	wakeEvals map[string]wakeEvaluation,
 	cfg *config.City,
 	poolDesired map[string]int,
@@ -440,7 +440,7 @@ func advanceSessionDrainsWithSessionsTraced(
 	trace *sessionReconcilerTraceCycle,
 ) {
 	if wakeEvals == nil {
-		wakeEvals = computeWakeEvaluations(sessions, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
+		wakeEvals = computeWakeEvaluations(sessionBeads, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
 	}
 	// Session front door constructed once from the same store; nil when store is
 	// nil so completeDrain keeps its store==nil short-circuit.
@@ -455,10 +455,17 @@ func advanceSessionDrainsWithSessionsTraced(
 			dt.remove(id)
 			continue
 		}
-		name := session.Metadata["session_name"]
+		// Derive the typed projection once per iteration for the classifier
+		// DECISION reads (session_name, generation, template). No mutation runs
+		// before these reads, and completeDrain (the only session.Metadata
+		// mutation below) is always followed by `continue`, so a single
+		// pre-mutation projection is byte-identical. The mutations
+		// (completeDrain, cancelSessionDrainFor*) and session.ID stay raw.
+		info := sessions.InfoFromPersistedBead(*session)
+		name := info.SessionNameMetadata
 
 		// Stale check: if session was re-woken (generation changed), cancel drain.
-		gen, _ := strconv.Atoi(session.Metadata["generation"])
+		gen, _ := strconv.Atoi(info.Generation)
 		if gen != ds.generation {
 			dt.clearIdleProbe(id)
 			if ds.ackSet {
@@ -466,7 +473,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			dt.remove(id)
 			if trace != nil {
-				trace.recordDecision("reconciler.drain.stale", normalizedSessionTemplate(*session, cfg), name, "stale_generation", "cancel", traceRecordPayload{
+				trace.recordDecision("reconciler.drain.stale", normalizedSessionTemplateInfo(info, cfg), name, "stale_generation", "cancel", traceRecordPayload{
 					"drain_reason":       ds.reason,
 					"drain_generation":   ds.generation,
 					"session_generation": gen,
@@ -487,7 +494,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
 			if trace != nil {
-				trace.recordDecision("reconciler.drain.complete", normalizedSessionTemplate(*session, cfg), name, ds.reason, "complete", traceRecordPayload{
+				trace.recordDecision("reconciler.drain.complete", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "complete", traceRecordPayload{
 					"drain_started_at": ds.startedAt,
 				}, nil, "")
 			}
@@ -499,7 +506,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			pendingDrainReasonCancelable(ds.reason) {
 			if cancelSessionDrainForPending(*session, sp, dt) {
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel_pending", nil, nil, "")
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel_pending", nil, nil, "")
 				}
 				continue
 			}
@@ -511,7 +518,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			assignedWorkDrainReasonCancelable(ds.reason) {
 			if cancelSessionDrainForAssignedWork(*session, sp, dt) {
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel_assigned_work", nil, nil, "")
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel_assigned_work", nil, nil, "")
 				}
 				continue
 			}
@@ -530,7 +537,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				}
 				dt.remove(id)
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel", nil, nil, "")
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel", nil, nil, "")
 				}
 				continue
 			}
@@ -565,7 +572,7 @@ func advanceSessionDrainsWithSessionsTraced(
 					outcome = "failed"
 					fields["error"] = err.Error()
 				}
-				trace.recordMutation("runtime_meta", normalizedSessionTemplate(*session, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
+				trace.recordMutation("runtime_meta", normalizedSessionTemplateInfo(info, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
 			}
 		}
 
@@ -583,7 +590,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				// Other errors (transient stop failure): keep drain
 				// active for retry on next tick.
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplate(*session, cfg), name, ds.reason, "retry", traceRecordPayload{
+					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "retry", traceRecordPayload{
 						"error": err.Error(),
 					}, nil, "")
 				}
@@ -601,7 +608,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplate(*session, cfg), name, ds.reason, "complete", nil, nil, "")
+					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "complete", nil, nil, "")
 				}
 			}
 			// If still running after stop, keep drain for next tick.

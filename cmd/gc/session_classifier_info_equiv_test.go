@@ -502,6 +502,20 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				session.ResetCommittedAtKey: pastRFC3339,
 			},
 		},
+		"generation-padded": {
+			// generation is read BOTH as strconv.Atoi (numeric drain-staleness
+			// compare) and strings.TrimSpace (string ack compare). The
+			// whitespace-padded value proves Info.Generation preserves the raw
+			// bytes the TrimSpace path depends on — an int mirror could not.
+			ID:     "ga-gen",
+			Type:   session.BeadType,
+			Title:  "gen",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":   "worker",
+				"generation": " 3 ",
+			},
+		},
 	}
 
 	const tmpl = "worker"
@@ -590,6 +604,12 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionBeadStoredTemplate":    {sessionBeadStoredTemplate, sessionBeadStoredTemplateInfo},
 		"sessionBeadAgentName":         {sessionBeadAgentName, sessionBeadAgentNameInfo},
 		"stampedPoolQualifiedIdentity": {stampedPoolQualifiedIdentity, stampedPoolQualifiedIdentityInfo},
+		// generation has no named classifier — it is read inline via Atoi/TrimSpace
+		// in the drain/wake path — so this pins the raw codec mirror directly.
+		"sessionGeneration": {
+			func(b beads.Bead) string { return b.Metadata["generation"] },
+			func(i session.Info) string { return i.Generation },
+		},
 	}
 
 	intChecks := map[string]struct {

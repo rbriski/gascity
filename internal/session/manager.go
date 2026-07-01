@@ -220,6 +220,13 @@ type Info struct {
 	// the durable marker for when a restart handoff committed. resetPendingCommittedAt
 	// parses it; the Info mirror keeps the raw value.
 	ResetCommittedAt string // reset_committed_at (raw)
+	// Generation is the RAW generation metadata, verbatim. The drain/wake
+	// staleness checks read it BOTH as strconv.Atoi (numeric compare against the
+	// in-memory drain generation) AND strings.TrimSpace (string compare against
+	// the persisted GC_DRAIN_GENERATION ack). A parsed int would lose the
+	// whitespace fidelity the TrimSpace path relies on, so the mirror keeps the
+	// raw string. Additive, internal-only (absent from the HTTP wire).
+	Generation string // generation (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a

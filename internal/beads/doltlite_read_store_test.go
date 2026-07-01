@@ -1830,3 +1830,49 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 	}
 	return writer
 }
+
+// TestDoltliteReadStoreReadyGraphOnly pins the GraphOnlyReadyStore contract for
+// DoltliteReadStore: ReadyGraphOnly always returns only wisps-tier beads,
+// regardless of the TierMode the caller provides.
+func TestDoltliteReadStoreReadyGraphOnly(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	// Add a ready bead in the wisps table (ephemeral graph tier).
+	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{
+		ID:        "gc-go-wisp",
+		Title:     "graph-only wisp",
+		Status:    "open",
+		IssueType: "task",
+		Ephemeral: true,
+	})
+
+	// Zero-arg call forces TierWisps: the wisp is present, the issues-tier
+	// bead from the default fixture (gc-ready) is absent.
+	got, err := store.ReadyGraphOnly()
+	if err != nil {
+		t.Fatalf("ReadyGraphOnly(): %v", err)
+	}
+	if !hasTestBead(got, "gc-go-wisp") {
+		t.Fatalf("ReadyGraphOnly() missing gc-go-wisp: %v", got)
+	}
+	if hasTestBead(got, "gc-ready") {
+		t.Fatalf("ReadyGraphOnly() included issues-tier bead gc-ready: %v", got)
+	}
+
+	// TierWisps is forced regardless of what the caller requests.
+	for _, tierMode := range []TierMode{TierBoth, TierIssues} {
+		got, err := store.ReadyGraphOnly(ReadyQuery{TierMode: tierMode})
+		if err != nil {
+			t.Fatalf("ReadyGraphOnly(TierMode=%v): %v", tierMode, err)
+		}
+		if hasTestBead(got, "gc-ready") {
+			t.Fatalf("ReadyGraphOnly(TierMode=%v) included issues-tier bead gc-ready: %v", tierMode, got)
+		}
+		if !hasTestBead(got, "gc-go-wisp") {
+			t.Fatalf("ReadyGraphOnly(TierMode=%v) missing gc-go-wisp: %v", tierMode, got)
+		}
+	}
+}

@@ -1,4 +1,4 @@
-import type { FormulaRunDetail } from 'gas-city-dashboard-shared';
+import type { FormulaRunDetail, RunScopeKind } from 'gas-city-dashboard-shared';
 import { api, ApiClientError } from '../api/client';
 
 // The run-detail view reads from the BFF run-projection endpoint
@@ -6,9 +6,10 @@ import { api, ApiClientError } from '../api/client';
 // the summary uses, so detail stages == summary stages by construction. The
 // whole client-side detail pipeline (the workflowRun snapshot + formulaDetail
 // fetch + enrichFormulaRun) moved to Go (internal/runproj.BuildRunDetail) and
-// is golden-gated byte-for-byte. Scope is no longer threaded into the read —
-// the projection derives a run's scope from its own root bead — though the
-// route still parses scope for the separate run-diff endpoint.
+// is golden-gated byte-for-byte. The projection derives a run's scope from its
+// own root bead; the route's scope (scope_kind/scope_ref) is threaded through as
+// a LAST-RESORT fallback the projection uses only when the run's own metadata
+// cannot resolve scope (the same scope the run-diff endpoint parses).
 
 // Retry transient failures a few times before surfacing one: the BFF's 503
 // warming signal while a city's projection cold-replays (bounded server-side to
@@ -19,10 +20,15 @@ import { api, ApiClientError } from '../api/client';
 // button recover anything past the budget.
 const WARMING_RETRY_DELAYS_MS = [600, 1_200, 2_400];
 
-export async function loadSupervisorFormulaRunDetail(runId: string): Promise<FormulaRunDetail> {
+export async function loadSupervisorFormulaRunDetail(
+  runId: string,
+  scopeKind?: RunScopeKind,
+  scopeRef?: string,
+): Promise<FormulaRunDetail> {
+  const params = scopeKind && scopeRef ? { scopeKind, scopeRef } : undefined;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await api.runDetail(runId);
+      return await api.runDetail(runId, params);
     } catch (err) {
       const delayMs = WARMING_RETRY_DELAYS_MS[attempt];
       if (delayMs !== undefined && isTransientDetailError(err)) {

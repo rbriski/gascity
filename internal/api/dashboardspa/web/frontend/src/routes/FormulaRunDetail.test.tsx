@@ -479,10 +479,15 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByRole('heading', { name: /adopt pr #42/i });
 
     const runUrls = fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
-    // The detail loader is scope-independent now (the BFF projection derives the
-    // run's scope from its own root bead); the route's scope still drives the
-    // separate run-diff fetch below.
-    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith('gc-adopt-pr-active');
+    // The BFF projection derives a run's scope from its own root bead; the
+    // route's scope is threaded into the detail read as a LAST-RESORT fallback
+    // (for source-attributed runs whose folded beads omit the store ref) and
+    // still drives the separate run-diff fetch below.
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith(
+      'gc-adopt-pr-active',
+      'city',
+      'racoon-city',
+    );
     expect(runUrls).toContain(
       '/api/city/test-city/runs/gc-adopt-pr-active/diff?scope_kind=city&scope_ref=racoon-city',
     );

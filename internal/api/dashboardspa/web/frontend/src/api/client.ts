@@ -415,12 +415,22 @@ export const api = {
   runSummary(): Promise<RunSummary> {
     return request('GET', cityPath('/runs/summary'), decodeRunSummary);
   },
-  // 200 → FormulaRunDetail. The endpoint rejects a non-graph.v2 run with
-  // 422 + reason 'not_run_view' (list-only) or 'invalid_snapshot' (load
-  // failure), an unknown run with 404, and a still-warming projection with
-  // 503 — surfaced to callers as ApiClientError (status + reason).
-  runDetail(runId: string): Promise<FormulaRunDetail> {
-    return request('GET', cityPath(`/runs/${encodeURIComponent(runId)}/detail`), decodeFormulaRunDetail);
+  // 200 → FormulaRunDetail. An unknown run (no members in the fold) is a 404;
+  // a still-warming projection is a 503 — both surfaced as ApiClientError. The
+  // optional scope params (?scope_kind=&scope_ref=) carry the summary lane's
+  // scope as a last-resort fallback the projection uses ONLY when a run's own
+  // bead metadata cannot resolve its scope (e.g. a source-attributed graph.v2
+  // run whose folded beads carry no store ref at all).
+  runDetail(
+    runId: string,
+    params?: { scopeKind?: RunScopeKind; scopeRef?: string },
+  ): Promise<FormulaRunDetail> {
+    const qs = runQuery(params);
+    return request(
+      'GET',
+      cityPath(`/runs/${encodeURIComponent(runId)}/detail${qs}`),
+      decodeFormulaRunDetail,
+    );
   },
 };
 

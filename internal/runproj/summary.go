@@ -341,6 +341,12 @@ func runScope(rootID string, issues []runIssue, feedScopes map[string]RunFeedSco
 	}
 
 	rootStoreRef := metadataString(ordered, beadmeta.RootStoreRefMetadataKey)
+	if rootStoreRef == "" {
+		// Source-attributed graph.v2 runs (pr_review/bugflow/design_review) carry
+		// their store ref under pr_review.workflow_store et al., not
+		// gc.root_store_ref. Fold it in so scope resolves from the source beads.
+		rootStoreRef = sourceWorkflowStoreRef(ordered)
+	}
 
 	// Build the metadata map fromRootMetadataScope consumes: root metadata,
 	// then overlay gc.root_store_ref and the resolved gc.scope_ref.

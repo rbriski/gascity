@@ -110,9 +110,10 @@ describe('useFormulaRunDetail', () => {
     expect(result.current.detail.title).toBe('Direct supervisor run');
     expect(result.current.refreshState).toEqual({ kind: 'idle' });
     expect('diff' in result.current).toBe(false);
-    // The loader is scope-independent now (the projection derives scope from the
-    // run's own root bead); the route's scope still drives only the cache key.
-    expect(mockLoadDetail).toHaveBeenCalledWith('wf-1');
+    // The projection derives scope from the run's own root bead; the route's
+    // scope is forwarded to the loader as a last-resort fallback (and drives the
+    // cache key).
+    expect(mockLoadDetail).toHaveBeenCalledWith('wf-1', 'city', 'test-city');
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 

@@ -58,7 +58,7 @@ export function useFormulaRunDetail(
   const key = formulaRunDetailCacheKey(runId, scopeKind, scopeRef);
   const { data, loading, error, refresh } = useCachedData(
     key,
-    () => loadFormulaRunDetail(runId),
+    () => loadFormulaRunDetail(runId, scopeKind, scopeRef),
     {
       onError: (err) => {
         if (runId !== undefined) reportRunDetailError('load detail', runId, err);
@@ -81,10 +81,14 @@ export function useFormulaRunDetail(
   return { kind: 'loading', refresh };
 }
 
-async function loadFormulaRunDetail(runId: string | undefined): Promise<FormulaRunDetailPayload> {
+async function loadFormulaRunDetail(
+  runId: string | undefined,
+  scopeKind?: RunScopeKind,
+  scopeRef?: string,
+): Promise<FormulaRunDetailPayload> {
   if (!runId) return { kind: 'unrequested' };
   try {
-    const detail = await loadSupervisorFormulaRunDetail(runId);
+    const detail = await loadSupervisorFormulaRunDetail(runId, scopeKind, scopeRef);
     return { kind: 'loaded', detail };
   } catch (err) {
     // gascity-dashboard-9w3k: a v1 / wisp run (not graph.v2) loads but has no

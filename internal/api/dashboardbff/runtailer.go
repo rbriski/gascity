@@ -212,7 +212,11 @@ const runDetailSnapshotVersion = 1
 // waits briefly for the cold replay on a city's first request, like
 // enrichedSummary. The bool reports whether the cold replay had completed (a
 // not-found run during warming is reported as warming, not a hard 404).
-func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.FormulaRunDetail, bool, error) {
+//
+// scopeHint carries the summary lane's ?scope_kind=&scope_ref= as a last-resort
+// fallback: it is used only when the run's own bead metadata cannot resolve its
+// scope, so a run the frontend already knows the scope for still projects.
+func (t *cityRunTailer) detail(ctx context.Context, runID string, scopeHint runproj.RunDetailScopeHint) (runproj.FormulaRunDetail, bool, error) {
 	select {
 	case <-t.readyCh:
 	case <-ctx.Done():
@@ -225,16 +229,8 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 	ready := t.ready
 	t.mu.RUnlock()
 
-	sessions, sessionsAvailable := t.mgr.fetchSessions(ctx, t.name)
-	var (
-		d   runproj.FormulaRunDetail
-		err error
-	)
-	if sessionsAvailable {
-		d, err = runproj.BuildRunDetailWithSessions(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions)
-	} else {
-		d, err = runproj.BuildRunDetail(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
-	}
+	sessions, _ := t.mgr.fetchSessions(ctx, t.name)
+	d, err := runproj.BuildRunDetailWithOptions(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions, scopeHint)
 	return d, ready, err
 }
 
@@ -337,7 +333,11 @@ func (p *Plane) registerRunDetail() {
 			writeError(w, http.StatusNotFound, "unknown city")
 			return
 		}
-		detail, ready, err := t.detail(r.Context(), r.PathValue("runId"))
+		scopeHint := runproj.RunDetailScopeHint{
+			ScopeKind: r.URL.Query().Get("scope_kind"),
+			ScopeRef:  r.URL.Query().Get("scope_ref"),
+		}
+		detail, ready, err := t.detail(r.Context(), r.PathValue("runId"), scopeHint)
 		if err != nil {
 			var unsupported *runproj.UnsupportedRunError
 			if errors.As(err, &unsupported) {

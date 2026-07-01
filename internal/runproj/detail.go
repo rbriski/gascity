@@ -44,11 +44,32 @@ func unsupportedRun(message string, reason UnsupportedRunReason) error {
 // identity (the golden passes 1/100; the live tailer passes a real version and
 // its LastSeq cursor).
 //
-// It returns an *UnsupportedRunError when the run is not a graph.v2 run or its
-// snapshot identity/scope is missing — the same cases the TS enrichFormulaRun
-// throws on.
+// It returns an *UnsupportedRunError only when the run has no graph.v2 detail
+// view at all; a run whose scope cannot be resolved from bead metadata (or the
+// optional scope hint) still projects a best-effort partial detail rather than
+// hard-erroring — the run-detail page renders with whatever data exists.
 func BuildRunDetail(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64) (FormulaRunDetail, error) {
 	return BuildRunDetailWithSessions(beadList, runID, snapshotVersion, snapshotEventSeq, nil)
+}
+
+// RunDetailScopeHint is an optional fallback scope used only when the run's bead
+// metadata cannot resolve its scope on its own. The HTTP detail endpoint threads
+// the summary lane's scope (?scope_kind=&scope_ref=) here so a run the frontend
+// already knows the scope for still projects, even when the folded source beads
+// omit both gc.root_store_ref and pr_review.workflow_store. An empty hint is
+// ignored.
+type RunDetailScopeHint struct {
+	ScopeKind string
+	ScopeRef  string
+}
+
+func (h RunDetailScopeHint) resolved() (kind, ref string, ok bool) {
+	kind, kindOK := parseRunScopeKind(strings.TrimSpace(h.ScopeKind))
+	ref = stringValueOrEmpty(h.ScopeRef)
+	if kindOK && ref != "" && scopeRefRe.MatchString(ref) {
+		return kind, ref, true
+	}
+	return "", "", false
 }
 
 // BuildRunDetailWithSessions is BuildRunDetail with a request-time session list
@@ -57,7 +78,15 @@ func BuildRunDetail(beadList []beads.Bead, runID string, snapshotVersion int, sn
 // passes nil (BuildRunDetail); the live endpoint passes the loopback /v0 sessions
 // read. Session enrichment is NOT golden-gated.
 func BuildRunDetailWithSessions(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64, sessions []DashboardSession) (FormulaRunDetail, error) {
-	snap, err := snapshotForRun(beadList, runID, snapshotVersion, snapshotEventSeq)
+	return BuildRunDetailWithOptions(beadList, runID, snapshotVersion, snapshotEventSeq, sessions, RunDetailScopeHint{})
+}
+
+// BuildRunDetailWithOptions is the full detail entry point: it takes the
+// request-time sessions plus an optional scope hint used only as a last-resort
+// fallback when the run's own metadata cannot resolve scope. All the other
+// entry points delegate here.
+func BuildRunDetailWithOptions(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64, sessions []DashboardSession, scopeHint RunDetailScopeHint) (FormulaRunDetail, error) {
+	snap, err := snapshotForRun(beadList, runID, snapshotVersion, snapshotEventSeq, scopeHint)
 	if err != nil {
 		return FormulaRunDetail{}, err
 	}
@@ -75,7 +104,7 @@ func BuildRunDetailWithSessions(beadList []beads.Bead, runID string, snapshotVer
 // (sourceRunRootID) and a phantom root snapshot bead is synthesized from that
 // same source metadata, so the detail pipeline (which requires a graph.v2 root
 // with scope/store identity) has the root it needs.
-func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq int64) (runSnapshot, error) {
+func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq int64, scopeHint RunDetailScopeHint) (runSnapshot, error) {
 	rootIdx := -1
 	for i := range beadList {
 		if beadList[i].ID == rootID {
@@ -96,7 +125,8 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		}
 	}
 
-	// No members at all — the run id is unknown to the fold entirely.
+	// No members at all — the run id is unknown to the fold entirely. This is the
+	// only genuine 404: there is literally nothing to project.
 	if len(members) == 0 {
 		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
 	}
@@ -108,13 +138,11 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		// The gcg-* root bead lives only in the graph_store. Synthesize a phantom
 		// root from the source-bead metadata so the detail pipeline recognizes the
 		// graph.v2 run. The synthesized root is prepended so it becomes members[0]
-		// (the parent depsForMembers hangs the rest off of).
-		phantom, ok := synthesizePhantomRoot(rootID, members)
-		if !ok {
-			return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
-		}
-		root = phantom
-		members = append([]beads.Bead{phantom}, members...)
+		// (the parent depsForMembers hangs the rest off of). A run whose scope
+		// cannot be resolved still gets a phantom root — the detail degrades to a
+		// best-effort partial rather than 404ing a run that has members.
+		root = synthesizePhantomRoot(rootID, members, scopeHint)
+		members = append([]beads.Bead{root}, members...)
 	}
 
 	snapBeads := make([]runSnapshotBead, 0, len(members))
@@ -150,38 +178,27 @@ func beadSourceRunRootID(b beads.Bead) string {
 
 // synthesizePhantomRoot builds the run-root bead the graph.v2 detail pipeline
 // requires when the real gcg-* root never folded to the event log. It carries
-// gc.formula_contract=graph.v2 plus the run's formula/target and scope/store
-// identity, reconstructed from the source (mc-*) member beads that DID fold. The
-// bool mirrors the scope resolver: without a resolvable scope the detail cannot
-// be projected, so the caller reports the run as not-found.
-func synthesizePhantomRoot(rootID string, members []beads.Bead) (beads.Bead, bool) {
+// gc.formula_contract=graph.v2 plus the run's formula/target and, when it can be
+// resolved, scope/store identity reconstructed from the source (mc-*) member
+// beads that DID fold. Scope is resolved the SAME way the summary's runScope
+// does — gc.scope_kind / gc.scope_ref, then gc.root_store_ref, then the source
+// workflow-store key (pr_review.workflow_store) — with the caller's query hint
+// as a last resort. When no scope resolves the phantom root still exists (so the
+// run projects a best-effort partial); it simply omits the scope metadata.
+func synthesizePhantomRoot(rootID string, members []beads.Bead, scopeHint RunDetailScopeHint) beads.Bead {
 	issues := make([]runIssue, 0, len(members))
 	for i := range members {
 		issues = append(issues, fromBead(members[i]))
 	}
 
-	// Reconstruct scope + store ref the same way runScope does: gc.scope_kind /
-	// gc.scope_ref first, gc.root_store_ref as the fallback. Without a resolvable
-	// scope the detail pipeline would reject the snapshot, so bail out.
-	rootStoreRef := metadataString(issues, beadmeta.RootStoreRefMetadataKey)
-	scopeMeta := map[string]string{
-		beadmeta.ScopeKindMetadataKey: metadataString(issues, beadmeta.ScopeKindMetadataKey),
-		beadmeta.ScopeRefMetadataKey:  metadataString(issues, beadmeta.ScopeRefMetadataKey),
-	}
-	if rootStoreRef != "" {
-		scopeMeta[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
-	}
-	scope, ok := fromRootMetadataScope(scopeMeta)
-	if !ok {
-		return beads.Bead{}, false
-	}
+	scope, scopeOK := resolveSourceScope(issues, scopeHint)
 
 	formulaName := metadataString(issues, "pr_review.workflow_formula")
 	if formulaName == "" {
 		formulaName = metadataString(issues, beadmeta.FormulaMetadataKey)
 	}
 	runTarget := metadataString(issues, beadmeta.RunTargetMetadataKey)
-	if runTarget == "" {
+	if runTarget == "" && scopeOK {
 		runTarget = scope.rootStoreRef
 	}
 
@@ -196,10 +213,12 @@ func synthesizePhantomRoot(rootID string, members []beads.Bead) (beads.Bead, boo
 	meta := map[string]string{
 		beadmeta.FormulaContractMetadataKey: "graph.v2",
 		beadmeta.KindMetadataKey:            "run",
-		beadmeta.RootStoreRefMetadataKey:    scope.rootStoreRef,
-		beadmeta.ScopeKindMetadataKey:       scope.scopeKind,
-		beadmeta.ScopeRefMetadataKey:        scope.scopeRef,
 		beadmeta.RunTargetMetadataKey:       runTarget,
+	}
+	if scopeOK {
+		meta[beadmeta.RootStoreRefMetadataKey] = scope.rootStoreRef
+		meta[beadmeta.ScopeKindMetadataKey] = scope.scopeKind
+		meta[beadmeta.ScopeRefMetadataKey] = scope.scopeRef
 	}
 	if formulaName != "" {
 		meta[beadmeta.FormulaMetadataKey] = formulaName
@@ -211,7 +230,38 @@ func synthesizePhantomRoot(rootID string, members []beads.Bead) (beads.Bead, boo
 		Status:   "open",
 		Type:     "molecule",
 		Metadata: meta,
-	}, true
+	}
+}
+
+// resolveSourceScope resolves a source-attributed run's scope the same way the
+// summary's runScope does: the explicit gc.scope_kind/gc.scope_ref pair, then
+// gc.root_store_ref, then the source workflow-store key (pr_review.workflow_store
+// et al.), and finally the caller's query hint. The rootStoreRef is filled from
+// whichever store ref resolved, or derived as "<kind>:<ref>" from the scope pair
+// when only the pair (or the hint) is known — so the detail identity gate never
+// rejects a run whose scope is otherwise resolvable.
+func resolveSourceScope(issues []runIssue, scopeHint RunDetailScopeHint) (runScopeWithStoreRef, bool) {
+	rootStoreRef := metadataString(issues, beadmeta.RootStoreRefMetadataKey)
+	if rootStoreRef == "" {
+		rootStoreRef = sourceWorkflowStoreRef(issues)
+	}
+	scopeMeta := map[string]string{
+		beadmeta.ScopeKindMetadataKey: metadataString(issues, beadmeta.ScopeKindMetadataKey),
+		beadmeta.ScopeRefMetadataKey:  metadataString(issues, beadmeta.ScopeRefMetadataKey),
+	}
+	if rootStoreRef != "" {
+		scopeMeta[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
+	}
+	if scope, ok := fromRootMetadataScope(scopeMeta); ok {
+		return scope, true
+	}
+
+	// Last resort: the summary lane already knew this run's scope, threaded in via
+	// the ?scope_kind=&scope_ref= query. Derive the store ref from the pair.
+	if kind, ref, ok := scopeHint.resolved(); ok {
+		return runScopeWithStoreRef{scopeKind: kind, scopeRef: ref, rootStoreRef: kind + ":" + ref}, true
+	}
+	return runScopeWithStoreRef{}, false
 }
 
 // toRunSnapshotBead projects a folded bead into the supervisor run-snapshot row.
@@ -291,10 +341,6 @@ type runningFormulaRun struct {
 // enrichFormulaRun (enrich.ts). opts carries the optional session list (nil on
 // the golden path).
 func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession) (FormulaRunDetail, error) {
-	if !isGraphV2(raw) {
-		return FormulaRunDetail{}, unsupportedRun("run is not a graph.v2 run", ReasonNotRunView)
-	}
-
 	rootBeadID := nonEmpty(raw.rootBeadID)
 	runID := nonEmpty(raw.runID)
 	rootStoreRef := nonEmpty(raw.rootStoreRef)
@@ -303,11 +349,30 @@ func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession) (FormulaRunD
 	root := rootBead(deduped, rootBeadID)
 	scopeKind, scopeRef, scopeOK := fromSnapshotScope(raw)
 
-	if runID == "" || rootStoreRef == "" || resolvedRootStore == "" {
+	// A run with no runID at all has no identity to project against; that is the
+	// one genuine invalid-snapshot case. A missing store ref, scope, or graph.v2
+	// contract is NOT fatal: the run still projects a best-effort partial detail
+	// so the page renders (the scope/graph-dependent fields simply degrade).
+	if runID == "" {
 		return FormulaRunDetail{}, unsupportedRun("run snapshot identity is missing or invalid", ReasonInvalidSnapshot)
 	}
+
+	var partialReasons []string
+	if raw.partial {
+		partialReasons = append(partialReasons, "supervisor_snapshot_partial")
+	}
+	if !isGraphV2(raw) {
+		// A v1/wisp molecule (or any run whose root lacks the graph.v2 contract)
+		// has no graph.v2 step topology, but it still has beads, deps, and phase we
+		// can project. Degrade to a partial rather than a hard not_run_view error so
+		// the run-detail page renders the run shell instead of a dead-end.
+		partialReasons = append(partialReasons, "not_graph_v2_run")
+	}
+	if rootStoreRef == "" || resolvedRootStore == "" {
+		partialReasons = append(partialReasons, "run_store_ref_unresolved")
+	}
 	if !scopeOK {
-		return FormulaRunDetail{}, unsupportedRun("run scope is missing or invalid", ReasonInvalidSnapshot)
+		partialReasons = append(partialReasons, "run_scope_unresolved")
 	}
 
 	formulaRun := buildRunningFormulaRun(runningFormulaRunInput{
@@ -322,11 +387,6 @@ func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession) (FormulaRunD
 		beads:             deduped,
 		sessions:          sessions,
 	})
-
-	var partialReasons []string
-	if raw.partial {
-		partialReasons = []string{"supervisor_snapshot_partial"}
-	}
 
 	return FormulaRunDetail{
 		RunID:             runID,

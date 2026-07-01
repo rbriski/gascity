@@ -11,6 +11,33 @@ import (
 // (shared/src/run-detail.ts).
 var scopeRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$`)
 
+// sourceWorkflowStoreKeys are the source-attribution metadata keys that carry a
+// run's store ref in "<kind>:<ref>" form (e.g. "rig:gascity"). Source-attributed
+// graph.v2 runs (pr_review/bugflow/design_review) whose gcg-* root bead lives
+// only in the graph_store never emit gc.root_store_ref to the event log; the
+// source (mc-*) beads that DID fold instead carry the store ref under their
+// workflow-namespaced key. Parallel to sourceRunRootID's key list.
+var sourceWorkflowStoreKeys = []string{
+	"pr_review.workflow_store",
+	"bugflow.workflow_store",
+	"design_review.workflow_store",
+}
+
+// sourceWorkflowStoreRef returns the first non-empty source-attribution store
+// ref across issues (format "<kind>:<ref>"), or "" when none is present. This is
+// the store ref a source-attributed graph.v2 run carries when gc.root_store_ref
+// is absent, and it is the shared input both the summary scope resolver
+// (runScope) and the detail phantom-root synthesizer feed into
+// fromRootMetadataScope so the two paths resolve scope identically.
+func sourceWorkflowStoreRef(issues []runIssue) string {
+	for _, key := range sourceWorkflowStoreKeys {
+		if v := metadataString(issues, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // runScopeWithStoreRef is the resolved scope. Port of TS RunScopeWithStoreRef.
 type runScopeWithStoreRef struct {
 	scopeKind    string

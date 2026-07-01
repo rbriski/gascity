@@ -24,6 +24,44 @@ gates manually). Trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply
 
 ## State (what's DONE)
 
+### Cascade session (`c73ff6ba4..8609a5198`, 4 commits — the pool-demand unlock)
+
+The biggest unlock from the section below is LANDED. In order:
+
+1. `688d3b79f` **providers ACP slice** — `observedACPSessionNames` reads
+   `OpenInfos()`; `infoUsesACPTransport` sibling; added Info fields `MCPIdentity`,
+   `MCPServersSnapshot`; `providers.go` added to `snapshotInfoOnlyFiles`.
+2. `6742a463b` **assigned-work scope filters** —
+   `filterAssignedWorkBeadsForPoolDemand` / `…ForSessionWake` now take
+   `[]session.Info`; new `filterSessionInfosByName` mirror; all 7 callers pass
+   `OpenInfos()`/Info locals.
+3. `d789dc2a2` **foundation** — Info health cluster (`ProviderTerminalError`,
+   `HealthState`, `HealthReason`, `Drainable`) + trigger cluster
+   (`TriggerBeadID`, `TriggerBeadStoreRef`, `BrainParentSID`); 4 siblings
+   (`sessionHasProviderTerminalErrorInfo`, `existingPoolSlotInfo`,
+   `isEphemeralSessionInfoForAgent`, `poolSessionConsumesNewDemandInfo`), all
+   equivalence-proven.
+4. `8609a5198` **pool desired-state engine flip** — `ComputePoolDesiredStates` /
+   `…Traced` / `…WithDemandTraced` / `computePoolDesiredStates` /
+   `canonicalSingletonAliasHeldTemplates` / `poolInFlightNewRequests` all take
+   `[]session.Info`; 5 production callers pass `OpenInfos()`; ~72 test call sites
+   projected via `sessionInfosFromBeads` (paren-aware transform). Pool +
+   reconciler E2E suites green.
+
+Now **28** raw-accessor sites remain (was 33). Two that look convertible are
+NOT, and should stay raw:
+- `usage_compute.go:emitDueComputeFacts`/`emitComputeFactForBead` — reads
+  usage-bookkeeping metadata (`awake_started_at`, `slept_at`,
+  `usage_compute_emitted_at`) that are not session-identity attributes; adding
+  them to `Info` would over-broaden it. Legitimate raw usage consumer.
+- `city_status_snapshot.go:countCitySessionsFromSnapshot` — needs an
+  `IsSessionBeadOrRepairableInfo`, but that reads `Type`/labels which the Info
+  projection drops (the snapshot only holds session beads, so the Info form
+  would be a trivial `true` whose fidelity depends on the snapshot invariant —
+  prove that invariant before converting).
+
+### Foundation P1–P3 (prior sessions)
+
 - **Foundation P1–P3 (prior sessions):** `session.Info` carries the full consumed
   session-attribute set; **23** `*Info` classifier siblings exist (originals
   untouched); the snapshot has `OpenInfos()`/`FindInfoByID`/`FindInfoByTemplate`/

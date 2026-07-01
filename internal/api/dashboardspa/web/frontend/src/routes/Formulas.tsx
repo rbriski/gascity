@@ -10,6 +10,7 @@ import { useCachedData } from '../hooks/useCachedData';
 import { formatRelative } from '../hooks/time';
 import {
   type SupervisorFormula,
+  cityScope,
   listSupervisorFormulas,
   recentRunTone,
 } from '../supervisor/formulaReads';
@@ -29,7 +30,7 @@ export function FormulasPage() {
   const now = useNow();
   const readOnly = useReadOnly();
   const { data, loading, error, refresh } = useCachedData(`formulas:list:${cityName ?? ''}`, () =>
-    listSupervisorFormulas(),
+    listSupervisorFormulas(cityScope(cityName)),
   );
   const formulas = data ?? null;
 

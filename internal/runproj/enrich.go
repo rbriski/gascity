@@ -112,7 +112,28 @@ func EnrichRunSummary(s RunSummary, sessions []DashboardSession, sessionsAvailab
 	out.BlockedLanes = blockedLanes
 	out.RunCounts = runCounts(liveActive, len(liveActive), len(blockedLanes))
 	out.Census = RunCensusState{Status: "available", Data: buildCensus(censusInput)}
+
+	// The lane slices this function assembles are always non-nil, but
+	// HistoricalLanes and RecentChanges are carried through untouched from the
+	// input summary. A warming (zero-value) input summary leaves those two nil,
+	// which marshals to JSON `null` — the SPA expects arrays. Guard the whole wire
+	// shape so the enriched summary always serializes arrays, never null.
+	out.Lanes = nonNilLanes(out.Lanes)
+	out.HistoricalLanes = nonNilLanes(out.HistoricalLanes)
+	out.BlockedLanes = nonNilLanes(out.BlockedLanes)
+	if out.RecentChanges == nil {
+		out.RecentChanges = []RunChange{}
+	}
 	return out
+}
+
+// nonNilLanes returns lanes unchanged when non-nil, or an empty (non-nil) slice
+// so the wire shape marshals to `[]` rather than `null`.
+func nonNilLanes(lanes []RunLane) []RunLane {
+	if lanes == nil {
+		return []RunLane{}
+	}
+	return lanes
 }
 
 // deriveRunHealthLanes returns the lanes with engine-derived health. Port of the

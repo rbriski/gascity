@@ -61,11 +61,20 @@ func BuildRunSummary(beadList []beads.Bead, opts ...BuildOption) RunSummary {
 	}
 
 	// Keep only real run groups (drop dangling roots and non-run groups).
+	//
+	// graph.v2 molecules keep their gcg-* run-root bead in the SQLite graph_store
+	// and never emit it as a bead event, so the root is absent from the fold and
+	// both guards below would drop the whole group. But the run identity IS on the
+	// wire: source beads (mc-*) carry pr_review/bugflow/design_review workflow-root
+	// pointers equal to the gcg-* root id. A group whose members carry such a
+	// pointer is a real run, so it survives even without the root bead.
 	var runRootIDs []string
 	var laneIssues []runIssue
 	for _, rootID := range order {
 		groupIssues := groups[rootID]
-		if isDanglingRootGroup(rootID, groupIssues) || !isRunGroup(rootID, groupIssues) {
+		sourced := isSourceAttributedRoot(rootID, groupIssues)
+		if (isDanglingRootGroup(rootID, groupIssues) && !sourced) ||
+			(!isRunGroup(rootID, groupIssues) && !sourced) {
 			continue
 		}
 		runRootIDs = append(runRootIDs, rootID)
@@ -295,6 +304,20 @@ func sourceRunRootID(issue runIssue) string {
 		}
 	}
 	return ""
+}
+
+// isSourceAttributedRoot reports whether any group member carries a workflow-root
+// pointer (pr_review/bugflow/design_review) equal to rootID. This is how a
+// graph.v2 run is recognized when its gcg-* run-root bead lives only in the
+// graph_store and was never emitted to the event log — the source beads that
+// DID fold carry the run identity.
+func isSourceAttributedRoot(rootID string, issues []runIssue) bool {
+	for _, i := range issues {
+		if sourceRunRootID(i) == rootID {
+			return true
+		}
+	}
+	return false
 }
 
 // runScope resolves a lane's scope from root metadata, then feed scopes.

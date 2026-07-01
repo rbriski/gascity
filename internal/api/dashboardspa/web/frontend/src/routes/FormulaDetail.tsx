@@ -10,6 +10,7 @@ import { formatRelative } from '../hooks/time';
 import {
   type SupervisorFormula,
   type SupervisorFormulaVarDef,
+  cityScope,
   getSupervisorFormulaRuns,
   listSupervisorFormulas,
   recentRunTone,
@@ -39,14 +40,14 @@ export function FormulaDetailPage() {
   const now = useNow();
 
   const { data: formulas } = useCachedData(`formulas:list:${cityName ?? ''}`, () =>
-    listSupervisorFormulas(),
+    listSupervisorFormulas(cityScope(cityName)),
   );
   const {
     data: runs,
     error: runsError,
     refresh: refreshRuns,
   } = useCachedData(`formulas:runs:${cityName ?? ''}:${name}`, () =>
-    getSupervisorFormulaRuns(name),
+    getSupervisorFormulaRuns(name, cityScope(cityName)),
   );
 
   const formula = formulas?.find((f) => f.name === name) ?? null;

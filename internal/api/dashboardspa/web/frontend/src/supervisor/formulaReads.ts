@@ -30,6 +30,17 @@ export interface FormulaScope {
   scope_ref?: string;
 }
 
+/**
+ * The city-scoped formula catalog scope. The supervisor's formulas endpoint
+ * rejects a request with no scope (scope_kind must be 'city' or 'rig'), so the
+ * catalog views scope to the active city. Returns undefined when the active city
+ * is not yet resolved, leaving the read to surface the unauthenticated error.
+ */
+export function cityScope(cityName: string | null): FormulaScope | undefined {
+  if (cityName === null || cityName === '') return undefined;
+  return { scope_kind: 'city', scope_ref: cityName };
+}
+
 /** Catalog list of formula definitions for the active city. */
 export async function listSupervisorFormulas(scope?: FormulaScope): Promise<SupervisorFormula[]> {
   const cityName = activeCityOrThrow('list supervisor formulas');

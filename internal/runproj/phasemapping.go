@@ -54,6 +54,20 @@ func mapRunPhase(issues []runIssue) phaseMapping {
 		}
 	}
 
+	// Authoritative workflow_status carried by the source (mc-*) beads of a
+	// graph.v2 run. When the gcg-* run-root bead never folds, this is the only
+	// terminal/blocked signal we have. Terminal states short-circuit; the active
+	// states (running / merge_ready) fall through so the gc.step_id structured
+	// phase still drives the fine stage below.
+	if ws := metadataString(issues, "pr_review.workflow_status"); ws != "" {
+		switch ws {
+		case "merged":
+			return phaseMapping{phase: "complete", label: "complete"}
+		case "finalize_blocked_nonrequired_ci":
+			return phaseMapping{phase: "blocked", label: "blocked"}
+		}
+	}
+
 	// gascity-dashboard-q3p1: structured-first phase derivation.
 	if structured, ok := structuredPhase(issues); ok {
 		return structured

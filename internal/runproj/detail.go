@@ -68,6 +68,13 @@ func BuildRunDetailWithSessions(beadList []beads.Bead, runID string, snapshotVer
 // Faithful port of the golden generator's snapshotForRun + toRunSnapshotBead +
 // depsForMembers: member selection, the issue_type→kind / ref→step_ref
 // projection, root→member parent deps, and snapshot identity from root metadata.
+//
+// graph.v2 molecules keep the gcg-* run-root bead in the SQLite graph_store and
+// never emit it to the event log, so the fold has no root bead. In that case the
+// members are still selected by the workflow-root pointer their metadata carries
+// (sourceRunRootID) and a phantom root snapshot bead is synthesized from that
+// same source metadata, so the detail pipeline (which requires a graph.v2 root
+// with scope/store identity) has the root it needs.
 func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq int64) (runSnapshot, error) {
 	rootIdx := -1
 	for i := range beadList {
@@ -76,10 +83,6 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 			break
 		}
 	}
-	if rootIdx < 0 {
-		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
-	}
-	root := beadList[rootIdx]
 
 	var members []beads.Bead
 	for i := range beadList {
@@ -87,9 +90,31 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		if b.ID == rootID ||
 			b.ParentID == rootID ||
 			b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID ||
-			strings.HasPrefix(b.ID, rootID+".") {
+			strings.HasPrefix(b.ID, rootID+".") ||
+			beadSourceRunRootID(b) == rootID {
 			members = append(members, b)
 		}
+	}
+
+	// No members at all — the run id is unknown to the fold entirely.
+	if len(members) == 0 {
+		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
+	}
+
+	var root beads.Bead
+	if rootIdx >= 0 {
+		root = beadList[rootIdx]
+	} else {
+		// The gcg-* root bead lives only in the graph_store. Synthesize a phantom
+		// root from the source-bead metadata so the detail pipeline recognizes the
+		// graph.v2 run. The synthesized root is prepended so it becomes members[0]
+		// (the parent depsForMembers hangs the rest off of).
+		phantom, ok := synthesizePhantomRoot(rootID, members)
+		if !ok {
+			return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
+		}
+		root = phantom
+		members = append([]beads.Bead{phantom}, members...)
 	}
 
 	snapBeads := make([]runSnapshotBead, 0, len(members))
@@ -114,6 +139,79 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		deps:              depsForMembers(members),
 		logicalEdges:      nil,
 	}, nil
+}
+
+// beadSourceRunRootID extracts the workflow-root pointer from a bead's
+// pr_review/bugflow/design_review metadata — the bead-level analog of
+// sourceRunRootID (which takes a runIssue).
+func beadSourceRunRootID(b beads.Bead) string {
+	return sourceRunRootID(fromBead(b))
+}
+
+// synthesizePhantomRoot builds the run-root bead the graph.v2 detail pipeline
+// requires when the real gcg-* root never folded to the event log. It carries
+// gc.formula_contract=graph.v2 plus the run's formula/target and scope/store
+// identity, reconstructed from the source (mc-*) member beads that DID fold. The
+// bool mirrors the scope resolver: without a resolvable scope the detail cannot
+// be projected, so the caller reports the run as not-found.
+func synthesizePhantomRoot(rootID string, members []beads.Bead) (beads.Bead, bool) {
+	issues := make([]runIssue, 0, len(members))
+	for i := range members {
+		issues = append(issues, fromBead(members[i]))
+	}
+
+	// Reconstruct scope + store ref the same way runScope does: gc.scope_kind /
+	// gc.scope_ref first, gc.root_store_ref as the fallback. Without a resolvable
+	// scope the detail pipeline would reject the snapshot, so bail out.
+	rootStoreRef := metadataString(issues, beadmeta.RootStoreRefMetadataKey)
+	scopeMeta := map[string]string{
+		beadmeta.ScopeKindMetadataKey: metadataString(issues, beadmeta.ScopeKindMetadataKey),
+		beadmeta.ScopeRefMetadataKey:  metadataString(issues, beadmeta.ScopeRefMetadataKey),
+	}
+	if rootStoreRef != "" {
+		scopeMeta[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
+	}
+	scope, ok := fromRootMetadataScope(scopeMeta)
+	if !ok {
+		return beads.Bead{}, false
+	}
+
+	formulaName := metadataString(issues, "pr_review.workflow_formula")
+	if formulaName == "" {
+		formulaName = metadataString(issues, beadmeta.FormulaMetadataKey)
+	}
+	runTarget := metadataString(issues, beadmeta.RunTargetMetadataKey)
+	if runTarget == "" {
+		runTarget = scope.rootStoreRef
+	}
+
+	title := metadataString(issues, "pr_review.workflow_formula")
+	if title == "" {
+		title = formulaName
+	}
+	if title == "" {
+		title = rootID
+	}
+
+	meta := map[string]string{
+		beadmeta.FormulaContractMetadataKey: "graph.v2",
+		beadmeta.KindMetadataKey:            "run",
+		beadmeta.RootStoreRefMetadataKey:    scope.rootStoreRef,
+		beadmeta.ScopeKindMetadataKey:       scope.scopeKind,
+		beadmeta.ScopeRefMetadataKey:        scope.scopeRef,
+		beadmeta.RunTargetMetadataKey:       runTarget,
+	}
+	if formulaName != "" {
+		meta[beadmeta.FormulaMetadataKey] = formulaName
+	}
+
+	return beads.Bead{
+		ID:       rootID,
+		Title:    title,
+		Status:   "open",
+		Type:     "molecule",
+		Metadata: meta,
+	}, true
 }
 
 // toRunSnapshotBead projects a folded bead into the supervisor run-snapshot row.

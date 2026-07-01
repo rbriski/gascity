@@ -11,6 +11,7 @@ import {
   setSupervisorApiForTests,
 } from './client';
 import {
+  cityScope,
   getSupervisorFormulaRuns,
   getSupervisorFormulaSteps,
   listSupervisorFormulas,
@@ -72,6 +73,23 @@ describe('formulaReads', () => {
 
     await listSupervisorFormulas({ scope_kind: 'rig', scope_ref: 'east' });
     expect(formulas).toHaveBeenCalledWith('test-city', { scope_kind: 'rig', scope_ref: 'east' });
+  });
+
+  it('scopes the catalog to the active city (backend rejects a scope-less request)', async () => {
+    const formulas = vi.fn(async () => ({ items: [], partial: false, total: 0 }));
+    stub({ formulas });
+
+    await listSupervisorFormulas(cityScope('test-city'));
+    expect(formulas).toHaveBeenCalledWith('test-city', {
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+    });
+  });
+
+  it('cityScope returns undefined for an unresolved city', () => {
+    expect(cityScope(null)).toBeUndefined();
+    expect(cityScope('')).toBeUndefined();
+    expect(cityScope('gc')).toEqual({ scope_kind: 'city', scope_ref: 'gc' });
   });
 
   it('reads recent runs for a formula', async () => {

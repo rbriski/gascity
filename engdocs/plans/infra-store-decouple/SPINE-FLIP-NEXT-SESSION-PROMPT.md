@@ -6,7 +6,7 @@ Paste the block below into a fresh session.
 
 Continue the **reconciler spine flip** on **PR #3839** (branch
 `upstream/object-front-doors-cleanup`, base `main`, DRAFT, worktree
-`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `aea0e50fa`).
+`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `6ccf9d698`).
 
 **Read first:** `engdocs/plans/infra-store-decouple/SPINE-FLIP-HANDOFF.md` — the
 authoritative, self-contained guide (design = Fork B, verified scope, field-gap
@@ -33,30 +33,44 @@ go test ./cmd/gc/ -run 'TestSessionClassifierInfoEquivalence|TestSnapshotInfoOnl
 git checkout go.sum
 ```
 
-**DONE already (`69ccc13c6`, Tier-0):** `Info.ResetCommittedAt` +
-`Info.ContinuationResetPending` + `resetPendingCommittedAtInfo` + 4 equivalence
-fixtures (the oracle for the `resetPendingCommittedAt` decision read).
+**DONE already:**
+- **Tier-0 (`69ccc13c6`):** `Info.ResetCommittedAt` + `Info.ContinuationResetPending`
+  + `resetPendingCommittedAtInfo` + 4 equivalence fixtures.
+- **Phase 2 (`a6dea375a`):** `Info.Generation` (RAW string mirror, NOT `int`) +
+  fixture + `sessionGeneration` case; `advanceSessionDrainsWithSessionsTraced`
+  (`session_wake.go`) decision reads → `info` (session_name, generation, 8
+  template sites); param `sessions`→`sessionBeads`.
+- **Phase 1, cluster 1 (`6ccf9d698`):** the reconciler loop preamble
+  (`session_reconciler.go:~1246–1275`) → `info` (name, reset-pending,
+  known-state, unknown-state trace); proven mutation-free-prefix.
 
-**First concrete increment (do this, as ONE verified commit):**
-1. Add **`Info.Generation string`** — a RAW mirror of `generation`, **not `int`**
-   (fidelity trap: `generation` is read both `strconv.Atoi` AND `strings.TrimSpace`,
-   `session_wake.go:41/173/283/331/350/461`). Struct (`internal/session/manager.go`)
-   + codec (`internal/session/info_store.go:InfoFromPersistedBead`) + an
-   equivalence case/fixture in `cmd/gc/session_classifier_info_equiv_test.go`.
-2. Convert **Phase 2** `advanceSessionDrainsWithSessionsTraced`
-   (`cmd/gc/session_wake.go:428–668`): at the top of the drain loop derive
-   `info := sessionpkg.InfoFromPersistedBead(*session)` and read
-   `info.SessionNameMetadata` (session_name), `info.Generation` (Atoi/TrimSpace as
-   the raw sites do), and `normalizedSessionTemplateInfo(info, cfg)` (template).
-   The mutations (`completeDrain`, `cancelSessionDrainForPending/ForAssignedWork`)
-   and `session.ID` **stay raw**.
-3. Verify: build + vet + lint + equivalence + the reconcile/pool E2E suites.
+**First concrete increment (do this, as ONE verified commit): Phase 1, cluster 2
+— the `!desired` orphan/suspend branch (`session_reconciler.go:~1277`+).**
+This is the FIRST re-derive-after-mutation cluster (do it with fresh context):
+1. The branch mutates the session mid-iteration: `attemptRollbackPendingCreate`,
+   the inline `session.Status = "closed"` (`~1369`), and `healStateWithRollback`
+   (`~1382`, mutates `session.Metadata` in lockstep via `sessFront`). So the
+   top-of-loop `info` from cluster 1 is STALE after each mutation.
+2. Audit each helper's mutation behavior first (as cluster 1 audited
+   `reconcileDrainAckStopPending`): `checkRateLimitStability`,
+   `isFailedCreateSessionBead`, `preserveConfiguredNamedSessionBead`,
+   `shouldRollbackPendingCreate`, `pendingCreateLeaseExpiredForRollback`.
+   `stateBeforeHeal`/`pendingCreateStartedAtBeforeHeal`/`lastWokeAtBeforeHeal`
+   (`~1379–1381`) are read-before-heal snapshots — keep them pre-heal (raw or a
+   pre-heal `info`).
+3. Convert only the pre-mutation decision reads in this branch, and/or
+   **re-derive `info := sessionpkg.InfoFromPersistedBead(*session)` after each
+   mutation** for the reads that follow it. The template reads here still use
+   `normalizedSessionTemplate(*session, cfg)` — convert to
+   `normalizedSessionTemplateInfo(info, cfg)` only where `info` is current.
+4. Verify: build + vet + lint + equivalence + trace-integration + the full
+   `TestReconcileSessionBeads*` suite (205 tests; run with a ≥420s timeout — the
+   box overloads under `fork/exec`, split the run if it times out).
 
-**Then:** the Phase-1 driver decision-read clusters
-(`reconcileSessionBeadsTracedWithNamedDemand`, `session_reconciler.go:1005`+),
-cluster by cluster, adding `Info.StartedConfigHash` (raw) and a `pin_awake`
-mirror as their sites are reached (see the handoff field-gap table). Leave the
-apply/write-back cluster + ProjectLifecycle + circuit breaker raw.
+**Then:** the remaining Phase-1 clusters (heal/stability, pool-demand,
+named-identity), cluster by cluster, adding `Info.StartedConfigHash` (raw) and a
+`pin_awake` mirror as their sites are reached (see the handoff field-gap table).
+Leave the apply/write-back cluster + ProjectLifecycle + circuit breaker raw.
 
 **Method:** keep original + ADD the `Info` field/sibling + ADD an equivalence case
 (byte-identical oracle) + THEN convert the decision read via the per-iteration

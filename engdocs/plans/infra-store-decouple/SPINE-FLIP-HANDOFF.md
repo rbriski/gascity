@@ -2,8 +2,8 @@
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`,
-**HEAD `aea0e50fa`** (pushed). Self-contained guide for finishing the reconciler
-spine flip. It supersedes the Fork-A material in
+**HEAD `6ccf9d698`** (pushed; Phase 2 + Phase-1 cluster 1 landed). Self-contained
+guide for finishing the reconciler spine flip. It supersedes the Fork-A material in
 `RECONCILER-CASCADE-HANDOFF.md` (kept only as background).
 
 > **Do not rush this.** It is genuinely a **3–5 session effort** on the system's
@@ -84,16 +84,50 @@ on the raw bead (accepted).** Therefore:
   byte-identical oracle for the `resetPendingCommittedAt` decision read at
   `session_reconciler.go:~1247`.
 
-**Verified scope (at HEAD):** 194 raw `.Metadata[` reads — reconciler 123 /
-reconcile 50 / wake 21 — plus 6 `.Status`. Most are inside the raw machinery
-that stays. Only DECISION reads convert.
+**DONE — Phase 2: drain-advance (`a6dea375a`):**
+- `Info.Generation` — a RAW string mirror of `generation` (NOT `int`, per the
+  Atoi/TrimSpace fidelity trap) — added to the struct + `InfoFromPersistedBead`
+  codec, plus a whitespace-padded (`" 3 "`) equivalence fixture and a
+  `sessionGeneration` stringChecks case pinning the raw codec mirror.
+- `advanceSessionDrainsWithSessionsTraced` (`session_wake.go`) decision reads
+  routed through a per-iteration `info := session.InfoFromPersistedBead(*session)`:
+  `session_name`→`info.SessionNameMetadata`, `generation`→
+  `strconv.Atoi(info.Generation)`, template (8 trace sites)→
+  `normalizedSessionTemplateInfo(info, cfg)`. Mutations (`completeDrain`,
+  `cancelSessionDrainFor*`) + `session.ID` stay raw. The `sessions []beads.Bead`
+  param was renamed `sessionBeads` to un-shadow the `session` package alias.
+  Byte-identical: `completeDrain` (the only in-loop mutation) writes only
+  sleep/state keys (SleepPatch/CompleteDrainPatch never touch
+  template/alias/agent_name/session_name) and always `continue`s.
+
+**DONE — Phase 1, cluster 1: reconciler loop preamble (`6ccf9d698`):**
+- The mutation-free top of the `reconcileSessionBeadsTracedWithNamedDemand`
+  per-session loop (`session_reconciler.go:~1246–1275`): `name`←
+  `strings.TrimSpace(info.SessionNameMetadata)`, reset-pending→
+  `resetPendingCommittedAtInfo(info)`, known-state→`isKnownStateInfo(info)`,
+  unknown-state trace→`info.SessionNameMetadata`/`info.MetadataState`/`info.Template`.
+- Proven mutation-free-prefix: `reconcileDrainAckStopPending` (called at ~1259,
+  between the reset read and the known-state read) mutates ONLY on its
+  true/continue paths — its sole false return is the non-mutating
+  `!isDrainAckStopPending` early-out (line 437) — so when control falls through
+  to the known-state check the session is still unmutated and the top-of-loop
+  projection is byte-identical. Verified: trace-integration suite (asserts the
+  `unknown_state` decision + template values) + all 205
+  `TestReconcileSessionBeads*`.
+
+**Verified scope (at HEAD `6ccf9d698`):** 194 raw `.Metadata[` reads at the
+CONT-5 census — reconciler 123 / reconcile 50 / wake 21 — plus 6 `.Status`.
+Most are inside the raw machinery that stays. Only DECISION reads convert.
+Phase 2 + Phase-1-cluster-1 have converted the drain-advance loop and the
+reconciler loop preamble; the rest of the Phase-1 main loop (orphan/suspend,
+heal/stability, pool-demand) is the remaining bulk.
 
 ## Field-gaps still needed (decision-reads only)
 
 | Key | Disposition | Sites |
 | --- | --- | --- |
-| `reset_committed_at`, `continuation_reset_pending` | **DONE** (`69ccc13c6`) | `resetPendingCommittedAt` @`session_reconciler.go:~1247` |
-| `generation` | Add **`Info.Generation string`** — RAW mirror, **NOT `int`**. **Fidelity trap:** read both as `strconv.Atoi` AND `strings.TrimSpace`, so a parsed int loses the string-comparison fidelity. | `session_wake.go:41/173/283/331/350/461` |
+| `reset_committed_at`, `continuation_reset_pending` | **DONE** (`69ccc13c6`); used in Phase-1 cluster 1 (`6ccf9d698`) | `resetPendingCommittedAt`/`Info` @`session_reconciler.go:~1249` |
+| `generation` | **field DONE** (`a6dea375a`): `Info.Generation string` RAW mirror (NOT `int`; Atoi/TrimSpace fidelity trap) added + the drain-advance loop site converted. The sibling wake-helper raw sites (`preWakeCommit`/`queueDrainAck…`) stay raw until later Phase-2 sub-clusters. | remaining raw: `session_wake.go:41/173/283/331/350` |
 | `started_config_hash` | Add `Info.StartedConfigHash string` (raw) for the **decision** reads; the write-back sites (`session_reconcile.go:1154`, batch writes) stay raw. | decision reads `session_reconciler.go:2026/2278/3571/3733`, `session_reconcile.go:814` |
 | `pin_awake` | Add a mirror for the one decision read. | `session_reconciler.go:2501` |
 | `held_until`, `wake_request` | ProjectLifecycle machinery → **stay raw**. | — |
@@ -101,22 +135,33 @@ that stays. Only DECISION reads convert.
 
 ## Incremental execution order (each its own verified commit)
 
-1. **Add `Info.Generation string` + convert Phase 2.** Add the raw `generation`
-   mirror to the struct + codec + an equivalence case, then convert
-   `advanceSessionDrainsWithSessionsTraced` (`session_wake.go:428–668`) decision
-   reads: at the top of the drain loop derive `info := sessionpkg.InfoFromPersistedBead(*session)`
-   and read `info.SessionNameMetadata` (session_name), `strconv.Atoi(info.Generation)`
-   / `strings.TrimSpace(info.Generation)` (generation), and
-   `normalizedSessionTemplateInfo(info, cfg)` (template). The mutations
-   (`completeDrain`, `cancelSessionDrainForPending/ForAssignedWork`) and
-   `session.ID` **stay raw**. This is the bounded, self-contained first slice.
+1. **DONE (`a6dea375a`) — `Info.Generation` + Phase 2 drain-advance.** See the
+   Status "Phase 2" block above.
 2. **The Phase-1 driver decision-read clusters** (`reconcileSessionBeadsTracedWithNamedDemand`,
-   `session_reconciler.go:1005`+), cluster by cluster — derive `info` per
-   iteration, re-derive after mutations, convert the classifier decision reads
-   (`isKnownState`→`isKnownStateInfo`, `name := info.SessionNameMetadata`,
+   `session_reconciler.go:1024`+), cluster by cluster — derive `info` per
+   iteration, **re-derive after each mutation**, convert the classifier decision
+   reads (`isKnownState`→`isKnownStateInfo`, `name := info.SessionNameMetadata`,
    `resetPendingCommittedAt`→`resetPendingCommittedAtInfo`, template/named-identity
    reads, etc.). Add each remaining field-gap (`StartedConfigHash`, `pin_awake`)
    as its cluster reaches it.
+   - **DONE — cluster 1 (`6ccf9d698`): loop preamble (`~1246–1275`).** The
+     mutation-free top of the per-session loop (see the Status "cluster 1" block).
+   - **NEXT — cluster 2: the `!desired` orphan/suspend branch (`~1277`+).** This
+     is where the FIRST mutations of the iteration occur — `attemptRollbackPendingCreate`,
+     the inline `session.Status = "closed"` (`~1369`), and
+     `healStateWithRollback` (`~1382`, which mutates `session.Metadata` in
+     lockstep via `sessFront`). So the top-of-loop `info` is stale after each of
+     these — **re-derive `info := sessionpkg.InfoFromPersistedBead(*session)`
+     after every mutation**, or keep the post-mutation reads raw and convert only
+     the pre-mutation decision reads in this branch. Audit each helper's mutation
+     behavior first (as cluster 1 audited `reconcileDrainAckStopPending`):
+     `checkRateLimitStability`, `isFailedCreateSessionBead`,
+     `preserveConfiguredNamedSessionBead`, `shouldRollbackPendingCreate`,
+     `pendingCreateLeaseExpiredForRollback` are the candidates; `stateBeforeHeal`/
+     `pendingCreateStartedAtBeforeHeal`/`lastWokeAtBeforeHeal` (`~1379–1381`) are
+     read-before-heal snapshots that MUST stay pre-mutation raw (or a pre-heal
+     `info`). Do this with fresh context — it is the first re-derive-after-mutation
+     cluster.
 3. **Leave raw:** the apply/write-back cluster (`healState*`, `checkStability`,
    `checkChurn`, `record*`/`clear*`, `markProviderTerminalError`, `healExpiredTimers`,
    `persistSessionCircuitBreakerMetadata`, the inline `session.Status="closed"` /

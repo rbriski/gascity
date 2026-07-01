@@ -22,18 +22,38 @@ git checkout go.sum   # churns spuriously on go test
 
 ## Where the migration stands
 
-Raw-accessor surface is **20** non-test sites (was 33). Foundation P1–P3 + the
-pool-demand cascade + five small cascades are DONE and guard-pinned where the
-file is fully accessor-free (`template_resolve.go`, `session_name_lookup.go`,
-`cmd_citystatus.go`, `session_reconciler_trace_cycle.go`, `providers.go`,
-`nudge_dispatcher.go`, `named_sessions.go`). The Info codec
-(`internal/session/info_store.go:InfoFromPersistedBead`) already carries every
-consumed session attribute (incl. the fidelity-trap raw mirrors `MetadataState`,
-`SessionNameMetadata`, `ManualSessionMetadata`, `TransportMetadata`, and
-`Type`/`ContinuityEligible`). ~25 `*Info` classifier siblings exist.
+Raw-accessor surface is **20** non-test sites, but the count now understates
+progress: the pool **sweep loop is converted** and its lone remaining
+`.FindByID` at `city_runtime.go` is a sanctioned rule-3 raw-bead recovery for
+the `GCSweepSessionBeads` store close op, not a field-door leak. Foundation
+P1–P3 + the pool-demand cascade + five small cascades are DONE and guard-pinned
+where the file is fully accessor-free (`template_resolve.go`,
+`session_name_lookup.go`, `cmd_citystatus.go`,
+`session_reconciler_trace_cycle.go`, `providers.go`, `nudge_dispatcher.go`,
+`named_sessions.go`). The Info codec
+(`internal/session/info_store.go:InfoFromPersistedBead`) carries every consumed
+session attribute (incl. the fidelity-trap raw mirrors `MetadataState`,
+`SessionNameMetadata`, `ManualSessionMetadata`, `TransportMetadata`,
+`Type`/`ContinuityEligible`, and now `LastWokeAt`/`StateReason`/
+`CreationCompleteAt`). ~30 `*Info` classifier siblings exist.
 
-**The 20 remaining sites almost all block on ONE thing: the reconciler's
-`*beads.Bead session` working copy and its `*ForAgent` classifier family.**
+**DONE this session (commits `d8c606fd8`, `79c375147`, `897f660ea`):**
+- The `*ForAgent` classifier family Info forms —
+  `isLegacyManualSessionInfoForAgent`, `isManualSessionInfoForAgent`,
+  `sessionAgentMetricIdentityInfo`/`pooledFallbackIdentityInfo`
+  (`isEphemeralSessionInfoForAgent`/`existingPoolSlotInfo` already existed).
+- The pending-create lease Info-helper family —
+  `pendingCreateStartInFlightInfo`, `pendingCreateNeverStartedLeaseExpiredInfo`,
+  `pendingCreateAttemptStaleInfo`, `pendingCreateLeaseActiveInfo`,
+  `pendingCreateClaimStillLeasedForSweepInfo` — plus the 3 fidelity fields.
+- **The pool sweep loop** (`sweepUndesiredPoolSessionBeads`) fully flipped to
+  `OpenInfos()`; all 20 `TestSweepUndesiredPoolSessionBeads_*` branch tests pass
+  unchanged.
+
+**The remaining sites almost all block on ONE thing: the reconciler's
+`*beads.Bead session` working copy** (the `*ForAgent` family it also needed now
+exists, so the desired-state recovery loop is unblocked on classifiers — but it
+still threads raw beads into the identity-resolution chain; see below).
 
 ## The reconciler cascade (the primary unlock — do this first)
 
@@ -116,18 +136,25 @@ reads on those loops are `.Closed`/`.MetadataState`/`isFailedCreateSessionInfo`/
 Convert as their blocking helper gains an Info form; add each newly
 accessor-free file to `snapshotInfoOnlyFiles`:
 
-- `build_desired_state.go` 2079 (recovery loop) — unblocked by the `*ForAgent`
-  family. 3341/3570/3816/4165 return/append raw `[]beads.Bead` candidate slices
+- `build_desired_state.go` 2079 (recovery loop) — the `*ForAgent` classifiers it
+  needs now EXIST, but the loop still threads the raw bead `b` into a deep
+  identity-resolution chain (`sessionBeadQualifiedName`,
+  `canonicalSessionIdentityWithConfig`, `resolveTemplateForSessionBead`,
+  `sessionBeadConfigAgent`, `buildFingerprintExtra`, `installAgentSideEffects`)
+  plus needs Info forms of `scaleCheckPartialSessionPreservable` +
+  `staleNonExpandingPoolSessionBead` and an `Info.Alias` read. Converting the
+  loop's field reads to Info while recovering `b` via `FindByID` for the
+  identity chain is a self-contained NEXT slice (the identity helpers stay raw,
+  rule 3). 3341/3570/3816/4165 return/append raw `[]beads.Bead` candidate slices
   sorted + threaded into pool-create planning; these stay raw unless that
   planning takes Info (assess — likely a separate, later slice; contract rule 3).
+- **`city_runtime.go` 2658 (sweep) — DONE** (commit `897f660ea`). Iterates
+  `OpenInfos()`; candidates recovered via `FindByID(info.ID)` for the
+  `GCSweepSessionBeads` store op (rule 3).
 - `session_beads.go` 2033 — read the loop; convert if pure, else leave (rule 3).
   `session_beads.go:57` returns `Open()` as `[]beads.Bead` to raw callers — a
   return-type cascade; do with its callers or leave.
-- `city_runtime.go` 2658 (sweep) — unblocked by the `*ForAgent` family + a
-  `pendingCreateClaimStillLeasedForSweep` Info form; note it threads into
-  `GCSweepSessionBeads` (a store close op) — only the field-read guard converts,
-  the close stays on the store.
-- `city_runtime.go` 3056 (`filterSessionBeadsByName`) — its caller (2896) feeds
+- `city_runtime.go` 3085 (`filterSessionBeadsByName`) — its caller feeds
   `newSessionBeadSnapshot(open)` + the raw-bead reconciler; converts only once
   `reconcileSessionBeadsAtPathWithNamedDemand` takes Info (part of this cascade).
 - `soft_reload.go` 103 — needs a `template_overrides` (or raw-metadata-map)

@@ -74,14 +74,22 @@ func (s *DoltliteReadStore) doltliteReadyIssueWhere(tables doltliteTableSet) (st
 	return doltliteReadyIssueWhere(tables, s.tableExists(doltliteWispTables.issues))
 }
 
-func doltliteReadyIssueWhere(tables doltliteTableSet, includeWispTargets bool) (string, []any) {
-	typePredicate, args := doltliteIssueTypeNotInPredicate("i")
+func (s *DoltliteReadStore) doltliteBlockingDepsWhere(tables doltliteTableSet) (string, []any) {
+	return doltliteBlockingDepsWhere(tables, s.tableExists(doltliteWispTables.issues))
+}
+
+// doltliteBlockingDepsWhere returns the NOT EXISTS predicate that excludes beads
+// with open blocking dependencies. Unlike doltliteReadyIssueWhere it does not
+// prepend a type-exclusion filter, so it is safe to use on the wisp table set
+// where the actionable types (molecule) are listed in readyExcludeTypes.
+func doltliteBlockingDepsWhere(tables doltliteTableSet, includeWispTargets bool) (string, []any) {
 	blockingTypes := make([]string, 0, len(readyBlockingDependencyTypes))
 	for typ := range readyBlockingDependencyTypes {
 		blockingTypes = append(blockingTypes, typ)
 	}
 	sort.Strings(blockingTypes)
 	blockingPlaceholders := strings.TrimRight(strings.Repeat("?,", len(blockingTypes)), ",")
+	args := make([]any, 0, len(blockingTypes))
 	for _, typ := range blockingTypes {
 		args = append(args, typ)
 	}
@@ -96,14 +104,17 @@ func doltliteReadyIssueWhere(tables doltliteTableSet, includeWispTargets bool) (
 		blockerStatus = "CASE WHEN " + wispTarget + " IS NOT NULL THEN COALESCE(blocker_wisp.status, '') ELSE COALESCE(blocker_issue.status, '') END"
 	}
 
-	return strings.Join([]string{
-		typePredicate,
-		`NOT EXISTS (
+	return `NOT EXISTS (
 				SELECT 1 FROM ` + tables.deps + ` d
 				` + blockerJoins + `
 				WHERE d.issue_id = i.id AND ` + depType + ` IN (` + blockingPlaceholders + `) AND ` + blockerStatus + ` != 'closed'
-			)`,
-	}, " AND "), args
+			)`, args
+}
+
+func doltliteReadyIssueWhere(tables doltliteTableSet, includeWispTargets bool) (string, []any) {
+	typePredicate, typeArgs := doltliteIssueTypeNotInPredicate("i")
+	depsWhere, depsArgs := doltliteBlockingDepsWhere(tables, includeWispTargets)
+	return typePredicate + " AND " + depsWhere, append(typeArgs, depsArgs...)
 }
 
 func doltliteIssueTypeNotInPredicate(alias string) (string, []any) {

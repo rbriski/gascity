@@ -43,6 +43,46 @@ func TestDoltliteReadStoreReadyGraphOnlyReturnsTierWispsOnly(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWisps pins that ReadyGraphOnly
+// filters out wisp beads with open blocking dependencies (ga-b5j6av). A wisp
+// whose blocker is already closed must still appear as ready.
+func TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWisps(t *testing.T) {
+	now := time.Now().UTC()
+	store := newDoltliteStoreWithRows(t, nil, []testDoltliteIssue{
+		{ID: "gco-blocker", Title: "open blocker", Status: "open", IssueType: "molecule", CreatedAt: now, Ephemeral: true},
+		{
+			ID: "gco-blocked", Title: "blocked step", Status: "open", IssueType: "molecule",
+			CreatedAt: now.Add(time.Second), Ephemeral: true,
+			Dependencies: []testDoltliteDependency{{DependsOnID: "gco-blocker"}},
+		},
+		{ID: "gco-closed-dep", Title: "closed dep", Status: "closed", IssueType: "molecule", CreatedAt: now.Add(2 * time.Second), Ephemeral: true},
+		{
+			ID: "gco-unblocked", Title: "unblocked step", Status: "open", IssueType: "molecule",
+			CreatedAt: now.Add(3 * time.Second), Ephemeral: true,
+			Dependencies: []testDoltliteDependency{{DependsOnID: "gco-closed-dep"}},
+		},
+	})
+
+	graphOnly, ok := GraphOnlyReadyFor(store)
+	if !ok {
+		t.Skip("DoltliteReadStore does not implement GraphOnlyReadyStore; add ReadyGraphOnly in ga-ifavnc.2")
+	}
+
+	rows, err := graphOnly.ReadyGraphOnly()
+	if err != nil {
+		t.Fatalf("ReadyGraphOnly: %v", err)
+	}
+	if hasTestBead(rows, "gco-blocked") {
+		t.Errorf("ReadyGraphOnly included gco-blocked (open blocker gco-blocker); ids=%v", testBeadIDs(rows))
+	}
+	if !hasTestBead(rows, "gco-blocker") {
+		t.Errorf("ReadyGraphOnly missing gco-blocker (no deps, should be ready); ids=%v", testBeadIDs(rows))
+	}
+	if !hasTestBead(rows, "gco-unblocked") {
+		t.Errorf("ReadyGraphOnly missing gco-unblocked (blocker closed, should be ready); ids=%v", testBeadIDs(rows))
+	}
+}
+
 // TestDoltliteReadStoreReadyGraphOnlyForcesTierWisps pins that ReadyGraphOnly
 // ignores the caller-supplied TierMode and always queries the wisp table set.
 // Passing TierBoth or TierIssues must not cause durable issues to appear.

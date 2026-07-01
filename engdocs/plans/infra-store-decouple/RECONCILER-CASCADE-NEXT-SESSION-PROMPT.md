@@ -1,5 +1,11 @@
 # Next-session prompt — finish the non-work field-door cleanup (recovery-loop slice + reconciler spine → ready)
 
+> **The reconciler spine flip now has dedicated, self-contained docs** (design =
+> Fork B, verified scope, incremental order): read
+> **`SPINE-FLIP-HANDOFF.md`** and paste **`SPINE-FLIP-NEXT-SESSION-PROMPT.md`**
+> for that work. The block below is the older broad-cascade prompt (recovery loop
+> DONE; spine flip is the remaining major item).
+
 Paste the block below into a fresh session.
 
 ---

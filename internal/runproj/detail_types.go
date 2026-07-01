@@ -47,10 +47,16 @@ type runSnapshot struct {
 	snapshotVersion   int
 	snapshotEventSeq  *int64
 	partial           bool
-	storesScanned     []string
-	beads             []runSnapshotBead
-	deps              []runSnapshotDep
-	logicalEdges      []runSnapshotDep
+	// extraPartialReasons are caller-supplied completeness reasons (e.g.
+	// "graph_fetch_failed" when the BFF could not reach the authoritative
+	// beads/graph endpoint and fell back to the incomplete event fold). They are
+	// merged into the detail's completeness so the UI never reports "complete" on
+	// a partial view.
+	extraPartialReasons []string
+	storesScanned       []string
+	beads               []runSnapshotBead
+	deps                []runSnapshotDep
+	logicalEdges        []runSnapshotDep
 }
 
 // RunFormula is the run's formula-identity union. TS RunFormula:

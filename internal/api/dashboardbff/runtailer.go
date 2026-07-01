@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
@@ -207,9 +208,19 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 // snapshot_version). It matches the golden generator's snapshot_version.
 const runDetailSnapshotVersion = 1
 
-// detail projects one run into the run-detail DTO off the warm bead snapshot,
-// layering request-time session links from one loopback /v0 sessions read. It
-// waits briefly for the cold replay on a city's first request, like
+// detail projects one run into the run-detail DTO. Step membership comes from
+// the AUTHORITATIVE run graph — one loopback read of GET
+// /v0/city/{name}/beads/graph/{runID} — because a graph.v2 run keeps its step
+// beads (scope-check, retry, spec, workflow-finalize, …) in the SQLite graph
+// store and only a handful ever reach the event log; projecting over the event
+// fold alone shows ~2 of ~67 steps. The graph beads are merged (union, deduped
+// by id) with the warm event-fold slice and passed to the detail builder. When
+// the graph read fails, the detail falls back to the (incomplete) event fold and
+// is marked partial with "graph_fetch_failed", so it never reports complete on a
+// truncated view. Request-time session links are layered from one loopback /v0
+// sessions read.
+//
+// It waits briefly for the cold replay on a city's first request, like
 // enrichedSummary. The bool reports whether the cold replay had completed (a
 // not-found run during warming is reported as warming, not a hard 404).
 //
@@ -230,8 +241,71 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string, scopeHint runp
 	t.mu.RUnlock()
 
 	sessions, _ := t.mgr.fetchSessions(ctx, t.name)
-	d, err := runproj.BuildRunDetailWithOptions(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions, scopeHint)
+
+	// Authoritative step membership from the run graph; fall back to the event
+	// fold (and mark partial) when the graph endpoint is unreachable.
+	var extraPartialReasons []string
+	detailBeads := beadSlice
+	if graphBeads, ok := t.mgr.fetchRunGraph(ctx, t.name, runID); ok {
+		detailBeads = mergeGraphBeads(graphBeads, beadSlice, runID)
+	} else {
+		extraPartialReasons = []string{"graph_fetch_failed"}
+	}
+
+	d, err := runproj.BuildRunDetailWith(detailBeads, runID, runDetailSnapshotVersion, int64(lastSeq), runproj.RunDetailOptions{
+		Sessions:            sessions,
+		ScopeHint:           scopeHint,
+		ExtraPartialReasons: extraPartialReasons,
+	})
 	return d, ready, err
+}
+
+// mergeGraphBeads unions the authoritative run-graph beads with the warm
+// event-fold slice, graph beads winning on id collision (they carry the live
+// store state). Only event-fold beads that belong to the same run — the root, or
+// carrying gc.root_bead_id == runID, or id-prefixed by runID — are folded in, so
+// unrelated fold beads don't leak into the run. The graph beads always lead so
+// the run root and its steps are present even when the fold had none.
+func mergeGraphBeads(graphBeads, foldBeads []beads.Bead, runID string) []beads.Bead {
+	seen := make(map[string]struct{}, len(graphBeads)+len(foldBeads))
+	out := make([]beads.Bead, 0, len(graphBeads)+len(foldBeads))
+	for _, b := range graphBeads {
+		if b.ID == "" {
+			continue
+		}
+		if _, dup := seen[b.ID]; dup {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		out = append(out, b)
+	}
+	for _, b := range foldBeads {
+		if b.ID == "" {
+			continue
+		}
+		if _, dup := seen[b.ID]; dup {
+			continue
+		}
+		if !beadBelongsToRun(b, runID) {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		out = append(out, b)
+	}
+	return out
+}
+
+// beadBelongsToRun reports whether an event-fold bead is part of the run rooted
+// at runID, mirroring snapshotForRun's membership predicate (minus the source-
+// attribution pointer, which the graph already resolves).
+func beadBelongsToRun(b beads.Bead, runID string) bool {
+	if b.ID == runID || b.ParentID == runID {
+		return true
+	}
+	if b.Metadata[beadmeta.RootBeadIDMetadataKey] == runID {
+		return true
+	}
+	return strings.HasPrefix(b.ID, runID+".")
 }
 
 // enrichedSummary returns the warm bead-derived summary with request-time
@@ -294,6 +368,63 @@ func (m *runTailerManager) fetchSessions(ctx context.Context, name string) ([]ru
 		env.Items = []runproj.DashboardSession{}
 	}
 	return env.Items, true
+}
+
+// fetchRunGraph reads GET {base}/v0/city/{name}/beads/graph/{rootID} over
+// loopback and returns the run's COMPLETE bead set (the root plus every graph
+// child) as folded beads. graph.v2 runs keep their step beads (scope-check,
+// retry, spec, workflow-finalize, …) in the SQLite graph store, and only a
+// handful ever reach the event log — so the event fold sees ~2 of ~67. This
+// endpoint is authoritative for step membership. Any failure returns
+// (nil, false) so the detail path degrades to the (incomplete) event fold and
+// marks itself partial, rather than reporting complete on a 2-of-67 view.
+//
+// The call is bounded by the request context (mirroring fetchSessions) so a
+// slow supervisor cannot stall the detail request unboundedly.
+func (m *runTailerManager) fetchRunGraph(ctx context.Context, name, rootID string) ([]beads.Bead, bool) {
+	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
+	if base == "" || rootID == "" {
+		return nil, false
+	}
+	url := base + "/v0/city/" + name + "/beads/graph/" + rootID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := m.httpc.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, false
+	}
+	// Mirrors internal/api.BeadGraphResponse ({root, beads, deps}); decoded with a
+	// local struct so the BFF stays decoupled from the heavy internal/api package
+	// (same approach fetchSessions takes for the sessions envelope). deps are not
+	// consumed — snapshotForRun synthesizes its own parent edges from membership.
+	var graph struct {
+		Root  beads.Bead   `json:"root"`
+		Beads []beads.Bead `json:"beads"`
+	}
+	if err := json.Unmarshal(body, &graph); err != nil {
+		return nil, false
+	}
+
+	out := make([]beads.Bead, 0, len(graph.Beads)+1)
+	if graph.Root.ID != "" {
+		out = append(out, graph.Root)
+	}
+	out = append(out, graph.Beads...)
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 func fileSize(path string) int64 {

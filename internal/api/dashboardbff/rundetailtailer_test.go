@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +63,80 @@ func beadCreatedEvent(seq uint64, b beads.Bead) events.Event {
 		Bead beads.Bead `json:"bead"`
 	}{b})
 	return events.Event{Seq: seq, Type: events.BeadCreated, Payload: payload}
+}
+
+// fakeSupervisor serves the loopback endpoints the run-detail path reads: an
+// empty /v0/city/{name}/sessions and a /v0/city/{name}/beads/graph/{rootID} that
+// returns the authoritative run graph for graphByRoot[rootID] (mirroring
+// internal/api.BeadGraphResponse: {root, beads, deps}). A rootID absent from the
+// map 404s, which the BFF treats as "graph unreachable" → partial fallback.
+func fakeSupervisor(t *testing.T, graphByRoot map[string][]beads.Bead) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/sessions") {
+			_, _ = w.Write([]byte(`{"items":[],"total":0}`))
+			return
+		}
+		const graphPrefix = "/beads/graph/"
+		if idx := strings.Index(r.URL.Path, graphPrefix); idx >= 0 {
+			rootID := r.URL.Path[idx+len(graphPrefix):]
+			runBeads, ok := graphByRoot[rootID]
+			if !ok || len(runBeads) == 0 {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"not found"}`))
+				return
+			}
+			body, _ := json.Marshal(struct {
+				Root  beads.Bead   `json:"root"`
+				Beads []beads.Bead `json:"beads"`
+				Deps  []any        `json:"deps"`
+			}{Root: runBeads[0], Beads: runBeads, Deps: nil})
+			_, _ = w.Write(body)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// graphStepBead builds a graph.v2 step bead as the beads/graph endpoint returns
+// it: carrying gc.root_bead_id so snapshotForRun selects it as a run member.
+func graphStepBead(id, root, stepID, status string) beads.Bead {
+	return beads.Bead{
+		ID:        id,
+		Title:     stepID,
+		Status:    status,
+		Type:      "task",
+		CreatedAt: time.Date(2026, 7, 1, 13, 1, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 1, 13, 5, 0, 0, time.UTC),
+		Metadata: map[string]string{
+			"gc.kind":         "step",
+			"gc.root_bead_id": root,
+			"gc.step_id":      stepID,
+		},
+	}
+}
+
+// graphRootBead builds the graph.v2 run-root bead as beads/graph returns it: it
+// carries gc.formula_contract=graph.v2 and gc.root_store_ref, but (like the live
+// gcg-* root) NOT gc.scope_kind / gc.scope_ref — scope is derived from the store
+// ref.
+func graphRootBead(id, formula, storeRef string) beads.Bead {
+	return beads.Bead{
+		ID:        id,
+		Title:     formula,
+		Status:    "in_progress",
+		CreatedAt: time.Date(2026, 7, 1, 13, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC),
+		Metadata: map[string]string{
+			"gc.formula_contract": "graph.v2",
+			"gc.kind":             "workflow",
+			"gc.formula":          formula,
+			"gc.root_store_ref":   storeRef,
+		},
+	}
 }
 
 // runDetailWire is the decoded detail body — a structural contract check that the
@@ -203,11 +279,11 @@ func containsStr(xs []string, want string) bool {
 	return false
 }
 
-// sourceAttributedEvent builds a source (mc-*) bead for a graph.v2 run whose
-// gcg-* root never folded, carrying the run identity plus scope ONLY under
+// sourceBead builds a source (mc-*) bead for a graph.v2 run whose gcg-* root
+// never folded, carrying the run identity plus scope ONLY under
 // pr_review.workflow_store=rig:<name> — the exact live shape that broke every
 // run-detail page.
-func sourceAttributedEvent(seq uint64, id, root string, withWorkflowStore bool) events.Event {
+func sourceBead(id, root string, withWorkflowStore bool) beads.Bead {
 	md := map[string]string{
 		"pr_review.workflow_root_id": root,
 		"pr_review.workflow_formula": "mol-adopt-pr-v2",
@@ -217,7 +293,7 @@ func sourceAttributedEvent(seq uint64, id, root string, withWorkflowStore bool) 
 	if withWorkflowStore {
 		md["pr_review.workflow_store"] = "rig:gascity"
 	}
-	return beadCreatedEvent(seq, beads.Bead{
+	return beads.Bead{
 		ID:        id,
 		Title:     "adopt pr source",
 		Status:    "open",
@@ -225,7 +301,11 @@ func sourceAttributedEvent(seq uint64, id, root string, withWorkflowStore bool) 
 		CreatedAt: time.Date(2026, 7, 1, 13, 0, 0, 0, time.UTC),
 		UpdatedAt: time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC),
 		Metadata:  md,
-	})
+	}
+}
+
+func sourceAttributedEvent(seq uint64, id, root string, withWorkflowStore bool) events.Event {
+	return beadCreatedEvent(seq, sourceBead(id, root, withWorkflowStore))
 }
 
 // TestRunDetailEndpointResolvesScopeFromWorkflowStore pins the primary fix at the
@@ -235,9 +315,17 @@ func sourceAttributedEvent(seq uint64, id, root string, withWorkflowStore bool) 
 func TestRunDetailEndpointResolvesScopeFromWorkflowStore(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, ".gc", "events.jsonl")
-	writeEventLog(t, logPath, sourceAttributedEvent(1, "mc-ht7k7", "gcg-40700", true))
+	source := sourceBead("mc-ht7k7", "gcg-40700", true)
+	writeEventLog(t, logPath, beadCreatedEvent(1, source))
 
-	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	// The graph endpoint returns the run's authoritative bead set (here the same
+	// source bead) so completeness stays complete rather than the graph-fetch
+	// fallback partial.
+	srv := fakeSupervisor(t, map[string][]beads.Bead{"gcg-40700": {source}})
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: srv.URL,
+	})
 	p.Start(t.Context())
 	defer p.Stop()
 
@@ -275,9 +363,16 @@ func TestRunDetailEndpointHonorsScopeQueryFallback(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, ".gc", "events.jsonl")
 	// withWorkflowStore=false → no gc.root_store_ref and no pr_review.workflow_store.
-	writeEventLog(t, logPath, sourceAttributedEvent(1, "mc-noscope", "gcg-noscope", false))
+	source := sourceBead("mc-noscope", "gcg-noscope", false)
+	writeEventLog(t, logPath, beadCreatedEvent(1, source))
 
-	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	// Graph endpoint returns the scopeless run so membership is complete; scope
+	// still can't resolve from metadata (only the query hint can).
+	srv := fakeSupervisor(t, map[string][]beads.Bead{"gcg-noscope": {source}})
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: srv.URL,
+	})
 	p.Start(t.Context())
 	defer p.Stop()
 
@@ -314,6 +409,112 @@ func TestRunDetailEndpointHonorsScopeQueryFallback(t *testing.T) {
 	}
 	if body.Completeness.Kind != "complete" {
 		t.Errorf("hinted completeness = %q, want complete", body.Completeness.Kind)
+	}
+}
+
+// TestRunDetailEndpointProjectsFullGraphNotJustFold is the acceptance test for
+// this fix: the event fold sees only the run root (1 bead), but the beads/graph
+// endpoint serves the full step set. The detail must project the graph's steps —
+// its node count must reflect the graph beads, NOT the 1-bead fold.
+func TestRunDetailEndpointProjectsFullGraphNotJustFold(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+
+	// The EVENT FOLD sees only the root (the graph.v2 steps never reach the log).
+	root := graphRootBead("gcg-big", "mol-adopt-pr-v2", "rig:gascity")
+	writeEventLog(t, logPath, beadCreatedEvent(1, root))
+
+	// The GRAPH endpoint returns the root plus many distinct steps.
+	stepKinds := []string{"scope-check", "spec", "retry", "ralph", "cleanup", "workflow-finalize"}
+	graph := []beads.Bead{root}
+	for i, kind := range stepKinds {
+		id := "gcg-big-step-" + strconv.Itoa(i)
+		graph = append(graph, graphStepBead(id, "gcg-big", kind, "open"))
+	}
+	if len(graph) != len(stepKinds)+1 {
+		t.Fatalf("graph fixture wrong size: %d", len(graph))
+	}
+
+	srv := fakeSupervisor(t, map[string][]beads.Bead{"gcg-big": graph})
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: srv.URL,
+	})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	// Warm the tailer and confirm the fold alone would show only the root.
+	_ = getRunSummary(t, p, "alpha")
+
+	rec := getRunDetailRaw(t, p, "alpha", "gcg-big")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		RunID string `json:"runId"`
+		Nodes []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+		Completeness struct {
+			Kind string `json:"kind"`
+		} `json:"completeness"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	// The graph has root + 6 steps. The fold had only the root (1 node). The
+	// detail must reflect the graph's steps, so node count must exceed the fold's.
+	if len(body.Nodes) <= 1 {
+		t.Fatalf("nodes = %d, want > 1 (the graph steps, not just the folded root); body=%s",
+			len(body.Nodes), rec.Body.String())
+	}
+	if len(body.Nodes) < len(stepKinds) {
+		t.Errorf("nodes = %d, want >= %d (one per graph step)", len(body.Nodes), len(stepKinds))
+	}
+	if body.Completeness.Kind != "complete" {
+		t.Errorf("completeness = %q, want complete (graph fetch succeeded)", body.Completeness.Kind)
+	}
+}
+
+// TestRunDetailEndpointGraphFetchFailureDegradesPartial pins the fallback: when
+// the beads/graph endpoint is unreachable, the detail falls back to the
+// (incomplete) event fold and is marked partial with graph_fetch_failed — it does
+// NOT report complete on a truncated view.
+func TestRunDetailEndpointGraphFetchFailureDegradesPartial(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	root := graphRootBead("gcg-partial", "mol-adopt-pr-v2", "rig:gascity")
+	writeEventLog(t, logPath, beadCreatedEvent(1, root))
+
+	// Supervisor serves NO graph for gcg-partial (empty map → 404), so the fetch
+	// fails and the detail falls back to the event fold.
+	srv := fakeSupervisor(t, map[string][]beads.Bead{})
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: srv.URL,
+	})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	_ = getRunSummary(t, p, "alpha")
+	rec := getRunDetailRaw(t, p, "alpha", "gcg-partial")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Completeness struct {
+			Kind    string   `json:"kind"`
+			Reasons []string `json:"reasons"`
+		} `json:"completeness"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if body.Completeness.Kind != "partial" {
+		t.Fatalf("completeness = %q, want partial (graph fetch failed); body=%s", body.Completeness.Kind, rec.Body.String())
+	}
+	if !containsStr(body.Completeness.Reasons, "graph_fetch_failed") {
+		t.Errorf("reasons = %v, want to include graph_fetch_failed", body.Completeness.Reasons)
 	}
 }
 

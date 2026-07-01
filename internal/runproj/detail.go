@@ -81,16 +81,43 @@ func BuildRunDetailWithSessions(beadList []beads.Bead, runID string, snapshotVer
 	return BuildRunDetailWithOptions(beadList, runID, snapshotVersion, snapshotEventSeq, sessions, RunDetailScopeHint{})
 }
 
+// RunDetailOptions bundles the request-time inputs for the detail projection.
+type RunDetailOptions struct {
+	// Sessions are the live sessions layered in for execution-instance links.
+	Sessions []DashboardSession
+	// ScopeHint is the last-resort fallback scope (from the ?scope_kind=&scope_ref=
+	// query) used only when the run's own metadata cannot resolve scope.
+	ScopeHint RunDetailScopeHint
+	// ExtraPartialReasons are completeness reasons the caller knows independently
+	// of the bead content — notably "graph_fetch_failed" when the BFF fell back to
+	// the incomplete event fold because the authoritative beads/graph endpoint was
+	// unreachable. They force completeness to partial so the UI never claims the
+	// run is complete on a truncated bead set.
+	ExtraPartialReasons []string
+}
+
 // BuildRunDetailWithOptions is the full detail entry point: it takes the
 // request-time sessions plus an optional scope hint used only as a last-resort
-// fallback when the run's own metadata cannot resolve scope. All the other
-// entry points delegate here.
+// fallback when the run's own metadata cannot resolve scope. The other narrow
+// entry points delegate here; the BFF calls BuildRunDetailWith for the full
+// option set (including extra partial reasons).
 func BuildRunDetailWithOptions(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64, sessions []DashboardSession, scopeHint RunDetailScopeHint) (FormulaRunDetail, error) {
-	snap, err := snapshotForRun(beadList, runID, snapshotVersion, snapshotEventSeq, scopeHint)
+	return BuildRunDetailWith(beadList, runID, snapshotVersion, snapshotEventSeq, RunDetailOptions{
+		Sessions:  sessions,
+		ScopeHint: scopeHint,
+	})
+}
+
+// BuildRunDetailWith is the option-struct detail entry point. It is the single
+// place that plumbs the scope hint, sessions, and caller-supplied partial
+// reasons into the snapshot + enrichment pipeline.
+func BuildRunDetailWith(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64, opts RunDetailOptions) (FormulaRunDetail, error) {
+	snap, err := snapshotForRun(beadList, runID, snapshotVersion, snapshotEventSeq, opts.ScopeHint)
 	if err != nil {
 		return FormulaRunDetail{}, err
 	}
-	return enrichFormulaRun(snap, sessions)
+	snap.extraPartialReasons = opts.ExtraPartialReasons
+	return enrichFormulaRun(snap, opts.Sessions)
 }
 
 // snapshotForRun synthesizes a run snapshot for one root from the folded beads.
@@ -150,15 +177,36 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		snapBeads = append(snapBeads, toRunSnapshotBead(members[i]))
 	}
 
-	seq := eventSeq
+	// Resolve scope + store ref uniformly, whether the root is the real graph
+	// bead or the synthesized phantom. The authoritative graph root (served by
+	// beads/graph) carries gc.root_store_ref (e.g. "rig:gascity") but often NOT
+	// gc.scope_kind / gc.scope_ref, so reading those keys off the root directly
+	// leaves scope unresolved. resolveSourceScope derives it the SAME way the
+	// summary does — gc.scope_kind/ref, then gc.root_store_ref, then the source
+	// workflow-store key, then the caller's query hint — over ALL members.
+	issues := make([]runIssue, 0, len(members))
+	for i := range members {
+		issues = append(issues, fromBead(members[i]))
+	}
+	scopeKind := root.Metadata[beadmeta.ScopeKindMetadataKey]
+	scopeRef := root.Metadata[beadmeta.ScopeRefMetadataKey]
 	rootStoreRef := root.Metadata[beadmeta.RootStoreRefMetadataKey]
+	if scope, ok := resolveSourceScope(issues, scopeHint); ok {
+		scopeKind = scope.scopeKind
+		scopeRef = scope.scopeRef
+		if rootStoreRef == "" {
+			rootStoreRef = scope.rootStoreRef
+		}
+	}
+
+	seq := eventSeq
 	return runSnapshot{
 		runID:             rootID,
 		rootBeadID:        rootID,
 		rootStoreRef:      rootStoreRef,
 		resolvedRootStore: rootStoreRef,
-		scopeKind:         root.Metadata[beadmeta.ScopeKindMetadataKey],
-		scopeRef:          root.Metadata[beadmeta.ScopeRefMetadataKey],
+		scopeKind:         scopeKind,
+		scopeRef:          scopeRef,
 		snapshotVersion:   version,
 		snapshotEventSeq:  &seq,
 		partial:           false,
@@ -361,6 +409,7 @@ func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession) (FormulaRunD
 	if raw.partial {
 		partialReasons = append(partialReasons, "supervisor_snapshot_partial")
 	}
+	partialReasons = append(partialReasons, raw.extraPartialReasons...)
 	if !isGraphV2(raw) {
 		// A v1/wisp molecule (or any run whose root lacks the graph.v2 contract)
 		// has no graph.v2 step topology, but it still has beads, deps, and phase we

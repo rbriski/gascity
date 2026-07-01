@@ -1,5 +1,10 @@
 # Next-session prompt — finish the non-work field-door cleanup (post-cascade)
 
+> **SUPERSEDED (2026-07-01):** the current authoritative pair is
+> `RECONCILER-CASCADE-NEXT-SESSION-PROMPT.md` + `RECONCILER-CASCADE-HANDOFF.md`
+> (HEAD `e6f3d2b1e`, 20 sites, reconciler cascade = the primary unlock). Use
+> those. This file is kept for continuity.
+
 Paste the block below into a fresh session.
 
 ---

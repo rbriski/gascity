@@ -1244,9 +1244,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			return 0
 		}
 		session := &ordered[i]
-		name := strings.TrimSpace(session.Metadata["session_name"])
+		// Typed projection for this iteration's mutation-free preamble decision
+		// reads (session_name, reset-pending, known-state, and the unknown-state
+		// trace). reconcileDrainAckStopPending below only mutates on its
+		// true/continue paths, so when control falls through to the known-state
+		// check the session is still unmutated and this projection stays
+		// byte-identical. Reads after the first mutation (heal/rollback/close)
+		// stay raw for now — later clusters re-derive after each mutation.
+		info := sessionpkg.InfoFromPersistedBead(*session)
+		name := strings.TrimSpace(info.SessionNameMetadata)
 		tp, desired := desiredState[name]
-		if _, _, pending := resetPendingCommittedAt(*session); !pending && dt != nil {
+		if _, _, pending := resetPendingCommittedAtInfo(info); !pending && dt != nil {
 			dt.clearResetStall(session.ID)
 		}
 		// #3630: the session is in the desired set this tick, so its spec is
@@ -1263,12 +1271,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Skip beads with unrecognized states. This enables forward-compatible
 		// rollback: if a newer version writes "draining" or "archived", the
 		// older reconciler ignores those beads rather than crashing.
-		if !isKnownState(*session) {
+		if !isKnownStateInfo(info) {
 			fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", //nolint:errcheck // best-effort stderr
-				session.Metadata["session_name"], session.Metadata["state"])
+				info.SessionNameMetadata, info.MetadataState)
 			if trace != nil {
-				trace.recordDecision("reconciler.session.unknown_state", session.Metadata["template"], session.Metadata["session_name"], "unknown_state_skipped", "skipped", traceRecordPayload{
-					"state": session.Metadata["state"],
+				trace.recordDecision("reconciler.session.unknown_state", info.Template, info.SessionNameMetadata, "unknown_state_skipped", "skipped", traceRecordPayload{
+					"state": info.MetadataState,
 				}, nil, "")
 			}
 			continue

@@ -2655,14 +2655,14 @@ func sweepUndesiredPoolSessionBeads(
 	}
 	startupTimeout := cfg.Session.StartupTimeoutDuration()
 	var candidates []beads.Bead
-	for _, bead := range sessionBeads.Open() {
-		if bead.Status == "closed" {
+	for _, info := range sessionBeads.OpenInfos() {
+		if info.Closed {
 			continue
 		}
-		if _, desired := desiredState[bead.Metadata["session_name"]]; desired {
+		if _, desired := desiredState[info.SessionNameMetadata]; desired {
 			continue
 		}
-		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
+		if isManualSessionInfo(info) || isNamedSessionInfo(info) {
 			continue
 		}
 		// Don't sweep beads that the reconciler still considers "start
@@ -2679,10 +2679,10 @@ func sweepUndesiredPoolSessionBeads(
 		// on the same tick it's created (no work assigned →
 		// GCSweepSessionBeads closes it), spinning the pool in a rapid
 		// create→sweep→recreate loop.
-		if pendingCreateClaimStillLeasedForSweep(bead, startupTimeout) {
+		if pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) {
 			continue
 		}
-		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead) {
+		if strings.TrimSpace(info.MetadataState) == "creating" && !isStaleCreatingInfo(info) {
 			continue
 		}
 		// Age grace period for the post-creating, pre-wake window. After
@@ -2729,20 +2729,28 @@ func sweepUndesiredPoolSessionBeads(
 		// "mid-start" window. The atomicity requirement therefore only
 		// binds within a single binary (writers and sweep are the same
 		// process); the rollout needs no cross-version coordination.
-		if state := strings.TrimSpace(bead.Metadata["state"]); (state == "active" || state == "awake") &&
-			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" {
-			if creationCompleteAt, ok := parseRFC3339Metadata(bead.Metadata["creation_complete_at"]); ok &&
+		if state := strings.TrimSpace(info.MetadataState); (state == "active" || state == "awake") &&
+			strings.TrimSpace(info.StateReason) == "creation_complete" {
+			if creationCompleteAt, ok := parseRFC3339Metadata(info.CreationCompleteAt); ok &&
 				time.Since(creationCompleteAt) < postCreateProtectionTimeout {
 				continue
 			}
 		}
-		template := normalizedSessionTemplate(bead, cfg)
+		template := normalizedSessionTemplateInfo(info, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !isEphemeralSessionBead(bead) {
+		if agentCfg == nil || !isEphemeralSessionInfo(info) {
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, *agentCfg, exec.LookPath)
-		if running, err := poolSessionBeadRuntimeRunning(bead, sp, processNames); err == nil && running {
+		if running, err := poolSessionBeadRuntimeRunningInfo(info, sp, processNames); err == nil && running {
+			continue
+		}
+		// The candidate is threaded raw into GCSweepSessionBeads (a store close
+		// op, rule 3); recover the source bead by ID from the same snapshot. The
+		// projection is index-stable (OpenInfos()[i] == InfoFromPersistedBead(
+		// Open()[i])), so FindByID(info.ID) returns exactly this info's bead.
+		bead, ok := sessionBeads.FindByID(info.ID)
+		if !ok {
 			continue
 		}
 		candidates = append(candidates, bead)
@@ -2761,6 +2769,21 @@ func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, process
 	// The sweep only needs provider-runtime/process presence, not attachment or
 	// activity details. Process-name hints preserve the same false-negative
 	// recovery used by worker observation without the heavier handle path.
+	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
+}
+
+// poolSessionBeadRuntimeRunningInfo is the session.Info sibling of
+// poolSessionBeadRuntimeRunning; it reads the RAW session_name
+// (Info.SessionNameMetadata) the same way the bead form does. Equivalence
+// is structural: identical body over the same raw field.
+func poolSessionBeadRuntimeRunningInfo(info sessionpkg.Info, sp runtime.Provider, processNames []string) (bool, error) {
+	if sp == nil {
+		return false, fmt.Errorf("pool session runtime check: %w", runtime.ErrSessionNotFound)
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		return false, fmt.Errorf("pool session runtime check missing session name: %w", runtime.ErrSessionNotFound)
+	}
 	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
 }
 

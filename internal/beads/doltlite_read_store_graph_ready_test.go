@@ -75,3 +75,44 @@ func TestDoltliteReadStoreReadyGraphOnlyForcesTierWisps(t *testing.T) {
 		}
 	}
 }
+
+// TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWisps verifies that
+// ReadyGraphOnly gates on wisp_dependencies: a wisp whose depends_on_wisp_id
+// target is still open must not appear; one whose target is closed must appear.
+func TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWisps(t *testing.T) {
+	now := time.Now().UTC()
+	store := newDoltliteStoreWithRows(t, nil, []testDoltliteIssue{
+		// Open dependency: no own deps, so it IS ready itself.
+		{ID: "gco-dep-open", Title: "open dep", Status: "open", IssueType: "molecule", Ephemeral: true, CreatedAt: now},
+		// Blocked by gco-dep-open (open) → must be excluded.
+		{
+			ID: "gco-dep-blocked", Title: "blocked wisp", Status: "open", IssueType: "molecule", Ephemeral: true,
+			CreatedAt:    now.Add(time.Second),
+			Dependencies: []testDoltliteDependency{{DependsOnWispID: "gco-dep-open", Type: "blocks"}},
+		},
+		// Closed dependency.
+		{ID: "gco-dep-done", Title: "done dep", Status: "closed", IssueType: "molecule", Ephemeral: true, CreatedAt: now.Add(2 * time.Second)},
+		// Blocked by gco-dep-done (closed) → must be included.
+		{
+			ID: "gco-dep-unblocked", Title: "unblocked wisp", Status: "open", IssueType: "molecule", Ephemeral: true,
+			CreatedAt:    now.Add(3 * time.Second),
+			Dependencies: []testDoltliteDependency{{DependsOnWispID: "gco-dep-done", Type: "blocks"}},
+		},
+	})
+
+	graphOnly, ok := GraphOnlyReadyFor(store)
+	if !ok {
+		t.Skip("DoltliteReadStore does not implement GraphOnlyReadyStore")
+	}
+
+	rows, err := graphOnly.ReadyGraphOnly()
+	if err != nil {
+		t.Fatalf("ReadyGraphOnly: %v", err)
+	}
+	if hasTestBead(rows, "gco-dep-blocked") {
+		t.Errorf("ReadyGraphOnly included wisp gco-dep-blocked whose dep gco-dep-open is still open")
+	}
+	if !hasTestBead(rows, "gco-dep-unblocked") {
+		t.Errorf("ReadyGraphOnly missing gco-dep-unblocked (closed-dep wisp); ids=%v", testBeadIDs(rows))
+	}
+}

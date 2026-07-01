@@ -3,9 +3,10 @@ package main
 import "github.com/gastownhall/gascity/internal/beads"
 
 // ReadyGraphOnlyHandle returns a graph-only-ready handle when the wrapped store
-// exposes GraphOnlyReadyStore. The handle applies expandPolicyReadyQuery before
-// delegating so TierIssues is widened to TierBoth consistently across all Ready
-// surfaces; TierWisps and other explicit modes pass through unchanged.
+// exposes GraphOnlyReadyStore. The handle delegates without applying
+// expandPolicyReadyQuery: this surface is wisp-only by contract and the lower
+// layer forces TierWisps regardless of caller TierMode, so tier promotion is
+// meaningless here.
 func (s *beadPolicyStore) ReadyGraphOnlyHandle() (beads.GraphOnlyReadyStore, bool) {
 	g, ok := beads.GraphOnlyReadyFor(s.Store)
 	if !ok {
@@ -19,5 +20,5 @@ type beadPolicyGraphOnlyStore struct {
 }
 
 func (s beadPolicyGraphOnlyStore) ReadyGraphOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	return s.g.ReadyGraphOnly(expandPolicyReadyQuery(query...))
+	return s.g.ReadyGraphOnly(query...)
 }

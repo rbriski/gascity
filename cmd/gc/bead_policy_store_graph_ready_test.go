@@ -23,7 +23,7 @@ func (s *policyGraphOnlyStore) ReadyGraphOnly(_ ...beads.ReadyQuery) ([]beads.Be
 }
 
 // policyCapturingGraphOnlyStore records the query received by ReadyGraphOnly so
-// tests can assert that the policy tier expansion has been applied.
+// tests can assert pass-through behavior.
 type policyCapturingGraphOnlyStore struct {
 	beads.Store
 	gotQuery beads.ReadyQuery
@@ -64,11 +64,11 @@ func TestBeadPolicyStorePreservesGraphOnlyReadyCapability(t *testing.T) {
 	}
 }
 
-// TestBeadPolicyStoreReadyGraphOnlyHandleExpandsPolicyTier pins that the handle
-// returned by beadPolicyStore applies expandPolicyReadyQuery before delegating:
-// a caller-supplied TierIssues is widened to TierBoth so the policy layer's
-// default-tier promotion is consistent across all Ready surfaces.
-func TestBeadPolicyStoreReadyGraphOnlyHandleExpandsPolicyTier(t *testing.T) {
+// TestBeadPolicyStoreReadyGraphOnlyHandlePassesThroughQuery verifies that the
+// policy wrapper passes the caller's query through unchanged. This surface is
+// wisp-only by contract; the lower layer forces TierWisps regardless of caller
+// TierMode, so the policy layer must not alter the query.
+func TestBeadPolicyStoreReadyGraphOnlyHandlePassesThroughQuery(t *testing.T) {
 	capturing := &policyCapturingGraphOnlyStore{Store: beads.NewMemStore()}
 	wrapped := wrapStoreWithBeadPolicies(capturing, nil)
 
@@ -79,7 +79,7 @@ func TestBeadPolicyStoreReadyGraphOnlyHandleExpandsPolicyTier(t *testing.T) {
 	if _, err := handle.ReadyGraphOnly(beads.ReadyQuery{TierMode: beads.TierIssues}); err != nil {
 		t.Fatalf("ReadyGraphOnly: %v", err)
 	}
-	if capturing.gotQuery.TierMode != beads.TierBoth {
-		t.Fatalf("backing received TierMode=%v, want TierBoth (policy tier expansion)", capturing.gotQuery.TierMode)
+	if capturing.gotQuery.TierMode != beads.TierIssues {
+		t.Fatalf("backing received TierMode=%v, want TierIssues (policy layer must not alter query)", capturing.gotQuery.TierMode)
 	}
 }

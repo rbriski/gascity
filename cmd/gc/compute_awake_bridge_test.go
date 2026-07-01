@@ -510,6 +510,28 @@ func TestReadyAssignedByBeadIDAcceptsCrossStoreCollisionForPoolResumeUse(t *test
 	}
 }
 
+// TestReadyAssignedByBeadIDFailsClosedOnIndexMismatch verifies that when
+// storeRefs is shorter than beadList (a length mismatch that should never
+// happen in production, since both slices always come from the same
+// collectAssignedWorkBeadsWithStores construction), readyAssignedByBeadID
+// resolves the out-of-range bead to not-ready rather than falling through to
+// a lookup keyed on an empty store ref — mirroring readyAssignedFlagsForBeads,
+// which skips the lookup entirely for the same edge case (ga-frpt4k).
+func TestReadyAssignedByBeadIDFailsClosedOnIndexMismatch(t *testing.T) {
+	const id = "ga-outofrange"
+	work := []beads.Bead{{ID: id}}
+	var storeRefs []string // shorter than work: index 0 is out of range
+	readyAssigned := map[storeScopedBeadKey]bool{
+		{StoreRef: "", ID: id}: true, // a same-ID entry keyed under the empty store ref
+	}
+
+	got := readyAssignedByBeadID(readyAssigned, work, storeRefs)
+
+	if got[id] {
+		t.Fatal("out-of-range index must resolve to not-ready, not fall through to an empty-store-ref lookup")
+	}
+}
+
 func TestWorkBeadResumeReady(t *testing.T) {
 	cases := []struct {
 		name   string

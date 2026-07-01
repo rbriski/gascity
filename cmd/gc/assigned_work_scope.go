@@ -295,11 +295,11 @@ func readyAssignedByBeadID(readyAssigned map[storeScopedBeadKey]bool, beadList [
 	}
 	byID := make(map[string]bool, len(beadList))
 	for i, wb := range beadList {
-		ref := ""
-		if i < len(storeRefs) {
-			ref = storeRefs[i]
+		if i >= len(storeRefs) {
+			byID[wb.ID] = false
+			continue
 		}
-		byID[wb.ID] = readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}]
+		byID[wb.ID] = readyAssigned[storeScopedBeadKey{StoreRef: storeRefs[i], ID: wb.ID}]
 	}
 	return byID
 }

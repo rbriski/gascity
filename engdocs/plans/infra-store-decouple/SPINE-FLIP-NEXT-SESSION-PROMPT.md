@@ -6,7 +6,7 @@ Paste the block below into a fresh session.
 
 Continue the **reconciler spine flip** on **PR #3839** (branch
 `upstream/object-front-doors-cleanup`, base `main`, DRAFT, worktree
-`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `8c3e600ae`).
+`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `806de56f5`).
 
 **Read first:** `engdocs/plans/infra-store-decouple/SPINE-FLIP-HANDOFF.md` — the
 authoritative, self-contained guide (design = Fork B, verified scope, field-gap
@@ -87,26 +87,54 @@ git checkout go.sum
   `*session` by value still shares the `Metadata` map — safety rests on the write-set
   audit, not the value copy.** No new siblings/codec change.
 
-**KEY RE-FRAMING (settled):** the **entire `!desired` branch is now Info-routed**
-(pre-heal clusters 1–3 + post-heal 4a switch guards + 4b default block). The
-remaining reconciler decision reads live in the **desired path** (after
-`session_reconciler.go:~1718`).
+- **Phase 1, cluster 4c-foundation (`4dedfa476`):** the two DESIRED-branch field
+  mirrors — `Info.StartedConfigHash` + `Info.PinAwake` (RAW string mirrors, Generation
+  pattern, no json tag → internal-only) on struct+codec + a whitespace-padded
+  `config-hash-and-pin` fixture + `sessionStartedConfigHash`/`sessionPinAwake`
+  stringChecks. No reconcile-driver change.
+- **Phase 1, cluster 4c (`6e65e7f69`):** FIRST desired-branch conversion.
+  `pendingResumePreservingNamedRestart` (pure classifier, `session_reconciler.go:897`)
+  → `…Info` (uses the new `StartedConfigHash`; `pendingCreateLeaseActiveInfo` tail) +
+  a `pending-resume-preserve` true-branch fixture (guarded). Single call site (`~2444`)
+  with a **fresh local re-derive** `infoAsleepDrift := InfoFromPersistedBead(*session)`
+  (top-of-loop info is stale that deep; the sibling is `||`-short-circuited so the
+  fresh projection is byte-identical).
+- **Phase 1, cluster 4d (`806de56f5`):** the wake-pass sleep-policy loop (`~2672`,
+  `for _, target := range wakeTargets`) — read-only over the bead, so ONE loop-top
+  `info` (no re-derive). Converted `session_name`→`info.SessionNameMetadata`,
+  `pin_awake != "true"`→`info.PinAwake != "true"`, `normalizedSessionTemplate`→
+  `…Info`. `resolveSessionSleepPolicy`/`configWakeSuppressed` (whole-bead+runtime) +
+  `sleep_intent` (no mirror yet) stay raw.
 
-**First concrete increment (do this as verified commits): Phase 1, cluster 4c+ —
-the DESIRED branch + field-gaps. This is a NEW, less-mapped region — MAP IT FRESH
-before converting** (re-run the census greps; do not assume the `!desired` anchors
-carry over). The decision reads now live in the desired path: the "Liveness includes
-zombie detection" fast-path (`~1718`+) and the stability/churn/drain-advance branches
-below it, plus the scattered field-gaps: `started_config_hash` drift-detection reads
-(`~2026/2278/3571/3733`, `session_reconcile.go:814`) — **add `Info.StartedConfigHash
-string` (raw mirror) first** (struct+codec+equivalence fixture); `pin_awake`
-(`~2501`) — add a mirror. Method unchanged: add each missing sibling bottom-up
-(equivalence-cased), THEN convert cluster by cluster, **re-deriving `info` after each
-mutation** in the desired path exactly as 4a/4b did post-heal. Leave the
-apply/write-back cluster (`healState*`, `checkStability`, `checkChurn`,
-`record*`/`clear*`, `persistSessionCircuitBreakerMetadata`, inline
-`session.Status`/`restart_requested` writes) + `ProjectLifecycle` + the circuit
-breaker RAW.
+**KEY RE-FRAMING (settled):** the **entire `!desired` branch is now Info-routed**
+(clusters 1–4b), and the DESIRED branch is started (4c resume-preserve gate + 4d
+wake-pass). **RE-SCOPING (4c/4d fresh map):** most `started_config_hash` "decision
+reads" are NOT convertible — the config-drift machinery (`~2165/2417`,
+`sessionConfigDriftKey` @`3705`, `resetConfiguredNamedSessionForConfigDrift` @`3833`,
+`session_reconcile.go:832`) is entangled with `sessionCoreConfigForHash` whole-bead
+config derivation + unmirror­ed sub-hashes → **stays RAW** (Fork B). `Info.StartedConfigHash`
+has exactly one consumer (4c); `Info.PinAwake` has exactly one (4d).
+
+**First concrete increment (do this as verified commits): Phase 1, cluster 4e+ —
+the rest of the DESIRED branch. MAP IT FRESH** (re-run the census greps; pin
+`git rev-parse HEAD` first). Candidate clusters, each its own verified commit:
+- **Zombie/rollback fast-path (`~1753–1777`):** `shouldRollbackPendingCreate` (2 sites)
+  + `pendingCreateLeaseExpiredForRollback` — siblings EXIST. **Needs a re-derive after
+  the zombie-capture block:** `markProviderTerminalError` (`~1732`, NO `continue`
+  after) writes `pending_create_claim`/`pending_create_started_at`/`last_woke_at` = the
+  read keys, so top-of-loop info is stale. Audit `recordResetStallIfDue` (`~1726`,
+  by-value bead → shares Metadata map) for bead writes. Medium risk.
+- **`namedSessionIdentity(*session)` (`~2024`, restart-requested block):** sibling
+  EXISTS; after mutations → re-derive at the call site.
+- **`sleep_intent` field-gap (`~2696`):** add `Info.SleepIntent` (raw mirror) bottom-up
+  + equivalence case, then convert the wake-pass `hasExplicitSleepIntent` read.
+- **maxAge/progress-stall/pendingInteraction reads** (`~1922–2001`, `~2463`): map fresh.
+- **STAY RAW:** the config-drift machinery + all its `started_config_hash`/sub-hash reads;
+  the apply/write-back cluster (`healState*`, `checkStability`, `checkChurn`,
+  `record*`/`clear*`, `persistSessionCircuitBreakerMetadata`, inline
+  `session.Status`/`restart_requested` writes); `ProjectLifecycle`; the circuit breaker.
+Method unchanged: add each missing sibling bottom-up (equivalence-cased), THEN convert
+cluster by cluster, **re-deriving `info` after each mutation** exactly as 4a/4b/4c did.
 
 Verify each cluster: build + vet + lint + equivalence + guards + trace-integration +
 the full `TestReconcileSessionBeads*` suite (205 tests; ≥420s timeout — the box can

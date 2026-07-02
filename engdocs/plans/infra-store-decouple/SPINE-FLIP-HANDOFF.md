@@ -2,10 +2,11 @@
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`,
-**HEAD `8c3e600ae`** (pushed; Phase 2 + Phase-1 clusters 1+2+3 + 4a+4b landed — the
-entire `!desired` branch is now Info-routed). Self-contained
-guide for finishing the reconciler spine flip. It supersedes the Fork-A material in
-`RECONCILER-CASCADE-HANDOFF.md` (kept only as background).
+**HEAD `806de56f5`** (pushed; Phase 2 + Phase-1 clusters 1+2+3 + 4a+4b landed the
+entire `!desired` branch, then the cluster-4c field foundation + clusters 4c/4d
+started the DESIRED branch). Self-contained guide for finishing the reconciler
+spine flip. It supersedes the Fork-A material in `RECONCILER-CASCADE-HANDOFF.md`
+(kept only as background).
 
 > **Do not rush this.** It is genuinely a **3–5 session effort** on the system's
 > most correctness-critical component (the reconcile tick silently manages live
@@ -215,17 +216,75 @@ on the raw bead (accepted).** Therefore:
   not the value copy. The inline `session.Status="closed"` write + trace-only bool
   payloads stay raw. No new siblings/codec change; correctness proven by the E2E.
 
+**DONE — Phase 1, cluster 4c foundation (`4dedfa476`):** the two DESIRED-branch
+field-gap mirrors. `Info.StartedConfigHash` (raw `started_config_hash`) +
+`Info.PinAwake` (raw `pin_awake`), both RAW string mirrors (Generation pattern, no
+json tag → internal-only, absent from the HTTP wire) on the struct
+(`internal/session/manager.go`) + codec (`info_store.go`). Added a whitespace-padded
+`config-hash-and-pin` equivalence fixture (proves the raw mirror preserves the bytes
+the `TrimSpace` reader depends on) + `sessionStartedConfigHash`/`sessionPinAwake`
+stringChecks cases. No reconcile-driver change this commit. Verified
+`Info` has no json tags (wire uses a separate DTO) and the `get_persisted_response`
+`DeepEqual` compares two codec-derived values, so additive fields stay balanced.
+
+**DONE — Phase 1, cluster 4c: asleep-drift resume-preserve gate (`6e65e7f69`):**
+the FIRST desired-branch decision-read conversion. `pendingResumePreservingNamedRestart`
+(`session_reconciler.go:897`) is a PURE classifier (state / pending-create claim /
+session_key / `started_config_hash` / `pending_create_started_at`, lease tail →
+`pendingCreateLeaseActive`). Added the Info sibling
+`pendingResumePreservingNamedRestartInfo` (uses the new `Info.StartedConfigHash`,
+`pendingCreateLeaseActiveInfo` tail) + a `pendingResumePreservingNamedRestart`
+clkBoolChecks case + a `pending-resume-preserve` **true-branch fixture** (creating +
+claim + session_key + started_config_hash + a recent `pending_create_started_at`, so
+the lease is start-in-flight) guarded by an assert that the raw form returns true.
+Converted the single call site (`~2444`) with a **fresh local re-derive**
+`infoAsleepDrift := InfoFromPersistedBead(*session)` — the top-of-loop info is stale
+that deep in the desired path (drain-ack/restart-request/alive-config-drift ran
+above). The sibling is only evaluated when `driftRestartedInPlace` is false
+(short-circuit `||`), so the fresh projection reflects the current bead exactly.
+
+**DONE — Phase 1, cluster 4d: wake-pass decision reads (`806de56f5`):** consumed the
+`Info.PinAwake` mirror. The post-loop sleep-policy pass
+(`session_reconciler.go:~2672`, `for _, target := range wakeTargets`) writes ONLY
+`wakeEvals`/`eval` — never the bead — so a single loop-top
+`info := InfoFromPersistedBead(*target.session)` is byte-identical throughout (no
+re-derive, lowest-risk shape). Converted the three pure decision reads with mirrors:
+`session_name`→`info.SessionNameMetadata`, `pin_awake != "true"`→`info.PinAwake !=
+"true"` (the sole `PinAwake` decision read), `normalizedSessionTemplate`→
+`normalizedSessionTemplateInfo(info,cfg)`. The sleep-policy resolvers
+(`resolveSessionSleepPolicy`, `configWakeSuppressed` — whole-bead + runtime:
+`sleep_reason`/`sleep_policy_fingerprint`/`sessionIdleReference`) stay RAW under
+Fork B; `sleep_intent` has no mirror yet and stays raw. No new siblings/codec change
+(PinAwake covered by 4c's fixture; template/SessionNameMetadata already proven).
+
+**KEY RE-SCOPING (cluster-4c/4d fresh map, correcting the field-gap table):** most of
+the `started_config_hash` "decision reads" the earlier census listed
+(`~2165/2417`, `sessionConfigDriftKey` @`3705`, `resetConfiguredNamedSessionForConfigDrift`
+@`3833`, `session_reconcile.go:832`) are NOT cleanly convertible — they are entangled
+with `sessionCoreConfigForHash` (→ `applyTemplateOverridesToConfig`, a whole-bead
+config derivation) and the unmirror­ed sub-hash reads (`core_hash_breakdown`,
+`started_provision_hash`, `started_launch_hash`). That machinery is a **Fork-B
+whole-bead consumer and stays RAW**, same class as ProjectLifecycle. The ONLY genuinely
+pure `started_config_hash` decision read was `pendingResumePreservingNamedRestart`
+(converted in 4c). So `Info.StartedConfigHash` has exactly one consumer; the config-drift
+block stays raw by design.
+
 **Verified scope (census at HEAD `6ccf9d698`):** 194 raw `.Metadata[` reads at the
 CONT-5 census — reconciler 123 / reconcile 50 / wake 21 — plus 6 `.Status`.
 Most are inside the raw machinery that stays. Only DECISION reads convert.
-**Done so far (HEAD `8c3e600ae`):** Phase 2 drain-advance + the **entire `!desired`
-branch** — pre-heal (clusters 1–3: loop preamble, pending-create rollback gate,
-preserve-named, failed-create-close) AND post-heal (cluster 4a switch guards +
-cluster 4b `default` block: drain-ack / orphan-drain / suspend / close). **Remaining
-(cluster 4c+):** the **desired branch** (after `session_reconciler.go:~1718` — the
-zombie-detection fast-path + the stability/churn/drain-advance branches) and the
-scattered field-gap decision reads (`started_config_hash`, `pin_awake`). The
-apply/write-back cluster + `ProjectLifecycle` + circuit breaker stay raw (by design).
+**Done so far (HEAD `806de56f5`):** Phase 2 drain-advance + the **entire `!desired`
+branch** (clusters 1–4b) + the DESIRED-branch **field foundation** (4c-foundation:
+`Info.StartedConfigHash`+`Info.PinAwake`) and **two desired-branch conversions** —
+4c (`pendingResumePreservingNamedRestart` asleep-drift resume-preserve gate, with a
+fresh local re-derive) and 4d (the wake-pass sleep-policy loop:
+`session_name`/`pin_awake`/`template`). **Remaining (cluster 4e+):** the rest of the
+desired branch — the zombie/rollback fast-path (`~1753–1777`), `namedSessionIdentity`
+in the restart-requested block (`~2024`), the maxAge/progress-stall/pendingInteraction
+reads, and the `sleep_intent` field-gap (add `Info.SleepIntent` first). The config-drift
+machinery + its `started_config_hash` reads (`~2165/2417`, `sessionConfigDriftKey`,
+`resetConfiguredNamedSessionForConfigDrift`, `session_reconcile.go:832`) stay RAW
+(whole-bead config derivation, Fork B). The apply/write-back cluster + `ProjectLifecycle`
++ circuit breaker stay raw (by design).
 
 ## Field-gaps still needed (decision-reads only)
 
@@ -233,10 +292,11 @@ apply/write-back cluster + `ProjectLifecycle` + circuit breaker stay raw (by des
 | --- | --- | --- |
 | `reset_committed_at`, `continuation_reset_pending` | **DONE** (`69ccc13c6`); used in Phase-1 cluster 1 (`6ccf9d698`) | `resetPendingCommittedAt`/`Info` @`session_reconciler.go:~1249` |
 | `generation` | **field DONE** (`a6dea375a`): `Info.Generation string` RAW mirror (NOT `int`; Atoi/TrimSpace fidelity trap) added + the drain-advance loop site converted. The sibling wake-helper raw sites (`preWakeCommit`/`queueDrainAck…`) stay raw until later Phase-2 sub-clusters. | remaining raw: `session_wake.go:41/173/283/331/350` |
-| `started_config_hash` | Add `Info.StartedConfigHash string` (raw) for the **decision** reads; the write-back sites (`session_reconcile.go:1154`, batch writes) stay raw. | decision reads `session_reconciler.go:2026/2278/3571/3733`, `session_reconcile.go:814` |
-| `pin_awake` | Add a mirror for the one decision read. | `session_reconciler.go:2501` |
+| `started_config_hash` | **field DONE** (`4dedfa476`): `Info.StartedConfigHash string` raw mirror. **RE-SCOPED:** the ONLY pure decision read was `pendingResumePreservingNamedRestart` (converted in 4c, `6e65e7f69`). The rest (`~2165/2417`, `sessionConfigDriftKey`, `resetConfiguredNamedSessionForConfigDrift`, `session_reconcile.go:832`) are entangled with `sessionCoreConfigForHash` whole-bead config derivation + unmirror­ed sub-hashes → **stay RAW** (Fork B). | done: `pendingResumePreservingNamedRestart`. raw: config-drift machinery |
+| `pin_awake` | **DONE** (field `4dedfa476`, converted `806de56f5`): `Info.PinAwake` mirror; the sole decision read (wake-pass, now `~2678`) routes through it. | `session_reconciler.go:~2678` |
+| `sleep_intent` | **NEW field-gap** (found in 4d): the wake-pass `hasExplicitSleepIntent` read (`~2696`) stays raw. Add `Info.SleepIntent` (raw mirror) bottom-up, then convert. | `session_reconciler.go:~2696` |
 | `held_until`, `wake_request` | ProjectLifecycle machinery → **stay raw**. | — |
-| `churn_count`, `core_hash_breakdown` | Write-back / drift-logging machinery → **stay raw**. | `session_reconcile.go:895/923-934`, `session_reconciler.go:2055/2302/4107/4232` |
+| `churn_count`, `core_hash_breakdown`, `started_provision_hash`, `started_launch_hash` | Write-back / config-drift-derivation machinery → **stay raw**. | `session_reconcile.go:895/923-934`, `session_reconciler.go:~2194/2206/2207` |
 
 ## Incremental execution order (each its own verified commit)
 
@@ -281,21 +341,43 @@ apply/write-back cluster + `ProjectLifecycle` + circuit breaker stay raw (by des
      (`~1550–1717`).** drain-ack / orphan-drain / suspend / close, converted through
      the 4a `infoPostHeal`. A single top-of-switch re-derive proved sufficient (full
      write-set audit; no per-branch re-derive). See the Status "cluster 4b" block.
-   - **NEXT — cluster 4c+: the DESIRED branch + field-gaps (a NEW, less-mapped
-     region — map it fresh before converting).** The entire `!desired` branch is now
-     done; the remaining reconciler decision reads live in the **desired path**
-     (after `session_reconciler.go:~1718`, the "Liveness includes zombie detection"
-     fast-path and the stability/churn/drain-advance branches below it) and the
-     scattered field-gap sites. Concretely: `started_config_hash` drift-detection
-     decision reads (`~2026/2278/3571/3733`, `session_reconcile.go:814`) — add
-     `Info.StartedConfigHash string` (raw mirror) first; `pin_awake` (`~2501`) — add
-     a mirror. Map the desired path's decision reads, add each missing sibling
-     bottom-up (equivalence-cased), then convert cluster by cluster — **re-deriving
-     `info` after each mutation** in the desired path just as in 4a/4b. Leave the
-     apply/write-back cluster (`healState*`, `checkStability`, `checkChurn`,
-     `record*`/`clear*`, `persistSessionCircuitBreakerMetadata`, inline
-     `session.Status`/`restart_requested` writes) + `ProjectLifecycle` + the circuit
-     breaker RAW.
+   - **DONE — cluster 4c-foundation (`4dedfa476`): `Info.StartedConfigHash` +
+     `Info.PinAwake` raw mirrors** + equivalence fixtures/cases. No reconcile-driver
+     change. See the Status "cluster 4c foundation" block.
+   - **DONE — cluster 4c (`6e65e7f69`): asleep-drift resume-preserve gate.**
+     `pendingResumePreservingNamedRestart`→`…Info` (pure, uses `StartedConfigHash`),
+     single call site with a fresh local re-derive. See the Status "cluster 4c" block.
+   - **DONE — cluster 4d (`806de56f5`): wake-pass decision reads.** The read-only
+     sleep-policy loop (`~2672`): `session_name`/`pin_awake`/`template`→`info`, one
+     loop-top projection (no re-derive). See the Status "cluster 4d" block.
+   - **NEXT — cluster 4e+: the rest of the DESIRED branch (map fresh; re-run the
+     census greps, pin `git rev-parse HEAD` first).** Candidate clusters, each its own
+     verified commit:
+     - **Zombie/rollback fast-path (`~1753–1777`):** `shouldRollbackPendingCreate`
+       (2 sites) + `pendingCreateLeaseExpiredForRollback` — siblings EXIST. **Needs a
+       re-derive after the zombie-capture block:** `markProviderTerminalError` (`~1732`,
+       no `continue` after it) writes `pending_create_claim:""`,
+       `pending_create_started_at:""`, `last_woke_at:""` — exactly the read keys — so
+       the top-of-loop info is stale for these reads. Also audit `recordResetStallIfDue`
+       (`~1726`, takes the bead by value → shares the Metadata map, the by-value trap)
+       for whether it writes bead metadata. Medium risk.
+     - **`namedSessionIdentity(*session)` (`~2024`, restart-requested block):** sibling
+       EXISTS; sits after mutations → re-derive at the call site.
+     - **`sleep_intent` field-gap (`~2696`):** add `Info.SleepIntent` (raw mirror)
+       bottom-up + equivalence case, then convert the wake-pass `hasExplicitSleepIntent`
+       read.
+     - **maxAge / progress-stall / pendingInteraction reads** (`~1922–2001`, `~2463`):
+       map these fresh — `pendingInteractionKeepsAwake`, `pendingCreateStartInFlight`
+       (siblings exist), `creation_complete_at` (mirror exists), `lifecycleTimerBlocker`
+       (whole-`Metadata` consumer? verify). 
+     - **STAY RAW:** the config-drift machinery (`~2156–2450`, `sessionConfigDriftKey`,
+       `resetConfiguredNamedSessionForConfigDrift`) + all its `started_config_hash`/
+       sub-hash reads (whole-bead config derivation, Fork B); the apply/write-back
+       cluster (`healState*`, `checkStability`, `checkChurn`, `record*`/`clear*`,
+       `persistSessionCircuitBreakerMetadata`, inline `session.Status`/`restart_requested`
+       writes); `ProjectLifecycle`; the circuit breaker.
+     Method unchanged: derive `info` per iteration, **re-derive after each mutation**,
+     add each missing sibling bottom-up (equivalence-cased) before converting.
 3. **Leave raw:** the apply/write-back cluster (`healState*`, `checkStability`,
    `checkChurn`, `record*`/`clear*`, `markProviderTerminalError`, `healExpiredTimers`,
    `persistSessionCircuitBreakerMetadata`, the inline `session.Status="closed"` /

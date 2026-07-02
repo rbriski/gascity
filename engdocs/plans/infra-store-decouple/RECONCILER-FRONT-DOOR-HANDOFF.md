@@ -107,12 +107,47 @@ same-tick test**. Non-`continue` read-after-write sites: `infoPostHeal` (~1545),
       a lockstep). A `Get` refresh would pull those hidden keys into the snapshot and
       break Step 4's wake scan. `restart_requested` stays intra-tick (§5.2, unbuilt).
 - [ ] **Step 4 — `LifecycleInput` from `Info` + the four cross-session scans.**
-      Populate `LifecycleInput` from `Info` fields (needs step 1), then convert the
-      scans onto the coherent snapshot — **`buildAwakeInputFromReconciler` first**
-      (the primary consumer; drives all wake/drain via `ProjectLifecycle`), then the
-      min-floor scan (`Status != "closed"` → `!Info.Closed`), then progress-signatures
-      + `advanceSessionDrains`. Byte-identical `LifecycleView` fixtures across the
-      full bounded key set.
+      Approach chosen by owner: **Full typed `LifecycleInput`** (replace its
+      `Metadata map[string]string` with typed fields; rewrite `ProjectLifecycle` +
+      callers). Analysis (this session) narrowed the surface: **`ProjectLifecycle`
+      itself reads only 13 keys** — `state`, `sleep_reason`, `continuity_eligible`,
+      `configured_named_identity`, `held_until`, `quarantined_until`,
+      `pending_create_claim`, `last_woke_at`, `session_key`, `started_config_hash`,
+      `pending_create_started_at`, `pin_awake`, `wake_request` — **all now mirrored**
+      (`wake_request` added phase A, `af9471021`). The `session_circuit_state` /
+      `restart_requested` / `wait_hold` / `alias` / `session_name` reads live in the
+      **post-view display helpers** (`lifecycleDisplayReasonFromView`,
+      `lifecycleResetPendingReasonVisible`, `LifecycleIdentifiersReleased`) — those
+      are display/API paths, NOT the reconciler scan, so they KEEP their `map`
+      params (out of scope). Phases:
+      - [x] **4A** — add `Info.WakeRequest` mirror (`af9471021`).
+      - [ ] **4B** — typed `LifecycleInput` core (internal/session): drop
+        `.Metadata`, add the 13 typed fields (12 raw-string + `PendingCreateClaim
+        bool`), convert `ProjectLifecycle` + helpers (`projectBlockers`,
+        `projectWakeCauses`, `projectRuntimeProjection`, `creatingStateIsStale`,
+        `shouldResetContinuation`) to read them. Add `LifecycleInputFromMetadata
+        (status, meta, …)` (legacy/display callers) + `LifecycleInputFromInfo(info,
+        …)` (reconciler) constructors — both in internal/session (key literals stay
+        below the codec edge). Route the internal wrappers + `manager.go`/`waits.go`
+        through `FromMetadata`. Byte-identical oracle: `FromMetadata(meta)` ≡
+        `FromInfo(InfoFromPersistedBead(bead))` → identical `LifecycleView` across
+        the 13-key set (incl. missing-vs-empty).
+      - [ ] **4C** — cmd/gc callers: `compute_awake_bridge.go`
+        `buildAwakeInputFromReconciler` → `LifecycleInputFromInfo(info)` off the
+        snapshot + convert its DIRECT `b.Metadata[...]` reads (`sleep_reason`,
+        `template`, `dependency_only`, `wait_hold`, `restart_requested`,
+        `continuation_reset_pending`+`reset_committed_at`, `currently_processing_bead_id`,
+        `detached_at`) → `Info`. **NOTE `restart_requested`**: the direct read @129
+        + the ProjectLifecycle-adjacent one — it is the §5.2 intra-tick marker set
+        in-memory @2084; during raw-refresh coexistence a raw `Info.RestartRequested`
+        mirror reflects it (add it), Step 6 handles the Get-cutover intra-tick
+        carrier. Route `session_reconcile.go`/`session_sleep.go`/`cmd_session.go`
+        through `FromMetadata`.
+      - [ ] **4D** — the 3 simpler scans: min-floor (`ordered[j].Status != "closed"`
+        → `!Info.Closed`; every close site must set Closed on the refreshed snapshot),
+        `computeNamedSessionProgressSignatures`, `advanceSessionDrains`; and pass the
+        `infoByID` snapshot into `buildAwakeInputFromReconciler` instead of raw
+        `sessionBeads`. Whole-tick E2E.
 - [ ] **Step 5 — circuit-breaker typed accessor.** Add `session.Store.CircuitState
       (id) (CircuitState, error)` reading the full `session_circuit_*` key cluster
       (progress_signature/restarts/last_restart/last_progress/last_observed/opened_at/

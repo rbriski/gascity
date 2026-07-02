@@ -35,10 +35,10 @@ func seedSessionStore(t *testing.T, beadsIn ...beads.Bead) beads.SessionStore {
 	return beads.SessionStore{Store: mem}
 }
 
-// TestInfoStoreGetSpeaksInfo asserts the domain store hands back a session.Info
+// TestStoreGetSpeaksInfo asserts the domain store hands back a session.Info
 // projected from the persisted bead, with bead serialization confined inside
 // the store. The Info must match the persisted projection codec exactly.
-func TestInfoStoreGetSpeaksInfo(t *testing.T) {
+func TestStoreGetSpeaksInfo(t *testing.T) {
 	b := sessionBeadFixture("s-get-1", "open", map[string]string{
 		"__title":      "My Session",
 		"template":     "polecat",
@@ -53,7 +53,7 @@ func TestInfoStoreGetSpeaksInfo(t *testing.T) {
 	})
 	store := seedSessionStore(t, b)
 
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	got, err := is.Get("s-get-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -71,19 +71,19 @@ func TestInfoStoreGetSpeaksInfo(t *testing.T) {
 	}
 }
 
-// TestInfoStoreGetNotFound asserts a missing session id surfaces a not-found error.
-func TestInfoStoreGetNotFound(t *testing.T) {
+// TestStoreGetNotFound asserts a missing session id surfaces a not-found error.
+func TestStoreGetNotFound(t *testing.T) {
 	store := seedSessionStore(t)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	if _, err := is.Get("missing"); err == nil {
 		t.Fatal("Get(missing): want error, got nil")
 	}
 }
 
-// TestInfoStoreListFiltersLikeCatalog asserts List applies the same state and
+// TestStoreListFiltersLikeCatalog asserts List applies the same state and
 // template filtering as the existing ListFullFromBeads projection, returns only
 // session.Info (no raw beads), and excludes closed beads by default.
-func TestInfoStoreListFiltersLikeCatalog(t *testing.T) {
+func TestStoreListFiltersLikeCatalog(t *testing.T) {
 	open := sessionBeadFixture("s-open", "open", map[string]string{
 		"template": "polecat", "state": "asleep",
 	})
@@ -94,7 +94,7 @@ func TestInfoStoreListFiltersLikeCatalog(t *testing.T) {
 		"template": "polecat", "state": "asleep",
 	})
 	store := seedSessionStore(t, open, active, closed)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 
 	// Default filter excludes closed.
 	all, err := is.List("", "")
@@ -153,11 +153,11 @@ func TestInfoFromPersistedBeadProjectionDeterminism(t *testing.T) {
 	storeA := seedSessionStore(t, b)
 	storeB := seedSessionStore(t, b)
 
-	infoA, err := NewInfoStore(storeA).Get("s-inv")
+	infoA, err := NewStore(storeA).Get("s-inv")
 	if err != nil {
 		t.Fatalf("Get A: %v", err)
 	}
-	infoB, err := NewInfoStore(storeB).Get("s-inv")
+	infoB, err := NewStore(storeB).Get("s-inv")
 	if err != nil {
 		t.Fatalf("Get B: %v", err)
 	}

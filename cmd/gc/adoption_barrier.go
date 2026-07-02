@@ -54,7 +54,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // sessions have beads).
 func runAdoptionBarrier(
 	cityPath string,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	cityName string,
@@ -274,7 +274,7 @@ func runAdoptionBarrier(
 	return result, passed
 }
 
-func openSessionBeadExists(sessFront *sessionpkg.InfoStore, sessionName string) (bool, error) {
+func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
 	existing, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
 		Metadata: map[string]string{"session_name": sessionName},
 		Live:     true,

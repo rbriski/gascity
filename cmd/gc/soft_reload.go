@@ -81,7 +81,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 // Returns accepted-session, failed-session, stale-drain-cancelation, and
 // empty-desired-state diagnostics for the controller reply.
 func acceptConfigDriftAcrossSessions(
-	sessFront *session.InfoStore,
+	sessFront *session.Store,
 	desired map[string]TemplateParams,
 	sessionBeads *sessionBeadSnapshot,
 	sp runtime.Provider,

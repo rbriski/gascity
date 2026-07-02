@@ -10,7 +10,7 @@ import (
 
 // frontDoorStoreFreeFiles are the cmd/gc source files whose every function was
 // converted to take a dependency-injected typed front door
-// (*session.InfoStore / *orders.Store / *nudgequeue.Store) in place of a raw
+// (*session.Store / *orders.Store / *nudgequeue.Store) in place of a raw
 // bead store. They must never regress to holding a raw store: with no
 // beads.Store in scope, a raw bead op on a non-work object (a session
 // state-heal, a circuit-breaker metadata write, …) is *untypeable* rather than
@@ -62,7 +62,7 @@ func TestFrontDoorStoreFreeFilesStayStoreFree(t *testing.T) {
 		content := string(data)
 		for _, needle := range frontDoorForbiddenInStoreFreeFiles {
 			if strings.Contains(content, needle) {
-				t.Errorf("%s contains forbidden raw-store/front-door-construction pattern %q — this file is dependency-injection store-free; receive the typed front door (*session.InfoStore / *orders.Store / *nudgequeue.Store) as a parameter instead of holding a raw store", name, needle)
+				t.Errorf("%s contains forbidden raw-store/front-door-construction pattern %q — this file is dependency-injection store-free; receive the typed front door (*session.Store / *orders.Store / *nudgequeue.Store) as a parameter instead of holding a raw store", name, needle)
 			}
 		}
 	}

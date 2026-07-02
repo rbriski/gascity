@@ -256,7 +256,7 @@ func sessionKeepWarmEligible(
 
 func persistSleepPolicyMetadata(
 	session *beads.Bead,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	policy resolvedSessionSleepPolicy,
 	configSuppressed bool,
 ) {
@@ -303,7 +303,7 @@ func persistSleepPolicyMetadata(
 	}
 }
 
-func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.InfoStore) {
+func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.Store) {
 	if session == nil || sessFront == nil || session.Metadata["sleep_intent"] == "idle-stop-pending" {
 		return
 	}
@@ -318,7 +318,7 @@ func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.InfoStore) 
 
 func recoverPendingIdleSleep(
 	session *beads.Bead,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	running bool,
 	clk clock.Clock,
 ) bool {

@@ -607,7 +607,7 @@ func formatCircuitTime(tm time.Time) string {
 }
 
 func persistSessionCircuitBreakerMetadata(
-	sessFront *session.InfoStore,
+	sessFront *session.Store,
 	session *beads.Bead,
 	cb *sessionCircuitBreaker,
 	identity string,
@@ -638,7 +638,7 @@ func persistSessionCircuitBreakerMetadata(
 }
 
 func recordSessionCircuitBreakerRestart(
-	sessFront *session.InfoStore,
+	sessFront *session.Store,
 	session *beads.Bead,
 	cb *sessionCircuitBreaker,
 	identity string,
@@ -732,7 +732,7 @@ func sessionCircuitMetadataEqual(existing map[string]string, next map[string]str
 	return true
 }
 
-func loadPersistedSessionCircuitResetGeneration(sessFront *session.InfoStore, sessionID, identity string, cb *sessionCircuitBreaker) error {
+func loadPersistedSessionCircuitResetGeneration(sessFront *session.Store, sessionID, identity string, cb *sessionCircuitBreaker) error {
 	if sessFront == nil || cb == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(identity) == "" {
 		return nil
 	}
@@ -746,7 +746,7 @@ func loadPersistedSessionCircuitResetGeneration(sessFront *session.InfoStore, se
 	return nil
 }
 
-func clearPersistedSessionCircuitBreakerMetadata(sessFront *session.InfoStore, sessionID string, resetGeneration uint64) error {
+func clearPersistedSessionCircuitBreakerMetadata(sessFront *session.Store, sessionID string, resetGeneration uint64) error {
 	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}

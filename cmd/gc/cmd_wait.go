@@ -737,7 +737,7 @@ func isWaitLookupLimitError(err error) bool {
 	return beads.IsLookupLimitError(err)
 }
 
-func stampWaitLookupCapDiagnostic(sessFront *sessionpkg.InfoStore, sessionID string, err error, now time.Time, source string) {
+func stampWaitLookupCapDiagnostic(sessFront *sessionpkg.Store, sessionID string, err error, now time.Time, source string) {
 	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
@@ -759,7 +759,7 @@ func stampWaitLookupCapDiagnostic(sessFront *sessionpkg.InfoStore, sessionID str
 	}
 }
 
-func stampGlobalWaitLookupCapDiagnostics(sessFront *sessionpkg.InfoStore, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
+func stampGlobalWaitLookupCapDiagnostics(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
 	for _, sessionInfo := range sessionBeads.OpenInfos() {
 		stampWaitLookupCapDiagnostic(sessFront, sessionInfo.ID, err, now, "wake-state-global")
 	}
@@ -1289,7 +1289,7 @@ func cancelWaitsForSession(store beads.Store, sessionID string) error {
 	return err
 }
 
-func clearSessionWaitHold(sessFront *sessionpkg.InfoStore, sessionID string) error {
+func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}

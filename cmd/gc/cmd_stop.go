@@ -345,7 +345,7 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
 	}
 }
 
-func markCityStopSessionSleepReason(sessFront *session.InfoStore, stderr io.Writer) {
+func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
 	if !sessFront.Backed() {
 		return
 	}
@@ -443,7 +443,7 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.InfoStore,
+func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) {
 	running, err := sp.ListRunning("")

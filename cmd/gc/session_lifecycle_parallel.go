@@ -893,7 +893,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
 		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
-			var sessFront *sessionpkg.InfoStore
+			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
 			}
@@ -1428,7 +1428,7 @@ func commitAsyncStartResultWithContext(
 	template := result.prepared.candidate.tp.TemplateName
 	// Session front door constructed once from the same store; nil when store
 	// is nil so the session-only leaves keep their store==nil short-circuit.
-	var sessFront *sessionpkg.InfoStore
+	var sessFront *sessionpkg.Store
 	if store != nil {
 		sessFront = sessionFrontDoor(store)
 	}
@@ -1524,7 +1524,7 @@ func asyncStartPreparedCommandStale(prepared preparedStart, current beads.Bead) 
 	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
 }
 
-func clearPendingStartInFlightLease(session *beads.Bead, sessFront *sessionpkg.InfoStore, stderr io.Writer) {
+func clearPendingStartInFlightLease(session *beads.Bead, sessFront *sessionpkg.Store, stderr io.Writer) {
 	if session == nil || sessFront == nil {
 		return
 	}
@@ -1820,7 +1820,7 @@ func providerCommandBaseName(rp *config.ResolvedProvider) string {
 // the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
 // Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
 // breaker / churn logic treats this as the same kind of recovery cycle.
-func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.InfoStore) {
+func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Store) {
 	if session == nil {
 		return
 	}
@@ -1842,7 +1842,7 @@ func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Info
 
 func commitStartResult(
 	result startResult,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	clk clock.Clock,
 	rec events.Recorder,
 	wave int, //nolint:unparam // always 0 here but passed through to commitStartResultTraced which uses it
@@ -1868,7 +1868,7 @@ func confirmPendingStart(currentState string) bool {
 
 func commitStartResultTraced(
 	result startResult,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	clk clock.Clock,
 	rec events.Recorder,
 	wave int,
@@ -1990,7 +1990,7 @@ func commitStartResultTraced(
 // wake-failure accounting, plus the matching trace and log records. It is split
 // out of commitStartResultTraced to keep the success path legible; the caller
 // returns false after invoking it.
-func commitStartFailure(result startResult, sessFront *sessionpkg.InfoStore, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
+func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
 	session := result.prepared.candidate.session
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
@@ -2195,7 +2195,7 @@ func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string,
 	return expectedToken != "" && liveToken == expectedToken
 }
 
-func rollbackPendingCreate(session *beads.Bead, sessFront *sessionpkg.InfoStore, now time.Time, stderr io.Writer) {
+func rollbackPendingCreate(session *beads.Bead, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) {
 	if session == nil || sessFront == nil {
 		return
 	}
@@ -2211,7 +2211,7 @@ func rollbackPendingCreate(session *beads.Bead, sessFront *sessionpkg.InfoStore,
 	closeBead(sessFront.Store().Store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
 }
 
-func rollbackPendingCreateClearingClaim(session *beads.Bead, sessFront *sessionpkg.InfoStore, now time.Time, stderr io.Writer) {
+func rollbackPendingCreateClearingClaim(session *beads.Bead, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) {
 	if session == nil || sessFront == nil {
 		return
 	}
@@ -2279,7 +2279,7 @@ func executePlannedStartsTraced(
 	// the session-only leaves (circuit metadata, lease clears, commit writes);
 	// nil when store is nil so those leaves keep their store==nil short-circuit.
 	// The raw store stays for the dependency/worker reads this driver also does.
-	var sessFront *sessionpkg.InfoStore
+	var sessFront *sessionpkg.Store
 	if store != nil {
 		sessFront = sessionFrontDoor(store)
 	}
@@ -2936,7 +2936,7 @@ func cityStopSessionMarked(store beads.Store, sessionID string) bool {
 	return strings.TrimSpace(b.Metadata["sleep_reason"]) == sleepReasonCityStop
 }
 
-func markCityStopSessionAsAsleep(sessFront *sessionpkg.InfoStore, sessionID string, stderr io.Writer) {
+func markCityStopSessionAsAsleep(sessFront *sessionpkg.Store, sessionID string, stderr io.Writer) {
 	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}

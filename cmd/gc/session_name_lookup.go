@@ -197,7 +197,7 @@ func storedTemplateMatchesPoolTemplate(storedTemplate, template string, cfg *con
 }
 
 func createPoolSessionBead(
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	template string,
 	now time.Time,
 	identity poolSessionCreateIdentity,

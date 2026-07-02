@@ -903,7 +903,7 @@ func isStorelessMailProvider() bool {
 // sessionMailboxAddress / sessionMailboxAddresses delegate to the session-class
 // front-door codec (internal/session) so the session-bead metadata vocabulary
 // (alias / alias_history / session_name) lives in one place. The per-session-id
-// resolution paths route through InfoStore.MailboxAddress(es); these thin
+// resolution paths route through Store.MailboxAddress(es); these thin
 // wrappers remain for the list-scan sites that already hold a []beads.Bead.
 func sessionMailboxAddress(b beads.Bead) string {
 	return session.MailboxAddress(b)
@@ -931,7 +931,7 @@ func resolveMailIdentityCached(store beads.Store, identifier string, cache *mail
 		}
 		return "", err
 	}
-	address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+	address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -952,7 +952,7 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
 		if err == nil {
-			address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+			address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 			if err != nil {
 				return "", err
 			}
@@ -1148,7 +1148,7 @@ func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailI
 		}
 		return resolvedMailTarget{}, err
 	}
-	addresses, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
+	addresses, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}

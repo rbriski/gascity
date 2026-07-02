@@ -518,7 +518,7 @@ func newSessionStoredMCPMetadata(
 // channel that is closed when background title generation completes.
 // Short-lived CLI paths (e.g. --no-attach) should block on it before
 // exiting to ensure the model-refined title is persisted.
-func maybeAutoTitle(sessFront *session.InfoStore, beadID, userTitle, titleHint string, provider *config.ResolvedProvider, workDir string, stderr io.Writer) <-chan struct{} {
+func maybeAutoTitle(sessFront *session.Store, beadID, userTitle, titleHint string, provider *config.ResolvedProvider, workDir string, stderr io.Writer) <-chan struct{} {
 	return api.MaybeGenerateTitleAsync(sessFront.Store(), beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "session %s: "+format+"\n", append([]any{beadID}, args...)...) //nolint:errcheck // best-effort stderr
 	})
@@ -658,7 +658,7 @@ func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
 // waitForSession polls the provider until the session is running or timeout.
 // If a bead store is provided, it checks for early failure (bead transitioned
 // to "closed" state) and logs progress every 5 seconds.
-func waitForSession(sp runtime.Provider, sessionName string, timeout time.Duration, sessFront *session.InfoStore, beadID string, stderr io.Writer) error {
+func waitForSession(sp runtime.Provider, sessionName string, timeout time.Duration, sessFront *session.Store, beadID string, stderr io.Writer) error {
 	deadline := time.Now().Add(timeout)
 	lastProgress := time.Now()
 	for time.Now().Before(deadline) {

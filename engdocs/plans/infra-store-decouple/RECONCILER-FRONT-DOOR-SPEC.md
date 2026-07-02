@@ -17,10 +17,10 @@ than a parallel mechanism.
 ## 1. Decisions locked (this conversation)
 
 1. **Store-centric front door, not an entity handle.** The typed seam is
-   `session.InfoStore` (domain wrapper in `internal/session` holding
+   `session.Store` (domain wrapper in `internal/session` holding
    `beads.SessionStore` by value, owning the codec). Callers speak
    `store.Method(id, …)`. No `Session`/`BeadSession` object is introduced.
-2. **The map is hidden inside `InfoStore`.** Above the codec edge nothing speaks
+2. **The map is hidden inside `session.Store`.** Above the codec edge nothing speaks
    `beads.Bead`, `map[string]string`, or a metadata-key literal.
 3. **Every mutation is a persistent write; reads re-read from the coherent view.**
    The store is the single source of truth. No shared mutable in-memory bead graph
@@ -64,18 +64,18 @@ later" split (v1 §6) was inverted and unsafe.
 
 ## 3. What already exists (do not rebuild)
 
-- **Read half** — `InfoStore.Get(id) → session.Info`, `List(...) → []Info`, via
+- **Read half** — `session.Store.Get(id) → session.Info`, `List(...) → []Info`, via
   `InfoFromPersistedBead` (backend-invariant). `internal/session/info_store.go`.
   (There is **no** `GetInfo`/`ListInfo` — those are `Get`/`List`; a promoted
   `ListInfo(ListFilter)` is unbuilt.)
-- **Write half** — `InfoStore.ApplyPatch(id, MetadataPatch)` (single chokepoint)
+- **Write half** — `session.Store.ApplyPatch(id, MetadataPatch)` (single chokepoint)
   plus ~20 typed methods (`SetState`, `Sleep`, `BeginDrainAckStopPending`,
   `RequestRestart`, `ResetConfigDrift`, `Close`, `GetState`,
   `CircuitResetGeneration`, `RepairType`, …). `internal/session/store.go`.
 - **Write vocabulary** — 25 `MetadataPatch` builders (`lifecycle_transition.go`,
   `lifecycle_exits.go`).
 - **Partial Phase-4 wiring** — many writes already route through
-  `sessFront *sessionpkg.InfoStore.ApplyPatch` — **each still followed by a raw
+  `sessFront *sessionpkg.Store.ApplyPatch` — **each still followed by a raw
   `session.Metadata[k]=v` lockstep** (that lockstep is what §2/§6 retire *last*).
 - **`LifecycleInput` is already a typed struct** (`lifecycle_projection.go:161`)
   with `WaitHold`/`RestartRequested`/`SleepReason`/`DependencyOnly`/… fields — but
@@ -121,7 +121,7 @@ the close lockstep is dropped.
 
 ### 4.3 The coherent snapshot + refresh-on-write
 
-The tick loads a typed working set once (`ListInfo` promoting `InfoStore.List` →
+The tick loads a typed working set once (`ListInfo` promoting `session.Store.List` →
 `[]Info` / `map[id]Info`). After any per-session mutation (which persists), the
 reconciler refreshes **that session's** entry from the store (one `Get`, or a
 write method that returns the new `Info`). Cross-session scans read the coherent
@@ -200,7 +200,7 @@ fail to open (silent lifecycle-safety regression). This **blocks the raw-bead re
 (§6 step 6)**, so pin it now, do not defer:
 
 > Add a dedicated typed `session.CircuitState` value read via a named front-door
-> accessor (`InfoStore.CircuitState(id) (CircuitState, error)`) — **not** `Info`
+> accessor (`session.Store.CircuitState(id) (CircuitState, error)`) — **not** `Info`
 > fields. Add a breaker-restore fixture to the byte-identical oracle.
 
 `LifecycleInput` is already typed (§3); the leak is only its **population** — that

@@ -55,7 +55,7 @@ func isDrainAckStopPending(session beads.Bead) bool {
 		strings.TrimSpace(session.Metadata["state_reason"]) == sessionpkg.DrainAckStopPendingReason
 }
 
-func markDrainAckStopPending(session *beads.Bead, sessFront *sessionpkg.InfoStore, clk clock.Clock, stderr io.Writer) bool {
+func markDrainAckStopPending(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) bool {
 	if session == nil || sessFront == nil || session.ID == "" {
 		return false
 	}
@@ -1173,7 +1173,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// drain-ack stop-pending). The raw store stays for the work/by-id/worker
 	// residual. Same underlying store, so every session bead write is
 	// byte-identical.
-	sessFront := sessionpkg.NewInfoStore(sessStore)
+	sessFront := sessionpkg.NewStore(sessStore)
 	// Every tick counts as a cycle, including ticks aborted by context
 	// cancellation after real work (e.g. starts) already executed — the
 	// counter means "cycles", not "cycles that ran to completion". started
@@ -3600,7 +3600,7 @@ func namedSessionActivelyInUse(session beads.Bead, sp runtime.Provider, name str
 	return active
 }
 
-func shouldDeferNamedSessionConfigDrift(session beads.Bead, sessFront *sessionpkg.InfoStore, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
+func shouldDeferNamedSessionConfigDrift(session beads.Bead, sessFront *sessionpkg.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
 	reason, active := namedSessionActiveUseReason(session, sp, name, clk)
 	if !active {
 		return "", false, nil
@@ -3616,7 +3616,7 @@ func shouldDeferNamedSessionConfigDrift(session beads.Bead, sessFront *sessionpk
 
 func boundedNamedSessionConfigDriftDeferral(
 	session beads.Bead,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	clk clock.Clock,
 	driftKey string,
 	reason string,
@@ -3652,7 +3652,7 @@ func boundedNamedSessionConfigDriftDeferral(
 	return "", false, nil
 }
 
-func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, sessFront *sessionpkg.InfoStore, t time.Time, driftKey string) error {
+func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, sessFront *sessionpkg.Store, t time.Time, driftKey string) error {
 	if sessFront == nil || session.ID == "" {
 		return nil
 	}
@@ -3662,7 +3662,7 @@ func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, sessFront *sess
 	})
 }
 
-func clearSessionConfigDriftDeferral(session beads.Bead, sessFront *sessionpkg.InfoStore) error {
+func clearSessionConfigDriftDeferral(session beads.Bead, sessFront *sessionpkg.Store) error {
 	if sessFront == nil || session.ID == "" {
 		return nil
 	}
@@ -3680,7 +3680,7 @@ func clearSessionConfigDriftDeferral(session beads.Bead, sessFront *sessionpkg.I
 	})
 }
 
-func recordSessionAttachedConfigDriftDeferral(session beads.Bead, sessFront *sessionpkg.InfoStore, clk clock.Clock, driftKey string) error {
+func recordSessionAttachedConfigDriftDeferral(session beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock, driftKey string) error {
 	if sessFront == nil || session.ID == "" {
 		return nil
 	}
@@ -4309,7 +4309,7 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 // does not match runtime.FingerprintVersion. The reconciler invokes this
 // instead of draining the session — the hash mismatch is purely a
 // versioning artifact, not real config drift.
-func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.InfoStore, agentCfg runtime.Config) error {
+func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.Store, agentCfg runtime.Config) error {
 	if session == nil || sessFront == nil {
 		return nil
 	}
@@ -4349,7 +4349,7 @@ func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.In
 func relaunchAgentForLaunchDrift(
 	ctx context.Context,
 	sp runtime.Provider,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	session *beads.Bead,
 	name string,
 	agentCfg runtime.Config,
@@ -4411,7 +4411,7 @@ func relaunchAgentForLaunchDrift(
 // not), so a concurrent SessionLive change is re-applied idempotently by the
 // live-drift clause on the next tick. Contrast sessionHashRebaselineMetadata,
 // which rebaselines every field (used when the config did not actually change).
-func rebaselineLaunchDriftHashes(session *beads.Bead, sessFront *sessionpkg.InfoStore, agentCfg runtime.Config) error {
+func rebaselineLaunchDriftHashes(session *beads.Bead, sessFront *sessionpkg.Store, agentCfg runtime.Config) error {
 	if session == nil || sessFront == nil {
 		return nil
 	}

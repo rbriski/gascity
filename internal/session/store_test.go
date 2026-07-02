@@ -9,14 +9,14 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
-// recordingInfoStore seeds a session bead into a recording-fake store and
-// returns the InfoStore front door plus the recorder, so a test can assert the
+// recordingStore seeds a session bead into a recording-fake store and
+// returns the Store front door plus the recorder, so a test can assert the
 // typed write method emitted byte-identical bead writes.
-func recordingInfoStore(t *testing.T, b beads.Bead) (*InfoStore, *beadstest.RecordingStore) {
+func recordingStore(t *testing.T, b beads.Bead) (*Store, *beadstest.RecordingStore) {
 	t.Helper()
 	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
 	rec := beadstest.NewRecordingStore(mem)
-	return NewInfoStore(beads.SessionStore{Store: rec}), rec
+	return NewStore(beads.SessionStore{Store: rec}), rec
 }
 
 // TestApplyPatchByteIdenticalToSetMetaBatch proves ApplyPatch emits exactly one
@@ -24,7 +24,7 @@ func recordingInfoStore(t *testing.T, b beads.Bead) (*InfoStore, *beadstest.Reco
 // setMetaBatch(store, id, patch).
 func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	patch := MetadataPatch{"state": "asleep", "last_woke_at": "", "sleep_reason": "max-age"}
 	if err := is.ApplyPatch("s-1", patch); err != nil {
@@ -48,7 +48,7 @@ func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 // setMetaBatch's len==0 short-circuit).
 func TestApplyPatchEmptyIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.ApplyPatch("s-1", MetadataPatch{}); err != nil {
 		t.Fatalf("ApplyPatch: %v", err)
@@ -62,7 +62,7 @@ func TestApplyPatchEmptyIsNoOp(t *testing.T) {
 // write that SleepPatch produces — the same write the reconciler raw op did.
 func TestSleepEmitsSleepPatch(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
@@ -82,7 +82,7 @@ func TestSleepEmitsSleepPatch(t *testing.T) {
 // empty-string writes the raw cmd_wait.go clear did.
 func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "x"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetWaitHold("s-1", false, ""); err != nil {
 		t.Fatalf("SetWaitHold: %v", err)
@@ -103,7 +103,7 @@ func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
 // (that is Phase 6).
 func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	closed, err := is.Close("s-1", "gc_swept", now)
@@ -128,7 +128,7 @@ func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 // TestCloseAlreadyClosedIsNoOp proves Close on a closed bead emits no writes.
 func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", nil)
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	closed, err := is.Close("s-1", "gc_swept", time.Now())
 	if err != nil {
@@ -146,7 +146,7 @@ func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 // without raw beads crossing the boundary.
 func TestGetStateProjectsState(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "asleep"})
-	is, _ := recordingInfoStore(t, b)
+	is, _ := recordingStore(t, b)
 
 	state, closed, err := is.GetState("s-1")
 	if err != nil {
@@ -163,7 +163,7 @@ func TestGetStateProjectsState(t *testing.T) {
 // sleep_reason), NOT a SetMetadataBatch.
 func TestSetMarkerEmitsSingleKeySetMetadata(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetMarker("s-1", "sleep_reason", "city-stop"); err != nil {
 		t.Fatalf("SetMarker: %v", err)
@@ -182,7 +182,7 @@ func TestSetMarkerEmitsSingleKeySetMetadata(t *testing.T) {
 // (the empty-string-clear contract) via a single SetMetadata op.
 func TestSetMarkerEmptyValueClears(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"sleep_intent": "idle-stop-pending"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetMarker("s-1", "sleep_intent", ""); err != nil {
 		t.Fatalf("SetMarker: %v", err)
@@ -198,7 +198,7 @@ func TestSetMarkerEmptyValueClears(t *testing.T) {
 // recordCurrentBeadIDOnWake's raw store.SetMetadata write (NOT a batch).
 func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.RecordCurrentBead("s-1", "gcg-42"); err != nil {
 		t.Fatalf("RecordCurrentBead: %v", err)
@@ -218,7 +218,7 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 // store.Close(id) after it stamps ClosePatch separately.
 func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.CloseWithoutReason("s-1"); err != nil {
 		t.Fatalf("CloseWithoutReason: %v", err)
@@ -237,7 +237,7 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 // store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
 func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetStatusOpen("s-1"); err != nil {
 		t.Fatalf("SetStatusOpen: %v", err)
@@ -264,7 +264,7 @@ func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 func TestRepairTypeEmitsTypeOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
 	b.Type = ""
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.RepairType("s-1"); err != nil {
 		t.Fatalf("RepairType: %v", err)
@@ -290,7 +290,7 @@ func TestCircuitResetGenerationReturnsPersistedValue(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{
 		SessionCircuitResetGenerationMetadataKey: "7",
 	})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	got, err := is.CircuitResetGeneration("s-1")
 	if err != nil {
@@ -310,7 +310,7 @@ func TestCircuitResetGenerationReturnsPersistedValue(t *testing.T) {
 // stamped the generation.
 func TestCircuitResetGenerationEmptyWhenUnset(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, _ := recordingInfoStore(t, b)
+	is, _ := recordingStore(t, b)
 
 	got, err := is.CircuitResetGeneration("s-1")
 	if err != nil {
@@ -326,7 +326,7 @@ func TestCircuitResetGenerationEmptyWhenUnset(t *testing.T) {
 // store.Get error path the front door replaces.
 func TestCircuitResetGenerationSurfacesStoreError(t *testing.T) {
 	store := seedSessionStore(t)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	if _, err := is.CircuitResetGeneration("missing"); err == nil {
 		t.Fatal("CircuitResetGeneration(missing): want store error, got nil")
 	}
@@ -344,7 +344,7 @@ func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 		"continuation_epoch": "4",
 		"sleep_reason":       "wait-hold",
 	})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	got, err := is.PersistedMarkers("s-1")
 	if err != nil {
@@ -370,7 +370,7 @@ func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 // stamped those markers.
 func TestPersistedMarkersEmptyWhenUnset(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, _ := recordingInfoStore(t, b)
+	is, _ := recordingStore(t, b)
 
 	got, err := is.PersistedMarkers("s-1")
 	if err != nil {
@@ -386,7 +386,7 @@ func TestPersistedMarkersEmptyWhenUnset(t *testing.T) {
 // store.Get error path the front door replaces.
 func TestPersistedMarkersSurfacesStoreError(t *testing.T) {
 	store := seedSessionStore(t)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	if _, err := is.PersistedMarkers("missing"); err == nil {
 		t.Fatal("PersistedMarkers(missing): want store error, got nil")
 	}

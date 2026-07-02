@@ -30,7 +30,7 @@ var errTokenMismatch = errors.New("instance token mismatch")
 // Returns the new generation and instance token on success.
 func preWakeCommit(
 	session *beads.Bead,
-	sessFront *sessions.InfoStore,
+	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, err error) {
 	name := session.Metadata["session_name"]
@@ -618,7 +618,7 @@ func advanceSessionDrainsWithSessionsTraced(
 }
 
 // completeDrain writes drain-complete metadata to the bead.
-func completeDrain(session *beads.Bead, sessFront *sessions.InfoStore, ds *drainState, clk clock.Clock) {
+func completeDrain(session *beads.Bead, sessFront *sessions.Store, ds *drainState, clk clock.Clock) {
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
 	if sessFront != nil {
 		if err := sessFront.ApplyPatch(session.ID, batch); err != nil {

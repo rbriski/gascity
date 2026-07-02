@@ -18,7 +18,7 @@ import (
 // when the assignee has been pointed at a different bead. The metadata
 // survives session restart, so crash recovery can resume the same bead
 // instead of jumping to a sibling assignment.
-func recordCurrentBeadIDOnWake(session *beads.Bead, sessFront *sessionpkg.InfoStore, beadID string, stderr io.Writer) {
+func recordCurrentBeadIDOnWake(session *beads.Bead, sessFront *sessionpkg.Store, beadID string, stderr io.Writer) {
 	if session == nil || sessFront == nil {
 		return
 	}

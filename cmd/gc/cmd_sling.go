@@ -1490,7 +1490,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-				var sessFront *session.InfoStore
+				var sessFront *session.Store
 				if store != nil {
 					sessFront = sessionFrontDoor(store)
 				}

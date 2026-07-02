@@ -930,7 +930,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// closeFailedCreateBead/syncDesiredPoolSlots); the raw store stays for the
 	// snapshot/Get and work-release/close residual. Same underlying store, so
 	// every session bead write is byte-identical.
-	sessFront := session.NewInfoStore(sessStore)
+	sessFront := session.NewStore(sessStore)
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -1711,7 +1711,7 @@ func queueAliasChangeDriftRebaseline(b beads.Bead, tp TemplateParams, queueMeta 
 }
 
 func syncDesiredPoolSlots(
-	sessFront *session.InfoStore,
+	sessFront *session.Store,
 	desiredState map[string]TemplateParams,
 	openBeads []beads.Bead,
 	indexBySessionName map[string]int,
@@ -1857,7 +1857,7 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 
 // setMeta wraps store.SetMetadata with error logging. Returns the error
 // so callers can abort dependent writes (e.g., skip config_hash on failure).
-func setMeta(sessFront *session.InfoStore, id, key, value string, stderr io.Writer) error {
+func setMeta(sessFront *session.Store, id, key, value string, stderr io.Writer) error {
 	if err := sessFront.SetMarker(id, key, value); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
 		return err
@@ -1872,11 +1872,11 @@ func setMeta(sessFront *session.InfoStore, id, key, value string, stderr io.Writ
 // session-class store (or the single-store default that backs it); the wrapper
 // holds beads.SessionStore by value and never traps a typed nil (it carries the
 // raw store directly).
-func sessionFrontDoor(store beads.Store) *session.InfoStore {
-	return session.NewInfoStore(beads.SessionStore{Store: store})
+func sessionFrontDoor(store beads.Store) *session.Store {
+	return session.NewStore(beads.SessionStore{Store: store})
 }
 
-func setMetaBatch(sessFront *session.InfoStore, id string, batch map[string]string, stderr io.Writer) error {
+func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -1887,7 +1887,7 @@ func setMetaBatch(sessFront *session.InfoStore, id string, batch map[string]stri
 	return nil
 }
 
-func closeFailedCreateBead(sessFront *session.InfoStore, id string, now time.Time, stderr io.Writer) bool {
+func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""

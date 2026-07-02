@@ -450,7 +450,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	deliveryStore := openNudgeBeadStore(target.cityPath)
-	var deliverySessFront *session.InfoStore
+	var deliverySessFront *session.Store
 	if deliveryStore.Store != nil {
 		deliverySessFront = sessionFrontDoor(deliveryStore.Store)
 	}
@@ -1045,7 +1045,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-				var sessFront *session.InfoStore
+				var sessFront *session.Store
 				if store != nil {
 					sessFront = sessionFrontDoor(store)
 				}
@@ -1259,7 +1259,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	if deliveryStore == nil {
 		deliveryStore = openNudgeBeadStore(target.cityPath).Store
 	}
-	var deliverySessFront *session.InfoStore
+	var deliverySessFront *session.Store
 	if deliveryStore != nil {
 		deliverySessFront = sessionFrontDoor(deliveryStore)
 	}
@@ -1330,7 +1330,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
 }
 
-func stampLastNudgeDeliveredAt(sessFront *session.InfoStore, sessionID string, t time.Time) {
+func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
 	if sessFront == nil || sessionID == "" {
 		return
 	}

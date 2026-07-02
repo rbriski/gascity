@@ -1781,7 +1781,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 		}
-		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
+		// Re-derive after the zombie-capture block: the alive-gated read just below
+		// can never see a markProviderTerminalError mutation (that runs only under
+		// `running && !alive`, mutually exclusive with `alive`), but the !alive
+		// rollback reads (the block below) run on the post-capture bead — so project
+		// once here and reuse for the whole rollback fast-path. Between the three
+		// reads the only mutations sit on `continue` paths
+		// (attemptRollbackPendingCreate; checkRateLimitStability on hit) and
+		// runningSessionMatchesPendingCreate is read-only, so infoPostZombie stays
+		// byte-identical throughout.
+		infoPostZombie := sessionpkg.InfoFromPersistedBead(*session)
+		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && !runningSessionMatchesPendingCreate(session, name, sp) {
 			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false)
 			continue
 		}
@@ -1792,12 +1802,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// attempts ("alias already belongs to gm-XXXX") for any session whose
 		// template still has demand. Rolling back closes the dead bead so the
 		// next reconciler tick can allocate a fresh slot under the same alias.
-		if !alive && shouldRollbackPendingCreate(session) {
+		if !alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
 			var startupTimeout time.Duration
 			if cfg != nil {
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
-			if pendingCreateLeaseExpiredForRollback(*session, clk, startupTimeout) {
+			if pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout) {
 				rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
 				if rateLimitHit || rateLimitErr != nil {
 					continue

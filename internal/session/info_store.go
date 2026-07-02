@@ -126,6 +126,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
 		AttachedConfigDriftDeferredKey: b.Metadata["attached_config_drift_deferred_key"],
 		StrandedEventEmittedAt:         b.Metadata["stranded_event_emitted_at"],
+		SessionNameExplicit:            b.Metadata["session_name_explicit"],
 	}
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n

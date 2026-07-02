@@ -94,6 +94,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"common_name":               "mayor",
 				"alias":                     "mayor",
 				"session_name":              "mayor",
+				"session_name_explicit":     "true",
 				"alias_history":             "mayor,boss",
 			},
 		},
@@ -823,6 +824,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionStrandedEventEmittedAt": {
 			func(b beads.Bead) string { return b.Metadata[strandedEventEmittedKey] },
 			func(i session.Info) string { return i.StrandedEventEmittedAt },
+		},
+		"sessionNameExplicit": {
+			func(b beads.Bead) string { return b.Metadata["session_name_explicit"] },
+			func(i session.Info) string { return i.SessionNameExplicit },
 		},
 	}
 

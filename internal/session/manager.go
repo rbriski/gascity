@@ -309,6 +309,11 @@ type Info struct {
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
 	StrandedEventEmittedAt string // stranded_event_emitted_at (raw)
+	// SessionNameExplicit is the RAW session_name_explicit metadata. The lifecycle
+	// projection's LifecycleIdentifiersReleased predicate reads it (trimmed == "")
+	// alongside alias / session_name, and build_desired_state / the parallel
+	// lifecycle path branch on it (trimmed == "true"). Mirror keeps the raw value.
+	SessionNameExplicit string // session_name_explicit (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a

@@ -227,6 +227,19 @@ type Info struct {
 	// whitespace fidelity the TrimSpace path relies on, so the mirror keeps the
 	// raw string. Additive, internal-only (absent from the HTTP wire).
 	Generation string // generation (raw)
+	// StartedConfigHash is the RAW started_config_hash metadata, verbatim — the
+	// Core fingerprint captured when the session last started. The reconciler's
+	// config-drift detection reads it both as a direct string compare (stored
+	// hash vs the recomputed Core fingerprint) and via strings.TrimSpace (the
+	// emptiness gate that forces firstStart), so the mirror keeps the raw bytes
+	// exactly as the drift path relies on. Additive, internal-only (absent from
+	// the HTTP wire).
+	StartedConfigHash string // started_config_hash (raw)
+	// PinAwake is the RAW pin_awake metadata, verbatim. The reconciler's wake
+	// pass suppresses config-driven wake only when it is != "true", an exact
+	// string compare, so the mirror keeps the raw value. Additive, internal-only
+	// (absent from the HTTP wire).
+	PinAwake string // pin_awake (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a

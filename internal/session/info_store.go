@@ -100,6 +100,8 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		ContinuationResetPending: b.Metadata["continuation_reset_pending"],
 		ResetCommittedAt:         b.Metadata[ResetCommittedAtKey],
 		Generation:               b.Metadata["generation"],
+		StartedConfigHash:        b.Metadata["started_config_hash"],
+		PinAwake:                 b.Metadata["pin_awake"],
 	}
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n

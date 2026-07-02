@@ -516,6 +516,22 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"generation": " 3 ",
 			},
 		},
+		"config-hash-and-pin": {
+			// started_config_hash is read BOTH as a direct string compare (stored
+			// hash vs recomputed Core fingerprint) and via strings.TrimSpace (the
+			// firstStart emptiness gate). The whitespace-padded value proves
+			// Info.StartedConfigHash preserves the raw bytes the TrimSpace path
+			// depends on. pin_awake is read as an exact != "true" compare.
+			ID:     "ga-cfghash",
+			Type:   session.BeadType,
+			Title:  "cfghash",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":            "worker",
+				"started_config_hash": " abc123 ",
+				"pin_awake":           "true",
+			},
+		},
 	}
 
 	const tmpl = "worker"
@@ -611,6 +627,18 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionGeneration": {
 			func(b beads.Bead) string { return b.Metadata["generation"] },
 			func(i session.Info) string { return i.Generation },
+		},
+		// started_config_hash / pin_awake have no named classifier — the reconciler
+		// reads them inline (string compare / TrimSpace / != "true") in the desired
+		// path's config-drift and wake branches — so these pin the raw codec mirrors
+		// directly, the same way sessionGeneration does.
+		"sessionStartedConfigHash": {
+			func(b beads.Bead) string { return b.Metadata["started_config_hash"] },
+			func(i session.Info) string { return i.StartedConfigHash },
+		},
+		"sessionPinAwake": {
+			func(b beads.Bead) string { return b.Metadata["pin_awake"] },
+			func(i session.Info) string { return i.PinAwake },
 		},
 	}
 

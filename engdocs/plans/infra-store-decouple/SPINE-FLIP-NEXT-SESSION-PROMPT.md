@@ -6,7 +6,7 @@ Paste the block below into a fresh session.
 
 Continue the **reconciler spine flip** on **PR #3839** (branch
 `upstream/object-front-doors-cleanup`, base `main`, DRAFT, worktree
-`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `6c1e41d1b`).
+`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `937beeb13`).
 
 **Read first:** `engdocs/plans/infra-store-decouple/SPINE-FLIP-HANDOFF.md` — the
 authoritative, self-contained guide (design = Fork B, verified scope, field-gap
@@ -51,51 +51,42 @@ git checkout go.sum
   `configuredNamedSessionBeadHasSpecInfo`) + 5 equivalence cases + a real-cfg guard.
   **Key finding:** this block is PRE-heal, so it reuses the top-of-loop `info`
   with NO re-derive (the block's mutations all `continue`).
+- **Phase 1, cluster 3 (`937beeb13`):** the rest of the `!desired` pre-heal region
+  (`session_reconciler.go:~1414–1457`) → `info`, no re-derive. preserve-named
+  (`preserveConfiguredNamedSessionBead`→`…Info`) + failed-create close
+  (`isFailedCreateSessionBead`→`isFailedCreateSessionInfo`,
+  `pendingCreateSessionStillLeased`→`…Info`) + their trace templates
+  (`normalizedSessionTemplateInfo`+`info.Template`). Added the 4 checklist siblings
+  (`staleCreatingStateInfo`, `sessionStartRequestedInfo`,
+  `pendingCreateSessionStillLeasedInfo`, `preserveConfiguredNamedSessionBeadInfo`) +
+  4 equivalence cases (`pendingCreateSessionStillLeased` under a worker-resolving
+  `leaseCfg`) + a keep-alias real-cfg guard. No `Info` struct/codec change.
+  **Verified pre-heal safety:** checkRateLimitStability writes no
+  template/agent_name/alias key; the failed-create reads sit behind its
+  non-mutating `(false,nil)` return. Trace-payload `pending_create_claim`/`state` +
+  inline `session.Status="closed"` + read-before-heal snapshots stay raw.
 
-**KEY RE-FRAMING (the earlier plan was wrong about this):** the `!desired` branch
-does NOT need re-derive until the heal. Everything from the top of `!desired`
-(`~1330`) down to **`healStateWithRollback` (`session_reconciler.go:1441`)** is the
-**pre-heal region** — same safety class as clusters 1–2, NO re-derive. The genuine
-re-derive-after-mutation work is the **post-heal region** (after `1441`).
+**KEY RE-FRAMING (settled):** the whole `!desired` pre-heal region — from the top of
+`!desired` down to **`healStateWithRollback` (`session_reconciler.go:1491`)** — is now
+fully converted (clusters 1–3), NO re-derive. The genuine re-derive-after-mutation
+work is the **post-heal region** (after `1491`).
 
-**First concrete increment (do this, as ONE verified commit): Phase 1, cluster 3
-— the remaining pre-heal blocks (`session_reconciler.go:~1367–1436`).** Still NO
-re-derive — reuse the top-of-loop `info`. Two sub-blocks:
-1. **preserve-named + rate-limit (`~1367`):** `preserveConfiguredNamedSessionBead`
-   → new `preserveConfiguredNamedSessionBeadInfo` (composes `isNamedSessionInfo` +
-   `namedSessionIdentityInfo` [now exists] + `findNamedSessionSpec` +
-   `info.SessionNameMetadata`/`MetadataState`/`SleepReason`/`LastWokeAt`);
-   trace `normalizedSessionTemplate`→`normalizedSessionTemplateInfo(info,cfg)`
-   [exists]. `checkRateLimitStability` stays raw (mutation).
-2. **failed-create close (`~1405–1436`):** `isFailedCreateSessionBead`
-   →`isFailedCreateSessionInfo(info)` [exists]; `pendingCreateSessionStillLeased`
-   (`~1410`, PRE-heal)→ new `pendingCreateSessionStillLeasedInfo` (composes
-   `pendingCreateLeaseActiveInfo` [exists] + new `sessionStartRequestedInfo` +
-   `normalizedSessionTemplateInfo` + `findAgentByTemplate`); template reads [exists].
-   The inline `session.Status="closed"` write + the read-before-heal snapshots
-   (`~1438–1440`) stay raw. The `session.Metadata["pending_create_claim"]`
-   trace-payload read stays raw (`Info.PendingCreateClaim` is a bool, not the raw
-   string).
-3. Verify: build + vet + lint + equivalence + trace-integration + the full
-   `TestReconcileSessionBeads*` suite (205 tests; ≥420s timeout — the box overloads
-   under `fork/exec`, split the run if it times out) + rollback/lease chaos + pool/
-   named suites.
-
-The handoff's **"Cluster 3 foundation gaps (VERIFIED at HEAD `6c1e41d1b`)"** section
-is the exact checklist: 4 new siblings to add bottom-up — `staleCreatingStateInfo`,
-`sessionStartRequestedInfo`, `pendingCreateSessionStillLeasedInfo`,
-`preserveConfiguredNamedSessionBeadInfo` — with each one's source anchor + leaf
-dependencies (all leaves already EXIST) + which equivalence-check group it lands in.
-No `Info` struct/codec change is needed (all fields already exist). Re-run the
-sanity greps in that section first in case HEAD moved.
-
-**Then:** cluster 4+ — the **post-heal region** (`1441`+), the FIRST genuine
-re-derive cluster: after the heal, **re-derive
+**First concrete increment (do this, as ONE verified commit): Phase 1, cluster 4+
+— the post-heal region (`session_reconciler.go:1491`+), the FIRST genuine re-derive
+cluster.** After `healStateWithRollback` mutates `session.Metadata`, **re-derive
 `info := sessionpkg.InfoFromPersistedBead(*session)`** and convert the switch/
-`default` decision reads (post-heal `pendingCreateSessionStillLeased` at `~1476`,
-the drain-ack block, the orphan-drain/suspend/close block). Add `Info.StartedConfigHash`
-(raw) + a `pin_awake` mirror as later sites reach them (see the handoff field-gap
-table). Leave the apply/write-back cluster + ProjectLifecycle + circuit breaker raw.
+`default` decision reads: post-heal `pendingCreateSessionStillLeased` at `~1526`,
+the drain-ack block, the orphan-drain/suspend/close block. **Re-derive `info` after
+EACH mutation** in this region — this is where the stale-`info` risk actually lives,
+so go slowly and with fresh context. Add `Info.StartedConfigHash` (raw) + a
+`pin_awake` mirror as those sites are reached (see the handoff field-gap table).
+Leave the apply/write-back cluster + `ProjectLifecycle` + circuit breaker raw.
+
+Verify each cluster: build + vet + lint + equivalence + guards + trace-integration +
+the full `TestReconcileSessionBeads*` suite (205 tests; ≥420s timeout — the box can
+overload under `fork/exec`, split the run if it times out) + rollback/lease chaos +
+pool/named suites. Re-run the handoff's sanity greps before starting in case HEAD
+moved; if you re-run a mapping agent, pin `git rev-parse HEAD` first.
 
 **Method:** keep original + ADD the `Info` field/sibling + ADD an equivalence case
 (byte-identical oracle) + THEN convert the decision read via the per-iteration

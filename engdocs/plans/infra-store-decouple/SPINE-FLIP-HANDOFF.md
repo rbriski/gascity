@@ -2,7 +2,7 @@
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`,
-**HEAD `6c1e41d1b`** (pushed; Phase 2 + Phase-1 clusters 1+2 landed). Self-contained
+**HEAD `937beeb13`** (pushed; Phase 2 + Phase-1 clusters 1+2+3 landed). Self-contained
 guide for finishing the reconciler spine flip. It supersedes the Fork-A material in
 `RECONCILER-CASCADE-HANDOFF.md` (kept only as background).
 
@@ -141,14 +141,49 @@ on the raw bead (accepted).** Therefore:
   vet/lint clean; equivalence + 205 `TestReconcileSessionBeads*` + rollback/lease
   chaos + trace-integration + pool/named suites.
 
+**DONE — Phase 1, cluster 3: remaining pre-heal blocks (`937beeb13`):**
+- The rest of the `!desired` pre-heal region (`session_reconciler.go:~1414–1457`),
+  reusing the top-of-loop `info` with NO re-derive. Two sub-blocks:
+  - **preserve-named:** `preserveConfiguredNamedSessionBead`→
+    `preserveConfiguredNamedSessionBeadInfo(info,cfg,cityName)`; the rate-limit-hit
+    trace template→`normalizedSessionTemplateInfo(info,cfg)`+`info.Template`.
+  - **failed-create close:** `isFailedCreateSessionBead`→`isFailedCreateSessionInfo(info)`;
+    `pendingCreateSessionStillLeased`→`pendingCreateSessionStillLeasedInfo(info,cfg,clk)`;
+    its trace template→`normalizedSessionTemplateInfo(info,cfg)`+`info.Template`.
+- **Pre-heal safety (verified):** these reads run on a byte-identical top-of-loop
+  bead. `preserveNamed` (`~1414`) runs before any in-region mutation (the rollback
+  block only mutates on `continue` paths). `checkRateLimitStability` (`~1433`) is the
+  one in-region mutation, and both its write paths (`markProviderTerminalError`,
+  `RateLimitQuarantinePatch`) touch only state/sleep/health/quarantine keys — **never
+  template/agent_name/alias** — so the template trace read on its hit/err path stays
+  byte-identical against `info`. The failed-create-close reads (`~1452+`) are reached
+  ONLY via checkRateLimitStability's non-mutating `(false,nil)` return at
+  `session_reconcile.go:699` (any mutating path sets hit/err → `continue` at `~1450`),
+  so the bead is fully unmutated there. The two trace-payload raw-string reads
+  (`pending_create_claim`, `state`) stay raw: `pending_create_claim` has no raw-string
+  Info mirror (`Info.PendingCreateClaim` is a bool). The inline `session.Status="closed"`
+  write + the read-before-heal snapshots stay raw.
+- **New Info siblings (all 4 from the cluster-3 checklist, equivalence-proven):**
+  `staleCreatingStateInfo` + `sessionStartRequestedInfo` (`session_reconcile.go`),
+  `pendingCreateSessionStillLeasedInfo` (`session_reconciler.go`),
+  `preserveConfiguredNamedSessionBeadInfo` (`session_beads.go`). No `Info` struct/codec
+  change — all fields already existed. Equivalence test gained 4 cases (the
+  `pendingCreateSessionStillLeased` case runs under a worker-resolving `leaseCfg` to
+  exercise the `!agent.Suspended` tail) + a keep-alias real-cfg guard so the preserve
+  case is a true-branch comparison, not a both-false pass. Verified: build/vet/lint
+  clean; equivalence + guards + 205 `TestReconcileSessionBeads*` +
+  preserve/failed-create/pending-create/stale-creating + `TestReconciler_*`
+  rollback-deferral + `TestSessionLifecycleChaos*` + trace-integration suites.
+
 **Verified scope (at HEAD `6ccf9d698`):** 194 raw `.Metadata[` reads at the
 CONT-5 census — reconciler 123 / reconcile 50 / wake 21 — plus 6 `.Status`.
 Most are inside the raw machinery that stays. Only DECISION reads convert.
-Phase 2 + Phase-1 clusters 1+2 have converted the drain-advance loop, the
-reconciler loop preamble, and the pending-create rollback gate; the rest of the
-`!desired` pre-heal region (preserve-named, failed-create-close) is cluster 3,
-and the post-heal region (heal/stability, drain-ack, orphan-drain/close,
-pool-demand) is the remaining bulk (cluster 4+, first genuine re-derive).
+Phase 2 + Phase-1 clusters 1+2+3 have converted the drain-advance loop and the
+**entire `!desired` pre-heal region** (loop preamble, pending-create rollback
+gate, preserve-named, failed-create-close). The **post-heal region**
+(heal/stability, drain-ack, orphan-drain/suspend/close, pool-demand — everything
+after `healStateWithRollback` at `session_reconciler.go:1491`) is the remaining
+bulk (cluster 4+, the **first genuine re-derive**).
 
 ## Field-gaps still needed (decision-reads only)
 
@@ -189,41 +224,30 @@ pool-demand) is the remaining bulk (cluster 4+, first genuine re-derive).
    same safety class as clusters 1–2, **NO re-derive**. The genuine
    re-derive-after-mutation work is the **post-heal region** (after `1441`).
 
-   - **NEXT — cluster 3: the remaining pre-heal blocks (`~1367–1436`), still no
-     re-derive.** Two sub-blocks, both before the heal, both reusing the top-of-loop
-     `info`:
-     - **preserve-named + rate-limit (`~1367`):**
-       `preserveConfiguredNamedSessionBead(*session,cfg,cityName)`→ new
-       `preserveConfiguredNamedSessionBeadInfo(info,cfg,cityName)` (composes
-       `isNamedSessionInfo` + `namedSessionIdentityInfo` [now exists] +
-       `findNamedSessionSpec` + `info.SessionNameMetadata`/`info.MetadataState`/
-       `info.SleepReason`/`info.LastWokeAt` via `parseRFC3339Metadata`); trace
-       `normalizedSessionTemplate`→`normalizedSessionTemplateInfo(info,cfg)`
-       [exists]. `checkRateLimitStability` stays raw (mutation).
-     - **failed-create close (`~1405–1436`):**
-       `isFailedCreateSessionBead(*session)`→`isFailedCreateSessionInfo(info)`
-       [exists]; `pendingCreateSessionStillLeased(*session,cfg,clk)` (`~1410`,
-       PRE-heal)→ new `pendingCreateSessionStillLeasedInfo(info,cfg,clk)` (composes
-       `pendingCreateLeaseActiveInfo` [exists] + a new `sessionStartRequestedInfo` +
-       `normalizedSessionTemplateInfo` + `findAgentByTemplate`); template reads
-       [exists]. The inline `session.Status="closed"` write + the read-before-heal
-       snapshots (`stateBeforeHeal`/`pendingCreateStartedAtBeforeHeal`/
-       `lastWokeAtBeforeHeal`, `~1438–1440`) stay raw. Trace-payload raw-string
-       reads (`session.Metadata["pending_create_claim"]`, `["state"]`) may stay raw
-       or use `info.MetadataState` — the `pending_create_claim` one has no raw-string
-       Info mirror (`Info.PendingCreateClaim` is a bool), so keep it raw.
-   - **THEN — cluster 4+: the post-heal region (`1441`+), the first genuine
+   - **DONE — cluster 3 (`937beeb13`): the remaining pre-heal blocks
+     (`~1414–1457`), no re-derive.** preserve-named + failed-create-close, both
+     reusing the top-of-loop `info`. See the Status "cluster 3" block above for the
+     converted reads, the 4 new siblings, and the verified pre-heal safety argument
+     (checkRateLimitStability writes no template/agent_name/alias key; the
+     failed-create reads sit behind its non-mutating `(false,nil)` return).
+   - **NEXT — cluster 4+: the post-heal region (`1491`+), the first genuine
      re-derive cluster.** After `healStateWithRollback` mutates `session.Metadata`,
      **re-derive `info := sessionpkg.InfoFromPersistedBead(*session)`** and convert
      the switch/`default` decision reads (post-heal `pendingCreateSessionStillLeased`
-     at `~1476`, the drain-ack block, the orphan-drain/suspend/close block). Do this
-     with fresh context — it is where the stale-`info` risk actually lives.
+     at `~1526`, the drain-ack block, the orphan-drain/suspend/close block). Add
+     `Info.StartedConfigHash` (raw) + a `pin_awake` mirror as those sites are reached
+     (see the field-gap table). Do this with fresh context — it is where the
+     stale-`info` risk actually lives; re-derive after EACH mutation. Leave the
+     apply/write-back cluster + ProjectLifecycle + circuit breaker raw.
 3. **Leave raw:** the apply/write-back cluster (`healState*`, `checkStability`,
    `checkChurn`, `record*`/`clear*`, `markProviderTerminalError`, `healExpiredTimers`,
    `persistSessionCircuitBreakerMetadata`, the inline `session.Status="closed"` /
    `restart_requested` writes), `ProjectLifecycle`, and the circuit breaker.
 
-## Cluster 3 foundation gaps (VERIFIED at HEAD `6c1e41d1b`)
+## Cluster 3 foundation gaps — LANDED (`937beeb13`)
+
+All 4 siblings below shipped in cluster 3 (`937beeb13`), each equivalence-proven.
+Kept as the build-order record. The original checklist follows.
 
 Exact sibling-mirror checklist for cluster 3. All `Info` **fields** the cluster
 needs already exist (`MetadataState`, `PendingCreateClaim`, `SessionNameMetadata`,

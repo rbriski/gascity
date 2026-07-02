@@ -685,19 +685,21 @@ func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 	// while-subshell (xargs can't invoke a shell function, so this is a
 	// read loop rather than `xargs -rI{}`) by exiting with status 2 and
 	// checking $? immediately after the pipeline.
-	return bdFatalGuardFunctionScript() +
-		`template=` + shellquote.Quote(template) + `; ` +
+	return `template=` + shellquote.Quote(template) + `; ` +
+		bdFatalGuardFunctionScript() +
 		`routed_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
 		`[ $bd_rc -eq 2 ] && exit 1; ` +
 		`routed_ids=$(printf '%s' "$routed_raw" | jq -r '.[].id' 2>/dev/null); ` +
-		`workflow_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
+		`run_target_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
 		`[ $bd_rc -eq 2 ] && exit 1; ` +
-		`workflow_ids=$(printf '%s' "$workflow_raw" | jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null); ` +
+		`run_target_ids=$(printf '%s' "$run_target_raw" | jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null); ` +
 		`ephemeral_raw=$(` + bdOrFatalGuarded(bdQueryEphemeralStatusShell("in_progress")) + `); bd_rc=$?; ` +
 		`[ $bd_rc -eq 2 ] && exit 1; ` +
 		`ephemeral_ids=$(printf '%s' "$ephemeral_raw" | jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null); ` +
-		`{ printf '%s\n' "$routed_ids"; printf '%s\n' "$workflow_ids"; printf '%s\n' "$ephemeral_ids"; } | awk 'NF && !seen[$0]++' | ` +
+		`{ printf '%s\n' "$routed_ids"; printf '%s\n' "$run_target_ids"; printf '%s\n' "$ephemeral_ids"; } | ` +
+		`awk 'NF && !seen[$0]++' | ` +
 		`while IFS= read -r id; do ` +
+		`[ -z "$id" ] && continue; ` +
 		bdOrFatalGuarded(`bd update "$id" --status open`) + `; bd_rc=$?; ` +
 		`[ $bd_rc -eq 2 ] && exit 2; ` +
 		`done; boot_rc=$?; if [ $boot_rc -eq 2 ]; then exit 1; fi`

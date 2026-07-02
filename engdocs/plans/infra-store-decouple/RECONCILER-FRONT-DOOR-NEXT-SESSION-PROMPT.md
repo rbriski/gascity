@@ -1,4 +1,4 @@
-# Next-session prompt — reconciler front-door Step 4D (snapshot plumbing + 3 scans)
+# Next-session prompt — reconciler front-door Step 5 (CircuitState typed accessor)
 
 Paste the block below into a fresh session.
 
@@ -6,72 +6,80 @@ Paste the block below into a fresh session.
 
 Continue the **session reconciler front-door migration** on **PR #3839** (branch
 `upstream/object-front-doors-cleanup`, base `main`, DRAFT, worktree
-`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `6843e8607`).
+`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `4617c0821`).
 
 **Read first, in order:**
 1. `engdocs/plans/infra-store-decouple/RECONCILER-FRONT-DOOR-HANDOFF.md` — the
-   authoritative handoff + ordered backlog. Steps 0–3 DONE; Step 4A + 4B + 4C DONE;
-   you are starting **Step 4D**. (This SUPERSEDES the `SPINE-FLIP-*` docs.)
+   authoritative handoff + ordered backlog. **Steps 0–4 DONE**; you are starting
+   **Step 5**. (This SUPERSEDES the `SPINE-FLIP-*` docs.)
 2. `engdocs/plans/infra-store-decouple/RECONCILER-FRONT-DOOR-SPEC.md` — design v2.
 
-**Where things stand.** 4B typed `LifecycleInput` + the FromMetadata/FromInfo
-constructors + the byte-identical oracle. 4C (`6843e8607`) added `Info.RestartRequested`
-and converted `buildAwakeInputFromReconciler`'s session-beads loop to read
-`info := session.InfoFromPersistedBead(*b)` — a LOCAL re-derive — with every fact off
-`Info` and the lifecycle view fed by `LifecycleInputFromInfo(info)`.
+**Where things stand.** Step 4 is complete: all four reconciler session scans read
+typed `Info` (no raw session-bead metadata cracking). The `LifecycleInput` is typed
+(4B), `buildAwakeInputFromReconciler` reads the coherent `infoByID` snapshot (4C/4D),
+the min-floor scan reads the snapshot with a close-refresh discipline (4D phase 2),
+and `computeNamedSessionProgressSignatures` / `advanceSessionDrains` read per-bead
+`Info` projections at their Phase-0.5 / post-forward-pass points (4D phase 3).
 
 **Confirm a green baseline:**
 ```
-git rev-parse HEAD            # expect 6843e8607 (or later)
+git rev-parse HEAD            # expect 4617c0821 (or later)
 go build ./... && go vet ./cmd/gc/... ./internal/session/...
 golangci-lint run ./cmd/gc/... ./internal/session/...   # expect 0
-go test ./cmd/gc/ -run 'TestSessionClassifierInfoEquivalence|TestFrontDoorStoreFreeFilesStayStoreFree|TestSnapshotInfoOnlyFilesStayOnInfoAccessors' -count=1
-go test ./internal/session/ -run 'TestLifecycleInputConstructorsProjectIdentically|TestGetReflectsApplyPatch' -count=1
+go test ./cmd/gc/ -run 'TestSessionClassifierInfoEquivalence|TestOpenPoolSessionCountForTemplateExcludesClosed|TestBuildAwakeInputFromReconcilerReadsInfoSnapshot' -count=1
+go test ./internal/session/ -run 'TestLifecycleInputConstructorsProjectIdentically' -count=1
 git checkout go.sum
 ```
 
-**DO STEP 4D (this session):** stop the re-derive in `buildAwakeInputFromReconciler`,
-then convert the 3 simpler scans. Each is one verified commit.
+**DO STEP 5 (this session): the circuit-breaker typed accessor.** The reconciler's
+Phase-0.5 circuit-breaker restore reads raw `ordered[i].Metadata` — the last raw
+session-metadata read cluster on the reconciler's decision path. Add a dedicated
+typed value (NOT `Info` — this is a distinct concern) and route the reads through it.
 
-1. **Snapshot plumbing.** `buildAwakeInputFromReconciler` (`compute_awake_bridge.go`)
-   takes `sessionBeads []beads.Bead` and re-derives `InfoFromPersistedBead(*b)` per
-   iteration (the 4C local shape). Change it to consume the reconciler's coherent
-   snapshot so the awake scan reads the SAME `Info` the tick already refreshed. The
-   snapshot is `infoByID map[string]sessionpkg.Info` built in `session_reconciler.go`
-   @~1329 (from `ordered`, kept fresh by `refreshSessionInfo`). Production caller is
-   `session_reconciler.go`@~2721. Either change the param to an ordered
-   `[]session.Info` (built from `ordered`/`infoByID` in tick order) or pass `infoByID`
-   + keep iterating `sessionBeads` for order and look each `info` up by ID — pick the
-   shape that keeps the loop order identical and the diff smallest. **~14 test callers**
-   of `buildAwakeInputFromReconciler` (`compute_awake_bridge_test.go`,
-   `compute_awake_set_min_active_test.go`) build `[]beads.Bead` — update them (project
-   via `InfoFromPersistedBead` or build `Info` directly). Behavior byte-identical:
-   `infoByID[id] == InfoFromPersistedBead(ordered-bead)` by construction (raw-refresh,
-   Step 3 decision). Drop the 4C local `info := InfoFromPersistedBead(*b)`.
-2. **Min-floor scan** (`build_desired_state.go` @~1031/1039, `b.Status != "closed"`):
-   convert to `!Info.Closed`. **INVARIANT:** every mid-tick close site must set
-   `Closed` on the refreshed snapshot entry (via `refreshSessionInfo`) so a bead closed
-   earlier in the tick reads closed here — confirm each close path refreshes before this
-   scan runs, and add a multi-session read-after-close same-tick test.
-3. **`computeNamedSessionProgressSignatures`** (`session_circuit_breaker.go`@~855) and
-   **`advanceSessionDrains`** (`session_wake.go`@~392): route their per-session raw
-   reads through `Info` (use the `*Info` classifier siblings / `Info` fields; add
-   mirrors only if a genuinely-unmirrored key surfaces — check the Step-1 inventory
-   first). Keep each byte-identical; equivalence-case any new mirror.
+1. **`session.Store.CircuitState(id) (CircuitState, error)`** in `internal/session`,
+   reading the full `session_circuit_*` cluster (9 keys):
+   `session_circuit_breaker` (state), `session_circuit_progress_signature`,
+   `session_circuit_restarts`, `session_circuit_last_restart`,
+   `session_circuit_last_progress`, `session_circuit_last_observed`,
+   `session_circuit_opened_at`, `session_circuit_open_restart_count`,
+   `session_circuit_reset_generation` (`SessionCircuitResetGenerationMetadataKey`).
+   Define a typed `CircuitState` struct (raw-string fields + parsed forms as the
+   consumers need), with the metadata-key literals confined below the codec edge.
+   Also add a `CircuitStateFromMetadata(meta map[string]string) CircuitState` (and,
+   if useful, a `CircuitStateFromInfo` — but the CB keys are NOT mirrored on `Info`,
+   so likely `FromMetadata` only for now).
+2. **Route the two Phase-0.5 CB reads** (`session_reconciler.go`@~1277
+   `cb.observeResetGenerationFromMetadata(identity, ordered[i].Metadata)` and @~1286
+   `cb.restoreFromMetadata(identity, ordered[i].Metadata, cbNow)`) through the typed
+   accessor. Change `restoreFromMetadata`/`observeResetGenerationFromMetadata`
+   (`session_circuit_breaker.go`) to take a `session.CircuitState` instead of
+   `map[string]string`, keeping every parse/compare exactly where it is
+   (byte-identical). `persistSessionCircuitBreakerMetadata` (the WRITE half) already
+   goes through `sessFront`; leave it unless it also cracks raw reads.
+3. **Byte-identical oracle**: extend `TestSessionClassifierInfoEquivalence` (or add a
+   dedicated breaker-restore fixture/test) so `restoreFromMetadata`/`observe…` fed a
+   `CircuitStateFromMetadata(bead.Metadata)` produce identical breaker state to the
+   raw-map form, across representative `session_circuit_*` shapes (open/closed,
+   reset-generation stale vs fresh, missing-vs-empty).
 
-Then **Step 5** (`session.Store.CircuitState` typed accessor over the 9-key
-`session_circuit_*` cluster — a dedicated value, NOT `Info`) and **Step 6** (drop the
-lockstep + remove the raw `ordered`/`beadByID` working set + cut `refreshSessionInfo`
-over to `sessFront.Get` + add explicit intra-tick suppression of `reset_committed_at`
-/ `started_live_hash` so the #2345 force-wake regression can't return).
+**Optional consolidation:** `computeNamedSessionProgressSignatures` also runs in this
+Phase-0.5 block on a per-bead projection. If Step 5 naturally builds a coherent typed
+view here, both it and the CB reads can share it — but do NOT move the `infoByID`
+snapshot construction ahead of the CB restore without handling the CB block's
+`persistSessionCircuitBreakerMetadata` mutation of `ordered[i]` (that mutation is
+exactly why `infoByID` is built AFTER the CB block today).
+
+**Then Step 6** (the finale): drop every `session.Metadata[k]=v` lockstep, remove the
+raw `ordered []beads.Bead` + `beadByID` working set, cut `refreshSessionInfo` over to
+`sessFront.Get`, and add explicit intra-tick suppression of `reset_committed_at` /
+`started_live_hash` (else the #2345 force-wake regression returns). Only then do the
+reconciler files become raw-free and join `snapshotInfoOnlyFiles`.
 
 **Gates per commit:** `go build ./...` · `go vet` · `golangci-lint ./cmd/gc/...
-./internal/session/...`=0 · gofmt · `TestSessionClassifierInfoEquivalence` + front-door
-guards + the `LifecycleInput` oracle · whole-tick `TestReconcileSessionBeads*` +
-pool/named/chaos/wake/sleep/drain/trace/awake after any read/scan change (run heavy
-suites in the background; the broad `Pool|Named|Wake|Sleep|Drain|Trace|Reconcil|Phase0|
-Circuit|Awake` sweep is ~125s here). Per §2 governing principle, each lockstep-adjacent
-close/refresh conversion needs a read-after-write same-tick test. `git checkout go.sum`
+./internal/session/...`=0 · gofmt · the new CircuitState oracle +
+`TestSessionClassifierInfoEquivalence` + front-door guards · whole-tick
+`TestReconcileSessionBeads*` + circuit/named/pool/wake/sleep/drain/trace (run heavy
+suites in the background; the broad sweep is ~70–130s here). `git checkout go.sum`
 after. Commit AND push `--no-verify`. Trailer:
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Never
 `tmux kill-server` / `go clean -cache` (`-testcache` ok); gascity Dolt is LOCAL-ONLY

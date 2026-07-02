@@ -1,18 +1,17 @@
 # Reconciler Front-Door Handoff — the backlog to work through
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
-worktree `.claude/worktrees/object-front-doors`, **HEAD `6843e8607`**.
+worktree `.claude/worktrees/object-front-doors`, **HEAD `4617c0821`**.
 
 This is the authoritative handoff for finishing the session reconciler's move off
 raw `beads.Bead.Metadata`, onto the typed **`session.Store`** front door. It
 **supersedes** `SPINE-FLIP-HANDOFF.md` / `SPINE-FLIP-NEXT-SESSION-PROMPT.md` (the
 `InfoFromPersistedBead(*session)` re-derive approach — retired; see below).
 
-**Status (as of `6843e8607`):** Steps 0–3 DONE, Step 4 in progress (4A + 4B + 4C
-done). Next actionable = **Step 4D** (pass the `infoByID` snapshot into
-`buildAwakeInputFromReconciler` so it stops re-deriving Info + convert the 3 simpler
-scans). Session commits `cece437df`..`6843e8607` (12).
-`RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md` is paste-ready for 4D.
+**Status (as of `4617c0821`):** Steps 0–4 DONE. Next actionable = **Step 5**
+(circuit-breaker typed `CircuitState` accessor over the Phase-0.5 CB reads). Session
+commits `cece437df`..`4617c0821` (16).
+`RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md` is paste-ready for Step 5.
 
 **Read first:** `RECONCILER-FRONT-DOOR-SPEC.md` (the design, review-hardened v2) and
 `OBJECT-MODEL-FRONT-DOOR-DESIGN.md` (the parent design; §3.1 session, §7 Phases 4–5).
@@ -112,7 +111,9 @@ same-tick test**. Non-`continue` read-after-write sites: `infoPostHeal` (~1545),
       force-wake prevention; the RunLive re-apply persists `started_live_hash` without
       a lockstep). A `Get` refresh would pull those hidden keys into the snapshot and
       break Step 4's wake scan. `restart_requested` stays intra-tick (§5.2, unbuilt).
-- [ ] **Step 4 — `LifecycleInput` from `Info` + the four cross-session scans.**
+- [x] **Step 4 — `LifecycleInput` from `Info` + the four cross-session scans.** DONE
+      (4A–4D, `af9471021`..`4617c0821`). All four reconciler session scans now read
+      typed `Info`; no raw session-bead metadata cracking remains in them.
       Approach chosen by owner: **Full typed `LifecycleInput`** (replace its
       `Metadata map[string]string` with typed fields; rewrite `ProjectLifecycle` +
       callers). Analysis (this session) narrowed the surface: **`ProjectLifecycle`
@@ -164,11 +165,34 @@ same-tick test**. Non-`continue` read-after-write sites: `infoPostHeal` (~1545),
         source to the passed-in `infoByID` snapshot. The
         `shouldProbeAttachmentForAwakeInput`/`wakeTargets` reads (`target.session`, a
         different data source) stay raw — out of scope.
-      - [ ] **4D** — the 3 simpler scans: min-floor (`ordered[j].Status != "closed"`
-        → `!Info.Closed`; every close site must set Closed on the refreshed snapshot),
-        `computeNamedSessionProgressSignatures`, `advanceSessionDrains`; and pass the
-        `infoByID` snapshot into `buildAwakeInputFromReconciler` instead of raw
-        `sessionBeads`. Whole-tick E2E.
+      - [x] **4D** — snapshot plumbing + the simpler scans (3 commits,
+        `84c5987ba`/`f11867ef0`/`4617c0821`). **Phase 1** (`84c5987ba`):
+        `buildAwakeInputFromReconciler` takes a `sessionInfoByID` param and reads
+        `infoByID[b.ID]` (fallback to a per-bead projection when nil, for unit
+        tests) instead of re-deriving; the reconciler re-syncs the snapshot to the
+        beads with a blanket `refreshSessionInfo(ordered[i].ID)` pass right before
+        the scan (the forward pass's late un-lockstepped mutations — the §5.2
+        `restart_requested` marker and pending-create rollback that `continue`s
+        without a refresh — must land first), which runs after the whole forward
+        pass so it perturbs no earlier same-iteration read and is byte-identical to
+        the 4C re-derive by construction. New test
+        `TestBuildAwakeInputFromReconcilerReadsInfoSnapshot`. **Phase 2**
+        (`f11867ef0`): min-floor scan → `openPoolSessionCountForTemplate(ordered,
+        infoByID, cfg, template)` reading `!Info.Closed` +
+        `normalizedSessionTemplateInfo`; the four forward-pass in-memory close sites
+        (failed-create @1548, orphan @1786, two `finalizeDrainAckStoppedSession`
+        @1687/@1989) now `refreshSessionInfo` after the close so the cross-session
+        count excludes a session closed this tick. Guarded by
+        `TestOpenPoolSessionCountForTemplateExcludesClosed` (a full mid-tick-close
+        integration test is impractical — `topoOrder` hides processing order — so
+        it's guarded by construction + the consumer-side unit test). **Phase 3**
+        (`4617c0821`): `computeNamedSessionProgressSignatures` reads
+        `info.ConfiguredNamedIdentity`/`SessionNameMetadata`/`Alias`/`ID` via a
+        per-bead projection (Phase 0.5 — no snapshot yet — the same shape
+        `advanceSessionDrains` already uses). **`advanceSessionDrains` needed no
+        change**: it was already converted to `InfoFromPersistedBead(*session)`
+        Info reads in a prior sub-cluster. Switching the two per-bead projections to
+        the snapshot follows in steps 5/6.
 - [ ] **Step 5 — circuit-breaker typed accessor.** Add `session.Store.CircuitState
       (id) (CircuitState, error)` reading the full `session_circuit_*` key cluster
       (progress_signature/restarts/last_restart/last_progress/last_observed/opened_at/

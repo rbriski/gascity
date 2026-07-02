@@ -1,5 +1,15 @@
 # Spine-Flip Handoff — reconciler decision-reads → `session.Info` (Fork B)
 
+> **⚠️ SUPERSEDED (2026-07-02).** The `InfoFromPersistedBead(*session)` re-derive
+> approach documented here was retired by owner review: it re-projects the raw
+> working copy instead of hiding the map behind a front door. The reads now route
+> through the typed **`session.Store`** front door. **Use
+> `RECONCILER-FRONT-DOOR-HANDOFF.md` + `RECONCILER-FRONT-DOOR-SPEC.md` instead.**
+> This doc is kept as history: the landed commits (Tier-0 `69ccc13c6` … cluster 4e
+> `733812a11`) and their `*Info` classifiers + equivalence oracle stay on the branch
+> as the accessor foundation; only their re-derive *call sites* get rewritten.
+
+
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`,
 **HEAD `806de56f5`** (pushed; Phase 2 + Phase-1 clusters 1+2+3 + 4a+4b landed the

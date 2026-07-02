@@ -1,5 +1,10 @@
 # Next-session prompt — continue the reconciler spine flip (Fork B, incremental)
 
+> **⚠️ SUPERSEDED (2026-07-02).** Do NOT continue the re-derive clusters below. The
+> reconciler read migration now goes through the typed **`session.Store`** front
+> door. Use **`RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md`** instead.
+
+
 Paste the block below into a fresh session.
 
 ---

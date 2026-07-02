@@ -91,16 +91,21 @@ same-tick test**. Non-`continue` read-after-write sites: `infoPostHeal` (~1545),
       principle *better* than blanket-wiring unconsumed refreshes now. Gates:
       build ./... · vet · golangci-lint=0 · gofmt · `TestReconcileSessionBeads*` +
       reconciler/phase0/chaos/named (427 PASS) + trace green.
-- [ ] **Step 3 — per-session reads onto the snapshot + refresh-on-write (folded
-      from Step 2).** Introduce a `refreshSessionInfo(id)` helper (re-`Get` →
-      `infoByID[id]`) and fold clusters 1–4e off the `InfoFromPersistedBead(*session)`
-      re-derive onto the snapshot `Info` — `infoPostHeal`@~1545, `infoPostZombie`
-      @~1793, `infoAsleepDrift`@~2457, wake-pass `info`@~2690. Convert each **write +
-      its refresh + the non-`continue` dependent read as ONE unit, one commit** (§2
-      governing principle); each such drop needs a multi-session / read-after-write
-      test. `restart_requested` stays an **in-memory intra-tick field** (spec §5.2 —
-      do NOT persist it). Trace-payload reads of bool/int-mirrored keys keep the raw
-      string (spec §4.1). E2E after each cluster.
+- [x] **Step 3 — per-session reads onto the snapshot + refresh-on-write.** DONE (4
+      commits). Introduced `refreshSessionInfo(id)` and folded all four post-mutation
+      re-derives onto the snapshot: `infoPostHeal` (`2f5fef84f`, cluster 1/4 — also
+      added `TestGetReflectsApplyPatch`), then `infoPostZombie` + `infoAsleepDrift`
+      (`94f39e538`, clusters 2-3), then the wake-pass `info` + `Info.SleepIntent`
+      (`3d1725abf`, cluster 4/4). No `InfoFromPersistedBead(*session|*target.session)`
+      re-derive remains in the reconciler. **KEY DECISION (owner, via the
+      reset_committed_at audit):** `refreshSessionInfo` refreshes from the **raw
+      working copy** (`InfoFromPersistedBead(*beadByID[id])`), NOT `sessFront.Get`,
+      during the coexistence phase — byte-identical BY CONSTRUCTION and it preserves
+      the reconciler's deliberate intra-tick raw/store divergences (the restart
+      handoff persists `reset_committed_at` but the lockstep skips it, #2145/#2345
+      force-wake prevention; the RunLive re-apply persists `started_live_hash` without
+      a lockstep). A `Get` refresh would pull those hidden keys into the snapshot and
+      break Step 4's wake scan. `restart_requested` stays intra-tick (§5.2, unbuilt).
 - [ ] **Step 4 — `LifecycleInput` from `Info` + the four cross-session scans.**
       Populate `LifecycleInput` from `Info` fields (needs step 1), then convert the
       scans onto the coherent snapshot — **`buildAwakeInputFromReconciler` first**
@@ -114,11 +119,19 @@ same-tick test**. Non-`continue` read-after-write sites: `infoPostHeal` (~1545),
       open_restart_count/state/reset_generation) — a dedicated typed value, **NOT**
       `Info`. Route `restoreFromMetadata`/`observeResetGenerationFromMetadata` through
       it. Breaker-restore fixture in the oracle. (Blocks step 6 — do not defer.)
-- [ ] **Step 6 — drop the lockstep + remove the raw working set.** Now that all
-      dependent reads are on the snapshot: drop every `session.Metadata[k]=v`
-      lockstep, and remove the raw `ordered []beads.Bead` + `beadByID` /
-      `circuitSessionByIdentity` aliasing. Only now do the reconciler files become
-      raw-free and join `snapshotInfoOnlyFiles`.
+- [ ] **Step 6 — drop the lockstep + remove the raw working set + cut refresh over
+      to `Get`.** Now that all dependent reads are on the snapshot: drop every
+      `session.Metadata[k]=v` lockstep, remove the raw `ordered []beads.Bead` +
+      `beadByID` / `circuitSessionByIdentity` aliasing, and switch
+      `refreshSessionInfo` from the raw-bead projection to `sessFront.Get` (its sole
+      remaining source once the raw working set is gone). **CRITICAL:** the raw-bead
+      refresh currently preserves the reconciler's deliberate intra-tick raw/store
+      divergences (`reset_committed_at` kept off the in-memory bead, #2145/#2345;
+      un-locksteped `started_live_hash` re-apply). A `Get`-based refresh exposes
+      those — so Step 6 must add **explicit intra-tick suppression** of those keys
+      (an in-memory "hidden this tick" set, analogous to `restart_requested`'s
+      intra-tick field §5.2) or the #2345 force-wake regression returns. Only now do
+      the reconciler files become raw-free and join `snapshotInfoOnlyFiles`.
 
 Out of scope here: the cross-class WORK/assignment split (design §5 / Phase 6).
 

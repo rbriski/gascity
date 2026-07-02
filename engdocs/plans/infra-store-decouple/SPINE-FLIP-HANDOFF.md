@@ -2,7 +2,8 @@
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`,
-**HEAD `dac68d506`** (pushed; Phase 2 + Phase-1 clusters 1+2+3 + 4a landed). Self-contained
+**HEAD `8c3e600ae`** (pushed; Phase 2 + Phase-1 clusters 1+2+3 + 4a+4b landed — the
+entire `!desired` branch is now Info-routed). Self-contained
 guide for finishing the reconciler spine flip. It supersedes the Fork-A material in
 `RECONCILER-CASCADE-HANDOFF.md` (kept only as background).
 
@@ -193,6 +194,27 @@ on the raw bead (accepted).** Therefore:
   raw.
 - The **`default` block stays raw this commit** — see cluster 4b below.
 
+**DONE — Phase 1, cluster 4b: post-heal `default` block (`8c3e600ae`):**
+- The drain-ack / orphan-drain / suspend / close block (`session_reconciler.go:
+  ~1550–1717`), converted through the `infoPostHeal` re-derived in 4a. Converted
+  the decision read `isNamedSessionBead(*session)`→`isNamedSessionInfo(infoPostHeal)`
+  + all 8 `normalizedSessionTemplate(*session,cfg)` trace reads (+ their
+  `Metadata["template"]` fallbacks)→`normalizedSessionTemplateInfo(infoPostHeal,cfg)`
+  +`infoPostHeal.Template`.
+- **Verified a SINGLE top-of-switch re-derive suffices (no per-branch re-derive):**
+  every converted read is on the byte-identical post-heal bead. Full write-set audit:
+  the in-place mutators (`markDrainAckStopPending`→`DrainAckStopPendingPatch` =
+  state/state_reason/drain_at/pending-create keys; `finalizeDrainAckStoppedSession`)
+  each run AFTER their path's converted read then `continue`; the by-value-bead
+  helpers (`cancelSessionDrainForAssignedWork`, `cancelRecoveredDrainForAssignedWork`,
+  `beginSessionDrain`) write NO bead metadata (only drainTracker/provider/telemetry);
+  and no converted-read key (template/agent_name/alias/configured_named_session) is
+  ever rewritten by drain/close logic. **NOTE the by-value-map trap:** passing
+  `*session` (a `beads.Bead` value) still shares the `Metadata` map — "by value" does
+  NOT by itself prevent Metadata mutation; the safety rests on the write-set audit,
+  not the value copy. The inline `session.Status="closed"` write + trace-only bool
+  payloads stay raw. No new siblings/codec change; correctness proven by the E2E.
+
 **Verified scope (at HEAD `6ccf9d698`):** 194 raw `.Metadata[` reads at the
 CONT-5 census — reconciler 123 / reconcile 50 / wake 21 — plus 6 `.Status`.
 Most are inside the raw machinery that stays. Only DECISION reads convert.
@@ -252,29 +274,25 @@ bulk (cluster 4+, the **first genuine re-derive**).
      `infoPostHeal` after the heal; converted the `preserveNamed` + post-heal
      `pendingCreateSessionStillLeased` switch arms. See the Status "cluster 4a"
      block above.
-   - **NEXT — cluster 4b: the post-heal `default` block
-     (`session_reconciler.go:~1550–1716`) — drain-ack / orphan-drain / suspend /
-     close.** This is the fiddly per-mutation part. Decision read to convert:
-     `isNamedSessionBead(*session)` (`~1666`) → `isNamedSessionInfo(infoPostHeal)`.
-     Plus the ~8 `normalizedSessionTemplate(*session,cfg)` trace reads scattered
-     through the block → `normalizedSessionTemplateInfo(…, cfg)`. **Audit each
-     mutation boundary and re-derive after any mutation that precedes a converted
-     read:** the block interleaves `cancelSessionDrainForAssignedWork`/
-     `cancelRecoveredDrainForAssignedWork`, `markDrainAckStopPending`,
-     `clearDrainTrackerForStopPending`, `finalizeDrainAckStoppedSession`,
-     `beginSessionDrain`, and the inline close (`closeSessionBeadIfReachableStoreUnassigned`
-     + `session.Status="closed"`) with the reads. Most template reads sit right
-     before a `continue`-terminated trace, so many are still pre-mutation for their
-     path — but confirm each. Whether a single top-of-`default` re-derive suffices
-     or per-branch re-derives are needed is the core judgement; when in doubt add a
-     re-derive right before the read (cheap, always correct). The trace-payload raw
-     reads + the `session.Status="closed"` write stay raw.
-   - **THEN — cluster 4c+: the remaining post-`!desired` decision reads** (the
-     desired-branch / drain-advance tail, `started_config_hash` drift checks at
-     `session_reconciler.go:2026/2278/3571/3733`, `pin_awake` at `~2501`). Add
-     `Info.StartedConfigHash` (raw) + a `pin_awake` mirror as those sites are
-     reached (see the field-gap table). Leave the apply/write-back cluster +
-     `ProjectLifecycle` + circuit breaker raw.
+   - **DONE — cluster 4b (`8c3e600ae`): the post-heal `default` block
+     (`~1550–1717`).** drain-ack / orphan-drain / suspend / close, converted through
+     the 4a `infoPostHeal`. A single top-of-switch re-derive proved sufficient (full
+     write-set audit; no per-branch re-derive). See the Status "cluster 4b" block.
+   - **NEXT — cluster 4c+: the DESIRED branch + field-gaps (a NEW, less-mapped
+     region — map it fresh before converting).** The entire `!desired` branch is now
+     done; the remaining reconciler decision reads live in the **desired path**
+     (after `session_reconciler.go:~1718`, the "Liveness includes zombie detection"
+     fast-path and the stability/churn/drain-advance branches below it) and the
+     scattered field-gap sites. Concretely: `started_config_hash` drift-detection
+     decision reads (`~2026/2278/3571/3733`, `session_reconcile.go:814`) — add
+     `Info.StartedConfigHash string` (raw mirror) first; `pin_awake` (`~2501`) — add
+     a mirror. Map the desired path's decision reads, add each missing sibling
+     bottom-up (equivalence-cased), then convert cluster by cluster — **re-deriving
+     `info` after each mutation** in the desired path just as in 4a/4b. Leave the
+     apply/write-back cluster (`healState*`, `checkStability`, `checkChurn`,
+     `record*`/`clear*`, `persistSessionCircuitBreakerMetadata`, inline
+     `session.Status`/`restart_requested` writes) + `ProjectLifecycle` + the circuit
+     breaker RAW.
 3. **Leave raw:** the apply/write-back cluster (`healState*`, `checkStability`,
    `checkChurn`, `record*`/`clear*`, `markProviderTerminalError`, `healExpiredTimers`,
    `persistSessionCircuitBreakerMetadata`, the inline `session.Status="closed"` /

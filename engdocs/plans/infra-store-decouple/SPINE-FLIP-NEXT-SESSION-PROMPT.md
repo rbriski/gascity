@@ -6,7 +6,7 @@ Paste the block below into a fresh session.
 
 Continue the **reconciler spine flip** on **PR #3839** (branch
 `upstream/object-front-doors-cleanup`, base `main`, DRAFT, worktree
-`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `dac68d506`).
+`/data/projects/gascity/.claude/worktrees/object-front-doors`, HEAD `8c3e600ae`).
 
 **Read first:** `engdocs/plans/infra-store-decouple/SPINE-FLIP-HANDOFF.md` — the
 authoritative, self-contained guide (design = Fork B, verified scope, field-gap
@@ -74,31 +74,39 @@ git checkout go.sum
   `pendingCreateSessionStillLeasedInfo(infoPostHeal,cfg,clk)` + its case template. Go
   switch cases don't fall through, so both arms read the byte-identical post-heal
   bead. No new siblings/codec change. The `default` block stays raw (→ cluster 4b).
+- **Phase 1, cluster 4b (`8c3e600ae`):** the post-heal `default` block
+  (`session_reconciler.go:~1550–1717`) — drain-ack / orphan-drain / suspend / close —
+  converted through the 4a `infoPostHeal`. `isNamedSessionBead(*session)`→
+  `isNamedSessionInfo(infoPostHeal)` + all 8 `normalizedSessionTemplate` trace reads→
+  `normalizedSessionTemplateInfo(infoPostHeal,cfg)`. **A SINGLE top-of-switch
+  re-derive proved sufficient (no per-branch re-derive):** full write-set audit
+  showed the in-place mutators (`markDrainAckStopPending`,
+  `finalizeDrainAckStoppedSession`) run AFTER their path's read then `continue`, and
+  the by-value-bead helpers (`cancelSessionDrain*`, `beginSessionDrain`) write no bead
+  metadata (only dt/sp/telemetry). **Trap noted for future clusters: passing
+  `*session` by value still shares the `Metadata` map — safety rests on the write-set
+  audit, not the value copy.** No new siblings/codec change.
 
-**KEY RE-FRAMING (settled):** the whole `!desired` pre-heal region — from the top of
-`!desired` down to **`healStateWithRollback` (`session_reconciler.go:1491`)** — is
-fully converted (clusters 1–3), NO re-derive. The post-heal region begins at `1491`;
-cluster 4a converted its switch guards. The remaining post-heal work is the
-`default` block (cluster 4b) then the tail (4c+).
+**KEY RE-FRAMING (settled):** the **entire `!desired` branch is now Info-routed**
+(pre-heal clusters 1–3 + post-heal 4a switch guards + 4b default block). The
+remaining reconciler decision reads live in the **desired path** (after
+`session_reconciler.go:~1718`).
 
-**First concrete increment (do this, as ONE verified commit): Phase 1, cluster 4b
-— the post-heal `default` block (`session_reconciler.go:~1550–1716`): drain-ack /
-orphan-drain / suspend / close.** `infoPostHeal` is already re-derived at the top of
-the switch (`~1514`); the `default` block is the fiddly per-mutation part. Convert:
-the decision read `isNamedSessionBead(*session)` (`~1666`) →
-`isNamedSessionInfo(infoPostHeal)`, and the ~8 `normalizedSessionTemplate(*session,
-cfg)` trace reads → `normalizedSessionTemplateInfo(…,cfg)`. **Audit each mutation
-boundary** (`cancelSessionDrainForAssignedWork`/`cancelRecoveredDrainForAssignedWork`,
-`markDrainAckStopPending`, `clearDrainTrackerForStopPending`,
-`finalizeDrainAckStoppedSession`, `beginSessionDrain`, the inline close +
-`session.Status="closed"`) and **re-derive after any mutation that precedes a
-converted read** — most template reads sit right before a `continue`-terminated
-trace so are still pre-mutation for their path, but confirm each; when in doubt add a
-re-derive right before the read (cheap, always correct). The trace-payload raw reads
-+ the `session.Status="closed"` write stay raw. **THEN cluster 4c+:** the remaining
-post-`!desired` reads + `started_config_hash` drift checks (`~2026/2278/3571/3733`,
-add `Info.StartedConfigHash` raw) + `pin_awake` (`~2501`, add a mirror). Leave the
-apply/write-back cluster + `ProjectLifecycle` + circuit breaker raw.
+**First concrete increment (do this as verified commits): Phase 1, cluster 4c+ —
+the DESIRED branch + field-gaps. This is a NEW, less-mapped region — MAP IT FRESH
+before converting** (re-run the census greps; do not assume the `!desired` anchors
+carry over). The decision reads now live in the desired path: the "Liveness includes
+zombie detection" fast-path (`~1718`+) and the stability/churn/drain-advance branches
+below it, plus the scattered field-gaps: `started_config_hash` drift-detection reads
+(`~2026/2278/3571/3733`, `session_reconcile.go:814`) — **add `Info.StartedConfigHash
+string` (raw mirror) first** (struct+codec+equivalence fixture); `pin_awake`
+(`~2501`) — add a mirror. Method unchanged: add each missing sibling bottom-up
+(equivalence-cased), THEN convert cluster by cluster, **re-deriving `info` after each
+mutation** in the desired path exactly as 4a/4b did post-heal. Leave the
+apply/write-back cluster (`healState*`, `checkStability`, `checkChurn`,
+`record*`/`clear*`, `persistSessionCircuitBreakerMetadata`, inline
+`session.Status`/`restart_requested` writes) + `ProjectLifecycle` + the circuit
+breaker RAW.
 
 Verify each cluster: build + vet + lint + equivalence + guards + trace-integration +
 the full `TestReconcileSessionBeads*` suite (205 tests; ≥420s timeout — the box can

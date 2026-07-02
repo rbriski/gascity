@@ -2671,11 +2671,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// ConfigSuppressed and Policy fields.
 	for _, target := range wakeTargets {
 		eval := wakeEvals[target.session.ID]
+		// Typed projection for this iteration's decision reads (session_name,
+		// pin_awake, template). The loop writes only wakeEvals/eval — never the
+		// bead — so a single projection is byte-identical throughout. The sleep
+		// policy resolvers (resolveSessionSleepPolicy, configWakeSuppressed) read
+		// whole-bead + runtime state and stay raw; sleep_intent has no mirror yet
+		// and stays raw (next cluster).
+		info := sessionpkg.InfoFromPersistedBead(*target.session)
 		policy := resolveSessionSleepPolicy(*target.session, cfg, sp)
 		eval.Policy = policy
-		name := target.session.Metadata["session_name"]
+		name := info.SessionNameMetadata
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
+		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
 			// Direct assigned work overrides sleep suppression for every
 			// sleep class — the assignment is session-specific, so a pool
 			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)
@@ -2688,7 +2695,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// to release resources.
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
-			template := normalizedSessionTemplate(*target.session, cfg)
+			template := normalizedSessionTemplateInfo(info, cfg)
 			hasExplicitSleepIntent := target.session.Metadata["sleep_intent"] != ""
 			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent)
 			if !demandOverrides {

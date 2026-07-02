@@ -1330,6 +1330,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range ordered {
 		infoByID[ordered[i].ID] = sessionpkg.InfoFromPersistedBead(ordered[i])
 	}
+	// refreshSessionInfo re-reads a session's Info from the store into the
+	// coherent snapshot after a mutation persisted through sessFront, so a
+	// post-mutation decision read routes through infoByID instead of a fresh
+	// InfoFromPersistedBead(*session) re-derive (front-door migration Step 3).
+	// Get is the store-authoritative path; the raw-bead fallback keeps the refresh
+	// byte-identical to the retired re-derive if Get hits a transient store error
+	// (the lockstep keeps the raw working copy coherent during migration). The
+	// fallback — and the raw beadByID it reads — are removed in Step 6 once the
+	// lockstep and the raw working set go away and Get becomes the sole source.
+	refreshSessionInfo := func(id string) {
+		if inf, err := sessFront.Get(id); err == nil {
+			infoByID[id] = inf
+			return
+		}
+		if b := beadByID[id]; b != nil {
+			infoByID[id] = sessionpkg.InfoFromPersistedBead(*b)
+		}
+	}
 
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
@@ -1552,17 +1570,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				providerAlive,
 				healBatch,
 			)
-			// Post-heal re-derive: healStateWithRollback (above) mutates
-			// session.Metadata in lockstep, so the top-of-loop `info` (@~1296) is
-			// now stale for this switch. Re-derive from the just-healed bead. The
-			// trace call above takes the bead by value (cannot mutate), and Go
-			// switch cases do not fall through, so both the preserveNamed body and
-			// the pendingCreateSessionStillLeased guard/body below read the same
-			// unmutated post-heal bead — `infoPostHeal` is byte-identical for them.
-			// The `default` block's own reads stay raw for now (later sub-cluster):
-			// it interleaves mutations (markDrainAckStopPending, beginSessionDrain,
-			// finalize/close) with reads and needs a per-mutation re-derive.
-			infoPostHeal := sessionpkg.InfoFromPersistedBead(*session)
+			// Post-heal refresh: healStateWithRollback (above) persists through
+			// sessFront and mirrors the batch onto session.Metadata in lockstep, so
+			// the top-of-loop `info` (from the snapshot at loop entry) is now stale
+			// for this switch. Refresh this session's snapshot entry from the store
+			// and read the post-heal Info off it. The trace call above takes the
+			// bead by value (cannot mutate), and Go switch cases do not fall through,
+			// so both the preserveNamed body and the pendingCreateSessionStillLeased
+			// guard/body below read the same unmutated post-heal snapshot —
+			// `infoPostHeal` is byte-identical for them. The `default` block's own
+			// reads stay raw for now (later sub-cluster): it interleaves mutations
+			// (markDrainAckStopPending, beginSessionDrain, finalize/close) with reads
+			// and needs a per-mutation refresh.
+			refreshSessionInfo(session.ID)
+			infoPostHeal := infoByID[session.ID]
 			switch {
 			case preserveNamed:
 				template := normalizedSessionTemplateInfo(infoPostHeal, cfg)

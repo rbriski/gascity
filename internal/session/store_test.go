@@ -58,6 +58,58 @@ func TestApplyPatchEmptyIsNoOp(t *testing.T) {
 	}
 }
 
+// TestGetReflectsApplyPatch proves the refresh-on-write guarantee the session
+// reconciler relies on (front-door Step 3): after a mutation persisted through
+// ApplyPatch, a re-Get returns an Info reflecting that mutation. This is what
+// makes refreshSessionInfo(id) — re-Get into the coherent snapshot after a heal
+// — byte-identical to the retired InfoFromPersistedBead(*session) post-heal
+// re-derive, and it is the guarantee that must survive the Step 6 lockstep
+// removal (when the raw working copy is gone and Get is the sole source).
+func TestGetReflectsApplyPatch(t *testing.T) {
+	// A creating, still-claimed pending-create session — the shape whose lease
+	// fields (state / pending_create_claim / last_woke_at) a heal-with-rollback
+	// flips, and whose staleness would flip pendingCreateSessionStillLeasedInfo
+	// in the reconciler's post-heal switch.
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+		"last_woke_at":         "2026-01-01T00:00:00Z",
+	})
+	is, _ := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (pre): %v", err)
+	}
+	if pre.MetadataState != "creating" || !pre.PendingCreateClaim {
+		t.Fatalf("pre Get = state %q claim %v, want creating/true", pre.MetadataState, pre.PendingCreateClaim)
+	}
+
+	// Persist a heal-shaped rollback: clear the claim and drop the lease markers.
+	if err := is.ApplyPatch("s-1", MetadataPatch{
+		"state":                "asleep",
+		"pending_create_claim": "",
+		"last_woke_at":         "",
+	}); err != nil {
+		t.Fatalf("ApplyPatch: %v", err)
+	}
+
+	// The re-Get must reflect the persisted write — the refresh guarantee.
+	post, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (post): %v", err)
+	}
+	if post.MetadataState != "asleep" {
+		t.Errorf("post MetadataState = %q, want asleep", post.MetadataState)
+	}
+	if post.PendingCreateClaim {
+		t.Errorf("post PendingCreateClaim = true, want false (cleared)")
+	}
+	if post.LastWokeAt != "" {
+		t.Errorf("post LastWokeAt = %q, want empty (cleared)", post.LastWokeAt)
+	}
+}
+
 // TestSleepEmitsSleepPatch proves the typed Sleep method emits exactly the bead
 // write that SleepPatch produces — the same write the reconciler raw op did.
 func TestSleepEmitsSleepPatch(t *testing.T) {

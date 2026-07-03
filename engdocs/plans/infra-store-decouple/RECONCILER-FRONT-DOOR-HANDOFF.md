@@ -15,13 +15,23 @@ Owner locked the 6d mechanism = **write-returns-`Info`** (not targeted-`Get`, no
 meta-accumulator). The `Info.ApplyPatch(patch)` primitive + its equivalence oracle are
 landed (unwired), and the multi-session read-after-write test harness
 (`cmd/gc/session_reconciler_read_after_write_test.go`, single-template deterministic
-ordering, teeth-verified) is landed — the two things the wiring rests on. Next actionable =
-**the 6d WIRING** (thread
-batches out of the nested helpers, convert every refresh site to `ApplyPatch`/markClosed,
-ApplyPatch the `restart_requested` in-memory write, delete the blanket pre-pass, convert
-`advanceSessionDrains`/`newSessionBeadSnapshot`, then drop the lockstep + raw working set)
-then **6e** (join the guard). **The full per-site wiring plan is STEP6-DESIGN §8** (derived
-+ verified this session — read it first). Design + sub-phase backlog:
+ordering, teeth-verified) is landed — the two things the wiring rests on.
+
+**NEXT ACTIONABLE = the 6d WIRING, and the exact first commit is chosen:** add
+`Info.markClosed()` (Closed=true, State="") and convert the two **store-only** close
+refreshes — `@~1590` failed-create (ALREADY guarded by
+`TestReconcileSessionBeads_MinFloorCountReflectsMidTickClose` — just verify green) and
+`@~1834` orphan (add an orphan sibling test) — from `refreshSessionInfo(id)` to
+`infoByID[id] = infoByID[id].markClosed()`, KEEPING the raw mirror. Byte-identical because
+`closeFailedCreateBead`/`closeBead` are `id`-based store-only (the ClosePatch never touches
+the raw bead, so the raw reproject already only sees `Status=closed`). Then commit 2 = the
+drain-ack `finalize*` closes (they DO mirror a ClosePatch → `ApplyPatch(closeBatch).markClosed()`),
+commit 3 = the nested-helper-writes (`markProviderTerminalError`@~1886, `healState`@~1628 return
+their batch), commit 4 = `restart_requested`@~2130 (ApplyPatch + clear-on-persisted), commit 5+ =
+delete the blanket pre-pass + convert `advanceSessionDrains`/`newSessionBeadSnapshot` + drop the
+lockstep and raw working set, then **6e** (join the guard). **The full per-site wiring plan is
+STEP6-DESIGN §8; the paste-ready sequenced prompt is `RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md`.**
+Design + sub-phase backlog:
 `RECONCILER-FRONT-DOOR-STEP6-DESIGN.md` (fable 4-lens
 audit + opus synthesis, opus red-team GO-WITH-CHANGES, then a deeper **fable red-team**
 GO_WITH_CHANGES folded into §5; §6 has the 6b audit corrections + landed commits). Step 6

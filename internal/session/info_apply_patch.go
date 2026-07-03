@@ -209,3 +209,29 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 	}
 	return info
 }
+
+// MarkClosed returns a copy of info reflecting an in-memory status close. When
+// the reconciler closes a session bead this tick it sets session.Status =
+// "closed" on the working bead; the coherent Info snapshot must match without a
+// store re-read. Status is the source of exactly the two facts
+// InfoFromPersistedBead derives from b.Status == "closed": Closed becomes true,
+// and State is blanked (a closed bead carries no runtime state). Every
+// metadata-derived field is independent of Status, so it carries forward
+// unchanged.
+//
+// MarkClosed is the status-close counterpart to ApplyPatch, which deliberately
+// never flips Closed (a metadata patch cannot carry a status change). Together
+// they are the write-returns-Info snapshot refresh (front-door migration Step
+// 6d): ApplyPatch folds a metadata batch, MarkClosed folds an in-memory status
+// close, each byte-identical to re-projecting the mutated bead — so the
+// reconciler refreshes the snapshot from the mutation it just applied instead of
+// re-projecting the raw working bead or issuing a store Get.
+//
+// TestInfoMarkClosedMatchesReprojection is the equivalence oracle: for any open
+// bead b, InfoFromPersistedBead(b).MarkClosed() equals
+// InfoFromPersistedBead(b with Status "closed").
+func (info Info) MarkClosed() Info {
+	info.Closed = true
+	info.State = "" // closed beads have no runtime state
+	return info
+}

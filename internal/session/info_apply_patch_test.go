@@ -176,6 +176,36 @@ func TestInfoApplyPatchMatchesReprojection(t *testing.T) {
 	}
 }
 
+// TestInfoMarkClosedMatchesReprojection is the byte-identity oracle for the
+// status-close refresh: for every base bead forced open, folding a status close
+// onto the projected Info via MarkClosed must equal projecting the same bead
+// with Status "closed" from scratch. This guards MarkClosed against drift from
+// the Status-derived facts in InfoFromPersistedBead (Closed set true, State
+// blanked) — the counterpart to TestInfoApplyPatchMatchesReprojection for the
+// close half of the Step-6d write-returns-Info snapshot refresh.
+func TestInfoMarkClosedMatchesReprojection(t *testing.T) {
+	for _, base := range oracleBaseBeads() {
+		open := base
+		open.Status = "open" // force open so MarkClosed has a status change to fold
+
+		closed := open
+		closed.Status = "closed"
+
+		got := InfoFromPersistedBead(open).MarkClosed()
+		want := InfoFromPersistedBead(closed)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("base=%s: MarkClosed diverged from full reprojection of the closed bead\n got=%+v\nwant=%+v", base.ID, got, want)
+		}
+
+		// Idempotent: MarkClosed on an already-closed projection is a no-op (State
+		// is already blanked and Closed already true), so re-marking a closed
+		// session's snapshot entry never diverges.
+		if again := want.MarkClosed(); !reflect.DeepEqual(again, want) {
+			t.Errorf("base=%s: MarkClosed not idempotent on a closed projection\n got=%+v\nwant=%+v", base.ID, again, want)
+		}
+	}
+}
+
 // TestInfoApplyPatchDoesNotMutateReceiver guards that ApplyPatch's value
 // receiver never mutates the caller's Info (its slices in particular): the
 // reconciler reuses the snapshot Info across reads within a tick.

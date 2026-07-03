@@ -1586,8 +1586,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Status = "closed"
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
-						// session closed this tick must not still count as open in its pool.
-						refreshSessionInfo(session.ID)
+						// session closed this tick must not still count as open in its
+						// pool. This is a store-only close — closeFailedCreateBead stamps
+						// its ClosePatch on the store, not the raw bead — so the only
+						// raw-bead change is Status="closed", and the snapshot refresh is
+						// byte-identical to MarkClosed (Closed=true, State="") rather than
+						// a raw re-projection. This is the write-returns-Info status-close
+						// half of the Step-6d front-door cutover; the raw session.Status
+						// lockstep above stays until the final lockstep drop. Guarded by
+						// TestReconcileSessionBeads_MinFloorCountReflectsMidTickClose.
+						infoByID[session.ID] = infoByID[session.ID].MarkClosed()
 					}
 					continue
 				}
@@ -1829,9 +1837,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
 						session.Status = "closed"
-						// Keep the snapshot's Info.Closed in step with the in-memory close
-						// so the cross-session min-floor scan does not count this orphan.
-						refreshSessionInfo(session.ID)
+						// Keep the snapshot's Info.Closed in step with the in-memory
+						// close so the cross-session min-floor scan does not count this
+						// orphan. Store-only close (same helper family as the
+						// failed-create site above: closeBead/closeFailedCreateBead stamp
+						// the ClosePatch on the store, not the raw bead), so the only
+						// raw-bead change is Status="closed" and the byte-identical
+						// snapshot refresh is MarkClosed (Closed=true, State="") — the
+						// write-returns-Info status-close half of the Step-6d cutover.
+						// The heal refresh (~1628) already synced this entry, so
+						// MarkClosed folds onto a coherent pre-close Info. Guarded by
+						// TestReconcileSessionBeads_MinFloorCountReflectsMidTickCloseOrphan.
+						infoByID[session.ID] = infoByID[session.ID].MarkClosed()
 					}
 				}
 				continue

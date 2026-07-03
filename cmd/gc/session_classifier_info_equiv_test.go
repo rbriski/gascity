@@ -1034,6 +1034,11 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	if !isDrainAckStopPending(beadsByShape["drain-ack-stop-pending"]) {
 		t.Fatal("isDrainAckStopPending(drain-ack-stop-pending) = false; fixture no longer exercises the true branch")
 	}
+	// The hold/quarantine fixture must drive lifecycleTimerBlocker's non-empty
+	// branch so its equivalence case is a real comparison, not a both-empty pass.
+	if lifecycleTimerBlocker(beadsByShape["hold-and-quarantine"].Metadata, clk.Now()) == "" {
+		t.Fatal(`lifecycleTimerBlocker(hold-and-quarantine) = ""; fixture no longer exercises the blocker branch`)
+	}
 
 	for shape, b := range beadsByShape {
 		b := b

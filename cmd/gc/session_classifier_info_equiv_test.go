@@ -36,6 +36,20 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"template": "worker",
 			},
 		},
+		// drain-ack stop-pending: state=draining + state_reason=drain-ack-stop-pending
+		// exercises the true branch of isDrainAckStopPending / isDrainAckStopPendingInfo.
+		"drain-ack-stop-pending": {
+			ID:     "ga-drainack",
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        string(session.StateDraining),
+				"state_reason": session.DrainAckStopPendingReason,
+				"session_name": "worker-drainack",
+			},
+		},
 		"pool-managed-slot": {
 			ID:     "ga-pool",
 			Type:   session.BeadType,
@@ -677,6 +691,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"poolSessionConsumesNewDemand":        {poolSessionConsumesNewDemand, poolSessionConsumesNewDemandInfo},
 		"scaleCheckPartialSessionRetainable":  {scaleCheckPartialSessionRetainable, scaleCheckPartialSessionRetainableInfo},
 		"scaleCheckPartialSessionPreservable": {scaleCheckPartialSessionPreservable, scaleCheckPartialSessionPreservableInfo},
+		"isDrainAckStopPending":               {isDrainAckStopPending, isDrainAckStopPendingInfo},
 	}
 
 	// Agent-dependent classifiers. A bare pool agent (no instance-expansion, no
@@ -1013,6 +1028,11 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// not a trivial both-false pass.
 	if !pendingResumePreservingNamedRestart(beadsByShape["pending-resume-preserve"], clk, leaseStartupTimeout) {
 		t.Fatal("pendingResumePreservingNamedRestart(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
+	}
+	// The drain-ack fixture must hit the true branch so isDrainAckStopPending's
+	// equivalence case is a real comparison, not a trivial both-false pass.
+	if !isDrainAckStopPending(beadsByShape["drain-ack-stop-pending"]) {
+		t.Fatal("isDrainAckStopPending(drain-ack-stop-pending) = false; fixture no longer exercises the true branch")
 	}
 
 	for shape, b := range beadsByShape {

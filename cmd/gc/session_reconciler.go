@@ -70,6 +70,15 @@ func isDrainAckStopPending(session beads.Bead) bool {
 		strings.TrimSpace(session.Metadata["state_reason"]) == sessionpkg.DrainAckStopPendingReason
 }
 
+// isDrainAckStopPendingInfo is the session.Info sibling of isDrainAckStopPending:
+// it reports whether a session is parked in the drain-ack stop-pending state from
+// the typed Info.MetadataState (raw "state") / Info.StateReason mirrors, with the
+// same TrimSpace compares. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
+	return strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateDraining) &&
+		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
+}
+
 func markDrainAckStopPending(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) bool {
 	if session == nil || sessFront == nil || session.ID == "" {
 		return false
@@ -448,7 +457,7 @@ func reconcileDrainAckStopPending(
 	rec events.Recorder,
 	stderr io.Writer,
 ) bool {
-	if session == nil || !isDrainAckStopPending(*session) {
+	if session == nil || !isDrainAckStopPendingInfo(sessionpkg.InfoFromPersistedBead(*session)) {
 		return false
 	}
 	name := strings.TrimSpace(session.Metadata["session_name"])
@@ -488,7 +497,7 @@ func finalizeDrainAckStopPendingSessions(
 	finalized := 0
 	for i := range sessions {
 		session := &sessions[i]
-		if !isDrainAckStopPending(*session) {
+		if !isDrainAckStopPendingInfo(sessionpkg.InfoFromPersistedBead(*session)) {
 			continue
 		}
 		name := strings.TrimSpace(session.Metadata["session_name"])

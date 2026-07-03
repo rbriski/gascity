@@ -3947,7 +3947,7 @@ func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead
 	if tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
 		return
 	}
-	ovr, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	ovr, err := sessionpkg.ParseTemplateOverridesFromInfo(sessionpkg.InfoFromPersistedBead(session))
 	if err != nil || len(ovr) == 0 {
 		return
 	}

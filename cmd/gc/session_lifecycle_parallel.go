@@ -1057,7 +1057,7 @@ func parseSessionTemplateOverridesForLaunch(session *beads.Bead) map[string]stri
 	if session == nil {
 		return nil
 	}
-	overrides, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	overrides, err := sessionpkg.ParseTemplateOverridesFromInfo(sessionpkg.InfoFromPersistedBead(*session))
 	if err != nil {
 		log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 		return nil

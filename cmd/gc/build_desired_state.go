@@ -658,6 +658,15 @@ func buildDesiredStateWithSessionBeads(
 	var namedDefaultDemand map[string]bool
 	if store != nil {
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
+		// Retag graph-resident (gcg-) beads collected from the city graph store
+		// with the logical rig ref their routing carries. Under graph_store=sqlite
+		// the city collection pass tags them storeRef "", which makes every
+		// rig-scoped reachability gate (pool demand, session wake, namedWorkReady,
+		// scoped ownership) miss — the assigned-work sibling of a7f7b2bcd. This is
+		// the single production consumer of the collected storeRefs; every other
+		// reader takes them from DesiredStateResult, so the one remap heals them
+		// all. Inert for default Dolt cities.
+		remapGraphResidentAssignedWorkStoreRefs(cfg, cityPath, store, assignedWorkBeads, assignedWorkStoreRefs)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}

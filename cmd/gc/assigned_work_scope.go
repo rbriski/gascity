@@ -4,9 +4,89 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+// graphResidentAssignedWorkStoreRef derives the logical store-ref a
+// graph-resident (gcg-) work bead belongs to. Under graph_store=sqlite these
+// beads physically live in the city Router's ClassGraph leg, so the city
+// collection pass tags them storeRef "" even when their routing binds them to a
+// rig-scoped owner — which makes every storeRef-scoped gate
+// (assignedWorkIndexReachableFromAgent, filterAssignedWorkBeadsForSessionWake,
+// openSessionOwnsWork, namedWorkReady, pool demand) miss: the assigned-work
+// sibling of the routed-unassigned wake fix (a7f7b2bcd), and the logical-ref
+// analog of the physical ownerStore remap in releaseOrphanedPoolAssignments.
+//
+// Resolution order: (1) the routed owner agent (gc.routed_to / legacy workflow
+// target) — the per-bead executor is authoritative, and reusing
+// assignedWorkStoreRefForAgent makes the remapped ref equal-by-construction to
+// what every gate computes for that same agent (including "" for a city-dir
+// agent executing a step of a rig-rooted workflow); (2) gc.root_store_ref
+// ("rig:NAME" -> "NAME", validated against cfg.Rigs) for direct-assigned steps
+// with no route. Returns "" (city scope, today's tag) when no rig owner is
+// derivable.
+func graphResidentAssignedWorkStoreRef(cfg *config.City, cityPath string, b beads.Bead) string {
+	if template := routedToOrLegacyWorkflowTarget(b); template != "" {
+		if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
+			return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+		}
+		// Route present but unresolvable (config drift): the per-bead owner is
+		// unknown, so DON'T guess from the workflow root's rig — keep city scope.
+		return ""
+	}
+	// Direct session bind: the executor session's scope governs, not the
+	// workflow root's rig. gc.session_id is stamped exactly when gc.routed_to is
+	// deleted for a direct bind (graphroute.ApplyGraphRouteBinding), and the bound
+	// session can belong to a city-dir/unscoped agent whose gate ref is "".
+	// Retagging it to the root's rig would flip reachable work to unreachable.
+	if strings.TrimSpace(b.Metadata[beadmeta.SessionIDMetadataKey]) != "" {
+		return ""
+	}
+	// Direct-assigned step with no route and no session bind: fall back to the
+	// workflow root's rig ref (gc.root_store_ref "rig:NAME" -> "NAME").
+	ref := strings.TrimSpace(b.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if name, ok := strings.CutPrefix(ref, "rig:"); ok {
+		name = strings.TrimSpace(name)
+		if name != "" && findRigByName(name, cfg.Rigs) != nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// remapGraphResidentAssignedWorkStoreRefs retags, in place, graph-resident beads
+// that the city collection pass tagged storeRef "" with the logical rig ref their
+// routing carries, preserving index alignment with the work slice. The physical
+// store slice is intentionally NOT touched: these beads live in the city graph
+// store and every write path must keep targeting it (the same split the
+// releaseOrphanedPoolAssignments ownerStore remap relies on). Inert on default
+// Dolt cities (no distinct ClassGraph backend -> GraphOnlyListFor absent or
+// GraphIDPrefix "") and for non-graph beads (by ID prefix), so the snapshot is
+// byte-identical there.
+func remapGraphResidentAssignedWorkStoreRefs(cfg *config.City, cityPath string, cityStore beads.Store, work []beads.Bead, storeRefs []string) {
+	if cfg == nil || len(work) == 0 || len(storeRefs) != len(work) {
+		return
+	}
+	gol, ok := beads.GraphOnlyListFor(cityStore)
+	if !ok {
+		return
+	}
+	prefix := gol.GraphIDPrefix()
+	if prefix == "" {
+		return
+	}
+	prefix += "-"
+	for i := range work {
+		if storeRefs[i] != "" || !strings.HasPrefix(work[i].ID, prefix) {
+			continue
+		}
+		if ref := graphResidentAssignedWorkStoreRef(cfg, cityPath, work[i]); ref != "" {
+			storeRefs[i] = ref
+		}
+	}
+}
 
 func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *config.Agent) string {
 	if cfg == nil || agentCfg == nil {

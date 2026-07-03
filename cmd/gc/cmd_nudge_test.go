@@ -270,7 +270,7 @@ func TestPruneExpiredQueuedNudgesIgnoresMissingTerminalBead(t *testing.T) {
 		},
 	}
 
-	if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+	if err := pruneExpiredQueuedNudges(state, store, now, noMaintenanceDeadline()); err != nil {
 		t.Fatalf("pruneExpiredQueuedNudges: %v", err)
 	}
 	if len(state.Pending) != 0 {
@@ -305,7 +305,7 @@ func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
 	item.DeadAt = now.Add(-30 * time.Minute)
 
 	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, store, now); err != nil {
+	if err := pruneDeadQueuedNudges(state, store, now, noMaintenanceDeadline()); err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
 	}
 	if len(state.Dead) != 1 {
@@ -385,7 +385,7 @@ func TestPruneExpiredQueuedNudgesWithAmbiguousBeadIDContinues(t *testing.T) {
 		},
 	}
 
-	if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+	if err := pruneExpiredQueuedNudges(state, store, now, noMaintenanceDeadline()); err != nil {
 		t.Fatalf("pruneExpiredQueuedNudges: %v", err)
 	}
 	if len(state.Pending) != 0 {
@@ -4193,7 +4193,7 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (has terminal bead), recent kept.
 	store := openNudgeBeadStore(dir)
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		return pruneDeadQueuedNudges(state, store, now)
+		return pruneDeadQueuedNudges(state, store, now, noMaintenanceDeadline())
 	})
 	if err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
@@ -4231,7 +4231,7 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 
 	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		return pruneDeadQueuedNudges(state, nil, now)
+		return pruneDeadQueuedNudges(state, nil, now, noMaintenanceDeadline())
 	})
 	if err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)

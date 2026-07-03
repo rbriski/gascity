@@ -374,11 +374,34 @@ the four raw aggregates confirmed `clearMissingIdleProbes` was the SOLE pure rea
   raw `*beads.Bead` for the `persistSleepPolicyMetadata` write @2853, so these are 6d, not
   part of the 6c four-aggregate scope.
 
-## 8. 6d execution plan (foundation + Commit 1 LANDED; wiring continues)
+## 8. 6d execution plan (foundation + Commits 1–2 LANDED; wiring continues)
 
 **Owner decision (this session): mechanism = write-returns-`Info`** (not the
 targeted-`Get`-everywhere variant, not a snapshot meta-accumulator). Scope directive:
 "drive as far as gates stay green."
+
+**Commit 2 LANDED (`e2f1f4adf`).** The three drain-ack `finalize*` closes wired via
+`drainAckFinalizeResult{batch, closed, witnessInfo}` + `result.applyTo(infoByID[id])`.
+Correction to the naive "return the close batch" plan: `finalizeDrainAckStoppedSession`
+has FOUR exit shapes, not one — Path A (ClosePatch mirror → `ApplyPatch(closePatch).MarkClosed()`),
+Path B (NDI witness, wholesale `session.Metadata = latest.Metadata` swap → full reprojection,
+NOT a patch fold; the one path still reading the raw bead, reworked at the lockstep drop),
+Path C (non-close `AcknowledgeDrain`/`CompleteDrain` incl. the `restart_requested` clear →
+`ApplyPatch(batch)`, no MarkClosed), and early-return/persist-error/async-stop → zero result.
+`reconcileDrainAckStopPending` returns `(bool, result)` (single caller = site 1); the two
+statement-call sites (`finalizeDrainAckStopPendingSessions`@574, tests) discard the return.
+Byte-identity rests on the ApplyPatch+MarkClosed oracles AND per-site coherence (verified:
+top-of-loop / post-heal@1701 / post-zombie@1972, no un-refreshed `*session` mutation reaches
+any finalize call on its reaching path). **Three teeth-verified per-site read-after-write
+tests** (site 1 `…DrainAck`, site 2 `…DrainAckOrphan`, site 3 `…DrainAckReconciler`) +
+`reconcileAtPathWithDrainOps` harness helper. **6-lens fable adversarial panel
+(wf_3d1f12c0): 0 byte-identity/coherence defects**; the one confirmed finding (sites 2/3
+lacked per-site guards) is closed. Design/analysis in `raw/step6d-commit2-analysis.md`.
+**Next: Commit 3 = the nested-helper-write refreshes** — `healStateWithRollback`@1676
+(feeds the heal refresh@1701 `infoPostHeal`) and `markProviderTerminalError`@1939 (feeds
+the zombie refresh@1972 `infoPostZombie`) return their applied batch; each refresh becomes
+a conditional `ApplyPatch(batch)` (nil→no-op), which ALSO dodges the injected-error hazard.
+Line numbers below are pre-Commit-2 — re-grep.
 
 **Commit 1 LANDED (`cfd6893fb`).** Added `Info.MarkClosed()` (Closed=true, State="";
 oracle `TestInfoMarkClosedMatchesReprojection`) — the status-close counterpart to
@@ -387,9 +410,8 @@ oracle `TestInfoMarkClosedMatchesReprojection`) — the status-close counterpart
 infoByID[id].MarkClosed()`, keeping the raw `session.Status="closed"` lockstep. Byte-identical
 (store-only closes stamp their ClosePatch on the store, not the raw bead, so the raw reproject
 already only saw `Status=closed`). Both sites teeth-verified by sibling read-after-write tests
-(`…MinFloorCountReflectsMidTickClose` + new `…Orphan`). **Next: Commit 2 = the drain-ack
-`finalize*` closes (deletion-order step 1 continues) — they DO mirror a ClosePatch, so
-`ApplyPatch(closeBatch).MarkClosed()`.** Line numbers shifted +~11 after Commit 1; re-grep.
+(`…MinFloorCountReflectsMidTickClose` + new `…Orphan`). **Commit 2 (`e2f1f4adf`) LANDED
+the drain-ack `finalize*` closes** — see the Commit-2 note at the top of this section.
 
 **Foundation LANDED (`b031a356d`):** `Info.ApplyPatch(patch MetadataPatch) Info`
 (internal/session/info_apply_patch.go) — folds a patch onto a projected `Info` by

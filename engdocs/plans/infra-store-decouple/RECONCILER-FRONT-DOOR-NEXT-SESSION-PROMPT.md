@@ -1,4 +1,4 @@
-# Next-session prompt — reconciler front-door Step 6d WIRING (start the cutover)
+# Next-session prompt — reconciler front-door Step 6d WIRING (Commits 1–2 done; Commit 3 next)
 
 Paste the block below into a fresh session.
 
@@ -67,29 +67,31 @@ git checkout go.sum
 **DO — the 6d wiring, ONE small commit per site (KEEP the raw `session.Metadata[k]=v` mirror on
 every one until the final deletion; each is byte-identical + gets a read-after-write test):**
 
-**Commit 1 DONE (`cfd6893fb`).** Added `Info.MarkClosed()` (Closed=true, State=""; oracle
-`TestInfoMarkClosedMatchesReprojection`) and converted the two **store-only** close refreshes
-(`@~1590` failed-create, `@~1834` orphan) from `refreshSessionInfo(id)` to `infoByID[id] =
-infoByID[id].MarkClosed()`, keeping the raw `session.Status="closed"` lockstep. Byte-identical
-(store-only closes stamp their ClosePatch on the store, not the raw bead). Both teeth-verified
-(`…MinFloorCountReflectsMidTickClose` + new `…Orphan`). **Line numbers shifted +~11 after
-Commit 1 — re-grep every anchor below before editing.**
+**Commit 1 DONE (`cfd6893fb`).** `Info.MarkClosed()` + the two **store-only** close refreshes
+(failed-create, orphan) → `infoByID[id] = infoByID[id].MarkClosed()`, keeping the raw lockstep.
+Teeth-verified (`…MidTickClose` + `…Orphan`).
 
-**START HERE — Commit 2 — the drain-ack finalize closes (pre-Commit-1 `@~1456, @~1735, @~2045`;
-re-grep).** Unlike the store-only closes, `finalizeDrainAckStoppedSession` DOES mirror a
-`ClosePatch` (@~372), so change it to return its applied close batch and convert each refresh to
-`infoByID[id] = infoByID[id].ApplyPatch(closeBatch).MarkClosed()`. Add a drain-ack
-mid-tick-close harness test (a drain-acked, no-live-runtime pool companion at slice index 0 that
-`finalizeDrainAckStoppedSession` closes mid-tick, same min-floor exemption assertion as the
-Commit-1 orphan test). Teeth-verify: disabling the converted refresh fails the new test.
+**Commit 2 DONE (`e2f1f4adf`).** The three **drain-ack `finalize*` closes** wired via
+`drainAckFinalizeResult{batch, closed, witnessInfo}` + `result.applyTo(infoByID[id])`.
+Correction to the original one-liner plan: `finalizeDrainAckStoppedSession` has FOUR exit
+shapes — Path A (ClosePatch mirror → `ApplyPatch.MarkClosed`), Path B (NDI witness wholesale
+metadata swap → full reprojection, the one path still reading the raw bead), Path C (non-close
+drain-ack incl. `restart_requested` clear → `ApplyPatch`, no MarkClosed), and
+early/error/async → zero result. `reconcileDrainAckStopPending` returns `(bool, result)`; the
+two statement-call sites discard the new return. THREE teeth-verified per-site tests
+(`…DrainAck` site 1, `…DrainAckOrphan` site 2, `…DrainAckReconciler` site 3) +
+`reconcileAtPathWithDrainOps` helper. 6-lens fable panel (wf_3d1f12c0): 0 defects.
+**Line numbers shifted after Commit 2 — re-grep every anchor below before editing.**
 
-**Commit 3 — the nested-helper-write refreshes.** `markProviderTerminalError` (@~1886, feeds
-`infoPostZombie`) already builds `batch` locally → change it to return `(sessionpkg.MetadataPatch,
-error)` (3 callers: session_reconcile.go:687, session_reconciler.go:1853, session_lifecycle_parallel.go:1999
-— only the 1853 caller uses the batch, the others take `_`); the @1886 refresh becomes conditional
-`infoByID[id] = infoByID[id].ApplyPatch(terminalErrBatch)` (nil→no-op). This ALSO removes the
-`Get`-consumes-injected-errors hazard (ApplyPatch never touches the store). Same for `healState`
-(@~1628 `infoPostHeal`). Same-session read-after-write tests.
+**START HERE — Commit 3 — the nested-helper-write refreshes (re-grep).** `markProviderTerminalError`
+(feeds the zombie refresh `refreshSessionInfo`@1972 `infoPostZombie`) already builds `batch`
+locally → change it to return `(sessionpkg.MetadataPatch, error)` (3 callers: session_reconcile.go,
+session_reconciler.go ~1939, session_lifecycle_parallel.go — only the reconciler caller uses the
+batch, the others take `_`); the @1972 refresh becomes conditional `infoByID[id] =
+infoByID[id].ApplyPatch(terminalErrBatch)` (nil→no-op). This ALSO removes the
+`Get`-consumes-injected-errors hazard (ApplyPatch never touches the store). Same for
+`healStateWithRollback`@1676 (feeds the heal refresh@1701 `infoPostHeal`). Same-session
+read-after-write tests (single-template harness, following the Commit-2 sites).
 
 **Commit 4 — `restart_requested` @~2130** (in-memory-only write): `infoByID[id] =
 infoByID[id].ApplyPatch(MetadataPatch{"restart_requested":"true"})`, and CLEAR it (empty) when a

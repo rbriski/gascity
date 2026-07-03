@@ -1,8 +1,8 @@
 # Reconciler Front-Door Handoff — the backlog to work through
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
-worktree `.claude/worktrees/object-front-doors`, **HEAD `cfd6893fb`** (6d Commit 1 —
-`MarkClosed` + the two store-only close refreshes wired).
+worktree `.claude/worktrees/object-front-doors`, **HEAD `e2f1f4adf`** (6d Commit 2 —
+the three drain-ack `finalize*` closes wired via `drainAckFinalizeResult.applyTo`).
 
 This is the authoritative handoff for finishing the session reconciler's move off
 raw `beads.Bead.Metadata`, onto the typed **`session.Store`** front door. It
@@ -18,28 +18,43 @@ multi-session read-after-write test harness
 (`cmd/gc/session_reconciler_read_after_write_test.go`, single-template deterministic
 ordering, teeth-verified) are all landed — the foundation the rest of the wiring rests on.
 
-**6d Commit 1 DONE (`cfd6893fb`).** Added `Info.MarkClosed()` (Closed=true, State="";
-oracle `TestInfoMarkClosedMatchesReprojection`) and converted the two **store-only** close
-refreshes — `@~1590` failed-create and `@~1834` orphan — from `refreshSessionInfo(id)` to
-`infoByID[id] = infoByID[id].MarkClosed()`, KEEPING the raw `session.Status="closed"`
-lockstep. Byte-identical because `closeFailedCreateBead`/`closeBead` are `id`-based
-store-only (the ClosePatch never touches the raw bead, so the raw reproject already only
-saw `Status=closed`). Both sites have teeth-verified sibling read-after-write tests
-(`…MinFloorCountReflectsMidTickClose` + the new `…Orphan`); disabling either site's
-`MarkClosed` fails only that site's test. Gates green (build/vet/lint 0/gofmt/both
-oracles/both harness tests/whole reconciler+session suites).
+**6d Commit 1 DONE (`cfd6893fb`).** Added `Info.MarkClosed()` and converted the two
+**store-only** close refreshes (failed-create, orphan) from `refreshSessionInfo(id)` to
+`infoByID[id] = infoByID[id].MarkClosed()`, KEEPING the raw lockstep. Teeth-verified
+sibling tests (`…MidTickClose` + `…Orphan`).
 
-**NEXT ACTIONABLE = 6d Commit 2 — the drain-ack `finalize*` closes** (`refreshSessionInfo`
-call sites near the pre-Commit-1 `@~1456`, `@~1735`, `@~2045`; **re-grep, line numbers
-shifted +~11 after Commit 1**). Unlike the store-only closes, `finalizeDrainAckStoppedSession`
-DOES mirror a `ClosePatch` onto the raw bead (~372), so change it to return its applied
-close batch and convert each refresh to `infoByID[id] = infoByID[id].ApplyPatch(closeBatch).MarkClosed()`;
-add a drain-ack mid-tick-close harness test. Then commit 3 = the nested-helper-writes
-(`markProviderTerminalError`@~1886, `healState`@~1628 return their batch), commit 4 =
-`restart_requested`@~2130 (ApplyPatch + clear-on-persisted), commit 5+ = delete the blanket
-pre-pass + convert `advanceSessionDrains`/`newSessionBeadSnapshot` + drop the lockstep and
-raw working set, then **6e** (join the guard). **The full per-site wiring plan is
-STEP6-DESIGN §8; the paste-ready sequenced prompt is `RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md`.**
+**6d Commit 2 DONE (`e2f1f4adf`).** Converted the three **drain-ack `finalize*` closes**
+(`refreshSessionInfo` @1456/@1735/@2045 pre-Commit-1) to write-returns-`Info`.
+`finalizeDrainAckStoppedSession` now returns `drainAckFinalizeResult{batch, closed,
+witnessInfo}`; callers fold via `result.applyTo(infoByID[id])` (ApplyPatch(batch) +
+MarkClosed on a close, witness reprojection outright, no-op for the zero value). Four
+exit shapes, all byte-identical: Path A (ClosePatch+MarkClosed), Path B (NDI witness
+reproject — the one path still reading the raw bead, reworked at the lockstep drop),
+Path C (non-close drain-ack batch incl. #2574 `restart_requested` clear), and
+early/error/async → zero result. `reconcileDrainAckStopPending` (site 1's wrapper) now
+returns `(bool, result)`; the two statement-call sites discard the new return unchanged.
+Coherence verified at all three sites (top-of-loop / post-heal / post-zombie refresh, no
+un-refreshed `*session` mutation reaches any finalize call). **Three teeth-verified
+per-site read-after-write tests** (`…DrainAck` site 1, `…DrainAckOrphan` site 2,
+`…DrainAckReconciler` site 3) — disabling ONLY a given site's fold fails ONLY its test
+(new `reconcileAtPathWithDrainOps` harness helper injects the controller drain-ack sites
+2/3 gate on). **Reviewed by a 6-lens fable adversarial panel (wf_3d1f12c0): 0
+byte-identity/coherence defects; the sole confirmed finding — sites 2/3 lacked per-site
+guards — is closed by the two added tests.** Gates green (build/vet/lint 0/gofmt/oracles/
+all five harness tests -count=5/whole reconciler+drain+pool+named+wake+circuit suites).
+
+**NEXT ACTIONABLE = 6d Commit 3 — the nested-helper-write refreshes** (re-grep — line
+numbers shifted after Commit 2): `healStateWithRollback` @1676 feeds the heal refresh
+`refreshSessionInfo`@1701 (`infoPostHeal`); `markProviderTerminalError` @1939 feeds the
+zombie refresh @1972 (`infoPostZombie`). Change each to return its applied batch and
+convert the refresh to a conditional `infoByID[id] = infoByID[id].ApplyPatch(batch)`
+(nil→no-op) — this ALSO removes the `Get`-consumes-injected-errors hazard (ApplyPatch
+never touches the store). Then commit 4 = `restart_requested` in-memory write (ApplyPatch
++ clear-on-persisted), commit 5+ = delete the blanket pre-pass @2865 + the aggregating
+refreshes (`infoAsleepDrift`@2643, wakeTargets@2889) + convert
+`advanceSessionDrains`/`newSessionBeadSnapshot` + drop the lockstep and raw working set,
+then **6e** (join the guard). **The full per-site wiring plan is STEP6-DESIGN §8; the
+paste-ready sequenced prompt is `RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md`.**
 Design + sub-phase backlog:
 `RECONCILER-FRONT-DOOR-STEP6-DESIGN.md` (fable 4-lens
 audit + opus synthesis, opus red-team GO-WITH-CHANGES, then a deeper **fable red-team**

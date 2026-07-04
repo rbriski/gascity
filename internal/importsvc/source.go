@@ -48,6 +48,9 @@ func hasRepositoryRefInSource(source string) bool {
 // The boolean reports whether the resolved source is git-backed.
 func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, error) {
 	if isRemoteImportSource(source) {
+		if err := rejectSourceUserinfo(source); err != nil {
+			return "", false, err
+		}
 		return source, true, nil
 	}
 
@@ -67,6 +70,31 @@ func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool
 		return canonical, true, nil
 	}
 	return source, false, nil
+}
+
+// rejectSourceUserinfo refuses an http(s)/file source that embeds credentials
+// (user or user:password) in the URL: such a token would leak into city.toml,
+// packs.lock, the shared cache's .git/config, the RepoCacheKey, and error
+// output. It only inspects the URL-scheme forms — git@host: and ssh://user@
+// carry transport identity, not a secret, and stay legal. The error never
+// echoes the secret (it redacts via gitcred.RedactUserinfo) and is returned as
+// ErrInvalidSource by the caller (HTTP 400).
+func rejectSourceUserinfo(source string) error {
+	source = strings.TrimSpace(source)
+	if !strings.HasPrefix(source, "https://") &&
+		!strings.HasPrefix(source, "http://") &&
+		!strings.HasPrefix(source, "file://") {
+		return nil
+	}
+	u, err := url.Parse(source)
+	if err != nil || u.User == nil {
+		return nil
+	}
+	redacted := gitcred.RedactUserinfo(source)
+	if _, hasPassword := u.User.Password(); hasPassword {
+		return fmt.Errorf("credentials embedded in the source URL would leak into city.toml, packs.lock, the shared repo cache's .git/config, and error output; remove them and register a credential instead: gc import credential add <host> (source: %s)", redacted)
+	}
+	return fmt.Errorf("a username embedded in the source URL would leak into city.toml, packs.lock, the shared repo cache's .git/config, and error output; remove it and register a credential instead: gc import credential add <host> (source: %s)", redacted)
 }
 
 func resolveImportAddPath(cityPath, source string) (string, error) {

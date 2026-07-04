@@ -667,7 +667,10 @@ func importAddErrorLine(source, nameOverride string, err error) string {
 	case errors.Is(err, importsvc.ErrScopeLoad), errors.Is(err, importsvc.ErrImportExists):
 		return fmt.Sprintf("gc import add: %v", err)
 	default:
-		return fmt.Sprintf("gc import add %q: %v", source, err)
+		// Redact any userinfo in the source so a credential-bearing URL never
+		// reaches the error line. RedactUserinfo is the identity on clean URLs, so
+		// every pinned public-source test stays byte-identical.
+		return fmt.Sprintf("gc import add %q: %v", gitcred.RedactUserinfo(source), err)
 	}
 }
 

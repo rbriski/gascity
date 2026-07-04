@@ -2374,6 +2374,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			alive,
 			healBatch,
 		)
+		// Fold heal#2's batch onto the snapshot (Step 6d write-returns-Info),
+		// identical to the heal#1 fold above (~1713): healStateWithRollback returns
+		// exactly the batch it mirrored (nil ⇒ ApplyPatch no-op). The base is
+		// coherent here — the pre-heal rate-limit gate `continue`s on hit and the
+		// restart/drain-ack blocks above either `continue` or self-refresh. This is
+		// one of the forward-pass writers the blanket pre-pass still masks; folding it
+		// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
+		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(healBatch)
 		if recoverPendingIdleSleep(session, sessFront, running, clk) {
 			alive = false
 		}
@@ -2806,6 +2814,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
+					// Fold the sleep onto the snapshot (Step 6d write-returns-Info): this
+					// max-age kill falls through to the wakeTargets append below, whose
+					// awake-scan read of state=asleep drives a same-tick re-wake — so the
+					// snapshot must carry the sleep. Base is coherent (the aggregating
+					// refresh @~2692 synced it and the intervening drift blocks `continue`).
+					// A pre-pass-masked writer (STEP6-PREPASS-AUDIT group 11).
+					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(batch)
 					alive = false
 				}
 			}
@@ -2880,6 +2895,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
+					// Fold the sleep onto the snapshot (Step 6d write-returns-Info): the
+					// idle kill falls through to the wakeTargets append below, whose
+					// awake-scan read of state=asleep drives a same-tick re-wake. Base
+					// coherent (aggregating refresh @~2692 + intervening `continue`s). A
+					// pre-pass-masked writer (STEP6-PREPASS-AUDIT group 12).
+					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(batch)
 					alive = false
 				}
 			}

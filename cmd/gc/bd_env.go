@@ -52,17 +52,32 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	})
 }
 
+// bdCommandRunnerContextForCity is bdCommandRunnerForCity's ctx-aware
+// sibling: it powers BdStore.ListContext (via WithBdStoreRunnerContext) so
+// the 2 status read paths can actually cancel a stuck backing bd child
+// instead of gracefully degrading to the legacy abandon-goroutine pattern.
+// See bdCommandRunnerContextWithManagedRetryErr for why it deliberately
+// does not share the plain runner's managed-Dolt recovery step.
+func bdCommandRunnerContextForCity(cityPath string) beads.CommandRunnerContext {
+	return bdCommandRunnerContextWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvWithError(cityPath)
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		return env, err
+	})
+}
+
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}
 	reapStaleBdExportJSONL(dir)
+	opts := append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreRunnerContext(bdCommandRunnerContextForCity(cityPath)))
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		bdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -773,6 +788,7 @@ func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
 
 var (
 	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
+	beadsExecCommandRunnerContextWithEnv      = beads.ExecCommandRunnerContext
 	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
 	ambientNativeDoltOpenEnv                  = beads.AmbientNativeDoltOpenEnv
 )
@@ -1145,6 +1161,70 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		ensureProjectedPostgresEnvExplicit(retryEnv)
 		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
 		return retryRunner(dir, name, args...)
+	}
+}
+
+// bdCommandRunnerContextWithManagedRetryErr is
+// bdCommandRunnerWithManagedRetryErr's ctx-aware sibling, used only via
+// WithBdStoreRunnerContext for callers that need ListContext's cancellation
+// (e.g. the status endpoint's per-store read timeout). It deliberately
+// does NOT call recoverManagedBDCommand.
+//
+// recoverManagedBDCommand runs under providerOpTimeout("recover") == 120s.
+// Ctx-bound callers of this runner use short, best-effort budgets — e.g.
+// statusStoreReadTimeout == 1s. Invoking recovery inline would block a
+// bounded status read for up to 120x its own budget: precisely the
+// unbounded hang ListContext exists to prevent. So this path skips
+// recovery entirely and relies on the plain (non-ctx) runner's callers
+// and health patrol to drive managed-Dolt recovery instead.
+//
+// A single ctx-bound retry is still attempted for any transport-retryable
+// error (not just the "recoverable" subset), mirroring the plain runner's
+// at-most-2-attempts shape minus the recovery step: cheap, ctx-bound, and
+// occasionally enough on its own if the blip already cleared or another
+// caller's recovery already landed.
+func bdCommandRunnerContextWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandRunnerContext {
+	return func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		env, envErr := envFn(dir)
+		if envErr != nil {
+			return nil, envErr
+		}
+		if env == nil {
+			env = map[string]string{}
+		}
+		ensureProjectedDoltEnvExplicit(env)
+		ensureProjectedPostgresEnvExplicit(env)
+		runner := beadsExecCommandRunnerContextWithEnv(env)
+		out, err := runner(ctx, dir, name, args...)
+		if name != "bd" {
+			return out, err
+		}
+		// PG-backed scopes never invoke managed-Dolt recovery. A transport
+		// error gets wrapped with an operator-facing hint and surfaced; gc
+		// does not manage external PG endpoints.
+		if err != nil {
+			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
+			if classifyErr != nil {
+				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
+			}
+			if ok {
+				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
+			}
+		}
+		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
+			return out, err
+		}
+		if !bdTransportRetryableError(cityPath, dir, env, err) {
+			return out, err
+		}
+		retryEnv, retryEnvErr := envFn(dir)
+		if retryEnvErr != nil {
+			return nil, retryEnvErr
+		}
+		ensureProjectedDoltEnvExplicit(retryEnv)
+		ensureProjectedPostgresEnvExplicit(retryEnv)
+		retryRunner := beadsExecCommandRunnerContextWithEnv(retryEnv)
+		return retryRunner(ctx, dir, name, args...)
 	}
 }
 

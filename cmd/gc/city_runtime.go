@@ -2310,13 +2310,25 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	cr.requestDeferredDrainFollowUpTick()
-	cr.recordReconcileTraceResults(trace, open, recordPhase)
-	phaseStart = time.Now()
+	// Load the post-reconcile session snapshot once and share it between the trace
+	// terminal-state read and the wait-nudge dispatch (this is the same snapshot the
+	// dispatch already loaded; moved up, not added). recordReconcileTraceResults sources
+	// each session's terminal state/sleep_reason from this authoritative store snapshot
+	// so the lockstep-drop (Step 5b+) can retire the raw metadata mirrors without staling
+	// the trace. This intentionally makes the trace MORE accurate than the prior raw
+	// open-bead read, which was already stale for woken sessions (preWakeCommit mirrors
+	// onto a discarded store.Get copy, never the open bead) and drain-completed sessions
+	// (completeDrain's mirror was already dropped).
 	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
 	if err != nil {
-		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
+		fmt.Fprintf(cr.stderr, "%s: loading post-reconcile session snapshot: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
+	cr.recordReconcileTraceResults(trace, open, dispatchSessionBeads, recordPhase)
+	phaseStart = time.Now()
+	if err == nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); nudgeErr != nil {
+			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
+		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
 	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
@@ -2443,6 +2455,7 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 func (cr *CityRuntime) recordReconcileTraceResults(
 	trace *sessionReconcilerTraceCycle,
 	open []beads.Bead,
+	postReconcile *sessionBeadSnapshot,
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) {
 	if trace == nil {
@@ -2454,9 +2467,26 @@ func (cr *CityRuntime) recordReconcileTraceResults(
 		if template == "" {
 			continue
 		}
+		// Terminal state/sleep_reason come off the authoritative post-reconcile store
+		// snapshot rather than the raw open bead. The raw open-bead read this replaces was
+		// already stale for some transitions (woken sessions kept their pre-wake state
+		// because preWakeCommit mirrors onto a discarded store.Get copy; drain-completed
+		// sessions kept "draining" because completeDrain no longer mirrors), so this is a
+		// deliberate accuracy improvement, not a byte-identical swap. It also decouples the
+		// trace from the raw metadata mirrors the lockstep drop (Step 5b+) is retiring. A
+		// bead absent from the snapshot (closed this tick — the snapshot excludes closed
+		// history) falls back to its open metadata, unchanged from the prior read.
+		state := bead.Metadata["state"]
+		sleepReason := bead.Metadata["sleep_reason"]
+		if postReconcile != nil {
+			if final, ok := postReconcile.FindByID(bead.ID); ok {
+				state = final.Metadata["state"]
+				sleepReason = final.Metadata["sleep_reason"]
+			}
+		}
 		trace.RecordSessionResult(template, bead.Metadata["session_name"], TraceOutcomeComplete, TraceCompletenessComplete, map[string]any{
-			"state":        bead.Metadata["state"],
-			"sleep_reason": bead.Metadata["sleep_reason"],
+			"state":        state,
+			"sleep_reason": sleepReason,
 		})
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.record_trace_session_results", phaseStart, map[string]any{

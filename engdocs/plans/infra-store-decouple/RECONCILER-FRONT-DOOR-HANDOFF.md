@@ -1,8 +1,8 @@
 # Reconciler Front-Door Handoff — the backlog to work through
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
-worktree `.claude/worktrees/object-front-doors`, **HEAD `a7edb1edc`** (6d Commit 3 —
-the heal + zombie helper-write refreshes wired via `ApplyPatch(batch)`).
+worktree `.claude/worktrees/object-front-doors`, **HEAD `556f02696`** (6d Commit 4 —
+the `restart_requested` overlay SET+consume folds).
 
 This is the authoritative handoff for finishing the session reconciler's move off
 raw `beads.Bead.Metadata`, onto the typed **`session.Store`** front door. It
@@ -60,17 +60,33 @@ had no observable + shipped no test; the **6-lens fable panel (wf_1cfcf522) empi
 refuted that** (0 byte-identity/coherence defects, but a CONFIRMED missing heal teeth test
 + 2 inaccurate coherence comments — all fixed).
 
-**NEXT ACTIONABLE = 6d Commit 4 — the `restart_requested` in-memory write** (re-grep — line
-numbers shifted after Commit 3): the direct `session.Metadata["restart_requested"] = "true"`
-at ~2247 (progress-stall handoff) is written in-memory only (NOT via a mirrored ApplyPatch
-batch), so it must ALSO do `infoByID[id] = infoByID[id].ApplyPatch(sessionpkg.MetadataPatch{"restart_requested":"true"})`,
-and CLEAR it (empty) when a persisted `restart_requested` batch later lands (the ~472 drain-ack
-consume / fresh-cycle) — else the #2574 phantom-restart. Add a kill-success-then-refresh test
-asserting it reads empty. Then commit 5+ = delete the blanket pre-pass @2892 + the aggregating
-refreshes (`infoAsleepDrift`@2670, wakeTargets@2916) + convert
-`advanceSessionDrains`/`newSessionBeadSnapshot` + drop the lockstep and raw working set,
-then **6e** (join the guard). **The full per-site wiring plan is STEP6-DESIGN §8; the
-paste-ready sequenced prompt is `RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md`.**
+**6d Commit 4 DONE (`556f02696`).** Folded the `restart_requested` overlay: the in-memory-only
+SET @~2259 (`ApplyPatch(MetadataPatch{"restart_requested":"true"})`) and the CONSUME @~2331
+(`restartFold` = RestartRequestPatch minus `ResetCommittedAtKey`, folded so a consumed restart
+clears the marker on the snapshot; the overlay survives only the failure `continue`s = the #2574
+lifecycle). Byte-identical + coherent. **These folds are CURRENTLY MASKED by the blanket pre-pass
+@~2913** (it re-projects every session before the awake scan, the only `Info.RestartRequested`
+reader), so there is NO behavior change and NO isolated teeth test — the whole-tick suite confirms
+no regression but cannot verify the folds; they are prerequisite setup for the pre-pass deletion.
+Verified by a **4-lens fable panel (wf_06452ded): 0 confirmed defects** (byte-identity + coherence
+clean; #2574 overlay lifecycle + masking confirmed correct). Also updated the pre-pass rationale
+comment to record which writers self-refresh vs. which the pre-pass still masks.
+
+**NEXT ACTIONABLE = 6d Commit 5 — DELETE the blanket pre-pass @~2913 (the LANDMINE).** This is
+gated on converting the COMPLETE set of forward-pass writers to self-refresh (STEP6-DESIGN §5 —
+**re-enumerate from code**, do NOT trust any list). Head-start enumeration from the Commit-4
+review (all currently masked by the pre-pass, none folded): (1) **pending-create rollback**
+(`rollbackPendingCreate` mutates `session_name` + closes in-store, the `continue`d sites ~2002/
+~2022); (2) **`resetConfiguredNamedSessionForConfigDrift`** (calls @~2538 / @~2726, mirrors
+`ConfigDriftResetPatch` — state/session_key/last_woke_at/pending_create_*/continuation_reset_pending
+— @~4201, then `continue`s); (3) **SleepPatch max-age/idle kills** (raw-mirror sites ~2801 / ~2875);
+(4) **stability/churn/detach writes**. Fold each (byte-identical, coherence-checked), THEN delete
+the pre-pass, THEN add the comprehensive read-after-write test that becomes possible (a
+kill-success-then-awake-scan asserting `restart_requested` reads empty; a config-drift-repair
+asserting the reset-pending wake rung fires). Also the aggregating refreshes (`infoAsleepDrift`
+@~2688, wakeTargets @~2938) + `advanceSessionDrains`/`newSessionBeadSnapshot` + drop the lockstep &
+raw working set, then **6e** (join the guard). **STEP6-DESIGN §8 is the plan;
+`RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md` is paste-ready.**
 Design + sub-phase backlog:
 `RECONCILER-FRONT-DOOR-STEP6-DESIGN.md` (fable 4-lens
 audit + opus synthesis, opus red-team GO-WITH-CHANGES, then a deeper **fable red-team**

@@ -374,11 +374,26 @@ the four raw aggregates confirmed `clearMissingIdleProbes` was the SOLE pure rea
   raw `*beads.Bead` for the `persistSleepPolicyMetadata` write @2853, so these are 6d, not
   part of the 6c four-aggregate scope.
 
-## 8. 6d execution plan (foundation + Commits 1–3 LANDED; wiring continues)
+## 8. 6d execution plan (foundation + Commits 1–4 LANDED; wiring continues)
 
 **Owner decision (this session): mechanism = write-returns-`Info`** (not the
 targeted-`Get`-everywhere variant, not a snapshot meta-accumulator). Scope directive:
 "drive as far as gates stay green."
+
+**Commit 4 LANDED (`556f02696`).** Folded the `restart_requested` overlay — the SET @~2259
+(in-memory-only `ApplyPatch(MetadataPatch{"restart_requested":"true"})`) and the CONSUME @~2331
+(`restartFold` = RestartRequestPatch minus `ResetCommittedAtKey`; clears the marker on the
+snapshot on consume-success; survives only the failure `continue`s = the #2574 lifecycle).
+Byte-identical + coherent. **KEY: these folds are MASKED by the blanket pre-pass @~2913** (it
+re-projects every session before the awake scan, the only `Info.RestartRequested` reader), so
+there is no behavior change and no isolated teeth test — the pre-pass overwrites them; they are
+prerequisite setup for the pre-pass deletion (where a comprehensive read-after-write test becomes
+possible). Verified by a **4-lens fable panel (wf_06452ded): 0 confirmed defects** (byte-identity
++ coherence clean; #2574 overlay lifecycle + masking confirmed). **Next: Commit 5 = DELETE the
+pre-pass** — the LANDMINE, gated on folding the COMPLETE forward-pass writer set (re-enumerate from
+code per §5). Review head-start (all masked, unfolded): pending-create rollback
+(`rollbackPendingCreate`), `resetConfiguredNamedSessionForConfigDrift` (@~2538/@~2726, mirrors
+`ConfigDriftResetPatch`), SleepPatch max-age/idle kills (~2801/~2875), stability/churn/detach writes.
 
 **Commit 3 LANDED (`a7edb1edc`).** The two nested-helper-write refreshes → `ApplyPatch(batch)`:
 HEAL (`healStateWithRollback` already returns its mirrored batch) and ZOMBIE

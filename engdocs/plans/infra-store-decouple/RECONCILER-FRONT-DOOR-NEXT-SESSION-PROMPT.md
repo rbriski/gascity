@@ -1,4 +1,4 @@
-# Next-session prompt — reconciler front-door Step 6d WIRING (Commits 1–3 done; Commit 4 next)
+# Next-session prompt — reconciler front-door Step 6d WIRING (Commits 1–4 done; Commit 5 = pre-pass deletion next)
 
 Paste the block below into a fresh session.
 
@@ -95,19 +95,29 @@ carries the healed state to the post-zombie rollback read on the `case preserveN
 The first draft's "no heal observable" claim was empirically FALSE; the missing heal test + 2
 inaccurate comments were fixed. **Line numbers shifted after Commit 3 — re-grep every anchor.**
 
-**START HERE — Commit 4 — `restart_requested` @~2247** (in-memory-only write; re-grep):
-`session.Metadata["restart_requested"] = "true"` is written in-memory only (NOT via a mirrored
-ApplyPatch batch), so it must ALSO do `infoByID[id] =
-infoByID[id].ApplyPatch(sessionpkg.MetadataPatch{"restart_requested":"true"})`, and CLEAR it
-(empty) when a persisted `restart_requested` batch lands (the ~472 drain-ack consume /
-fresh-cycle) — else #2574 phantom-restart. Add a kill-success-then-refresh test asserting it
-reads empty. (Note: Commit 2's Path-C `finalizeDrainAckStoppedSession` already folds the
-drain-ack `restart_requested=""` clear via ApplyPatch — this commit handles the in-memory SET
-+ the progress-stall clear.)
+**Commit 4 DONE (`556f02696`).** Folded the `restart_requested` overlay: the in-memory-only SET
+@~2259 (`ApplyPatch(MetadataPatch{"restart_requested":"true"})`) + the CONSUME @~2331 (`restartFold`
+= RestartRequestPatch minus `ResetCommittedAtKey`; clears the marker on consume-success; survives
+only the failure `continue`s = #2574 lifecycle). Byte-identical + coherent. **These folds are MASKED
+by the blanket pre-pass @~2913** (re-projects every session before the awake scan), so no behavior
+change + no isolated teeth test — prerequisite setup for the pre-pass deletion. 4-lens fable panel
+(wf_06452ded): 0 defects. **Line numbers shifted after Commit 4 — re-grep every anchor.**
 
-**Commit 5+ — retire the blanket pre-pass + working set (the deletions).** Once every forward-pass
-writer self-refreshes, delete the blanket pre-pass `for i := range ordered { refreshSessionInfo }`
-@~2774. Then convert the last raw consumers — `advanceSessionDrains` mutations (`completeDrain` off
+**START HERE — Commit 5 — DELETE the blanket pre-pass @~2913 (the LANDMINE).** Gated on folding the
+COMPLETE forward-pass writer set — **re-enumerate from code (STEP6-DESIGN §5), do NOT trust a list.**
+Head-start from the Commit-4 review (all masked, unfolded): (1) **pending-create rollback**
+(`rollbackPendingCreate`, `continue`d @~2002/@~2022, mutates `session_name` + closes in-store);
+(2) **`resetConfiguredNamedSessionForConfigDrift`** (@~2538 / @~2726, mirrors `ConfigDriftResetPatch`
+@~4201: state/session_key/last_woke_at/pending_create_*/continuation_reset_pending, then `continue`);
+(3) **SleepPatch max-age/idle kills** (raw-mirror ~2801 / ~2875); (4) **stability/churn/detach
+writes**. Fold each (byte-identical + coherence-checked, like Commits 1–4), THEN delete the pre-pass,
+THEN add the comprehensive read-after-write test now possible (kill-success-then-awake-scan asserts
+`restart_requested` empty; config-drift-repair asserts the reset-pending wake rung fires). Verify each
+fold is teeth-testable ONLY after the pre-pass is gone (before that they are masked). Then the
+aggregating refreshes + working-set removal (below).
+
+**Then — retire the blanket pre-pass + working set (the deletions).** After the pre-pass is deleted,
+convert the last raw consumers — `advanceSessionDrains` mutations (`completeDrain` off
 the raw bead → retire `sessionLookup`) and feed `newSessionBeadSnapshot` (via
 `resolvePreservedConfiguredNamedSessionTemplate`, bucket-D, HARDEST — may need a store `List`).
 Only THEN drop every `session.Metadata[k]=v` lockstep, delete `refreshSessionInfo`, `beadByID`,

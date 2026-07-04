@@ -3004,8 +3004,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// snapshot via write-returns-Info (STEP6-PREPASS-AUDIT groups 1-12), so the
 	// snapshot is already coherent here without re-projecting the raw beads.
 	phaseStart = time.Now()
+	// Build the awake-scan domain from the coherent typed snapshot in `ordered`
+	// slice order (load-bearing — ComputeAwakeSet resolves SessionName
+	// last-write-wins over a non-unique key, so map iteration order must not
+	// leak in). Every ordered[i].ID keys infoByID (built at tick entry, only
+	// updated thereafter, never deleted), so this reproduces the former
+	// per-bead snapshot lookup exactly.
+	sessionInfos := make([]sessionpkg.Info, len(ordered))
+	for i := range ordered {
+		sessionInfos[i] = infoByID[ordered[i].ID]
+	}
 	awakeInput := buildAwakeInputFromReconciler(
-		cfg, cityPath, ordered, infoByID, poolDesired, namedSessionDemand, workSet, readyWaitSet,
+		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, workSet, readyWaitSet,
 		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)

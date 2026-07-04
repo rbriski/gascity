@@ -18,8 +18,7 @@ import (
 func buildAwakeInputFromReconciler(
 	cfg *config.City,
 	cityPath string,
-	sessionBeads []beads.Bead,
-	sessionInfoByID map[string]session.Info,
+	sessionInfos []session.Info,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	workSet map[string]bool,
@@ -94,19 +93,15 @@ func buildAwakeInputFromReconciler(
 		}
 	}
 
-	// Session beads. Read persisted facts through the typed session.Info
-	// projection rather than cracking b.Metadata inline. The reconciler passes its
-	// coherent sessionInfoByID snapshot (refreshed to the beads just before this
-	// call) so the scan reads the same Info the tick already built. Callers that do
-	// not maintain a snapshot (unit tests) pass nil and fall back to a per-bead
-	// projection — byte-identical, since the snapshot IS that projection. Step 6
-	// removes the raw working set and this fallback with it.
-	for i := range sessionBeads {
-		b := &sessionBeads[i]
-		info, ok := sessionInfoByID[b.ID]
-		if !ok {
-			info = session.InfoFromPersistedBead(*b)
-		}
+	// Session infos. The reconciler passes its coherent typed snapshot — one
+	// session.Info per session bead, in the reconciler's `ordered` slice order.
+	// Slice order is load-bearing: ComputeAwakeSet resolves SessionName by
+	// last-write-wins and first-match, and SessionName is non-unique (a retired
+	// duplicate and its winner share it), so the iteration domain must stay
+	// order-preserving. Each Info already carries the typed persisted facts, so no
+	// raw session bead is cracked here.
+	for i := range sessionInfos {
+		info := sessionInfos[i]
 		if info.Closed {
 			continue
 		}

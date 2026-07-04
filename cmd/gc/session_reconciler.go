@@ -1567,8 +1567,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						template = info.Template
 					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, nil)
-					rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, providerAlive, dt, sessFront, clk, peek)
+					rateLimitHit, rateLimitErr, rlBatch := checkRateLimitStability(session, cfg, providerAlive, dt, sessFront, clk, peek)
 					if rateLimitHit || rateLimitErr != nil {
+						// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
+						// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
+						infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatch)
 						continue
 					}
 					clearClaim := configuredNamedSessionBeadHasSpecInfo(info, cfg, cityName)
@@ -1599,6 +1602,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				preserveErr  error
 				rateLimitHit bool
 				rateLimitErr error
+				rlBatchNamed map[string]string
 			)
 			if preserveNamed {
 				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
@@ -1606,7 +1610,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
-					rateLimitHit, rateLimitErr = checkRateLimitStability(session, cfg, rateLimitAlive, dt, sessFront, clk, peek)
+					rateLimitHit, rateLimitErr, rlBatchNamed = checkRateLimitStability(session, cfg, rateLimitAlive, dt, sessFront, clk, peek)
 				}
 			}
 			if rateLimitHit || rateLimitErr != nil {
@@ -1623,6 +1627,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						"provider_alive": providerAlive,
 					}, nil, "")
 				}
+				// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
+				// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
+				infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatchNamed)
 				continue
 			}
 			if isFailedCreateSessionInfo(info) {
@@ -2023,8 +2030,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
 			if pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout) {
-				rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
+				rateLimitHit, rateLimitErr, rlBatch := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
 				if rateLimitHit || rateLimitErr != nil {
+					// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
+					// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
+					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatch)
 					continue
 				}
 				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime", false)
@@ -2364,8 +2374,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
-		rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
+		rateLimitHit, rateLimitErr, rlBatchFwd := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
 		if rateLimitHit || rateLimitErr != nil {
+			// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
+			// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
+			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatchFwd)
 			continue // rate-limit hold recorded before state healing resets continuity metadata
 		}
 
@@ -2411,7 +2424,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Stability check: detect rapid crash after state healing. Rate-limit
 		// detection intentionally ran above before healState.
-		if checkStability(session, cfg, alive, dt, sessFront, clk, nil) {
+		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
+		// nil (no-op) when no stability event was recorded.
+		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
+		if stab, stabBatch := checkStability(session, cfg, alive, dt, sessFront, clk, nil); stab {
+			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(stabBatch)
 			continue // rapid exit recorded, skip further processing
 		}
 
@@ -2419,7 +2436,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fires for sessions that survived past stabilityThreshold but
 		// died before churnProductivityThreshold — alive long enough to
 		// not be a rapid crash, but too short to be productive.
-		if checkChurn(session, cfg, alive, dt, sessFront, clk) {
+		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info)
+		// regardless of the bool — ExitProductiveDeath may clear churn_count.
+		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
+		churn, churnBatch := checkChurn(session, cfg, alive, dt, sessFront, clk)
+		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(churnBatch)
+		if churn {
 			continue // churn recorded, skip further processing
 		}
 

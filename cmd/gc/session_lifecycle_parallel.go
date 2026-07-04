@@ -2012,7 +2012,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		return
 	}
 	if result.rateLimitScreen {
-		if err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
+		if _, err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
 			if trace != nil {
 				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{

@@ -36,6 +36,20 @@ Line numbers are HEAD `61e646e18` (re-grep — they shift as folds land).
 | 11 | max-age SleepPatch kill | 2801 | `ApplyPatch(batch)` (batch in hand) | state=asleep etc.; falls through to wakeTargets@2889 (load-bearing re-wake) |
 | 12 | idle SleepPatch kill | 2875 | `ApplyPatch(batch)` (batch in hand) | same as 11 |
 
+## STATUS: DONE. All 22 sites folded (batches 1-5); the blanket pre-pass, both
+aggregating refreshes (infoAsleepDrift, wakeTargets), and `refreshSessionInfo` are
+deleted. Verified by the comprehensive reconciler suite (211-212s green with every
+refresh gone) + a 4-lens capstone fable review (wf_e8507262: 0 confirmed defects).
+
+**One KNOWN-INERT residue (capstone review):** `buildPreparedStart` inside
+`recoverRunningPendingCreate` (Group 7) mirrors a few extra keys onto the raw bead
+(stale-resume clear of session_key/started_config_hash/continuation_reset_pending +
+a session_key/instance_token mint) that are NOT threaded into the folded batch, so on
+its failure path the snapshot keeps the pre-call values. Decision-inert: the block is
+gated on pending_create_claim="true" (drives WakeCausePendingCreate → identical awake
+decision to the pre-pass); the residue keys have no same-tick Info reader and self-heal
+next tick. Deferred to the Get-cutover. Documented at the fold site.
+
 ## NOT-a-dependency (verified, so the set is exhaustive)
 
 - **`resetConfiguredNamedSessionForConfigDrift` ALIVE lane @2538** — falls through

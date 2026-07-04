@@ -2460,7 +2460,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 			// Fold the CommitStartedPatch onto the snapshot (Step 6d write-returns-Info);
-			// nil on failure (no mirror ran). Pre-pass-masked (STEP6-PREPASS-AUDIT group 7).
+			// nil on failure (no CommitStartedPatch mirror ran). STEP6-PREPASS-AUDIT
+			// group 7. KNOWN-INERT RESIDUE (capstone review wf_e8507262): buildPreparedStart
+			// inside recoverRunningPendingCreate may mirror a few extra keys (a
+			// stale-resume clear of session_key/started_config_hash/continuation_reset_pending,
+			// and a session_key/instance_token mint) that are NOT threaded into
+			// commitBatch, so on the failure path the snapshot keeps the pre-call values.
+			// Decision-inert: the block is gated on pending_create_claim=="true", which
+			// survives every failure return and drives WakeCausePendingCreate, so the
+			// awake decision matches the deleted pre-pass; the residue keys have no
+			// same-tick Info reader and self-heal on the next tick's store reload.
+			// Threading buildPreparedStart's batch out is deferred to the Get-cutover.
 			ok, commitBatch := recoverRunningPendingCreate(session, tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck

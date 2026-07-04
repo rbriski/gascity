@@ -1,8 +1,8 @@
 # Reconciler Front-Door Handoff — the backlog to work through
 
 **PR #3839** (DRAFT, base `main`), branch `upstream/object-front-doors-cleanup`,
-worktree `.claude/worktrees/object-front-doors`, **HEAD `b15b02892`** (6d Commit 5 batches 1-2 —
-heal#2 + SleepPatch kills + drain-ack-stop-pending + idle-recover-sleep folds).
+worktree `.claude/worktrees/object-front-doors`, **HEAD `366e203f3`+** (6d PRE-PASS DELETION
+COMPLETE — all 22 folds + blanket pre-pass + both aggregating refreshes + `refreshSessionInfo` gone).
 
 This is the authoritative handoff for finishing the session reconciler's move off
 raw `beads.Bead.Metadata`, onto the typed **`session.Store`** front door. It
@@ -72,53 +72,36 @@ Verified by a **4-lens fable panel (wf_06452ded): 0 confirmed defects** (byte-id
 clean; #2574 overlay lifecycle + masking confirmed correct). Also updated the pre-pass rationale
 comment to record which writers self-refresh vs. which the pre-pass still masks.
 
-**6d Commit 5 = DELETE the blanket pre-pass — IN PROGRESS (the LANDMINE, a multi-batch commit).**
-The COMPLETE fold set was audited from code (4-region fable audit + opus synthesis, wf_df3cae94):
-**12 mechanisms / 22 sites**, fully enumerated in
-`RECONCILER-FRONT-DOOR-STEP6-PREPASS-AUDIT.md` (the authoritative plan — exact folds, commit
-sequence, not-dependencies, tests-unlocked-at-deletion). Every fold is MASKED by the pre-pass
-(byte-identical, no behavior change, NO isolated teeth test — verified by review; teeth tests
-land at the deletion).
+**6d Commit 5 = DELETE the blanket pre-pass — DONE (the LANDMINE, landed as 7 commits
+`901b3c6b8`..`366e203f3`, + a residue-doc follow-up).** The COMPLETE fold set was audited from
+code (wf_df3cae94: 12 mechanisms / 22 sites, enumerated in `RECONCILER-FRONT-DOOR-STEP6-PREPASS-AUDIT.md`).
+Every one now folds its mutation onto the typed snapshot via write-returns-Info; the blanket
+pre-pass, both per-session aggregating refreshes (infoAsleepDrift, wakeTargets), AND the
+`refreshSessionInfo` closure are ALL DELETED. Fold batches: 1 = heal#2 + SleepPatch kills;
+2 = drain-ack-stop-pending + idle-recover (deterministic reconstruction, no sig change);
+3 = detach/clears/rebaseline/relaunch/recover; 4 = rate-limit/stability/churn (sub-helper batch
+threading + `mergeMetadataPatch`); 5 = config-drift #2574 + rollback (**NO MarkClosed** — the
+close is store-only, so the raw bead stays open and the pre-pass saw `Closed=false`; the audit
+table's "+ MarkClosed" was a Get-cutover note, corrected). Batches 3-4 delegated to sonnet
+subagents against the audit spec, each fable-panel-reviewed; batches 1/2/5 + the deletion done by
+hand. **Verified: the comprehensive reconciler suite (211-212s green with every refresh gone — a
+stale snapshot from any missed fold flips an awake/sleep/recycle/drain decision and fails) + a
+4-lens capstone fable review (wf_e8507262: 0 confirmed defects).** One KNOWN-INERT residue
+documented at the fold site + in the audit: `buildPreparedStart`'s extra keys on the
+`recoverRunningPendingCreate` failure path (decision-inert — the block is `pending_create_claim`-gated,
+which drives the wake; deferred to the Get-cutover).
 
-**Batches 1-2 DONE (`901b3c6b8`, `b15b02892`) — 5 of 22 sites folded.** The folds needing
-NO helper signature change (batch in hand or deterministic-Info-key reconstruction gated on a
-`true` return): heal#2 `ApplyPatch(healBatch)` @~2394 (linchpin) + the max-age & idle SleepPatch
-kills @~2833/@~2913 (Groups 4, 11, 12); + `markDrainAckStopPending` ×2 (reconstruct
-`DrainAckStopPendingPatch(now)`) and `recoverPendingIdleSleep` (reconstruct `SleepPatch(now,"idle")`)
-(Groups 3, 6-partial). Byte-identical + coherent; batch 1 fable-reviewed clean.
-
-**NEXT = the SIGNATURE-CHANGE fold batches — the bulk (17 sites, ~8 helpers).** Every remaining
-helper CONDITIONALLY mutates and does NOT return its batch, so reconstruction is unsafe → each
-needs a sig change to return its mirrored batch (like `markProviderTerminalError` in Commit 3),
-then `ApplyPatch(batch)` at the forward-pass call site (other callers take `_`; tests updated).
-Ordered by rising difficulty (the last two thread the batch out of SUB-helpers — deeper surgery):
-- **`clearWakeFailures`/`clearChurn`** (Group 5, void→`map[string]string`; both build a conditional
-  local `batch`/marker — return it or nil).
-- **`reconcileDetachedAt`** (Group 6, void→ the `detached_at` patch it set/cleared; value is a
-  timestamp, NOT reconstructable).
-- **`recoverRunningPendingCreate`** (Group 7, bool→`(bool, batch)`; the `CommitStartedPatch` is a
-  local `metadata` var).
-- **`silentRebaselineSessionHashes`** (Group 8, error→`(batch, error)`; 3 callers, 1 forward-pass).
-- **`relaunchAgentForLaunchDrift`** (Group 9, bool→`(bool, batch)`; gate on `true`; 2 sites).
-- **`resetConfiguredNamedSessionForConfigDrift`** asleep (Group 10, void→ batch; **#2574 hazard —
-  clears restart_requested**; 2 callers, only the @~2734 asleep one folds).
-- **`checkStability`/`checkChurn`** (Group 5, bool→`(bool, batch)`; batch spread across
-  `recordWakeFailure`/`ConversationResetPatch`/`clearLastWokeAt` sub-calls — thread it out).
-- **`checkRateLimitStability`** (Group 1, `(bool,error)`→`(bool,error,batch)`; batch via
-  `markProviderTerminalError`[already returns] / `recordRateLimitQuarantine`; 4 forward-pass sites +
-  1 other; 1 test).
-- **`attemptRollbackPendingCreate`** (Group 2; `ApplyPatch(rollbackBatch)` for last_woke_at/
-  session_name/claims **+ a separate `MarkClosed`** since `rollbackPendingCreate`/ClearingClaim close
-  STORE-ONLY, never setting raw Status; 3 sites).
-
-**THEN** delete the pre-pass @~2940 + retire the aggregating refreshes (`infoAsleepDrift` @~2710,
-wakeTargets @~2968) + add the comprehensive read-after-write tests (finally possible: same-tick
-re-wake off a mid-tick sleep; cross-session drain-ack/min-floor visibility; #2574 suppression) +
-`advanceSessionDrains`/`newSessionBeadSnapshot` + drop the lockstep & raw working set, then **6e**
-(the guard forbidding raw `session.Metadata[` writes on the decision path). **STEP6-PREPASS-AUDIT.md
-is the per-fold plan; STEP6-DESIGN §8 is the higher-level design.** NOTE: every fold is MASKED
-until the pre-pass is deleted (no isolated teeth test; whole-tick suite catches regressions on the
-raw path; review verifies fold correctness; the comprehensive tests land at deletion).
+**NEXT = the LOCKSTEP DROP.** Every snapshot update is now write-returns-Info (no raw-bead
+re-derive anywhere on the decision or refresh path), so the raw working set can go: drop every
+`session.Metadata[k]=v` lockstep mirror, remove `beadByID` / `circuitSessionByIdentity` / the raw
+`ordered []beads.Bead` (replace the iteration domain with an ORDER-PRESERVING `[]Info`/`[]string`
+— NOT map iteration: `buildAwakeInputFromReconciler` appends to `input.SessionBeads` in slice order
+and `ComputeAwakeSet` does `SessionName`-keyed last-write-wins over it), convert
+`advanceSessionDrains` / `newSessionBeadSnapshot` off the raw bead, and cut the snapshot source to
+store-authoritative `Get` (handling the reset_committed_at / started_live_hash / buildPreparedStart
+intra-tick divergences the raw refresh preserved — the exposure set). Then **6e** — the guard
+forbidding raw `session.Metadata[` writes on the decision path. See STEP6-DESIGN §8 deletion-order
+steps 4-6; STEP6-PREPASS-AUDIT.md records the exposure set.
 Design + sub-phase backlog:
 `RECONCILER-FRONT-DOOR-STEP6-DESIGN.md` (fable 4-lens
 audit + opus synthesis, opus red-team GO-WITH-CHANGES, then a deeper **fable red-team**

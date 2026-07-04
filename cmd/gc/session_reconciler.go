@@ -1567,8 +1567,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// trace read on its hit/err path stays byte-identical against `info`;
 			// and the failed-create-close reads are reached only when it took its
 			// non-mutating (false,nil) return (any mutation sets hit/err → continue).
-			// The two trace-payload raw reads (pending_create_claim, state) stay raw:
-			// pending_create_claim has no raw-string Info mirror (it is a bool).
+			// The two trace-payload reads (pending_create_claim, state) read the typed
+			// snapshot: Info.PendingCreateClaimMetadata (the verbatim raw-string mirror,
+			// Step 6a) and Info.MetadataState (Step 5a).
 			preserveNamed := preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName)
 			// #3630: the configured spec is present this tick — reset any
 			// suspend-drain confirmation window so a later genuine removal still
@@ -1629,9 +1630,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if pendingCreateSessionStillLeasedInfo(info, cfg, clk) {
 					if trace != nil {
 						trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
-							"pending_create_claim": strings.TrimSpace(session.Metadata["pending_create_claim"]),
+							"pending_create_claim": strings.TrimSpace(infoByID[session.ID].PendingCreateClaimMetadata),
 							"provider_alive":       providerAlive,
-							"state":                session.Metadata["state"],
+							"state":                infoByID[session.ID].MetadataState,
 						}, nil, "")
 					}
 					continue
@@ -1666,9 +1667,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// storeQueryPartial=true the formal rollback is deferred, so the
 			// heal path must also preserve pending_create_claim to avoid a
 			// half-applied rollback that races the next complete tick.
-			stateBeforeHeal := strings.TrimSpace(session.Metadata["state"])
-			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(session.Metadata["pending_create_started_at"])
-			lastWokeAtBeforeHeal := strings.TrimSpace(session.Metadata["last_woke_at"])
+			stateBeforeHeal := strings.TrimSpace(infoByID[session.ID].MetadataState)
+			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].PendingCreateStartedAt)
+			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].LastWokeAt)
 			healBatch := healStateWithRollback(session, providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
 			traceHealClearedPendingCreateLease(
 				trace,
@@ -1737,9 +1738,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				if trace != nil {
 					trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
-						"pending_create_claim": strings.TrimSpace(session.Metadata["pending_create_claim"]),
+						"pending_create_claim": strings.TrimSpace(infoByID[session.ID].PendingCreateClaimMetadata),
 						"provider_alive":       providerAlive,
-						"state":                session.Metadata["state"],
+						"state":                infoByID[session.ID].MetadataState,
 					}, nil, "")
 				}
 				continue
@@ -2290,7 +2291,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if runtimeRunning && dops != nil {
 				tmuxRequested, _ = dops.isRestartRequested(name)
 			}
-			beadRequested := session.Metadata["restart_requested"] == "true"
+			beadRequested := infoByID[session.ID].RestartRequested == "true"
 			if tmuxRequested || beadRequested {
 				if runtimeRunning {
 					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
@@ -2376,9 +2377,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Heal advisory state metadata.
-		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
-		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(session.Metadata["pending_create_started_at"])
-		lastWokeAtBeforeHeal := strings.TrimSpace(session.Metadata["last_woke_at"])
+		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[session.ID].MetadataState))
+		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].PendingCreateStartedAt)
+		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].LastWokeAt)
 		healBatch := healStateWithRollback(session, alive, sessFront, clk, startupTimeout, true)
 		traceHealClearedPendingCreateLease(
 			trace,
@@ -2461,15 +2462,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 			// Fold recoverRunningPendingCreate's batch onto the snapshot (Step 6d
-			// write-returns-Info). The batch now carries CommitStartedPatch PLUS
-			// buildPreparedStart's persisted instance_token mint (threaded out in
-			// pendingCreateInstanceTokenFold, on every return path): the Phase-2 drain
-			// scan reads info.InstanceToken (verifiedStop, Step 2b), so that mint can no
-			// longer stay a snapshot-inert residue. STEP6-PREPASS-AUDIT group 7. The
-			// remaining buildPreparedStart residue (a stale-resume clear of
-			// session_key/started_config_hash/continuation_reset_pending) is still not
-			// threaded — it has no same-tick Info reader and self-heals on the next
-			// tick's store reload; thread it out when Step 3 moves the awake scan onto Info.
+			// write-returns-Info). The batch carries CommitStartedPatch PLUS
+			// buildPreparedStart's persisted residue (threaded out in
+			// pendingCreateResidueFold, on the abort paths): the instance_token mint,
+			// read by the Phase-2 drain scan (info.InstanceToken via verifiedStop,
+			// Step 2b), and the stale-resume started_config_hash clear, read by the
+			// forward-pass config-drift gate below (info.StartedConfigHash, Step 5a,
+			// #127). STEP6-PREPASS-AUDIT group 7. The other two clearStaleResumeKeyMetadata
+			// keys (session_key/continuation_reset_pending) stay unthreaded — neither has
+			// a same-tick Info reader whose verdict the residue changes — and self-heal on
+			// the next tick's store reload.
 			ok, commitBatch := recoverRunningPendingCreate(session, tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
@@ -2495,7 +2497,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// what config the session actually started with. Before it's
 			// written (during the startup window), skip the drift check
 			// to avoid false-positive drains. Fixes #127.
-			storedHash := session.Metadata["started_config_hash"]
+			storedHash := infoByID[session.ID].StartedConfigHash
 			if template != "" && storedHash != "" {
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
@@ -2529,8 +2531,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash), agentCfg.Command) //nolint:errcheck
 						// Diagnostic: log per-field breakdown to identify the drifting field.
-						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
-						runtime.LogCoreFingerprintDrift(stderr, name, session.Metadata["core_hash_breakdown"], agentCfg)
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(infoByID[session.ID].CoreHashBreakdown, agentCfg)
+						runtime.LogCoreFingerprintDrift(stderr, name, infoByID[session.ID].CoreHashBreakdown, agentCfg)
 						// Launch-only drift (B2.3): the box (provision half) is
 						// unchanged but the agent (launch half) moved. When the
 						// provider can relaunch the agent in the existing warm box,
@@ -2541,8 +2543,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// (a session started before B2.2) are treated as "not
 						// launch-only" → full restart, which re-stamps the sub-hashes
 						// and self-heals.
-						storedProvision := session.Metadata["started_provision_hash"]
-						storedLaunch := session.Metadata["started_launch_hash"]
+						storedProvision := infoByID[session.ID].StartedProvisionHash
+						storedLaunch := infoByID[session.ID].StartedLaunchHash
 						launchOnlyDrift := storedProvision != "" && storedLaunch != "" &&
 							storedProvision == runtime.ProvisionFingerprint(agentCfg) &&
 							storedLaunch != runtime.LaunchFingerprint(agentCfg)
@@ -2707,7 +2709,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// Core config matches — check live-only drift.
 					// Use started_live_hash exclusively, matching
 					// the started_config_hash pattern above.
-					storedLive := session.Metadata["started_live_hash"]
+					storedLive := infoByID[session.ID].StartedLiveHash
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
 						switch {
@@ -2782,7 +2784,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
 			}
-			storedHash := session.Metadata["started_config_hash"]
+			storedHash := infoByID[session.ID].StartedConfigHash
 			if template != "" && storedHash != "" {
 				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHash(tp, *session)
@@ -2811,7 +2813,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
-						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(infoByID[session.ID].CoreHashBreakdown, agentCfg)
 						// Fold the config-drift reset onto the snapshot (Step 6d
 						// write-returns-Info); this asleep lane `continue`s, so the fold must
 						// run before the continue. Clears restart_requested on the snapshot
@@ -2838,7 +2840,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// then pending interaction, then assigned work, then stop); this
 		// block gathers the facts it asks for and executes the outcome.
 		if maxAgeTr != nil && alive {
-			creationCompleteAt, hasAnchor := parseRFC3339Metadata(session.Metadata["creation_complete_at"])
+			creationCompleteAt, hasAnchor := parseRFC3339Metadata(infoByID[session.ID].CreationCompleteAt)
 			facts := sessionpkg.TimerFacts{
 				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
 			}

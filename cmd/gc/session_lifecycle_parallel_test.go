@@ -4148,6 +4148,35 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	}
 }
 
+// TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear pins the
+// Step-5a fix: buildPreparedStart's stale-resume guard (clearStaleResumeKeyMetadata)
+// clears started_config_hash on the raw bead + store outside any folded batch. On the
+// recoverRunningPendingCreate abort paths, the fold must carry that clear so the
+// reconciler snapshot's Info.StartedConfigHash matches the raw bead — otherwise the
+// forward-pass config-drift gate (which now reads Info.StartedConfigHash) would see a
+// stale non-empty hash and wrongly enter the drift block (#127 startup-window skip).
+func TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear(t *testing.T) {
+	// A bead whose started_config_hash was just cleared by the stale-resume guard.
+	session := &beads.Bead{ID: "s", Metadata: map[string]string{
+		"instance_token":      "tok",
+		"started_config_hash": "", // cleared
+	}}
+	fold := pendingCreateResidueFold(session)
+	if v, ok := fold["started_config_hash"]; !ok || v != "" {
+		t.Fatalf("fold[started_config_hash] = %q, present=%v; want present and empty (carry the clear)", v, ok)
+	}
+	if fold["instance_token"] != "tok" {
+		t.Fatalf("fold[instance_token] = %q, want tok", fold["instance_token"])
+	}
+
+	// A bead the guard did NOT clear: the fold carries the current hash verbatim (a
+	// no-op fold against a coherent snapshot).
+	kept := &beads.Bead{ID: "s", Metadata: map[string]string{"started_config_hash": "H"}}
+	if v := pendingCreateResidueFold(kept)["started_config_hash"]; v != "H" {
+		t.Fatalf("fold[started_config_hash] = %q, want H (current value carried verbatim)", v)
+	}
+}
+
 // A successful atomic start batch must land state=active, state_reason,
 // creation_complete_at, AND the pending_create_claim clear together —
 // downstream readers (e.g. the pool bead sweep) rely on this atomicity so

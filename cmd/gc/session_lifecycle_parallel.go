@@ -2100,7 +2100,7 @@ func recoverRunningPendingCreate(
 				"error": err.Error(),
 			}, nil, "")
 		}
-		return false, pendingCreateInstanceTokenFold(session)
+		return false, pendingCreateResidueFold(session)
 	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
@@ -2141,7 +2141,7 @@ func recoverRunningPendingCreate(
 				"error": err.Error(),
 			}, nil, "")
 		}
-		return false, pendingCreateInstanceTokenFold(session)
+		return false, pendingCreateResidueFold(session)
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(metadata))
@@ -2163,19 +2163,39 @@ func recoverRunningPendingCreate(
 	return true, metadata
 }
 
-// pendingCreateInstanceTokenFold returns buildPreparedStart's persisted
-// instance_token mint as a one-key fold batch (nil when unset). recoverRunningPendingCreate
-// returns it on the paths that abort before CommitStartedPatch persists, so the caller's
-// snapshot still reflects a token buildPreparedStart already wrote to the store — the
-// Phase-2 drain scan reads info.InstanceToken (verifiedStop) and must not see a stale "".
-func pendingCreateInstanceTokenFold(session *beads.Bead) map[string]string {
+// pendingCreateResidueFold returns the buildPreparedStart residue that
+// recoverRunningPendingCreate must carry on the paths that abort before
+// CommitStartedPatch persists, so the caller's snapshot matches the raw bead
+// buildPreparedStart already mutated:
+//   - the stale-resume started_config_hash clear (clearStaleResumeKeyMetadata
+//     writes it to the raw bead + store outside any folded batch) — the
+//     forward-pass config-drift gate reads info.StartedConfigHash (Step 5a),
+//     and a "" hash must skip that block (startup-window, #127), so the snapshot
+//     must not keep the stale pre-tick hash. Its current value is folded: the
+//     clear ("") when the guard fired, or the unchanged original (a no-op fold)
+//     otherwise. Always present, so the returned batch is never nil.
+//   - the instance_token mint (only when set) — the Phase-2 drain scan reads
+//     info.InstanceToken (verifiedStop, Step 2b) and must not see a stale "".
+//
+// The other two clearStaleResumeKeyMetadata keys are not folded here on purpose:
+//   - session_key: no same-tick Info reader.
+//   - continuation_reset_pending: the awake scan reads info.ContinuationResetPending
+//     (a Step-3 read, NOT introduced by 5a). Its residue can defer the
+//     continuation-reset classification by one self-healing tick when the session
+//     carries a durable reset_committed_at (RestartRequestPatch stamps it; no path
+//     clears it) — a pre-existing Step-3/6d coherence gap, #2345-class, that 5a
+//     neither introduces nor changes. Threading it would alter awake-scan behaviour
+//     versus the current snapshot and belongs to that separate cleanup, not this
+//     commit. It self-heals on the next tick's store reload.
+func pendingCreateResidueFold(session *beads.Bead) map[string]string {
 	if session == nil {
 		return nil
 	}
+	fold := map[string]string{"started_config_hash": session.Metadata["started_config_hash"]}
 	if tok := session.Metadata["instance_token"]; tok != "" {
-		return map[string]string{"instance_token": tok}
+		fold["instance_token"] = tok
 	}
-	return nil
+	return fold
 }
 
 func shouldRollbackPendingCreate(session *beads.Bead) bool {

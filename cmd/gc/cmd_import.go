@@ -107,8 +107,26 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportWhyCmd(stdout, stderr),
 		newImportMigrateCmd(stdout, stderr),
 		newImportPruneCmd(stdout, stderr),
+		newImportCredentialCmd(stdout, stderr),
 	)
 	return cmd
+}
+
+// printCredentialHint appends the pack-credential remediation hint when err
+// carries an auth classification from a network git run. It is deliberately
+// separate from importAddErrorLine's framing (pinned by exact-match tests).
+func printCredentialHint(stderr io.Writer, err error) {
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	if authErr.Matched {
+		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                                        //nolint:errcheck
+	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                                //nolint:errcheck
+	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
 }
 
 func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -624,6 +642,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
 	if err != nil {
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
@@ -678,6 +697,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
@@ -688,6 +708,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	lock, err = installLockedImports(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
@@ -776,11 +797,13 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc import upgrade %q: %v\n", target, err) //nolint:errcheck
+			printCredentialHint(stderr, err)
 			return 1
 		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {

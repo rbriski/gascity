@@ -1357,7 +1357,7 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, sessionFrontDoor(store), ds, clk)
+	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["last_woke_at"] != "" {
@@ -1388,7 +1388,7 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, sessionFrontDoor(store), ds, clk)
+	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "" {
@@ -1422,7 +1422,7 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, sessionFrontDoor(store), ds, clk)
+	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "resume-key" {
@@ -1450,7 +1450,7 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, sessionFrontDoor(store), ds, clk)
+	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["pending_create_claim"] != "" {

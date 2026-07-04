@@ -489,7 +489,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 		if !running {
 			// Process exited — drain complete.
-			completeDrain(session, sessFront, ds, clk)
+			completeDrain(info, sessFront, ds, clk)
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
@@ -603,7 +603,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				running = false
 			}
 			if !running {
-				completeDrain(session, sessFront, ds, clk)
+				completeDrain(info, sessFront, ds, clk)
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
@@ -617,20 +617,19 @@ func advanceSessionDrainsWithSessionsTraced(
 	}
 }
 
-// completeDrain writes drain-complete metadata to the bead.
-func completeDrain(session *beads.Bead, sessFront *sessions.Store, ds *drainState, clk clock.Clock) {
-	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
-	if sessFront != nil {
-		if err := sessFront.ApplyPatch(session.ID, batch); err != nil {
-			return
-		}
+// completeDrain writes drain-complete metadata to the store for the drained
+// session. It reads only the typed Info (id + raw wake_mode); the raw-bead
+// mirror the reconciler used to keep is dropped. Nothing reads a drained
+// session's metadata later in the tick — the awake scan runs before
+// advanceSessionDrains, and completeDrain is always followed by dt.remove +
+// continue — so the store write is the sole observable effect (all completeDrain
+// tests assert on store.Get). With no store there is nothing to persist.
+func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState, clk clock.Clock) {
+	if sessFront == nil {
+		return
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
+	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
+	_ = sessFront.ApplyPatch(info.ID, batch)
 }
 
 // verifiedStop stops a session after verifying the instance_token matches.

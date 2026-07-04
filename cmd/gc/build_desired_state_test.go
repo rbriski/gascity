@@ -253,7 +253,7 @@ type failingGraphLeg struct {
 	err error
 }
 
-func (s *failingGraphLeg) List(beads.ListQuery) ([]beads.Bead, error)     { return nil, s.err }
+func (s *failingGraphLeg) List(beads.ListQuery) ([]beads.Bead, error)      { return nil, s.err }
 func (s *failingGraphLeg) Ready(...beads.ReadyQuery) ([]beads.Bead, error) { return nil, s.err }
 func (s *failingGraphLeg) IDPrefix() string                                { return "gcg" }
 

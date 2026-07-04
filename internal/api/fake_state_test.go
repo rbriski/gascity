@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,11 +58,6 @@ type fakeState struct {
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
-	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
-	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
-	// matching the real implementation's answer for the MemStore fakes most
-	// tests use.
-	scopedStoreFn func(ctx context.Context, existing beads.Store) (beads.Store, error)
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -116,12 +110,6 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
-func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
-	if f.scopedStoreFn == nil {
-		return nil, nil
-	}
-	return f.scopedStoreFn(ctx, existing)
-}
 
 func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
 	if f.nudgesBeadStore != nil {

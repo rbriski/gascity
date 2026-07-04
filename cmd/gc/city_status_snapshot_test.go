@@ -187,14 +187,14 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	}
 }
 
-// TestLoadStatusSessionSnapshotKillsBdChildOnTimeout is the ga-cdmx6x
-// regression test for `gc status`'s session-snapshot read: a bd child
-// spawned via the store loadStatusSessionSnapshot builds internally must
-// be killed when its budget expires, instead of surviving to
-// bdCommandTimeout the way the pre-fix abandon-the-goroutine pattern let
-// it. Mirrors TestScopedBdStoreForCityKillsChildOnCtxCancel's pidfile
-// pattern, driven through loadStatusSessionSnapshot itself so the whole
-// call site — not just scopedBdStoreForCity in isolation — is covered.
+// TestLoadStatusSessionSnapshotKillsBdChildOnTimeout is the regression test
+// for `gc status`'s session-snapshot read: a bd child spawned by the store
+// loadStatusSessionSnapshot reads through must be killed when its budget
+// expires, instead of surviving to bdCommandTimeout the way the pre-fix
+// abandon-the-goroutine pattern let it. realStore is built via
+// bdStoreForCity, which wires beads.WithBdStoreRunnerContext in production
+// (ga-yxwid1), so loadStatusSessionSnapshot's ctx-bound ListContext call
+// (ga-oeeggk) actually cancels the in-flight bd child on timeout.
 func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 	processgrouptest.RequireRealProcessSignals(t)
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -207,6 +207,13 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
+	// GC_BEADS=file is load-bearing (see
+	// TestBdStoreForCityListContextKillsChildOnTimeout): it makes
+	// cityUsesBdStoreContract false, so bdRuntimeEnvWithError short-circuits
+	// before managed-Dolt target resolution/health/recovery, which otherwise
+	// spends 30-40s probing with no real Dolt server and starves the bd stub
+	// below of ever actually being exec'd within this test's budget.
+	t.Setenv("GC_BEADS", "file")
 
 	binDir := t.TempDir()
 	pidFile := filepath.Join(binDir, "bd-child.pid")
@@ -234,6 +241,21 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 	}
 	_ = exec.Command("kill", "-KILL", childPid).Run()
 	t.Fatalf("bd child process %s survived loadStatusSessionSnapshot's timeout", childPid)
+}
+
+func waitForNonEmptyFileContent(t *testing.T, path string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			return strings.TrimSpace(string(data))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to be written", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded is the

@@ -1368,13 +1368,6 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, true)
 }
 
-// bdRuntimeEnvForRigWithErrorNoRecovery is bdRuntimeEnvForRigWithError
-// without the managed-dolt recovery side effects; see
-// bdRuntimeEnvWithErrorNoRecovery for why (gascity ga-cdmx6x).
-func bdRuntimeEnvForRigWithErrorNoRecovery(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
-	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, false)
-}
-
 func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
 	return bdRuntimeEnvForRigWithErrorRecoveryContext(context.Background(), cityPath, cfg, rigPath, allowRecovery)
 }
@@ -1440,19 +1433,6 @@ func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg 
 
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	return bdRuntimeEnvWithErrorRecovery(cityPath, true)
-}
-
-// bdRuntimeEnvWithErrorNoRecovery is bdRuntimeEnvWithError without the
-// managed-dolt recovery/health-check/autostart side effects: it reads
-// existing published or configured connection state only, and fails fast
-// (env still gets the non-Dolt opt-out vars set) when no managed server is
-// currently reachable. Recovering a managed dolt server is legitimate
-// work, but doing it from every concurrent, short-budget scoped-store
-// construction would multiply exactly the load a read-storm mitigation
-// exists to bound (gascity ga-cdmx6x) — those callers use this instead of
-// bdRuntimeEnvWithError.
-func bdRuntimeEnvWithErrorNoRecovery(cityPath string) (map[string]string, error) {
-	return bdRuntimeEnvWithErrorRecovery(cityPath, false)
 }
 
 func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[string]string, error) {

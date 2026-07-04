@@ -2245,6 +2245,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = map[string]string{}
 					}
 					session.Metadata["restart_requested"] = "true"
+					// Reflect the restart_requested marker on the snapshot (Step 6d
+					// write-returns-Info). Unlike every other forward-pass mutation this
+					// one is written IN-MEMORY ONLY — it is not persisted through a
+					// mirrored ApplyPatch batch — so the awake scan (which reads
+					// Info.RestartRequested off infoByID) would otherwise see it only via
+					// the blanket pre-pass re-projection. Folding it here is a
+					// prerequisite for dropping that pre-pass: the restart-request
+					// consume below then clears it on the snapshot (else #2574). The base
+					// is coherent (infoByID[session.ID] == InfoFromPersistedBead(*session)
+					// here — the zombie fold synced it and every intervening mutating
+					// block `continue`s).
+					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
 				}
 			}
@@ -2297,16 +2309,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if session.Metadata == nil {
 					session.Metadata = make(map[string]string, len(batch))
 				}
+				// Fold the mirrored batch onto the snapshot too (Step 6d
+				// write-returns-Info), so the restart handoff — which CONSUMES the
+				// in-memory restart_requested marker (RestartRequestPatch sets it to "")
+				// and clears started_config_hash / last_woke_at / pending_create_* —
+				// clears the marker (and its siblings) on the snapshot the awake scan
+				// reads. Without this, once the blanket pre-pass is dropped a consumed
+				// restart_requested would survive on the snapshot and re-fire as a
+				// phantom second restart (#2574). Excludes ResetCommittedAtKey exactly
+				// like the in-memory mirror above: the durable reset marker is for the
+				// next tick, and admitting it here would force-wake on-demand sessions
+				// without demand (#2345).
+				restartFold := make(sessionpkg.MetadataPatch, len(batch))
 				for key, value := range batch {
-					// The durable reset commit marker is for the next
-					// reconciler pass; keeping it out of this tick's
-					// in-memory bead prevents on-demand sessions from
-					// being force-woken without demand.
 					if key == sessionpkg.ResetCommittedAtKey {
 						continue
 					}
 					session.Metadata[key] = value
+					restartFold[key] = value
 				}
+				infoByID[session.ID] = infoByID[session.ID].ApplyPatch(restartFold)
 				if runtimeRunning {
 					if tmuxRequested && dops != nil {
 						if err := dops.clearRestartRequested(name); err != nil {
@@ -2882,12 +2904,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Use ComputeAwakeSet for the wake/sleep decision. The awake scan reads every
 	// session's typed Info from the coherent infoByID snapshot rather than
 	// re-deriving per bead, so re-sync the snapshot to the beads here first: the
-	// forward pass's late mutations that are not lockstep-refreshed — the §5.2
-	// restart_requested marker (@~2084) and pending-create rollback (which
-	// `continue`s without a refresh) — must be reflected before the scan reads
-	// them. refreshSessionInfo re-projects from the raw working bead, so each entry
-	// becomes byte-identical to a fresh InfoFromPersistedBead(bead); step 6 folds
-	// this into the Get-cutover refresh discipline.
+	// forward pass has late mutations that are not yet self-refreshed onto the
+	// snapshot and must be reflected before the scan reads them. refreshSessionInfo
+	// re-projects from the raw working bead, so each entry becomes byte-identical to
+	// a fresh InfoFromPersistedBead(bead). This blanket pre-pass is the Step-6d
+	// linchpin: it is dropped only once EVERY forward-pass writer folds its own
+	// mutation onto the snapshot (write-returns-Info). Already self-refreshed: the
+	// close/heal/zombie refreshes and the restart_requested SET+consume (@~2259 /
+	// @~2331). Still relying on this pre-pass (must be folded, then re-enumerated
+	// from code per STEP6-DESIGN §5, before deletion): the pending-create rollback
+	// (rollbackPendingCreate, `continue`s), resetConfiguredNamedSessionForConfigDrift
+	// (@~2538 / @~2726, mirrors ConfigDriftResetPatch), the SleepPatch max-age/idle
+	// kills, and the stability/churn/detach writes.
 	for i := range ordered {
 		refreshSessionInfo(ordered[i].ID)
 	}

@@ -35,7 +35,18 @@ worktree `.claude/worktrees/object-front-doors`, **HEAD `0d694acee`** (re-grep
       `sessionBead`. Byte-identical (every ordered ID keys infoByID, never deleted; `ordered` never
       resliced; fallback was prod-dead). Fable 4-lens review wf_21c330af: **0 findings**. Analysis in
       `raw/lockstep-drop-step3-awake-domain.md`.
-- [ ] Steps 3.5–6 below.
+- [x] **Step 3.5 — wakeTargets apply loop + awake bridge off the raw bead** (consumer #4).
+      3.5a (`2d387146c`): additive codec `Info.PendingCreateClaimMetadata` (verbatim). 3.5b
+      (`60e231cb2`): the post-Phase-1 wakeTargets apply loop reads off `info := infoByID[id]`
+      (session_name/wake_mode/sleep_intent/sleep_reason/last_woke_at + classifier siblings +
+      idle-probe helpers threaded infoByID + shouldBeginIdleDrainInfo); 4 mutating helpers return
+      their fold (recordCurrentBeadIDOnWake, cycleAlive minus ResetCommittedAtKey, markIdleSleepPending,
+      emitSessionStrandedDiagnostic) + MarkClosed/sleep_intent-clear folds; raw mirrors kept for Step 5.
+      3.5c (`a06980fd0`): the awake bridge wakeTargets loop + `shouldProbeAttachmentForAwakeInput` read
+      off an ID-keyed `sessionInfos` index (state → `MetadataState`, the raw-verbatim landmine). All
+      three fable-reviewed (0 findings), reconciler subset green. See
+      `RECONCILER-FRONT-DOOR-REMAINING-PLAN.md` (the fable design of record) for 4/5/6e.
+- [ ] Steps 4–6 below.
 
 ## Where things stand
 

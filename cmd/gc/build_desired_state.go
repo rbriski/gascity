@@ -955,20 +955,18 @@ func buildDesiredStateWithSessionBeads(
 			if assignee != identity {
 				continue
 			}
-			if spec.Agent.SupportsExpandedSessionIdentities() {
-				// Defense in depth (ga-i1d0tr Candidate B): a bare-template Assignee
-				// is only a legitimate "this IS my identity" match for a template
-				// with exactly one possible live identity. For a template that
-				// supports expanded per-instance identities (a multi-slot pool or
-				// namepool coexisting with this named session), a bare-template
-				// Assignee means some other path wrote the wrong value — a pool
-				// slot's claim, a human running `bd update --assignee=<template>`
-				// directly, or an older client — not a genuine claim by this named
-				// session. Do not treat it as this named session's demand; the
-				// durable fix (claims under the concrete alias, ga-2xqke7) prevents
-				// the pool-claim case from producing this shape going forward.
-				continue
-			}
+			// ga-i1d0tr Candidate B: a bare-template Assignee used to be
+			// distrusted for templates supporting expanded per-instance
+			// identities (a multi-slot pool or namepool coexisting with this
+			// named session), because pool's wake-known-identity tier had no
+			// awareness of cfg.NamedSessions and could independently wake a
+			// competing pool worker for the same bare identity. That read-side
+			// ambiguity is now resolved structurally at the source
+			// (isConfiguredNamedSessionIdentity, pool_desired_state.go): pool
+			// can no longer generate wake-known-identity demand for a
+			// configured named session's own bare identity, so this bare match
+			// is trustworthy unconditionally — no per-template-shape guard
+			// needed here anymore (ga-p0u752).
 			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
 				continue
 			}

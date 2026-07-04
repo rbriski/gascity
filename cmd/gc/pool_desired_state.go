@@ -206,6 +206,15 @@ func computePoolDesiredStates(
 				})
 				continue
 			}
+			if isConfiguredNamedSessionIdentity(cfg, assignee) {
+				// A configured named session's own bare identity never
+				// generates pool demand — namedWorkReady recovers it
+				// instead (ga-i1d0tr Candidate B). Mirrors the resume
+				// tier's namedSessionBeadIDs skip above, extended to the
+				// case where no live session bead resolves the assignee
+				// at all.
+				continue
+			}
 			if !agentTemplateIdentitiesEquivalent(cfg, assignee, template) || !isKnownPoolTemplate(assignee, cfg) {
 				// Assignee set but session closed/unknown and not a configured
 				// pool template — orphaned work, not our job to respawn. The
@@ -777,4 +786,24 @@ func isKnownPoolTemplate(assignee string, cfg *config.City) bool {
 
 func isResumeLikeTier(tier string) bool {
 	return tier == "resume" || tier == "wake-known-identity"
+}
+
+// isConfiguredNamedSessionIdentity reports whether assignee names a
+// configured [[named_session]]'s own identity — checked structurally via
+// cfg.NamedSessions, with no live-session/store lookup, so it holds even
+// when the named session has no live session bead at all. A named session
+// whose backing agent is suspended is excluded: the named-session tier
+// never claims work for a suspended agent (mirrors the namedSpecs filter in
+// build_desired_state.go), so exempting it here too would orphan the bead
+// with neither side picking it up.
+func isConfiguredNamedSessionIdentity(cfg *config.City, assignee string) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || cfg == nil {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, "", assignee)
+	if !ok || spec.Agent == nil {
+		return false
+	}
+	return !spec.Agent.Suspended
 }

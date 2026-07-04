@@ -868,6 +868,81 @@ func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) 
 	}
 }
 
+// TestComputePoolDesiredStates_WakeKnownIdentitySkipsConfiguredNamedSession is
+// the ga-p0u752 fix: the wake-known-identity tier (no live session bead
+// resolves the assignee) must NOT treat a bare assignee as generic pool demand
+// when that identity is structurally a configured [[named_session]] — even
+// though the resume-tier guard (namedSessionBeadIDs, lines 194-196) never
+// fires here because there is no session bead at all. Without this fix,
+// isKnownPoolTemplate has zero awareness of cfg.NamedSessions and wakes a
+// competing pool worker for a named session's own orphaned bare self-claim
+// (ga-i1d0tr Candidate B).
+func TestComputePoolDesiredStates_WakeKnownIdentitySkipsConfiguredNamedSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("builder", "gascity", intPtr(3), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "builder", Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+	// No live session bead at all: the named session's canonical bead is
+	// reaped/closed, but the bare-identity in-progress claim survives.
+	work := []beads.Bead{
+		workBead("w1", "gascity/builder", "gascity/builder", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total pool requests = %d, want 0 (bare identity belongs to a configured named session; pool must not compete for it)", total)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentityFiresForSuspendedNamedSession
+// covers the suspension-awareness risk the architecture review flagged
+// (ga-wfcfoe): a suspended named session must not be silently exempted from
+// pool demand, or the bead would orphan with neither side picking it up.
+// isConfiguredNamedSessionIdentity is unit-tested directly below
+// (TestIsConfiguredNamedSessionIdentity) because computePoolDesiredStates'
+// own outer loop already skips a suspended agent's entire per-template pass
+// (line ~151), so this exact scenario can't be reconstructed end-to-end
+// through ComputePoolDesiredStates for the overlapping bare-identity shape
+// this bug family targets — suspending the shared agent suspends both tiers
+// uniformly by design, which is correct (not orphaning), not a gap.
+func TestIsConfiguredNamedSessionIdentity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("builder", "gascity", intPtr(3), 0),
+			{Name: "reviewer", Dir: "gascity", Suspended: true, MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "builder", Dir: "gascity", Mode: "on_demand"},
+			{Template: "reviewer", Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		assignee string
+		want     bool
+	}{
+		{"matches active named session", "gascity/builder", true},
+		{"matches named session with suspended backing agent", "gascity/reviewer", false},
+		{"no matching named session", "gascity/other", false},
+		{"empty assignee", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isConfiguredNamedSessionIdentity(cfg, tt.assignee); got != tt.want {
+				t.Errorf("isConfiguredNamedSessionIdentity(%q) = %v, want %v", tt.assignee, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestComputePoolDesiredStates_UnassignedRoutedBeadDoesNotCreateDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},

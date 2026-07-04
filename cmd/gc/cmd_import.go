@@ -124,8 +124,8 @@ func printCredentialHint(stderr io.Writer, err error) {
 		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
 		return
 	}
-	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                                        //nolint:errcheck
-	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                                //nolint:errcheck
+	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                            //nolint:errcheck
+	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                   //nolint:errcheck
 	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
 }
 
@@ -1450,11 +1450,11 @@ func defaultImportHeadCommit(cityRoot, source string) (string, error) {
 		if authErr := gitcred.ClassifyAuthError(cloneURL, inj, string(out), err); authErr != nil {
 			return "", authErr
 		}
-		return "", fmt.Errorf("resolving HEAD for %q: %w", source, err)
+		return "", fmt.Errorf("resolving HEAD for %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		return "", fmt.Errorf("resolving HEAD for %q: empty response", source)
+		return "", fmt.Errorf("resolving HEAD for %q: empty response", gitcred.RedactUserinfo(source))
 	}
 	return fields[0], nil
 }

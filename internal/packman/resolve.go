@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/gitcred"
 )
 
 // ErrNoSemverTags reports that a source has no semver tags to resolve.
@@ -70,7 +72,7 @@ func listRemoteTags(cityRoot, source string) (map[string]string, error) {
 	cloneURL := normalizeRemoteSource(source).CloneURL
 	out, err := runNetworkGit(cityRoot, cloneURL, "", "ls-remote", "--tags", cloneURL)
 	if err != nil {
-		return nil, fmt.Errorf("listing tags for %q: %w", source, err)
+		return nil, fmt.Errorf("listing tags for %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 
 	tags := make(map[string]string)

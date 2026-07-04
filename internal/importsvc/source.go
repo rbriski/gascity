@@ -248,11 +248,11 @@ func defaultHeadCommit(cityRoot, source string) (string, error) {
 		if authErr := gitcred.ClassifyAuthError(cloneURL, inj, string(out), err); authErr != nil {
 			return "", authErr
 		}
-		return "", fmt.Errorf("resolving HEAD for %q: %w", source, err)
+		return "", fmt.Errorf("resolving HEAD for %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		return "", fmt.Errorf("resolving HEAD for %q: empty response", source)
+		return "", fmt.Errorf("resolving HEAD for %q: empty response", gitcred.RedactUserinfo(source))
 	}
 	return fields[0], nil
 }

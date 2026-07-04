@@ -3299,3 +3299,19 @@ func TestDefaultImportHeadCommitIgnoresPoisonedGitEnv(t *testing.T) {
 		t.Fatalf("defaultImportHeadCommit = %q, want %q (must resolve the requested source)", got, wantHead)
 	}
 }
+
+// TestDefaultImportHeadCommitRedactsUserinfo proves the HEAD-resolve error never
+// echoes a userinfo token in the source. GIT_ALLOW_PROTOCOL=file fails the https
+// probe instantly (offline) so the resolve error path runs without a network hit.
+func TestDefaultImportHeadCommitRedactsUserinfo(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+	_, err := defaultImportHeadCommit("", "https://user:ghp_secret@github.com/example/repo")
+	if err == nil {
+		t.Fatalf("expected the offline https probe to fail")
+	}
+	if strings.Contains(err.Error(), "ghp_secret") {
+		t.Fatalf("resolve error leaked the userinfo token: %v", err)
+	}
+}

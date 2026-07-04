@@ -1,6 +1,10 @@
 package packman
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestResolveVersionLatestMatchingConstraint(t *testing.T) {
 	prev := runNetworkGit
@@ -41,6 +45,22 @@ func TestResolveVersionSupportsSHA(t *testing.T) {
 	}
 	if got.Version != "sha:deadbeef" || got.Commit != "deadbeef" {
 		t.Fatalf("ResolveVersion = %#v", got)
+	}
+}
+
+func TestResolveVersionRedactsUserinfoInError(t *testing.T) {
+	prev := runNetworkGit
+	runNetworkGit = func(_, _, _ string, _ ...string) (string, error) {
+		return "", errors.New("git failed")
+	}
+	t.Cleanup(func() { runNetworkGit = prev })
+
+	_, err := ResolveVersion("", "https://user:ghp_secret@github.com/example/repo", "^1.0")
+	if err == nil {
+		t.Fatalf("expected an error from the failing ls-remote")
+	}
+	if strings.Contains(err.Error(), "ghp_secret") {
+		t.Fatalf("error leaked the userinfo token: %v", err)
 	}
 }
 

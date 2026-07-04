@@ -362,7 +362,9 @@ func namedSessionStatusForCity(
 	if err != nil {
 		return "lookup error: " + err.Error()
 	}
-	if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+	// Read the raw state through the session.Info codec (verbatim MetadataState)
+	// rather than cracking bead.Metadata inline (class-store leak closure).
+	if state := strings.TrimSpace(session.InfoFromPersistedBead(bead).MetadataState); state != "" {
 		return state
 	}
 	return "materialized"
@@ -408,11 +410,11 @@ func countCitySessionsFromSnapshot(snapshot *sessionBeadSnapshot) StatusSummaryJ
 	if snapshot == nil {
 		return summary
 	}
-	for _, bead := range snapshot.Open() {
-		if bead.Status == "closed" || !session.IsSessionBeadOrRepairable(bead) {
+	for _, info := range snapshot.OpenInfos() {
+		if info.Closed || !session.IsSessionBeadOrRepairableInfo(info) {
 			continue
 		}
-		switch sessionMetadataState(bead) {
+		switch sessionMetadataStateInfo(info) {
 		case string(session.StateActive):
 			summary.ActiveSessions++
 		case string(session.StateSuspended):

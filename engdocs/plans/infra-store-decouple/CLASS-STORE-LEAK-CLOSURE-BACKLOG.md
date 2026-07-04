@@ -106,6 +106,11 @@ Enforcement mechanism (already in place, extend per class):
   as it goes raw-free. Start with read-only status/CLI files (lowest blast radius).
 - **Acceptance:** every non-raw-by-design session file guard-listed; the raw-by-design
   set is the documented census. **Size: L (partly done).**
+- **Progress:** `city_status_snapshot.go` closed — its two raw session reads
+  (`bead.Metadata["state"]`, `snapshot.Open()`) now go through
+  `session.InfoFromPersistedBead(...).MetadataState` / `OpenInfos()` +
+  `sessionMetadataStateInfo` / `IsSessionBeadOrRepairableInfo` (proven mirrors);
+  added to both `snapshotInfoOnlyFiles` and `metadataInfoOnlyFiles`.
 
 ### 5. Convoy — *no typed interface* — **weak seal**
 - **Interface:** functions over raw `beads.Store`; `ConvoyFields` unexported;

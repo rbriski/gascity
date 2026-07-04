@@ -84,6 +84,7 @@ var snapshotInfoOnlyFiles = []string{
 	"template_resolve.go",
 	"session_name_lookup.go",
 	"cmd_citystatus.go",
+	"city_status_snapshot.go",
 	"session_reconciler_trace_cycle.go",
 	"providers.go",
 	"nudge_dispatcher.go",
@@ -157,6 +158,7 @@ var metadataInfoOnlyFiles = []string{
 	"compute_awake_bridge.go",
 	"session_progress.go",
 	"session_circuit_breaker.go",
+	"city_status_snapshot.go",
 }
 
 // forbiddenRawBeadMetadata is the raw bead-metadata crack this guard forbids.

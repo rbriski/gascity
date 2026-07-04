@@ -3777,6 +3777,74 @@ func TestProcessWorkflowFinalizeLeavesCrossStoreSourceBeadOpenOnFailure(t *testi
 	}
 }
 
+func TestProcessWorkflowFinalizeReopensInProgressSourceOnFailure(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+
+	// The source was flipped to in_progress at cook launch (new design: no
+	// attach block). A failed workflow must reopen it to open + gc.outcome=fail
+	// so it is honestly "available again", not stranded in_progress.
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#9",
+		Type:  "task",
+	})
+	inProgress := "in_progress"
+	if err := store.Update(source.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("flip source in_progress: %v", err)
+	}
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   source.ID,
+		},
+	})
+
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "Clean up worktree",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome": "fail",
+		},
+	})
+
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	sourceAfter, err := store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if sourceAfter.Status != "open" {
+		t.Fatalf("source status = %q, want open (reopened on failure)", sourceAfter.Status)
+	}
+	if got := sourceAfter.Metadata["gc.outcome"]; got != "fail" {
+		t.Errorf("source gc.outcome = %q, want fail", got)
+	}
+}
+
 func TestProcessWorkflowFinalizeKeepsFinalizerOpenWhenSourceResolverFails(t *testing.T) {
 	t.Parallel()
 

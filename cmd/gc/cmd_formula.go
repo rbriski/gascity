@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -686,7 +687,7 @@ conflicting live workflow from the same source is an error.`,
 						}
 						if existing != nil {
 							result = existing
-							return ensureFormulaCookAttachDep(store, attach, result.RootID)
+							return markCookSourceInProgress(store, attach)
 						}
 						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
 							return err
@@ -720,7 +721,7 @@ conflicting live workflow from the same source is an error.`,
 							}
 							return err
 						}
-						return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						return markCookSourceInProgress(store, attach)
 					})
 					if err != nil {
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -889,21 +890,36 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
-func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
-	if store == nil || strings.TrimSpace(attachBeadID) == "" || strings.TrimSpace(rootID) == "" {
+// markCookSourceInProgress flips a graph.v2 cook --attach source bead to
+// in_progress for honest visibility when the formula launches. It REPLACES the
+// old cross-leg attach block (source -> blocks -> gcg-root): a molecule's steps,
+// not the source, are the claimable unit of work, and a worker's hook only ever
+// returns beads assigned to its own identity, so the sole worker-claim guard is
+// the source staying UNASSIGNED — which this never violates (it only sets
+// Status, never Assignee). Only a not-yet-started status is promoted, so the
+// flip is idempotent (a re-cook of an already in_progress source is a no-op).
+// The workflow_id / gc.source_bead_id linkage is left to the sling's
+// doStartGraphWorkflow; on failure the source is reopened by finalize.
+func markCookSourceInProgress(store beads.Store, attachBeadID string) error {
+	attachBeadID = strings.TrimSpace(attachBeadID)
+	if store == nil || attachBeadID == "" {
 		return nil
 	}
-	deps, err := store.DepList(attachBeadID, "down")
+	source, err := store.Get(attachBeadID)
 	if err != nil {
-		return fmt.Errorf("checking attach dependency %s -> %s: %w", attachBeadID, rootID, err)
+		return fmt.Errorf("loading cook attach source %s: %w", attachBeadID, err)
 	}
-	for _, dep := range deps {
-		if dep.IssueID == attachBeadID && dep.DependsOnID == rootID && dep.Type == "blocks" {
-			return nil
-		}
+	if strings.TrimSpace(source.Assignee) != "" {
+		// Never touch an assigned bead: it is being worked directly, and the
+		// no-assignee invariant is what keeps a worker off a formula source.
+		return nil
 	}
-	if err := store.DepAdd(attachBeadID, rootID, "blocks"); err != nil {
-		return fmt.Errorf("wiring attach dependency %s -> %s: %w", attachBeadID, rootID, err)
+	if !sling.ShouldPromoteWorkflowLaunchStatus(source.Status) {
+		return nil
+	}
+	inProgress := "in_progress"
+	if err := store.Update(attachBeadID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		return fmt.Errorf("marking cook attach source %s in_progress: %w", attachBeadID, err)
 	}
 	return nil
 }

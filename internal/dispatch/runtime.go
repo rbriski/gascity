@@ -732,8 +732,10 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// On success, propagate the closure across the gc.source_bead_id chain so
 	// parent source beads in other stores (e.g. the city-scope "Adopt PR"
 	// request that spawned a rig-scope mol-adopt-pr-v2 workflow) don't accumulate
-	// as orphans. Failures intentionally leave parent sources open so a human
-	// can investigate via list - the bead IS the audit handle.
+	// as orphans. On failure, reopen the chain: the source was flipped to
+	// in_progress at cook launch (replacing the old attach block), so a failed
+	// workflow must return it to open + gc.outcome=fail — an honest "available
+	// again" marker a human can act on — rather than strand it in_progress.
 	if outcome == "pass" {
 		if err := preflightSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: preflighting source bead chain: %w", rootID, err))
@@ -760,6 +762,10 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))
 		}
+	} else {
+		if err := reopenSourceBeadChain(store, rootID, opts); err != nil {
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: reopening source bead chain: %w", rootID, err))
+		}
 	}
 	if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err))
@@ -780,8 +786,20 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
 }
 
+// sourceChainAction selects what walkSourceBeadChain does to each parent source
+// bead it reaches: nothing (preflight), close it (workflow passed), or reopen it
+// (workflow failed — undo the cook-launch in_progress flip so the source is
+// honestly "available again" rather than stranded in_progress).
+type sourceChainAction int
+
+const (
+	sourceChainPreflight sourceChainAction = iota
+	sourceChainClose
+	sourceChainReopen
+)
+
 func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
-	return walkSourceBeadChain(rootStore, rootID, opts, false)
+	return walkSourceBeadChain(rootStore, rootID, opts, sourceChainPreflight)
 }
 
 // closeSourceBeadChain walks gc.source_bead_id / gc.source_store_ref upward
@@ -792,10 +810,21 @@ func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts Process
 // open for retry. This is what makes "Adopt PR" city-scope source beads
 // disappear from the human-visible queue once the rig-scope workflow merges.
 func closeSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
-	return walkSourceBeadChain(rootStore, rootID, opts, true)
+	return walkSourceBeadChain(rootStore, rootID, opts, sourceChainClose)
 }
 
-func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions, mutate bool) error {
+// reopenSourceBeadChain is the failure-path mirror of closeSourceBeadChain: it
+// walks the same source chain and reopens every parent source bead that is still
+// in_progress (the state markCookSourceInProgress left it in at cook launch),
+// stamping gc.outcome=fail. It stops at any source that still has a live child
+// workflow, so a source owned by another running workflow is never reopened.
+// Replaces today's free "root-close releases the attach block" recovery now that
+// the block is gone.
+func reopenSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
+	return walkSourceBeadChain(rootStore, rootID, opts, sourceChainReopen)
+}
+
+func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions, action sourceChainAction) error {
 	currentStore := rootStore
 	currentID := rootID
 	currentRef := ""
@@ -850,11 +879,11 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 		visited[key] = true
 
 		var stopWalk bool
-		loadAndClose := func() error {
+		applySourceMutation := func() error {
 			loaded, err := nextStore.Get(nextID)
 			if err != nil {
 				if errors.Is(err, beads.ErrNotFound) {
-					opts.tracef("close-source-chain root=%s stop reason=deleted_parent source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+					opts.tracef("source-chain root=%s stop reason=deleted_parent source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 					stopWalk = true
 					return nil
 				}
@@ -865,31 +894,45 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				return fmt.Errorf("listing live workflows for source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
 			}
 			if len(liveRoots) > 0 {
-				opts.tracef("close-source-chain root=%s stop reason=live_child_workflow source=%s ref=%s live_roots=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef), sourceChainRootIDs(liveRoots))
+				opts.tracef("source-chain root=%s stop reason=live_child_workflow source=%s ref=%s live_roots=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef), sourceChainRootIDs(liveRoots))
 				stopWalk = true
 				return nil
 			}
-			if !mutate {
+			switch action {
+			case sourceChainPreflight:
 				return nil
+			case sourceChainClose:
+				if err := propagateSourceBeadTerminalMetadata(nextStore, loaded.ID, current.Metadata); err != nil {
+					return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+				}
+				if loaded.Status == "closed" {
+					opts.tracef("source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+					return nil
+				}
+				if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
+					return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+				}
+				opts.tracef("source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
+			case sourceChainReopen:
+				// Only undo the cook-launch flip: reopen a source still held at
+				// in_progress. An already-open/closed source, or one a human
+				// re-took by assigning, is left untouched.
+				if loaded.Status != "in_progress" {
+					opts.tracef("source-chain root=%s skip reason=not_in_progress source=%s ref=%s status=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef), loaded.Status)
+					return nil
+				}
+				if err := reopenSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
+					return fmt.Errorf("reopening source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+				}
+				opts.tracef("source-chain root=%s reopened source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 			}
-			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded.ID, current.Metadata); err != nil {
-				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
-			}
-			if loaded.Status == "closed" {
-				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
-				return nil
-			}
-			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
-				return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
-			}
-			opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
 			return nil
 		}
-		if mutate && opts.SourceWorkflowLock != nil {
-			if err := opts.SourceWorkflowLock(effectiveRef, nextID, loadAndClose); err != nil {
+		if action != sourceChainPreflight && opts.SourceWorkflowLock != nil {
+			if err := opts.SourceWorkflowLock(effectiveRef, nextID, applySourceMutation); err != nil {
 				return fmt.Errorf("locking source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
 			}
-		} else if err := loadAndClose(); err != nil {
+		} else if err := applySourceMutation(); err != nil {
 			return err
 		}
 		if stopWalk {
@@ -1077,6 +1120,19 @@ func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error 
 	opts := beads.UpdateOpts{Status: &status}
 	if strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == "" {
 		opts.Metadata = map[string]string{beadmeta.OutcomeMetadataKey: "pass"}
+	}
+	return store.Update(bead.ID, opts)
+}
+
+// reopenSourceBeadPreservingOutcome is the failure mirror of
+// closeSourceBeadPreservingOutcome: it returns a source bead to open (so it is
+// honestly available again) and stamps gc.outcome=fail without clobbering an
+// outcome the source already carries.
+func reopenSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error {
+	status := "open"
+	opts := beads.UpdateOpts{Status: &status}
+	if strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == "" {
+		opts.Metadata = map[string]string{beadmeta.OutcomeMetadataKey: "fail"}
 	}
 	return store.Update(bead.ID, opts)
 }

@@ -736,6 +736,55 @@ func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
 	}
 }
 
+func TestMarkCookSourceInProgress(t *testing.T) {
+	t.Run("promotes an open source without assigning it", func(t *testing.T) {
+		store := beads.NewMemStore()
+		src, err := store.Create(beads.Bead{Title: "src", Type: "task"})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := markCookSourceInProgress(store, src.ID); err != nil {
+			t.Fatalf("markCookSourceInProgress: %v", err)
+		}
+		got, _ := store.Get(src.ID)
+		if got.Status != "in_progress" {
+			t.Fatalf("status = %q, want in_progress", got.Status)
+		}
+		if got.Assignee != "" {
+			t.Fatalf("assignee = %q, want empty (must never assign the source)", got.Assignee)
+		}
+	})
+	t.Run("is idempotent on an already in_progress source", func(t *testing.T) {
+		store := beads.NewMemStore()
+		src, _ := store.Create(beads.Bead{Title: "src", Type: "task"})
+		inProgress := "in_progress"
+		if err := store.Update(src.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatalf("pre-set in_progress: %v", err)
+		}
+		if err := markCookSourceInProgress(store, src.ID); err != nil {
+			t.Fatalf("markCookSourceInProgress: %v", err)
+		}
+		got, _ := store.Get(src.ID)
+		if got.Status != "in_progress" {
+			t.Fatalf("status = %q, want in_progress (idempotent)", got.Status)
+		}
+	})
+	t.Run("never touches an assigned bead", func(t *testing.T) {
+		store := beads.NewMemStore()
+		src, _ := store.Create(beads.Bead{Title: "src", Type: "task", Assignee: "worker-1"})
+		if err := markCookSourceInProgress(store, src.ID); err != nil {
+			t.Fatalf("markCookSourceInProgress: %v", err)
+		}
+		got, _ := store.Get(src.ID)
+		if got.Status == "in_progress" {
+			t.Fatalf("status = %q, want unchanged (assigned bead must not be flipped)", got.Status)
+		}
+		if got.Assignee != "worker-1" {
+			t.Fatalf("assignee = %q, want worker-1 (unchanged)", got.Assignee)
+		}
+	})
+}
+
 func TestFormulaCookAttachGraphV2CreatesFreshRootForBareBeadTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	t.Setenv("GC_HOME", t.TempDir())
@@ -809,27 +858,30 @@ title = "Do work for {{convoy_id}}"
 			t.Fatalf("root %s ParentID = %q, want standalone graph.v2 root", root.ID, root.ParentID)
 		}
 	}
+	// The cook attach no longer writes a cross-leg blocking dep on the source;
+	// instead it flips the source to in_progress for honest visibility (the
+	// worker-claim guard is the source staying unassigned, not the block).
 	deps, err := store.DepList(source.ID, "down")
 	if err != nil {
 		t.Fatalf("DepList(source): %v", err)
 	}
-	blockedRoots := map[string]bool{}
 	for _, dep := range deps {
 		if dep.IssueID == source.ID && dep.Type == "blocks" {
-			blockedRoots[dep.DependsOnID] = true
-		}
-	}
-	for _, root := range roots {
-		if !blockedRoots[root.ID] {
-			t.Fatalf("source deps = %+v, want blocks dep to graph root %s", deps, root.ID)
+			t.Fatalf("source deps = %+v, want NO attach block (source is flipped to in_progress instead)", deps)
 		}
 	}
 	sourceAfter, err := store.Get(source.ID)
 	if err != nil {
 		t.Fatalf("get source: %v", err)
 	}
+	if sourceAfter.Status != "in_progress" {
+		t.Fatalf("source status = %q, want in_progress (cook visibility flip)", sourceAfter.Status)
+	}
+	if strings.TrimSpace(sourceAfter.Assignee) != "" {
+		t.Fatalf("source assignee = %q, want empty (never assign the source)", sourceAfter.Assignee)
+	}
 	if sourceAfter.Metadata["workflow_id"] != "" || sourceAfter.Metadata["molecule_id"] != "" {
-		t.Fatalf("source metadata = %#v, want graph.v2 cook attach to leave source unmodified", sourceAfter.Metadata)
+		t.Fatalf("source metadata = %#v, want cook attach to leave source workflow linkage unmodified", sourceAfter.Metadata)
 	}
 }
 

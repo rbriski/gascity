@@ -87,7 +87,19 @@ func rejectSourceUserinfo(source string) error {
 		return nil
 	}
 	u, err := url.Parse(source)
-	if err != nil || u.User == nil {
+	if err != nil {
+		// A malformed userinfo (invalid %-escape, raw space/^/|) makes url.Parse
+		// fail, but the raw token still would leak. Fall back to a string scan so
+		// a password-bearing source is still rejected. A username-only malformed
+		// source is left to the normal path (nothing to leak beyond the username,
+		// which the git seam already redacts).
+		_, pass, ok := splitURLUserinfo(source)
+		if !ok || pass == "" {
+			return nil
+		}
+		return fmt.Errorf("credentials embedded in the source URL would leak into city.toml, packs.lock, the shared repo cache's .git/config, and error output; remove them and register a credential instead: gc import credential add <host> (source: %s)", gitcred.RedactUserinfo(source))
+	}
+	if u.User == nil {
 		return nil
 	}
 	redacted := gitcred.RedactUserinfo(source)
@@ -95,6 +107,31 @@ func rejectSourceUserinfo(source string) error {
 		return fmt.Errorf("credentials embedded in the source URL would leak into city.toml, packs.lock, the shared repo cache's .git/config, and error output; remove them and register a credential instead: gc import credential add <host> (source: %s)", redacted)
 	}
 	return fmt.Errorf("a username embedded in the source URL would leak into city.toml, packs.lock, the shared repo cache's .git/config, and error output; remove it and register a credential instead: gc import credential add <host> (source: %s)", redacted)
+}
+
+// splitURLUserinfo extracts the userinfo of a URL by string scan, for sources
+// url.Parse rejects. It returns the username, the password (empty if none), and
+// whether an authority "@" was found. The userinfo is the authority segment
+// before the first "/" of the path and before the "@"; a ":" splits user from
+// password.
+func splitURLUserinfo(source string) (user, password string, ok bool) {
+	sep := strings.Index(source, "://")
+	if sep < 0 {
+		return "", "", false
+	}
+	rest := source[sep+3:]
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	at := strings.LastIndexByte(rest, '@')
+	if at < 0 {
+		return "", "", false
+	}
+	userinfo := rest[:at]
+	if i := strings.IndexByte(userinfo, ':'); i >= 0 {
+		return userinfo[:i], userinfo[i+1:], true
+	}
+	return userinfo, "", true
 }
 
 func resolveImportAddPath(cityPath, source string) (string, error) {

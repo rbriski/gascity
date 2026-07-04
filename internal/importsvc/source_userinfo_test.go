@@ -18,6 +18,9 @@ func TestRejectSourceUserinfo(t *testing.T) {
 		{"scp form", "git@github.com:org/repo.git", false},
 		{"ssh url with user", "ssh://git@github.com/org/repo", false},
 		{"shorthand", "github.com/org/repo", false},
+		// Malformed userinfo (invalid %-escape) makes url.Parse fail; the string
+		// fallback must still reject a password-bearing source and never leak it.
+		{"https malformed userinfo with password", "https://user:ghp_x%SS@github.com/org/repo", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -29,10 +32,12 @@ func TestRejectSourceUserinfo(t *testing.T) {
 				t.Fatalf("unexpected rejection for %q: %v", tc.source, err)
 			}
 			if err != nil {
-				if strings.Contains(err.Error(), "ghp_secret") || strings.Contains(err.Error(), ":pass@") {
+				msg := err.Error()
+				if strings.Contains(msg, "ghp_secret") || strings.Contains(msg, ":pass@") ||
+					strings.Contains(msg, "ghp_x%SS") {
 					t.Fatalf("error leaked the secret: %v", err)
 				}
-				if !strings.Contains(err.Error(), "***@") {
+				if !strings.Contains(msg, "***@") {
 					t.Fatalf("error should carry a redacted source, got %v", err)
 				}
 			}

@@ -164,6 +164,7 @@ type Info struct {
 	TriggerBeadID       string // gc.trigger_bead_id (raw)
 	TriggerBeadStoreRef string // gc.trigger_bead_store_ref (raw)
 	BrainParentSID      string // gc.brain_parent_sid (raw)
+	Pack                string // gc.pack (raw); resolveTemplateForSessionBead threads it into GC_PACKER_PACK
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//

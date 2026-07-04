@@ -161,6 +161,30 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	}
 }
 
+// newSessionBeadSnapshotFromInfos builds a snapshot from a typed session.Info
+// feed instead of raw beads. It populates ONLY openInfos — the non-closed
+// entries (filtered by info.Closed) in the caller's order. The raw
+// open []beads.Bead slice and the agent/template index maps are left nil
+// because this constructor backs resolvePreservedConfiguredNamedSessionTemplate's
+// feed, whose sole reachable snapshot read is OpenInfos(); the beadNames
+// pre-seed short-circuits FindSessionNameByTemplate, so the index maps are never
+// consulted on that path. Do NOT call Open(), the raw Find* methods, or the
+// Find*ByTemplate index lookups on a snapshot built this way — they return
+// empty. This is the front-door replacement for newSessionBeadSnapshot(ordered)
+// at the reconciler's mid-tick preserve call: feeding the live infoByID rather
+// than the raw working set keeps membership tracking mid-tick closes once the
+// raw Status lockstep is dropped.
+func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
+	openInfos := make([]sessionpkg.Info, 0, len(infos))
+	for _, in := range infos {
+		if in.Closed {
+			continue
+		}
+		openInfos = append(openInfos, in)
+	}
+	return &sessionBeadSnapshot{openInfos: openInfos}
+}
+
 // replaceOpenLocked replaces the snapshot's open set and rebuilt lookup maps
 // from `open`. Callers must hold s.mu.
 func (s *sessionBeadSnapshot) replaceOpenLocked(open []beads.Bead) {

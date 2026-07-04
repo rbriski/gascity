@@ -3045,23 +3045,36 @@ func resolveTemplateForSessionBead(
 	fpExtra map[string]string,
 	sessionBead beads.Bead,
 ) (TemplateParams, error) {
+	return resolveTemplateForSessionBeadInfo(bp, cfgAgent, qualifiedName, fpExtra, session.InfoFromPersistedBead(sessionBead))
+}
+
+// resolveTemplateForSessionBeadInfo is the typed core of resolveTemplateForSessionBead.
+// It reads only session_name, the two trigger keys, and pack — all verbatim raw
+// mirrors on session.Info — so it is byte-identical to the raw-bead form it backs.
+func resolveTemplateForSessionBeadInfo(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	qualifiedName string,
+	fpExtra map[string]string,
+	info session.Info,
+) (TemplateParams, error) {
 	local := *bp
-	local.beadNames = map[string]string{qualifiedName: sessionBead.Metadata["session_name"]}
+	local.beadNames = map[string]string{qualifiedName: info.SessionNameMetadata}
 	tp, err := resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
 	if err != nil {
 		return tp, err
 	}
-	if triggerID := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey]); triggerID != "" {
+	if triggerID := strings.TrimSpace(info.TriggerBeadID); triggerID != "" {
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
 		}
 		tp.Env["GC_TRIGGER_BEAD_ID"] = triggerID
 		tp.Env["GC_TRIGGER_WORK_BEAD_ID"] = triggerID
-		if storeRef := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); storeRef != "" {
+		if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
 			tp.Env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
 			tp.Env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
 		}
-		if pack := strings.TrimSpace(sessionBead.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+		if pack := strings.TrimSpace(info.Pack); pack != "" {
 			tp.Env["GC_PACKER_PACK"] = pack
 		}
 	}

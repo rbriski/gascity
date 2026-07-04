@@ -1584,7 +1584,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				rlBatchNamed map[string]string
 			)
 			if preserveNamed {
-				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
+				// Feed the preserve template resolver from the live mid-tick
+				// infoByID snapshot in `ordered` order (front-door Step 4),
+				// not the raw `ordered` working set. Byte-identical today
+				// (every pre-call close still writes raw Status in lockstep,
+				// so membership matches) and forward-correct once that lockstep
+				// drops. The only reachable snapshot read is OpenInfos().
+				preservedInfos := make([]sessionpkg.Info, len(ordered))
+				for k := range ordered {
+					preservedInfos[k] = infoByID[ordered[k].ID]
+				}
+				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
 				if preserveErr == nil {
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
@@ -3406,8 +3416,8 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	openSessions []beads.Bead,
-	session beads.Bead,
+	openInfos []sessionpkg.Info,
+	info sessionpkg.Info,
 	clk clock.Clock,
 	stderr io.Writer,
 ) (TemplateParams, error) {
@@ -3417,15 +3427,15 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	if cityName == "" && cfg != nil {
 		cityName = cfg.EffectiveCityName()
 	}
-	identity := namedSessionIdentity(session)
+	identity := namedSessionIdentityInfo(info)
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok || spec.Agent == nil {
 		return TemplateParams{}, fmt.Errorf("configured named session %q not found", identity)
 	}
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, clk.Now().UTC(), store, stderr)
-	bp.sessionBeads = newSessionBeadSnapshot(openSessions)
+	bp.sessionBeads = newSessionBeadSnapshotFromInfos(openInfos)
 	fpExtra := buildFingerprintExtra(spec.Agent)
-	tp, err := resolveTemplateForSessionBead(bp, spec.Agent, identity, fpExtra, session)
+	tp, err := resolveTemplateForSessionBeadInfo(bp, spec.Agent, identity, fpExtra, info)
 	if err != nil {
 		return TemplateParams{}, err
 	}

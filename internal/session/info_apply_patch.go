@@ -116,6 +116,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.TriggerBeadStoreRef = v
 		case beadmeta.BrainParentSIDMetadataKey:
 			info.BrainParentSID = v
+		case beadmeta.PackMetadataKey:
+			info.Pack = v
 		case "pending_create_claim":
 			info.PendingCreateClaim = strings.TrimSpace(v) == "true"
 			info.PendingCreateClaimMetadata = v

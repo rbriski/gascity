@@ -5619,6 +5619,46 @@ func TestReconcileSessionBeads_PreservedConfiguredNamedRateLimitRunsBeforeHeal(t
 	}
 }
 
+// TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicateExcluded
+// pins the one behavior the Step-4 infoByID feed can touch: the GC_SESSION_ID
+// resolution scan (template_resolve.go Step 7) picks the FIRST OpenInfos entry
+// whose session_name matches. A store-only-closed twin (info.Closed=true but a
+// live raw Status) sharing the preserved session's session_name, placed EARLIER
+// in the feed, must be filtered out by newSessionBeadSnapshotFromInfos so the
+// live preserved bead — not the closed twin — resolves GC_SESSION_ID.
+func TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicateExcluded(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+	})
+	sessionInfo := sessionpkg.InfoFromPersistedBead(session)
+
+	// A store-only-closed twin sharing the same session_name, earlier in the
+	// feed. It would win the first-match GC_SESSION_ID scan if not filtered.
+	closedTwin := sessionInfo
+	closedTwin.ID = "closed-twin"
+	closedTwin.Closed = true
+
+	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{closedTwin, sessionInfo}, sessionInfo, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	if got := preservedTP.Env["GC_SESSION_ID"]; got != session.ID {
+		t.Fatalf("GC_SESSION_ID = %q, want the live preserved bead ID %q (store-only-closed twin must be filtered from the feed)", got, session.ID)
+	}
+}
+
 func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -5637,7 +5677,8 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "on_demand",
 	})
-	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []beads.Bead{session}, session, env.clk, io.Discard)
+	sessionInfo := sessionpkg.InfoFromPersistedBead(session)
+	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}

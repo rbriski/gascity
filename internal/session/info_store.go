@@ -82,6 +82,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TriggerBeadID:       b.Metadata[beadmeta.TriggerBeadIDMetadataKey],
 		TriggerBeadStoreRef: b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey],
 		BrainParentSID:      b.Metadata[beadmeta.BrainParentSIDMetadataKey],
+		Pack:                b.Metadata[beadmeta.PackMetadataKey],
 
 		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
 		// kept verbatim so the reconciler classifiers read the same value the

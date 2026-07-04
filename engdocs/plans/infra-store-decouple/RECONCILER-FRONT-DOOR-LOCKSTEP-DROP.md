@@ -157,13 +157,33 @@ worktree `.claude/worktrees/object-front-doors`, **HEAD `97fd6fbc6`** (re-grep
       The two order-sensitive rebuilds and the pool count no longer touch `ordered`. The surviving
       `session.Metadata[` sites are the raw-by-design classifier helper reads + the 5 start/emit-once-coupled
       survivor mirrors (S1–S5), all documented above.
-- [ ] **Step 6e remains** — the CI guard (`frontdoor_di_guard_test.go`). **Caveat sharpened by 5c/5e:** the
-      guard cannot blanket-forbid `session.Metadata[` in `session_reconciler.go` — the raw-by-design classifier
-      helpers (`isDrainAckStopPending`, `pendingCreateStartInFlight`, …) legitimately READ it, and the 5 survivor
-      mirrors (S1–S5) legitimately WRITE it. Scope the needle (e.g. a read-only needle, or exclude the survivor
-      writes) or relocate per the FINISH-doc caveat; add `compute_awake_bridge.go` (raw-free) + `session_reconcile.go`
-      if raw-free. Do NOT add the raw-by-design files. Revert-canary. `ordered` physical deletion stays out of scope
-      (start-execution consumer #7).
+- [x] **Step 6e — the CI guard** (`frontdoor_di_guard_test.go`). Added `TestMetadataInfoOnlyFilesStayOnInfoSnapshot`
+      with `metadataInfoOnlyFiles = [compute_awake_bridge.go, session_progress.go, session_circuit_breaker.go]`
+      and needle `".Metadata["` (matches every receiver spelling — `session.Metadata[`, `target.session.Metadata[`,
+      `b.Metadata[`, `bead.Metadata[`). The three listed files are the Info/CircuitState-only decision-path helpers
+      that crack ZERO bead metadata inline, so the broad needle is exact for them and catches the dominant
+      `b.Metadata[` leak spelling a `session.`-anchored needle would miss. **Scoping reality (sharpened by the
+      5c/5e census):** a file-level substring guard can protect ONLY files that crack NO bead metadata inline.
+      `session_reconciler.go` (54 hits) and `session_reconcile.go` (50 hits) are intentionally EXCLUDED and
+      un-guardable by substring — they retain a bounded, documented raw-by-design census (the `session beads.Bead`
+      classifier helpers that are the oracle-verified siblings of the Info classifiers, plus the S1–S5 survivor
+      mirrors); a needle cannot tell those from a new leak, so their protection is the in-code census comments +
+      this LOCKSTEP-DROP census. `session_sleep.go`/`session_wake.go`/`session_lifecycle_parallel.go`/
+      `session_bead_snapshot.go` stay off (raw-by-design). Reworded the one `compute_awake_bridge.go` comment that
+      contained the literal so the needle is exact. **Revert-canary passed** (both the `session.` and `b.Metadata[`
+      spellings fail the guard; removing them passes). **A fable 2-lens review of the first cut caught 3 real
+      coverage gaps** — `session_progress.go` (MEDIUM) and `session_circuit_breaker.go` (LOW) were wrongly excluded,
+      and the original `session.Metadata[` needle was variable-name-blind (LOW) — all three folded in before commit.
+      gofmt/vet clean; guard + sibling front-door guards + classifier oracle green. `ordered` physical deletion
+      stays out of scope (start-execution consumer #7).
+
+**The reconciler front-door lockstep drop is COMPLETE (Steps 1–6e).** Every raw `session.Metadata[…]` decision
+read on the reconciler path is off the typed `session.Info` snapshot; the read-dead lockstep mirror WRITES are
+deleted; the surviving raw `session.Metadata[` in the reconciler files is the documented raw-by-design census
+(classifier oracle siblings + S1–S5 start/emit-once-coupled survivor mirrors); the dead drain fallback params are
+gone; `ordered` is demoted to the load-time slice; and the `compute_awake_bridge.go` decision-path conversion is
+CI-guarded. Remaining beyond this front door: the cross-class WORK/assignment split, the tier fix, and the
+owner-gated cold migration (see below).
 
 ## Where things stand
 

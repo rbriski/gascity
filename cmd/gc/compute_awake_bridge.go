@@ -201,9 +201,9 @@ func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *conf
 		return false
 	}
 	// MetadataState is the RAW state metadata (verbatim), matching the former
-	// target.session.Metadata["state"] read — NOT the normalized, closed-blanked
-	// Info.State, which would flip the probe verdict for a closed bead whose raw
-	// state is still "active".
+	// raw state field read off the session bead — NOT the normalized,
+	// closed-blanked Info.State, which would flip the probe verdict for a closed
+	// bead whose raw state is still "active".
 	state := info.MetadataState
 	if state != string(session.StateActive) && state != string(session.StateAwake) {
 		return true

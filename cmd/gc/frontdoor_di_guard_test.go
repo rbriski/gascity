@@ -126,3 +126,72 @@ func TestSnapshotInfoOnlyFilesStayOnInfoAccessors(t *testing.T) {
 		}
 	}
 }
+
+// metadataInfoOnlyFiles are the reconciler decision-path files whose session
+// beads are read AND written exclusively through the typed session.Info snapshot
+// (infoByID) / session.CircuitState — never by cracking bead metadata off a raw
+// bead. This is the write+read half of the reconciler front-door boundary
+// completed by the lockstep drop
+// (engdocs/plans/infra-store-decouple/RECONCILER-FRONT-DOOR-LOCKSTEP-DROP.md):
+// once a file routes every session field through the typed projection, a
+// reappearing `.Metadata[...]` bead crack is a regression to raw-bead reads.
+//
+// Only files that crack NO bead metadata inline (session OR work) belong here —
+// each listed file currently contains zero `.Metadata[` of any receiver spelling,
+// so the guard forbids the whole family (session.Metadata[, target.session.Metadata[,
+// b.Metadata[, bead.Metadata[) with no false positive.
+//
+// session_reconciler.go and session_reconcile.go are intentionally ABSENT and
+// CANNOT be added with a file-level substring guard: they retain a bounded,
+// DOCUMENTED raw-by-design census — the raw classifier helpers that take a
+// `session beads.Bead` parameter (the oracle-verified siblings of the typed Info
+// classifiers, kept for TestSessionClassifierInfoEquivalence and boundary
+// projections) plus the start-execution / cross-tick emit-once coupled survivor
+// mirrors (S1-S5 in the lockstep-drop census) — which a substring needle cannot
+// distinguish from a new decision-path leak. Their protection is the in-code
+// census comments plus the LOCKSTEP-DROP census. session_sleep.go /
+// session_wake.go / session_lifecycle_parallel.go / session_bead_snapshot.go are
+// likewise raw-by-design (sleep-policy helpers, start execution, the bead
+// constructor) and stay off this list.
+var metadataInfoOnlyFiles = []string{
+	"compute_awake_bridge.go",
+	"session_progress.go",
+	"session_circuit_breaker.go",
+}
+
+// forbiddenRawBeadMetadata is the raw bead-metadata crack this guard forbids.
+// The needle `.Metadata[` matches every receiver spelling (session.Metadata[,
+// target.session.Metadata[, b.Metadata[, bead.Metadata[, item.bead.Metadata[).
+// The listed files are Info/CircuitState-only decision helpers that read no bead
+// metadata at all, so the broad needle is exact for them and catches the dominant
+// `b.Metadata[` / `bead.Metadata[` leak spelling that a `session.`-anchored needle
+// would miss.
+var forbiddenRawBeadMetadata = []string{
+	".Metadata[",
+}
+
+// TestMetadataInfoOnlyFilesStayOnInfoSnapshot pins the write+read half of the
+// reconciler front-door boundary: the fully-converted decision-path files must
+// keep routing every session field through the typed Info/CircuitState
+// projection, never cracking bead metadata off a raw bead. Mirrors
+// TestSnapshotInfoOnlyFilesStayOnInfoAccessors for the metadata surface.
+func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	for _, name := range metadataInfoOnlyFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		content := string(data)
+		for _, needle := range forbiddenRawBeadMetadata {
+			if strings.Contains(content, needle) {
+				t.Errorf("%s contains forbidden raw bead-metadata crack %q — this file was converted to the typed session.Info / CircuitState projection; read and write session fields through the typed accessor (info.<Field> / infoByID / ApplyPatch / CircuitState) instead of cracking the raw bead", name, needle)
+			}
+		}
+	}
+}

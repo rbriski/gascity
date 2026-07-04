@@ -3023,23 +3023,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 
 	// Use ComputeAwakeSet for the wake/sleep decision. The awake scan reads every
-	// session's typed Info from the coherent infoByID snapshot rather than
-	// re-deriving per bead, so re-sync the snapshot to the beads here first: the
-	// forward pass has late mutations that are not yet self-refreshed onto the
-	// snapshot and must be reflected before the scan reads them. refreshSessionInfo
-	// re-projects from the raw working bead, so each entry becomes byte-identical to
-	// a fresh InfoFromPersistedBead(bead). This blanket pre-pass is the Step-6d
-	// linchpin: it is dropped only once EVERY forward-pass writer folds its own
-	// mutation onto the snapshot (write-returns-Info). Already self-refreshed: the
-	// close/heal/zombie refreshes and the restart_requested SET+consume (@~2259 /
-	// @~2331). Still relying on this pre-pass (must be folded, then re-enumerated
-	// from code per STEP6-DESIGN §5, before deletion): the pending-create rollback
-	// (rollbackPendingCreate, `continue`s), resetConfiguredNamedSessionForConfigDrift
-	// (@~2538 / @~2726, mirrors ConfigDriftResetPatch), the SleepPatch max-age/idle
-	// kills, and the stability/churn/detach writes.
-	for i := range ordered {
-		refreshSessionInfo(ordered[i].ID)
-	}
+	// session's typed Info from the coherent infoByID snapshot. The former blanket
+	// pre-pass (a full re-project of every session right before this scan) is GONE
+	// (Step 6d): every forward-pass writer now folds its own mutation onto the
+	// snapshot via write-returns-Info (STEP6-PREPASS-AUDIT groups 1-12), so the
+	// snapshot is already coherent here without re-projecting the raw beads.
 	phaseStart = time.Now()
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, cityPath, ordered, infoByID, poolDesired, namedSessionDemand, workSet, readyWaitSet,

@@ -446,10 +446,6 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		return snapshot
 	}
 
-	// reqCtx bounds the scoped-store read below; defer cancel() fires on
-	// every return path (including the time.After timeout), killing an
-	// in-flight bd child instead of leaking it past this function's budget
-	// (gascity ga-cdmx6x).
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
 
@@ -460,23 +456,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
-		// ScopedStoreLike hands back a bd-CLI-backed clone reqCtx can cancel,
-		// or (nil, nil) for non-bd backends (native/file/mem) — those read
-		// through store unchanged. Its resolution (bd env / managed-dolt
-		// connection state) is synchronous and can block on a mutex the
-		// reconcile loop holds without honoring reqCtx; kept before the select
-		// it hung the whole handler past its read budget, dragging the
-		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
-		// as the read bounds it.
-		readStore := store
-		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
-			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
-			return
-		} else if scoped != nil {
-			readStore = scoped
-		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		infos, partialErrors, err := sessionReadModelInfosContext(reqCtx, session.NewStore(beads.SessionStore{Store: store}))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
@@ -488,7 +468,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		infos = result.infos
 		partialErrors = result.partialErrors
 		err = result.err
-	case <-time.After(statusStoreReadTimeout):
+	case <-reqCtx.Done():
 		snapshot.partialErrors = []string{fmt.Sprintf("sessions: loading session snapshot timed out after %s", statusStoreReadTimeout)}
 		return snapshot
 	}
@@ -555,7 +535,7 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 		wg.Add(1)
 		go func(i int, rigName string, store beads.Store) {
 			defer wg.Done()
-			results[i] = statusStoreWorkCounts(ctx, s.state, rigName, store)
+			results[i] = statusStoreWorkCounts(ctx, rigName, store)
 		}(i, rigName, stores[rigName])
 	}
 	wg.Wait()
@@ -575,7 +555,7 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 // hydration-free Counter path. Operational count failures (timeouts,
 // connection errors) report a partial error without retrying via List —
 // the List scan would hit the same backend and pay the timeout again.
-func statusStoreWorkCounts(ctx context.Context, state State, rigName string, store beads.Store) statusWorkResult {
+func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Store) statusWorkResult {
 	if counter, ok := store.(beads.Counter); ok {
 		wc, err := statusCountWork(ctx, counter)
 		if err == nil {
@@ -586,7 +566,7 @@ func statusStoreWorkCounts(ctx context.Context, state State, rigName string, sto
 		}
 	}
 
-	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
+	list, err := statusListStoreWithTimeout(ctx, store, beads.ListQuery{AllowScan: true})
 	var result statusWorkResult
 	if err != nil {
 		result.errs = append(result.errs, fmt.Sprintf("rig %s work: %v", rigName, err))
@@ -637,43 +617,35 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	return wc, nil
 }
 
-// statusListStoreWithTimeout lists with the per-store read timeout.
-// Store.List takes no context, so on timeout the goroutine is abandoned
-// (it keeps its connection until the scan returns) — unless state offers a
-// ctx-bound scoped clone of store (bd-CLI-backed stores do; native/file/mem
-// stores don't and are read unchanged), in which case cancellation kills
-// the in-flight backend command instead of abandoning it (gascity
-// ga-cdmx6x). Counter-capable stores avoid this path entirely.
-func statusListStoreWithTimeout(ctx context.Context, state State, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+// statusListStoreWithTimeout lists with the per-store read timeout. Stores
+// implementing beads.ContextLister get a real ctx-bound cancellation: on
+// timeout the backing query is canceled and its connection released.
+// Stores without it fall back to the legacy abandon-goroutine pattern
+// (bounded return, but the goroutine keeps its connection until the scan
+// returns) — unchanged behavior for backends that haven't adopted the
+// capability. Counter-capable stores avoid this path entirely.
+func statusListStoreWithTimeout(ctx context.Context, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
+	if lister, ok := store.(beads.ContextLister); ok {
+		return lister.ListContext(ctx, query)
+	}
 	type listResult struct {
 		rows []beads.Bead
 		err  error
 	}
 	done := make(chan listResult, 1)
 	go func() {
-		// Resolve the ctx-bound scoped store INSIDE the timed goroutine so a
-		// slow, ctx-blind resolution (a store mutex held by the reconcile
-		// loop) is bounded by the same time.After as the list instead of
-		// hanging the handler synchronously (gc-08qgn).
-		readStore := store
-		if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
-			done <- listResult{err: fmt.Errorf("resolving scoped store: %w", err)}
-			return
-		} else if scoped != nil {
-			readStore = scoped
-		}
-		rows, err := readStore.List(query)
+		rows, err := store.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()
 	select {
 	case result := <-done:
 		return result.rows, result.err
-	case <-time.After(statusStoreReadTimeout):
+	case <-ctx.Done():
 		return nil, fmt.Errorf("list timed out after %s", statusStoreReadTimeout)
 	}
 }

@@ -80,6 +80,19 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// ListContext implements beads.ContextLister with the same read-tier
+// expansion as List. The embedded Store interface does not promote optional
+// capabilities, so the delegation must be explicit — mirrors Count's
+// explicit Counter delegation. Inner stores without a ContextLister fall
+// back to List, same graceful-degradation shape as Count's ErrCountUnsupported.
+func (s *beadPolicyStore) ListContext(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	lister, ok := s.Store.(beads.ContextLister)
+	if !ok {
+		return s.List(query)
+	}
+	return lister.ListContext(ctx, expandPolicyReadTier(query))
+}
+
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
 }

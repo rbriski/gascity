@@ -56,7 +56,7 @@ func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
 	if snapshot.NamedSessions[0].Status != "materialized" {
 		t.Fatalf("named session status = %q, want materialized", snapshot.NamedSessions[0].Status)
 	}
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -165,7 +165,7 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	snapshot := loadStatusSessionSnapshot("/city", &config.City{}, store, &stderr)
+	snapshot := loadStatusSessionSnapshot(store, &stderr)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("loadStatusSessionSnapshot elapsed %s, want bounded timeout", elapsed)
 	}
@@ -220,7 +220,7 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	_ = loadStatusSessionSnapshot(cityDir, &config.City{}, realStore, &stderr)
+	_ = loadStatusSessionSnapshot(realStore, &stderr)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("loadStatusSessionSnapshot blocked %s; want bounded by statusSessionSnapshotTimeout", elapsed)
 	}
@@ -662,7 +662,7 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want materialized", got)
 	}
 
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot("/home/user/city", cfg, store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

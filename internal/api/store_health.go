@@ -54,7 +54,7 @@ func (s *Server) computeStoreHealth(ctx context.Context) *StatusStoreHealth {
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
+	rows := countBeadStoreRows(ctx, s.state.CityBeadStore())
 	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
 	h := storehealth.Compute(cityPath, size, rows, lastAt, lastStatus)
 	return statusStoreHealthFromDomain(h)
@@ -82,15 +82,12 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // store is nil or the scan fails — the ratio is best-effort. The
 // closed-inclusive query is never answerable from the in-memory cache,
 // so this path always hydrates; counting closed history without
-// hydration needs backend support (#1896 follow-up). Because it always
-// hydrates, this is the store-health block's exposure to ga-cdmx6x's
-// bd-child leak; statusListStoreWithTimeout's state.ScopedStoreLike wiring
-// covers it the same way as the work-count fallback.
-func countBeadStoreRows(ctx context.Context, state State, store beads.Store) int {
+// hydration needs backend support (#1896 follow-up).
+func countBeadStoreRows(ctx context.Context, store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	list, err := statusListStoreWithTimeout(ctx, store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		return 0
 	}

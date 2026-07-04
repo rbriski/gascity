@@ -50,18 +50,22 @@ Enforcement mechanism (already in place, extend per class):
   bead is a *shadow/observer* of a `state.json` authority (`internal/nudgequeue/state.go`).
 - **Access seam:** `nudgesBeadStore()` → `resolveNudgesStore`; `nudgeFrontDoor(` (the
   construction site, `cmd/gc/nudge_beads.go` — a thin adapter over the Store).
-- **Census result:** the nudge shadow bead is `Type:"chore"` + `nudge:<id>` label, and a
-  repo-wide grep finds **zero** raw construction/query/crack of it outside
-  `internal/nudgequeue` (all access is `nudgequeue.Store.Save/Terminalize/Find/FindBead`).
-  The residual `.Metadata["nudge_id"]` reads in `cmd_wait.go` / `nudge_mail_sweep.go` are
-  on **wait/mail** beads that *reference* a nudge — cross-class reads that belong to the
-  wait/mail buckets, NOT nudge-bead access, so they do not block a nudge backend swap.
-  One `doctor_backlog_depth.go:69` `title HasPrefix "nudge:"` classification heuristic is
-  a read-only diagnostic (acceptable raw-by-design).
-- **Outcome:** no code change required — `resolveNudgesStore` relocation already captures
-  100% of nudge-bead access. **This is the closure.** (The adapter can't join a store-free
-  guard list — it legitimately holds the `nudgeFrontDoor(` construction — so the guard
-  entry is N/A; the seal is structural.)
+- **Census result (corrected):** the nudge shadow bead is `Type:"chore"` + `gc:nudge` label.
+  The shadow-bead **lifecycle** (create/terminalize/find) was already sealed behind
+  `nudgequeue.Store.Save/Terminalize/Find/FindBead`. But an earlier "fully sealed" claim was
+  wrong: the **maintenance sweep** (`nudge_mail_sweep.go` phase-1) constructed a raw
+  `nudgeStore.List(ListQuery{Label:nudgeBeadLabel, …})` in package main — a nudge-bead query
+  the lifecycle API doesn't expose. **Closed:** added `nudgequeue.StaleCandidatesBefore(store,
+  before, limit)` encapsulating that query (the `gc:nudge` label + wisp tier stay in
+  `internal/nudgequeue`); routed both sweep sites (live + dry-run) through it.
+- **Residual (cross-class, not nudge):** the `.Metadata["nudge_id"]` reads in `cmd_wait.go` /
+  the sweep are on **wait/mail** beads that *reference* a nudge — wait/mail-bucket reads. One
+  `doctor_backlog_depth.go` `title/label` classification heuristic is a read-only diagnostic
+  (acceptable raw-by-design). `nudge_beads.go` legitimately holds the `nudgeFrontDoor(`
+  construction (can't join a store-free guard).
+- **Outcome:** nudge-bead lifecycle AND maintenance query now confined to `internal/nudgequeue`;
+  `resolveNudgesStore` relocation captures nudge access. Seal is structural (the `Type:"chore"`
+  literal legitimately lives in the package; no clean substring guard).
 
 ### 2. Orders — `orders.Store` — **re-scoped: an access-layer Store-routing refactor, not a label cleanup**
 - **Interface:** strong. `CreateRun`/`SetOutcome`/`SetCursor`/`CloseRun`/`RecentRuns`;
@@ -88,19 +92,25 @@ Enforcement mechanism (already in place, extend per class):
 - **Acceptance:** order-bead CRUD/query only through `orders.Store`; guard-enforced.
   **Size: M (control-plane; do as its own pass with fresh context, not a tail-end quick close).**
 
-### 3. Mail — `mail.Provider` + `internal/mail/beadmail` — **strong seal, surgical leak**
+### 3. Mail — `mail.Provider` + `internal/mail/beadmail` — **✅ CLOSED (2026-07-04)**
 - **Interface:** complete for user-facing ops; one ~60-line conversion edge
-  (`createMessageBead`/`beadToMessage`).
-- **Access seam:** `mailBeadStore()` → `resolveMailMessagesStore`.
-- **Leak shape:** GC maintenance sweepers cracking `Type:"message"` +
-  `Metadata["mail.*"]` directly — `cmd/gc/wisp_gc.go`, `cmd/gc/nudge_mail_sweep.go`,
-  plus a couple of `b.Type=="message"` checks (`order_dispatch.go`,
-  `doctor_backlog_depth.go`). (NB: a raw `"message"` grep is noisy — many hits are
-  event-type/schema strings, NOT mail beads; verify semantically.)
-- **Close work:** expose a `mail.Provider` list/candidate method for the sweepers;
-  route them through it; guard the mail files.
-- **Acceptance:** message-bead queries/cracks only inside `internal/mail`;
-  guard-enforced. **Size: S–M.**
+  (`createMessageBead`/`beadToMessage`). `beadmail` docstring already asserts the invariant
+  "callers above this package never construct a message bead directly."
+- **Access seam:** `mailBeadStore()` → `resolveMailMessagesStore`. Already sealed — both GC
+  sweeps (`nudge_mail_sweep.go`, `wisp_gc.go`) take the typed `beads.MailStore` from the
+  controller paths, so a mail relocation already captures them.
+- **Census result:** the remaining leak was the **shape layer** — the sweepers constructed raw
+  `beads.ListQuery{Type:"message", …}` in package main (violating the `beadmail` invariant), and
+  the `mail.read` metadata key was defined in `cmd/gc/wisp_gc.go`.
+- **Closed:** added `mail.ReadMetadataKey` (exported) + `beadmail.ReadMessagesBefore(store,
+  before, limit)` and `beadmail.ReadMessageWispEntries(store)` encapsulating the two `Type:"message"`
+  maintenance queries; routed all 3 sweeper sites (2 in nudge_mail_sweep live+dry-run, 1 in wisp_gc)
+  through them; dropped the cmd/gc `mailReadMetadataKey`. Byte-identical (queries moved field-for-field;
+  fable 2-lens review 0 findings; mail/beadmail/nudgequeue + sweep tests green).
+- **Residual (not mail-bead access):** `b.Type=="message"` *classification* checks in
+  `order_dispatch.go`/`doctor_backlog_depth.go` are read-only type routing (coordclass-adjacent),
+  acceptable raw-by-design. Seal is structural (the `Type:"message"` literal lives in `beadmail`;
+  no clean substring guard — the `"message"` needle is noisy).
 
 ### 4. Sessions — `session.Store` + `session.Info` + `session.CircuitState` — **mid-migration**
 - **Interface:** exists; the **reconciler decision path is sealed** (Steps 1–6e,

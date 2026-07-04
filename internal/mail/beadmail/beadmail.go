@@ -684,6 +684,36 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	return msgs, nil
 }
 
+// ReadMessagesBefore lists read message beads created before `before`, oldest
+// first — the candidate set for the stale-mail retention sweep. It returns raw
+// beads (the caller closes them via the store); the message-bead query shape
+// (Type + "read" label) stays confined to this package, per the package invariant
+// that callers above beadmail never construct a message-bead query directly.
+// limit == 0 means unbounded.
+func ReadMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		Type:          "message",
+		Label:         "read",
+		CreatedBefore: before,
+		Limit:         limit,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+}
+
+// ReadMessageWispEntries lists read message beads in the wisp tier (open or
+// closed) — the candidate set for the wisp-GC retention sweep. It returns raw
+// beads (the caller deletes them); like ReadMessagesBefore it keeps the
+// message-bead query shape confined to this package.
+func ReadMessageWispEntries(store beads.Store) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		Type:          "message",
+		Metadata:      map[string]string{mail.ReadMetadataKey: "true"},
+		IncludeClosed: true,
+		TierMode:      beads.TierWisps,
+	})
+}
+
 // Recipient route helpers expand an operator-facing recipient into every
 // stable mailbox address that might hold mail for that recipient.
 func (p *Provider) recipientRoutes(recipient string) []string {

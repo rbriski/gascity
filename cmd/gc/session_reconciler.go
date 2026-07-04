@@ -1799,6 +1799,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								template = infoPostHeal.Template
 							}
 							if markDrainAckStopPending(session, sessFront, clk, stderr) {
+								// Fold the stop-pending transition onto the snapshot (Step 6d):
+								// markDrainAckStopPending mirrors DrainAckStopPendingPatch only on
+								// this true return; its Info keys (state=draining,
+								// state_reason=drain-ack-stop-pending, cleared pending_create_*) are
+								// time-independent, so reconstructing the patch reproduces the
+								// mirror (drain_at is non-Info). Cross-session isDrainAckStopPendingInfo
+								// reader. Pre-pass-masked (STEP6-PREPASS-AUDIT group 3).
+								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
 								clearDrainTrackerForStopPending(session, dt)
 								queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 								if trace != nil {
@@ -2135,6 +2143,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					if alive {
 						if markDrainAckStopPending(session, sessFront, clk, stderr) {
+							// Fold the stop-pending transition onto the snapshot (Step 6d);
+							// deterministic DrainAckStopPendingPatch reconstruction, same as the
+							// orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
+							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
 							clearDrainTrackerForStopPending(session, dt)
 							queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 							if trace != nil {
@@ -2384,6 +2396,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(healBatch)
 		if recoverPendingIdleSleep(session, sessFront, running, clk) {
 			alive = false
+			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).
+			// recoverPendingIdleSleep mirrors SleepPatch(now,"idle") only on this true
+			// return; its Info-projected keys are time-independent, so reconstructing
+			// the same SleepPatch reproduces the mirror exactly (slept_at /
+			// sleep_policy_fingerprint are non-Info). Pre-pass-masked (STEP6-PREPASS-AUDIT
+			// group 6).
+			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(sessionpkg.SleepPatch(clk.Now().UTC(), "idle"))
 		}
 		reconcileDetachedAt(session, store, policy, alive, sp, clk)
 

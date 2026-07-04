@@ -121,9 +121,20 @@ worktree `.claude/worktrees/object-front-doors`, **HEAD `97fd6fbc6`** (re-grep
       Gates: gofmt clean, `go build`/`go vet` clean, `golangci-lint` 0, full reconciler subset green (206s).
       Fable 3-lens adversarial review (wf_38565cae, deletion-safety / fold+guard / survivor+trace; ~345K tokens,
       103 tool calls): **0 findings**.
-- [ ] **Steps 5d, 5e, 6e remain** (see `RECONCILER-FRONT-DOOR-REMAINING-PLAN.md` §Step 5 / 6e). Drop the dead
-      `sessionBeads` param on `advanceSessionDrainsWithSessionsTraced` (5d), demote `ordered` (5e), then the 6e
-      guard. **6e caveat sharpened by 5c:** the guard cannot blanket-forbid `session.Metadata[` in
+- [x] **Step 5d — drop the dead fallback params on `advanceSessionDrainsWithSessionsTraced`**. The traced core
+      had a `wakeEvals==nil` fallback (`computeWakeEvaluations(sessionBeads, cfg, sp, poolDesired, workSet,
+      readyWaitSet, clk)`); the prod caller (reconciler `:3399`) and both direct test callers always pass
+      `wakeEvals` non-nil, and the drain scan runs entirely off `infoLookup`, so `sessionBeads`/`poolDesired`/
+      `workSet`/`readyWaitSet` were all dead in the core. Dropped those 4 params + the fallback from the core;
+      moved the identical fallback into the test-only wrapper `advanceSessionDrainsWithSessions` (which keeps
+      `sessions`/`poolDesired`/`workSet`/`readyWaitSet`). `advanceSessionDrains` still reaches it via a
+      `wakeEvals==nil` call. `computeWakeEvaluations`/`evaluateWakeReasons` kept (CLI wake column + wrappers).
+      All 3 core call sites updated to the 8-arg signature. gofmt/vet clean, `golangci-lint` 0 (the newly-dead
+      params would have tripped `unparam` — hence removing them, not just `sessionBeads`), reconciler+drain+trace
+      subset green (224s); fable 2-lens equivalence review (wf_2c0d9209): 0 findings.
+- [ ] **Steps 5e, 6e remain** (see `RECONCILER-FRONT-DOOR-REMAINING-PLAN.md` §Step 5 / 6e). Demote `ordered`
+      (5e), then the 6e guard. **6e caveat sharpened by 5c:** the guard cannot blanket-forbid `session.Metadata[`
+      in
       `session_reconciler.go` — the raw-by-design classifier helpers (`isDrainAckStopPending`,
       `pendingCreateStartInFlight`, …) legitimately read it, and the 5 survivor mirrors (S1-S5) legitimately
       write it. Scope the needle or relocate per the FINISH-doc caveat. Step 5 stays re-scoped to DEMOTE

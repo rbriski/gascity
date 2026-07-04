@@ -464,7 +464,15 @@ func advanceSessionDrainsWithSessions(
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) {
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(sessionLookup), sessions, wakeEvals, cfg, poolDesired, workSet, readyWaitSet, clk, nil)
+	// Non-reconciler drain entry points (and their tests) still carry raw beads.
+	// Derive the wake evaluations from them here when the caller supplied none —
+	// the traced core requires a non-nil wakeEvals map (Step 5d moved this fallback
+	// off the prod core; computeWakeEvaluations/evaluateWakeReasons stay for the
+	// CLI wake column and these wrappers).
+	if wakeEvals == nil {
+		wakeEvals = computeWakeEvaluations(sessions, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
+	}
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(sessionLookup), wakeEvals, cfg, clk, nil)
 }
 
 // infoLookupFromBeadLookup adapts a raw *beads.Bead lookup to the typed Info
@@ -486,18 +494,16 @@ func advanceSessionDrainsWithSessionsTraced(
 	sp runtime.Provider,
 	store beads.Store,
 	infoLookup func(id string) (sessions.Info, bool),
-	sessionBeads []beads.Bead,
 	wakeEvals map[string]wakeEvaluation,
 	cfg *config.City,
-	poolDesired map[string]int,
-	workSet map[string]bool,
-	readyWaitSet map[string]bool,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
 ) {
-	if wakeEvals == nil {
-		wakeEvals = computeWakeEvaluations(sessionBeads, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
-	}
+	// wakeEvals is required. The reconciler builds it from the coherent infoByID
+	// snapshot; the non-reconciler wrappers derive it via computeWakeEvaluations
+	// from their raw beads before calling in. Step 5d dropped the raw-bead
+	// wakeEvals==nil fallback and its now-unused sessionBeads/poolDesired/workSet/
+	// readyWaitSet inputs from this prod core — the scan runs entirely off infoLookup.
 	// Session front door constructed once from the same store; nil when store is
 	// nil so completeDrain keeps its store==nil short-circuit.
 	sessFront := sessionFrontDoor(store)

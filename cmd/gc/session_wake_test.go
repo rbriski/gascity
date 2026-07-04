@@ -1280,9 +1280,9 @@ func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), []beads.Bead{b}, map[string]wakeEvaluation{
+	}), map[string]wakeEvaluation{
 		b.ID: {Reasons: []WakeReason{WakePending}},
-	}, cfg, map[string]int{"worker": 1}, nil, nil, clk, nil)
+	}, cfg, clk, nil)
 
 	if dt.get(b.ID) != nil {
 		t.Error("config-drift drain should be canceled by a pending wake")

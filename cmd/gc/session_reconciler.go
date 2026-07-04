@@ -3396,7 +3396,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, ordered, wakeEvals, cfg, poolDesired, nil, readyWaitSet, clk, trace)
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	recordPhase(TraceSiteSessionReconcileDrainAdvance, "session_reconcile.advance_drains", phaseStart, map[string]any{
 		"ordered_session_count": len(ordered),

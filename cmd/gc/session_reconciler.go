@@ -1344,7 +1344,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	cbNow := clk.Now().UTC()
 	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
 	var cb *sessionCircuitBreaker
-	var circuitSessionByIdentity map[string]*beads.Bead
+	var circuitIDByIdentity map[string]string
 	if cbEnabled {
 		// Phase 0.5: Feed the respawn circuit breaker persisted state and the
 		// current progress signature for every named-session identity. A change
@@ -1353,13 +1353,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// restarts accumulate. See session_circuit_breaker.go.
 		cb = defaultSessionCircuitBreaker()
 		cb.configure(cbCfg)
-		circuitSessionByIdentity = make(map[string]*beads.Bead, len(ordered))
+		circuitIDByIdentity = make(map[string]string, len(ordered))
 		for i := range ordered {
 			identity := namedSessionIdentity(ordered[i])
 			if identity == "" {
 				continue
 			}
-			circuitSessionByIdentity[identity] = &ordered[i]
+			circuitIDByIdentity[identity] = ordered[i].ID
 			// Read the persisted breaker cluster through the typed CircuitState
 			// front door instead of cracking ordered[i].Metadata inline. This runs
 			// in Phase 0.5, before the reconciler's coherent infoByID snapshot
@@ -1378,15 +1378,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if reset, err := cb.restoreFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(ordered[i].Metadata), cbNow); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: loading session circuit breaker state for %s: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			} else if reset {
-				if err := persistSessionCircuitBreakerMetadata(sessFront, &ordered[i], cb, identity, cbNow); err != nil {
+				if err := persistSessionCircuitBreakerMetadata(sessFront, ordered[i].ID, cb, identity, cbNow); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 				}
 			}
 		}
 		for identity, sig := range computeNamedSessionProgressSignatures(ordered, assignedWorkBeads) {
 			if cb.ObserveProgressSignature(identity, sig, cbNow) {
-				if session := circuitSessionByIdentity[identity]; session != nil {
-					if err := persistSessionCircuitBreakerMetadata(sessFront, session, cb, identity, cbNow); err != nil {
+				if id := circuitIDByIdentity[identity]; id != "" {
+					if err := persistSessionCircuitBreakerMetadata(sessFront, id, cb, identity, cbNow); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 					}
 				}
@@ -3121,7 +3121,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				identity := namedSessionIdentity(*target.session)
 				if identity != "" {
 					if cb.IsOpen(identity, cbNow) {
-						if err := persistSessionCircuitBreakerMetadata(sessFront, target.session, cb, identity, cbNow); err != nil {
+						if err := persistSessionCircuitBreakerMetadata(sessFront, target.session.ID, cb, identity, cbNow); err != nil {
 							fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 						}
 						cb.LogOpenOnce(identity, stderr)

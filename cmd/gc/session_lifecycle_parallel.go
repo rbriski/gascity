@@ -2431,7 +2431,7 @@ func executePlannedStartsTraced(
 							if done != nil {
 								done()
 							}
-							if err := persistSessionCircuitBreakerMetadata(sessFront, candidate.session, cb, identity, cbNow); err != nil {
+							if err := persistSessionCircuitBreakerMetadata(sessFront, candidate.session.ID, cb, identity, cbNow); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 							}
 							cb.LogOpenOnce(identity, stderr)
@@ -2442,7 +2442,7 @@ func executePlannedStartsTraced(
 							}
 							continue
 						}
-						state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.session, cb, identity, cbNow)
+						state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.session.ID, cb, identity, cbNow)
 						if err != nil {
 							if release != nil {
 								release()

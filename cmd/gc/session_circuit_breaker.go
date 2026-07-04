@@ -626,12 +626,12 @@ func formatCircuitTime(tm time.Time) string {
 
 func persistSessionCircuitBreakerMetadata(
 	sessFront *session.Store,
-	session *beads.Bead,
+	id string,
 	cb *sessionCircuitBreaker,
 	identity string,
 	now time.Time,
 ) error {
-	if sessFront == nil || session == nil || cb == nil {
+	if sessFront == nil || strings.TrimSpace(id) == "" || cb == nil {
 		return nil
 	}
 	cb.mu.Lock()
@@ -640,29 +640,27 @@ func persistSessionCircuitBreakerMetadata(
 	if err != nil {
 		return err
 	}
-	if sessionCircuitMetadataEqual(session.Metadata, metadata) {
+	current, err := sessFront.CircuitState(id)
+	if err != nil {
+		return fmt.Errorf("loading session circuit breaker metadata for %s: %w", id, err)
+	}
+	if current == session.CircuitStateFromMetadata(metadata) {
 		return nil
 	}
-	if err := sessFront.ApplyPatch(session.ID, metadata); err != nil {
-		return fmt.Errorf("persisting session circuit breaker metadata for %s: %w", session.ID, err)
-	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(metadata))
-	}
-	for key, value := range metadata {
-		session.Metadata[key] = value
+	if err := sessFront.ApplyPatch(id, metadata); err != nil {
+		return fmt.Errorf("persisting session circuit breaker metadata for %s: %w", id, err)
 	}
 	return nil
 }
 
 func recordSessionCircuitBreakerRestart(
 	sessFront *session.Store,
-	session *beads.Bead,
+	id string,
 	cb *sessionCircuitBreaker,
 	identity string,
 	now time.Time,
 ) (circuitBreakerStateKind, error) {
-	if sessFront == nil || session == nil {
+	if sessFront == nil || strings.TrimSpace(id) == "" {
 		return circuitClosed, nil
 	}
 	identity = strings.TrimSpace(identity)
@@ -682,18 +680,17 @@ func recordSessionCircuitBreakerRestart(
 		cb.restoreEntryLocked(identity, previous, hadPrevious)
 		return state, err
 	}
-	if sessionCircuitMetadataEqual(session.Metadata, metadata) {
+	current, err := sessFront.CircuitState(id)
+	if err != nil {
+		cb.restoreEntryLocked(identity, previous, hadPrevious)
+		return state, fmt.Errorf("loading session circuit breaker metadata for %s: %w", id, err)
+	}
+	if current == session.CircuitStateFromMetadata(metadata) {
 		return state, nil
 	}
-	if err := sessFront.ApplyPatch(session.ID, metadata); err != nil {
+	if err := sessFront.ApplyPatch(id, metadata); err != nil {
 		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", session.ID, err)
-	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(metadata))
-	}
-	for key, value := range metadata {
-		session.Metadata[key] = value
+		return state, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", id, err)
 	}
 	return state, nil
 }
@@ -739,15 +736,6 @@ func (b *sessionCircuitBreaker) restoreIdentity(identity string, snapshot sessio
 		return
 	}
 	delete(b.resetGenerations, identity)
-}
-
-func sessionCircuitMetadataEqual(existing map[string]string, next map[string]string) bool {
-	for _, key := range sessionCircuitMetadataKeys {
-		if existing[key] != next[key] {
-			return false
-		}
-	}
-	return true
 }
 
 func loadPersistedSessionCircuitResetGeneration(sessFront *session.Store, sessionID, identity string, cb *sessionCircuitBreaker) error {

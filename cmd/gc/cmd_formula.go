@@ -687,7 +687,7 @@ conflicting live workflow from the same source is an error.`,
 						}
 						if existing != nil {
 							result = existing
-							return markCookSourceInProgress(store, attach)
+							return markCookSourceInProgress(store, attach, result.RootID)
 						}
 						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
 							return err
@@ -721,7 +721,7 @@ conflicting live workflow from the same source is an error.`,
 							}
 							return err
 						}
-						return markCookSourceInProgress(store, attach)
+						return markCookSourceInProgress(store, attach, result.RootID)
 					})
 					if err != nil {
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -898,9 +898,14 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 // the source staying UNASSIGNED — which this never violates (it only sets
 // Status, never Assignee). Only a not-yet-started status is promoted, so the
 // flip is idempotent (a re-cook of an already in_progress source is a no-op).
-// The workflow_id / gc.source_bead_id linkage is left to the sling's
-// doStartGraphWorkflow; on failure the source is reopened by finalize.
-func markCookSourceInProgress(store beads.Store, attachBeadID string) error {
+// A cook root carries no gc.source_bead_id back to this source (the cook recipe
+// is decorated with an empty sourceBeadID), so finalize's source-chain walk can
+// reach neither a close-on-pass nor a reopen-on-fail here. Instead this stamps
+// gc.cook_attach_launch=rootID, and the reconciler cook-source heal
+// (healStrandedCookAttachSourcesWhenSnapshotsComplete) reads that marker to
+// reach the root and resolve the source's terminal state once the molecule is
+// done — the sole terminal transition for a cook-attach source.
+func markCookSourceInProgress(store beads.Store, attachBeadID, rootID string) error {
 	attachBeadID = strings.TrimSpace(attachBeadID)
 	if store == nil || attachBeadID == "" {
 		return nil
@@ -918,7 +923,13 @@ func markCookSourceInProgress(store beads.Store, attachBeadID string) error {
 		return nil
 	}
 	inProgress := "in_progress"
-	if err := store.Update(attachBeadID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+	opts := beads.UpdateOpts{Status: &inProgress}
+	// Stamp the launch marker atomically with the flip so the reconciler heal
+	// can always find the root of an in_progress cook source.
+	if rootID = strings.TrimSpace(rootID); rootID != "" {
+		opts.Metadata = map[string]string{beadmeta.CookAttachLaunchMetadataKey: rootID}
+	}
+	if err := store.Update(attachBeadID, opts); err != nil {
 		return fmt.Errorf("marking cook attach source %s in_progress: %w", attachBeadID, err)
 	}
 	return nil

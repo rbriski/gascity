@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -743,7 +744,7 @@ func TestMarkCookSourceInProgress(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if err := markCookSourceInProgress(store, src.ID); err != nil {
+		if err := markCookSourceInProgress(store, src.ID, "gcg-root-1"); err != nil {
 			t.Fatalf("markCookSourceInProgress: %v", err)
 		}
 		got, _ := store.Get(src.ID)
@@ -753,6 +754,9 @@ func TestMarkCookSourceInProgress(t *testing.T) {
 		if got.Assignee != "" {
 			t.Fatalf("assignee = %q, want empty (must never assign the source)", got.Assignee)
 		}
+		if got.Metadata[beadmeta.CookAttachLaunchMetadataKey] != "gcg-root-1" {
+			t.Fatalf("launch marker = %q, want gcg-root-1", got.Metadata[beadmeta.CookAttachLaunchMetadataKey])
+		}
 	})
 	t.Run("is idempotent on an already in_progress source", func(t *testing.T) {
 		store := beads.NewMemStore()
@@ -761,7 +765,7 @@ func TestMarkCookSourceInProgress(t *testing.T) {
 		if err := store.Update(src.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
 			t.Fatalf("pre-set in_progress: %v", err)
 		}
-		if err := markCookSourceInProgress(store, src.ID); err != nil {
+		if err := markCookSourceInProgress(store, src.ID, "gcg-root-1"); err != nil {
 			t.Fatalf("markCookSourceInProgress: %v", err)
 		}
 		got, _ := store.Get(src.ID)
@@ -772,7 +776,7 @@ func TestMarkCookSourceInProgress(t *testing.T) {
 	t.Run("never touches an assigned bead", func(t *testing.T) {
 		store := beads.NewMemStore()
 		src, _ := store.Create(beads.Bead{Title: "src", Type: "task", Assignee: "worker-1"})
-		if err := markCookSourceInProgress(store, src.ID); err != nil {
+		if err := markCookSourceInProgress(store, src.ID, "gcg-root-1"); err != nil {
 			t.Fatalf("markCookSourceInProgress: %v", err)
 		}
 		got, _ := store.Get(src.ID)
@@ -781,6 +785,9 @@ func TestMarkCookSourceInProgress(t *testing.T) {
 		}
 		if got.Assignee != "worker-1" {
 			t.Fatalf("assignee = %q, want worker-1 (unchanged)", got.Assignee)
+		}
+		if got.Metadata[beadmeta.CookAttachLaunchMetadataKey] != "" {
+			t.Fatalf("launch marker = %q, want empty (assigned bead must not be marked)", got.Metadata[beadmeta.CookAttachLaunchMetadataKey])
 		}
 	})
 }

@@ -57,8 +57,15 @@ const (
 	ControllerErrorClassMetadataKey    = "gc.controller_error_class"
 	ControllerErrorMetadataKey         = "gc.controller_error"
 	ControllerRetryableMetadataKey     = "gc.controller_retryable"
-	CurrentRunIDMetadataKey            = "gc.current_run_id"
-	CwdMetadataKey                     = "gc.cwd"
+	// CookAttachLaunchMetadataKey records, on a `gc formula cook --attach`
+	// source work bead, the id of the graph.v2 molecule root the cook
+	// launched. markCookSourceInProgress stamps it when it flips the source to
+	// in_progress; the reconciler cook-source heal reads it to reach the
+	// molecule root (which carries no gc.source_bead_id back to the source) and
+	// resolve the source's terminal state once that root is done.
+	CookAttachLaunchMetadataKey = "gc.cook_attach_launch"
+	CurrentRunIDMetadataKey     = "gc.current_run_id"
+	CwdMetadataKey              = "gc.cwd"
 	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
 	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
 	// stamped at the claim hook and read at the usage record site to populate
@@ -262,6 +269,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CookAttachLaunchMetadataKey,
 	CurrentRunIDMetadataKey,
 	ActiveWorkBeadMetadataKey,
 	CwdMetadataKey,

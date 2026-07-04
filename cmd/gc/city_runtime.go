@@ -2120,6 +2120,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		}
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
 	}
+	// Heal `gc formula cook --attach` sources stranded in_progress: their
+	// molecule root carries no gc.source_bead_id back to them, so finalize's
+	// close-on-pass / reopen-on-fail never reach them. This reconciler pass is
+	// their sole terminal transition (close on pass, reopen on fail/purged).
+	phaseStart = time.Now()
+	strandedCookSources, strandedCookStores := collectStrandedCookSources(store, rigStores)
+	healedCookSources := healStrandedCookAttachSources(store, strandedCookSources, strandedCookStores)
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.heal_stranded_cook_sources", phaseStart, map[string]any{
+		"healed_count": len(healedCookSources),
+	})
+	for _, id := range healedCookSources {
+		fmt.Fprintf(cr.stderr, "healed stranded cook source: %s\n", id) //nolint:errcheck
+	}
 	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound
 	// this city's managed port returns zero demand, indistinguishable from a
 	// genuinely-idle fleet — and would drain every running pool. This runs on

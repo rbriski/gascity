@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/gitcred"
@@ -78,13 +79,13 @@ func (c *PackCredentialsCheck) Run(ctx *CheckContext) *CheckResult {
 	return r
 }
 
-// remoteImportsWithoutRule returns the redacted clone URLs of remote imports
-// that no credential rule matches. A public import legitimately has no rule, so
-// this is advisory only (StatusWarning), not an error.
+// remoteImportsWithoutRule returns the redacted clone URLs of networked remote
+// imports that no credential rule matches. A public import legitimately has no
+// rule, so this is advisory only (StatusWarning), not an error.
 func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []string {
 	var missing []string
 	for _, imp := range c.imports {
-		if !remotesource.IsRemote(imp.Source) {
+		if !credentialRelevantRemote(imp.Source) {
 			continue
 		}
 		if _, ok := rules.MatchSource(imp.Source); ok {
@@ -95,11 +96,12 @@ func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []
 	return missing
 }
 
-// matchedRuleOrigins reports which rules match at least one remote import.
+// matchedRuleOrigins reports which rules match at least one networked remote
+// import.
 func (c *PackCredentialsCheck) matchedRuleOrigins(rules *gitcred.Rules) map[string]bool {
 	used := make(map[string]bool)
 	for _, imp := range c.imports {
-		if !remotesource.IsRemote(imp.Source) {
+		if !credentialRelevantRemote(imp.Source) {
 			continue
 		}
 		if lr, ok := rules.MatchSource(imp.Source); ok {
@@ -107,6 +109,14 @@ func (c *PackCredentialsCheck) matchedRuleOrigins(rules *gitcred.Rules) map[stri
 		}
 	}
 	return used
+}
+
+// credentialRelevantRemote reports whether a source is a networked remote that
+// could require a credential. file:// and local-path sources authenticate no
+// network fetch (they clone from disk), so they are excluded — otherwise a
+// local file:// import would be wrongly flagged as a remote with no rule.
+func credentialRelevantRemote(source string) bool {
+	return remotesource.IsRemote(source) && !strings.HasPrefix(source, "file://")
 }
 
 func originMatchKey(lr gitcred.LoadedRule) string {

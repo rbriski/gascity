@@ -83,6 +83,21 @@ func TestPackCredentialsCheckMatchedRemoteOK(t *testing.T) {
 	}
 }
 
+func TestPackCredentialsCheckSkipsFileAndLocalImports(t *testing.T) {
+	ctx := credCtx(t)
+	writeCityCred(t, ctx.CityPath, "[[credential]]\nmatch=\"github.com/gascity\"\nhelper=\"x\"\n", 0o600)
+	imports := map[string]config.Import{
+		"local-file":  {Source: "file:///home/u/shared-packs/review"},
+		"local-path":  {Source: "/Users/you/shared-packs/packs/review"},
+		"local-rel":   {Source: "./packs/review"},
+		"remote-http": {Source: "https://github.com/gascity/tools", Version: "^1.0"},
+	}
+	r := NewPackCredentialsCheck(imports).Run(ctx)
+	if r.Status != StatusOK {
+		t.Fatalf("status = %v, want OK (file:// and local imports need no credential rule); msg=%q details=%v", r.Status, r.Message, r.Details)
+	}
+}
+
 func TestPackCredentialsCheckNoFixNoWarmup(t *testing.T) {
 	c := NewPackCredentialsCheck(nil)
 	if c.CanFix() {

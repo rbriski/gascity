@@ -35,9 +35,11 @@ type beadPolicyGraphStore struct {
 	applier beads.GraphApplyStore
 }
 
-var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
-var _ beads.GraphOnlyReadyProvider = (*beadPolicyStore)(nil)
-var _ beads.GraphOnlyListProvider = (*beadPolicyStore)(nil)
+var (
+	_ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
+	_ beads.GraphOnlyReadyProvider        = (*beadPolicyStore)(nil)
+	_ beads.GraphOnlyListProvider         = (*beadPolicyStore)(nil)
+)
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	if store == nil {

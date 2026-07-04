@@ -183,12 +183,15 @@ func (s *failingReadStore) ListOpen(...string) ([]beads.Bead, error)   { return 
 func (s *failingReadStore) Children(string, ...beads.QueryOpt) ([]beads.Bead, error) {
 	return nil, s.err
 }
+
 func (s *failingReadStore) ListByLabel(string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
 	return nil, s.err
 }
+
 func (s *failingReadStore) ListByAssignee(string, string, int) ([]beads.Bead, error) {
 	return nil, s.err
 }
+
 func (s *failingReadStore) ListByMetadata(map[string]string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
 	return nil, s.err
 }

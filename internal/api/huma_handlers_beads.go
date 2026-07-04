@@ -355,9 +355,11 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		// ReadyCacheOnly reads the in-memory projection and never primes the
 		// backing store (returning ErrCacheUnavailable when the projection is not
 		// live, which the federation surfaces as a partial/outage so the
-		// dispatcher backs off instead of hanging on a cold or dirty cache); for
-		// a plain store both handles delegate to the same Ready, so non-caching
-		// backends behave identically on either path.
+		// dispatcher backs off instead of hanging on a cold cache); an unrelated
+		// dirty bead is scoped out per-bead rather than declining the whole read,
+		// so it cannot stall the fallback-free control lane. For a plain store
+		// both handles delegate to the same Ready, so non-caching backends behave
+		// identically on either path.
 		//
 		// The default (non-cached) path additionally honors the
 		// graph_store=sqlite optimization: a worker only ever executes graph

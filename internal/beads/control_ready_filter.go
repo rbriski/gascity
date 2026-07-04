@@ -67,6 +67,16 @@ func (f ControlReadyFilter) Apply(in []Bead) []Bead {
 		assignee := assignee
 		addMatches(func(b Bead) bool { return b.Assignee == assignee })
 	}
+	// Match an unassigned bead by any routing key that names a control route.
+	// This trusts the routing metadata without re-checking gc.kind: that is safe
+	// because graph routing stamps a control-dispatcher route (run-target,
+	// routed-to, or execution-routed-to) exclusively on control-kind steps —
+	// DecorateGraphWorkflowRecipe gates the control binding on
+	// graphroute.IsControlDispatcherKind, so a non-control bead never carries a
+	// control-dispatcher route to match here (pinned by
+	// TestAssignGraphStepRoute_NonControlStepOmitsControlDispatcherRoute). A bead
+	// admitted here therefore has a control kind the dispatcher's ProcessControl
+	// switch handles, not one it would quarantine.
 	for _, route := range f.Routes {
 		route := route
 		addMatches(func(b Bead) bool {

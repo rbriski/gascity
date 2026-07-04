@@ -55,10 +55,23 @@ worktree `.claude/worktrees/object-front-doors`, **HEAD `0d694acee`** (re-grep
       is the GC_SESSION_ID scan, drift-fingerprint-excluded). Cleared by a 3-agent fable feed-hazard
       analysis (wf_58aa9f17) + 3-lens review (0 findings) + a guard test. Boundary correction: the
       original "may need store List" was wrong — live `infoByID`, not a store List (REMAINING-PLAN §Step 4).
-- [ ] Steps 5–6 below (see `RECONCILER-FRONT-DOOR-REMAINING-PLAN.md` §Step 5 / 6e). Step 5 is re-scoped to
-      DEMOTE `ordered` (zero raw decision reads + zero lockstep mirror writes on the decision path); physical
-      deletion of `ordered` is deferred (start-execution `startCandidate`/`buildPreparedStart` = raw-by-design
-      consumer #7, out of scope).
+- [x] **Step 5a — forward-pass decision reads off the raw bead** (`6e31df0dc`). Flipped the 20 remaining
+      raw `session.Metadata[k]` DECISION reads in the forward-pass loop to `infoByID[session.ID].<Field>`
+      (state/pending_create_claim/pending_create_started_at/last_woke_at/restart_requested + the config-drift
+      hash cluster + creation_complete_at). Raw mirror WRITES stay (5c). **The fable review caught a real
+      MEDIUM byte-identity defect**: flipping the config-drift gate (`started_config_hash`) made it a same-tick
+      reader of `buildPreparedStart`'s stale-resume residue; `clearStaleResumeKeyMetadata` clears it on
+      raw+store but the abort-path fold didn't carry it → drift block wrongly ran (#127). FIXED by threading it
+      (`pendingCreateInstanceTokenFold`→`pendingCreateResidueFold` carries `started_config_hash`; teeth test).
+      `session_key`/`continuation_reset_pending` residue stays unthreaded (documented: the CRP one-tick-deferral
+      is a pre-existing Step-3/6d gap, not 5a's). Reviews wf_9be58e9c + fix re-review wf_78063ee2.
+- [ ] **Steps 5b–5e, 6e remain** (see `RECONCILER-FRONT-DOOR-REMAINING-PLAN.md` §Step 5 / 6e). The entire
+      decision-path READ conversion is now DONE (Steps 1–5a). Remaining = delete the now-read-dead raw mirror
+      WRITES (5b drain-ack finalize family; 5c the raw lockstep mirror loops — the riskiest, needs the per-key
+      census INCL `buildPreparedStart` start-execution coupling: mirrors whose keys the start path reads
+      SURVIVE), drop the dead `sessionBeads` param (5d), demote `ordered` (5e), and the 6e guard. Step 5 is
+      re-scoped to DEMOTE `ordered` (not delete — start-execution `startCandidate`/`buildPreparedStart` is
+      raw-by-design consumer #7, out of scope).
 
 ## Where things stand
 

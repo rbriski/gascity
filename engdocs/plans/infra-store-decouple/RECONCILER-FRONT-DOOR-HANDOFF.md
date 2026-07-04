@@ -100,7 +100,9 @@ and `ComputeAwakeSet` does `SessionName`-keyed last-write-wins over it), convert
 `advanceSessionDrains` / `newSessionBeadSnapshot` off the raw bead, and cut the snapshot source to
 store-authoritative `Get` (handling the reset_committed_at / started_live_hash / buildPreparedStart
 intra-tick divergences the raw refresh preserved — the exposure set). Then **6e** — the guard
-forbidding raw `session.Metadata[` writes on the decision path. See STEP6-DESIGN §8 deletion-order
+forbidding raw `session.Metadata[` writes on the decision path. **The focused per-step plan +
+paste-ready prompt for this phase are `RECONCILER-FRONT-DOOR-LOCKSTEP-DROP.md` +
+`RECONCILER-FRONT-DOOR-NEXT-SESSION-PROMPT.md`.** See also STEP6-DESIGN §8 deletion-order
 steps 4-6; STEP6-PREPASS-AUDIT.md records the exposure set.
 Design + sub-phase backlog:
 `RECONCILER-FRONT-DOOR-STEP6-DESIGN.md` (fable 4-lens

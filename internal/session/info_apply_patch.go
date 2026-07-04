@@ -118,6 +118,7 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.BrainParentSID = v
 		case "pending_create_claim":
 			info.PendingCreateClaim = strings.TrimSpace(v) == "true"
+			info.PendingCreateClaimMetadata = v
 		case "pending_create_started_at":
 			info.PendingCreateStartedAt = v
 		case "quarantined_until":

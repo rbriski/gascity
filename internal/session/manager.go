@@ -182,12 +182,17 @@ type Info struct {
 	// Classifiers that branch on "no session_name was persisted" (pool-name
 	// ownership, ephemeral pool-slot detection, assignee identities) must read
 	// this raw value, not the always-populated Info.SessionName.
-	SessionNameMetadata    string
-	PendingCreateClaim     bool     // pending_create_claim == "true"
-	PendingCreateStartedAt string   // pending_create_started_at (raw RFC3339; stale-create sweep parses it)
-	WakeAttempts           int      // wake_attempts parsed as int (0 on missing/invalid)
-	QuarantinedUntil       string   // quarantined_until (raw RFC3339; quarantine check parses it)
-	AliasHistory           []string // prior aliases (alias_history, normalized via session.AliasHistory)
+	SessionNameMetadata string
+	PendingCreateClaim  bool // pending_create_claim == "true"
+	// PendingCreateClaimMetadata is the RAW pending_create_claim metadata string,
+	// kept verbatim (untrimmed) so trace payloads reproduce a non-canonical raw
+	// value (e.g. "yes") that the PendingCreateClaim bool cannot. Additive,
+	// internal-only mirror; see WakeAttemptsMetadata for the precedent.
+	PendingCreateClaimMetadata string
+	PendingCreateStartedAt     string   // pending_create_started_at (raw RFC3339; stale-create sweep parses it)
+	WakeAttempts               int      // wake_attempts parsed as int (0 on missing/invalid)
+	QuarantinedUntil           string   // quarantined_until (raw RFC3339; quarantine check parses it)
+	AliasHistory               []string // prior aliases (alias_history, normalized via session.AliasHistory)
 	// ContinuityEligible is the RAW continuity_eligible metadata, verbatim.
 	// NamedSessionContinuityEligibleInfo compares it (trimmed) against "false"/
 	// "true", so the Info mirror keeps the raw value. Additive, internal-only.

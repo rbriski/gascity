@@ -141,6 +141,8 @@ func oraclePatches() []MetadataPatch {
 		{aliasHistoryMetadataKey: ""},
 		{"pool_managed": " true "},
 		{"pool_managed": "TRUE"},
+		{"pending_create_claim": "yes"},    // non-canonical: Metadata mirror verbatim, bool false
+		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
 		{"live_hash": "ignored"},         // unknown key: must not change Info
@@ -171,6 +173,38 @@ func TestInfoApplyPatchMatchesReprojection(t *testing.T) {
 			want := InfoFromPersistedBead(reprojectBead(base, patch))
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("base=%s patch=%v: ApplyPatch diverged from full reprojection\n got=%+v\nwant=%+v", base.ID, patch, got, want)
+			}
+		}
+	}
+}
+
+// TestPendingCreateClaimMetadataIsVerbatim pins the contract of the raw mirror
+// added for the wakeTargets-loop trace reads: PendingCreateClaimMetadata keeps
+// the pending_create_claim value verbatim (untrimmed, non-canonical values and
+// all), while the PendingCreateClaim bool stays the trimmed=="true" verdict.
+// Both projection paths (InfoFromPersistedBead and ApplyPatch) must agree.
+func TestPendingCreateClaimMetadataIsVerbatim(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantMeta string
+		wantBool bool
+	}{
+		{"true", "true", true},
+		{" true ", " true ", true},
+		{"yes", "yes", false},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		b := beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{"pending_create_claim": tc.raw}}
+		fromBead := InfoFromPersistedBead(b)
+		fromPatch := InfoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
+			ApplyPatch(MetadataPatch{"pending_create_claim": tc.raw})
+		for name, got := range map[string]Info{"InfoFromPersistedBead": fromBead, "ApplyPatch": fromPatch} {
+			if got.PendingCreateClaimMetadata != tc.wantMeta {
+				t.Errorf("%s(%q): PendingCreateClaimMetadata = %q, want %q", name, tc.raw, got.PendingCreateClaimMetadata, tc.wantMeta)
+			}
+			if got.PendingCreateClaim != tc.wantBool {
+				t.Errorf("%s(%q): PendingCreateClaim = %v, want %v", name, tc.raw, got.PendingCreateClaim, tc.wantBool)
 			}
 		}
 	}

@@ -2184,7 +2184,7 @@ func recoverRunningPendingCreate(
 //     continuation-reset classification by one self-healing tick when the session
 //     carries a durable reset_committed_at (RestartRequestPatch stamps it; no path
 //     clears it) — a pre-existing Step-3/6d coherence gap, #2345-class, that 5a
-//     neither introduces nor changes. Threading it would alter awake-scan behaviour
+//     neither introduces nor changes. Threading it would alter awake-scan behavior
 //     versus the current snapshot and belongs to that separate cleanup, not this
 //     commit. It self-heals on the next tick's store reload.
 func pendingCreateResidueFold(session *beads.Bead) map[string]string {

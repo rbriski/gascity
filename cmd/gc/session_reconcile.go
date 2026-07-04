@@ -650,7 +650,7 @@ func healExpiredTimers(session *beads.Bead, sessFront *sessionpkg.Store, clk clo
 // STEP6-PREPASS-AUDIT group 2). Returns (false, nil) otherwise; ApplyPatch(nil)
 // is a no-op.
 func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string) {
-	if handled, err, rlBatch := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
+	if handled, rlBatch, err := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return true, rlBatch
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
@@ -677,7 +677,7 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 // ApplyPatch (front-door migration Step 6d, STEP6-PREPASS-AUDIT group 1).
 // batch is nil on every path that mirrors nothing (no-hit, nil session, or
 // persist error); ApplyPatch(nil) is a no-op.
-func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, error, map[string]string) {
+func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string, error) {
 	if session == nil {
 		return false, nil, nil
 	}
@@ -690,9 +690,9 @@ func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, 
 			if reason := runtime.ProviderTerminalErrorReason(content); reason != "" {
 				termBatch, markErr := markProviderTerminalError(session, sessFront, clk, reason)
 				if markErr != nil {
-					return false, markErr, nil
+					return false, nil, markErr
 				}
-				return true, nil, termBatch
+				return true, termBatch, nil
 			}
 			if runtime.ContainsProviderRateLimitScreen(content) {
 				facts.Screen = sessionpkg.ScreenRateLimit
@@ -705,9 +705,9 @@ func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, 
 	}
 	rlBatch, err := recordRateLimitQuarantine(session, sessFront, clk)
 	if err != nil {
-		return false, err, nil
+		return false, nil, err
 	}
-	return true, nil, rlBatch
+	return true, rlBatch, nil
 }
 
 // sessionExitFacts gathers the cheap facts for the exit-classification

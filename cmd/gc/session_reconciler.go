@@ -1422,26 +1422,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range ordered {
 		infoByID[ordered[i].ID] = sessionpkg.InfoFromPersistedBead(ordered[i])
 	}
-	// refreshSessionInfo re-projects a session's Info into the coherent snapshot
-	// after a mutation, so a post-mutation decision read routes through infoByID
-	// instead of a fresh InfoFromPersistedBead(*session) re-derive (front-door
-	// migration Step 3). During the lockstep-coexistence phase (Steps 3-5) it
-	// refreshes from the raw working copy: byte-identical BY CONSTRUCTION to the
-	// retired re-derive, since healState/markProviderTerminalError/… mirror every
-	// persisted write onto session.Metadata in lockstep. Refreshing from the raw
-	// bead (rather than a store-authoritative sessFront.Get) deliberately preserves
-	// the reconciler's intra-tick raw/store divergences — e.g. reset_committed_at
-	// is persisted but kept OFF the in-memory bead this tick (#2345, force-wake
-	// prevention), and the RunLive re-apply persists started_live_hash without a
-	// lockstep — which a Get would wrongly pull into the snapshot. Step 6 removes
-	// the raw working set and cuts refresh over to Get, handling those hidden keys
-	// with explicit intra-tick suppression.
-	refreshSessionInfo := func(id string) {
-		if b := beadByID[id]; b != nil {
-			infoByID[id] = sessionpkg.InfoFromPersistedBead(*b)
-		}
-	}
-
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
@@ -1572,7 +1552,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						template = info.Template
 					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, nil)
-					rateLimitHit, rateLimitErr, rlBatch := checkRateLimitStability(session, cfg, providerAlive, dt, sessFront, clk, peek)
+					rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, cfg, providerAlive, dt, sessFront, clk, peek)
 					if rateLimitHit || rateLimitErr != nil {
 						// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 						// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -1618,7 +1598,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
-					rateLimitHit, rateLimitErr, rlBatchNamed = checkRateLimitStability(session, cfg, rateLimitAlive, dt, sessFront, clk, peek)
+					rateLimitHit, rlBatchNamed, rateLimitErr = checkRateLimitStability(session, cfg, rateLimitAlive, dt, sessFront, clk, peek)
 				}
 			}
 			if rateLimitHit || rateLimitErr != nil {
@@ -2040,7 +2020,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
 			if pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout) {
-				rateLimitHit, rateLimitErr, rlBatch := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
+				rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
 				if rateLimitHit || rateLimitErr != nil {
 					// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 					// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -2386,7 +2366,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
-		rateLimitHit, rateLimitErr, rlBatchFwd := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
+		rateLimitHit, rlBatchFwd, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
 		if rateLimitHit || rateLimitErr != nil {
 			// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 			// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -2778,17 +2758,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// hash until the new process commits. Without the durable guard,
 		// a deferred start's next reconcile tick would clear the preserved
 		// hash and rotate session_key before --resume can be prepared.
-		// Refresh the snapshot: the top-of-loop info is stale here — the
+		// Read the drift-repair skip decision off the coherent snapshot. The
 		// desired-path blocks above (drain-ack, restart-request, alive config-drift)
-		// may have mutated session.Metadata in lockstep — so re-project the current
-		// bead for the drift-repair skip decision. The Info sibling is only
-		// evaluated when driftRestartedInPlace is false (short-circuit ||); the
-		// refresh reflects the lockstep-updated bead exactly, byte-identical to the
-		// raw read it replaces. (The restart-handoff block above persists
-		// reset_committed_at without a lockstep by design — refreshing from the raw
-		// bead, not Get, correctly keeps that key off this tick's snapshot; see
-		// refreshSessionInfo.)
-		refreshSessionInfo(session.ID)
+		// all fold their mutations onto infoByID now (Step 6d write-returns-Info), so
+		// the snapshot entry is already byte-identical to the lockstep-updated bead —
+		// no re-projection needed. (The restart-handoff consume above folds a batch
+		// that excludes reset_committed_at, so that durable next-tick marker stays off
+		// this tick's snapshot exactly as the old raw refresh kept it off; #2345.)
 		infoAsleepDrift := infoByID[session.ID]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
@@ -3045,12 +3021,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		eval := wakeEvals[target.session.ID]
 		// Typed projection for this iteration's decision reads (session_name,
 		// pin_awake, template, sleep_intent). Refreshed from the snapshot: this is
-		// a post-Phase-1 loop, so target.session may have been mutated during Phase
-		// 1 after its last refresh. The loop itself writes only wakeEvals/eval —
-		// never the bead — so one refresh here is byte-identical throughout. The
-		// sleep policy resolvers (resolveSessionSleepPolicy, configWakeSuppressed)
-		// read whole-bead + runtime state and stay raw.
-		refreshSessionInfo(target.session.ID)
+		// a post-Phase-1 loop, and every Phase-1 mutation folds onto infoByID now
+		// (Step 6d write-returns-Info), so the snapshot entry is already coherent —
+		// no re-projection needed. The loop itself writes only wakeEvals/eval, never
+		// the bead. The sleep policy resolvers (resolveSessionSleepPolicy,
+		// configWakeSuppressed) read whole-bead + runtime state and stay raw.
 		info := infoByID[target.session.ID]
 		policy := resolveSessionSleepPolicy(*target.session, cfg, sp)
 		eval.Policy = policy

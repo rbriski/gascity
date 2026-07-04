@@ -3,7 +3,6 @@ package main
 import (
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -14,10 +13,12 @@ import (
 // so a session closed earlier in the tick is excluded as soon as its close has
 // been refreshed onto the snapshot. It feeds the min-floor idle-worker
 // exemption: a pool at or below its floor is entirely always-warm contingent.
-func openPoolSessionCountForTemplate(ordered []beads.Bead, infoByID map[string]sessionpkg.Info, cfg *config.City, template string) int {
+//
+// The count is order-independent (unique session IDs), so it ranges infoByID
+// directly rather than the raw `ordered` beads (Step 5e demotion).
+func openPoolSessionCountForTemplate(infoByID map[string]sessionpkg.Info, cfg *config.City, template string) int {
 	open := 0
-	for j := range ordered {
-		info := infoByID[ordered[j].ID]
+	for _, info := range infoByID {
 		if !info.Closed && normalizedSessionTemplateInfo(info, cfg) == template {
 			open++
 		}

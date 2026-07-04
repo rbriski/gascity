@@ -1418,7 +1418,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// stale before it is visited. Entries are refreshed from the store (via Get)
 	// after a mutation as the post-mutation reads migrate onto them (Step 3+).
 	infoByID := make(map[string]sessionpkg.Info, len(ordered))
+	// orderedIDs carries the tick's topo order as plain session IDs (Step 5e). The
+	// order-sensitive decision-domain rebuilds (the awake-scan `sessionInfos` feed
+	// and the preserve-template feed) walk it instead of the raw `ordered` beads,
+	// so those rebuilds no longer reach into `ordered[i]` — `ordered` is demoted to
+	// the load-time slice that builds this snapshot and carries raw beads into the
+	// documented raw-by-design / start-execution consumers. Order is load-bearing:
+	// ComputeAwakeSet resolves the non-unique SessionName last-write-wins, so these
+	// rebuilds must stay in topo order and never `range infoByID`.
+	orderedIDs := make([]string, len(ordered))
 	for i := range ordered {
+		orderedIDs[i] = ordered[i].ID
 		infoByID[ordered[i].ID] = sessionpkg.InfoFromPersistedBead(ordered[i])
 	}
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
@@ -1594,14 +1604,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			)
 			if preserveNamed {
 				// Feed the preserve template resolver from the live mid-tick
-				// infoByID snapshot in `ordered` order (front-door Step 4),
-				// not the raw `ordered` working set. Byte-identical today
-				// (every pre-call close still writes raw Status in lockstep,
+				// infoByID snapshot in topo (orderedIDs) order (front-door
+				// Step 4/5e), not the raw `ordered` working set. Byte-identical
+				// today (every pre-call close still writes raw Status in lockstep,
 				// so membership matches) and forward-correct once that lockstep
 				// drops. The only reachable snapshot read is OpenInfos().
-				preservedInfos := make([]sessionpkg.Info, len(ordered))
-				for k := range ordered {
-					preservedInfos[k] = infoByID[ordered[k].ID]
+				preservedInfos := make([]sessionpkg.Info, len(orderedIDs))
+				for k := range orderedIDs {
+					preservedInfos[k] = infoByID[orderedIDs[k]]
 				}
 				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
 				if preserveErr == nil {
@@ -2228,7 +2238,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
 						minFloor := cfgAgent.EffectiveMinActiveSessions()
 						if minFloor > 0 {
-							openInPool := openPoolSessionCountForTemplate(ordered, infoByID, cfg, tp.TemplateName)
+							openInPool := openPoolSessionCountForTemplate(infoByID, cfg, tp.TemplateName)
 							if isMinFloorIdleWorker(minFloor, openInPool) {
 								exempt = true
 								if trace != nil {
@@ -3038,12 +3048,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Build the awake-scan domain from the coherent typed snapshot in `ordered`
 	// slice order (load-bearing — ComputeAwakeSet resolves SessionName
 	// last-write-wins over a non-unique key, so map iteration order must not
-	// leak in). Every ordered[i].ID keys infoByID (built at tick entry, only
+	// leak in). Every orderedIDs entry keys infoByID (built at tick entry, only
 	// updated thereafter, never deleted), so this reproduces the former
-	// per-bead snapshot lookup exactly.
-	sessionInfos := make([]sessionpkg.Info, len(ordered))
-	for i := range ordered {
-		sessionInfos[i] = infoByID[ordered[i].ID]
+	// per-bead snapshot lookup exactly (Step 5e: walk orderedIDs, not raw beads).
+	sessionInfos := make([]sessionpkg.Info, len(orderedIDs))
+	for i := range orderedIDs {
+		sessionInfos[i] = infoByID[orderedIDs[i]]
 	}
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, workSet, readyWaitSet,

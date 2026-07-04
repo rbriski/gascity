@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -17,12 +16,8 @@ import (
 // both excluded.
 func TestOpenPoolSessionCountForTemplateExcludesClosed(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	ordered := []beads.Bead{
-		{ID: "s-open-1"},
-		{ID: "s-open-2"},
-		{ID: "s-closed-worker"},
-		{ID: "s-open-scout"},
-	}
+	// Ranged as a map (Step 5e): membership + Closed/template drive the count, not
+	// order. Two open workers count; the closed worker and the scout are excluded.
 	infoByID := map[string]sessionpkg.Info{
 		"s-open-1":        {ID: "s-open-1", Template: "worker"},
 		"s-open-2":        {ID: "s-open-2", Template: "worker"},
@@ -30,7 +25,7 @@ func TestOpenPoolSessionCountForTemplateExcludesClosed(t *testing.T) {
 		"s-open-scout":    {ID: "s-open-scout", Template: "scout"},
 	}
 
-	if got := openPoolSessionCountForTemplate(ordered, infoByID, cfg, "worker"); got != 2 {
+	if got := openPoolSessionCountForTemplate(infoByID, cfg, "worker"); got != 2 {
 		t.Fatalf("openPoolSessionCountForTemplate = %d, want 2 (two open workers; the closed worker and the scout must be excluded)", got)
 	}
 }

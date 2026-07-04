@@ -132,14 +132,38 @@ worktree `.claude/worktrees/object-front-doors`, **HEAD `97fd6fbc6`** (re-grep
       All 3 core call sites updated to the 8-arg signature. gofmt/vet clean, `golangci-lint` 0 (the newly-dead
       params would have tripped `unparam` — hence removing them, not just `sessionBeads`), reconciler+drain+trace
       subset green (224s); fable 2-lens equivalence review (wf_2c0d9209): 0 findings.
-- [ ] **Steps 5e, 6e remain** (see `RECONCILER-FRONT-DOOR-REMAINING-PLAN.md` §Step 5 / 6e). Demote `ordered`
-      (5e), then the 6e guard. **6e caveat sharpened by 5c:** the guard cannot blanket-forbid `session.Metadata[`
-      in
-      `session_reconciler.go` — the raw-by-design classifier helpers (`isDrainAckStopPending`,
-      `pendingCreateStartInFlight`, …) legitimately read it, and the 5 survivor mirrors (S1-S5) legitimately
-      write it. Scope the needle or relocate per the FINISH-doc caveat. Step 5 stays re-scoped to DEMOTE
-      `ordered` (not delete — start-execution `startCandidate`/`buildPreparedStart` is raw-by-design consumer #7,
-      out of scope).
+- [x] **Step 5e — demote `ordered`**. Introduced `orderedIDs []string` (built in the same tick-start loop as
+      `infoByID`) and pointed the two order-sensitive decision rebuilds — the awake-scan `sessionInfos` feed and
+      the preserve-template `preservedInfos` feed — at `orderedIDs` instead of `ordered[i]` (topo order preserved;
+      never `range infoByID` for these — SessionName last-write-wins). Switched `openPoolSessionCountForTemplate`
+      to `range infoByID` (order-independent count over unique IDs; dropped its `ordered []beads.Bead` param and
+      the now-unused `beads` import in both `session_progress.go` and its test). Byte-identical: `orderedIDs[i] ==
+      ordered[i].ID` at every index, and every `infoByID` key is an `ordered[i].ID` (built only from `ordered`,
+      only ApplyPatch-updated in place thereafter — never inserted under a new ID nor deleted). gofmt/vet clean,
+      `golangci-lint` 0, reconciler+pool+preserve subset green; fable 2-lens byte-identity review (wf_e72467fd):
+      0 findings.
+
+      **FINAL RAW CENSUS** (`grep '\bordered\b' cmd/gc/session_reconciler.go` after 5a–5e). `ordered` survives
+      ONLY as the load-time slice for:
+      - (i) **tick-start typed builds** (pre-snapshot, blessed): the Phase-0.5 circuit-breaker block
+        (`namedSessionIdentity(ordered[i])`, `ordered[i].ID`, `CircuitStateFromMetadata(ordered[i].Metadata)`,
+        `computeNamedSessionProgressSignatures(ordered, …)` — infoByID does not exist yet here) and the
+        `infoByID`/`orderedIDs` build.
+      - (ii) **the forward-pass `&ordered[i]`** (`session := &ordered[i]`) that carries the raw bead into the
+        documented raw-by-design helpers (`resolveSessionSleepPolicy`, `sessionHasOpenAssignedWorkForReachableStore`,
+        …) and into `startCandidate.session` — start execution, **consumer #7, out of scope** (the sole blocker to
+        physically deleting `ordered`; a separate future initiative).
+      - (iii) `len(ordered)` trace/phase counts.
+      The two order-sensitive rebuilds and the pool count no longer touch `ordered`. The surviving
+      `session.Metadata[` sites are the raw-by-design classifier helper reads + the 5 start/emit-once-coupled
+      survivor mirrors (S1–S5), all documented above.
+- [ ] **Step 6e remains** — the CI guard (`frontdoor_di_guard_test.go`). **Caveat sharpened by 5c/5e:** the
+      guard cannot blanket-forbid `session.Metadata[` in `session_reconciler.go` — the raw-by-design classifier
+      helpers (`isDrainAckStopPending`, `pendingCreateStartInFlight`, …) legitimately READ it, and the 5 survivor
+      mirrors (S1–S5) legitimately WRITE it. Scope the needle (e.g. a read-only needle, or exclude the survivor
+      writes) or relocate per the FINISH-doc caveat; add `compute_awake_bridge.go` (raw-free) + `session_reconcile.go`
+      if raw-free. Do NOT add the raw-by-design files. Revert-canary. `ordered` physical deletion stays out of scope
+      (start-execution consumer #7).
 
 ## Where things stand
 

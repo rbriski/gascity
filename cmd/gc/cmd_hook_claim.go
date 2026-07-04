@@ -114,6 +114,17 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 		return writeHookClaimNoWork(opts, ops, stdout, stderr)
 	}
 
+	// graph_store=sqlite: a worker executes only graph-resident (gcg-) nodes.
+	// Drop any Dolt work-leg (non-gcg-) candidate so a routing leak can never
+	// result in a worker claiming a work bead, regardless of status/assignee —
+	// the sqlite-side analog of the assignee=="" invariant that keeps workers
+	// off formula sources under a single Dolt store. Fail-open: when the store
+	// split can't be confirmed, candidates are unchanged.
+	candidates = filterClaimCandidatesForGraphSplit(candidates, hookClaimGraphStoreSQLite(dir, opts.Env), stderr)
+	if len(candidates) == 0 {
+		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	}
+
 	if result, bead, ok := hookClaimExistingOrAssigned(candidates, opts); ok {
 		return writeHookClaimWorkResultForBead(result, bead, opts, ops, dir, stdout, stderr)
 	}
@@ -211,6 +222,51 @@ func hookCandidateClaimable(candidate beads.Bead, routeTargets []string) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
 		hookClaimMatchesRoute(candidate, routeTargets)
+}
+
+// filterClaimCandidatesForGraphSplit drops non-graph-resident work-query
+// candidates when graph_store=sqlite is in effect. Under the split a worker
+// only ever executes graph-class (gcg-) nodes; a Dolt work-leg (ga-) id
+// reaching the claim path is a routing leak, and claiming it would let a worker
+// mutate a work-leg bead that no graph query should have handed it. Dropping it
+// here permanently closes that path — including the Tier-1 crash-recovery read
+// (`bd list --status in_progress --assignee=$id`), which is not graph-filtered.
+//
+// Fail-open by design: sqliteEnabled is false whenever the store split cannot be
+// confirmed (non-sqlite deployment, or a config that could not be loaded), and
+// then candidates are returned unchanged. A dropped candidate is logged so a
+// genuine leak is observable rather than silent.
+func filterClaimCandidatesForGraphSplit(candidates []beads.Bead, sqliteEnabled bool, stderr io.Writer) []beads.Bead {
+	if !sqliteEnabled || len(candidates) == 0 {
+		return candidates
+	}
+	prefix := graphStoreIDPrefix + "-"
+	kept := make([]beads.Bead, 0, len(candidates))
+	for _, c := range candidates {
+		if strings.HasPrefix(strings.TrimSpace(c.ID), prefix) {
+			kept = append(kept, c)
+			continue
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: dropping non-graph candidate %q under graph_store=sqlite; a work-leg bead must not be claimed by a worker (routing leak?)\n", c.ID) //nolint:errcheck
+	}
+	return kept
+}
+
+// hookClaimGraphStoreSQLite reports whether the city that owns this hook runs
+// graph_store=sqlite. It resolves the city path from the agent env/dir and
+// reads the city config; any resolution or load failure returns false so the
+// claim guard fails open. Cheap (a TOML parse — no bd/dolt subprocess), and the
+// same detection hookClaimDefault already uses to route graph claims.
+func hookClaimGraphStoreSQLite(dir string, env []string) bool {
+	cityPath := hookClaimCityPath(dir, env)
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return false
+	}
+	return graphStoreSQLiteEnabled(cfg)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a

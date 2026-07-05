@@ -617,28 +617,36 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	return wc, nil
 }
 
-// statusListStoreWithTimeout lists with the per-store read timeout. Stores
-// implementing beads.ContextLister get a real ctx-bound cancellation: on
-// timeout the backing query is canceled and its connection released.
-// Stores without it fall back to the legacy abandon-goroutine pattern
-// (bounded return, but the goroutine keeps its connection until the scan
-// returns) — unchanged behavior for backends that haven't adopted the
-// capability. Counter-capable stores avoid this path entirely.
+// statusListStoreWithTimeout lists with the per-store read timeout, always
+// bounding the caller's return under a goroutine+select guard. Stores
+// implementing beads.ContextLister additionally get real cancellation: the
+// ctx passed into ListContext cancels the backing query and releases its
+// connection on timeout, so the guard goroutine returns promptly rather than
+// leaking. Stores without it — and ContextLister implementations that cannot
+// honor ctx (a nil-runnerContext BdStore falls back to plain List;
+// DoltliteReadStore.ListContext is a synchronous native scan) — still return
+// the caller at the deadline; their goroutine keeps its connection until the
+// underlying read returns. The guard around the ContextLister branch is the
+// defense in depth that keeps a ctx-ignoring implementation from blocking a
+// bounded status read for up to bdReadCommandTimeout (ga-enpau9 / PR #3918
+// review, Blocker). Counter-capable stores avoid this path entirely.
 func statusListStoreWithTimeout(ctx context.Context, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	if lister, ok := store.(beads.ContextLister); ok {
-		return lister.ListContext(ctx, query)
-	}
 	type listResult struct {
 		rows []beads.Bead
 		err  error
 	}
 	done := make(chan listResult, 1)
 	go func() {
+		if lister, ok := store.(beads.ContextLister); ok {
+			rows, err := lister.ListContext(ctx, query)
+			done <- listResult{rows: rows, err: err}
+			return
+		}
 		rows, err := store.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()

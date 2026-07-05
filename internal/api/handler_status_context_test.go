@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -54,6 +55,48 @@ func TestHandleStatusWorkCountsPreferListContextOverGoroutineList(t *testing.T) 
 	}
 	if store.listCalls != 0 {
 		t.Fatalf("plain List called %d times, want 0 (ListContext should be used exclusively)", store.listCalls)
+	}
+}
+
+// ctxIgnoringBlockingListStore claims beads.ContextLister but blocks and
+// ignores its context, modeling the two shapes that satisfy the interface yet
+// cannot honor a deadline: a nil-runnerContext BdStore (ListContext falls back
+// to plain, non-cancellable List) and DoltliteReadStore.ListContext (a
+// synchronous native SQLite scan). block is never closed by the store, so the
+// only way statusListStoreWithTimeout can return is via its own guard.
+type ctxIgnoringBlockingListStore struct {
+	beads.Store
+	block chan struct{}
+}
+
+func (s *ctxIgnoringBlockingListStore) ListContext(_ context.Context, _ beads.ListQuery) ([]beads.Bead, error) {
+	<-s.block
+	return nil, nil
+}
+
+// TestStatusListStoreWithTimeoutBoundsCtxIgnoringLister proves the guard around
+// the ContextLister branch bounds the caller even when the implementation
+// ignores ctx and blocks — the regression the removed goroutine+select guard
+// reintroduced (ga-enpau9 / PR #3918 review, Blocker). The parent context's
+// short deadline propagates into statusListStoreWithTimeout's derived timeout,
+// so the select fires without waiting on the wedged ListContext.
+func TestStatusListStoreWithTimeoutBoundsCtxIgnoringLister(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	store := &ctxIgnoringBlockingListStore{Store: beads.NewMemStore(), block: block}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := statusListStoreWithTimeout(ctx, store, beads.ListQuery{AllowScan: true})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("statusListStoreWithTimeout returned nil error against a wedged ctx-ignoring ListContext; want a timeout error, never a silent empty result")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("statusListStoreWithTimeout blocked %s against a ctx-ignoring ListContext; want it bounded near the parent deadline", elapsed)
 	}
 }
 

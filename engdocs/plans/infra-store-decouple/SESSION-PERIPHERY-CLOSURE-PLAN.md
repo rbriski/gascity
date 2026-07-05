@@ -211,10 +211,11 @@ a fable adversarial byte-identity review, 0 findings each). Commits on
 - `1fbcb7728` cmd_session_logs.go, mcp_integration.go (ProviderKind consumers;
   `sessionLogFallbackCandidateLive` signature → Info)
 - `b5fb81b51` session_index.go (+ deleted dead `pool_template` field per no-ghosts)
+- `6f60e2c4d` cmd_session_wake.go (two local helpers → Info form)
 
-**8 files now on `metadataInfoOnlyFiles`** (shape-sealed): session_template_start,
+**9 files now on `metadataInfoOnlyFiles`** (shape-sealed): session_template_start,
 adoption_barrier, cmd_prime, cmd_skill, session_resolve, cmd_session_logs,
-mcp_integration, session_index. Verified census artifact:
+mcp_integration, session_index, cmd_session_wake. Verified census artifact:
 `raw/session-tier4-census.json`.
 
 **KEY LESSON — clean Tier-4 criterion (sharper than the census):** a file is a clean
@@ -232,5 +233,5 @@ substring guard (documented census).
 **Remaining Tier-4 (next):** doctor_session_model (mixed, no guard), usage_compute
 (needs bookkeeping-key Phase A + work refs), session_origin (bead-form helper library),
 pool_session_name / pool_desired_state (mixed + a dead `poolSessionConsumesNewDemand`
-legacy helper to delete), cmd_session_wake (mixed, helpers). Then Tier-2
-(soft_reload/cmd_start/cmd_session), then the Tier-1 giants.
+legacy helper to delete). Then Tier-2 (soft_reload/cmd_start/cmd_session), then the
+Tier-1 giants.

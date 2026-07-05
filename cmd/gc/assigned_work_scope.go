@@ -310,10 +310,20 @@ func workBeadResumeReady(status string, ready bool) bool {
 // into a plain bead-ID map, built while beadList and storeRefs are still
 // index-aligned — i.e., before filterAssignedWorkBeadsForPoolDemand or any
 // other bead-dropping filter runs, since those filters do not produce a
-// correspondingly-filtered storeRefs slice. Bead IDs are globally unique
-// across stores in this fleet (unlike the small-integer-style IDs the
-// store-scoped key defends against elsewhere), so collapsing to a plain ID
-// key is safe for this map's consumer, the pool reconciler's resume tier.
+// correspondingly-filtered storeRefs slice.
+//
+// The collapse to a plain bead-ID key is a deliberate operational trade-off,
+// not an enforced invariant. Nothing asserts distinct bead-ID prefixes across
+// stores at config load — BdStore tracks only an owned prefix per store, not a
+// cross-store uniqueness guarantee — so on a shared-ID collision the last bead
+// written for that ID wins (last-write-wins by iteration order). The sibling
+// readyAssignedFlagsForBeads above keeps its store-scoped key precisely to
+// defend the wake path against that collision; this map's sole consumer, the
+// pool reconciler's resume tier, tolerates it because bead IDs are globally
+// unique across this fleet's stores in practice. That trade-off is pinned by
+// TestReadyAssignedByBeadIDAcceptsCrossStoreCollisionForPoolResumeUse, so a
+// future change in the ID-uniqueness assumption is caught there rather than
+// silently altering pool resume decisions.
 func readyAssignedByBeadID(readyAssigned map[storeScopedBeadKey]bool, beadList []beads.Bead, storeRefs []string) map[string]bool {
 	if len(beadList) == 0 {
 		return nil

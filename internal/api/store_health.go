@@ -8,10 +8,13 @@ import (
 )
 
 // storeHealthCacheTTL is the refresh interval for the /v0/status
-// StoreHealth block. The underlying inputs (directory size walk,
-// maintenance-log read) are cheap enough to run every minute but
-// running them on every dashboard poll is wasteful.
-const storeHealthCacheTTL = 30 * time.Second
+// StoreHealth block. The underlying inputs include a full closed-history
+// Dolt row scan (countBeadStoreRows) whose cost grows with store history
+// and can exceed a minute on a long-lived city. A TTL shorter than that
+// scan time makes every poll re-trigger the scan (the cache is stale
+// before it finishes), pegging the supervisor; keep the TTL well above
+// the worst observed scan time.
+const storeHealthCacheTTL = 3 * time.Minute
 
 // cachedStoreHealth returns the memoized StoreHealth block, refreshing
 // when the TTL has elapsed. Safe for concurrent callers.

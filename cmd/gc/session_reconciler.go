@@ -4260,13 +4260,20 @@ func traceHealClearedPendingCreateLease(
 }
 
 func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {
+	applyTemplateOverridesToConfigInfo(agentCfg, sessionpkg.InfoFromPersistedBead(session), tp)
+}
+
+// applyTemplateOverridesToConfigInfo is the session.Info form of
+// applyTemplateOverridesToConfig: byte-identical logic reading the parsed
+// template overrides directly off Info instead of re-projecting a raw bead.
+func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpkg.Info, tp TemplateParams) {
 	if agentCfg == nil {
 		return
 	}
 	if tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
 		return
 	}
-	ovr, err := sessionpkg.ParseTemplateOverridesFromInfo(sessionpkg.InfoFromPersistedBead(session))
+	ovr, err := sessionpkg.ParseTemplateOverridesFromInfo(info)
 	if err != nil || len(ovr) == 0 {
 		return
 	}

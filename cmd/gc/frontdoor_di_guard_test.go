@@ -89,6 +89,7 @@ var snapshotInfoOnlyFiles = []string{
 	"providers.go",
 	"nudge_dispatcher.go",
 	"named_sessions.go",
+	"soft_reload.go",
 }
 
 // forbiddenRawSnapshotAccessors are the *sessionBeadSnapshot methods that return
@@ -178,6 +179,7 @@ var metadataInfoOnlyFiles = []string{
 	"mcp_integration.go",
 	"session_index.go",
 	"cmd_session_wake.go",
+	"soft_reload.go",
 }
 
 // forbiddenRawBeadMetadata is the raw bead-metadata crack this guard forbids.

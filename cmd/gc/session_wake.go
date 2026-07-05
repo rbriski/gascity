@@ -299,10 +299,17 @@ func cancelSessionDrainForAssignedWork(session beads.Bead, sp runtime.Provider, 
 }
 
 func cancelSessionConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+	return cancelSessionConfigDriftDrainInfo(sessions.InfoFromPersistedBead(session), sp, dt)
+}
+
+// cancelSessionConfigDriftDrainInfo is the session.Info form of
+// cancelSessionConfigDriftDrain: byte-identical, threading Info straight into
+// the typed drain-cancel core (cancelSessionDrainIfInfo).
+func cancelSessionConfigDriftDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
 	if dt == nil {
 		return false
 	}
-	return cancelSessionDrainIf(session, sp, dt, func(reason string) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, func(reason string) bool {
 		return reason == "config-drift"
 	})
 }

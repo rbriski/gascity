@@ -78,6 +78,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc worktree](#gc-worktree) | Manage per-bead git worktrees |
 
 ## gc agent
 
@@ -4423,3 +4424,32 @@ gc wait ready <wait-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc worktree
+
+Manage per-bead git worktrees
+
+```
+gc worktree
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc worktree hq](#gc-worktree-hq) | Provision (or reuse) a dedicated worktree for HQ-targeting bead work |
+
+## gc worktree hq
+
+Provision an isolated git worktree of the city repo itself, for bead work
+that targets HQ (the city) rather than a rig.
+
+Idempotent: reuses an existing worktree for the calling role and bead ID if
+one already exists; otherwise creates one via worktree-setup.sh. Always
+freshens onto the latest main via rebase (--freshen-commit), never resets
+it. The worktree's .beads/redirect is unconditionally rewritten to point at
+the city's own beads store.
+
+The calling role is resolved from $GC_TEMPLATE (preferred) or $GC_AGENT.
+
+```
+gc worktree hq <bead-id>
+```

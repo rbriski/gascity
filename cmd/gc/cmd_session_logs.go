@@ -186,20 +186,21 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Sto
 	if err != nil {
 		return sessionLogContext{}, false
 	}
-	workDir := strings.TrimSpace(b.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	info := sessionpkg.InfoFromPersistedBead(b)
+	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
 		return sessionLogContext{}, false
 	}
-	provider := strings.TrimSpace(b.Metadata["provider_kind"])
+	provider := strings.TrimSpace(info.ProviderKind)
 	if provider == "" {
-		provider = strings.TrimSpace(b.Metadata["provider"])
+		provider = strings.TrimSpace(info.Provider)
 	}
 	return sessionLogContext{
 		sessionID:  sessionID,
 		workDir:    workDir,
-		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
+		sessionKey: strings.TrimSpace(info.SessionKey),
 		provider:   provider,
-		createdAt:  b.CreatedAt,
+		createdAt:  info.CreatedAt,
 	}, true
 }
 
@@ -228,26 +229,27 @@ func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogCo
 	targetLive := false
 	for _, b := range all {
 		if b.ID == logCtx.sessionID {
-			targetLive = sessionLogFallbackCandidateLive(b)
+			targetLive = sessionLogFallbackCandidateLive(sessionpkg.InfoFromPersistedBead(b))
 			break
 		}
 	}
 	matches := 0
 	for _, b := range all {
-		if !sessionpkg.IsSessionBeadOrRepairable(b) {
+		info := sessionpkg.InfoFromPersistedBead(b)
+		if !sessionpkg.IsSessionBeadOrRepairableInfo(info) {
 			continue
 		}
-		if strings.TrimSpace(b.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != logCtx.workDir {
+		if strings.TrimSpace(info.WorkDir) != logCtx.workDir {
 			continue
 		}
-		provider := strings.TrimSpace(b.Metadata["provider_kind"])
+		provider := strings.TrimSpace(info.ProviderKind)
 		if provider == "" {
-			provider = strings.TrimSpace(b.Metadata["provider"])
+			provider = strings.TrimSpace(info.Provider)
 		}
 		if logCtx.provider != "" && provider != "" && provider != logCtx.provider {
 			continue
 		}
-		if targetLive && b.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(b) {
+		if targetLive && info.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(info) {
 			continue
 		}
 		matches++
@@ -289,11 +291,11 @@ func sessionLogFallbackCandidates(store beads.Store, workDir, provider string) (
 	return out, nil
 }
 
-func sessionLogFallbackCandidateLive(b beads.Bead) bool {
-	if b.Status == "closed" {
+func sessionLogFallbackCandidateLive(info sessionpkg.Info) bool {
+	if info.Closed {
 		return false
 	}
-	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateDraining:
 		return true
 	default:

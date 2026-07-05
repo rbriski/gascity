@@ -212,11 +212,28 @@ a fable adversarial byte-identity review, 0 findings each). Commits on
   `sessionLogFallbackCandidateLive` signature → Info)
 - `b5fb81b51` session_index.go (+ deleted dead `pool_template` field per no-ghosts)
 - `6f60e2c4d` cmd_session_wake.go (two local helpers → Info form)
+- `ccb793ef8` **soft_reload.go — FIRST FULLY-SEALED file** (Tier-2 + Phase B): on all
+  three guard lists (store-free + snapshot-info-only + metadata-info-only) = shape AND
+  access sealed. Added 3 additive Info-form helper wrappers (bead forms delegate,
+  byte-identical, big-file callers untouched) that also unblock future big-file work:
+  `sessionCoreConfigForHashInfo`, `applyTemplateOverridesToConfigInfo`,
+  `cancelSessionConfigDriftDrainInfo`. `Open()`→`OpenInfos()` (lockstep-identical).
 
-**9 files now on `metadataInfoOnlyFiles`** (shape-sealed): session_template_start,
-adoption_barrier, cmd_prime, cmd_skill, session_resolve, cmd_session_logs,
-mcp_integration, session_index, cmd_session_wake. Verified census artifact:
-`raw/session-tier4-census.json`.
+**9 files on `metadataInfoOnlyFiles` (shape-sealed) + soft_reload.go on ALL THREE lists
+(fully sealed):** session_template_start, adoption_barrier, cmd_prime, cmd_skill,
+session_resolve, cmd_session_logs, mcp_integration, session_index, cmd_session_wake,
+soft_reload. Verified census artifact: `raw/session-tier4-census.json`.
+
+**Remaining Tier-4 re-classified after direct inspection (all DEFER — not clean
+this-pass wins):** `session_origin.go` = bead-form helper library whose bead forms are
+STILL called by build_desired_state.go (×5) + session_reconcile.go + session_beads.go +
+the classifier-equivalence oracle test → convert WITH the big files. `pool_desired_state.go`
+`poolSessionConsumesNewDemand` is NOT dead — it's the oracle-equivalence reference (census
+was wrong) → stays. `usage_compute.go` reads via a `meta := bead.Metadata` alias (bypasses
+the `.Metadata[` guard) + needs Phase A for awake_started_at/slept_at/usage_compute_emitted_at
++ ResolveRunID run-chain keys → own effort. `pool_session_name.go`/`doctor_session_model.go`
+= mixed (work/wait/opts `.Metadata[`) → session reads convertible but file stays OFF the
+substring guard.
 
 **KEY LESSON — clean Tier-4 criterion (sharper than the census):** a file is a clean
 this-pass target only when its raw reads are on a bead **the function loaded itself**

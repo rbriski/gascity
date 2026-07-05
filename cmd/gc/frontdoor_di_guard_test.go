@@ -26,6 +26,9 @@ import (
 var frontDoorStoreFreeFiles = []string{
 	"session_circuit_breaker.go",
 	"soft_reload.go",
+	"adoption_barrier.go",
+	"session_index.go",
+	"mcp_integration.go",
 }
 
 // frontDoorForbiddenInStoreFreeFiles are the raw-store parameter types and the

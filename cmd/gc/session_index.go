@@ -8,7 +8,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -39,12 +38,12 @@ func newSessionIndex() *sessionIndex {
 // populateIndex performs a one-time scan of session beads from the store
 // and builds the in-memory index. Only open beads are indexed (closed and
 // archived beads are skipped to keep the index small).
-func (idx *sessionIndex) populateIndex(store beads.Store, stderr io.Writer) {
-	if store == nil {
+func (idx *sessionIndex) populateIndex(sessFront *session.Store, stderr io.Writer) {
+	if !sessFront.Backed() {
 		return
 	}
 
-	loaded, err := loadSessionBeads(store)
+	loaded, err := loadSessionBeads(sessFront.Store().Store)
 	if err != nil {
 		fmt.Fprintf(stderr, "session index: populate: %v\n", err) //nolint:errcheck
 		return

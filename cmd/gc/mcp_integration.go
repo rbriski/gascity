@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
@@ -368,16 +367,19 @@ func resolveConfiguredAgentMCPProjection(
 func resolveSessionMCPProjection(
 	cityPath string,
 	cfg *config.City,
-	store beads.Store,
+	sessFront *session.Store,
 	sessionID string,
 	lookPath config.LookPathFunc,
 ) (resolvedMCPProjection, error) {
 	if cfg == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("city config unavailable")
 	}
-	if store == nil {
+	if !sessFront.Backed() {
 		return resolvedMCPProjection{}, fmt.Errorf("session store unavailable")
 	}
+	// Reach the raw session-class store the front door wraps for the named-session
+	// resolver and the by-id load; same underlying store, so behavior is unchanged.
+	store := sessFront.Store().Store
 	id, err := resolveSessionIDAllowClosedWithConfig(cityPath, cfg, store, sessionID)
 	if err != nil {
 		return resolvedMCPProjection{}, err

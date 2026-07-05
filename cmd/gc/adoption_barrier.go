@@ -67,9 +67,9 @@ func runAdoptionBarrier(
 	if sessFront == nil {
 		return result, false
 	}
-	// Session-bead list queries below go through the raw store the front door
-	// wraps (sessionpkg.ListAllSessionBeads takes a beads.Store); creates go
-	// through the front door. Same underlying store, so behavior is unchanged.
+	// Session-bead list queries below go through the raw session-class store the
+	// front door wraps (sessionpkg.ListAllSessionBeads takes a raw store); creates
+	// go through the front door. Same underlying store, so behavior is unchanged.
 	store := sessFront.Store().Store
 
 	// Step 1: List all running sessions.

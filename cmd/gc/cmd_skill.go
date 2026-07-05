@@ -81,7 +81,7 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 				}
 			}
 
-			entries, err := listVisibleSkillEntries(cityPath, cfg, sessionFrontDoor(store), agentName, sessionID)
+			entries, err := listVisibleSkillEntries(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), agentName, sessionID)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit

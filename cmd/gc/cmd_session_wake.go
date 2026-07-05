@@ -52,13 +52,14 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	if cityErr == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
-	b, err := store.Get(id)
+	b, err := sessStore.Get(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
@@ -68,8 +69,8 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(session.InfoFromPersistedBead(b), cfg)
-	session.RepairEmptyType(store, &b)
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	session.RepairEmptyType(sessStore, &b)
+	nudgeIDs, err := session.WakeSession(sessStore, b, time.Now().UTC())
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
@@ -79,7 +80,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(session.InfoFromPersistedBead(b)) {
-		if err := sessionFrontDoor(store).ApplyPatch(id, map[string]string{
+		if err := sessionFrontDoor(sessStore).ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
 			"pending_create_claim":      "",

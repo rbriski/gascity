@@ -224,3 +224,73 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// sessionRelocationRoutedFiles are the CLI one-shot ROOT files whose SESSION-class
+// bead access (session lifecycle beads AND durable gc:wait beads — both
+// coordclass.ClassSessions) was routed through the session coordination-class
+// store via cliSessionStore / cliSessionFrontDoor (→ resolveSessionStore). A
+// one-shot CLI command opens the generic city (work) store from openCityStore*;
+// left unrouted, its session writes would land in the work store instead of the
+// relocated session backend once [beads.classes.sessions] moves — the split-brain
+// this migration closes (engdocs/plans/infra-store-decouple/
+// SESSION-PERIPHERY-CLOSURE-PLAN.md). These files must never regress to
+// constructing the session front door straight from the generic work store.
+//
+// Two files are intentionally ABSENT even though they route: controller.go (its
+// session-circuit-reset socket handler routes, but the file also holds the
+// already-safe param-threaded runtime `sessionFrontDoor(store.Store)` at the
+// gracefulStop path, which the substring needle cannot distinguish) and
+// cmd_start.go (its adoption barrier routes, but its whole-city reconcile cascade
+// legitimately wraps `beads.SessionStore{Store: oneShotStore}` — a separate
+// mirror-of-runtime follow-up). Both are protected by in-code comments and the
+// end-to-end relocation acceptance test rather than this file-level guard.
+var sessionRelocationRoutedFiles = []string{
+	"cmd_session_wake.go",
+	"cmd_session_pin.go",
+	"cmd_skill.go",
+}
+
+// sessionRelocationForbidden are the UNROUTED session-front-door constructions a
+// routed CLI root must never contain. The routed form cliSessionFrontDoor( does
+// not contain the lowercase-s substring "sessionFrontDoor(", and the
+// sessionFrontDoor(cliSessionStore(...)) wrap lives only in cli_session_store.go
+// (which is off this list), so the needles below fire only on a regression to the
+// generic-store form. A sessionFrontDoor(sessStore) call (a routed local already
+// in hand) is a distinct substring and is allowed.
+var sessionRelocationForbidden = []string{
+	"sessionFrontDoor(store)",
+	"sessionFrontDoor(store.Store)",
+	"sessionFrontDoor(openCityStore",
+}
+
+// TestSessionRelocationRootsRouteThroughSessionClassStore pins the CLI relocation
+// boundary: the one-shot command roots must construct their session front door
+// through the session coordination-class store (cliSessionStore /
+// cliSessionFrontDoor), never straight from the generic work store, so a
+// [beads.classes.sessions] relocation reaches them. It is a regression canary:
+// a substring guard cannot prove every non-front-door session read (store.Get,
+// resolveSessionID*) was routed — the end-to-end relocation acceptance test is the
+// authoritative check. Mirrors TestFrontDoorStoreFreeFilesStayStoreFree.
+func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	for _, name := range sessionRelocationRoutedFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		content := string(data)
+		for _, needle := range sessionRelocationForbidden {
+			if strings.Contains(content, needle) {
+				t.Errorf("%s contains unrouted session front door %q — this CLI root must route its session-class access through cliSessionFrontDoor(store, cfg, cityPath) / cliSessionStore(...) so a [beads.classes.sessions] relocation reaches it", name, needle)
+			}
+		}
+		if !strings.Contains(content, "cliSessionStore(") && !strings.Contains(content, "cliSessionFrontDoor(") {
+			t.Errorf("%s is listed as session-relocation-routed but never calls cliSessionStore( / cliSessionFrontDoor( — did the routing get dropped?", name)
+		}
+	}
+}

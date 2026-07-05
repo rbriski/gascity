@@ -29,6 +29,8 @@ var frontDoorStoreFreeFiles = []string{
 	"adoption_barrier.go",
 	"session_index.go",
 	"mcp_integration.go",
+	"skill_visibility.go",
+	"session_logs_resolve.go",
 }
 
 // frontDoorForbiddenInStoreFreeFiles are the raw-store parameter types and the

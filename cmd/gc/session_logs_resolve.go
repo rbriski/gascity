@@ -1,0 +1,166 @@
+package main
+
+import (
+	"context"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+// session_logs_resolve.go holds the session-front-door-injected half of `gc
+// session logs`: the resolvers that take the typed *session.Store rather than a
+// raw store. The command root (cmd_session_logs.go) opens the city store and
+// constructs the front door; these leaves receive it, so this file is store-free
+// (frontDoorStoreFreeFiles). Session-bead access reaches the raw session-class
+// store the front door wraps via sessFront.Store().Store — the same underlying
+// store, so behavior is unchanged.
+
+func resolveStoredSessionLogSource(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, identifier string, searchPaths []string) (string, string, bool, string) {
+	logCtx, ok := resolveSessionLogContext(cityPath, cfg, sessFront, identifier)
+	if !ok {
+		return "", "", false, ""
+	}
+	if logCtx.sessionID != "" {
+		handle, err := workerHandleForSessionWithConfig(cityPath, sessFront.Store().Store, newSessionProvider(), cfg, logCtx.sessionID)
+		if err == nil {
+			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
+				return path, logCtx.provider, true, ""
+			}
+		}
+	}
+	path := ""
+	fallbackAllowed := canFallbackStoredSessionLogByWorkDir(sessFront, logCtx)
+	if strings.TrimSpace(logCtx.sessionKey) != "" {
+		path = resolveSessionKeyedLogPath(searchPaths, logCtx)
+		if path == "" && fallbackAllowed {
+			path = resolveSessionLogPath(searchPaths, logCtx)
+		}
+	} else if fallbackAllowed {
+		path = resolveSessionLogPath(searchPaths, logCtx)
+	}
+	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
+		path = ""
+	}
+	if path == "" && fallbackAllowed {
+		factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
+		if err == nil {
+			path = factory.DiscoverWorkDirTranscript(logCtx.provider, logCtx.workDir)
+		}
+	}
+	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
+		path = ""
+	}
+	if path == "" && !fallbackAllowed {
+		return "", logCtx.provider, true, ambiguousSessionLogDiagnostic(logCtx)
+	}
+	return path, logCtx.provider, true, ""
+}
+
+func resolveSessionLogContext(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, identifier string) (sessionLogContext, bool) {
+	if !sessFront.Backed() {
+		return sessionLogContext{}, false
+	}
+	store := sessFront.Store().Store
+	sessionID, err := resolveSessionIDAllowClosedWithConfig(cityPath, cfg, store, identifier)
+	if err != nil {
+		return sessionLogContext{}, false
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return sessionLogContext{}, false
+	}
+	info := sessionpkg.InfoFromPersistedBead(b)
+	workDir := strings.TrimSpace(info.WorkDir)
+	if workDir == "" {
+		return sessionLogContext{}, false
+	}
+	provider := strings.TrimSpace(info.ProviderKind)
+	if provider == "" {
+		provider = strings.TrimSpace(info.Provider)
+	}
+	return sessionLogContext{
+		sessionID:  sessionID,
+		workDir:    workDir,
+		sessionKey: strings.TrimSpace(info.SessionKey),
+		provider:   provider,
+		createdAt:  info.CreatedAt,
+	}, true
+}
+
+func canFallbackStoredSessionLogByWorkDir(sessFront *sessionpkg.Store, logCtx sessionLogContext) bool {
+	if !sessFront.Backed() || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
+		return false
+	}
+	all, err := sessionLogFallbackCandidates(sessFront, logCtx.workDir, logCtx.provider)
+	if err != nil {
+		return false
+	}
+	targetLive := false
+	for _, b := range all {
+		if b.ID == logCtx.sessionID {
+			targetLive = sessionLogFallbackCandidateLive(sessionpkg.InfoFromPersistedBead(b))
+			break
+		}
+	}
+	matches := 0
+	for _, b := range all {
+		info := sessionpkg.InfoFromPersistedBead(b)
+		if !sessionpkg.IsSessionBeadOrRepairableInfo(info) {
+			continue
+		}
+		if strings.TrimSpace(info.WorkDir) != logCtx.workDir {
+			continue
+		}
+		provider := strings.TrimSpace(info.ProviderKind)
+		if provider == "" {
+			provider = strings.TrimSpace(info.Provider)
+		}
+		if logCtx.provider != "" && provider != "" && provider != logCtx.provider {
+			continue
+		}
+		if targetLive && info.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(info) {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return false
+		}
+	}
+	return matches == 1
+}
+
+func sessionLogFallbackCandidates(sessFront *sessionpkg.Store, workDir, provider string) ([]beads.Bead, error) {
+	store := sessFront.Store().Store
+	candidates := make(map[string]beads.Bead)
+	add := func(filters map[string]string) error {
+		found, err := store.ListByMetadata(filters, 0)
+		if err != nil {
+			return err
+		}
+		for _, b := range found {
+			candidates[b.ID] = b
+		}
+		return nil
+	}
+	if strings.TrimSpace(provider) == "" {
+		if err := add(map[string]string{beadmeta.LegacyWorkDirMetadataKey: workDir}); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := add(map[string]string{beadmeta.LegacyWorkDirMetadataKey: workDir, "provider": provider}); err != nil {
+			return nil, err
+		}
+		if err := add(map[string]string{beadmeta.LegacyWorkDirMetadataKey: workDir, "provider_kind": provider}); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]beads.Bead, 0, len(candidates))
+	for _, b := range candidates {
+		out = append(out, b)
+	}
+	return out, nil
+}

@@ -84,6 +84,17 @@ func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
 	return filter
 }
 
+// legacyEphemeralPoolDemandShell's quiet=false branch used to combine
+// "capture bd's exit status" with "pipe bd's stdout into jq" in one
+// `{ ... } || printf "[]"` group, which silently converted a real bd query
+// failure into zero legacy-ephemeral demand via two distinct pathways (jq's
+// empty-stdin exit-0 quirk, and `|| printf "[]"` swallowing a jq parse error
+// on garbage stdout). That was the last surviving instance of that masking
+// anti-pattern in the file; poolDemandCountShell's other 3 lines already
+// fail loud via `|| exit $?`. The quiet=true branch (doctor/status-style
+// callers) intentionally keeps the old best-effort swallow-into-"[]"
+// behavior — only the count-form path needs to abort the whole script on a
+// bd failure like its siblings.
 func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool) string {
 	if includeEphemeralReady {
 		return `printf "[]"`
@@ -93,15 +104,13 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
 		limit,
 	)
-	query := bdQueryEphemeralStatusShell("open")
-	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
+	if !quiet {
+		query := bdQueryEphemeralStatusShell("open")
+		return `ephemeral_json=$(` + query + `) || exit $?; ` +
+			`printf '%s' "$ephemeral_json" | jq --arg target "$target" ` + shellquote.Quote(filter)
 	}
-	jqStderr := ""
-	if quiet {
-		jqStderr = ` 2>/dev/null`
-	}
-	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+	query := bdQueryEphemeralStatusQuietShell("open")
+	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + ` 2>/dev/null; } || printf "[]"`
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -150,7 +159,7 @@ func poolDemandCountShell(target string, includeEphemeralReady bool) string {
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
-		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
+		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `) || exit $?; ` +
 		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }

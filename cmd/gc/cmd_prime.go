@@ -390,7 +390,15 @@ func primeHookSessionTemplate(cityPath string) string {
 	if err != nil {
 		return ""
 	}
-	sessionBead, err := store.Get(sessionID)
+	// Route the session-bead read through the session coordination-class store so
+	// a [beads.classes.sessions] relocation reaches this prime hook. The
+	// no-refresh config loader is deliberate: this hook fires frequently, and the
+	// pack-refresh side effect of loadCityConfig is inappropriate on a hot path
+	// (the completion path uses the same no-refresh loader for the same reason).
+	// A failed load yields nil cfg, which cliSessionStore treats as identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionBead, err := sessStore.Get(sessionID)
 	if err != nil {
 		return ""
 	}
@@ -575,7 +583,14 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		warn("opening city store for session %q: %v", gcSessionID, err)
 		return
 	}
-	sessionBead, err := store.Get(gcSessionID)
+	// Route the session_key write through the session coordination-class store so
+	// a [beads.classes.sessions] relocation reaches it — otherwise the provider
+	// resume key would silently land on the work store while the real session
+	// bead lives in the relocated store. No-refresh loader on this hot hook path
+	// (see primeHookSessionTemplate); nil cfg → cliSessionStore identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionBead, err := sessStore.Get(gcSessionID)
 	if err != nil {
 		warn("loading session bead %q: %v", gcSessionID, err)
 		return
@@ -587,7 +602,7 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	if existing := strings.TrimSpace(session.InfoFromPersistedBead(sessionBead).SessionKey); existing != "" {
 		return
 	}
-	if err := sessionFrontDoor(store).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
+	if err := sessionFrontDoor(sessStore).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
 	}
 }

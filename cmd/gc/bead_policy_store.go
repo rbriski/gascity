@@ -80,6 +80,11 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// Compile-time assertion that beadPolicyStore satisfies beads.ContextLister,
+// so signature drift fails the build instead of silently degrading the status
+// read to the non-cancellable path (ga-enpau9 / PR #3918 review).
+var _ beads.ContextLister = (*beadPolicyStore)(nil)
+
 // ListContext implements beads.ContextLister with the same read-tier
 // expansion as List. The embedded Store interface does not promote optional
 // capabilities, so the delegation must be explicit — mirrors Count's

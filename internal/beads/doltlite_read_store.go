@@ -244,6 +244,11 @@ func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
 	return s.queryIssues(query, "", nil, query.Limit)
 }
 
+// Compile-time assertion that DoltliteReadStore satisfies ContextLister via
+// this explicit override rather than the promoted *BdStore method (ga-enpau9
+// / PR #3918 review).
+var _ ContextLister = (*DoltliteReadStore)(nil)
+
 // ListContext is List's ContextLister sibling. Without this override,
 // ListContext would resolve via Go method promotion to the embedded
 // *BdStore's ListContext — the bd-CLI-subprocess path — even though

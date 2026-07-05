@@ -17,6 +17,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	return c.list(query, c.backing.List)
 }
 
+// Compile-time assertion that CachingStore satisfies ContextLister (signature
+// drift → build failure, not a silent non-cancellable fall-through; ga-enpau9
+// / PR #3918 review).
+var _ ContextLister = (*CachingStore)(nil)
+
 // ListContext is like List but accepts a context so a caller with a deadline
 // can cancel the backing query when the cache must delegate. Cache-hit paths
 // are in-memory and instant, so they ignore ctx and reuse List's logic

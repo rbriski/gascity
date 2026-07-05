@@ -2218,6 +2218,11 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	return s.listWith(s.runBDTransientRead, query)
 }
 
+// Compile-time assertion that BdStore satisfies ContextLister, so a signature
+// drift becomes a build failure instead of a silent fall-through to the
+// non-cancellable List path (ga-enpau9 / PR #3918 review).
+var _ ContextLister = (*BdStore)(nil)
+
 // ListContext is like List but binds the spawned bd child to ctx when the
 // store was configured with a ctx-aware runner (WithBdStoreRunnerContext), so
 // a caller with a deadline can cancel the backing query and release its

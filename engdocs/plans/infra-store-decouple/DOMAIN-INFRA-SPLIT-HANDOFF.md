@@ -23,8 +23,41 @@ worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`.
 > two-store shape), and let the invariant test DRIVE completeness (TDD: it fails → route
 > the surfaced site → passes). The controller is already fully class-routed; E1.1 closed
 > the CLI session/mail/nudge/wait paths; the invariant test finds the residual graph/
-> orders/api/session-dogfood misses more reliably than a blind sweep. **HEAD (post-E1.1)
-> ~`3f93191b6`.** Next: E1.2 design→impl→review, then E2.
+> orders/api/session-dogfood misses more reliably than a blind sweep.
+>
+> **E2.1 MECHANISM LANDED (commit `8a529ce23`, byte-identical, fable-red-teamed).**
+> Design of record: `raw/e2-design-wf_d170b33a.json` (`e2` object) + E1.2 census (`e12`).
+> KEY INSIGHT: a "store" is a SCOPE-ROOT dir (its own Dolt db on the shared server), so
+> the city INFRA store is just a 2nd scope `.gc/infra` — NO beads-factory change. E2.1
+> added the `infraStore` param to resolveClassStore (class_store.go) with boundary
+> dispatch (infra classes→infra store, work→work store; gate on infraStore-presence +
+> class, NEVER backend) + infraScopeRoot/cityHasInfraStore/openCityInfraStoreResultAt/
+> cachedCityInfraStore (main.go, same policy-wrap+CachingStore path) + controllerState.
+> cityInfraStore / CityRuntime.standaloneCityInfraStore + accessor threading + the
+> identity/routing test split. INERT until E2.4 creates the scope (cityHasInfraStore
+> false → nil → identity).
+>
+> **DORMANT DEFECTS — MUST FIX BEFORE E2.4 flips any city (split-city-only, cannot
+> trigger today; full detail in commit `8a529ce23`):** (1) api_state.go update()
+> use-after-close when infra reopens but city fails; (2) update() provider/accessor
+> split-brain when infra reopen FAILS while city succeeds (compute effective retain-old
+> infra store before rebuilding the provider; distinguish present=false from failure);
+> (3) cachedCityInfraStore caches open-error as nil permanently + is reachable in the
+> controller (circuit-reset socket → cliSessionStore) → controller paths must source
+> cs.cityInfraStore, not the memoized handle.
+>
+> **E2 REMAINING (implementationOrder in the design):** E2.1-harden (3 dormant defects)
+> → **E2.2 = write the boundary-invariant test FIRST (TDD forcing function:
+> TestNoInfraBeadInDomainStore/TestNoDomainBeadInInfraStore; its failing list IS the
+> E2.3 worklist)** → E2.3 (sling/order split-brain: SlingDeps.GraphStore + nudge enqueue
+> + coordClassStoreCandidates infra-arm collapse + openSourceWorkflowStores, gated on
+> cityHasInfraStore) → E2.4 (gc init/start infra-scope seed + reserved prefixes gcg/…) →
+> E2.5 (integration invariant test + TestClassStoreDispatchIsBackendBlind guard + backend
+> audit). Then E3 (migrate 1-db→2-db) + E4 (e2e). **E1.2 census done** (18 graph/orders/
+> nudges CLI sites in `e12`: cmd_convoy_dispatch/molecule_autoclose/wisp_autoclose/
+> cmd_formula/cmd_order/order_store/nudge_beads; add cli_class_store.go cliGraphStore/
+> cliOrderStore seam like cliSessionStore). E1.3(api)/E1.4(worker)/E1.5(session-dogfood):
+> let the E2.2 invariant test drive. **HEAD ~`8a529ce23`.** Next: E2.1-harden, then E2.2.
 
 > **CONT (2026-07-06) — E1.6 DONE + audit finding.** A parallel census
 > (`raw/e1-census-wf_61848080.json`: 1 adversarial E1.6 auditor + 5 E1.1 file

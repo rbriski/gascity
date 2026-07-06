@@ -7,8 +7,9 @@ Paste the block below into a fresh session.
 Continue the **CLI session relocation-routing** pass on branch
 `upstream/object-front-doors-cleanup` (base `main`, DRAFT PR #3839, worktree
 `/data/projects/gascity/.claude/worktrees/object-front-doors`; run `git rev-parse HEAD` —
-should be at/after `593310fe2`). **12 files routed so far** (CONT-41 added cmd_restart,
-completion, providers; CONT-42 added cmd_session.go — all 10 gc session command roots).
+should be at/after `b7e359895`). **15 files routed so far** (CONT-41 added cmd_restart,
+completion, providers; CONT-42 added cmd_session.go — all 10 gc session command roots;
+CONT-43 added the gc status trio: cmd_status.go, cmd_citystatus.go, city_status_snapshot.go).
 
 **Read first, in order:**
 1. `engdocs/plans/infra-store-decouple/RELOCATION-ROUTING-HANDOFF.md` — the current-state
@@ -30,14 +31,21 @@ completion, providers; CONT-42 added cmd_session.go — all 10 gc session comman
   (paired shared-helper effort), cmd_nudge.go, cmd_sling.go, cmd_start.go reconcile cascade.
 
 **IMMEDIATE WORK (pick with the owner):**
-- **cmd_status.go → city_status_snapshot.go** — SURGICAL/multi-class: route the session consumers
-  (loadStatusSessionSnapshot resolveSessionIDWithConfig@353 + store.Get@361, namedSessionStatusForCity,
-  observeStatusTargetsParallel) but keep `buildCityStoreHealth`→`collectStoreHealth`@138/145 (store-maintenance
-  health, NOT session) on the plain store. cfg+cityPath thread through collectCityStatusSnapshot.
 - **cmd_mail.go** (12 subcommands) — the session reads are in the SHARED beadmail provider, not the
   subcommands. Route `openCityMailProvider` (providers.go@814) ONCE — but this is the two-store mail-provider
   follow-up (resolveMailMessagesStore), i.e. split the beadmail store into messaging-class + session-class.
-  Larger than a substring route; scope with the owner.
+  Larger than a substring route; scope with the owner. (This is now the LAST non-deferred blind root.)
+- After cmd_mail: only the DEFERRED entangled set remains (see below) + **Phase 6** (the end-to-end
+  `[beads.classes.sessions]` relocation acceptance test — the authoritative check the substring guard cannot
+  provide). Consider scoping Phase 6 with the owner once the blind roots close.
+
+**DONE at CONT-43 (do not redo):** the gc status trio — cmd_status.go (`gc rig status`),
+cmd_citystatus.go + city_status_snapshot.go (`gc status`). SURGICAL/multi-class: routed the session reads
+(loadStatusSessionSnapshot, namedSessionStatusForCity's resolveSessionIDWithConfig + store.Get,
+collectCitySessionCounts's workerSessionCatalogWithConfig) through cliSessionStore; kept
+buildCityStoreHealth→collectStoreHealth→store.List (footprint of the OPENED store) on the plain work store;
+observeSessionTargetWithWarning store param is DEAD. `collectCityStatusSnapshot` was a live TEST entry
+(not dead), routed too. Commit `b7e359895`.
 
 **DONE at CONT-41 (do not redo):** cmd_restart.go (whole-store at the cmdRigRestart caller),
 completion.go (whole-store), providers.go (PARTIAL — loadProviderSessionSnapshot routed; the

@@ -537,3 +537,34 @@ Technique note for big multi-root files: a Workflow census fan-out (one agent pe
 classifying each store consumer to its leaf bead-class) is the right tool — it parallelizes the read-heavy
 analytical work while the edits + gates + canary + single whole-file fable review stay sequential in the
 main context.
+
+**Session 2026-07-06 (CONT-43) — gc status trio DONE (13th/14th/15th routed files), 1 commit
+`b7e359895`.** Detail in `RELOCATION-ROUTING-{HANDOFF,NEXT-SESSION-PROMPT}.md`. The `gc status`
+(cmd_citystatus.go + city_status_snapshot.go) and `gc rig status` (cmd_status.go) roots open a
+generic work store used for a MIX of session reads and one store-health read. SURGICAL/multi-class:
+
+- **SESSION (routed → cliSessionStore):** `loadStatusSessionSnapshot` → `ListAllSessionBeads` (5 call
+  sites: cmd_citystatus ×4, cmd_status ×1, plus the `collectCityStatusSnapshot` test entry);
+  `namedSessionStatusForCity` → `resolveSessionIDWithConfig` + `store.Get` (routed inside the leaf, one
+  `sessStore :=` local); `collectCitySessionCounts` → `workerSessionCatalogWithConfig`.
+- **STORE-HEALTH (kept on plain store):** `buildCityStoreHealth` → `collectStoreHealth` → `liveRowCount`
+  → `store.List(AllowScan,IncludeClosed)` measures the OPENED store's on-disk footprint (all classes),
+  so it belongs on the work store, not the session store — semantically correct, not merely
+  byte-identical.
+- **DEAD (kept on plain store):** `observeSessionTargetWithWarning`'s store param is `_ beads.Store` and
+  the inner `observeSessionTargetForStatus` call hardcodes nil.
+
+Key findings: (1) `collectCityStatusSnapshot` looked dead (no non-test callers) but is a live TEST entry
+(13 call sites in city_status_snapshot_test.go / city_status_store_health_test.go) — routed, not deleted.
+(2) These files route session access via NON-front-door reads (no `sessionFrontDoor` anywhere), so the
+guard's negative `sessionFrontDoor(store...)` needles are inert; the positive `cliSessionStore(` tripwire
+is the protection (revert-canary fired for all 3, "did the routing get dropped?"). (3) The fable model
+endpoint returned 401 in this env → ran the adversarial byte-identity review with sonnet instead: 0
+behavioral defects (byte-identity + surgical correctness + nil/error/timeout paths all COULD-NOT-REFUTE;
+its lone "structural" note was a non-defect contract-clarity observation about routing at the leaf vs the
+call site, harmless because cliSessionStore is idempotent-identity).
+
+Full gates: gofmt · build · vet · golangci-lint 0 · targeted status+guard tests (9.6s) · revert-canary ·
+adversarial review. REMAINING immediate = cmd_mail.go (two-store mail-provider follow-up, the last
+non-deferred blind root); then the deferred entangled set (cmd_wait, cmd_handoff+cmd_runtime_drain,
+cmd_nudge, cmd_sling, cmd_start cascade) + Phase 6 acceptance test.

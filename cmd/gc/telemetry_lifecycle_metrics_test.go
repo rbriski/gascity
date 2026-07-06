@@ -343,7 +343,7 @@ func TestDoHandoffRemote_RecordsAgentStopMetric(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, sessionName, sessionName, "sender",
+	code := doHandoffRemote(store, store, rec, sp, sessionName, sessionName, "sender",
 		[]string{"Context refresh", "body"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())

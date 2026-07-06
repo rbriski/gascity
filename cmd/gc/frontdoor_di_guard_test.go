@@ -303,6 +303,61 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // protects the routed sling-nudge arm but NOT those two deferred cross-package
 // sites — consistent with this guard being a regression canary, not a completeness
 // proof.
+//
+// cmd_handoff.go routes its full SESSION arm — restartability
+// (sessionRestartableByController), restart-request clear (clearRestartRequest ->
+// sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
+// the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
+// (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
+// beadmail.NewWithStores(store, sessStore) — through cliSessionStore, while
+// createHandoffMail's message-bead persistence deliberately stays on the plain store
+// (messaging class, its own slice, mirroring newCityMailProvider's msgStore/sessStore
+// split and cmd_sling.go's deferred nudge enqueue). cmd_runtime_drain.go routes only
+// cmdRuntimeRequestRestart's session-bead access; every other command in the file is
+// drainOps runtime metadata (no bead store) plus nil-store worker observation, so the
+// guard is a regression canary for that one root.
+//
+// cmd_wait.go additionally hosts the controller-shared wait machinery, so its
+// session-class store params are named sessStore (making sessionFrontDoor(sessStore)
+// and sessionFrontDoor(sessStore.Store) the sanctioned in-file forms). Its four CLI
+// roots — cmdSessionWait, cmdWaitSetStateResult, doWaitListFallback,
+// doWaitInspectFallback — derive sessStore := cliSessionStore(store, cfg, cityPath)
+// and route the SESSION/wait bead access (wait-bead CRUD, session-bead lookups,
+// wait_hold clears, cap-diagnostic stamps) through it, while dependency-bead reads
+// (loadWaitDependencyBead / depsWaitReadyDetailedForCity) deliberately stay on the
+// plain WORK store (dep beads are work class, federated across rig scopes) and the
+// wait-nudge shadow lookups ride a NudgesStore over the same work store (nudges class,
+// its own E1.2 routing). The positive cliSessionStore( tripwire protects the routed
+// arm; as a non-front-door router (most session reads go through store args) this
+// guard is a regression canary for the file, not a completeness proof — the
+// end-to-end relocation acceptance test remains authoritative.
+//
+// cmd_nudge.go routes its delivery-tree SESSION arm via a two-store split derived
+// from the nudge target's cfg+cityPath (the deliverSlingNudge precedent): the raw
+// openNudgeBeadStore store keeps threading the nudge-queue currency, while each
+// delivery helper derives sessStore := cliSessionStore(store, target.cfg,
+// target.cityPath) and routes the session-class ops — worker observe/handle
+// (nudgeObserveTarget / workerObserveNudgeTarget / workerHandleForNudgeTarget), the
+// managed wake (session.WakeSession via requestManagedNudgeWake), named-session
+// materialization (resolveSessionIDMaterializingNamed) and its Get, the last-nudge
+// stamp (sessionFrontDoor(sessStore/deliverySessStore)), and the wait-bead reads in
+// splitQueuedNudgesForDelivery — through it. tryDeliverQueuedNudgesByPoller and
+// dispatchAllQueuedNudges take an explicit sessStore param that the CALLER resolves:
+// the controller threads cr.sessionsBeadStore().Store, whose fallback is the WORK
+// store (NOT the nudges store) — this closed the live controller-dispatcher class-mix
+// where the session store was derived from cr.nudgesBeadStore().Store. The CLI
+// poll/drain paths derive sessStore from their openNudgeBeadStore base, which is
+// identity to the work store today (nil cfg) but is nudges-class-routed; a tracked
+// E1.2 follow-up must thread a genuine work store there once openNudgeBeadStore
+// relocates, or the CLI-path sessions fallback would re-land on the nudge DB.
+// deliveryStore stays the nudges store for the queue record/dead-letter. The nudge-queue roots deliberately
+// stay on openNudgeBeadStore — enqueue/ack/release/record/terminalize/rollback and
+// nudgeFrontDoor are nudges class (their own E1.2 routing), mirroring cmd_sling.go's
+// deferred nudge enqueue. nudge_dispatcher.go is a pure RECEIVER of that session store
+// (routed at the controller boundary in city_runtime.go, a mixed file off this list),
+// so it is intentionally absent from the routed-files list. The positive cliSessionStore(
+// tripwire protects the routed delivery arm; as a non-front-door router this guard is
+// a regression canary for the file, not a completeness proof.
 var sessionRelocationRoutedFiles = []string{
 	"cmd_session_wake.go",
 	"cmd_session_pin.go",
@@ -321,6 +376,10 @@ var sessionRelocationRoutedFiles = []string{
 	"city_status_snapshot.go",
 	"cmd_start.go",
 	"cmd_sling.go",
+	"cmd_handoff.go",
+	"cmd_runtime_drain.go",
+	"cmd_wait.go",
+	"cmd_nudge.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a
@@ -334,6 +393,8 @@ var sessionRelocationForbidden = []string{
 	"sessionFrontDoor(store)",
 	"sessionFrontDoor(store.Store)",
 	"sessionFrontDoor(openCityStore",
+	"sessionFrontDoor(deliveryStore.Store)",
+	"sessionFrontDoor(deliveryStore)",
 }
 
 // TestSessionRelocationRootsRouteThroughSessionClassStore pins the CLI relocation

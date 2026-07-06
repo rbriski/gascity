@@ -2252,7 +2252,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessStore, time.Now(), sessionBeads)
+	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessStore, store, cr.nudgesBeadStore(), time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -2319,14 +2319,16 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// open-bead read, which was already stale for woken sessions (preWakeCommit mirrors
 	// onto a discarded store.Get copy, never the open bead) and drain-completed sessions
 	// (completeDrain's mirror was already dropped).
-	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
+	// Post-reconcile session snapshot feeds trace + wait dispatch; read it from
+	// the typed session store (controller-parity fix, identity today).
+	dispatchSessionBeads, err := loadSessionBeadSnapshot(sessStore.Store)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: loading post-reconcile session snapshot: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 	cr.recordReconcileTraceResults(trace, open, dispatchSessionBeads, recordPhase)
 	phaseStart = time.Now()
 	if err == nil {
-		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); nudgeErr != nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessStore, cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
 		}
 	}
@@ -2898,7 +2900,7 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if sessionBeads == nil {
 		return
 	}
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sp, sessionBeads); err != nil {
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }

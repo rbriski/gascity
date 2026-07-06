@@ -100,9 +100,22 @@ cover every touched file; the crutch is gone except the bare-CLI-id lookup.
   authority on which arg is session vs work, not a static read of the callee.** The
   leading store's city-work dual-role (collectAssignedWorkBeadsWithStores /
   cold-wake scale-check) rides the session store on BOTH sides today = a shared E2
-  two-store split. Remaining E1.1: cmd_sling.go (clean-surgical per census — the
-  doSlingNudge hub + deliverSlingNudge sessionFrontDoor@~1495), then the entangled
-  cmd_nudge / cmd_wait / cmd_handoff+cmd_runtime_drain set.
+  two-store split.
+  **cmd_sling.go DONE (2026-07-06, commit `cea22bf59`).** Routed the sling-nudge
+  session arm (doSlingNudge session lookups; deliverSlingNudge observe/handle/stamp
+  via a sessStore derived from target.cfg+cityPath — no signature change; printNudgePreview
+  gained a cityPath param) through cliSessionStore/cliSessionFrontDoor, keeping the
+  queued-nudge enqueue on the plain store. **Census was WRONG AGAIN: it called
+  deliverSlingNudge "clean-surgical" but it is multi-class (session observe/handle/stamp
+  + NUDGES enqueue on one store param)** — caught by tracing each consumer's leaf class +
+  the fable review. cmd_sling.go joined the guard; 2 DEFERRED cross-package sling-root
+  session sites documented (cliDirectSessionResolver needs a SlingDeps/graphroute two-store
+  split; resolveGraphStepBinding* routed by cmd_convoy_dispatch). Remaining E1.1: the
+  entangled cmd_nudge / cmd_wait / cmd_handoff+cmd_runtime_drain set. **Owner chose
+  SEQUENTIAL FULL-QUALITY execution for all of E1 (one verified+pushed commit per file/
+  group; no worktree fan-out); each file: per-consumer census re-verified against the
+  DAEMON/controller routing (city_runtime.go / nudge_dispatcher.go), byte-identity +
+  revert-canary + fable review.**
 - [ ] **E1.2 — Non-session infra classes' periphery (cmd/gc).** Front-door the
   graph / nudges / orders read+write sites the way sessions were (mail is largely
   done via the beadmail two-store split, CONT-44). Each class → its typed accessor.

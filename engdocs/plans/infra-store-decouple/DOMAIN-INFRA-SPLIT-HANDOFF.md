@@ -19,7 +19,21 @@ worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`.
 > conversion; needs its own analysis + owner sign-off (see backlog E1.6). E1.1
 > census in the same artifact: `cmd_sling.go` and `cmd_start.go` are **clean-surgical**
 > with concrete plans; `cmd_wait`/`cmd_nudge`/`cmd_handoff+drain` are entangled.
-> **Next: E1.1 clean-surgical files, then the entangled set.**
+>
+> **CONT (same session) — E1.1 cmd_start.go DONE (commit `4b4961146`).** Routed the
+> full standalone reconcile-cascade session arm (loadSessionBeadSnapshot ×2,
+> buildDesiredStateWithSessionBeads LEADING store ×3, sync ×3, reconcile ×1) to
+> `sessStore := cliSessionStore(oneShotStore,cfg,cityPath)`, keeping rigStores +
+> releaseOrphaned plain — an EXACT mirror of the daemon (city_runtime.go). cmd_start.go
+> joined the relocation guard. **KEY LESSON: the census was WRONG to defer
+> buildDesiredStateWithSessionBeads** ("dual-role, can't arg-swap") — the daemon ALREADY
+> arg-swaps its leading store to `sessionsBeadStore().Store`, so deferring diverged from
+> the daemon and left session-bead CREATES unrouted. Caught by the FABLE review (round 1
+> refuted the defer; round 2 confirmed the fix). **Discipline update for the rest of E1.1:
+> validate every "leave-plain/defer" decision against the DAEMON's store-role assignment
+> in city_runtime.go — the daemon is the authority on session-vs-work, not a static read
+> of the callee, and not the census.** **Next: cmd_sling.go (clean-surgical), then the
+> entangled cmd_nudge / cmd_wait / cmd_handoff+cmd_runtime_drain set.**
 
 **The backlog is `DOMAIN-INFRA-SPLIT-BACKLOG.md` (E1→E5). Read it with this doc.**
 This handoff is the *why* and the *don't-re-derive-it-wrong*; the backlog is the

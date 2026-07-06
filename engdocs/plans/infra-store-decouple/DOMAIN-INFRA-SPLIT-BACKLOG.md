@@ -82,6 +82,27 @@ cover every touched file; the crutch is gone except the bare-CLI-id lookup.
   (paired, share `sessionRestartableByController`/`clearRestartRequest`),
   `cmd_nudge.go`, `cmd_sling.go`, `cmd_start.go` reconcile cascade.
   *Extends:* `RELOCATION-ROUTING-HANDOFF.md` "Deferred" set.
+  **cmd_start.go DONE (2026-07-06, commit `4b4961146`).** Routed the full
+  standalone reconcile-cascade SESSION arm (2× loadSessionBeadSnapshot, 3×
+  buildDesiredStateWithSessionBeads LEADING store, 3× sync, 1× reconcile) through
+  `sessStore := cliSessionStore(oneShotStore,cfg,cityPath)`, keeping `rigStores` +
+  `releaseOrphanedPoolAssignmentsWhenSnapshotsComplete` plain — an EXACT mirror of
+  the daemon's store-role split (`CityRuntime.buildDesiredState`/`controlDispatcherTick`
+  pass `sessionsBeadStore().Store` as the leading store; `beadReconcileTick` passes
+  `cityBeadStore()` to releaseOrphaned). cmd_start.go joined `sessionRelocationRoutedFiles`.
+  **LESSON: the E1 census was WRONG to defer buildDesiredStateWithSessionBeads.** It
+  reasoned "leading store is dual-role (session snapshot + work demand) so it can't be
+  arg-swapped" — but the daemon ALREADY arg-swaps it to the session store, so deferring
+  it DIVERGED from the daemon and left session-bead CREATES (`agentBuildParams.beadStore`)
+  unrouted (a post-relocation split-brain). Caught by the adversarial fable review, not
+  the census. **For the remaining E1.1 files, validate every "leave on plain / defer"
+  call against the DAEMON's store-role assignment (city_runtime.go) — the daemon is the
+  authority on which arg is session vs work, not a static read of the callee.** The
+  leading store's city-work dual-role (collectAssignedWorkBeadsWithStores /
+  cold-wake scale-check) rides the session store on BOTH sides today = a shared E2
+  two-store split. Remaining E1.1: cmd_sling.go (clean-surgical per census — the
+  doSlingNudge hub + deliverSlingNudge sessionFrontDoor@~1495), then the entangled
+  cmd_nudge / cmd_wait / cmd_handoff+cmd_runtime_drain set.
 - [ ] **E1.2 — Non-session infra classes' periphery (cmd/gc).** Front-door the
   graph / nudges / orders read+write sites the way sessions were (mail is largely
   done via the beadmail two-store split, CONT-44). Each class → its typed accessor.

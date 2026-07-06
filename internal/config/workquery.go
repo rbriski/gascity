@@ -429,7 +429,11 @@ func (a *Agent) EffectiveSlingQuery() string {
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
 func (a *Agent) DefaultSlingQuery() string {
-	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + a.QualifiedName()
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
 }
 
 // EffectiveDefaultSlingFormula returns the default sling formula for

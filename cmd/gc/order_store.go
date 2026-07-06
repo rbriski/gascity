@@ -80,7 +80,11 @@ func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, in
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return beads.OrdersStore{}, 1
 	}
-	return beads.OrdersStore{Store: store}, 0
+	// Route order-tracking bookkeeping to the orders coordination-class store:
+	// the infra store on a split city, else the raw store (identity today). cfg
+	// is not loaded on this path; cliOrderStore keys the infra store off
+	// cityPath, so nil cfg is fine.
+	return beads.OrdersStore{Store: cliOrderStore(store, nil, cityPath)}, 0
 }
 
 func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
@@ -95,7 +99,11 @@ func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, s
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return beads.OrdersStore{}, 1
 	}
-	return beads.OrdersStore{Store: store}, 0
+	// Route order-tracking bookkeeping to the orders coordination-class store.
+	// On a split city this collapses rig-scoped order tracking to the one city
+	// infra store (the E2 intent — order tracking is infra); today it is
+	// identity to the raw scope store.
+	return beads.OrdersStore{Store: cliOrderStore(store, cfg, cityPath)}, 0
 }
 
 func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error) {
@@ -525,13 +533,13 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		if err != nil {
 			return nil, err
 		}
-		out := []beads.OrdersStore{{Store: primary}}
+		out := []beads.OrdersStore{{Store: cliOrderStore(primary, cfg, cityPath)}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, beads.OrdersStore{Store: legacy})
+			out = append(out, beads.OrdersStore{Store: cliOrderStore(legacy, cfg, cityPath)})
 		}
 		return out, nil
 	}
@@ -574,7 +582,15 @@ func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City,
 		targets = filtered
 	}
 	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
-		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
+		store, err := openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		// Wrap the INNER store with the orders class resolution before it is
+		// embedded in orderTrackingSweepScopedStore, so the sweep's structural
+		// type assertions (orderTrackingSweepStoreKey/Label) still promote.
+		// Identity today; the infra store on a split city.
+		return cliOrderStore(store, cfg, cityPath), nil
 	})
 }
 
@@ -625,14 +641,14 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if err != nil {
 			return nil, err
 		}
-		out := []beads.OrdersStore{{Store: primary}}
+		out := []beads.OrdersStore{{Store: cliOrderStore(primary, cfg, cityPath)}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
 				return out, nil
 			}
-			out = append(out, beads.OrdersStore{Store: legacy})
+			out = append(out, beads.OrdersStore{Store: cliOrderStore(legacy, cfg, cityPath)})
 		}
 		return out, nil
 	}

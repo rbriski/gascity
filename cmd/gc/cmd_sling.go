@@ -392,7 +392,19 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		SP:       sp,
 		Runner:   runner,
 		Store:    store,
-		StoreRef: storeRef,
+		// GraphStore routes the workflow/wisp molecule explosion to the graph
+		// coordination-class store. On a split city (infra store present) the
+		// graph class resolves to the infra store, so the molecule root + steps
+		// land there instead of the rig/work store. On a legacy single-store
+		// city cachedCityInfraStore returns nil, so we leave GraphStore unset
+		// (nil) — SlingDeps.graphStore() then collapses onto Store exactly as
+		// before this seam, preserving the historical rig-store graph
+		// destination byte-for-byte. We do NOT set GraphStore to the city store
+		// on legacy cities: that would move new molecules off the rig store, a
+		// behavior change without a boundary to justify it (design open
+		// question #5).
+		GraphStore: slingSplitGraphStore(store, cfg, cityPath),
+		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStores(cfg, cityPath, "")
 			if err != nil {
@@ -421,6 +433,28 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+}
+
+// slingSplitGraphStore returns the SlingDeps.GraphStore value for a sling: the
+// graph coordination-class store on a split city (the infra store), or nil on a
+// legacy single-store city so SlingDeps.graphStore() collapses onto Store
+// exactly as before the seam.
+//
+// The nil-on-legacy gate is deliberate and load-bearing for byte-identity:
+// cliGraphStore over the rig `store` returns that same rig store on a legacy
+// city (cachedCityInfraStore is nil ⇒ resolveGraphStore is identity), which is
+// what graphStore() would fall back to anyway — but wiring it as an explicit
+// nil keeps the SlingDeps shape identical to today's (GraphStore unset) rather
+// than pinning it to a concrete value, and documents that the divergence is
+// scoped to split cities only.
+func slingSplitGraphStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
+	if cachedCityInfraStore(cityPath, cfg) == nil {
+		// Legacy single-store city: leave GraphStore unset so graphStore()
+		// falls back to Store (the rig/work store), byte-identical to today.
+		return nil
+	}
+	// Split city: route the molecule explosion to the graph-class (infra) store.
+	return cliGraphStore(store, cfg, cityPath)
 }
 
 func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
@@ -1516,7 +1550,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: cliNudgesStore(store, target.cfg, target.cityPath)}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

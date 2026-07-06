@@ -199,11 +199,75 @@ if a domain store holds an infra bead or vice-versa.
   the identity stub (`cmd/gc/class_store.go:231`). Wire the 5 typed views over the
   one infra store. Blocked by: E2.1. (Pinned identity tests
   `TestControllerStateClassAccessorsAreIdentity` get updated to boundary tests.)
-- [ ] **E2.3 — Uniform infra scope (kill the sling split-brain).** Today the CLI
-  sling creates infra beads in the *rig* store while the controller reads them
-  from the city store — which is why `coordClassStoreCandidates` fans infra across
+- [~] **E2.3 — Uniform infra scope (kill the sling split-brain). WRITE-ROUTING
+  DONE (2026-07-06); read-side fan-out collapse DEFERRED.** Today the CLI sling
+  creates infra beads in the *rig* store while the controller reads them from the
+  city store — which is why `coordClassStoreCandidates` fans infra across
   city+rigs. Route infra creation to the city infra store everywhere; collapse the
   infra fan-out to city-only. Blocked by: E2.2.
+
+  **DONE (the forcing function — flips the E2.2 invariant test):**
+  - New CLI seam `cmd/gc/cli_class_store.go`: `cliGraphStore` / `cliOrderStore` /
+    `cliNudgesStore`, mirroring `cliSessionStore`. Each is
+    `resolve<Class>Store(store, cachedCityInfraStore(cityPath, cfg), cfg, cityPath, nil)`
+    — infra store on a split city, identity on a legacy city (nil recorder,
+    documented follow-up like `cliSessionStore`).
+  - **Sling graph split-brain:** `cmd_sling.go` deps construction now sets
+    `GraphStore: slingSplitGraphStore(store, cfg, cityPath)`. On a split city that
+    is the infra store (the wisp/workflow molecule explosion lands there); on a
+    legacy city it returns **nil**, so `SlingDeps.graphStore()` collapses onto
+    `Store` (the rig store) byte-for-byte as before — design open question #5
+    (do NOT move legacy molecules to the city store). Sling nudge enqueue (:1519)
+    now routes through `cliNudgesStore`.
+  - **Order run wisp:** `cmd_order.go doOrderRunWithJSON` routes the wisp
+    recipe/routing/`molecule.Instantiate`/root-`Update` through
+    `cliGraphStore(store.Store, cfg, cityPath)` (`genericStore`), while
+    `CreateRunClosed` tracking stays on the `OrdersStore`. The root `Update` moved
+    from `store.Update` → `genericStore.Update` so it targets the store the root
+    was created in (else a split-city update 404s).
+  - **Order-store openers (`order_store.go`):** `openCityOrderStore`,
+    `openOrderStoreForOrder`, `cachedOrderStoresResolver`,
+    `cachedOrderHistoryStoresResolver`, and the sweep
+    (`orderTrackingSweepStoresForConfigTargets`) now wrap the INNER store with
+    `cliOrderStore(...)` before embedding, so the sweep's structural
+    key/label assertions still promote. All identity today.
+  - **Invariant test converted:** `TestSlingGraphMaterializationLeaksIntoDomainStore`
+    (the known-leak) DELETED; sling-graph added as a PASS creator (#9) in
+    `runRoutedCreators` (driven by the production `slingSplitGraphStore` selection,
+    with `cachedInfraStoreOpen` swapped to the harness infra store), so the two
+    boundary tests + the conformance table now assert sling's graph beads land in
+    the INFRA store. New `TestSlingGraphRoutesToInfraStore` (direct fix pin) and
+    `TestSlingSplitGraphStoreIsNilOnLegacyCity` (byte-identity gate) added.
+
+  **DEFERRED (read-side fan-out collapse — precise notes; own follow-up):**
+  These are read-side sweep-surface changes on a split city, gated by the design's
+  risk #4 (MIXED-MODE SESSION SWEEP). They do NOT affect the write-side invariant
+  (already flipped), and each is a hot-path or mixed-use change that must not be
+  half-done:
+  - `coordClassStoreCandidates` (`cmd/gc/session_beads.go:682`): the SESSION/infra
+    arm should collapse to a single `{store: cityInfraStore, ref: "city"}`
+    candidate when `cityHasInfraStore`, while the WORK arms keep the city+rigs
+    fan-out. It has 3 hot reconciler call sites in `build_desired_state.go`
+    (`:1005` session arm / `:1139` assigned-work arm / `:4171` session arm) and
+    currently takes `(cfg, cityStore, rigStores, suspendedRigPaths, cityRef)` with
+    **no infra store** — the collapse requires threading the infra store into these
+    per-tick functions and split-by-class at the builder. Deferred to avoid a
+    risky, partial change to the reconciler hot path; the write-side invariant is
+    already green without it.
+  - `openSourceWorkflowStores` (`cmd/gc/cmd_convoy_dispatch.go:1652` /
+    `openSourceWorkflowStoresWith:1673`): the workflow-root singleton probe fans
+    across every rig store; on a split city workflow roots live only in the infra
+    store, so each opened store should be wrapped with `cliGraphStore(...)` for the
+    root reads. Deferred because this opener is **also** used for by-id bead
+    lookups (`findUniqueBeadAcrossStoresView:495` passes a `beadID`, reading
+    work-class beads by id), so wrapping every returned view with the graph class
+    would need to split the graph-root-read use from the by-id work-read use at the
+    same seam — not a safe blanket wrap. (Byte-identical today either way, since
+    `cliGraphStore` is identity on a legacy city.)
+  - **Guard follow-up:** extend `frontdoor_di_guard_test.go` with
+    graph/orders/nudges relocation-root guards (analogous to
+    `TestSessionRelocationRootsRouteThroughSessionClassStore`) pinning the routed
+    spellings at these roots. Part of the broader E1.2 census guard work.
 - [ ] **E2.4 — Mint new infra beads with reserved prefixes.** Activate
   `gcs/gcg/gcm/gco/gcn` for newly-created infra beads. Regeneralize the
   `reserved_prefixes.go` doc from "SQLite-relocated" → "infra-store" (backend-

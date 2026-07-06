@@ -689,7 +689,17 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// handing it to molecule.Instantiate would hide the underlying
 	// GraphApplyStore and silently fall back to sequential creation. store stays
 	// the typed wrapper for the order-tracking bead operations below.
-	genericStore := store.Store
+	//
+	// Route the graph-class (wisp molecule) materialization through the graph
+	// coordination-class store: on a split city the wisp root + steps land in
+	// the infra store instead of the order-scope store; on a legacy single-store
+	// city cliGraphStore is identity, so this is byte-identical (the same
+	// unwrapped store.Store). This is the `gc order run` analog of the E2.3 sling
+	// split-brain; the controller's dispatchWisp (order_dispatch.go) has the
+	// identical shape and must move in lockstep at the E2 flip. The order-
+	// tracking bead (CreateRunClosed below) stays on `store` (the OrdersStore)
+	// so tracking bookkeeping keeps its typed wrapper.
+	genericStore := cliGraphStore(store.Store, cfg, cityPath)
 	recipe, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -726,7 +736,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	rootID := cookResult.RootID
 
 	// Track the spawned root in the same store that created it so manual runs
-	// stay provider-aware and do not fall back to ambient bd CLI state.
+	// stay provider-aware and do not fall back to ambient bd CLI state. The root
+	// was created in genericStore (the graph-class store), so the label/metadata
+	// stamp must target genericStore too — on a split city the root lives in the
+	// infra store, and store.Update (the order-scope store) would 404. On a
+	// legacy city genericStore is the same unwrapped store, so this is identical.
 	update := beads.UpdateOpts{
 		Labels: []string{"order-run:" + scoped},
 	}
@@ -739,7 +753,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
-	if err := store.Update(rootID, update); err != nil {
+	if err := genericStore.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

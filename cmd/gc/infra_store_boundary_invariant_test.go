@@ -37,15 +37,14 @@ import (
 // test. A creator that is not yet routed through the typed accessors surfaces
 // as a bead on the wrong side — that failing list IS the E2.3 worklist.
 //
-// KNOWN LEAK captured here (the E2.3 target): `gc sling` never sets
-// SlingDeps.GraphStore (grep-confirmed: zero `GraphStore:` assignments in
-// production cmd/gc + internal/api), so SlingDeps.graphStore() collapses the
-// entire molecule explosion onto SlingDeps.Store — the RIG/work store — while
-// the controller resolves graph → the infra store. See
-// TestSlingGraphMaterializationLeaksIntoDomainStore below: it asserts the leak
-// EXISTS today so the invariant stays honest; when E2.3 wires the GraphStore
-// seam it flips red and must be converted into a PASS arm of the two boundary
-// tests.
+// SLING (the E2.3 target, now ROUTED): `gc sling` builds SlingDeps with
+// GraphStore := slingSplitGraphStore(store, cfg, cityPath) — the graph
+// coordination-class store, which is the infra store on a split city and nil on
+// a legacy single-store city (so graphStore() collapses onto Store exactly as
+// before, byte-identical). The molecule explosion therefore lands in the infra
+// store on a split city. This is exercised as a PASS arm of runRoutedCreators
+// (creator "sling-graph"), so a regression that unroutes the sling GraphStore
+// seam fails the two boundary tests below.
 
 // splitCity is the real two-store harness: a domain/work rig store plus a
 // separate infra store, both wrapped in the SAME production policy stack
@@ -72,14 +71,33 @@ func newSplitCity(t *testing.T) *splitCity {
 	rig := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
 	infra := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
 	const rigName = "rig-one"
+	cityPath := t.TempDir()
 	cs := &controllerState{
 		cfg:            cfg,
 		cityName:       "test-city",
-		cityPath:       t.TempDir(),
+		cityPath:       cityPath,
 		cityBeadStore:  work,
 		cityInfraStore: infra,
 		beadStores:     map[string]beads.Store{rigName: rig},
 	}
+
+	// The CLI seam (cliGraphStore / cliOrderStore / cliNudgesStore, used by the
+	// gc sling and gc order roots) sources the infra store from
+	// cachedCityInfraStore(cityPath) — the filesystem-marker path — not the
+	// controllerState.cityInfraStore field the controller accessors read. Point
+	// that opener at the SAME policy-wrapped infra store this harness uses, so
+	// the sling PASS arm exercises the real production GraphStore selection
+	// (slingSplitGraphStore) against the two-store shape rather than a bare
+	// injection. Reset the memo so the swap takes effect for this cityPath.
+	clearInfraStoreCacheKey(cityPath)
+	restore := swapCachedInfraStoreOpen(func(string) (beads.Store, bool, error) {
+		return infra, true, nil
+	})
+	t.Cleanup(func() {
+		restore()
+		clearInfraStoreCacheKey(cityPath)
+	})
+
 	return &splitCity{
 		cfg:        cfg,
 		workStore:  work,
@@ -271,6 +289,27 @@ func (sc *splitCity) runRoutedCreators(t *testing.T) []creatorResult {
 		results = append(results, creatorResult{"user-convoy", coordclass.ClassWork, delta > 0, delta})
 	}
 
+	// 9. SLING GRAPH molecule — routed via the PRODUCTION SlingDeps.GraphStore
+	//    selection (slingSplitGraphStore → cliGraphStore → the graph class),
+	//    NOT the cs accessor. This is the E2.3 fix: on a split city the sling
+	//    graph store is the infra store, so the workflow/wisp explosion lands
+	//    there. We build the exact SlingDeps.GraphStore production code builds
+	//    and materialize onto SlingDeps.graphStore(), so a regression that
+	//    unroutes the seam deposits graph beads in the rig store and fails the
+	//    boundary tests.
+	{
+		delta := countInfraDelta(func() {
+			deps := sling.SlingDeps{
+				Store:      sc.rigStore,
+				GraphStore: slingSplitGraphStore(sc.rigStore, sc.cfg, sc.cs.cityPath),
+			}
+			if _, err := molecule.Instantiate(context.Background(), slingDepsGraphStore(deps), graphRecipe(), molecule.Options{}); err != nil {
+				t.Fatalf("molecule instantiate (sling seam): %v", err)
+			}
+		})
+		results = append(results, creatorResult{"sling-graph", coordclass.ClassGraph, delta > 0, delta})
+	}
+
 	return results
 }
 
@@ -349,77 +388,84 @@ func TestInfraCreatorConformanceTable(t *testing.T) {
 	}
 }
 
-// TestSlingGraphMaterializationLeaksIntoDomainStore is the E2.3 worklist,
-// encoded as an executable known-leak. `gc sling` never sets
-// SlingDeps.GraphStore, so SlingDeps.graphStore() — the production seam — falls
-// back to SlingDeps.Store (the rig/work store), and the entire molecule
-// explosion (root + steps carrying gc.kind=workflow / gc.root_bead_id) lands in
-// the DOMAIN store while the controller resolves graph → the infra store.
-//
-// This test asserts the leak EXISTS today, using the real production
-// SlingDeps.graphStore() function to pick the destination store. It is
-// intentionally RED-preventing: it stays green while the bug is present, and
-// flips to FAIL the moment E2.3 wires the GraphStore seam — at which point this
-// test must be deleted and the sling path folded into the two boundary tests
-// above as a PASS arm.
-//
-// E2.3 worklist (from the design's e23SlingSplitBrain), verified reachable:
-//   - cmd_sling.go SlingDeps construction: never sets GraphStore →
-//     graphStore() collapses onto the rig store. FIX: set GraphStore to the
-//     graph-class resolution over the city store (infra store when split).
-//   - cmd_sling.go nudge enqueue (:1519): beads.NudgesStore{Store: store} where
-//     store may be the rig store → route through resolveNudgesStore.
-//   - coordClassStoreCandidates (session_beads.go) + openSourceWorkflowStores
-//     (cmd_convoy_dispatch.go): session/workflow probe fan-out across rig stores
-//     is a read-side leak vector on a split city.
-func TestSlingGraphMaterializationLeaksIntoDomainStore(t *testing.T) {
+// TestSlingGraphRoutesToInfraStore is the direct E2.3 assertion (the former
+// TestSlingGraphMaterializationLeaksIntoDomainStore, flipped): on a split city
+// the production SlingDeps.GraphStore selection (slingSplitGraphStore) resolves
+// to the infra store, so the sling molecule explosion lands there and NOT in
+// the rig/domain store. This pins the fix directly, in addition to the
+// sling-graph arm of the two boundary tests.
+func TestSlingGraphRoutesToInfraStore(t *testing.T) {
 	sc := newSplitCity(t)
 
-	// Faithfully reproduce the sling seam: a rig-scoped sling sets
-	// SlingDeps.Store = rigStore and never sets GraphStore. graphStore() is the
-	// exact production function that picks the graph destination.
-	deps := sling.SlingDeps{Store: sc.rigStore}
-	graphDest := deps.GraphStore // unset in production; graphStore() falls back to Store.
-	if graphDest != nil {
-		t.Fatal("precondition: production sling leaves SlingDeps.GraphStore unset")
+	// Build the exact SlingDeps.GraphStore production builds for a rig-scoped
+	// sling, then materialize where production materializes it: onto
+	// SlingDeps.graphStore().
+	deps := sling.SlingDeps{
+		Store:      sc.rigStore,
+		GraphStore: slingSplitGraphStore(sc.rigStore, sc.cfg, sc.cs.cityPath),
+	}
+	if deps.GraphStore == nil {
+		t.Fatal("split city: SlingDeps.GraphStore must be the infra store, got nil (leak preserved)")
 	}
 
-	// Materialize the molecule where production materializes it: onto
-	// SlingDeps.graphStore(), which collapses onto the rig store.
-	before := storeBeadCount(t, sc.rigStore)
-	if _, err := molecule.Instantiate(context.Background(), slingGraphStore(deps), graphRecipe(), molecule.Options{}); err != nil {
+	beforeRig := storeBeadCount(t, sc.rigStore)
+	beforeInfra := storeBeadCount(t, sc.infraStore)
+	if _, err := molecule.Instantiate(context.Background(), slingDepsGraphStore(deps), graphRecipe(), molecule.Options{}); err != nil {
 		t.Fatalf("molecule instantiate (sling seam): %v", err)
 	}
-	graphBeadsInRig := 0
-	list, err := sc.rigStore.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	if err != nil {
-		t.Fatalf("rig List: %v", err)
-	}
-	for _, b := range list {
-		if coordclass.Classify(b) == coordclass.ClassGraph {
-			graphBeadsInRig++
-		}
-	}
-	after := storeBeadCount(t, sc.rigStore)
 
-	if graphBeadsInRig == 0 {
-		t.Fatalf("EXPECTED the sling split-brain leak (graph beads in the rig/domain store), but found none; "+
-			"if E2.3 has wired SlingDeps.GraphStore, DELETE this known-leak test and fold sling into the two "+
-			"boundary tests as a PASS arm (rig delta was %d)", after-before)
+	graphBeadsInRig := countGraphClassBeads(t, sc.rigStore)
+	if graphBeadsInRig != 0 {
+		t.Fatalf("sling graph LEAK: %d graph-class bead(s) landed in the rig/domain store %q "+
+			"(rig delta %d); the GraphStore seam is unrouted", graphBeadsInRig, sc.rigName,
+			storeBeadCount(t, sc.rigStore)-beforeRig)
 	}
-	t.Logf("E2.3 WORKLIST (known leak, present today): sling materialized %d graph-class bead(s) into the rig "+
-		"DOMAIN store %q via SlingDeps.graphStore() fallback (GraphStore unset). E2.3 must route this to the "+
-		"infra store.", graphBeadsInRig, sc.rigName)
+	graphBeadsInInfra := countGraphClassBeads(t, sc.infraStore)
+	if graphBeadsInInfra == 0 {
+		t.Fatalf("sling graph produced no graph-class bead in the infra store (infra delta %d)",
+			storeBeadCount(t, sc.infraStore)-beforeInfra)
+	}
 }
 
-// slingGraphStore returns the store SlingDeps.graphStore() resolves to. The
+// TestSlingSplitGraphStoreIsNilOnLegacyCity pins the byte-identity gate: with no
+// infra store present (cachedCityInfraStore nil), slingSplitGraphStore returns
+// nil so SlingDeps.graphStore() collapses onto Store, exactly as before the
+// seam. A legacy single-store city therefore keeps the historical rig-store
+// graph destination.
+func TestSlingSplitGraphStoreIsNilOnLegacyCity(t *testing.T) {
+	cityPath := t.TempDir() // no infra marker seeded
+	clearInfraStoreCacheKey(cityPath)
+	rig := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+	if got := slingSplitGraphStore(rig, nil, cityPath); got != nil {
+		t.Fatalf("legacy city: slingSplitGraphStore must return nil (graphStore() collapses onto Store), got %T", got)
+	}
+}
+
+// slingDepsGraphStore returns the store SlingDeps.graphStore() resolves to. The
 // method is unexported; this mirrors its one-line fallback (GraphStore ?? Store)
-// so the known-leak test uses the exact production selection logic.
-func slingGraphStore(deps sling.SlingDeps) beads.Store {
+// so the tests use the exact production selection logic.
+func slingDepsGraphStore(deps sling.SlingDeps) beads.Store {
 	if deps.GraphStore != nil {
 		return deps.GraphStore
 	}
 	return deps.Store
+}
+
+// countGraphClassBeads lists every bead in a store and counts those the
+// classifier routes to the graph class.
+func countGraphClassBeads(t *testing.T, store beads.Store) int {
+	t.Helper()
+	list, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	n := 0
+	for _, b := range list {
+		if coordclass.Classify(b) == coordclass.ClassGraph {
+			n++
+		}
+	}
+	return n
 }
 
 // graphRecipe is a minimal formula recipe that materializes a graph molecule:

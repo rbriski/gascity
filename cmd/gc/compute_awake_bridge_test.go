@@ -371,6 +371,171 @@ func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testi
 	}
 }
 
+// TestBuildAwakeInputFromReconciler_BackoffMetadataSuppressesWake covers the
+// ga-7fldxz.2 fallback: a work bead carrying a future backoff_until in its
+// metadata must not hold its session awake, mirroring how QuarantinedUntil
+// suppresses a session bead.
+func TestBuildAwakeInputFromReconciler_BackoffMetadataSuppressesWake(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "gc__run-operator-mc-1",
+			"template":     "gc.run-operator",
+		},
+	}
+	backedOffWork := beads.Bead{
+		ID:       "ga-backed-off",
+		Status:   "in_progress",
+		Assignee: "gc__run-operator-mc-1",
+		Metadata: map[string]string{
+			"backoff_until": now.Add(10 * time.Minute).Format(time.RFC3339),
+			"backoff_count": "2",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]beads.Bead{sessionBead},
+		nil,
+		nil,
+		nil,
+		nil,
+		[]beads.Bead{backedOffWork},
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if len(input.WorkBeads) != 1 || input.WorkBeads[0].WakeBackoffUntil.IsZero() {
+		t.Fatalf("WorkBeads = %+v, want one bead with WakeBackoffUntil parsed from metadata", input.WorkBeads)
+	}
+	if input.WorkBeads[0].WakeBackoffCount != 2 {
+		t.Fatalf("WakeBackoffCount = %d, want 2", input.WorkBeads[0].WakeBackoffCount)
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got := decisions["gc__run-operator-mc-1"]
+	if got.ShouldWake {
+		t.Fatalf("backed-off in-progress work must not wake session; got decision = %+v", got)
+	}
+}
+
+// TestBuildAwakeInputFromReconciler_BackoffInvalidatedByExternalUpdate covers
+// NFR2a: a genuine external change to the bead (mail reply, PR update, label
+// change) observed after backoff_last_set must force an immediate reset,
+// independent of agent judgment — the bridge invalidates WakeBackoffUntil
+// rather than trusting the stale backoff window.
+func TestBuildAwakeInputFromReconciler_BackoffInvalidatedByExternalUpdate(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "gc__run-operator-mc-1",
+			"template":     "gc.run-operator",
+		},
+	}
+	backedOffWork := beads.Bead{
+		ID:        "ga-backed-off",
+		Status:    "in_progress",
+		Assignee:  "gc__run-operator-mc-1",
+		UpdatedAt: now,
+		Metadata: map[string]string{
+			"backoff_until":    now.Add(10 * time.Minute).Format(time.RFC3339),
+			"backoff_last_set": now.Add(-1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]beads.Bead{sessionBead},
+		nil,
+		nil,
+		nil,
+		nil,
+		[]beads.Bead{backedOffWork},
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if !input.WorkBeads[0].WakeBackoffUntil.IsZero() {
+		t.Fatalf("external update since backoff_last_set must invalidate WakeBackoffUntil, got %+v", input.WorkBeads[0])
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got := decisions["gc__run-operator-mc-1"]
+	if !got.ShouldWake {
+		t.Fatalf("invalidated backoff must wake session; got decision = %+v", got)
+	}
+}
+
+// TestBuildAwakeInputFromReconciler_BackoffNotSelfInvalidatedWithinGraceWindow
+// pins the self-invalidation-confound fix: the very write that records
+// backoff_until/backoff_last_set bumps UpdatedAt to the same instant. Without
+// a grace window, that write would immediately defeat its own suppression.
+func TestBuildAwakeInputFromReconciler_BackoffNotSelfInvalidatedWithinGraceWindow(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "gc__run-operator-mc-1",
+			"template":     "gc.run-operator",
+		},
+	}
+	backedOffWork := beads.Bead{
+		ID:        "ga-backed-off",
+		Status:    "in_progress",
+		Assignee:  "gc__run-operator-mc-1",
+		UpdatedAt: now,
+		Metadata: map[string]string{
+			"backoff_until":    now.Add(10 * time.Minute).Format(time.RFC3339),
+			"backoff_last_set": now.Format(time.RFC3339),
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]beads.Bead{sessionBead},
+		nil,
+		nil,
+		nil,
+		nil,
+		[]beads.Bead{backedOffWork},
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if input.WorkBeads[0].WakeBackoffUntil.IsZero() {
+		t.Fatalf("backoff-recording write itself must not self-invalidate, got %+v", input.WorkBeads[0])
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got := decisions["gc__run-operator-mc-1"]
+	if got.ShouldWake {
+		t.Fatalf("backoff must still suppress wake immediately after being set; got decision = %+v", got)
+	}
+}
+
 // TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped pins
 // the cross-store readiness fix: AssignedWorkBeads can carry the same bead ID
 // from independent city and rig stores. A ready city bead must NOT mark a

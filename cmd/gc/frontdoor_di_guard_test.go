@@ -270,6 +270,7 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_restart.go",
 	"completion.go",
 	"providers.go",
+	"cmd_session.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

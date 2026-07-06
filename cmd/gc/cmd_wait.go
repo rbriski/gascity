@@ -728,10 +728,13 @@ func loadWaitBeads(store beads.Store) ([]beads.Bead, error) {
 }
 
 // readyWaitSetForList returns the set of session IDs that have a ready wait
-// nudge, keyed by session_id. It reads WAIT beads (a separate coordination
-// class from session beads), so it lives with the other wait-bead loaders here
-// rather than in the session command file; `gc session list` consumes it to
-// surface a "wait" wake reason.
+// nudge, keyed by session_id. It reads WAIT beads, which are session
+// coordination-class: gc:wait maps to coordclass.ClassSessions alongside the
+// session lifecycle beads (see internal/coordclass), so under a
+// [beads.classes.sessions] relocation `gc session list` reads them from the
+// session-class store. It lives with the other wait-bead loaders here rather
+// than in the session command file; `gc session list` consumes it to surface a
+// "wait" wake reason.
 func readyWaitSetForList(store beads.Store) (map[string]bool, error) {
 	items, err := loadWaitBeads(store)
 	ready := make(map[string]bool)

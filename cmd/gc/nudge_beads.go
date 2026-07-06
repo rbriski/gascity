@@ -39,7 +39,7 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 	if err != nil {
 		return beads.NudgesStore{}
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(store, nil, cityPath, nil)}
+	return beads.NudgesStore{Store: resolveNudgesStore(store, cachedCityInfraStore(cityPath, nil), nil, cityPath, nil)}
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

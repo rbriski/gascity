@@ -7,7 +7,8 @@ Paste the block below into a fresh session.
 Continue the **CLI session relocation-routing** pass on branch
 `upstream/object-front-doors-cleanup` (base `main`, DRAFT PR #3839, worktree
 `/data/projects/gascity/.claude/worktrees/object-front-doors`; run `git rev-parse HEAD` —
-should be at/after `3e05a03fe`).
+should be at/after `6d432a0d3`). **11 files routed so far** (CONT-41 added cmd_restart,
+completion, providers).
 
 **Read first, in order:**
 1. `engdocs/plans/infra-store-decouple/RELOCATION-ROUTING-HANDOFF.md` — the current-state
@@ -29,12 +30,21 @@ should be at/after `3e05a03fe`).
   (paired shared-helper effort), cmd_nudge.go, cmd_sling.go, cmd_start.go reconcile cascade.
 
 **IMMEDIATE WORK (pick with the owner):**
-- **cmd_restart.go** `doRigRestart` — likely a clean whole-store route (same session-name+runtime
-  pattern as cmd_stop, which was clean). Verify all consumers session-class first. Good next target.
 - **cmd_session.go** (Phase 4, BIG — ~9 roots, its own session) — surgical; cmdSessionClose/Kill are
   multi-class (rigStores = WORK, leave). Verify EACH root's consumers per-consumer (prior classifications
   proved unreliable).
-- **cmd_mail.go** (12 subcommands, mail+session addressing) — surgical, careful, cfg scoping varies.
+- **cmd_status.go → city_status_snapshot.go** — SURGICAL/multi-class: route the session consumers
+  (loadStatusSessionSnapshot resolveSessionIDWithConfig@353 + store.Get@361, namedSessionStatusForCity,
+  observeStatusTargetsParallel) but keep `buildCityStoreHealth`→`collectStoreHealth`@138/145 (store-maintenance
+  health, NOT session) on the plain store. cfg+cityPath thread through collectCityStatusSnapshot.
+- **cmd_mail.go** (12 subcommands) — the session reads are in the SHARED beadmail provider, not the
+  subcommands. Route `openCityMailProvider` (providers.go@814) ONCE — but this is the two-store mail-provider
+  follow-up (resolveMailMessagesStore), i.e. split the beadmail store into messaging-class + session-class.
+  Larger than a substring route; scope with the owner.
+
+**DONE at CONT-41 (do not redo):** cmd_restart.go (whole-store at the cmdRigRestart caller),
+completion.go (whole-store), providers.go (PARTIAL — loadProviderSessionSnapshot routed; the
+openCityMailProvider/beadmail session read+write is the deferred two-store-mail gap, documented in-code).
 
 **Discipline (byte-identity is the bar):** per root — verified per-consumer census (re-grep; DON'T trust
 prior classifications) → route → gofmt·build·vet·`golangci-lint 0`·targeted tests → **revert-canary**

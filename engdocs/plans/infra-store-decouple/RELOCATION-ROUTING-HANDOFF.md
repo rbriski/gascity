@@ -2,7 +2,19 @@
 
 **Branch** `upstream/object-front-doors-cleanup` (base `main`), **PR #3839 DRAFT**,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`.
-**HEAD `3e05a03fe`** (always `git rev-parse HEAD`; re-grep every line number below).
+**HEAD `6d432a0d3`** (always `git rev-parse HEAD`; re-grep every line number below).
+
+> **CONT-41 (2026-07-06):** +3 files routed — cmd_restart.go (9th), completion.go
+> (10th), providers.go (11th, PARTIAL). Two census corrections from the fable
+> byte-identity passes: (1) providers.go was NOT "NON-SESSION safe" — its
+> `loadProviderSessionSnapshot` reads gc:session beads off a raw store (now routed);
+> (2) NEW deferred gap: `openCityMailProvider` → beadmail does session reads AND
+> WRITES on its store (`session.ListAllSessionBeads` / `ResolveSessionID` /
+> `RepairEmptyType`, beadmail.go:79,91,187,760,799) — the mail session-addressing
+> layer beneath cmd_mail.go lives in the SHARED provider, not per-subcommand; route
+> it at openCityMailProvider (the two-store mail-provider follow-up at
+> `resolveMailMessagesStore`), not one subcommand at a time. Commits
+> `d9486309c` (completion), `ba530c91f` (restart), `6d432a0d3` (providers).
 
 This is the successor to the access-pass DI batches (store-free guard, CONT-37→39). The
 **access pass PIVOTED** from store-free DI hygiene to the actual mission:
@@ -80,8 +92,14 @@ check is the end-to-end `[beads.classes.sessions]` relocation acceptance test �
 | cmd_start.go | doStartStandalone | adoption barrier ONLY (reconcile cascade deferred) | ❌ (partial/mixed) |
 | cmd_session_reset.go | cmdSessionReset | whole-store sessStore | ✅ |
 | controller.go | handleSessionCircuitResetSocketCmd | cliSessionStore + no-refresh cfg load | ❌ (mixed file) |
+| cmd_restart.go (CONT-41) | doRigRestart (via cmdRigRestart caller) | whole-store sessStore (all 5 consumers session-class, like gc stop) | ✅ |
+| completion.go (CONT-41) | loadSessionsForCompletion | whole-store sessStore (ListAllSessionBeads + session catalog) | ✅ |
+| providers.go (CONT-41) | loadProviderSessionSnapshot | surgical sessStore (opens own store; mail sibling deferred) | ✅ (PARTIAL — see note) |
 
-`sessionRelocationRoutedFiles` (8): wake, pin, skill, mcp, session_logs, prime, stop, session_reset.
+`sessionRelocationRoutedFiles` (11): wake, pin, skill, mcp, session_logs, prime, stop,
+session_reset, cmd_restart, completion, providers (providers is PARTIAL — the
+openCityMailProvider/beadmail session read+write is a deferred two-store-mail gap;
+the guard entry protects only the loadProviderSessionSnapshot route).
 
 ---
 
@@ -97,17 +115,27 @@ remaining blind-root set:
 Multi-class: `cmdSessionClose` uses `store` for session reads AND `unclaimWorkAssignedToRetiredSessionBead(store, rigStores, …)` (WORK) — **surgical** routing (route session calls, keep work-release on plain store; `rigStores map[string]beads.Store` is a cross-class rig map, leave). **Verify each root's consumers per-consumer** — the plan's classifications proved unreliable (it was wrong about cmd_stop's consumers). cmdSessionKill reaches `resetSessionCircuitBreakerAfterExplicitKill(cityPath, store, …)` (session) + `store.SetMetadataBatch` (session). All roots have cfg+cityPath.
 
 ### NEW blind roots the plan never listed (found by the completeness census)
-- **cmd_restart.go** `doRigRestart` (store@158): reaches `lookupSessionNameOrLegacy`, `resolvePoolSessionRefs`,
-  `workerSessionTargetRunningWithConfig` — the **same session-name+runtime pattern as cmd_stop**, likely
-  a clean whole-store route. cfg@141, cityPath@144. **Verify all consumers session-class (like cmd_stop was).**
-- **cmd_mail.go** (12 subcommands, store via `openCityMailProvider`@1171/1193 + direct@2099): reaches
-  `resolveSessionID`, `resolveSessionIDWithConfig`, `session.ListAllSessionBeads`, `namedSessionIdentityMetadata`
-  for mail **addressing/identity resolution**. MULTI-CLASS (mail beads + session addressing) — **surgical**,
-  careful. cfg/cityPath inconsistently scoped across subcommands.
-- **cmd_status.go** → `city_status_snapshot.go` `loadStatusSessionSnapshot` (`resolveSessionIDWithConfig`@353):
-  status reads a session id. Indirect; route when the caller routes.
-- **completion.go** `loadSessionsForCompletion` (`session.ListAllSessionBeads`@251): completion path;
-  low impact, hot — use the no-refresh loader if routed.
+- **cmd_restart.go** `doRigRestart` — ✅ DONE (CONT-41). Whole-store route at the caller
+  `cmdRigRestart` (cityPath@127, cfg@128; store used only to hand to doRigRestart, so its
+  signature + ~15 test callers are untouched). All 5 consumers verified session-class
+  (lookupSessionNameOrLegacy, workerSessionTargetRunningWithConfig, resolvePoolSessionRefs,
+  selectRunningPoolSessionRefs, stopTargetsBounded → hydrateStopTargets/stopTargetThroughWorkerBoundary).
+- **completion.go** `loadSessionsForCompletion` — ✅ DONE (CONT-41). Whole-store route
+  (ListAllSessionBeads + workerSessionCatalogWithConfig→session catalog). Already used the
+  no-refresh cfg loader. Only store-using root in the file.
+- **providers.go** `loadProviderSessionSnapshot` — ✅ DONE (CONT-41, PARTIAL). This was
+  MIS-CLASSIFIED as "NON-SESSION safe" below; it reads gc:session beads off `openSessionProviderStore`
+  (= openCityStoreAt). Routed surgically (opens its own store, so it fixes CLI + controller
+  provider-construction at once). **BUT the file is only partially routed** — see the beadmail
+  gap under Deferred.
+- **cmd_mail.go** (12 subcommands) — still DEFERRED, but the census sharpened: the session
+  reads/writes are NOT per-subcommand — they live in the SHARED beadmail provider built by
+  `openCityMailProvider` (see Deferred). Route that provider once, not 12 subcommands.
+- **cmd_status.go** → `city_status_snapshot.go` — MULTI-CLASS (surgical). `loadStatusSessionSnapshot`
+  (`resolveSessionIDWithConfig`@353, `store.Get`@361) is session, but `buildCityStoreHealth`→
+  `collectStoreHealth`@138/145 reads store-maintenance health (NOT session), and `namedSessionStatusForCity`
+  /`observeStatusTargetsParallel` are session. Route the session consumers, keep store-health on plain
+  store. Indirect; route when the caller routes.
 
 ### Deferred (entangled — own coordinated efforts; owner-approved for cmd_wait)
 - **cmd_handoff.go + cmd_runtime_drain.go** — PAIRED. Share the session helpers
@@ -122,8 +150,17 @@ Multi-class: `cmdSessionClose` uses `store` for session reads AND `unclaimWorkAs
   helpers — its own "wait-machinery class-split" effort. (Closure plan treats "wait as a separate future class".)
 - **cmd_nudge.go** (@455/1050/1264 build sessionFrontDoor from a NUDGES-class store), **cmd_sling.go** (@1495),
   **cmd_start.go reconcile cascade** (`beads.SessionStore{Store: oneShotStore}` — multi-class mirror-of-runtime).
+- **openCityMailProvider → beadmail (providers.go@814)** — NEW (CONT-41, fable-found). The beadmail
+  provider uses its ONE store for BOTH messaging-class ops AND session-class reads+WRITES:
+  `session.ListAllSessionBeads` (beadmail.go:79,91), `session.ResolveSessionID` (:187),
+  `session.RepairEmptyType` (:760,799 — writes). This is the real session-access layer beneath
+  cmd_mail.go (all 12 subcommands share this provider). Deliberately NOT routed: the split belongs to
+  the two-store mail-provider follow-up parked at `resolveMailMessagesStore`/`newCityMailProvider`
+  (class_store.go). Route mail's session reads HERE (once), not per-subcommand. Documented in-code at
+  openCityMailProvider.
 
-### NON-SESSION (verified safe, no routing): cmd_prompt.go, cmd_start_warmup.go, dispatch_runtime.go, providers.go.
+### NON-SESSION (verified safe, no routing): cmd_prompt.go, cmd_start_warmup.go, dispatch_runtime.go.
+  (providers.go was REMOVED from this list at CONT-41 — it had a session read; now partially routed.)
 
 ---
 

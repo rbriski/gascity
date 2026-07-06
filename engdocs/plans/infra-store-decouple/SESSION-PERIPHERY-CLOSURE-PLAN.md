@@ -472,3 +472,34 @@ cmd_session_reset + cmd_runtime_drain surfaced). REMAINING blind roots:
 
 **Phase 6 (TODO):** end-to-end `[beads.classes.sessions]` relocation acceptance test — the
 authoritative check the substring guard cannot provide.
+
+**Session 2026-07-06 (CONT-41) — 3 more CLI roots routed (11 total), 3 commits pushed.**
+Detail in `RELOCATION-ROUTING-{HANDOFF,NEXT-SESSION-PROMPT}.md`. Commits
+`ba530c91f` (cmd_restart), `d9486309c` (completion), `6d432a0d3` (providers) on
+`upstream/object-front-doors-cleanup` (#3839 DRAFT). HEAD `6d432a0d3`.
+
+Each root followed the full discipline: verified per-consumer census (re-grepped, did NOT
+trust prior classifications) → whole-store/surgical route → gofmt · build · vet ·
+golangci-lint 0 · targeted guard+root tests → revert-canary (guard fails naming the file via
+the positive `cliSessionStore(` tripwire) → FABLE adversarial byte-identity review before commit.
+
+- **cmd_restart.go** `doRigRestart` — whole-store route at the caller `cmdRigRestart` (it holds
+  cityPath+cfg; store is used only to hand to doRigRestart, so the signature + ~15 test callers
+  stay untouched). All 5 consumers verified session-class. Fable: COULD-NOT-REFUTE (both identity-today
+  and whole-store session-class-completeness).
+- **completion.go** `loadSessionsForCompletion` — whole-store route (ListAllSessionBeads + the session
+  catalog); already on the no-refresh cfg loader (hot path). Fable: COULD-NOT-REFUTE both.
+- **providers.go** `loadProviderSessionSnapshot` — surgical route (opens its own store → fixes CLI +
+  controller provider-construction at once). CORRECTS the earlier "providers.go = NON-SESSION safe"
+  census line. **PARTIAL:** fable refuted the FIRST-DRAFT rationale (not the code) — `openCityMailProvider`'s
+  beadmail provider is NOT pure mail-class; it also does session reads+WRITES on its store
+  (ListAllSessionBeads/ResolveSessionID/RepairEmptyType, beadmail.go:79,91,187,760,799). Left un-routed as
+  the deferred two-store-mail follow-up (resolveMailMessagesStore); recorded in the guard-list doc and an
+  in-code note at openCityMailProvider. This beadmail layer — shared by all 12 cmd_mail subcommands — is the
+  right place to route mail's session reads (once), not per-subcommand.
+
+Two-perspective note on providers.go: a perfectionist could argue a partially-routed file shouldn't sit on
+`sessionRelocationRoutedFiles` (its doc says "session access routed"); a pragmatist keeps it there because the
+positive `cliSessionStore(` tripwire gives real, false-positive-free regression protection for the one route
+that IS done. Chose pragmatist + an explicit PARTIAL caveat in the doc. Revisit if the file accretes more
+un-routed session reads.

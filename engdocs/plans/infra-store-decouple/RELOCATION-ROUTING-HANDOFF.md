@@ -2,7 +2,17 @@
 
 **Branch** `upstream/object-front-doors-cleanup` (base `main`), **PR #3839 DRAFT**,
 worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`.
-**HEAD `6d432a0d3`** (always `git rev-parse HEAD`; re-grep every line number below).
+**HEAD `593310fe2`** (always `git rev-parse HEAD`; re-grep every line number below).
+
+> **CONT-42 (2026-07-06):** cmd_session.go DONE — all 10 gc session command roots
+> routed (12th routed file). Per-consumer census via a 10-agent workflow fan-out,
+> ground-truthed + fable byte-identity reviewed (COULD-NOT-REFUTE on all 4 claims).
+> 9 whole-store, 1 surgical (cmdSessionClose keeps unclaimWorkAssignedToRetiredSessionBead
+> on the plain WORK store). cmdSessionPrune needed a hoisted resolveCity +
+> loadCityConfigWithoutBuiltinPackRefresh (no pack refresh; reuses cityPath for the
+> withdraw block). The handoff's "close+kill both multi-class" hint was WRONG — kill
+> is whole-store (no work-release); only close has the work-release. Also fixed a stale
+> cmd_wait.go comment (gc:wait IS ClassSessions, not "a separate class"). Commit `593310fe2`.
 
 > **CONT-41 (2026-07-06):** +3 files routed — cmd_restart.go (9th), completion.go
 > (10th), providers.go (11th, PARTIAL). Two census corrections from the fable
@@ -96,10 +106,12 @@ check is the end-to-end `[beads.classes.sessions]` relocation acceptance test �
 | completion.go (CONT-41) | loadSessionsForCompletion | whole-store sessStore (ListAllSessionBeads + session catalog) | ✅ |
 | providers.go (CONT-41) | loadProviderSessionSnapshot | surgical sessStore (opens own store; mail sibling deferred) | ✅ (PARTIAL — see note) |
 
-`sessionRelocationRoutedFiles` (11): wake, pin, skill, mcp, session_logs, prime, stop,
-session_reset, cmd_restart, completion, providers (providers is PARTIAL — the
-openCityMailProvider/beadmail session read+write is a deferred two-store-mail gap;
-the guard entry protects only the loadProviderSessionSnapshot route).
+| cmd_session.go (CONT-42) | 10 roots: New/ListFallback/Attach/Suspend/Rename/Prune/PeekFallback/Kill/Submit (whole-store) + Close (surgical) | per-root sessStore | ✅ |
+
+`sessionRelocationRoutedFiles` (12): wake, pin, skill, mcp, session_logs, prime, stop,
+session_reset, cmd_restart, completion, providers, cmd_session (providers is PARTIAL — the
+openCityMailProvider/beadmail session read+write is a deferred two-store-mail gap; the guard
+entry protects only the loadProviderSessionSnapshot route).
 
 ---
 
@@ -109,10 +121,19 @@ The original census only grepped **direct** `sessionFrontDoor` sites and MISSED 
 session state via **helpers** (that's how cmd_session_reset + cmd_runtime_drain surfaced). The full
 remaining blind-root set:
 
-### Phase 4 — cmd_session.go (BIG, its own session)
-~9 in-file RunE roots (cmdSessionNew, doSessionListFallback, cmdSessionSuspend, **cmdSessionClose**,
-**cmdSessionKill**, cmdSessionAttach, cmdSessionRename, cmdSessionSubmit, doSessionPeekFallback).
-Multi-class: `cmdSessionClose` uses `store` for session reads AND `unclaimWorkAssignedToRetiredSessionBead(store, rigStores, …)` (WORK) — **surgical** routing (route session calls, keep work-release on plain store; `rigStores map[string]beads.Store` is a cross-class rig map, leave). **Verify each root's consumers per-consumer** — the plan's classifications proved unreliable (it was wrong about cmd_stop's consumers). cmdSessionKill reaches `resetSessionCircuitBreakerAfterExplicitKill(cityPath, store, …)` (session) + `store.SetMetadataBatch` (session). All roots have cfg+cityPath.
+### Phase 4 — cmd_session.go — ✅ DONE (CONT-42)
+All 10 store-opening roots routed (New, ListFallback, Attach, Suspend, Rename, Prune, PeekFallback,
+Kill, Submit = whole-store; Close = surgical). Census by a 10-agent workflow fan-out + ground-truth
++ fable byte-identity review (COULD-NOT-REFUTE all claims). Key findings that CORRECT the prior guesses:
+- `cmdSessionClose` IS surgical (keeps `unclaimWorkAssignedToRetiredSessionBead(store, rigStores, …)`
+  on the plain WORK store; `rigStores` is a cross-class rig map, left alone). The 3 session consumers routed.
+- `cmdSessionKill` is WHOLE-STORE, not multi-class — it has NO work-release (only close does). All 5
+  consumers (resolveSessionIDWithConfig, store.Get, workerHandle, resetSessionCircuitBreakerAfterExplicitKill,
+  store.SetMetadataBatch) are session-class.
+- `doSessionListFallback` routes a goroutine that captures the routed store; `readyWaitSetForList`→gc:wait
+  is coordclass.ClassSessions (session), verified against the classifier (corrected a stale cmd_wait.go comment).
+- `cmdSessionPrune` had no cfg/cityPath — hoisted resolveCity + loadCityConfigWithoutBuiltinPackRefresh
+  (no pack refresh; catalog args stay "",nil), reused cityPath for the withdraw-nudges block.
 
 ### NEW blind roots the plan never listed (found by the completeness census)
 - **cmd_restart.go** `doRigRestart` — ✅ DONE (CONT-41). Whole-store route at the caller

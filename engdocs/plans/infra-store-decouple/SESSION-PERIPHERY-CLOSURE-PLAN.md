@@ -503,3 +503,37 @@ Two-perspective note on providers.go: a perfectionist could argue a partially-ro
 positive `cliSessionStore(` tripwire gives real, false-positive-free regression protection for the one route
 that IS done. Chose pragmatist + an explicit PARTIAL caveat in the doc. Revisit if the file accretes more
 un-routed session reads.
+
+**Session 2026-07-06 (CONT-42) — cmd_session.go DONE: all 10 gc session command roots routed (12th
+routed file), 1 commit `593310fe2`.** The big Phase 4 target. Census ran as a 10-agent Workflow fan-out
+(one agent per root, tracing every store consumer to its leaf bead-class), then I ground-truthed the two
+flagged roots myself and ran a single fable byte-identity review over the whole diff (COULD-NOT-REFUTE on
+all 4 claims: identity-today, no-missed/over-routing, the prune scope addition, zero residual).
+
+- **9 whole-store roots:** cmdSessionNew (11 consumers across the reconciler-first + fallback paths, incl.
+  3 sessionFrontDoor front doors + alias/session-name availability checks — used replace_all for the
+  New-only function-anchored patterns + indent-distinct edits for the two multi-line handle-call store args),
+  doSessionListFallback (goroutine captures the routed store; readyWaitSetForList→gc:wait is ClassSessions),
+  cmdSessionAttach, cmdSessionSuspend (incl. held_until ApplyPatch), cmdSessionRename, cmdSessionPrune,
+  doSessionPeekFallback, cmdSessionKill, cmdSessionSubmit.
+- **1 surgical:** cmdSessionClose — routes its 3 session consumers but keeps
+  unclaimWorkAssignedToRetiredSessionBead on the plain WORK store (beads.WorkStore assignment beads,
+  skips session beads).
+- **Corrected the plan's guesses:** the old census lumped close+kill as multi-class; the fan-out proved
+  KILL is whole-store (no work-release) — only CLOSE has it. "Prior classifications proved unreliable"
+  held again.
+- **cmdSessionPrune** was cfg-less: hoisted resolveCity + loadCityConfigWithoutBuiltinPackRefresh (no
+  pack-refresh side effect; the fable pass confirmed the applyFeatureFlags global write is already applied
+  two lines later by newSessionProvider and has no reader on the prune path), reused cityPath for the
+  existing withdraw-nudges block (no extra resolveCity call).
+- **Bonus doc fix (fable-found):** cmd_wait.go's comment called wait beads "a separate coordination class
+  from session beads" — false; coordclass maps gc:wait → ClassSessions. Corrected, since the routing relies
+  on it.
+- **Revert-canary** fired on BOTH the sessionFrontDoor(store) needle AND the cliSessionStore( tripwire
+  (stronger than prior files); ran non-destructively via `git stash push -- cmd/gc/cmd_session.go` keeping
+  the guard-list entry, then `git stash pop`.
+
+Technique note for big multi-root files: a Workflow census fan-out (one agent per root, structured schema
+classifying each store consumer to its leaf bead-class) is the right tool — it parallelizes the read-heavy
+analytical work while the edits + gates + canary + single whole-file fable review stay sequential in the
+main context.

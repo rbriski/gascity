@@ -7,8 +7,8 @@ Paste the block below into a fresh session.
 Continue the **CLI session relocation-routing** pass on branch
 `upstream/object-front-doors-cleanup` (base `main`, DRAFT PR #3839, worktree
 `/data/projects/gascity/.claude/worktrees/object-front-doors`; run `git rev-parse HEAD` —
-should be at/after `6d432a0d3`). **11 files routed so far** (CONT-41 added cmd_restart,
-completion, providers).
+should be at/after `593310fe2`). **12 files routed so far** (CONT-41 added cmd_restart,
+completion, providers; CONT-42 added cmd_session.go — all 10 gc session command roots).
 
 **Read first, in order:**
 1. `engdocs/plans/infra-store-decouple/RELOCATION-ROUTING-HANDOFF.md` — the current-state
@@ -30,9 +30,6 @@ completion, providers).
   (paired shared-helper effort), cmd_nudge.go, cmd_sling.go, cmd_start.go reconcile cascade.
 
 **IMMEDIATE WORK (pick with the owner):**
-- **cmd_session.go** (Phase 4, BIG — ~9 roots, its own session) — surgical; cmdSessionClose/Kill are
-  multi-class (rigStores = WORK, leave). Verify EACH root's consumers per-consumer (prior classifications
-  proved unreliable).
 - **cmd_status.go → city_status_snapshot.go** — SURGICAL/multi-class: route the session consumers
   (loadStatusSessionSnapshot resolveSessionIDWithConfig@353 + store.Get@361, namedSessionStatusForCity,
   observeStatusTargetsParallel) but keep `buildCityStoreHealth`→`collectStoreHealth`@138/145 (store-maintenance
@@ -45,6 +42,12 @@ completion, providers).
 **DONE at CONT-41 (do not redo):** cmd_restart.go (whole-store at the cmdRigRestart caller),
 completion.go (whole-store), providers.go (PARTIAL — loadProviderSessionSnapshot routed; the
 openCityMailProvider/beadmail session read+write is the deferred two-store-mail gap, documented in-code).
+
+**DONE at CONT-42 (do not redo):** cmd_session.go — all 10 gc session command roots (9 whole-store +
+cmdSessionClose surgical). A 10-agent census workflow proved cmdSessionKill is whole-store (NOT
+multi-class as the old plan guessed) and only cmdSessionClose has the WORK-class work-release. If you
+tackle cmd_mail.go, remember the session reads live in the shared beadmail provider (openCityMailProvider),
+not the subcommands — it is the two-store-mail follow-up, larger than a substring route.
 
 **Discipline (byte-identity is the bar):** per root — verified per-consumer census (re-grep; DON'T trust
 prior classifications) → route → gofmt·build·vet·`golangci-lint 0`·targeted tests → **revert-canary**

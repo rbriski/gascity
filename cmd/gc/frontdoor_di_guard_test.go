@@ -250,6 +250,18 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // file's full relocation-safety still depends on that follow-up and the
 // end-to-end acceptance test; the guard entry protects only the snapshot route.
 //
+// The gc status trio (cmd_status.go, cmd_citystatus.go, city_status_snapshot.go)
+// is listed even though none of them constructs a session front door: their
+// session access is non-front-door (loadStatusSessionSnapshot → ListAllSessionBeads,
+// namedSessionStatusForCity → resolveSessionIDWithConfig + store.Get,
+// collectCitySessionCounts → workerSessionCatalogWithConfig), all routed through
+// cliSessionStore, while the store-health probe (buildCityStoreHealth →
+// collectStoreHealth → store.List) deliberately stays on the generic work store it
+// measures. The negative sessionFrontDoor(store...) needles are inert for these
+// files; the positive cliSessionStore( tripwire protects the routed reads the same
+// way it protects providers.go's snapshot route, consistent with this guard being
+// a regression canary rather than a completeness proof.
+//
 // Two files are intentionally ABSENT even though they route: controller.go (its
 // session-circuit-reset socket handler routes, but the file also holds the
 // already-safe param-threaded runtime `sessionFrontDoor(store.Store)` at the
@@ -271,6 +283,9 @@ var sessionRelocationRoutedFiles = []string{
 	"completion.go",
 	"providers.go",
 	"cmd_session.go",
+	"cmd_status.go",
+	"cmd_citystatus.go",
+	"city_status_snapshot.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

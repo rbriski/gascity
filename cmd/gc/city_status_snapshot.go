@@ -146,7 +146,7 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
-	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store, stderr), stderr)
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr), stderr)
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
@@ -350,7 +350,11 @@ func namedSessionStatusForCity(
 		return status
 	}
 
-	id, err := resolveSessionIDWithConfig(cityPath, cfg, store, identity)
+	// Route the session-ID resolve and the bead fetch through the session
+	// coordination-class store so a [beads.classes.sessions] relocation reaches
+	// this named-session status lookup. Identity to store at the default backend.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identity)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return status
@@ -358,7 +362,7 @@ func namedSessionStatusForCity(
 		return "lookup error: " + err.Error()
 	}
 
-	bead, err := store.Get(id)
+	bead, err := sessStore.Get(id)
 	if err != nil {
 		return "lookup error: " + err.Error()
 	}
@@ -386,7 +390,10 @@ func collectCitySessionCounts(cityPath string, store beads.Store, sp runtime.Pro
 	if store == nil {
 		return summary, nil
 	}
-	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
+	// Route the session catalog through the session coordination-class store so a
+	// [beads.classes.sessions] relocation reaches the active/suspended counts.
+	// Identity to store at the default backend.
+	catalog, err := workerSessionCatalogWithConfig(cityPath, cliSessionStore(store, cfg, cityPath), sp, cfg)
 	if err != nil {
 		return summary, err
 	}

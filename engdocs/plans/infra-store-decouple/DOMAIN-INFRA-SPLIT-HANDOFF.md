@@ -57,7 +57,32 @@ worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`.
 > nudges CLI sites in `e12`: cmd_convoy_dispatch/molecule_autoclose/wisp_autoclose/
 > cmd_formula/cmd_order/order_store/nudge_beads; add cli_class_store.go cliGraphStore/
 > cliOrderStore seam like cliSessionStore). E1.3(api)/E1.4(worker)/E1.5(session-dogfood):
-> let the E2.2 invariant test drive. **HEAD ~`8a529ce23`.** Next: E2.1-harden, then E2.2.
+> let the E2.2 invariant test drive.
+>
+> **E2.1-harden / E2.2 / E2.3 ALL DONE (commits `98bbdffb5`, `311d8ca12`, `41279174d`).**
+> E2.1-harden fixed the 3 dormant defects (fail-on-baseline tests). E2.2 landed the
+> BOUNDARY-INVARIANT TEST (`cmd/gc/infra_store_boundary_invariant_test.go`: real two-store
+> harness, classify every bead via coordclass.Classify, negative control) — the TDD
+> forcing function. E2.3 routed sling/order graph+nudge creation to the infra store
+> (new `cmd/gc/cli_class_store.go` cliGraphStore/cliOrderStore/cliNudgesStore;
+> slingSplitGraphStore = infra on split, nil on legacy = byte-identical). **THE INVARIANT
+> TEST IS NOW FULLY GREEN — the write-side split is PROVEN CORRECT** (session/mail/nudge/
+> wait/order/graph/sling→infra; task/convoy→domain). The MECHANISM is complete + byte-
+> identical + red-teamed.
+>
+> **NEXT = E2.4 (ACTIVATION — the riskiest step; needs INTEGRATION testing, real dolt).**
+> gc init/start seed the `.gc/infra` scope via initAndHookDir + reserved prefixes (gcg/…);
+> once a city HAS `.gc/infra`, cityHasInfraStore→true and the split goes LIVE. Design:
+> `raw/e2-design-wf_d170b33a.json` newCityCreation + reservedPrefixes + implementationOrder
+> E2.4. Then E2.5 (integration-tier invariant test + TestClassStoreDispatchIsBackendBlind
+> guard + backend-gating audit), E3 (migrate existing 1-db→2-db, idempotent), E4 (exhaustive
+> e2e on the two-store shape — the authoritative gate). **DEFERRED read-side fan-out
+> (byte-identical today, in backlog): coordClassStoreCandidates session-arm collapse (thread
+> infra store into 3 build_desired_state.go sites) + openSourceWorkflowStores (split graph-
+> read from by-id-work use).** E1.2 partial (sling/order done in E2.3; autoclose/formula-cook/
+> cmd_convoy_dispatch graph reads remain — let the E2.5 integration invariant surface them).
+> E1.3/E1.4/E1.5: let the invariant tests drive. **HEAD ~`41279174d`.** Next: E2.4 activation
+> (integration-tested), then E2.5 → E3 → E4.
 
 > **CONT (2026-07-06) — E1.6 DONE + audit finding.** A parallel census
 > (`raw/e1-census-wf_61848080.json`: 1 adversarial E1.6 auditor + 5 E1.1 file

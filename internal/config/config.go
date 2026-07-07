@@ -282,6 +282,14 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// Webhooks declares inbound HTTP receivers mounted on the supervisor edge
+	// under /hook/{name}. Composed like Services (pack concatenation + SourceDir
+	// provenance + the default-closed public pack-guard).
+	Webhooks []Webhook `toml:"webhook,omitempty"`
+	// WebhookPolicy holds city-level webhook governance (the [webhooks] table,
+	// notably allow_public grants). Authored only in the root city.toml; never
+	// merged from packs or fragments so a pack cannot grant itself exposure.
+	WebhookPolicy WebhookPolicyConfig `toml:"webhooks,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
 	// ExtMsg configures the external-messaging fabric (default routes
@@ -616,6 +624,12 @@ type Rig struct {
 	// invoked with only a bead ID (no explicit target). Resolved via
 	// resolveAgentIdentity. Example: "rig/polecat"
 	DefaultSlingTarget string `toml:"default_sling_target,omitempty"`
+	// DefaultSlingTargets is the plural form of DefaultSlingTarget.
+	// When set, targetless gc sling picks one entry at random each dispatch.
+	// Takes precedence over DefaultSlingTarget when non-empty. Each entry is
+	// resolved the same way as DefaultSlingTarget. Example:
+	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
+	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -3589,8 +3603,12 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 
 func routedReadyTierCommand(includeEphemeralReady bool) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks bd for the oldest candidate.
-	return bdReadyPoolDemandShell("--sort oldest --limit=1", includeEphemeralReady) + ` 2>/dev/null`
+	// sorting; the worker first-row path asks bd for the oldest candidates.
+	// The tier is widened past a single row (limit=20, not limit=1) so a
+	// self-blocked head (is_blocked / status==blocked) has Ready routed work
+	// behind it to fall through to instead of idle-exiting; the hook layer
+	// (filterUnreadyHookCandidates) strips the blocked head from the result.
+	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -4992,9 +5010,13 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
-// plus [imports.gascity] pinned to the registry release. The pack ships
-// skills and formulas only (no agents), so the city shape matches the
-// minimal template with the pack layered on top.
+// plus [imports.gascity] (skills and formulas) pinned to the registry release.
+// The gascity formulas route their steps to role agents (gc.run-operator,
+// gc.requirements-planner, ...) that ship in the separate gc-roles subpack, so
+// the template also seeds that pack as a default rig import bound "gc" — every
+// rig added to the city then inherits the providerless, rig-scoped roles the
+// formulas coordinate. Without it a fresh city can discover a formula but fails
+// to launch with `agent "gc.run-operator" not found in city.toml` (gascity#3832).
 func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
 	city := WizardCityWithProviders(name, defaultProvider, providers)
 	city.Imports = map[string]Import{
@@ -5003,6 +5025,13 @@ func GascityCityWithProviders(name, defaultProvider string, providers []string) 
 			Version: PublicGascityPackVersion,
 		},
 	}
+	city.DefaultRigImports = map[string]Import{
+		"gc": {
+			Source:  PublicGascityRolesPackSource,
+			Version: PublicGascityPackVersion,
+		},
+	}
+	city.DefaultRigImportOrder = []string{"gc"}
 	return city
 }
 

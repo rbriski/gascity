@@ -39,8 +39,19 @@ const (
 	defaultQueuedNudgeRetryDelay    = 15 * time.Second
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
-	defaultNudgePollInterval        = 2 * time.Second
-	defaultNudgePollQuiescence      = 3 * time.Second
+
+	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
+	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
+	// maintenance (expiring/pruning stale entries) while holding the
+	// withNudgeQueueState flock. Without this, maintenance does O(backlog)
+	// serial store writes with no cap, so a large backlog turns a sub-second
+	// foreground call into a multi-minute hang. Items skipped once the budget
+	// is exceeded are left untouched for the next enqueue, the per-session
+	// poller, or the doctor reaper to handle — never dropped.
+	nudgeEnqueueMaintenanceBudget = 2 * time.Second
+
+	defaultNudgePollInterval   = 2 * time.Second
+	defaultNudgePollQuiescence = 3 * time.Second
 	// A controller wake can legitimately take a couple of minutes when the
 	// session has to rematerialize a worktree and complete startup dialog.
 	defaultNudgePollStartGrace = 5 * time.Minute
@@ -1743,13 +1754,14 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 	}
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		pending := state.Pending[:0]
@@ -1785,13 +1797,14 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 	var inFlight []queuedNudge
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -1825,13 +1838,14 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 	var inFlight []queuedNudge
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -1927,13 +1941,14 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
@@ -1947,7 +1962,11 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 					existing.Reference.ID == item.Reference.ID
 			}
 			filtered := state.Pending[:0]
-			for _, existing := range state.Pending {
+			for i, existing := range state.Pending {
+				if time.Now().After(deadline) {
+					filtered = append(filtered, state.Pending[i:]...)
+					break
+				}
 				if matchesSupersession(existing) {
 					existing.DeadAt = now.UTC()
 					existing.LastError = "superseded"
@@ -1965,7 +1984,11 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 			// ack/failure won't find the item in InFlight and will no-op.
 			// This causes at most one redundant delivery, not data corruption.
 			inFlight := state.InFlight[:0]
-			for _, existing := range state.InFlight {
+			for i, existing := range state.InFlight {
+				if time.Now().After(deadline) {
+					inFlight = append(inFlight, state.InFlight[i:]...)
+					break
+				}
 				if matchesSupersession(existing) {
 					existing.DeadAt = now.UTC()
 					existing.LastError = "superseded"
@@ -2022,13 +2045,14 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 	}
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		var terminal []queuedNudge
@@ -2075,13 +2099,14 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 	}
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		var released []queuedNudge
@@ -2139,13 +2164,14 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 	var deadLettered []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
-		if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
 		var requeued []queuedNudge
@@ -2231,9 +2257,21 @@ func terminalStateForDeadQueuedNudge(item queuedNudge) string {
 	}
 }
 
-func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now time.Time) error {
+// noMaintenanceDeadline returns a deadline far enough in the future that a
+// nudge-queue maintenance pass never stops early. Callers outside the
+// latency-sensitive foreground enqueue path (poller, doctor, list/ack/release)
+// want the full backlog drained every time, matching pre-budget behavior.
+func noMaintenanceDeadline() time.Time {
+	return time.Now().Add(24 * time.Hour)
+}
+
+func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	filtered := state.Pending[:0]
-	for _, item := range state.Pending {
+	for i, item := range state.Pending {
+		if time.Now().After(deadline) {
+			filtered = append(filtered, state.Pending[i:]...)
+			break
+		}
 		if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
 			item.DeadAt = now.UTC()
 			if item.LastError == "" {
@@ -2252,9 +2290,13 @@ func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, n
 	return nil
 }
 
-func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Store, now time.Time) error {
+func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	filtered := state.InFlight[:0]
-	for _, item := range state.InFlight {
+	for i, item := range state.InFlight {
+		if time.Now().After(deadline) {
+			filtered = append(filtered, state.InFlight[i:]...)
+			break
+		}
 		if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
 			item.DeadAt = now.UTC()
 			if item.LastError == "" {
@@ -2282,10 +2324,14 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Stor
 // pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention
 // when a durable terminal bead record exists in the store. Items without a confirmed terminal
 // bead are retained so terminal history is not lost if the bead store write failed.
-func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now time.Time) error {
+func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
 	filtered := state.Dead[:0]
-	for _, item := range state.Dead {
+	for i, item := range state.Dead {
+		if time.Now().After(deadline) {
+			filtered = append(filtered, state.Dead[i:]...)
+			break
+		}
 		if item.BeadID != "" {
 			if front == nil {
 				// No store available — retain the item to avoid data loss.

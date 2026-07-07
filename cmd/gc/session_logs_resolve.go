@@ -54,6 +54,13 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, sessFront 
 	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
 		path = ""
 	}
+	// origin/main addition, ported into the front-door structure: when the plain
+	// workdir fallback is disallowed (multiple live siblings share the workdir),
+	// disambiguate a Codex session by session-start ordering before giving up with
+	// the ambiguity diagnostic.
+	if path == "" && !fallbackAllowed {
+		path = resolveCodexSiblingLogPath(sessFront, searchPaths, logCtx)
+	}
 	if path == "" && !fallbackAllowed {
 		return "", logCtx.provider, true, ambiguousSessionLogDiagnostic(logCtx)
 	}
@@ -95,9 +102,19 @@ func canFallbackStoredSessionLogByWorkDir(sessFront *sessionpkg.Store, logCtx se
 	if !sessFront.Backed() || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
 		return false
 	}
+	siblings, err := sessionLogFallbackSiblings(sessFront, logCtx)
+	return err == nil && len(siblings) == 1
+}
+
+// sessionLogFallbackSiblings returns the live same-workdir session beads that a
+// workdir-based transcript fallback would be ambiguous across. canFallback...
+// gates on exactly one; resolveCodexSiblingLogPath uses the full set to order
+// Codex transcripts. The filters mirror the pre-split raw-metadata version but
+// read through the session.Info codec (class-store leak closure).
+func sessionLogFallbackSiblings(sessFront *sessionpkg.Store, logCtx sessionLogContext) ([]beads.Bead, error) {
 	all, err := sessionLogFallbackCandidates(sessFront, logCtx.workDir, logCtx.provider)
 	if err != nil {
-		return false
+		return nil, err
 	}
 	targetLive := false
 	for _, b := range all {
@@ -106,7 +123,7 @@ func canFallbackStoredSessionLogByWorkDir(sessFront *sessionpkg.Store, logCtx se
 			break
 		}
 	}
-	matches := 0
+	var matches []beads.Bead
 	for _, b := range all {
 		info := sessionpkg.InfoFromPersistedBead(b)
 		if !sessionpkg.IsSessionBeadOrRepairableInfo(info) {
@@ -125,12 +142,26 @@ func canFallbackStoredSessionLogByWorkDir(sessFront *sessionpkg.Store, logCtx se
 		if targetLive && info.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(info) {
 			continue
 		}
-		matches++
-		if matches > 1 {
-			return false
-		}
+		matches = append(matches, b)
 	}
-	return matches == 1
+	return matches, nil
+}
+
+// resolveCodexSiblingLogPath resolves an ambiguous same-workdir Codex session to
+// its transcript by session-start ordering. It is used only when the plain
+// workdir fallback is disallowed because multiple live siblings share the
+// workdir. It returns "" when the sibling set cannot be gathered or the resolved
+// transcript is not fresh enough for the session.
+func resolveCodexSiblingLogPath(sessFront *sessionpkg.Store, searchPaths []string, logCtx sessionLogContext) string {
+	siblings, err := sessionLogFallbackSiblings(sessFront, logCtx)
+	if err != nil {
+		return ""
+	}
+	path := sessionpkg.ResolveCodexTranscriptBySessionOrder(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionID, siblings)
+	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
+		return ""
+	}
+	return path
 }
 
 func sessionLogFallbackCandidates(sessFront *sessionpkg.Store, workDir, provider string) ([]beads.Bead, error) {

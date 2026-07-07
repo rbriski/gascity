@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,11 +72,12 @@ type PoolJSON struct {
 
 // StatusRigJSON represents a rig in the JSON status output.
 type StatusRigJSON struct {
-	Name               string `json:"name"`
-	Path               string `json:"path"`
-	Prefix             string `json:"prefix,omitempty"`
-	Suspended          bool   `json:"suspended"`
-	DefaultSlingTarget string `json:"default_sling_target,omitempty"`
+	Name                string   `json:"name"`
+	Path                string   `json:"path"`
+	Prefix              string   `json:"prefix,omitempty"`
+	Suspended           bool     `json:"suspended"`
+	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
+	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
 }
 
 // StatusSummaryJSON is the agent count summary in JSON output.
@@ -178,7 +180,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		}
 		return code
 	}
-	statusSnapshot := loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr)
+	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
 	c, reason := cityStatusAPIClient(cityPath)
@@ -229,7 +231,7 @@ func routeCityStatus(
 	if code != 0 {
 		return code
 	}
-	statusSnapshot := loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr)
+	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
 	if jsonOutput {
 		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
 	}
@@ -386,17 +388,39 @@ type statusObservationTarget struct {
 	suspended          bool
 }
 
-func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
+func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshot(nil)
 	}
+	// Callers pass the session coordination-class store (cliSessionStore) so a
+	// [beads.classes.sessions] relocation reaches this snapshot; the guard in
+	// frontdoor_di_guard_test.go pins that seam at each read-site file.
+
+	// A throwaway, ctx-bound clone of store when it's bd-CLI-backed: on
+	// timeout below, canceling reqCtx kills an in-flight bd child instead
+	// of abandoning it to run past this function's return (gascity
+	// ga-cdmx6x). scopedStoreLike answers (nil, nil) for non-bd-CLI
+	// backends, which have no subprocess to leak — those keep reading
+	// through store directly, unchanged.
+	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
+	defer cancel()
+	readStore := store
+	if scoped, err := scopedStoreLike(reqCtx, cityPath, cfg, store); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc status: loading session snapshot: resolving store: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot: resolving store: %w", err))
+	} else if scoped != nil {
+		readStore = scoped
+	}
+
 	type snapshotResult struct {
 		snapshot *sessionBeadSnapshot
 		err      error
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		snapshot, err := loadSessionBeadSnapshot(store)
+		snapshot, err := loadSessionBeadSnapshot(readStore)
 		done <- snapshotResult{snapshot: snapshot, err: err}
 	}()
 
@@ -477,7 +501,7 @@ func doCityStatus(
 	if code != 0 {
 		return code
 	}
-	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
 }
 
 func doCityStatusWithStoreAndSnapshot(
@@ -527,7 +551,7 @@ func doCityStatusJSON(
 	if code != 0 {
 		return code
 	}
-	return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
+	return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
 }
 
 func doCityStatusJSONWithDiagnosticAndSnapshot(

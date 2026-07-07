@@ -146,7 +146,7 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
-	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr), stderr)
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stderr)
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
@@ -291,11 +291,12 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			}
 		}
 		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
-			Name:               r.Name,
-			Path:               r.Path,
-			Prefix:             r.EffectivePrefix(),
-			Suspended:          suspended,
-			DefaultSlingTarget: r.DefaultSlingTarget,
+			Name:                r.Name,
+			Path:                r.Path,
+			Prefix:              r.EffectivePrefix(),
+			Suspended:           suspended,
+			DefaultSlingTarget:  r.DefaultSlingTarget,
+			DefaultSlingTargets: r.DefaultSlingTargets,
 		})
 	}
 

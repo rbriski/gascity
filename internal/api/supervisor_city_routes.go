@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -115,12 +116,32 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Rigs.
 	cityGet(sm, "/rigs", (*Server).humaHandleRigList)
 	cityGet(sm, "/rig/{name}", (*Server).humaHandleRigGet)
+	// create-rig returns one of three success statuses (201 sync create, 202
+	// async clone accepted, 200 idempotent replay) over one union body. Huma
+	// only auto-schematizes op.DefaultStatus (201), so the 200/202 responses are
+	// declared manually here — cityRegister takes op by value with no
+	// op-modifier closure (city_scope.go), so they must exist before the call.
+	// All three reference the same RigCreateResponseBody registry schema, so
+	// genclient/dashboard get one type discriminated by status.
+	rigBodyRef := sm.humaAPI.OpenAPI().Components.Schemas.Schema(
+		reflect.TypeOf(RigCreateResponseBody{}), true, "RigCreateResponseBody")
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-rig",
 		Method:        http.MethodPost,
 		Path:          "/rigs",
 		Summary:       "Create a rig",
-		DefaultStatus: http.StatusCreated,
+		Description:   "Create a rig. Without git_url, appends the rig to city.toml synchronously (201). With git_url, clones and provisions asynchronously: returns 202 with an event_cursor — watch the city event stream for request.result.rig.create, rig.provision.progress, or request.failed carrying the request_id — or 200 for an idempotent replay of a succeeded create.",
+		DefaultStatus: http.StatusCreated, // 201 — Huma auto-schematizes the union body here
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Rig already exists — idempotent request_id replay of a succeeded async create.",
+				Content:     map[string]*huma.MediaType{"application/json": {Schema: rigBodyRef}},
+			},
+			"202": {
+				Description: "Provisioning accepted; watch the city event stream from event_cursor for request.result.rig.create, rig.provision.progress, or request.failed with this request_id.",
+				Content:     map[string]*huma.MediaType{"application/json": {Schema: rigBodyRef}},
+			},
+		},
 	}, (*Server).humaHandleRigCreate)
 	cityPatch(sm, "/rig/{name}", (*Server).humaHandleRigUpdate)
 	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete)

@@ -309,6 +309,17 @@ type StateMutator interface {
 	// CreateRig adds a new rig to city.toml.
 	CreateRig(r config.Rig) error
 
+	// ProvisionRigFromGit clones gitURL into the rig's working tree and
+	// provisions the rig, reusing CreateRig's config-write handshake under the
+	// per-city guard. The clone runs OUTSIDE that guard (a WAN fetch must not
+	// freeze config writes); the git URL host is SSRF-fenced before any clone.
+	// When r.Path is empty the server derives rigs/<name>. onStep, when
+	// non-nil, receives incremental provisioning progress (step name, human
+	// detail, warn flag) for typed-event projection. It returns the provisioned
+	// rig so the caller can report its resolved prefix/branch. This is the async
+	// server-side rig-add path (C4b); the sync CreateRig stays git-blind.
+	ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool)) (config.Rig, error)
+
 	// UpdateRig partially updates a rig in city.toml.
 	UpdateRig(name string, patch RigUpdate) error
 

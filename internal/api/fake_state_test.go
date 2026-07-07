@@ -187,6 +187,11 @@ type fakeMutatorState struct {
 	// assert mutations route through it.
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
+
+	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
+	// or receives — lets a test hold a provision in flight to exercise the
+	// live-index replay path deterministically.
+	provisionGate chan struct{}
 }
 
 func newFakeMutatorState(t *testing.T) *fakeMutatorState {
@@ -328,6 +333,27 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
+}
+
+// ProvisionRigFromGit is the fake async-clone path: it skips the real
+// clone/SSRF and just appends the rig (emitting synthetic progress) so handler
+// tests can exercise the 202 flow without a network. If onStep is set it emits
+// a clone + done step.
+func (f *fakeMutatorState) ProvisionRigFromGit(_ context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool)) (config.Rig, error) {
+	if f.provisionGate != nil {
+		<-f.provisionGate
+	}
+	if onStep != nil {
+		onStep("clone", "cloning "+gitURL, false)
+	}
+	if r.Path == "" {
+		r.Path = "rigs/" + r.Name
+	}
+	f.cfg.Rigs = append(f.cfg.Rigs, r)
+	if onStep != nil {
+		onStep("done", "Rig added.", false)
+	}
+	return r, nil
 }
 
 func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {

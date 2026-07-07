@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -34,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/ssrf"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -1509,8 +1511,56 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 	}
 	// Resolve against the city dir, never the daemon CWD, so a same-named rig
 	// in the controller's working directory can never win.
-	rigPath = resolveStoreScopeRoot(cs.cityPath, rigPath)
+	r.Path = resolveStoreScopeRoot(cs.cityPath, rigPath)
+	_, err := cs.provisionRigLocked(r, nil)
+	return err
+}
 
+// ProvisionRigFromGit is the async server-side rig-add path (C4b). It clones
+// gitURL into the rig's working tree OUTSIDE the per-city config lock (a WAN
+// fetch must not freeze config writes), SSRF-fencing the host first, then
+// reuses CreateRig's provisioning handshake under the guard. When r.Path is
+// empty the server derives rigs/<name>. onStep (nil-safe) receives progress.
+// The returned rig carries the resolved prefix/branch for the terminal event.
+func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool)) (config.Rig, error) {
+	gitURL = strings.TrimSpace(gitURL)
+	if gitURL == "" {
+		return config.Rig{}, fmt.Errorf("%w: git_url is required", configedit.ErrValidation)
+	}
+	rawPath := strings.TrimSpace(r.Path)
+	if rawPath == "" {
+		// Server-derived clone destination for git_url adds: rigs/<name> under
+		// the city dir. resolveStoreScopeRoot anchors it to the city, never CWD.
+		rawPath = filepath.Join("rigs", r.Name)
+	}
+	r.Path = resolveStoreScopeRoot(cs.cityPath, rawPath)
+
+	// Clone OUTSIDE the config lock. The SSRF host fence runs before git; the
+	// URL is never echoed into the progress event (an embedded credential must
+	// not leak onto the event stream). git.Clone re-asserts the scheme allowlist
+	// fail-closed and refuses every non-https, network-reaching form.
+	if err := ensurePublicGitHost(gitURL); err != nil {
+		return config.Rig{}, err
+	}
+	if onStep != nil {
+		onStep("clone", "  Cloning rig working tree from git", false)
+	}
+	if err := git.Clone(ctx, gitURL, r.Path, git.CloneOptions{}); err != nil {
+		return config.Rig{}, fmt.Errorf("cloning rig from git: %w", err)
+	}
+
+	// Provision under the guard. The freshly-cloned dir exists (with .git), so
+	// rig.Provision flows it through the git-detect / fresh-add path — git_url
+	// never enters ProvisionRequest, so nothing here can regress the sync path.
+	return cs.provisionRigLocked(r, onStep)
+}
+
+// provisionRigLocked runs the config-write half of a rig add under the per-city
+// guard (SerializeConfigWrite → mutateAndPoke). r.Path must already be resolved
+// absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
+// project provisioning progress onto events; nil onStep produces the exact
+// git-blind behavior CreateRig has always had. It returns the provisioned rig.
+func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, detail string, warn bool)) (config.Rig, error) {
 	// Duplicate-name guard preserving the API's 409-on-existing-name contract.
 	// Without it, Provision's re-add semantics would make same-name+same-path an
 	// idempotent success and same-name+different-path a plain 500. Config-level
@@ -1521,12 +1571,20 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 	if cfg != nil {
 		for _, existing := range cfg.Rigs {
 			if existing.Name == r.Name {
-				return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
+				return config.Rig{}, fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
 			}
 		}
 	}
 
-	var postErr error
+	var depOnStep func(rig.ProvisionStep)
+	if onStep != nil {
+		depOnStep = func(s rig.ProvisionStep) { onStep(s.Name, s.Detail, s.Warn) }
+	}
+
+	var (
+		postErr        error
+		provisionedRig config.Rig
+	)
 	if err := cs.SerializeConfigWrite(func() error {
 		return cs.mutateAndPoke(func() error {
 			// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
@@ -1574,6 +1632,7 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 				PrepareAdopt:  prepareRigAdoptProviderState,
 				StoreContract: cityUsesBdStoreContract,
 				DoltSkip:      gcDoltSkip,
+				OnStep:        depOnStep,
 				PostProvision: func(pc rig.ProvisionContext) error {
 					// Rig-local infrastructure the CLI installs. Failures are
 					// warn-and-continue (best-effort), logged rather than printed to
@@ -1609,9 +1668,9 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 				},
 			}
 
-			_, res, err := rig.Provision(deps, rig.ProvisionRequest{
+			resultRig, res, err := rig.Provision(deps, rig.ProvisionRequest{
 				Name:          r.Name,
-				Path:          rigPath,
+				Path:          r.Path,
 				Prefix:        r.Prefix,
 				DefaultBranch: r.DefaultBranch,
 			})
@@ -1623,14 +1682,33 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 			// so returning the error here would leave disk and controller state
 			// split-brained (mutateAndPoke treats a mutate error as "nothing
 			// committed").
+			provisionedRig = resultRig
 			postErr = res.PostProvisionErr
 			return nil
 		})
 	}); err != nil {
-		return err
+		return config.Rig{}, err
 	}
 	if postErr != nil {
 		log.Printf("api: rig create: post-provision: %v", postErr)
+	}
+	return provisionedRig, nil
+}
+
+// ensurePublicGitHost SSRF-fences the host of a rig-clone git URL before git
+// runs, delegating to the shared internal/ssrf fence (also used by the pack
+// import path) so the two callers cannot drift. A non-URL form (scp/bare/ext)
+// has no host to fence here; git.Clone's scheme allowlist refuses every such
+// network-reaching form before it connects, so there is no unfenced path. A
+// blocked host is a validation error so the async handler maps it to a
+// blocked_host request.failed code.
+func ensurePublicGitHost(gitURL string) error {
+	u, err := url.Parse(strings.TrimSpace(gitURL))
+	if err != nil || u == nil || u.Hostname() == "" {
+		return nil
+	}
+	if err := ssrf.EnsurePublicHost(u.Hostname()); err != nil {
+		return fmt.Errorf("%w: git host is blocked: %w", configedit.ErrValidation, err)
 	}
 	return nil
 }

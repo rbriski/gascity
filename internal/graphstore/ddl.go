@@ -199,12 +199,56 @@ WHEN OLD.fold_owned = 1
 BEGIN SELECT RAISE(ABORT, 'nodes: fold-owned row is write-closed (I-14)'); END;
 `
 
+// schemaV3 adds the explicit residence record and completes the Tier-A
+// write-closure (P3.2 — 12-p3-migration-blueprint §2, §3.2; 09a §A-2).
+//
+// graph_residence is the tri-state residence primitive keyed by root id. A root
+// is legacy-resident by DEFAULT — the absence of a row (∅). A row records one of
+// two non-default states: `migrating(fence_epoch=N)` while a strand migration is
+// copying the root's subgraph into the journal leg (reads still route legacy, the
+// half-copied journal rows stay hidden, conflicting controller writes are
+// blocked), and `journal` once the post-re-verify CAS flip has made the journal
+// copy authoritative. The record is the durable checkpoint of the migration
+// state machine: a crash at any step leaves a row whose state tells the next run
+// whether to resume (journal) or revert (migrating). CAS transitions serialize on
+// the store's single write connection.
+//
+// The frontier triggers finish the P1.2 write-closure (deferred there): the
+// `frontier` table is a PURE fold projection — only the fold applier writes it,
+// always with tier_a_write_gate open — so every INSERT/UPDATE/DELETE is gated on
+// that same gate. A rogue writer (or a stray façade write) that does not open the
+// gate hits a loud ABORT, mirroring the `nodes` fold-owned guard. Unlike `nodes`
+// there is no fold_owned column to narrow on: every frontier row is fold-owned,
+// so the guard is unconditional on ownership and conditional only on the gate.
+const schemaV3 = `
+CREATE TABLE graph_residence (
+  root_id     TEXT    PRIMARY KEY,
+  state       TEXT    NOT NULL CHECK (state IN ('migrating','journal')),
+  fence_epoch INTEGER NOT NULL DEFAULT 0,
+  updated_at  TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX graph_residence_state ON graph_residence (state);
+
+CREATE TRIGGER frontier_write_closed_no_insert BEFORE INSERT ON frontier
+WHEN NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'frontier is write-closed (I-14)'); END;
+
+CREATE TRIGGER frontier_write_closed_no_update BEFORE UPDATE ON frontier
+WHEN NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'frontier is write-closed (I-14)'); END;
+
+CREATE TRIGGER frontier_write_closed_no_delete BEFORE DELETE ON frontier
+WHEN NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'frontier is write-closed (I-14)'); END;
+`
+
 // migrations is the forward-only schema ladder. Index i applies to move the
 // database from schema_version i to i+1. Never edit an existing entry once it
 // has shipped; append a new one.
 var migrations = []string{
 	schemaV1,
 	schemaV2,
+	schemaV3,
 }
 
 // schemaVersionLatest is the target schema_version after all migrations apply.

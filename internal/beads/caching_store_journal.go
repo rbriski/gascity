@@ -42,3 +42,20 @@ func (c *CachingStore) WriterLeaseHandle() (WriterLeaseStore, bool) {
 func (c *CachingStore) ControlFrontierHandle() (ControlFrontierStore, bool) {
 	return ControlFrontierStoreFor(c.backing)
 }
+
+// ResidenceMigrationHandle forwards the backing store's residence-migration
+// capability. Residence records and staged import rows live in the journal
+// engine's own tables — a data domain disjoint from this bead-row cache — so the
+// forward is total and nothing is masked. A `migrating` root's rows are hidden by
+// the JournalStore's own residence-visibility gate underneath this cache.
+func (c *CachingStore) ResidenceMigrationHandle() (ResidenceMigrationStore, bool) {
+	return ResidenceMigrationStoreFor(c.backing)
+}
+
+// EdgeMetadataHandle forwards the backing store's edge-metadata read capability.
+// The cache holds bead-row projections, not the raw dependency-edge metadata
+// blob, so there is nothing to mask: the read reaches straight through to the
+// backing store's edges. Absent capability returns the honest (nil, false).
+func (c *CachingStore) EdgeMetadataHandle() (EdgeMetadataReader, bool) {
+	return EdgeMetadataReaderFor(c.backing)
+}

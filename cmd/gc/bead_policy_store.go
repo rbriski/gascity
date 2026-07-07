@@ -116,6 +116,25 @@ func (s *beadPolicyStore) ConditionalVersionHandle() (beads.ConditionalVersionSt
 	return beads.ConditionalVersionStoreFor(s.Store)
 }
 
+// ResidenceMigrationHandle forwards the residence-migration capability the
+// `gc migrate graph-journal` state machine and the router's ErrRootMigrating
+// write-gate reach for. The policy wrapper embeds beads.Store as an interface, so
+// this optional capability is not promoted automatically; the explicit forward
+// lets ResidenceMigrationStoreFor / ResidenceStoreFor reach a JournalStore behind
+// the policy wrapper (the journal residence leg is always policy-wrapped).
+func (s *beadPolicyStore) ResidenceMigrationHandle() (beads.ResidenceMigrationStore, bool) {
+	return beads.ResidenceMigrationStoreFor(s.Store)
+}
+
+// EdgeMetadataHandle forwards the wrapped store's edge-metadata read capability
+// so the strand migration can reach a JournalStore or native leg's raw edge
+// metadata (waits-for gate blobs) through the policy wrapper. The policy wrapper
+// embeds beads.Store as an interface, so this optional capability is not promoted
+// automatically. beadPolicyGraphStore embeds *beadPolicyStore, so it inherits it.
+func (s *beadPolicyStore) EdgeMetadataHandle() (beads.EdgeMetadataReader, bool) {
+	return beads.EdgeMetadataReaderFor(s.Store)
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

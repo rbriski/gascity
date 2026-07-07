@@ -170,6 +170,7 @@ var (
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
+	_ EdgeMetadataReader            = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -1099,6 +1100,48 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 		})
 	}
 	return deps, nil
+}
+
+// EdgeMetadata returns the raw metadata blob on the dependency edge
+// fromID -> toID of the given type, or "" when the edge is absent or carries no
+// metadata. DepList drops this blob (it returns only from/to/type); the strand
+// migration reads it here so a waits-for gate ({"gate":"any-children"}) survives
+// the copy into the journal leg. The read runs inside a transaction (the only
+// API that exposes GetDependencyRecords) and rolls back via a sentinel so it
+// never commits — a pure read must not churn the ledger.
+func (s *NativeDoltStore) EdgeMetadata(fromID, toID, depType string) (string, error) {
+	if depType == "" {
+		depType = "blocks"
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	var meta string
+	errStop := errors.New("edge-metadata read complete")
+	runErr := storage.RunInTransaction(ctx, "gc: read edge metadata", func(tx beadslib.Transaction) error {
+		deps, err := tx.GetDependencyRecords(ctx, fromID)
+		if err != nil {
+			return err
+		}
+		for _, d := range deps {
+			if d == nil {
+				continue
+			}
+			if d.DependsOnID == toID && string(d.Type) == depType {
+				meta = d.Metadata
+				break
+			}
+		}
+		return errStop
+	})
+	if runErr != nil && !errors.Is(runErr, errStop) {
+		return "", nativeStoreError(fromID, runErr)
+	}
+	return meta, nil
 }
 
 type nativeIssueGetter interface {

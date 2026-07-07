@@ -53,6 +53,7 @@ gc [flags]
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
+| [gc migrate](#gc-migrate) | Substrate migration commands |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
@@ -2341,6 +2342,90 @@ gc mcp list [flags]
 | `--agent` | string |  | show the projected MCP config for this agent |
 | `--json` | bool |  | Output one JSONL result record |
 | `--session` | string |  | show the projected MCP config for this session |
+
+## gc migrate
+
+Substrate migration commands.
+
+Subcommands move a city between substrate generations. They are inert until
+invoked and reversible at every step.
+
+```
+gc migrate
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc migrate graph-journal](#gc-migrate-graph-journal) | Migrate stranded graph roots onto the journal substrate |
+
+## gc migrate graph-journal
+
+Migrate stranded graph roots onto the journal substrate.
+
+With no subcommand this is the STRAND arm: for each --root it copies the root's
+subgraph from the legacy graph store into the journal store, preserving ids, and
+flips residence to journal — park -&gt; copy -&gt; fold-verify -&gt; re-verify -&gt; flip -&gt;
+tombstone. Every step is idempotent and crash-safe: a re-run resumes, the legacy
+copy is tombstoned (never deleted), and each durable step is CAS-guarded.
+
+Concurrency and external writes (read before relying on the fence):
+  - Only ONE migrator may hold a root. A second invocation over a root another
+    migrator is already migrating REFUSES rather than stomping it. If a migration
+    genuinely crashed, reclaim its stale record with --force-recover.
+  - The migrating fence blocks ROUTER-routed writes (the controller path). It does
+    NOT fence external 'bd' writers — they bypass the router. Such a write is
+    DETECTED, not prevented: re-verify catches one up to the flip, a pre-tombstone
+    delta check catches one in the residual re-verify→flip window, and a post-close
+    re-hash (status-excluded) catches one that races the tombstone close loop itself.
+    Any of these raises a LOUD alarm (no tombstone, non-zero exit) for manual
+    reconciliation rather than losing it silently. These hashes DETECT an external
+    modification to an existing bead in the window; they do not PREVENT it — true
+    prevention requires quiescing external bd writers (the P4/hosted path). A NEW
+    child created in the window is not the lossy case: it stays on the intact legacy
+    leg and is served via legacy fan-out. Only a modification to an EXISTING bead is
+    the detect-not-prevent residual.
+
+This is for stranded roots after an incident, never the mainline cutover (that
+moves zero bytes).
+
+Run "gc migrate graph-journal init" once to opt the city in.
+
+```
+gc migrate graph-journal [flags]
+```
+
+**Example:**
+
+```
+gc migrate graph-journal init
+gc migrate graph-journal --root gcg-42
+gc migrate graph-journal --root gcg-42 --dry-run --json
+gc migrate graph-journal --root gcg-42 --force-recover
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | compute and report the migration without writing anything |
+| `--force-recover` | bool |  | reclaim a root left in the migrating state by a crashed migration (epoch-guarded discard + revert, then re-attempt) |
+| `--json` | bool |  | emit a JSON summary |
+| `--root` | stringArray |  | root bead id to migrate (repeatable) |
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc migrate graph-journal init](#gc-migrate-graph-journal-init) | Opt the city into the graph-journal scope (idempotent) |
+
+## gc migrate graph-journal init
+
+Opt the city into the graph-journal scope.
+
+Creates &lt;city&gt;/.gc/graph/.beads/config.yaml and the journal database. Presence
+alone is inert: the city keeps minting new roots on the legacy leg until the
+generational cutover. Reversal is deleting the scope (no roots reside there yet).
+Idempotent — safe to run repeatedly.
+
+```
+gc migrate graph-journal init
+```
 
 ## gc nudge
 

@@ -4,9 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// rootWalkLimit caps the parent_id walk that maps a bead to its root during the
+// ErrRootMigrating write-gate. Control molecules are shallow; the cap only guards
+// against a pathological or cyclic parent chain so the guard can never loop.
+const rootWalkLimit = 256
 
 // errCrossResidenceDependency reports that a dependency (or a graph-apply plan)
 // would link two beads that live on different residence legs. Cross-store
@@ -42,6 +48,15 @@ var errCrossResidenceDependency = errors.New("cross-residence dependency rejecte
 type residenceRoutingGraphStore struct {
 	journal beads.Store // JournalStore adapter, policy-wrapped (never nil)
 	legacy  beads.Store // what resolveGraphStore returned before P1.5 (never nil)
+
+	// residence is the journal leg's explicit tri-state residence record (P3.2).
+	// It is nil when the journal leg does not expose the capability (e.g. a
+	// MemStore test leg), in which case the ErrRootMigrating write-gate is inert.
+	// It is what makes routing consult the EXPLICIT record instead of the implicit
+	// membership probe: a `migrating` root's half-copied journal rows are hidden by
+	// the JournalStore visibility gate (so residentBead already routes them
+	// legacy), and controller writes to such a root are blocked here.
+	residence beads.ResidenceStore
 }
 
 var (
@@ -60,7 +75,61 @@ var (
 // fields); the long-lived handles live on the controller state / one-shot
 // cache, so the reload-swap story keeps working without router invalidation.
 func newResidenceRoutingGraphStore(journal, legacy beads.Store) *residenceRoutingGraphStore {
-	return &residenceRoutingGraphStore{journal: journal, legacy: legacy}
+	residence, _ := beads.ResidenceStoreFor(journal)
+	return &residenceRoutingGraphStore{journal: journal, legacy: legacy, residence: residence}
+}
+
+// guardNotMigrating blocks a controller-path write to a bead whose root is
+// mid-migration (residence `migrating`) with beads.ErrRootMigrating (09a §A-2
+// step 1a). It short-circuits on the common path: when no root is migrating (the
+// residence capability is absent, or MigratingRoots is empty) it does zero extra
+// work per write. Only when a migration is actually in flight does it resolve the
+// bead's root by walking the legacy parent chain (a `migrating` bead still lives
+// on the legacy leg — its journal copy is hidden) and block if that root matches.
+// A hard error resolving residence fails the write loudly rather than letting a
+// racing write slip past the quarantine.
+func (s *residenceRoutingGraphStore) guardNotMigrating(id string) error {
+	if s.residence == nil {
+		return nil
+	}
+	roots, err := s.residence.MigratingRoots(context.Background())
+	if err != nil {
+		return fmt.Errorf("residence routing: checking migrating roots: %w", err)
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	root, err := s.rootOfLegacy(id)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(roots, root) {
+		return fmt.Errorf("%w: root %q", beads.ErrRootMigrating, root)
+	}
+	return nil
+}
+
+// rootOfLegacy walks id's parent_id chain on the legacy leg up to the root (the
+// first bead with no parent). A `migrating` bead is still legacy-resident, so the
+// walk resolves there. A bead that is absent legacy-side (already journal-resident
+// or unknown) resolves to itself, which no migrating root matches. The walk is
+// depth-capped so a cyclic parent chain can never loop.
+func (s *residenceRoutingGraphStore) rootOfLegacy(id string) (string, error) {
+	current := id
+	for i := 0; i < rootWalkLimit; i++ {
+		b, err := s.legacy.Get(current)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return current, nil
+			}
+			return "", fmt.Errorf("residence routing: resolving root of %q: %w", id, err)
+		}
+		if b.ParentID == "" || b.ParentID == current {
+			return current, nil
+		}
+		current = b.ParentID
+	}
+	return current, nil
 }
 
 // OverlaysStore reports whether other is this router's legacy (non-journal) leg
@@ -156,8 +225,12 @@ func (s *residenceRoutingGraphStore) Children(parentID string, opts ...beads.Que
 
 // --- by-id writes (hard probe error fails the write) -----------------------
 
-// Update routes by residence; a hard probe error fails the write.
+// Update routes by residence; a migrating root is blocked, a hard probe error
+// fails the write.
 func (s *residenceRoutingGraphStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.guardNotMigrating(id); err != nil {
+		return err
+	}
 	leg, err := s.legFor(id)
 	if err != nil {
 		return err
@@ -165,8 +238,12 @@ func (s *residenceRoutingGraphStore) Update(id string, opts beads.UpdateOpts) er
 	return leg.Update(id, opts)
 }
 
-// Close routes by residence; a hard probe error fails the write.
+// Close routes by residence; a migrating root is blocked, a hard probe error
+// fails the write.
 func (s *residenceRoutingGraphStore) Close(id string) error {
+	if err := s.guardNotMigrating(id); err != nil {
+		return err
+	}
 	leg, err := s.legFor(id)
 	if err != nil {
 		return err
@@ -174,8 +251,12 @@ func (s *residenceRoutingGraphStore) Close(id string) error {
 	return leg.Close(id)
 }
 
-// Reopen routes by residence; a hard probe error fails the write.
+// Reopen routes by residence; a migrating root is blocked, a hard probe error
+// fails the write.
 func (s *residenceRoutingGraphStore) Reopen(id string) error {
+	if err := s.guardNotMigrating(id); err != nil {
+		return err
+	}
 	leg, err := s.legFor(id)
 	if err != nil {
 		return err
@@ -183,8 +264,12 @@ func (s *residenceRoutingGraphStore) Reopen(id string) error {
 	return leg.Reopen(id)
 }
 
-// SetMetadata routes by residence; a hard probe error fails the write.
+// SetMetadata routes by residence; a migrating root is blocked, a hard probe
+// error fails the write.
 func (s *residenceRoutingGraphStore) SetMetadata(id, key, value string) error {
+	if err := s.guardNotMigrating(id); err != nil {
+		return err
+	}
 	leg, err := s.legFor(id)
 	if err != nil {
 		return err
@@ -192,8 +277,12 @@ func (s *residenceRoutingGraphStore) SetMetadata(id, key, value string) error {
 	return leg.SetMetadata(id, key, value)
 }
 
-// SetMetadataBatch routes by residence; a hard probe error fails the write.
+// SetMetadataBatch routes by residence; a migrating root is blocked, a hard probe
+// error fails the write.
 func (s *residenceRoutingGraphStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.guardNotMigrating(id); err != nil {
+		return err
+	}
 	leg, err := s.legFor(id)
 	if err != nil {
 		return err
@@ -201,8 +290,12 @@ func (s *residenceRoutingGraphStore) SetMetadataBatch(id string, kvs map[string]
 	return leg.SetMetadataBatch(id, kvs)
 }
 
-// Delete routes by residence; a hard probe error fails the write.
+// Delete routes by residence; a migrating root is blocked, a hard probe error
+// fails the write.
 func (s *residenceRoutingGraphStore) Delete(id string) error {
+	if err := s.guardNotMigrating(id); err != nil {
+		return err
+	}
 	leg, err := s.legFor(id)
 	if err != nil {
 		return err
@@ -216,6 +309,9 @@ func (s *residenceRoutingGraphStore) Delete(id string) error {
 func (s *residenceRoutingGraphStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	var journalIDs, legacyIDs []string
 	for _, id := range ids {
+		if err := s.guardNotMigrating(id); err != nil {
+			return 0, err
+		}
 		_, journal, err := s.resolveLeg(id)
 		if err != nil {
 			return 0, err
@@ -243,9 +339,15 @@ func (s *residenceRoutingGraphStore) CloseAll(ids []string, metadata map[string]
 // a new root (no ParentID) mints in the legacy leg at P1.5. New-roots→journal
 // is the M2 generational cutover, expressly not P1: journal roots enter only
 // via the Lumen executor writing the journal leg directly, keeping P1 inert.
+// A child create under a `migrating` root is blocked with ErrRootMigrating, the
+// same fence the by-id mutations apply, so a new step cannot slip onto the old
+// leg mid-copy and be silently absent from the journal copy (BLOCKER-1).
 func (s *residenceRoutingGraphStore) Create(b beads.Bead) (beads.Bead, error) {
 	if b.ParentID == "" {
 		return s.legacy.Create(b)
+	}
+	if err := s.guardNotMigrating(b.ParentID); err != nil {
+		return beads.Bead{}, err
 	}
 	leg, err := s.legFor(b.ParentID)
 	if err != nil {
@@ -259,6 +361,9 @@ func (s *residenceRoutingGraphStore) Create(b beads.Bead) (beads.Bead, error) {
 func (s *residenceRoutingGraphStore) CreateWithStorage(b beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
 	leg := s.legacy
 	if b.ParentID != "" {
+		if err := s.guardNotMigrating(b.ParentID); err != nil {
+			return beads.Bead{}, err
+		}
 		routed, err := s.legFor(b.ParentID)
 		if err != nil {
 			return beads.Bead{}, err
@@ -276,6 +381,9 @@ func (s *residenceRoutingGraphStore) CreateWithStorage(b beads.Bead, storage bea
 // DepAdd rejects a dependency whose two ends live on different residence legs;
 // otherwise it routes the edge to the shared leg.
 func (s *residenceRoutingGraphStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if err := s.guardNotMigrating(issueID); err != nil {
+		return err
+	}
 	leg, err := s.agreeingLeg(issueID, dependsOnID)
 	if err != nil {
 		return err
@@ -286,6 +394,9 @@ func (s *residenceRoutingGraphStore) DepAdd(issueID, dependsOnID, depType string
 // DepRemove rejects a removal spanning both legs; otherwise routes to the
 // shared leg.
 func (s *residenceRoutingGraphStore) DepRemove(issueID, dependsOnID string) error {
+	if err := s.guardNotMigrating(issueID); err != nil {
+		return err
+	}
 	leg, err := s.agreeingLeg(issueID, dependsOnID)
 	if err != nil {
 		return err
@@ -432,20 +543,28 @@ func mergeSortLimitBeads(legacy, journal []beads.Bead, sortFn func([]beads.Bead)
 	return merged
 }
 
-// mergeDedupeBeads returns legacy rows in order, then journal rows whose ID is
-// not already present. Residence makes the two sets disjoint, so the dedupe is
-// a belt over that suspenders. The returned slice is freshly owned (both legs
-// return fresh copies per call), so callers may sort it in place.
+// mergeDedupeBeads unions the two legs' rows, preferring the JOURNAL row on a
+// shared id (P3.2, Risk 1 — residence-aware dedupe). Residence normally makes the
+// sets disjoint, so this is a belt over that suspenders; the one window where an
+// id appears on BOTH legs is the flip→tombstone crash window, where the residence
+// record already says `journal` and the legacy row is a stale not-yet-tombstoned
+// copy. Journal-wins is exactly correct there, and safe everywhere else: the
+// JournalStore's residence-visibility gate hides a `migrating` root's rows, so any
+// row the journal leg actually RETURNS is authoritative (flipped or journal-born)
+// — never a half-copied migrating one. The returned slice is freshly owned, so
+// callers may sort it in place. A caller-supplied sortFn re-imposes global order,
+// so the interleave order here is not load-bearing.
 func mergeDedupeBeads(legacy, journal []beads.Bead) []beads.Bead {
 	if len(journal) == 0 {
 		return legacy
 	}
-	seen := make(map[string]struct{}, len(legacy))
-	for _, b := range legacy {
-		seen[b.ID] = struct{}{}
-	}
-	out := legacy
+	seen := make(map[string]struct{}, len(journal))
+	out := make([]beads.Bead, 0, len(legacy)+len(journal))
 	for _, b := range journal {
+		seen[b.ID] = struct{}{}
+		out = append(out, b)
+	}
+	for _, b := range legacy {
 		if _, ok := seen[b.ID]; ok {
 			continue
 		}
@@ -459,6 +578,14 @@ func mergeDedupeBeads(legacy, journal []beads.Bead) []beads.Bead {
 // Tx routes to the legacy leg at P1.5. Journal-side transactional writes go
 // through ApplyGraphPlan / the journal adapter's own capabilities; no
 // journal-resident bead reaches a Tx call site until P3 migrates roots.
+//
+// NOTE-1 (unguarded by design): the fn callback is opaque, so guardNotMigrating
+// cannot inspect which beads it mutates — a controller Tx touching a migrating root
+// therefore bypasses the migrating fence and is covered only by the same
+// detect-not-prevent backstop as an external bd writer (re-verify + ensureTombstone's
+// pre-close/post-close hashes). This is not a live control-path hole: control writes
+// reach a migrating root through the guarded by-id ops (Update/Close/SetMetadata/…),
+// not through Tx, which serves the legacy leg's own transactional API.
 func (s *residenceRoutingGraphStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
 	return s.legacy.Tx(commitMsg, fn)
 }
@@ -629,7 +756,13 @@ func (a graphRoutingApplier) ApplyGraphPlan(ctx context.Context, plan *beads.Gra
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
 	}
-	leg, err := a.s.applyLeg(collectPlanAnchors(plan))
+	anchors := collectPlanAnchors(plan)
+	for _, anchor := range anchors {
+		if err := a.s.guardNotMigrating(anchor); err != nil {
+			return nil, err
+		}
+	}
+	leg, err := a.s.applyLeg(anchors)
 	if err != nil {
 		return nil, err
 	}

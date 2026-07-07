@@ -17,9 +17,17 @@ type MemStore struct {
 	beads []Bead
 	deps  []Dep
 	seq   int
+	// edgeMeta holds the raw metadata blob for a dependency edge, keyed by
+	// EdgeKey. DepAdd carries no metadata argument, so this is populated via
+	// SetEdgeMetadata; it lets MemStore stand in as a legacy leg that carries
+	// waits-for gate metadata for the strand-migration edge-preservation tests.
+	edgeMeta map[EdgeKey]string
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ EdgeMetadataReader            = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
@@ -502,6 +510,33 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 		}
 	}
 	return result, nil
+}
+
+// SetEdgeMetadata records the raw metadata blob for an existing dependency edge.
+// It is the MemStore stand-in for the edge metadata a real graph store writes via
+// ApplyGraphPlan (DepAdd itself takes no metadata), so tests can seed a waits-for
+// gate edge. An empty depType defaults to "blocks", matching edge identity.
+func (m *MemStore) SetEdgeMetadata(fromID, toID, depType, metadata string) error {
+	if depType == "" {
+		depType = "blocks"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.edgeMeta == nil {
+		m.edgeMeta = make(map[EdgeKey]string)
+	}
+	m.edgeMeta[EdgeKey{FromID: fromID, ToID: toID, DepType: depType}] = metadata
+	return nil
+}
+
+// EdgeMetadata returns the metadata blob recorded for an edge, or "" when none.
+func (m *MemStore) EdgeMetadata(fromID, toID, depType string) (string, error) {
+	if depType == "" {
+		depType = "blocks"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.edgeMeta[EdgeKey{FromID: fromID, ToID: toID, DepType: depType}], nil
 }
 
 // DepListBatch returns "down" dependencies for multiple beads from memory.

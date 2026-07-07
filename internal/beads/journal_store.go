@@ -338,10 +338,22 @@ func journalTierClause(mode TierMode) string {
 	}
 }
 
+// journalResidenceVisiblePredicate hides a `migrating` root's half-copied import
+// rows from every façade read (P3.2 residence-visibility gate). Journal-born and
+// journal-resident rows either carry stream_id=” or a root whose residence is not
+// `migrating`, so they stay visible; only rows tagged with an in-flight
+// migration's root id are hidden until the flip. For a non-migrating city the
+// subquery matches nothing, so reads are byte-identical to the pre-P3.2 façade.
+const journalResidenceVisiblePredicate = `(n.stream_id = '' OR NOT EXISTS (
+	SELECT 1 FROM graph_residence r
+	WHERE r.root_id = n.stream_id AND r.state = 'migrating'))`
+
 // hydrateWhere selects fold_owned=0 nodes matching extraWhere and hydrates each
-// into a full Bead (labels, metadata, dependencies, live is_blocked).
+// into a full Bead (labels, metadata, dependencies, live is_blocked). Rows
+// belonging to a root that is mid-migration are hidden by the residence-visibility
+// gate; StagedRootBeads is the ungated reader fold-verify uses.
 func (s *JournalStore) hydrateWhere(ctx context.Context, q journalQueryer, extraWhere string, args []any) ([]Bead, error) {
-	sqlText := "SELECT " + journalNodeColumns + " FROM nodes n WHERE n.fold_owned = 0"
+	sqlText := "SELECT " + journalNodeColumns + " FROM nodes n WHERE n.fold_owned = 0 AND " + journalResidenceVisiblePredicate
 	if extraWhere != "" {
 		sqlText += " AND " + extraWhere
 	}
@@ -781,6 +793,27 @@ func journalRejectCallerID(id string) error {
 		return nil
 	}
 	return fmt.Errorf("journal store: caller-supplied bead id %q rejected: the store mints its own %s-%s<seq> ids", id, journalIDPrefix, journalIDMarker)
+}
+
+// journalIsMintShapedID reports whether id has this store's mint shape
+// (gcg-j<seq> where <seq> is one or more decimal digits). The migration import
+// path uses it to reject a source id that could collide with a future mint and
+// wedge the counter; ordinary Creates never see such an id because they mint it.
+func journalIsMintShapedID(id string) bool {
+	prefix := journalIDPrefix + "-" + journalIDMarker
+	if !strings.HasPrefix(id, prefix) {
+		return false
+	}
+	digits := id[len(prefix):]
+	if digits == "" {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // journalParentFromDeps returns the target of the first parent-child dependency

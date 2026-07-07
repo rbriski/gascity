@@ -735,15 +735,11 @@ func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSna
 	return snapshots, nil
 }
 
-// snapshotResolvedFile / snapshotOptionalFile delegate to internal/rig, which
-// owns the rollback primitives (C2.1). The symlink-resolution rationale lives on
+// snapshotResolvedFile delegates to internal/rig, which owns the rollback
+// primitives (C2.1). The symlink-resolution rationale lives on
 // rig.SnapshotResolvedFile.
 func snapshotResolvedFile(fs fsys.FS, path string) (fileSnapshot, error) {
 	return rig.SnapshotResolvedFile(fs, path)
-}
-
-func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
-	return rig.SnapshotOptionalFile(fs, path)
 }
 
 // cityTomlRollbackPath returns the symlink-resolved city.toml path that a

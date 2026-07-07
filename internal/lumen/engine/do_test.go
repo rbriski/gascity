@@ -113,9 +113,10 @@ func TestDoStepStubbedPassFoldsThroughExecutor(t *testing.T) {
 
 	wantOrder := []string{
 		engine.EventRunStarted,
+		engine.EventNodeActivated,
 		engine.EventEffectScheduled,
 		engine.EventEffectSettled,
-		engine.EventNodeSettled,
+		engine.EventOutcomeSettled,
 		engine.EventRunClosed,
 	}
 	if got := eventTypes(res.Events); !equalStrings(got, wantOrder) {
@@ -209,17 +210,20 @@ func TestDoStepOutputFlowsToDownstreamPrompt(t *testing.T) {
 	}
 }
 
-// TestDoStepHostInternalErrorInterruptsAndRunContinues covers the StubHost.Errs
-// arm: a host internal error (a result the host could not produce) settles the
-// effect interrupted and the node failed, RunWithOptions does NOT return an
-// error, and the run keeps executing the downstream step.
-func TestDoStepHostInternalErrorInterruptsAndRunContinues(t *testing.T) {
+// TestDoStepHostInternalErrorInterruptsAndSkipsDependent covers the
+// StubHost.Errs arm together with the P4.2 skip-cascade: a host internal error
+// (a result the host could not produce) settles the effect interrupted and the
+// node failed; RunWithOptions does NOT return an error; and the downstream do
+// step, which depends on the failed one, is SKIPPED — not run — so it never
+// schedules an effect. This is the correctness fix over P1, which ran every
+// leaf even after an upstream failure.
+func TestDoStepHostInternalErrorInterruptsAndSkipsDependent(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 
 	doc := decodeIR(t, blockDoc("agentrun",
 		doNode("broken", "Do a thing.", nil),
-		doNode("after", "Runs regardless.", []string{"broken"}),
+		doNode("after", "Skipped, upstream failed.", []string{"broken"}),
 	))
 	stub := &enginehost.StubHost{
 		Errs:    map[string]error{"broken": errors.New("host exploded")},
@@ -230,18 +234,23 @@ func TestDoStepHostInternalErrorInterruptsAndRunContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run must not error on a host internal error: %v", err)
 	}
-	// Effect pair still records a settlement; the interrupted one settles first,
-	// then the downstream do step runs and settles ok.
-	if got := effectSettledResults(t, res.Events); len(got) != 2 ||
-		got[0] != engine.EffectResultInterrupted || got[1] != engine.EffectResultOK {
-		t.Errorf("effect settled results = %v, want [interrupted ok]", got)
+	// Only the broken step schedules/settles an effect; the skipped dependent
+	// never acts, so there is exactly one (interrupted) effect settlement.
+	if got := effectSettledResults(t, res.Events); len(got) != 1 || got[0] != engine.EffectResultInterrupted {
+		t.Errorf("effect settled results = %v, want [interrupted]", got)
+	}
+	if h := len(stub.Calls()); h != 1 {
+		t.Errorf("host called %d times, want 1 (the dependent is skipped, not run)", h)
 	}
 	settled := settledIDs(t, res.Events)
-	if len(settled) != 2 || settled[0] != [2]string{"broken", "failed"} || settled[1] != [2]string{"after", "pass"} {
-		t.Errorf("settled = %v, want [{broken failed} {after pass}]", settled)
+	if len(settled) != 2 || settled[0] != [2]string{"broken", "failed"} || settled[1] != [2]string{"after", "skipped"} {
+		t.Errorf("settled = %v, want [{broken failed} {after skipped}]", settled)
 	}
 	if nodeStatus(t, store, "broken") != "failed" {
 		t.Errorf("broken node status = %q, want failed", nodeStatus(t, store, "broken"))
+	}
+	if nodeStatus(t, store, "after") != "skipped" {
+		t.Errorf("after node status = %q, want skipped", nodeStatus(t, store, "after"))
 	}
 	if res.Outcome != engine.OutcomeFailed {
 		t.Errorf("run outcome = %q, want failed (failed dominates)", res.Outcome)
@@ -357,9 +366,9 @@ func TestExecOnlyRunUnchangedWithHostPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	// The exec-only event set is EXACTLY the three coarse control events, in
-	// order, with neither effect event present.
-	want := []string{engine.EventRunStarted, engine.EventNodeSettled, engine.EventRunClosed}
+	// The exec-only event set is run.started, node.activated, outcome.settled,
+	// run.closed — with neither effect event present.
+	want := []string{engine.EventRunStarted, engine.EventNodeActivated, engine.EventOutcomeSettled, engine.EventRunClosed}
 	got := eventTypes(res.Events)
 	if !equalStrings(got, want) {
 		t.Errorf("event types = %v, want %v (no effect events for exec-only)", got, want)

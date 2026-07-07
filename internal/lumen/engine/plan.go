@@ -12,23 +12,22 @@ import (
 )
 
 // ErrUnsupportedNode is returned when the formula body contains a node kind the
-// linear walking-skeleton executor does not implement (do/agent, channels,
-// scatter, gather, dispatch, retry, run, async, …). It is a load-time-style
-// refusal surfaced before any effect runs — the executor never silently skips a
-// node it cannot honor.
+// P4.2 executor does not implement. It is a load-time-style refusal surfaced
+// before any effect runs — the executor never silently skips a node it cannot
+// honor. The P4.2 core implements block/exec/settle/lit/interp/do plus the DAG
+// arms scatter(members) and gather(authored). The remaining kinds are deferred
+// behind this refusal (see buildUnits).
 var ErrUnsupportedNode = errors.New("lumen: unsupported node kind")
 
-// step is one executable leaf of a flattened linear formula. block nodes are
-// transparent and never become steps; their members flatten in place.
+// step is one executable leaf's decoded payload.
 type step struct {
-	kind  ir.NodeKind
-	id    string
-	after []string
+	kind ir.NodeKind
+	id   string
 
 	// exec fields.
 	program   string
-	script    string // body.raw template, before {{var}} interpolation
-	passCodes []int  // exitMap.pass; nil means "0 is the only pass code"
+	script    string
+	passCodes []int
 	cwd       string
 	env       []string
 
@@ -36,79 +35,428 @@ type step struct {
 	outcome string
 
 	// do fields.
-	agentRef string // interpreter.agent name, "" = default
+	agentRef string
 
-	// settle/lit/interp/do value evaluation; the raw node object, evaluated
-	// against the live scope at run time (do renders body.raw / body.template).
+	// settle/lit/interp/do value evaluation.
 	raw map[string]json.RawMessage
 }
 
-// flatten lowers a linear formula body to an ordered slice of executable leaf
-// steps. block nodes are transparent containers (their members flatten in
-// place, recursively); exec/settle/lit/interp become steps; any other kind is
-// an ErrUnsupportedNode. The result is topologically ordered over each step's
-// `after` edges, with source order breaking ties, so a linear formula executes
-// in dependency order.
-// flatten lowers the body to executable leaf steps. allowDo reports whether an
-// AgentHost is configured: when false, a `do` node is refused with
-// ErrUnsupportedNode before any effect runs — exactly as the pre-P4.1 skeleton
-// refused it — so a do-formula without a host behaves byte-identically to today.
-func flatten(nodes []ir.Node, allowDo bool) ([]step, error) {
-	var steps []step
-	for i := range nodes {
-		if err := flattenNode(nodes[i], &steps, allowDo); err != nil {
-			return nil, err
-		}
-	}
-	return topoSort(steps)
+// unitKind classifies a plan unit's execution shape.
+type unitKind int
+
+const (
+	unitLeaf       unitKind = iota // exec / settle / lit / interp / do
+	unitScatterAgg                 // scatter aggregate: settles after its members
+	unitGather                     // gather: head-of-line drain + authored combine
+)
+
+// planUnit is one node of the lowered execution plan. Units are emitted in
+// dependency (topo) order; each carries its resolved activation-key deps so the
+// executor drives the DAG and the reducer folds it.
+type planUnit struct {
+	kind        unitKind
+	activation  string
+	nodeID      string
+	irKind      ir.NodeKind
+	parent      string // parent activation ("" = top-level, folds under the root)
+	memberIndex *int
+	silent      bool // pure lit/interp: compute scope, emit no journal events
+
+	rawAfter []string // IR `after` node ids
+
+	// Dependencies are split by kind so the drain exception is scoped correctly
+	// (H1): afterDeps are blocking gates (a failed/skipped one skip-cascades this
+	// unit), memberDeps drain (a scatter aggregate / gather waits for them to
+	// settle but any outcome is fine — a member failure does not skip the
+	// aggregate).
+	afterDeps  []string // resolved blocking `after` gates
+	memberDeps []string // resolved drain dependencies (scatter members / gather over-scatter)
+
+	leaf step // unitLeaf payload
+
+	members     []string // unitScatterAgg: direct member activation keys
+	onFail      string   // scatter on_fail ("continue" | "stop")
+	overScatter string   // unitGather: the drained scatter's aggregate activation key
+
+	gatherMembers []string   // unitGather: drained member activations, member order
+	combine       []planUnit // unitGather: authored combine leaf units
 }
 
-func flattenNode(n ir.Node, out *[]step, allowDo bool) error {
+// allDeps returns the union of a unit's blocking and drain dependencies, for
+// topological ordering (both kinds constrain execution order).
+func (u *planUnit) allDeps() []string {
+	if len(u.memberDeps) == 0 {
+		return u.afterDeps
+	}
+	deps := make([]string, 0, len(u.afterDeps)+len(u.memberDeps))
+	deps = append(deps, u.afterDeps...)
+	deps = append(deps, u.memberDeps...)
+	return deps
+}
+
+// activationFor returns the single activation key for a node id in this slice
+// (one activation per node; retry/repeat re-activation is deferred).
+func activationFor(nodeID string) string { return nodeID + ":0" }
+
+// buildUnits lowers a formula body to a topologically ordered plan. block nodes
+// are transparent; exec/settle/lit/interp/do become leaf units; scatter(members)
+// lowers to member leaves plus an aggregate; gather(authored) lowers to a gather
+// unit with an inline combine. allowDo gates the do arm on a configured host.
+func buildUnits(nodes []ir.Node, allowDo bool) ([]planUnit, error) {
+	l := &lowerer{allowDo: allowDo, scatterMembers: map[string][]string{}}
+	if err := l.lowerNodes(nodes, ""); err != nil {
+		return nil, err
+	}
+	if err := l.resolveDeps(); err != nil {
+		return nil, err
+	}
+	return topoSortUnits(l.units)
+}
+
+type lowerer struct {
+	allowDo        bool
+	units          []planUnit
+	scatterMembers map[string][]string // scatter node id -> member activation keys (in order)
+}
+
+func (l *lowerer) lowerNodes(nodes []ir.Node, parent string) error {
+	for i := range nodes {
+		if err := l.lowerNode(nodes[i], parent, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 	switch n.Kind {
 	case ir.NodeBlock:
 		members, err := childNodes(n.Raw["members"])
 		if err != nil {
 			return fmt.Errorf("lumen: block %q: %w", n.ID, err)
 		}
-		for i := range members {
-			if err := flattenNode(members[i], out, allowDo); err != nil {
-				return err
-			}
-		}
-		return nil
+		return l.lowerNodes(members, parent)
+
 	case ir.NodeExec:
 		s, err := decodeExec(n)
 		if err != nil {
 			return err
 		}
-		*out = append(*out, s)
+		l.addLeaf(n, parent, memberIndex, s, false)
 		return nil
+
 	case ir.NodeSettle:
-		*out = append(*out, decodeSettle(n))
+		l.addLeaf(n, parent, memberIndex, decodeSettle(n), false)
 		return nil
+
 	case ir.NodeLit, ir.NodeInterp:
-		*out = append(*out, step{kind: n.Kind, id: n.ID, after: n.After, raw: n.Raw})
+		l.addLeaf(n, parent, memberIndex, step{kind: n.Kind, id: n.ID, raw: n.Raw}, true)
 		return nil
+
 	case ir.NodeDo:
-		if !allowDo {
+		if !l.allowDo {
 			return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
 		}
 		s, err := decodeDo(n)
 		if err != nil {
 			return err
 		}
-		*out = append(*out, s)
+		l.addLeaf(n, parent, memberIndex, s, false)
 		return nil
+
+	case ir.NodeScatter:
+		return l.lowerScatter(n, parent)
+
+	case ir.NodeGather:
+		return l.lowerGather(n, parent)
+
 	default:
+		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
+		// fail-channel, for-each(scatter form:each), guard, map, quote, raise,
+		// recover, repeat, retry, run, timeout. Vocabulary + reducer transitions
+		// exist (total fold); executor arms land in later slices. Filed follow-up:
+		// blueprint §7 P4.2 corpus TODO.
 		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
 	}
 }
 
-// decodeDo lifts a do (agent) node into a step: it preserves the raw node so the
-// prompt (body.raw / body.template.parts) renders against the live scope at run
-// time, and extracts the optional interpreter.agent binding name.
+// lowerScatter lowers a scatter node. Only form "members" is implemented;
+// form "each" (for-each over a runtime array) is deferred.
+func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
+	var form string
+	if raw, ok := n.Raw["form"]; ok {
+		_ = json.Unmarshal(raw, &form)
+	}
+	if form != "members" {
+		// P4.2-deferred: scatter form:each iterates `over` a runtime array; it
+		// needs member materialization from a value, out of scope for this slice.
+		return fmt.Errorf("%w: %q form %q (node %q)", ErrUnsupportedNode, n.Kind, form, n.ID)
+	}
+	members, err := childNodes(n.Raw["members"])
+	if err != nil {
+		return fmt.Errorf("lumen: scatter %q members: %w", n.ID, err)
+	}
+	scatterAct := activationFor(n.ID)
+	firstUnit := len(l.units)
+	var memberActs []string
+	for i := range members {
+		idx := i
+		if err := l.lowerNode(members[i], scatterAct, &idx); err != nil {
+			return err
+		}
+	}
+	// Direct members only (L1): a member unit is one lowered directly under this
+	// scatter (parent == scatterAct). A nested scatter/block contributes its own
+	// aggregate/children as inner units parented elsewhere — those must NOT inflate
+	// the outer member set. Silent (lit/interp) members never settle, so they are
+	// excluded from the drained/aggregated set too.
+	for i := firstUnit; i < len(l.units); i++ {
+		u := &l.units[i]
+		if u.parent == scatterAct && !u.silent {
+			memberActs = append(memberActs, u.activation)
+		}
+	}
+	l.scatterMembers[n.ID] = memberActs
+
+	// Propagate the scatter's own `after` gate onto every unit lowered beneath it
+	// (H1): a scatter gated on a failed dependency must not run any member. The
+	// aggregate itself is gated separately below (its afterDeps). Descendants
+	// inherit the gate so a nested scatter's leaves skip-cascade too.
+	if len(n.After) > 0 {
+		for i := firstUnit; i < len(l.units); i++ {
+			l.units[i].rawAfter = append(l.units[i].rawAfter, n.After...)
+		}
+	}
+
+	onFail := "continue"
+	if raw, ok := n.Raw["on_fail"]; ok {
+		_ = json.Unmarshal(raw, &onFail)
+	}
+	l.units = append(l.units, planUnit{
+		kind:       unitScatterAgg,
+		activation: scatterAct,
+		nodeID:     n.ID,
+		irKind:     ir.NodeScatter,
+		parent:     parent,
+		rawAfter:   n.After,
+		members:    memberActs,
+		onFail:     onFail,
+	})
+	return nil
+}
+
+// lowerGather lowers a gather(authored) node: the head-of-line drain over the
+// referenced scatter's members plus the authored combine block.
+func (l *lowerer) lowerGather(n ir.Node, parent string) error {
+	overName, err := gatherOverName(n)
+	if err != nil {
+		return err
+	}
+	memberActs, ok := l.scatterMembers[overName]
+	if !ok {
+		return fmt.Errorf("lumen: gather %q references unknown scatter %q", n.ID, overName)
+	}
+	combine, err := l.lowerCombine(n)
+	if err != nil {
+		return err
+	}
+	l.units = append(l.units, planUnit{
+		kind:          unitGather,
+		activation:    activationFor(n.ID),
+		nodeID:        n.ID,
+		irKind:        ir.NodeGather,
+		parent:        parent,
+		rawAfter:      n.After,
+		overScatter:   activationFor(overName),
+		gatherMembers: memberActs,
+		combine:       combine,
+	})
+	return nil
+}
+
+// lowerCombine lowers a gather's authored combine block into leaf units parented
+// to the gather, resolving their inter-member deps. Only the authored form is
+// implemented, and only leaf members (exec/settle/do/lit/interp) are executable
+// in the combine — an aggregate or a deferred kind is refused with
+// ErrUnsupportedNode before any effect runs (B1).
+func (l *lowerer) lowerCombine(n ir.Node) ([]planUnit, error) {
+	raw, ok := n.Raw["combine"]
+	if !ok {
+		return nil, fmt.Errorf("lumen: gather %q missing combine", n.ID)
+	}
+	var combine struct {
+		Kind  string          `json:"kind"`
+		Block json.RawMessage `json:"block"`
+	}
+	if err := json.Unmarshal(raw, &combine); err != nil {
+		return nil, fmt.Errorf("lumen: gather %q combine: %w", n.ID, err)
+	}
+	if combine.Kind != "authored" {
+		// P4.2-deferred: builtin/reduce combine forms.
+		return nil, fmt.Errorf("%w: gather combine kind %q (node %q)", ErrUnsupportedNode, combine.Kind, n.ID)
+	}
+	var block ir.Node
+	if err := json.Unmarshal(combine.Block, &block); err != nil {
+		return nil, fmt.Errorf("lumen: gather %q combine block: %w", n.ID, err)
+	}
+	members, err := childNodes(block.Raw["members"])
+	if err != nil {
+		return nil, fmt.Errorf("lumen: gather %q combine members: %w", n.ID, err)
+	}
+	gatherAct := activationFor(n.ID)
+	sub := &lowerer{allowDo: l.allowDo, scatterMembers: map[string][]string{}}
+	if err := sub.lowerNodes(members, gatherAct); err != nil {
+		return nil, err
+	}
+	// Only executable leaf members can run in the combine loop. A scatter/gather
+	// aggregate (or any non-leaf) is refused here, before any append, preserving
+	// the pre-lease refusal discipline.
+	for i := range sub.units {
+		if sub.units[i].kind != unitLeaf {
+			return nil, fmt.Errorf("%w: gather %q combine member %q (kind %q) is not executable in a combine block",
+				ErrUnsupportedNode, n.ID, sub.units[i].nodeID, sub.units[i].irKind)
+		}
+	}
+	if err := sub.resolveDeps(); err != nil {
+		return nil, err
+	}
+	return topoSortUnits(sub.units)
+}
+
+// resolveDeps maps each unit's IR `after` node ids to activation keys, splitting
+// blocking `after` gates from drain member dependencies (H1). A dangling `after`
+// reference to an unknown node is a real lowering/IR bug and is refused loudly
+// (M3) rather than silently dropped. Silent (lit/interp) deps are elided (they
+// never settle, so they cannot gate a dependent).
+func (l *lowerer) resolveDeps() error {
+	byNodeID := make(map[string]string, len(l.units))
+	silent := make(map[string]bool, len(l.units))
+	for _, u := range l.units {
+		byNodeID[u.nodeID] = u.activation
+		silent[u.activation] = u.silent
+	}
+	for i := range l.units {
+		u := &l.units[i]
+		seen := map[string]bool{}
+		var afterDeps []string
+		add := func(act string) {
+			if act == "" || seen[act] || silent[act] {
+				return
+			}
+			seen[act] = true
+			afterDeps = append(afterDeps, act)
+		}
+		for _, dep := range u.rawAfter {
+			act, ok := byNodeID[dep]
+			if !ok {
+				return fmt.Errorf("lumen: node %q has an `after` reference to unknown node %q", u.nodeID, dep)
+			}
+			// The scatter a gather drains is a drain dependency (memberDeps below),
+			// not a blocking gate — the whole point of a gather is to collect the
+			// scatter regardless of its outcome.
+			if u.kind == unitGather && act == u.overScatter {
+				continue
+			}
+			add(act)
+		}
+		u.afterDeps = afterDeps
+
+		switch u.kind {
+		case unitScatterAgg:
+			u.memberDeps = append([]string(nil), u.members...)
+		case unitGather:
+			if u.overScatter != "" {
+				u.memberDeps = []string{u.overScatter}
+			}
+		}
+	}
+	return nil
+}
+
+// topoSortUnits returns units in a stable topological order over their resolved
+// deps. Ties break by source order for determinism; a cycle is a loud error.
+func topoSortUnits(units []planUnit) ([]planUnit, error) {
+	n := len(units)
+	idx := make(map[string]int, n)
+	for i, u := range units {
+		if _, dup := idx[u.activation]; dup {
+			return nil, fmt.Errorf("lumen: duplicate activation %q", u.activation)
+		}
+		idx[u.activation] = i
+	}
+	indeg := make([]int, n)
+	adj := make([][]int, n)
+	for i := range units {
+		for _, dep := range units[i].allDeps() {
+			j, ok := idx[dep]
+			if !ok {
+				continue
+			}
+			adj[j] = append(adj[j], i)
+			indeg[i]++
+		}
+	}
+	order := make([]planUnit, 0, n)
+	done := make([]bool, n)
+	for len(order) < n {
+		picked := -1
+		for i := 0; i < n; i++ {
+			if !done[i] && indeg[i] == 0 {
+				picked = i
+				break
+			}
+		}
+		if picked == -1 {
+			return nil, fmt.Errorf("lumen: dependency cycle among units")
+		}
+		done[picked] = true
+		order = append(order, units[picked])
+		for _, m := range adj[picked] {
+			indeg[m]--
+		}
+	}
+	return order, nil
+}
+
+func (l *lowerer) addLeaf(n ir.Node, parent string, memberIndex *int, s step, silent bool) {
+	l.units = append(l.units, planUnit{
+		kind:        unitLeaf,
+		activation:  activationFor(n.ID),
+		nodeID:      n.ID,
+		irKind:      n.Kind,
+		parent:      parent,
+		memberIndex: memberIndex,
+		silent:      silent,
+		rawAfter:    n.After,
+		leaf:        s,
+	})
+}
+
+// gatherOverName extracts the scatter node id a gather drains from its `over`
+// ref expression.
+func gatherOverName(n ir.Node) (string, error) {
+	raw, ok := n.Raw["over"]
+	if !ok {
+		return "", fmt.Errorf("lumen: gather %q missing over", n.ID)
+	}
+	var over struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &over); err != nil {
+		return "", fmt.Errorf("lumen: gather %q over: %w", n.ID, err)
+	}
+	if over.Kind != "ref" || over.Name == "" {
+		return "", fmt.Errorf("%w: gather %q over kind %q (node %q)", ErrUnsupportedNode, n.ID, over.Kind, n.ID)
+	}
+	return over.Name, nil
+}
+
+// decodeDo lifts a do (agent) node into a step, preserving the raw node so the
+// prompt renders against the live scope at run time, and extracting the optional
+// interpreter.agent binding name.
 func decodeDo(n ir.Node) (step, error) {
-	s := step{kind: ir.NodeDo, id: n.ID, after: n.After, raw: n.Raw}
+	s := step{kind: ir.NodeDo, id: n.ID, raw: n.Raw}
 	if raw, ok := n.Raw["interpreter"]; ok {
 		var interp struct {
 			Agent struct {
@@ -124,9 +472,8 @@ func decodeDo(n ir.Node) (step, error) {
 }
 
 // renderPrompt renders a do node's body to the prompt string against scope. It
-// prefers the structured template.parts form (splicing values into prose) and
-// falls back to {{var}} interpolation of body.raw. An absent body is an empty
-// prompt.
+// prefers the structured template.parts form and falls back to {{var}}
+// interpolation of body.raw. An absent body is an empty prompt.
 func renderPrompt(raw map[string]json.RawMessage, scope map[string]string) (string, error) {
 	bodyRaw, ok := raw["body"]
 	if !ok {
@@ -156,11 +503,9 @@ func childNodes(raw json.RawMessage) ([]ir.Node, error) {
 	return nodes, nil
 }
 
-// decodeExec lifts an exec node's interpreter/body/exitMap into a step. The
-// interpreter program kind selects the shell; body.raw is the script template;
-// exitMap.pass is the set of exit codes that settle pass.
+// decodeExec lifts an exec node's interpreter/body/exitMap into a step.
 func decodeExec(n ir.Node) (step, error) {
-	s := step{kind: ir.NodeExec, id: n.ID, after: n.After, program: exechost.ProgramExec}
+	s := step{kind: ir.NodeExec, id: n.ID, program: exechost.ProgramExec}
 
 	if raw, ok := n.Raw["interpreter"]; ok {
 		var interp struct {
@@ -223,70 +568,14 @@ func decodeExec(n ir.Node) (step, error) {
 // decodeSettle lifts a settle node's outcome into a step; its value expression
 // is evaluated later against the live scope.
 func decodeSettle(n ir.Node) step {
-	s := step{kind: ir.NodeSettle, id: n.ID, after: n.After, raw: n.Raw}
+	s := step{kind: ir.NodeSettle, id: n.ID, raw: n.Raw}
 	if raw, ok := n.Raw["outcome"]; ok {
 		_ = json.Unmarshal(raw, &s.outcome)
 	}
 	return s
 }
 
-// topoSort returns steps in a stable topological order over their `after` edges.
-// Edges that reference an id outside the leaf set (e.g. a transparent block id)
-// are ignored — for a linear formula those dependencies are already satisfied by
-// source order. Ties are broken by source order for determinism; a cycle is a
-// loud error.
-func topoSort(steps []step) ([]step, error) {
-	n := len(steps)
-	idx := make(map[string]int, n)
-	for i, s := range steps {
-		if _, dup := idx[s.id]; dup {
-			return nil, fmt.Errorf("lumen: duplicate step id %q", s.id)
-		}
-		idx[s.id] = i
-	}
-
-	indeg := make([]int, n)
-	adj := make([][]int, n)
-	for i, s := range steps {
-		for _, dep := range s.after {
-			j, ok := idx[dep]
-			if !ok {
-				continue // dependency outside the leaf set
-			}
-			adj[j] = append(adj[j], i)
-			indeg[i]++
-		}
-	}
-
-	done := make([]bool, n)
-	order := make([]step, 0, n)
-	for len(order) < n {
-		picked := -1
-		for i := 0; i < n; i++ {
-			if !done[i] && indeg[i] == 0 {
-				picked = i
-				break
-			}
-		}
-		if picked == -1 {
-			return nil, fmt.Errorf("lumen: dependency cycle among steps")
-		}
-		done[picked] = true
-		order = append(order, steps[picked])
-		for _, m := range adj[picked] {
-			indeg[m]--
-		}
-	}
-	return order, nil
-}
-
-// evalValue renders an IR value expression to a string against scope. It
-// handles the expression shapes the linear scope needs: a literal
-// ({"kind":"literal","value":X}), a ref ({"kind":"ref","name":N}), and the
-// emitted interp wrapper ({"kind":"interp","expr":{...}}, seen in the
-// linear-do-after / path-interpolation goldens), which unwraps to its inner
-// expression; a bare scalar is rendered directly. Any other expression kind is a
-// typed error.
+// evalValue renders an IR value expression to a string against scope.
 func evalValue(raw json.RawMessage, scope map[string]string) (string, error) {
 	if len(raw) == 0 {
 		return "", nil
@@ -298,7 +587,6 @@ func evalValue(raw json.RawMessage, scope map[string]string) (string, error) {
 		Expr  json.RawMessage `json:"expr"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		// Not an object — treat as a bare scalar (string/number/bool).
 		return scalarToString(raw), nil
 	}
 	switch probe.Kind {
@@ -315,10 +603,7 @@ func evalValue(raw json.RawMessage, scope map[string]string) (string, error) {
 	}
 }
 
-// evalInterp renders an interp node to a string. It supports a direct value
-// expression, a template-parts form (text parts plus embedded expressions), and
-// a raw-body form with {{var}} interpolation. An unrecognized shape is a typed
-// error rather than a silent empty string.
+// evalInterp renders an interp node to a string.
 func evalInterp(raw map[string]json.RawMessage, scope map[string]string) (string, error) {
 	if v, ok := raw["value"]; ok {
 		return evalValue(v, scope)
@@ -375,8 +660,7 @@ func evalInterp(raw map[string]json.RawMessage, scope map[string]string) (string
 	return "", fmt.Errorf("lumen: interp node: unrecognized shape")
 }
 
-// scalarToString renders a JSON scalar as a plain Go string: a JSON string is
-// unquoted; anything else (number, bool, object) is rendered from its raw form.
+// scalarToString renders a JSON scalar as a plain Go string.
 func scalarToString(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

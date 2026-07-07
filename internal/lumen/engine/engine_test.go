@@ -71,22 +71,23 @@ func eventTypes(events []graphstore.StoredEvent) []string {
 	return out
 }
 
-// settledIDs returns, in seq order, the (id, outcome) of every node.settled event.
+// settledIDs returns, in seq order, the (bare node id, outcome) of every
+// outcome.settled event, deriving the node id from the activation key.
 func settledIDs(t *testing.T, events []graphstore.StoredEvent) [][2]string {
 	t.Helper()
 	var out [][2]string
 	for _, e := range events {
-		if e.Type != engine.EventNodeSettled {
+		if e.Type != engine.EventOutcomeSettled {
 			continue
 		}
 		var p struct {
-			ID      string `json:"id"`
-			Outcome string `json:"outcome"`
+			Activation string `json:"activation"`
+			Outcome    string `json:"outcome"`
 		}
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
-			t.Fatalf("decode node.settled payload: %v", err)
+			t.Fatalf("decode outcome.settled payload: %v", err)
 		}
-		out = append(out, [2]string{p.ID, p.Outcome})
+		out = append(out, [2]string{engine.ActivationNodeID(p.Activation), p.Outcome})
 	}
 	return out
 }
@@ -147,7 +148,7 @@ func TestRunHelloExecEndToEnd(t *testing.T) {
 	}
 
 	if got, want := eventTypes(res.Events), []string{
-		engine.EventRunStarted, engine.EventNodeSettled, engine.EventRunClosed,
+		engine.EventRunStarted, engine.EventNodeActivated, engine.EventOutcomeSettled, engine.EventRunClosed,
 	}; !equalStrings(got, want) {
 		t.Errorf("journal event order = %v, want %v", got, want)
 	}

@@ -294,22 +294,23 @@ func printRunResult(stdout io.Writer, doc *ir.IR, result engine.RunResult) {
 
 	kinds := nodeKindsByID(doc)
 	for _, ev := range result.Events {
-		if ev.Type != engine.EventNodeSettled {
+		if ev.Type != engine.EventOutcomeSettled {
 			continue
 		}
 		var p struct {
-			ID      string `json:"id"`
-			Outcome string `json:"outcome"`
-			Output  string `json:"output"`
+			Activation string `json:"activation"`
+			Outcome    string `json:"outcome"`
+			Output     string `json:"output"`
 		}
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			continue
 		}
-		kind := kinds[p.ID]
+		nodeID := engine.ActivationNodeID(p.Activation)
+		kind := kinds[nodeID]
 		if kind == "" {
 			kind = "?"
 		}
-		fmt.Fprintf(stdout, "  %s  [%s]  %s\n", p.ID, kind, p.Outcome) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "  %s  [%s]  %s\n", nodeID, kind, p.Outcome) //nolint:errcheck // best-effort stdout
 		for _, line := range outputLines(p.Output) {
 			fmt.Fprintf(stdout, "    %s\n", line) //nolint:errcheck // best-effort stdout
 		}

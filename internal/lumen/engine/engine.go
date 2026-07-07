@@ -1,15 +1,16 @@
-// Package engine is the minimal Lumen executor: the walking skeleton that runs
-// a LINEAR formula of block/exec/settle/lit/interp nodes end-to-end directly on
-// the graphstore journal substrate. It is a single-writer driver that repeats a
-// decide -> persist -> act -> persist cycle: it appends a typed journal event,
-// folds it through the pure lumenReducer, and applies the resulting Tier-A delta
-// so the node/frontier projection advances in lockstep with the log.
+// Package engine is the Lumen executor: a single-writer driver that runs a
+// compiled Lumen formula end-to-end on the graphstore journal substrate. It
+// repeats a decide -> persist -> act -> persist cycle: it appends a typed
+// journal event, folds it through the pure lumenReducer (v2), and applies the
+// resulting Tier-A delta so the node/edge/frontier projection advances in
+// lockstep with the log.
 //
-// It talks to internal/graphstore directly — no beads.Store adapter, no gc
-// dispatcher — because those are integration breadth the walking skeleton does
-// not need. Node kinds outside the linear set (do/agent, channels, scatter,
-// gather, dispatch, retry, run, async, …) are refused with ErrUnsupportedNode
-// before any effect runs.
+// P4.2 folds a real DAG. The plan (internal/lumen/engine/plan.go) lowers a
+// formula to activations carrying dependency edges; the reducer builds the
+// frontier as deps-settled readiness with skip-cascade (a node whose upstream
+// failed is settled `skipped`, not run). The DAG arms scatter(members) and
+// gather(authored) are implemented; the remaining node kinds are refused with
+// ErrUnsupportedNode before any effect runs (blueprint §7 pressure valve).
 package engine
 
 import (
@@ -34,57 +35,47 @@ import (
 // leaseHolder identifies the executor as the writer-lease holder.
 const leaseHolder = "lumen-engine"
 
-// leaseTTL bounds how long a run holds the writer lease without renewal. A
-// linear walking-skeleton run is short; this is generous headroom.
+// leaseTTL bounds how long a run holds the writer lease without renewal.
 const leaseTTL = 30 * time.Second
 
-// RunResult is the outcome of a completed linear run.
+// RunResult is the outcome of a completed run.
 type RunResult struct {
 	// StreamID is the journal stream (and root node id) the run wrote to.
 	StreamID string
-	// Outcome is the run's aggregated outcome (pass unless a step failed).
+	// Outcome is the run's aggregated outcome.
 	Outcome string
-	// NodeOutputs maps each executed step id to its captured output value
-	// (trimmed stdout for exec; the settled value for settle/lit/interp).
+	// NodeOutputs maps each executed node id to its captured output value.
 	NodeOutputs map[string]string
 	// Events is the full committed journal for the run, in seq order.
 	Events []graphstore.StoredEvent
 }
 
-// RegisterVocabulary registers the executor's closed event vocabulary against
-// the store so Append will accept its events. Registration is idempotent.
+// RegisterVocabulary registers the executor's frozen event vocabulary against
+// the store so Append accepts its events. Registration is idempotent.
 func RegisterVocabulary(store *graphstore.Store) {
 	for _, t := range EventTypes {
 		store.RegisterEventType(Engine, t)
 	}
 }
 
-// Options tune a run. The zero value (nil Host) reproduces the pre-P4.1 linear
-// skeleton exactly: a do node is refused with ErrUnsupportedNode and no effect
-// events are emitted.
+// Options tune a run. The zero value (nil Host) refuses a do node with
+// ErrUnsupportedNode — no agent host, no do steps.
 type Options struct {
-	// Host runs agent `do` steps. Nil refuses do nodes (byte-identical to the
-	// exec-only skeleton).
+	// Host runs agent `do` steps. Nil refuses do nodes.
 	Host enginehost.AgentHost
 }
 
-// Run executes doc as a linear formula with no agent host — the exec-only path.
-// It is a thin wrapper over RunWithOptions with the zero Options, preserving the
-// original signature and behavior byte-for-byte for existing callers and goldens.
+// Run executes doc with no agent host — the exec-only path.
 func Run(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[string]any) (RunResult, error) {
 	return RunWithOptions(ctx, store, doc, input, Options{})
 }
 
-// RunWithOptions executes doc as a linear formula against store, threading input
-// into {{var}} interpolation, and returns the run's outcome, per-step outputs,
-// and the committed journal. It is the single writer for the run's stream: it
-// acquires the writer lease, appends run.started, executes each flattened step
-// (folding a node.settled event — and, for a do step, an effect.scheduled/settled
-// pair — and advancing the projection after each), then appends run.closed with
-// the aggregated outcome.
-//
-// When opts.Host is set, a do step runs through the host (agent session);
-// otherwise a do node is refused before any effect runs.
+// RunWithOptions executes doc against store, threading input into {{var}}
+// interpolation, and returns the run's outcome, per-node outputs, and the
+// committed journal. It is the single writer for the run's stream: it acquires
+// the writer lease, appends run.started, drives each plan unit (emitting
+// node.activated, then either running it or settling it skipped, then
+// outcome.settled), and appends run.closed with the fold-aggregated outcome.
 func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[string]any, opts Options) (RunResult, error) {
 	if store == nil {
 		return RunResult{}, fmt.Errorf("lumen: nil store")
@@ -93,13 +84,12 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		return RunResult{}, fmt.Errorf("lumen: nil IR document")
 	}
 
-	steps, err := flatten(doc.Nodes, opts.Host != nil)
+	units, err := buildUnits(doc.Nodes, opts.Host != nil)
 	if err != nil {
 		return RunResult{}, err
 	}
 
 	streamID := streamIDForRun(doc.Name, opts.Host != nil)
-	irVersion := doc.Contract.Version
 	RegisterVocabulary(store)
 
 	lease, err := store.AcquireWriterLease(ctx, streamID, leaseHolder, leaseTTL)
@@ -113,7 +103,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		ctx:      ctx,
 		store:    store,
 		streamID: streamID,
-		irVer:    irVersion,
+		irVer:    doc.Contract.Version,
 		epoch:    lease.Epoch,
 		reducer:  reducer,
 		state:    reducer.Zero(streamID),
@@ -124,6 +114,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	if err := d.append(EventRunStarted, streamID+":run:started", runStartedPayload{
 		RootID:    streamID,
 		Name:      doc.Name,
+		IRHash:    irHash(doc),
 		CreatedAt: createdAt,
 	}); err != nil {
 		return RunResult{}, err
@@ -132,52 +123,13 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	nodeOutputs := make(map[string]string)
 	scope := baseScope(input)
 
-	var (
-		anyFailed   bool
-		lastNonSkip = OutcomePass
-		haveOutcome bool
-	)
-
-	// MVP: every flattened leaf runs, even after an upstream step failed. The
-	// aggregated run outcome stays correct (failed dominates below), but a
-	// data-dependent successor still executes and its projected status may read
-	// pass where the spec would want skipped. A proper skip-cascade over the
-	// `after` edges is a later phase.
-	for _, s := range steps {
-		outcome, output, emit, err := d.execStep(s, scope, nodeOutputs)
-		if err != nil {
+	for i := range units {
+		if err := d.runUnit(units[i], scope, nodeOutputs); err != nil {
 			return RunResult{}, err
 		}
-		if s.id != "" {
-			scope[s.id] = output
-			nodeOutputs[s.id] = output
-		}
-		if emit {
-			if err := d.append(EventNodeSettled, streamID+":"+s.id+":0", nodeSettledPayload{
-				ID:      s.id,
-				Outcome: outcome,
-				Output:  output,
-			}); err != nil {
-				return RunResult{}, err
-			}
-			haveOutcome = true
-			if outcome == OutcomeFailed {
-				anyFailed = true
-			}
-			if outcome != OutcomeSkipped {
-				lastNonSkip = outcome
-			}
-		}
 	}
 
-	runOutcome := OutcomePass
-	if haveOutcome {
-		runOutcome = lastNonSkip
-	}
-	if anyFailed {
-		runOutcome = OutcomeFailed
-	}
-
+	runOutcome := d.st().runOutcome()
 	if err := d.append(EventRunClosed, streamID+":run:closed", runClosedPayload{Outcome: runOutcome}); err != nil {
 		return RunResult{}, err
 	}
@@ -186,13 +138,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	if err != nil {
 		return RunResult{}, fmt.Errorf("lumen: read stream %q: %w", streamID, err)
 	}
-
-	return RunResult{
-		StreamID:    streamID,
-		Outcome:     runOutcome,
-		NodeOutputs: nodeOutputs,
-		Events:      events,
-	}, nil
+	return RunResult{StreamID: streamID, Outcome: runOutcome, NodeOutputs: nodeOutputs, Events: events}, nil
 }
 
 // driver holds the single-writer append/fold/project loop state for one run.
@@ -208,16 +154,349 @@ type driver struct {
 	host     enginehost.AgentHost
 }
 
+// st returns the driver's live fold state as the concrete lumenState so the
+// decide phase can read dependency outcomes and aggregate results.
+func (d *driver) st() *lumenState { return d.state.(*lumenState) }
+
+// runUnit drives one plan unit through the decide -> persist -> act -> persist
+// cycle. A silent (pure lit/interp) unit only computes its scope value. Every
+// other unit emits node.activated, then — if a leaf's dependency settled with a
+// blocking outcome — settles `skipped` (the skip-cascade), otherwise runs and
+// settles its real outcome.
+func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error {
+	if u.silent {
+		val, err := evalSilent(u.leaf, scope)
+		if err != nil {
+			return err
+		}
+		scope[u.nodeID] = val
+		nodeOutputs[u.nodeID] = val
+		return nil
+	}
+
+	if err := d.appendActivated(u); err != nil {
+		return err
+	}
+
+	// Skip-cascade applies to every kind, gated on blocking `after` deps only
+	// (H1): a scatter/gather whose non-member `after` gate failed is SKIPPED — its
+	// members never run and its aggregate settles skipped. A failed drain MEMBER
+	// does not trigger this (members drain into the aggregate).
+	if d.blocked(u) {
+		if err := d.appendSettled(u.activation, OutcomeSkipped, "", "skipped: upstream dependency did not pass"); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Drain-aggregate skip-cascade (N-1): a scatter aggregate or gather whose
+	// every drain member settled skipped/canceled did no work at all. It must
+	// itself SKIP — its combine / authored body must NOT run (no side effects) —
+	// and the skip cascades to its dependents, exactly like a failed `after` gate.
+	// A single member that RAN (pass/degraded/failed) makes it drain instead. This
+	// runs BEFORE runScatter/runGather so an all-skip aggregate never executes.
+	if d.aggregateAllSkipped(u) {
+		if err := d.appendSettled(u.activation, OutcomeSkipped, "", "skipped: every drain member skipped (nothing ran)"); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	switch u.kind {
+	case unitLeaf:
+		return d.runLeaf(u, scope, nodeOutputs)
+	case unitScatterAgg:
+		return d.runScatter(u, nodeOutputs)
+	case unitGather:
+		return d.runGather(u, scope, nodeOutputs)
+	default:
+		return fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
+	}
+}
+
+// blocked reports whether any of a unit's blocking `after` deps settled with a
+// blocking outcome (failed / canceled / skipped) — the trigger for the
+// skip-cascade. Drain member deps are deliberately excluded (a failed member
+// drains into its aggregate, it does not skip it).
+func (d *driver) blocked(u planUnit) bool {
+	st := d.st()
+	for _, dep := range u.afterDeps {
+		if outcome, settled := st.outcomeOf(dep); settled && isBlocking(outcome) {
+			return true
+		}
+	}
+	return false
+}
+
+// aggregateAllSkipped reports whether u is a drain aggregate (scatter aggregate
+// or gather) whose every drain member settled skipped/canceled — nothing ran, so
+// the aggregate itself must SKIP (N-1) rather than drain-and-run its combine. A
+// unit with no drain members is never "all skipped" (there is nothing that could
+// have skipped). It reads memberDeps — the same edge set the reducer's ready()
+// gates on (nodeState.Members) — so the executor and the fold stay in agreement.
+func (d *driver) aggregateAllSkipped(u planUnit) bool {
+	if len(u.memberDeps) == 0 {
+		return false
+	}
+	st := d.st()
+	for _, m := range u.memberDeps {
+		o, settled := st.outcomeOf(m)
+		if !settled || !didNotRun(o) {
+			return false
+		}
+	}
+	return true
+}
+
+// runLeaf executes an exec / settle / do leaf and settles its outcome.
+func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error {
+	switch u.leaf.kind {
+	case ir.NodeExec:
+		script := interpolate(u.leaf.script, scope)
+		stdout, _, exitCode, runErr := exechost.Run(d.ctx, u.leaf.program, script, u.leaf.cwd, u.leaf.env)
+		if runErr != nil {
+			return fmt.Errorf("lumen: exec %q: %w", u.nodeID, runErr)
+		}
+		output := strings.TrimRight(stdout, "\n")
+		if err := d.appendSettled(u.activation, outcomeForExit(exitCode, u.leaf.passCodes), output, ""); err != nil {
+			return err
+		}
+		d.record(u.nodeID, output, scope, nodeOutputs)
+		return nil
+
+	case ir.NodeSettle:
+		value := ""
+		if raw, ok := u.leaf.raw["value"]; ok {
+			v, err := evalValue(raw, scope)
+			if err != nil {
+				return fmt.Errorf("lumen: settle %q value: %w", u.nodeID, err)
+			}
+			value = v
+		}
+		outcome := u.leaf.outcome
+		if outcome == "" {
+			outcome = OutcomePass
+		}
+		if err := d.appendSettled(u.activation, outcome, value, ""); err != nil {
+			return err
+		}
+		d.record(u.nodeID, value, scope, nodeOutputs)
+		return nil
+
+	case ir.NodeDo:
+		return d.runDo(u, scope, nodeOutputs)
+
+	default:
+		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, u.leaf.kind, u.nodeID)
+	}
+}
+
+// runDo runs one agent `do` step through the configured host under the
+// memoized-effect discipline (blueprint §3.3): it appends effect.scheduled
+// BEFORE acting, calls host.RunDo (the only side-effecting line), then appends
+// effect.settled, then outcome.settled. A nil host is impossible here
+// (buildUnits refuses do without one) but is guarded defensively.
+func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
+	if d.host == nil {
+		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, u.leaf.kind, u.nodeID)
+	}
+	prompt, err := renderPrompt(u.leaf.raw, scope)
+	if err != nil {
+		return fmt.Errorf("lumen: do %q prompt: %w", u.nodeID, err)
+	}
+	// NOTE (N2): the attempt suffix is pinned to 1 — one activation per node in
+	// P4.2 (retry/repeat re-activation is deferred). When retry lands (P4.3), the
+	// idem token must key on the live attempt number so at_least_once re-acts under
+	// the same token and at_most_once mints a fresh one.
+	effectIdem := d.streamID + ":" + u.nodeID + ":do:1"
+	spec := effectSpec{Prompt: prompt, AgentRef: u.leaf.agentRef}
+	specBytes, err := canonPayload(spec)
+	if err != nil {
+		return fmt.Errorf("lumen: do %q spec hash: %w", u.nodeID, err)
+	}
+	specHash := sha256.Sum256(specBytes)
+
+	if err := d.append(EventEffectScheduled, effectIdem+":sched", effectScheduledPayload{
+		Activation: u.activation,
+		Effect:     "do",
+		IdemToken:  effectIdem,
+		Policy:     PolicyAtMostOnce,
+		SpecHash:   hex.EncodeToString(specHash[:]),
+		Spec:       spec,
+	}); err != nil {
+		return err
+	}
+
+	result, runErr := d.host.RunDo(d.ctx, enginehost.DoRequest{
+		RunID:      d.streamID,
+		NodeID:     u.nodeID,
+		Activation: u.activation,
+		IdemToken:  effectIdem,
+		Prompt:     prompt,
+		AgentRef:   u.leaf.agentRef,
+	})
+	nodeOutcome, effResult, detail, out, session := foldDoResult(result, runErr)
+
+	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
+		Activation: u.activation,
+		IdemToken:  effectIdem,
+		Result:     effResult,
+		Output:     out,
+		Session:    session,
+		Detail:     detail,
+	}); err != nil {
+		return err
+	}
+	if err := d.appendSettled(u.activation, nodeOutcome, out, detail); err != nil {
+		return err
+	}
+	d.record(u.nodeID, out, scope, nodeOutputs)
+	return nil
+}
+
+// runScatter settles a scatter aggregate from its members' outcomes. It is
+// reached only when at least one member RAN — an all-skipped/canceled member set
+// is intercepted upstream (aggregateAllSkipped) and settles the aggregate
+// `skipped`, not `degraded` (N-1/N-3). A member failure drains into the
+// aggregate rather than skip-cascading it. With on_fail "stop", any
+// failed/canceled member fails the scatter. Otherwise the outcome reflects the
+// degree of success (M1): if NO member passed and at least one failed, the
+// honest outcome is `failed` (a total loss, not a partial success); a mix of
+// pass and non-pass is `degraded`; all-pass is `pass`.
+func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
+	st := d.st()
+	anyPass := false
+	anyNonPass := false
+	anyBlocking := false
+	for _, m := range u.members {
+		o, settled := st.outcomeOf(m)
+		if !settled {
+			continue
+		}
+		if o == OutcomePass {
+			anyPass = true
+		} else {
+			anyNonPass = true
+		}
+		if o == OutcomeFailed || o == OutcomeCanceled {
+			anyBlocking = true
+		}
+	}
+	outcome := OutcomePass
+	switch {
+	case u.onFail == "stop" && anyBlocking:
+		outcome = OutcomeFailed
+	case anyBlocking && !anyPass:
+		outcome = OutcomeFailed
+	case anyNonPass:
+		outcome = OutcomeDegraded
+	}
+	if err := d.appendSettled(u.activation, outcome, "", ""); err != nil {
+		return err
+	}
+	nodeOutputs[u.nodeID] = ""
+	return nil
+}
+
+// runGather drains its scatter's members head-of-line (a node.decision fold
+// checkpoint per member in member order, even if settlements arrived out of
+// order), runs the authored combine block, and settles the gather with the
+// combine's aggregated outcome. gatherMembers exclude silent (lit/interp)
+// members (L2): those never settle, so a fold checkpoint over them is
+// meaningless — the exclusion happens at lowering (scatterMembers).
+func (d *driver) runGather(u planUnit, scope, nodeOutputs map[string]string) error {
+	for _, m := range u.gatherMembers {
+		if err := d.append(EventNodeDecision, d.streamID+":"+u.activation+":ckpt:"+m, nodeDecisionPayload{
+			Activation:     u.activation,
+			Decision:       DecisionFoldCkpt,
+			NextMember:     m,
+			AccumulatorRef: u.activation,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Run each authored-combine member through the SAME execution path as any
+	// other unit (B1): an exec/do inside a combine actually runs and settles its
+	// REAL outcome (feeding the fold), rather than being mistaken for a settle.
+	// Skip-cascade and silent (lit/interp) handling come for free from runUnit.
+	for i := range u.combine {
+		if err := d.runUnit(u.combine[i], scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+
+	if err := d.appendSettled(u.activation, d.combineOutcome(u.combine), "", ""); err != nil {
+		return err
+	}
+	nodeOutputs[u.nodeID] = ""
+	return nil
+}
+
+// combineOutcome aggregates the settled outcomes of a gather's combine members:
+// a blocking outcome (failed/canceled/skipped) dominates to failed, then
+// degraded, else pass. Silent members contribute nothing (they never settle).
+func (d *driver) combineOutcome(combine []planUnit) string {
+	st := d.st()
+	var anyFailed, anyDegraded bool
+	for i := range combine {
+		if combine[i].silent {
+			continue
+		}
+		o, settled := st.outcomeOf(combine[i].activation)
+		if !settled {
+			continue
+		}
+		switch {
+		case isBlocking(o):
+			anyFailed = true
+		case o == OutcomeDegraded:
+			anyDegraded = true
+		}
+	}
+	switch {
+	case anyFailed:
+		return OutcomeFailed
+	case anyDegraded:
+		return OutcomeDegraded
+	default:
+		return OutcomePass
+	}
+}
+
+// record threads a settled node's output into the scope and the result map.
+func (d *driver) record(nodeID, output string, scope, nodeOutputs map[string]string) {
+	scope[nodeID] = output
+	nodeOutputs[nodeID] = output
+}
+
+// appendActivated emits a node.activated event for a unit, carrying its
+// dependency edges (activation keys) so the reducer folds the DAG.
+func (d *driver) appendActivated(u planUnit) error {
+	return d.append(EventNodeActivated, d.streamID+":"+u.activation+":act", nodeActivatedPayload{
+		NodeID:           u.nodeID,
+		Activation:       u.activation,
+		ParentActivation: u.parent,
+		MemberIndex:      u.memberIndex,
+		After:            u.afterDeps,
+		Members:          u.memberDeps,
+		Kind:             string(u.irKind),
+	})
+}
+
+// appendSettled emits an outcome.settled event for an activation.
+func (d *driver) appendSettled(activation, outcome, output, detail string) error {
+	return d.append(EventOutcomeSettled, d.streamID+":"+activation+":settled", outcomeSettledPayload{
+		Activation: activation,
+		Outcome:    outcome,
+		Output:     output,
+		Detail:     detail,
+	})
+}
+
 // append canonicalizes payload, commits it to the journal at head+1, folds the
 // committed event, and applies the resulting Tier-A delta in its own
 // transaction — the decide -> persist -> act -> persist cycle for one event.
-//
-// The idem token dedupes an identical re-append of the SAME bytes, but it is not
-// a replay mechanism for re-running a formula: a second Run of the same formula
-// name mints a fresh run.started payload (CreatedAt: time.Now()), whose bytes
-// differ from the first, so the reused idem token is rejected with
-// ErrIdemTokenReuse — safe and loud, but not an at-most-once replay.
-// Deterministic replay is a later-phase feature.
 func (d *driver) append(eventType, idemToken string, payload any) error {
 	body, err := canonPayload(payload)
 	if err != nil {
@@ -260,134 +539,33 @@ func (d *driver) append(eventType, idemToken string, payload any) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("lumen: commit projection for %s: %w", eventType, err)
 	}
-
 	d.head = seq
 	return nil
 }
 
-// execStep runs one flattened step and returns its outcome, output value, and
-// whether it should emit a node.settled event (exec and settle do; the pure
-// value nodes lit/interp fold into scope without an event). block nodes never
-// reach here — they are transparent and flattened away.
-func (d *driver) execStep(s step, scope map[string]string, _ map[string]string) (outcome, output string, emit bool, err error) {
+// evalSilent computes a pure lit/interp node's value for scope. It emits no
+// journal events (pure nodes fold into scope, R-PURE).
+func evalSilent(s step, scope map[string]string) (string, error) {
 	switch s.kind {
-	case ir.NodeExec:
-		script := interpolate(s.script, scope)
-		stdout, _, exitCode, runErr := exechost.Run(d.ctx, s.program, script, s.cwd, s.env)
-		if runErr != nil {
-			return "", "", false, fmt.Errorf("lumen: exec %q: %w", s.id, runErr)
-		}
-		return outcomeForExit(exitCode, s.passCodes), strings.TrimRight(stdout, "\n"), true, nil
-
-	case ir.NodeSettle:
-		value := ""
-		if raw, ok := s.raw["value"]; ok {
-			value, err = evalValue(raw, scope)
-			if err != nil {
-				return "", "", false, fmt.Errorf("lumen: settle %q value: %w", s.id, err)
-			}
-		}
-		outcome = s.outcome
-		if outcome == "" {
-			outcome = OutcomePass
-		}
-		return outcome, value, true, nil
-
 	case ir.NodeLit:
-		value, err := evalValue(s.raw["value"], scope)
+		v, err := evalValue(s.raw["value"], scope)
 		if err != nil {
-			return "", "", false, fmt.Errorf("lumen: lit %q value: %w", s.id, err)
+			return "", fmt.Errorf("lumen: lit %q value: %w", s.id, err)
 		}
-		return OutcomePass, value, false, nil
-
+		return v, nil
 	case ir.NodeInterp:
-		value, err := evalInterp(s.raw, scope)
+		v, err := evalInterp(s.raw, scope)
 		if err != nil {
-			return "", "", false, fmt.Errorf("lumen: interp %q: %w", s.id, err)
+			return "", fmt.Errorf("lumen: interp %q: %w", s.id, err)
 		}
-		return OutcomePass, value, false, nil
-
-	case ir.NodeDo:
-		return d.execDo(s, scope)
-
+		return v, nil
 	default:
-		return "", "", false, fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, s.kind, s.id)
+		return "", fmt.Errorf("lumen: evalSilent on non-pure kind %q", s.kind)
 	}
 }
 
-// execDo runs one agent `do` step through the configured host under the
-// memoized-effect discipline (the at_most_once contract documented on
-// EventEffectScheduled in reducer.go): it appends effect.scheduled BEFORE
-// acting, calls host.RunDo (the only side-effecting line), then appends
-// effect.settled pairing the observed result — so a crash between the two
-// resumes to a failed settlement rather than silently re-acting. It returns the
-// step outcome, the captured output (for downstream {{ref}} interpolation), and
-// emit=true so the caller appends node.settled. A nil host is impossible here
-// (flatten refuses do without one), but is guarded defensively with the same
-// typed refusal.
-func (d *driver) execDo(s step, scope map[string]string) (outcome, output string, emit bool, err error) {
-	if d.host == nil {
-		return "", "", false, fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, s.kind, s.id)
-	}
-
-	prompt, err := renderPrompt(s.raw, scope)
-	if err != nil {
-		return "", "", false, fmt.Errorf("lumen: do %q prompt: %w", s.id, err)
-	}
-
-	activation := s.id + ":0"
-	effectIdem := d.streamID + ":" + s.id + ":do:1"
-
-	// Hash the CANONICAL effect spec (prompt + agent_ref), not the prompt alone,
-	// so a memoized-effect identity check (P4.3) detects an agent-binding change:
-	// the same prompt bound to a different interpreter.agent is a different
-	// effect and must not resume against the earlier settlement.
-	spec := effectSpec{Prompt: prompt, AgentRef: s.agentRef}
-	specBytes, err := canonPayload(spec)
-	if err != nil {
-		return "", "", false, fmt.Errorf("lumen: do %q spec hash: %w", s.id, err)
-	}
-	specHash := sha256.Sum256(specBytes)
-
-	if err := d.append(EventEffectScheduled, effectIdem+":sched", effectScheduledPayload{
-		Activation: activation,
-		Effect:     "do",
-		IdemToken:  effectIdem,
-		Policy:     PolicyAtMostOnce,
-		SpecHash:   hex.EncodeToString(specHash[:]),
-		Spec:       spec,
-	}); err != nil {
-		return "", "", false, err
-	}
-
-	result, runErr := d.host.RunDo(d.ctx, enginehost.DoRequest{
-		RunID:      d.streamID,
-		NodeID:     s.id,
-		Activation: activation,
-		IdemToken:  effectIdem,
-		Prompt:     prompt,
-		AgentRef:   s.agentRef,
-	})
-	nodeOutcome, effResult, detail, out, session := foldDoResult(result, runErr)
-
-	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
-		Activation: activation,
-		IdemToken:  effectIdem,
-		Result:     effResult,
-		Output:     out,
-		Session:    session,
-		Detail:     detail,
-	}); err != nil {
-		return "", "", false, err
-	}
-
-	return nodeOutcome, out, true, nil
-}
-
-// foldDoResult maps a host's DoResult (and any internal error) onto the step
-// outcome, the effect.settled result, and the settled fields. An internal host
-// error (result the host could not produce) settles the effect interrupted and
-// the node failed — a scheduled effect always gets a settled record.
+// foldDoResult maps a host's DoResult (and any internal error) onto the node
+// outcome, the effect.settled result, and the settled fields.
 func foldDoResult(result enginehost.DoResult, runErr error) (nodeOutcome, effResult, detail, output, session string) {
 	if runErr != nil {
 		return OutcomeFailed, EffectResultInterrupted, "effect_interrupted: " + runErr.Error(), "", ""
@@ -396,9 +574,6 @@ func foldDoResult(result enginehost.DoResult, runErr error) (nodeOutcome, effRes
 	case enginehost.OutcomeFailed:
 		return OutcomeFailed, EffectResultFailed, result.Detail, result.Output, result.SessionRef
 	case enginehost.OutcomeDegraded:
-		// Degraded is a partial SUCCESS: the effect completed and produced a
-		// usable result, so it settles ok even though the node outcome is
-		// degraded (surfaced for downstream / observer judgment, not a failure).
 		return OutcomeDegraded, EffectResultOK, result.Detail, result.Output, result.SessionRef
 	case enginehost.OutcomePass:
 		return OutcomePass, EffectResultOK, result.Detail, result.Output, result.SessionRef
@@ -429,15 +604,12 @@ func outcomeForExit(exitCode int, passCodes []int) string {
 var interpRe = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
 
 // interpolate substitutes {{name}} tokens in s with values from scope. An
-// unknown name is left verbatim (the literal source wins when no binding
-// exists).
+// unknown name is left verbatim.
 //
-// SECURITY: interpolated values are spliced into the script text VERBATIM — they
-// are NOT shell-quoted or escaped. The result is handed to `sh -c` by the
-// exec-host, so a value carrying shell metacharacters (e.g. `; rm -rf …`)
-// executes. Untrusted input is therefore unsafe here — Lumen feedback 0020.
-// Proper shell-quoting / argv-based execution is a later phase; the current
-// walking-skeleton demo performs no interpolation.
+// SECURITY: interpolated values are spliced VERBATIM — not shell-quoted. Under
+// the exec-host's `sh -c`, an untrusted value carrying shell metacharacters
+// executes. Untrusted input is unsafe here (Lumen feedback 0020); argv-based
+// execution is a later phase.
 func interpolate(s string, scope map[string]string) string {
 	return interpRe.ReplaceAllStringFunc(s, func(m string) string {
 		name := interpRe.FindStringSubmatch(m)[1]
@@ -448,8 +620,7 @@ func interpolate(s string, scope map[string]string) string {
 	})
 }
 
-// baseScope seeds the interpolation scope from the run input, stringifying each
-// value (a string as-is, anything else via its JSON form).
+// baseScope seeds the interpolation scope from the run input.
 func baseScope(input map[string]any) map[string]string {
 	scope := make(map[string]string, len(input))
 	for k, v := range input {
@@ -474,25 +645,30 @@ func canonPayload(v any) ([]byte, error) {
 	return canon.Canonicalize(raw)
 }
 
-// streamIDFor derives a deterministic stream id from the formula name, so tests
-// (and reruns of the same formula) address a stable stream.
-//
-// CAVEAT: stream_id = sha256(name)[:12] is a pure function of the formula name,
-// so two runs of the same-named formula collide on one stream. That is fine for
-// the per-run / throwaway stores used here, but before this backs `gc run`
-// against a shared city store the id needs a run-unique component (e.g. a run
-// nonce) so concurrent or repeated runs do not contend on one stream.
+// irHash is the provenance pin stamped on run.started: the SHA-256 of the
+// canonicalized IR document. Resume (P4.3) refuses an IR whose hash differs.
+func irHash(doc *ir.IR) string {
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return ""
+	}
+	canonical, err := canon.Canonicalize(raw)
+	if err != nil {
+		return ""
+	}
+	h := canon.Hash(canonical)
+	return hex.EncodeToString(h[:])
+}
+
+// streamIDFor derives a deterministic stream id from the formula name.
 func streamIDFor(name string) string {
 	sum := sha256.Sum256([]byte(name))
 	return "gcg-run-" + hex.EncodeToString(sum[:])[:12]
 }
 
-// streamIDForRun derives the run's stream id. For exec-only runs (no host) it is
-// the pure hash of the formula name — byte-identical to the pre-P4.1 skeleton,
-// so exec-only goldens and stores are unchanged. For agent runs (host != nil) it
-// appends a per-run nonce, closing the documented collision caveat before any
-// persistent --db agent runs exist: two runs of one do-formula no longer contend
-// on a single stream.
+// streamIDForRun derives the run's stream id. Exec-only runs (no host) use the
+// pure hash of the formula name; agent runs (host != nil) append a per-run
+// nonce so repeated runs of one do-formula do not contend on a single stream.
 func streamIDForRun(name string, withNonce bool) string {
 	base := streamIDFor(name)
 	if !withNonce {
@@ -500,8 +676,6 @@ func streamIDForRun(name string, withNonce bool) string {
 	}
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failure is unrecoverable for a unique-stream guarantee;
-		// fall back to the base id (single-stream, as pre-P4.1).
 		return base
 	}
 	return base + "-" + hex.EncodeToString(b[:])

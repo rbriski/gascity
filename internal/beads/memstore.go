@@ -25,7 +25,11 @@ type MemStore struct {
 	honorExplicitID bool
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ BatchDeleter                  = (*MemStore)(nil)
+	_ ForeignIDCreator              = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
@@ -123,6 +127,43 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 			DependsOnID: dependsOnID,
 			Type:        depType,
 		})
+	}
+	return cloneBead(stored), nil
+}
+
+// CreateWithForeignID persists a new bead KEEPING its explicit ID unconditionally
+// (even when this MemStore does not otherwise honor explicit ids), so it mirrors
+// BdStore's forced foreign-prefix create for the store-migration copy. It errors
+// on an empty id or an id that already exists. It satisfies ForeignIDCreator.
+func (m *MemStore) CreateWithForeignID(b Bead) (Bead, error) {
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hasBeadID(b.ID) {
+		return Bead{}, fmt.Errorf("creating bead with foreign id %q: id already exists", b.ID)
+	}
+	m.seq++
+	b.Status = "open"
+	if b.Type == "" {
+		b.Type = "task"
+	}
+	b.CreatedAt = time.Now()
+	b.UpdatedAt = b.CreatedAt
+	stored := cloneBead(b)
+	m.beads = append(m.beads, stored)
+	for _, need := range stored.Needs {
+		depType := "blocks"
+		dependsOnID := need
+		if strings.Contains(need, ":") {
+			parts := strings.SplitN(need, ":", 2)
+			if parts[0] != "" && parts[1] != "" {
+				depType = parts[0]
+				dependsOnID = parts[1]
+			}
+		}
+		m.deps = append(m.deps, Dep{IssueID: stored.ID, DependsOnID: dependsOnID, Type: depType})
 	}
 	return cloneBead(stored), nil
 }
@@ -473,6 +514,50 @@ func (m *MemStore) Delete(id string) error {
 		}
 	}
 	return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+}
+
+// DeleteAllOrphaning removes every bead in ids and drops only the deleted beads'
+// OWN outbound dependency rows (edges whose issue_id is in the set), mirroring
+// bd's batch-delete fk cascade. Inbound edges — a staying bead depending on a
+// deleted bead — are PRESERVED as dangling rows, matching bd's orphan-preserving
+// batch semantics (bd delete <id1> <id2> … --force). This is the in-memory twin
+// of BdStore.DeleteAllOrphaning; it never strips references from staying beads.
+// Missing ids are ignored (idempotent). Returns the number of beads removed.
+func (m *MemStore) DeleteAllOrphaning(ids []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	del := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			del[id] = struct{}{}
+		}
+	}
+	if len(del) == 0 {
+		return 0, nil
+	}
+	kept := m.beads[:0]
+	removed := 0
+	for _, b := range m.beads {
+		if _, drop := del[b.ID]; drop {
+			removed++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	m.beads = kept
+	// Drop only the deleted beads' OWN outbound edges (issue_id in the set).
+	// Inbound edges (depends_on_id in the set, issue_id staying) survive as
+	// dangling rows — the orphan-preserving half of the contract.
+	deps := m.deps[:0]
+	for _, d := range m.deps {
+		if _, drop := del[d.IssueID]; drop {
+			continue
+		}
+		deps = append(deps, d)
+	}
+	m.deps = deps
+	return removed, nil
 }
 
 // Ping always succeeds for MemStore (in-memory, always available).

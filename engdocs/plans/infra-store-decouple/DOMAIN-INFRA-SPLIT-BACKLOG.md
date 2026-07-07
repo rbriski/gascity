@@ -308,17 +308,42 @@ idempotently and crash-safely. New cities already create two (E2.1).
 **Done-criteria:** existing cities upgrade with every infra bead moved to the
 infra store, no domain bead touched, no loss; re-running is a no-op.
 
-- [ ] **E3.1 — Detect + create.** Detect a single-db city; create the infra Dolt
-  store.
-- [ ] **E3.2 — Move existing infra beads.** Move the comingled (HQ-prefixed) infra
-  beads into the infra store. **Do NOT re-mint ids** (they're stable references) —
-  legacy infra beads keep their HQ-era prefix in the infra store; the bare-CLI-id
-  lookup + a bounded legacy scan cover reads of those until they age out.
-- [ ] **E3.3 — Idempotent / resumable / crash-safe.** Re-run picks up where it
-  stopped; no double-move; convergent (the design's "system converges because work
-  persists" property). No status file — discover state by querying the stores.
-- [ ] **E3.4 — New-city path verified 2-db.** Confirm `gc init` (E2.1) needs no
-  migration.
+- [x] **E3.1 — Detect + create. DONE (2026-07-07).** `cityNeedsInfraStoreMigration`
+  (config-shape + live-state, no marker file: can-migrate =
+  `cityUsesBdStoreContract && !isExternalDolt`; needs = `!cityHasInfraStore` OR a
+  domain store still holds infra-class beads) + `gc migrate infra-store`
+  (`cmd_migrate_infra_store.go`, registered via `newMigrateCmd` in main.go). Create
+  reuses the exact E2.5 calls (`seedInitInfraScope` + `initAndHookDir`) plus the
+  NEW `writeInfraScopeRoutes` (infra scope's `routes.jsonl` so a same-prefix
+  cross-boundary `bd dep add` resolves the read-only target). Preflight refuses a
+  live controller + external Dolt; brings managed Dolt up. Read-only doctor
+  ADVISORY (`infraStoreMigrationCheck`) points the operator at the command.
+- [x] **E3.2 — Move existing infra beads. DONE (2026-07-07).** Sweeps EVERY domain
+  store (city + all rigs), classifies each bead via `coordclass.Classify` (the sole
+  authority — never a type list), and copies infra-class beads into the infra store
+  **preserving id/type/status/metadata/labels** (`copyBeadPreservingID`: Create the
+  node with Needs/ParentID/Dependencies cleared so the policy wrapper never
+  re-mints a non-empty id, then restore status via Close/Update). Dependency EDGES
+  are re-added co-resident with their SOURCE (Phase M2), with cross-boundary targets
+  left dangling (resolved by the E1.6 seams). Deletion uses the NEW orphan-preserving
+  batch primitive `beads.BatchDeleter` / `DeleteAllOrphaning` (chunked `bd delete
+  --force --json`, ALWAYS ≥2 ids so bd takes the batch path — single-id delete is a
+  mutation bomb that strips inbound edges + text-rewrites neighbors). **Ids are
+  never re-minted** — legacy infra beads keep their HQ/rig-era prefix.
+- [x] **E3.3 — Idempotent / resumable / crash-safe. DONE (2026-07-07).** No status
+  file: the plan is recomputed from LIVE state every run (the infra store's current
+  contents are the idempotency oracle). Global phase ordering (all M1 copy → all M2
+  edges → M3 verify → all M4 delete) means an edge never precedes its endpoints and
+  a delete never precedes verification, so a crash in any phase leaves only
+  re-runnable states. Copy-then-delete + delete-only-what-verify-proved-copied. A
+  re-run on a migrated city is a convergent no-op (moved:0). Covered by fast-tier
+  (`infra_store_migrate_test.go`: core/re-run/crash-resume/dry-run + tripwire) and
+  the real-Dolt integration test (`infra_store_migrate_integration_test.go`).
+- [x] **E3.4 — New-city path verified 2-db. DONE (2026-07-07).** A city born split
+  under E2 (`GC_INFRA_STORE_SPLIT=1`) reports `cityNeedsInfraStoreMigration == false`
+  (the E2.5 integration city already has the infra scope and no infra beads left in a
+  domain store), and the post-migration integration city likewise reports false — so
+  `gc init` needs no migration.
 
 **Guard/enforcement:** the E2.5 boundary invariant test, run against a
 post-migration fixture city.

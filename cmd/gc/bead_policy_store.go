@@ -237,6 +237,34 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
 }
 
+// DeleteAllOrphaning forwards the orphan-preserving batch delete to the inner
+// store so the beads.BatchDeleter capability survives the policy wrapper. The
+// policy layer adds no delete-side behavior, so this is a pure delegation; a
+// backing store without the capability returns an error (never a single-id
+// fallback, which would defeat the orphan-preserving contract).
+func (s *beadPolicyStore) DeleteAllOrphaning(ids []string) (int, error) {
+	deleter, ok := s.Store.(beads.BatchDeleter)
+	if !ok {
+		return 0, fmt.Errorf("policy store: backing store %T does not support orphan-preserving batch delete", s.Store)
+	}
+	return deleter.DeleteAllOrphaning(ids)
+}
+
+// CreateWithForeignID forwards a forced foreign-prefix create to the inner store
+// so the beads.ForeignIDCreator capability survives the policy wrapper. It
+// DELIBERATELY bypasses the policy Create path (mintInfraBeadID + storage
+// policy): the migration supplies the exact stable id to preserve, so there is
+// nothing to mint, and the id-prefix force is the whole point. Storage-tier
+// selection still rides the bead's own Ephemeral/NoHistory flags, which the
+// migration copies verbatim from the source bead.
+func (s *beadPolicyStore) CreateWithForeignID(b beads.Bead) (beads.Bead, error) {
+	creator, ok := s.Store.(beads.ForeignIDCreator)
+	if !ok {
+		return beads.Bead{}, fmt.Errorf("policy store: backing store %T does not support foreign-id create", s.Store)
+	}
+	return creator.CreateWithForeignID(b)
+}
+
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
 		root, err := s.createTarget(coordclass.ClassGraph).Get(rootID)

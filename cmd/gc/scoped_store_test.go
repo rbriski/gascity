@@ -127,6 +127,29 @@ func TestScopedStoreLikeSelectsRigScopeWhenDirIsARig(t *testing.T) {
 	}
 }
 
+// TestScopedStoreLikeKeepsRelocatedInfraStore proves the infra-scope branch:
+// on a split city the session/graph/... front door returns the infra store,
+// whose backing BdStore.Dir() is the .gc/infra scope root — neither the city
+// work store nor a rig. scopedStoreLike must NOT rebuild it as a rig (that would
+// mis-scope the read to the wrong database and silently defeat the class front
+// door — the domain/infra split's issue-2 regression). It returns (nil, nil) so
+// the caller keeps reading through the routed store directly; the ctx-cancel
+// clone is a best-effort optimization forgone for this case, not a correctness
+// invariant.
+func TestScopedStoreLikeKeepsRelocatedInfraStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	existing := beads.NewBdStore(infraScopeRoot(cityDir), noopBdRunner())
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, &config.City{}, existing)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	if scoped != nil {
+		t.Fatalf("scopedStoreLike() = %v, want nil so the caller keeps the routed infra store (not a rig-mis-scoped clone)", scoped)
+	}
+}
+
 // TestScopedStoreLikeAvoidsManagedDoltRecovery is a regression test: an
 // earlier version of scopedBdStoreForCity/scopedBdStoreForRig called
 // bdRuntimeEnvWithError/bdRuntimeEnvForRigWithError (allowRecovery=true),

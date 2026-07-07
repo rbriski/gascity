@@ -83,5 +83,17 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	if samePath(dir, cityPath) {
 		return scopedBdStoreForCity(ctx, cityPath)
 	}
+	// A relocated coordination-class store on a split city: the session / graph /
+	// messaging / orders / nudges front door (resolveClassStore) returns the city
+	// INFRA store, whose backing dir is the .gc/infra scope root — neither the
+	// city work store nor a rig. Do NOT rebuild it via the rig env path: that
+	// mis-scopes the read (the rig env resolution is not the infra scope's) and
+	// silently defeats the class front door the caller routed through. Keep
+	// reading through the routed store directly (return nil, nil). The ctx-cancel
+	// clone (ga-cdmx6x) is a best-effort optimization we forgo for this case, not
+	// a correctness requirement — the caller's own timeout still bounds the read.
+	if samePath(dir, infraScopeRoot(cityPath)) {
+		return nil, nil
+	}
 	return scopedBdStoreForRig(ctx, cityPath, cfg, dir)
 }

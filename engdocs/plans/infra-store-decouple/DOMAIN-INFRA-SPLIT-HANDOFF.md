@@ -81,8 +81,31 @@ worktree `/data/projects/gascity/.claude/worktrees/object-front-doors`.
 > infra store into 3 build_desired_state.go sites) + openSourceWorkflowStores (split graph-
 > read from by-id-work use).** E1.2 partial (sling/order done in E2.3; autoclose/formula-cook/
 > cmd_convoy_dispatch graph reads remain — let the E2.5 integration invariant surface them).
-> E1.3/E1.4/E1.5: let the invariant tests drive. **HEAD ~`41279174d`.** Next: E2.4 activation
-> (integration-tested), then E2.5 → E3 → E4.
+> E1.3/E1.4/E1.5: let the invariant tests drive.
+>
+> **E2 + E3 COMPLETE + INTEGRATION-VALIDATED ON REAL DOLT (2026-07-07).** The earlier
+> "blocked on a dolt/bd version skew" was WRONG — a pure harness bug (doltlite vs the
+> working managed-Dolt harness setupManagedBdWaitTestCity). Commits: E2.4 activation
+> `0537c8b03`; E2.5 integration test PASSES on real managed Dolt `9d673e811`; E2.5
+> backend-blind guard `bc7d4cdf9`; E3 migration `e34971672` (both TestInfraStoreMigrate
+> Integration 184s + CrashResume 149s PASS). **THE TWO-DATABASE REFACTOR IS FUNCTIONALLY
+> COMPLETE + PROVEN ON REAL DOLT:** new cities split via E2 (GC_INFRA_STORE_SPLIT=1,
+> boundary invariant green end-to-end), existing cities migrate in place via
+> `gc migrate infra-store` (copy-then-delete, crash-safe, id-stable, cross-store deps
+> preserved). Reserved prefix = gcg (scope-prefix-only; bd rejects cross-prefix --id
+> without --force → ForeignIDCreator). New primitive beads.BatchDeleter.DeleteAllOrphaning
+> (raw SQL DELETE — bd delete text-rewrites staying neighbors, verified live). E3 design:
+> E3-MIGRATION-DESIGN.md.
+>
+> **REMAINING = E4.4 command-sweep e2e (E4.1/2/3/5/6 are covered by the E2.5 + E3
+> integration tests) + polish:** E4.4 = run a representative gc command sweep on a
+> two-store city, assert each succeeds AND the boundary invariant holds after (no
+> leakage). Then the DEFERRED read-side fan-out (coordClassStoreCandidates session-arm
+> collapse + openSourceWorkflowStores graph-vs-by-id split — byte-identical today) and
+> the E1.2 tail (autoclose/formula-cook graph reads) + E1.3/E1.4/E1.5 — the boundary
+> invariant + E4.4 sweep surface any real leak. Integration tests: `GC_FAST_UNIT=0 go
+> test -tags integration ./cmd/gc/ -run 'InfraStore|Migrate' -timeout 20m` (managed Dolt).
+> **HEAD ~`e34971672`.** Next: E4.4 command sweep, then read-side fan-out + E1 tail.
 
 > **CONT (2026-07-06) — E1.6 DONE + audit finding.** A parallel census
 > (`raw/e1-census-wf_61848080.json`: 1 adversarial E1.6 auditor + 5 E1.1 file

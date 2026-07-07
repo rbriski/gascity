@@ -101,6 +101,21 @@ func (s *beadPolicyStore) ControlFrontierHandle() (beads.ControlFrontierStore, b
 	return beads.ControlFrontierStoreFor(s.Store)
 }
 
+// AppendLogHandle and ConditionalVersionHandle forward the journal CAS
+// capabilities the control-epoch fence probes. The policy wrapper embeds
+// beads.Store as an interface, so these optional capabilities are not promoted
+// automatically; the explicit forwards let AppendLogStoreFor /
+// ConditionalVersionStoreFor reach a JournalStore behind the policy wrapper (the
+// journal residence leg is always policy-wrapped). beadPolicyGraphStore embeds
+// *beadPolicyStore, so it inherits both forwards.
+func (s *beadPolicyStore) AppendLogHandle() (beads.AppendLogStore, bool) {
+	return beads.AppendLogStoreFor(s.Store)
+}
+
+func (s *beadPolicyStore) ConditionalVersionHandle() (beads.ConditionalVersionStore, bool) {
+	return beads.ConditionalVersionStoreFor(s.Store)
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

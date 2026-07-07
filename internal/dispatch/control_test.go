@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -1465,6 +1466,10 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
+		{name: "fence contended", err: fmt.Errorf("wrap: %w", errControlFenceContended), want: true},
+		{name: "fence uncapped", err: fmt.Errorf("wrap: %w", errControlFenceUncapped), want: true},
+		{name: "graphstore busy", err: fmt.Errorf("append: %w", graphstore.ErrBusy), want: true},
+		{name: "molecule epoch conflict", err: fmt.Errorf("spawning attempt: %w", molecule.ErrEpochConflict), want: true},
 	}
 
 	for _, tt := range tests {

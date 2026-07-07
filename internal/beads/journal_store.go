@@ -82,6 +82,9 @@ var (
 // write connection (a read on the write pool inside a write Tx would deadlock —
 // H1).
 func NewJournalStore(gs *graphstore.Store) *JournalStore {
+	// The control-epoch fence appends into this engine; register its event type
+	// at construction so a fence CAS is never rejected as an unknown type (I-5).
+	registerControlFenceVocab(gs)
 	return &JournalStore{gs: gs, db: gs.DB(), rdb: gs.ReadDB()}
 }
 

@@ -179,6 +179,57 @@ type AttachOptions struct {
 	// Callers should always use IdempotencyKey together with ExpectedEpoch
 	// to ensure crash-recovery correctness.
 	ExpectedEpoch int
+
+	// Fence, when non-nil, serializes the epoch-bump decide-and-write against a
+	// journal-resident attach bead (the control dispatcher supplies it). It is
+	// probe-and-fallback: on a legacy bead it runs the closure unchanged, so a
+	// nil Fence and a Fence over a legacy bead are byte-identical to today's
+	// check-then-act. The closure re-reads gc.control_epoch and re-checks its
+	// precondition INSIDE the serialized region (see bumpEpochIfCurrent), which
+	// is what makes the bump correct under a lost race rather than merely
+	// narrowing the window. molecule stays free of graphstore/dispatch imports by
+	// receiving the fence as a function.
+	Fence ControlWriteFence
+}
+
+// ControlWriteFence serializes an epoch-fenced control write. Given the control
+// store, the bead whose gc.control_epoch is being mutated, and a decideAndWrite
+// closure, it acquires a per-bead serialization slot and only then invokes
+// decideAndWrite, so the closure's read-compare-write executes after every prior
+// fenced writer has committed. A concurrent writer that loses the acquisition
+// retries internally rather than erroring; budget exhaustion returns a transient
+// error. The dispatch layer implements it (dispatch/control_fence.go).
+type ControlWriteFence func(ctx context.Context, store beads.Store, beadID string, decideAndWrite func(context.Context) error) error
+
+// runFenced applies fence to decideAndWrite, or runs decideAndWrite directly
+// when no fence is set. A nil fence is the legacy path — the decide-and-write
+// runs once, unserialized (correct for single-writer legacy dispatch).
+func runFenced(ctx context.Context, fence ControlWriteFence, store beads.Store, beadID string, decideAndWrite func(context.Context) error) error {
+	if fence == nil {
+		return decideAndWrite(ctx)
+	}
+	return fence(ctx, store, beadID, decideAndWrite)
+}
+
+// bumpEpochIfCurrent re-reads beadID's gc.control_epoch and advances it to
+// expectedEpoch+1 only when it still equals expectedEpoch. It is the decision
+// half of an epoch-fenced write: run inside the fence's serialized region (via
+// runFenced), its read-compare-write executes after every prior fenced writer
+// has committed, so a writer that lost the race to a fresher epoch observes the
+// advanced value and no-ops rather than regressing it (the staggered
+// lost-update/regression kill). On the legacy path (nil fence) it is a plain
+// fresh-read check-then-act, unchanged in effect from the direct SetMetadata it
+// replaces.
+func bumpEpochIfCurrent(store beads.Store, beadID string, expectedEpoch int) error {
+	b, err := store.Get(beadID)
+	if err != nil {
+		return err
+	}
+	current, _ := strconv.Atoi(strings.TrimSpace(b.Metadata[beadmeta.ControlEpochMetadataKey]))
+	if current != expectedEpoch {
+		return nil
+	}
+	return store.SetMetadata(beadID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(expectedEpoch+1))
 }
 
 // ErrEpochConflict is returned when AttachOptions.ExpectedEpoch does not match
@@ -248,7 +299,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// This runs before epoch fencing so that crash-retries with stale epochs
 	// still return the existing result instead of failing.
 	if opts.IdempotencyKey != "" {
-		if existing, err := findExistingAttach(store, recipe, rootBeadID, attachBeadID, opts.IdempotencyKey, opts.ExpectedEpoch); err != nil {
+		if existing, err := findExistingAttach(ctx, store, recipe, rootBeadID, attachBeadID, opts.IdempotencyKey, opts.ExpectedEpoch, opts.Fence); err != nil {
 			return nil, fmt.Errorf("idempotency check: %w", err)
 		} else if existing != nil {
 			return existing, nil
@@ -304,10 +355,23 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("dep %s -> %s: %w", attachBeadID, result.RootID, err)
 	}
 
-	// Increment epoch after successful attach.
+	// Increment epoch after successful attach. The decision (re-read the epoch,
+	// advance only if it still equals ExpectedEpoch) runs INSIDE the fence's
+	// serialized region for journal-resident beads, so a concurrent processor
+	// that already advanced the bump is observed and this writer no-ops instead
+	// of regressing it (S0.4 / staggered-regression kill); legacy beads take the
+	// same fresh-read check-then-act unserialized.
+	//
+	// Scope (P5): the fence guards this epoch bump, not the sub-DAG instantiation
+	// above. Under a lost race a duplicate sub-DAG can still be created (both
+	// writers passed the pre-instantiate epoch pre-check); the epoch ends
+	// correct, but full duplicate-DAG prevention needs an Attach-level fence over
+	// the instantiate region, deferred to P5. The loser still no-ops the bump
+	// safely and never closes the workflow.
 	if opts.ExpectedEpoch > 0 {
-		nextEpoch := strconv.Itoa(opts.ExpectedEpoch + 1)
-		if err := store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, nextEpoch); err != nil {
+		if err := runFenced(ctx, opts.Fence, store, attachBeadID, func(context.Context) error {
+			return bumpEpochIfCurrent(store, attachBeadID, opts.ExpectedEpoch)
+		}); err != nil {
 			return nil, fmt.Errorf("incrementing epoch on %s: %w", attachBeadID, err)
 		}
 	}
@@ -322,7 +386,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
-func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
+func findExistingAttach(ctx context.Context, store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int, fence ControlWriteFence) (*AttachResult, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.IdempotencyKeyMetadataKey: key,
@@ -360,7 +424,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 				return nil, err
 			}
 		}
-		if err := advanceAttachEpochIfNeeded(store, attachBeadID, expectedEpoch); err != nil {
+		if err := advanceAttachEpochIfNeeded(ctx, store, attachBeadID, expectedEpoch, fence); err != nil {
 			return nil, err
 		}
 		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, b)
@@ -377,20 +441,17 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 	return nil, nil
 }
 
-func advanceAttachEpochIfNeeded(store beads.Store, attachBeadID string, expectedEpoch int) error {
+func advanceAttachEpochIfNeeded(ctx context.Context, store beads.Store, attachBeadID string, expectedEpoch int, fence ControlWriteFence) error {
 	if expectedEpoch <= 0 {
 		return nil
 	}
-	attachBead, err := store.Get(attachBeadID)
-	if err != nil {
-		return err
-	}
-	currentEpoch, _ := strconv.Atoi(strings.TrimSpace(attachBead.Metadata[beadmeta.ControlEpochMetadataKey]))
-	if currentEpoch != expectedEpoch {
-		return nil
-	}
-	nextEpoch := expectedEpoch + 1
-	return store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(nextEpoch))
+	// The read-compare-write moves INSIDE the fence (bumpEpochIfCurrent) so it
+	// runs against post-serialization state: the former pre-fence Get here saw a
+	// stale epoch and could regress it under a lost race. A no-op when the epoch
+	// already advanced is the correct duplicate-path behavior.
+	return runFenced(ctx, fence, store, attachBeadID, func(context.Context) error {
+		return bumpEpochIfCurrent(store, attachBeadID, expectedEpoch)
+	})
 }
 
 func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {

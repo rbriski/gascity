@@ -595,7 +595,17 @@ func workflowStores(state State) []workflowStoreInfo {
 	// there. It carries the city scope as its fallback (graph roots stamp their own
 	// scope metadata, which workflowSnapshotScope prefers) but a distinct ref so the
 	// store-scan dedup never conflates it with the city store.
-	if graphStore := state.GraphBeadStore().Store; graphStore != nil && graphStore != cityStore {
+	graphStore := state.GraphBeadStore().Store
+	graphRelocated := graphStore != nil && graphStore != cityStore
+	// When the graph store OVERLAYS the city store (the P1.5 residence router,
+	// whose legacy leg IS the city store), its fan-out reads already return the
+	// city (legacy) leg's beads, so adding a separate city entry would project
+	// every legacy-resident workflow root twice and make the delete path visit
+	// each root on both legs (HIGH-1). Drop the redundant city entry in that case.
+	// A disjoint relocated graph store (graph-store split, not an overlay) reports
+	// no overlap, so both entries are kept exactly as before — byte-identical.
+	graphOverlaysCity := graphRelocated && beads.StoreOverlaps(graphStore, cityStore)
+	if graphRelocated {
 		stores = append(stores, workflowStoreInfo{
 			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
@@ -604,7 +614,7 @@ func workflowStores(state State) []workflowStoreInfo {
 		})
 	}
 
-	if cityStore != nil {
+	if cityStore != nil && !graphOverlaysCity {
 		stores = append(stores, workflowStoreInfo{
 			ref:       "city:" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,

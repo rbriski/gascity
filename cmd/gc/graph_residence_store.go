@@ -25,14 +25,15 @@ var errCrossResidenceDependency = errors.New("cross-residence dependency rejecte
 // membership probe; it is never a prefix split. Both legs arrive already
 // policy-wrapped, so this store composes them without re-wrapping.
 //
-// P2-BLOCKER (HIGH-1): the API projection layer still builds run/convoy
-// projections directly from one store per request in handler_convoy_dispatch.go,
-// orders_feed.go, and huma_handlers_convoys.go. Once a city opts in and beads
-// span both legs, those projections double-count / miss cross-leg rows. The fix
-// is the overlay-awareness rework P2 does anyway (a single residence-aware
-// projection over this router), so it is deliberately NOT patched here; it is
-// inert until a city opts in. Do not route those projections through this store
-// piecemeal — land the P2 overlay first.
+// Overlay contract (HIGH-1): this router's global reads return legacy ∪ journal
+// (List/Ready/ListByLabel fan both legs out and dedupe), so a caller that also
+// iterated the legacy leg (the city store) separately would count every
+// legacy-resident bead twice. The router therefore implements beads.StoreOverlay
+// (OverlaysStore below): the API projection/delete arms that build a store list
+// from GraphBeadStore()+CityBeadStore() (workflowStores in
+// handler_convoy_dispatch.go, consumed by orders_feed.go and
+// huma_handlers_convoys.go) drop the redundant city entry when this router
+// overlays it, so each workflow root is projected once and deleted once.
 //
 // P2: this router does not yet forward the optional ConditionalAssignmentReleaser
 // or Counter capabilities to the routed leg (HandlesFor's Writer is the router,
@@ -44,11 +45,14 @@ type residenceRoutingGraphStore struct {
 }
 
 var (
-	_ beads.Store                         = (*residenceRoutingGraphStore)(nil)
-	_ beads.GraphApplyHandleProvider      = (*residenceRoutingGraphStore)(nil)
-	_ beads.ControlFrontierHandleProvider = (*residenceRoutingGraphStore)(nil)
-	_ beads.CachedReader                  = residenceRoutingReader{}
-	_ beads.LiveReader                    = residenceRoutingReader{}
+	_ beads.Store                            = (*residenceRoutingGraphStore)(nil)
+	_ beads.StoreOverlay                     = (*residenceRoutingGraphStore)(nil)
+	_ beads.GraphApplyHandleProvider         = (*residenceRoutingGraphStore)(nil)
+	_ beads.ControlFrontierHandleProvider    = (*residenceRoutingGraphStore)(nil)
+	_ beads.AppendLogHandleProvider          = (*residenceRoutingGraphStore)(nil)
+	_ beads.ConditionalVersionHandleProvider = (*residenceRoutingGraphStore)(nil)
+	_ beads.CachedReader                     = residenceRoutingReader{}
+	_ beads.LiveReader                       = residenceRoutingReader{}
 )
 
 // newResidenceRoutingGraphStore composes a journal leg and a legacy leg into a
@@ -57,6 +61,21 @@ var (
 // cache, so the reload-swap story keeps working without router invalidation.
 func newResidenceRoutingGraphStore(journal, legacy beads.Store) *residenceRoutingGraphStore {
 	return &residenceRoutingGraphStore{journal: journal, legacy: legacy}
+}
+
+// OverlaysStore reports whether other is this router's legacy (non-journal) leg
+// — the store whose beads the router already returns via fan-out (its global
+// reads are legacy ∪ journal, and its by-id reads route to the owning leg). When
+// it is, a caller that iterated both this router and other would project/delete
+// every legacy-resident bead twice, so the caller drops the redundant leg. Only
+// the legacy leg can be an overlay target: journal-resident beads have no
+// separate entry to conflate with. Identity is deliberate — the legacy leg is
+// the exact store pointer resolveGraphStore held before wrapping it, which is
+// the same value CityBeadStore() returns on a non-relocated-graph city, so a
+// graph-split (disjoint) legacy leg correctly reports no overlap with the city
+// store.
+func (s *residenceRoutingGraphStore) OverlaysStore(other beads.Store) bool {
+	return other != nil && s.legacy == other
 }
 
 // residentBead probes the journal leg for id. Returns (bead, true, nil) when
@@ -573,6 +592,24 @@ func (s *residenceRoutingGraphStore) GraphApplyHandle() (beads.GraphApplyStore, 
 // not expose the capability.
 func (s *residenceRoutingGraphStore) ControlFrontierHandle() (beads.ControlFrontierStore, bool) {
 	return beads.ControlFrontierStoreFor(s.journal)
+}
+
+// AppendLogHandle and ConditionalVersionHandle expose the JOURNAL leg's journal
+// CAS capabilities, which back the control-epoch fence. Like ControlFrontier
+// these are journal-only surfaces — they operate on the journal event streams,
+// a data domain the legacy leg does not have — so the router forwards straight
+// to the journal leg rather than composing both. Without these forwards, a
+// journal-resident control bead reached through this router would probe caps
+// as absent and the fence would (before this) silently degrade to an unfenced
+// write; now the fence treats that as a loud wiring bug, so the forwards are
+// what keep an opted city's control writes actually fenced. Returns
+// (nil, false) when the journal leg does not expose the capability.
+func (s *residenceRoutingGraphStore) AppendLogHandle() (beads.AppendLogStore, bool) {
+	return beads.AppendLogStoreFor(s.journal)
+}
+
+func (s *residenceRoutingGraphStore) ConditionalVersionHandle() (beads.ConditionalVersionStore, bool) {
+	return beads.ConditionalVersionStoreFor(s.journal)
 }
 
 // graphRoutingApplier routes a graph-apply plan to the leg its anchors reside

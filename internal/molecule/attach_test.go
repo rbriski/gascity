@@ -671,6 +671,95 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 	}
 }
 
+// recordingFence is a ControlWriteFence spy: it records each invocation (and the
+// bead id) and runs decideAndWrite so the epoch bump still applies. It proves a
+// call site actually routes its epoch write through the fence — if the site's
+// runFenced wiring were replaced by a direct SetMetadata, the spy would never be
+// called and the count assertion fails.
+type recordingFence struct {
+	calls   int
+	beadIDs []string
+}
+
+func (r *recordingFence) fence(ctx context.Context, _ beads.Store, beadID string, decideAndWrite func(context.Context) error) error {
+	r.calls++
+	r.beadIDs = append(r.beadIDs, beadID)
+	return decideAndWrite(ctx)
+}
+
+// TestAttachEpochBumpRoutesThroughFence proves site 2 (Attach's post-attach epoch
+// increment) routes through opts.Fence: a new attach with ExpectedEpoch>0 invokes
+// the fence exactly once for the attach bead, and the epoch advances to
+// ExpectedEpoch+1.
+func TestAttachEpochBumpRoutesThroughFence(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	spy := &recordingFence{}
+	recipe := makeWorkflowRecipe("attempt", "run")
+	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		ExpectedEpoch: 1,
+		Fence:         spy.fence,
+	})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("fence invoked %d times, want 1 (site 2 must route the epoch bump through the fence)", spy.calls)
+	}
+	if len(spy.beadIDs) != 1 || spy.beadIDs[0] != control.ID {
+		t.Fatalf("fence bead ids = %v, want [%s]", spy.beadIDs, control.ID)
+	}
+	updated, _ := store.Get(control.ID)
+	if got := updated.Metadata["gc.control_epoch"]; got != "2" {
+		t.Fatalf("epoch after fenced attach = %q, want 2", got)
+	}
+}
+
+// TestAttachDuplicateEpochAdvanceRoutesThroughFence proves site 3
+// (advanceAttachEpochIfNeeded, taken on the idempotent duplicate path) routes
+// through opts.Fence: a second attach with the same idempotency key finds the
+// existing sub-DAG and advances the epoch via the fence.
+func TestAttachDuplicateEpochAdvanceRoutesThroughFence(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	// First attach creates the sub-DAG and advances epoch 1 -> 2 (unfenced here).
+	if _, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "attempt:1",
+	}); err != nil {
+		t.Fatalf("first attach: %v", err)
+	}
+	// Reset epoch so the duplicate path's advanceAttachEpochIfNeeded has work to
+	// do (current == expected), forcing it through the fenced bump.
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	spy := &recordingFence{}
+	result, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "attempt:1",
+		Fence:          spy.fence,
+	})
+	if err != nil {
+		t.Fatalf("duplicate attach: %v", err)
+	}
+	if !result.Duplicate {
+		t.Fatalf("second attach should be a duplicate")
+	}
+	if spy.calls != 1 {
+		t.Fatalf("fence invoked %d times, want 1 (site 3 must route the duplicate-path epoch advance through the fence)", spy.calls)
+	}
+	updated, _ := store.Get(control.ID)
+	if got := updated.Metadata["gc.control_epoch"]; got != "2" {
+		t.Fatalf("epoch after fenced duplicate advance = %q, want 2", got)
+	}
+}
+
 func TestAttachDuplicateRecoveryPopulatesIDMappingAndAdvancesEpoch(t *testing.T) {
 	base := beads.NewMemStore()
 	root := setupWorkflow(t, base)

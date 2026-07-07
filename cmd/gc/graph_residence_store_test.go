@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/graphstore"
 )
 
 // residenceLegStore is a call-recording beads.Store fake over an in-memory store.
@@ -300,6 +302,34 @@ func TestGraphResidenceRoutingFanOutMergesBothLegs(t *testing.T) {
 	}
 }
 
+// TestGraphResidenceOverlaysStoreIdentifiesLegacyLeg pins the HIGH-1 overlay
+// contract: the router advertises that it overlays its legacy (non-journal) leg
+// — the store whose beads its fan-out already returns — so the API projection
+// and delete arms drop the redundant separate entry. Neither the journal leg
+// nor an unrelated store is reported as overlaid.
+func TestGraphResidenceOverlaysStoreIdentifiesLegacyLeg(t *testing.T) {
+	journal := newResidenceLegStore("journal", 0)
+	legacy := newResidenceLegStore("legacy", 1000)
+	router := newResidenceRoutingGraphStore(journal, legacy)
+
+	if !router.OverlaysStore(legacy) {
+		t.Fatal("OverlaysStore(legacy) = false, want true (legacy leg is overlaid)")
+	}
+	if router.OverlaysStore(journal) {
+		t.Fatal("OverlaysStore(journal) = true, want false (journal leg is not a separate overlaid entry)")
+	}
+	if router.OverlaysStore(newResidenceLegStore("other", 2000)) {
+		t.Fatal("OverlaysStore(unrelated) = true, want false")
+	}
+	if router.OverlaysStore(nil) {
+		t.Fatal("OverlaysStore(nil) = true, want false")
+	}
+	// The generic beads.StoreOverlaps helper resolves the capability the same way.
+	if !beads.StoreOverlaps(router, legacy) {
+		t.Fatal("beads.StoreOverlaps(router, legacy) = false, want true")
+	}
+}
+
 // failOnReady makes Ready return a hard error, to prove fan-out fails loudly.
 type failOnReady struct {
 	*residenceLegStore
@@ -308,6 +338,43 @@ type failOnReady struct {
 
 func (f *failOnReady) Ready(_ ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return nil, f.err
+}
+
+// TestGraphResidenceForwardsJournalCASCapsToJournalLeg pins the MED fix: the
+// residence router forwards the journal CAS capabilities (AppendLogStore /
+// ConditionalVersionStore) that back the control-epoch fence to its JOURNAL leg.
+// Without these forwards a journal-resident control bead reached through the
+// router would probe caps as absent and the fence would treat it as a wiring bug
+// (or, before the fence hardening, silently write unfenced). The second half
+// proves the forward is honest: a router whose journal leg lacks the caps
+// reports absent rather than fabricating a stub.
+func TestGraphResidenceForwardsJournalCASCapsToJournalLeg(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	gs, err := graphstore.Open(context.Background(), path, graphstore.Options{CityID: "residence-caps"})
+	if err != nil {
+		t.Fatalf("open graphstore: %v", err)
+	}
+	t.Cleanup(func() { _ = gs.Close() })
+	journal := beads.NewJournalStore(gs)
+	legacy := newResidenceLegStore("legacy", 1000)
+
+	router := newResidenceRoutingGraphStore(journal, legacy)
+	if _, ok := beads.AppendLogStoreFor(router); !ok {
+		t.Fatal("router does not forward AppendLogStore to the journal leg (fence would degrade)")
+	}
+	if _, ok := beads.ConditionalVersionStoreFor(router); !ok {
+		t.Fatal("router does not forward ConditionalVersionStore to the journal leg (fence would degrade)")
+	}
+
+	// Honest absence: a journal leg without the caps must not be papered over.
+	memJournal := newResidenceLegStore("journal", 0)
+	memRouter := newResidenceRoutingGraphStore(memJournal, legacy)
+	if _, ok := beads.AppendLogStoreFor(memRouter); ok {
+		t.Fatal("router fabricated an AppendLogStore when the journal leg exposes none")
+	}
+	if _, ok := beads.ConditionalVersionStoreFor(memRouter); ok {
+		t.Fatal("router fabricated a ConditionalVersionStore when the journal leg exposes none")
+	}
 }
 
 func TestGraphResidenceRoutingHardProbeErrorFailsWrites(t *testing.T) {

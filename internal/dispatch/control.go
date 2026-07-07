@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -302,15 +303,31 @@ func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error,
 }
 
 func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) error {
-	current, err := strconv.Atoi(strings.TrimSpace(control.Metadata[beadmeta.ControlEpochMetadataKey]))
-	if err != nil || current < 1 {
-		return nil
-	}
 	attemptNum, err := strconv.Atoi(strings.TrimSpace(attempt.Metadata[beadmeta.AttemptMetadataKey]))
-	if err != nil || attemptNum <= current {
+	if err != nil || attemptNum < 1 {
 		return nil
 	}
-	return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+	// The read-compare (current epoch vs attemptNum) moves INSIDE the fence so it
+	// runs after the serialization slot is acquired, against the freshest epoch:
+	// a writer that lost the race to a higher attempt observes the advanced epoch
+	// and no-ops instead of regressing it. attemptNum comes from the recovered
+	// attempt and is stable, so it stays captured outside.
+	return fenceControlWrite(context.Background(), store, control.ID, func(context.Context) error {
+		fresh, err := store.Get(control.ID)
+		if err != nil {
+			return err
+		}
+		current, err := strconv.Atoi(strings.TrimSpace(fresh.Metadata[beadmeta.ControlEpochMetadataKey]))
+		if err != nil || current < 1 {
+			// Epoch tracking is not active on this control bead — nothing to sync.
+			return nil
+		}
+		if attemptNum <= current {
+			// Already advanced to at least this attempt — no-op (regression kill).
+			return nil
+		}
+		return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+	})
 }
 
 func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
@@ -367,6 +384,20 @@ func IsTransientControllerError(err error) bool {
 		return true
 	}
 	if errors.Is(err, errTransientControllerBoundary) {
+		return true
+	}
+	// Typed journal/fence transients. errors.Is beats the string-match fallback
+	// below (the red-team flagged its brittleness): a control-epoch fence that
+	// lost the CAS-acquisition race (errControlFenceContended), hit a caps wiring
+	// bug (errControlFenceUncapped), or bubbled a retryable SQLite-busy from the
+	// journal append (graphstore.ErrBusy) is retryable, not a hard controller
+	// error. molecule.ErrEpochConflict means another processor already advanced
+	// the attach bead — the correct response is to back off and re-dispatch, so a
+	// concurrent duplicate-spawn attempt never closes the workflow.
+	if errors.Is(err, errControlFenceContended) ||
+		errors.Is(err, errControlFenceUncapped) ||
+		errors.Is(err, graphstore.ErrBusy) ||
+		errors.Is(err, molecule.ErrEpochConflict) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -514,6 +545,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
 		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 		ExpectedEpoch:  epoch,
+		Fence:          fenceControlWrite,
 	})
 	if err != nil {
 		failedRootID, lookupErr := failedAttemptAttachRootID(store, control, attemptNum)

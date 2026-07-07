@@ -126,10 +126,13 @@ var rigFlag string
 // errors to stderr. Returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
+	contextFlag, cityURLFlag, cityNameFlag = "", "", ""
 	defer func() {
 		cityFlag = prevCityFlag
 		rigFlag = prevRigFlag
+		contextFlag, cityURLFlag, cityNameFlag = prevContextFlag, prevCityURLFlag, prevCityNameFlag
 	}()
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
@@ -234,6 +237,12 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
+	root.PersistentFlags().StringVar(&contextFlag, "context", "",
+		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
+	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
+		"operate a REMOTE city at this base URL (https; requires --city-name)")
+	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
+		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
@@ -284,6 +293,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newRegisterCmd(stdout, stderr),
 		newUnregisterCmd(stdout, stderr),
 		newCitiesCmd(stdout, stderr),
+		newContextCmd(stdout, stderr),
 		newSupervisorCmd(stdout, stderr),
 		newSessionCmd(stdout, stderr),
 		newConvergeCmd(stdout, stderr),
@@ -422,8 +432,9 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 
 // resolvedContext holds the result of city+rig resolution.
 type resolvedContext struct {
-	CityPath string // absolute path to city root
-	RigName  string // rig name (empty if not in a rig context)
+	CityPath string        // absolute path to city root (empty when Remote is set)
+	RigName  string        // rig name (empty if not in a rig context)
+	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an
@@ -434,6 +445,14 @@ type resolvedContext struct {
 func resolveCommandContext(args []string) (resolvedContext, error) {
 	if len(args) == 0 {
 		return resolveContext()
+	}
+	// A positional city/rig argument targets a LOCAL city; combined with a remote
+	// FLAG (--city-url/--context) — the same explicit tier — it must not silently
+	// shadow the requested remote city, so reject that loudly. A remote ENV
+	// selector is lower precedence than the positional (flag > env), so it is
+	// shadowed rather than conflicting (Decision 4).
+	if remoteFlagPresent() {
+		return resolvedContext{}, remotePositionalConflictErr(args[0])
 	}
 	// A name-shaped positional may be a registered city name or a local rig
 	// directory. Route it through the shared name resolver, which consults the
@@ -457,17 +476,57 @@ func resolveCommandCity(args []string) (string, error) {
 // resolveContext resolves the city and optional rig context using a fixed
 // priority chain, each stage delegated to a helper that reports whether it
 // handled the request so the chain stops at the first match:
+//  0. remote target: --city-url/--context flag or GC_CITY_URL/GC_CITY_CONTEXT
+//     (resolveRemoteTarget)
 //  1. --city / --rig flags                  (resolveContextFromFlags)
 //  2. explicit city env + GC_RIG            (resolveContextFromCityEnv)
 //  3. GC_DIR / cwd discovery and walk-up    (resolveContextFromDir)
+//  4. sticky default context                (resolveStickyDefaultTarget)
+//
+// Steps 0 and 4 select a REMOTE city (Decision 4): an explicit remote flag/env
+// beats every local tier, while the sticky default is subordinate to local
+// discovery. A remote target is subject to the capability gate (see
+// remoteContextOrGate) until the no-fallback plane is in place.
 func resolveContext() (resolvedContext, error) {
+	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
+	// surfaces here regardless of the gate; a clean remote target goes through
+	// the capability gate.
+	if target, handled, err := resolveRemoteTarget(); err != nil {
+		return resolvedContext{}, err
+	} else if handled {
+		return remoteContextOrGate(target)
+	}
 	if ctx, handled, err := resolveContextFromFlags(); handled {
 		return ctx, err
 	}
 	if ctx, handled, err := resolveContextFromCityEnv(); handled {
 		return ctx, err
 	}
-	return resolveContextFromDir()
+	ctx, err := resolveContextFromDir()
+	if err == nil {
+		return ctx, nil
+	}
+	// Step 4: no local city discoverable — fall back to the sticky default
+	// context, if any (subordinate to local discovery, per Decision 4).
+	if target, ok, derr := resolveStickyDefaultTarget(); derr != nil {
+		return resolvedContext{}, derr
+	} else if ok {
+		return remoteContextOrGate(target)
+	}
+	return resolvedContext{}, err
+}
+
+// remoteContextOrGate wraps a resolved remote target in a resolvedContext, or
+// returns the capability-gate error until the remote read set is enabled. This
+// is the single choke point that keeps every city-operating command from
+// silently falling back to a local store under a remote target during Slice 0
+// build-out (only commands that call resolveContext are affected — city-
+// independent commands like `gc version` never reach here).
+func remoteContextOrGate(target *remoteTarget) (resolvedContext, error) {
+	if !remoteReadsEnabled {
+		return resolvedContext{}, errRemoteNotSupportedYet()
+	}
+	return resolvedContext{Remote: target}, nil
 }
 
 // resolveContextFromFlags resolves context from the explicit --city and --rig

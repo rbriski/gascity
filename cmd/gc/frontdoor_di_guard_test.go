@@ -14,8 +14,7 @@ import (
 // bead store. They must never regress to holding a raw store: with no
 // beads.Store in scope, a raw bead op on a non-work object (a session
 // state-heal, a circuit-breaker metadata write, …) is *untypeable* rather than
-// merely absent — the compile-time half of the object-model front-door boundary
-// (engdocs/plans/infra-store-decouple/OBJECT-MODEL-FRONT-DOOR-DESIGN.md).
+// merely absent — the compile-time half of the object-model front-door boundary.
 //
 // Only files that are ENTIRELY store-free belong here. Mixed/root files
 // (session_reconciler.go, cmd_nudge.go, order_dispatch.go, …) legitimately keep
@@ -75,9 +74,8 @@ func TestFrontDoorStoreFreeFilesStayStoreFree(t *testing.T) {
 
 // snapshotInfoOnlyFiles are the cmd/gc source files whose every session-bead
 // snapshot read was converted to the typed session.Info front door
-// (snapshot.OpenInfos() / FindInfoBy*) by the P4 non-work field-door cleanup
-// (engdocs/plans/infra-store-decouple/NONWORK-BEAD-FIELDDOOR-PLAN.md). They must
-// never regress to the raw-bead accessors: a raw session bead escaping the
+// (snapshot.OpenInfos() / FindInfoBy*) by the non-work field-door cleanup.
+// They must never regress to the raw-bead accessors: a raw session bead escaping the
 // snapshot is exactly the leak this migration closes — the field would then be
 // read straight off bead metadata instead of through the one codec edge.
 //
@@ -139,10 +137,8 @@ func TestSnapshotInfoOnlyFilesStayOnInfoAccessors(t *testing.T) {
 // InfoFromPersistedBead) / session.CircuitState — never by cracking bead
 // metadata off a raw bead. This is the SHAPE half of the object-model front-door
 // boundary: the reconciler decision-path files completed by the lockstep drop
-// (engdocs/plans/infra-store-decouple/RECONCILER-FRONT-DOOR-LOCKSTEP-DROP.md)
-// plus the session-class periphery files converted by the periphery closure
-// (engdocs/plans/infra-store-decouple/SESSION-PERIPHERY-CLOSURE-PLAN.md). Once a
-// file routes every session field through the typed projection, a reappearing
+// plus the session-class periphery files converted by the periphery closure.
+// Once a file routes every session field through the typed projection, a reappearing
 // `.Metadata[...]` bead crack is a regression to raw-bead reads.
 //
 // SHAPE-SEALED IS NOT RELOCATION-SAFE. Membership here means field reads go
@@ -232,8 +228,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // one-shot CLI command opens the generic city (work) store from openCityStore*;
 // left unrouted, its session writes would land in the work store instead of the
 // relocated session backend once [beads.classes.sessions] moves — the split-brain
-// this migration closes (engdocs/plans/infra-store-decouple/
-// SESSION-PERIPHERY-CLOSURE-PLAN.md). These files must never regress to
+// this migration closes. These files must never regress to
 // constructing the session front door straight from the generic work store.
 //
 // providers.go is a shared provider-construction helper rather than a one-shot

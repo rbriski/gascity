@@ -203,6 +203,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	}
 	register(newProviderCatalogDoctorCheck(cityPath))
 	register(newProviderCatalogReadinessAdvisoryCheck(cityPath))
+	register(infraStoreMigrationCheck{})
 	register(expandedConfigLoadCheck{})
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
@@ -460,6 +461,35 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 			nil)
 	}
 	return okCheck("expanded-config-load", "expanded config loaded")
+}
+
+// infraStoreMigrationCheck is a READ-ONLY advisory that tells the operator to
+// run `gc migrate infra-store` when this city predates the domain/infra store
+// split (or a prior migration did not finish). It never fixes anything and never
+// blocks: the migration is owner-gated and stop-the-world, so surfacing it as an
+// advisory is the whole job. It is intentionally cheap — cityNeedsInfraStoreMigration
+// only opens stores when the infra scope already exists (the resume case).
+type infraStoreMigrationCheck struct{}
+
+func (infraStoreMigrationCheck) Name() string { return "infra-store-migration" }
+
+func (infraStoreMigrationCheck) CanFix() bool { return false }
+
+func (infraStoreMigrationCheck) WarmupEligible() bool { return false }
+
+func (infraStoreMigrationCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (infraStoreMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	r := &doctor.CheckResult{Name: "infra-store-migration", Severity: doctor.SeverityAdvisory}
+	if !cityNeedsInfraStoreMigration(ctx.CityPath) {
+		r.Status = doctor.StatusOK
+		r.Message = "infra store layout is current (or not applicable)"
+		return r
+	}
+	r.Status = doctor.StatusWarning
+	r.Message = "this city predates the domain/infra store split (or a prior migration did not finish)"
+	r.FixHint = "stop the city (gc stop), then run `gc migrate infra-store` to move infrastructure beads into the infra store"
+	return r
 }
 
 func expandedConfigLoadFixHint(err error) string {

@@ -4,6 +4,35 @@
 integration-validated on real Dolt (boundary invariant passes). E3 migrates an EXISTING
 comingled single-db city to two stores in place.
 
+> **IMPLEMENTATION DEVIATIONS (2026-07-07, validated on real Dolt bd 1.1.0-rc.1).**
+> Two premises in §3/§7 were wrong against the real bd/Dolt code and were adapted to
+> the design's INTENT ("delete moved beads without mutating staying neighbors"):
+>
+> 1. **The `bd delete` batch path is NOT the safe path.** bd's batch delete
+>    (`cmd/bd/delete.go` `deleteBatch`) ALSO runs `updateTextReferencesInIssues`, so
+>    it text-rewrites every connected STAYING bead's free-text to `[deleted:ID]` —
+>    exactly the mutation bomb §7.1 attributed only to the single-id path. So
+>    `BdStore.DeleteAllOrphaning` deletes via a raw `bd sql "DELETE FROM issues/wisps
+>    WHERE id IN (...)"` (no `bd delete` at all): set-based row removal, FK cascades
+>    clean the deleted beads' own dep/label/event rows, and NO application-level text
+>    rewrite touches staying beads. The `≥2-ids-per-call` chunking rule is therefore
+>    obsolete (there is no single-vs-batch bd-delete branch to feed); a raw SQL DELETE
+>    is uniform for 1..N ids.
+> 2. **Inbound dependency ROWS do NOT survive on bd.** Migration 0043 added
+>    `fk_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id) ON
+>    DELETE CASCADE`, so deleting a moved bead cascade-drops the inbound edge from a
+>    staying bead. That is the E2-native cross-boundary shape (risk #2: the edge stops
+>    blocking), not a preservable dangling row. The MemStore fast tier still pins the
+>    row-preserving contract for a non-cascading backend; the integration tier instead
+>    proves the batch delete does not text-rewrite the staying neighbor.
+>
+> A `ForeignIDCreator` capability (`bd create --id <legacy-id> --force`) was also added:
+> bd rejects a create whose --id prefix differs from the infra db's `gcg` prefix without
+> `--force`, so copying a legacy HQ/rig-prefixed infra bead into the infra store needs the
+> forced create to keep the stable id. Both integration tests
+> (`TestInfraStoreMigrateIntegration`, `TestInfraStoreMigrateCrashResumeIntegration`) PASS
+> on managed Dolt.
+
 ## North Star
 After E3 the city's data is indistinguishable from a city born split under E2: infra-class
 beads in the infra store (keeping HQ/rig-era ids — do NOT re-mint), work beads untouched,

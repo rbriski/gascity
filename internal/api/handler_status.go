@@ -441,7 +441,11 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	store := s.state.CityBeadStore()
+	// Session-class read: route through the session store so a split city reads
+	// the relocated INFRA store, not the work store. ScopedStoreLike below is
+	// class-preserving (returns nil for the infra scope), so it keeps this routed
+	// store rather than rebuilding a mis-scoped clone.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return snapshot
 	}

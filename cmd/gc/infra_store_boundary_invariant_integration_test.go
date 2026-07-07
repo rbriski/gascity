@@ -180,6 +180,12 @@ func assertReservedPrefixBoundary(t *testing.T, workStore, infraStore beads.Stor
 // never leaked into a non-seeded city.
 func assertSingleStoreCityUntouched(t *testing.T) {
 	t.Helper()
+	// This helper proves an EXISTING single-store city is untouched by the split.
+	// It scaffolds via writeManagedBdWaitTestCityScaffold (not `gc init`), so it
+	// never seeds the infra scope regardless of the default; the explicit
+	// GC_INFRA_STORE_SPLIT=0 opt-out overrides the =1 the enclosing test set and
+	// pins the single-store premise now that two-store is the `gc init` default.
+	t.Setenv("GC_INFRA_STORE_SPLIT", "0")
 	cityPath := shortSocketTempDir(t, "gc-single-store-")
 	if _, err := writeManagedBdWaitTestCityScaffold(cityPath); err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)

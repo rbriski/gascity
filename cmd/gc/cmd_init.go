@@ -86,6 +86,7 @@ type wizardConfig struct {
 	startCommand     string                // custom start command (workspace-level)
 	bootstrapProfile string                // hosted bootstrap profile, or "" for local defaults
 	hostedDolt       hostedDoltInitOptions // external/hosted Dolt ledger endpoint (disabled when zero)
+	singleStore      bool                  // force the legacy single-store shape (opt out of the default domain/infra split)
 	err              error
 }
 
@@ -330,6 +331,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var preserveExisting bool
 	var jsonOut bool
 	var noStart bool
+	var singleStore bool
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
@@ -390,7 +392,12 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if flagMode != "" {
 				mode = flagMode
 			}
-			code := cmdInitWithPreparedWizardInternal(args, wiz, flagMode != "", nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut, noStart)
+			// A NEW city defaults to the domain/infra two-store split;
+			// --single-store forces the legacy single-store shape for this
+			// invocation (same effect as GC_INFRA_STORE_SPLIT=0). Threaded
+			// separately so it also applies when the wizard config is rebuilt
+			// internally (no provider/template flags → preparedSet is false).
+			code := cmdInitWithPreparedWizardSplitInternal(args, wiz, flagMode != "", nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut, noStart, singleStore)
 			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, wiz.configName, wizardDefaultProvider(wiz), wizardProviders(wiz), bootstrapProfileFlag, mode, stdout)
 		},
 	}
@@ -410,6 +417,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "initialize files and imports without registering or starting the city")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
+	cmd.Flags().BoolVar(&singleStore, "single-store", false, "provision a legacy single-store city (opt out of the default domain/infra two-store split)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
@@ -508,6 +516,16 @@ func cmdInitWithPreparedWizard(args []string, prepared wizardConfig, preparedSet
 }
 
 func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, preparedSet bool, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool, noStart bool) int {
+	return cmdInitWithPreparedWizardSplitInternal(args, prepared, preparedSet, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, forceDefaultWizard, noStart, false)
+}
+
+// cmdInitWithPreparedWizardSplitInternal is cmdInitWithPreparedWizardInternal
+// with the --single-store opt-out threaded through. singleStore forces the
+// legacy single-store shape (no domain/infra split) for this invocation
+// regardless of GC_INFRA_STORE_SPLIT; it is applied to the resolved wizard
+// config right before doInit so it survives an internal wizard rebuild (the
+// no-flag path where prepared is discarded).
+func cmdInitWithPreparedWizardSplitInternal(args []string, prepared wizardConfig, preparedSet bool, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool, noStart bool, singleStore bool) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -547,6 +565,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	wiz.singleStore = singleStore
 	if code := doInit(fsys.OSFS{}, cityPath, wiz, nameOverride, stdout, stderr, preserveExisting); code != 0 {
 		return code
 	}
@@ -1436,16 +1455,22 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			return 1
 		}
 	}
-	// Provision the domain/infra store split for a NEW city when opted in
-	// (GC_INFRA_STORE_SPLIT). This seeds the .gc/infra scope's canonical .beads
+	// Provision the domain/infra store split for a NEW city. Two-store is now the
+	// DEFAULT (owner decision): this seeds the .gc/infra scope's canonical .beads
 	// config + metadata (its own Dolt database, issue_prefix = the infra scope
 	// prefix), mirroring the hosted-Dolt canonical-config block above: gc init
 	// only writes config; the live `bd init` of the infra database happens at
 	// gc start. The presence of the seeded scope IS the activation boundary
 	// (cityHasInfraStore), so an EXISTING city — which never has this scope —
-	// stays single-store and byte-identical. Gated OFF by default so a plain
-	// gc init is unchanged.
-	if initShouldSeedInfraStore() {
+	// stays single-store and byte-identical. Opt out to single-store per-city with
+	// `gc init --single-store` (wiz.singleStore) or globally with
+	// GC_INFRA_STORE_SPLIT=0.
+	//
+	// seedInitInfraScope seeds a real managed-Dolt scope through the os package
+	// (not the injected fs), so it is only meaningful when doInit operates on the
+	// real filesystem. Skip it when fs is a fake in-memory FS (pure unit tests
+	// that never touch real disk); production always passes fsys.OSFS{}.
+	if isRealOSFS(fs) && initShouldSeedInfraStore(wiz.singleStore) {
 		if err := seedInitInfraScope(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc init: seeding infra bead store scope: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1559,6 +1584,18 @@ func bootstrapScopedFileProviderCityFS(fs fsys.FS, cityPath string) error {
 		return nil
 	}
 	return fs.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
+}
+
+// isRealOSFS reports whether fs is the real OS filesystem (fsys.OSFS). doInit
+// takes an injectable fsys.FS so its pure-config scaffolding is unit-testable
+// against an in-memory Fake, but seedInitInfraScope writes a real managed-Dolt
+// scope through the os package rather than the injected fs. Gating the infra
+// seed on this keeps the Fake-FS unit tests (which use non-existent absolute
+// paths) from attempting real os.MkdirAll calls while production, which always
+// passes fsys.OSFS{}, still seeds the split.
+func isRealOSFS(fs fsys.FS) bool {
+	_, ok := fs.(fsys.OSFS)
+	return ok
 }
 
 // seedInitInfraScope seeds a NEW city's INFRA store scope at gc init time: it

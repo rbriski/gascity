@@ -1119,21 +1119,25 @@ func infraScopeRoot(cityPath string) string {
 }
 
 // initShouldSeedInfraStore reports whether `gc init` should provision a NEW city
-// with the domain/infra store split (a second INFRA Dolt store). It is gated OFF
-// by default so a plain `gc init` stays single-store and byte-identical to
-// upstream Gas City; set GC_INFRA_STORE_SPLIT=1 to activate the split for a newly
-// created city. Existing cities are never affected — activation is the presence
-// of the seeded .gc/infra scope (cityHasInfraStore), which only this seed writes.
-// The gate is intentionally an env opt-in rather than a default so the split can
-// be flipped LIVE for new cities (and the E2.5 integration test) without changing
-// the behavior of every existing `gc init` invocation; whether new cities should
-// default to two-store is an owner decision left for a follow-up.
-func initShouldSeedInfraStore() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INFRA_STORE_SPLIT"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+// with the domain/infra store split (a second INFRA Dolt store). Two-store is now
+// the DEFAULT for newly created cities (owner decision): a plain `gc init` seeds
+// the .gc/infra scope. Opt out to the legacy single-store shape either per-city
+// (`gc init --single-store`, passed here as forceSingleStore) or globally by
+// setting GC_INFRA_STORE_SPLIT to a falsy value ({0,false,no,off}) — the opt-out
+// for upstream-compat / single-store tests. Existing cities are never affected —
+// activation is the presence of the seeded .gc/infra scope (cityHasInfraStore),
+// which only this seed writes; an existing city has no .gc/infra scope and stays
+// single-store. Precedence: forceSingleStore OR an explicit falsy env value forces
+// single-store; the default (neither) is two-store.
+func initShouldSeedInfraStore(forceSingleStore bool) bool {
+	if forceSingleStore {
 		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INFRA_STORE_SPLIT"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
 	}
 }
 

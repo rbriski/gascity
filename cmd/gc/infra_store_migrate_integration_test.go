@@ -31,8 +31,12 @@ import (
 
 func TestInfraStoreMigrateIntegration(t *testing.T) {
 	// Stand up a comingled single-store managed-Dolt city (city hq scope + fe rig
-	// scope). Deliberately DO NOT set GC_INFRA_STORE_SPLIT and DO NOT seed the
-	// infra scope: this is the pre-split state the migration upgrades.
+	// scope). This test's whole premise is a single-store→two-store upgrade, so the
+	// comingled city MUST start single-store. setupManagedBdWaitTestCity uses a
+	// template + initAndHookDir (not `gc init`), so it never seeds the infra scope
+	// regardless of the default; the explicit GC_INFRA_STORE_SPLIT=0 opt-out pins
+	// the single-store premise now that two-store is the `gc init` default.
+	t.Setenv("GC_INFRA_STORE_SPLIT", "0")
 	cityPath, rigPath := setupManagedBdWaitTestCity(t)
 	_ = rigPath
 

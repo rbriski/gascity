@@ -565,6 +565,11 @@ func buildDesiredStateWithSessionBeads(
 		backsNamedSession := namedSessionMode != ""
 
 		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
+		// On a split city, route the default count-form through the composite
+		// `gc ready` so spawn-demand counts graph-class routed beads in the infra
+		// store — keeping the reconciler's demand read symmetric with the worker's
+		// claim read. Custom scale_checks and single-store cities are unchanged.
+		sp.Check = splitCityPoolDemandQuery(cityPath, &cfg.Agents[i], cfg.Beads)
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)

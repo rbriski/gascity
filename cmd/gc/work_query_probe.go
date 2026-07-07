@@ -174,7 +174,7 @@ func prefixedWorkQueryForProbeWithEnv(
 		beadsCfg = cfg.Beads
 		rigs = cfg.Rigs
 	}
-	command := strings.TrimSpace(agentCfg.EffectiveWorkQueryForBeads(beadsCfg))
+	command := strings.TrimSpace(splitCityWorkQuery(cityPath, agentCfg, beadsCfg))
 	// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped agents probe with
 	// rig-specific metadata. Mirrors the scale_check expansion in
 	// build_desired_state.go; #793. Malformed templates are logged to

@@ -269,7 +269,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+	// On a split city, route the default work_query through the composite
+	// `gc ready` so the hook sees graph-class step beads in the infra store;
+	// single-store cities and custom work_queries are unchanged.
+	workQuery := splitCityWorkQuery(cityPath, &a, cfg.Beads)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.

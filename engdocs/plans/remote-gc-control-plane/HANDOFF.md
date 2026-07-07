@@ -2,6 +2,8 @@
 
 **Purpose:** hand a fresh session enough to continue implementing remote-city support for the `gc` CLI without re-deriving the design. The **authoritative design + build checklist is `DESIGN-BRIEF.md` v2** (council-ratified) in this directory. This doc is the *operational* state: what's done, what's next, how to work, and the landmines.
 
+> **CURRENT FRONTIER (2026-07-07): Slice 0 done (reads work); starting Slice 1 Phase 1 = "writes-first".** Human decisions locked: **(1) sequence writes-first — server hardening (G10/G11) + the grant client path (G18/G19) + a reference minter, so `gc --context prod sling <existing-bead>` mutates a hardened city end to end, BEFORE the big server-side rig provisioning (G12–G17,G20–G22); (2) build a reference minter `gc-write-mint`.** The concrete Phase-1 build spec is **§8** below. The grant contract to match is `internal/citywriteauth/citywriteauth.go` (`Grant`, `ReqDigest`, `Verify`) — token = `base64url(grantJSON) "." base64url(ed25519 sig over grantJSON)`.
+
 **Date of handoff:** 2026-07-07. **Worktree:** `/data/projects/gascity/.claude/worktrees/gc-remote` (branch `feat/agent-workspace-source`). Run everything from the worktree root; do **not** `cd` to the main checkout.
 
 ---
@@ -136,3 +138,31 @@ After Slice 0: **checkpoint** and get sign-off before Slice 1 (the capstone: ful
 - Design contract: `engdocs/plans/remote-gc-control-plane/DESIGN-BRIEF.md` (v2).
 - Design workflows (for reference/resume, not needed to continue): `.claude/wf-remote-gc-design.js`, `.claude/wf-remote-gc-council.js`.
 - Key seams (all cited with line numbers in brief §2): `cmd/gc/apiroute.go` (`apiClient`), `internal/api/client.go` (`newClient`, `ShouldFallback`, `waitForEvent`), `cmd/gc/main.go` (`resolveContext:463`, flags:233), `cmd/gc/cmd_events.go` (`eventsAPIScope.client:131`, `streamCityEventsOnce`), `internal/api/writeauth.go` + `internal/citywriteauth/` (verify-only grant plane), `internal/supervisor/registry.go:363-387` (atomic-write template), `cmd/gc/cmd_register.go` (the `gc context` UX model).
+
+---
+
+## 8. Slice 1 Phase 1 — "writes-first" build spec (NEXT)
+
+**Goal:** `gc --context prod sling <existing-bead>` performs a mutation against a DIRECT hardened city (`allow_mutations=true` + a verify key), with the grant minted client-side by a reference `gc-write-mint` and verified by the already-built `citywriteauth`. NO rig provisioning yet (that's Phase 2 = Group C). Human-locked: writes-first sequencing + build a reference minter.
+
+**The grant contract (match exactly — `internal/citywriteauth`):**
+- Token = `base64url(grantJSON) "." base64url(sig)`, `sig = ed25519.Sign(priv, grantJSON)`.
+- `Grant{Kid,Aud,City,Epoch,IAT,Exp,JTI,Req}` (all JSON, snake-ish per struct tags: `kid,aud,city,epoch,iat,exp,jti,req`).
+- `Req = ReqDigest(method, decodedPath, rawQuery, body)` = `hex(sha256( method "\n" path [ "\n" canonicalQuery ] "\n" hex(sha256(body)) ))`, canonicalQuery = `url.ParseQuery(rawQuery).Encode()` folded in only when non-empty.
+- Verify checks: kid→key, ed25519 sig over payload, non-empty city/req/jti, `aud==gc-city-write`, `exp>iat`, `exp-iat<=MaxTTL`, now∈[iat-skew, exp+skew], `epoch>=floor`, `city==pathCity`, `req==ReqDigest(thisRequest)`, single-use jti (MemoryReplayGuard → single-replica).
+
+**Build order (each step TDD, `go test`+`go vet` green before the next):**
+
+1. **`citywriteauth` refactor (tiny, additive):** add `ReqDigestFromBodyHash(method, path, rawQuery, bodyHashHex string) string` and make `ReqDigest(...body []byte)` delegate to it (byte-identical → the golden vector + `golden_test.go` stay green). The minter needs this because it receives the **body hash**, never the body.
+2. **`internal/clientgrant/` (new, mirror `internal/clientauth`):** the grant exec contract `gascity.dev/city-write-grant/v1`. `GrantInfo{Version,Aud,City,Method,Path,CanonicalQuery,BodySHA256,ReqDigest}` marshaled to env **`GC_GRANT_INFO`** (env only, never argv; strip inherited `GC_*_INFO`). `GrantSource.Mint(GrantInfo) (token string, err error)` execs `grant_command` via `sh -c`, returns stdout token, validates it splits into `payload.sig` with a 64-byte sig. **NO cache** — a grant is single-use + request-bound, so mint fresh per mutation (a retry mints a fresh grant).
+3. **`cmd/gc-write-mint/` (new binary — the reference minter):** reads `GC_GRANT_INFO`, **re-validates** `aud==gc-city-write` + `city==--city`(if pinned), recomputes `req_digest` via `ReqDigestFromBodyHash` and refuses if it ≠ the client's claimed `req_digest`, stamps `kid`(`--kid`)/`epoch`(`--epoch`)/`jti`(random)/`iat`/`exp`(iat+`--ttl`, ≤2m), ed25519-signs with `--key <ed25519 seed/pem>`, prints the token. Never reads argv for the request info (env only). This is a dev/reference tool, kept OUT of the verify-only `citywriteauth` path.
+4. **Grant editor (G18)** in `internal/api/client_remote.go`: `RemoteOptions.Grant clientgrant.GrantSource`; a genclient `RequestEditorFn` attached **LAST** (after X-GC-Request + Authorization) that, for a **mutating** method (not GET/HEAD/OPTIONS), computes `ReqDigest(req.Method, req.URL.Path, req.URL.RawQuery, body via GetBody+reset)`, mints the grant, sets `X-GC-City-Write`. Reads get NO grant. Tighten `remoteCheckRedirect` to refuse **all** redirects when the request carries `X-GC-City-Write`.
+5. **Write routing:** `resolveWriteTarget()` (sibling of `resolveReadTarget`) builds the remote client with `RemoteOptions.Grant` from `ctx.Ctx.GrantCommand`; `sling` routes its mutation through it (no fallback — G1 already covers remote clients). Non-migrated mutations stay gated via `resolveContext`.
+6. **Server hardening:**
+   - **G10 fail-closed boot** at BOTH seams (`controller.go:~1349`, `cmd_supervisor.go:~1256`): non-loopback + `allow_mutations` + no resolvable verify key ⇒ refuse to boot, with an explicit ack knob (name TBD — the one genuinely-open Q from brief §12) + a release-note migration entry so netpol-fronted fleets don't brick. Boot-test both sites with/without key/ack.
+   - **G11 gate `/svc/*`** on a hardened bind as a separate mux-layer change (leave `cityScopedObjectMutation` + the cross-repo golden vector untouched).
+7. **E2E:** an `httptest` server wired to a real `citywriteauth.Verifier` (test key) + a test `GrantSource` (or `gc-write-mint` built into a temp dir) → `sling` mints → server verifies → mutation accepted; plus a digest round-trip test with a percent-encoded city name and a query-bearing mutation (brief §10).
+
+**Landmines:** grant editor MUST be last (after body/query editors) or the digest won't match the wire body; the SSE result stream gets the credential editor but NEVER the grant editor; a retry mints a fresh grant (single-use); `GC_GRANT_INFO` env-only (never argv/`sh -c` interpolation); single-replica replay guard is an accepted residual (boot-warn a 2nd controller).
+
+**Then Phase 2 (Group C):** the big server-side `rig add --git-url` provisioning — `internal/rig` extraction (retire `controllerState.CreateRig`), git-clone hardening (RCE/SSRF), async 202 + atomic rollback, `request_id` state machine, per-rig lock, StateMutator reload, typed events, heartbeat-anchored wait, Huma both-shapes + regen (G12–G17, G20–G22). Then the full capstone one-liner + runbook (G23).

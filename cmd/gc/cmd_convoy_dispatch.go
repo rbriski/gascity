@@ -443,7 +443,7 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 // A transient fault carries a message the drain's transient classifier
 // (dispatch.IsTransientControllerError) recognizes, so the drain retries it.
 func controlStoreForBead(storePath, cityPath string, cfg *config.City, beadID string) (beads.Store, error) {
-	if currentGraphFrontierMode() == frontierModeServe {
+	if graphFrontierModeForCity(cityPath) == frontierModeServe {
 		if journal := cachedCityGraphJournal(cityPath); journal != nil {
 			_, err := journal.Get(beadID)
 			switch {

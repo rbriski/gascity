@@ -276,14 +276,15 @@ func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath strin
 // non-nil), the residence router coexists the two stores root-atomically
 // (ADR-0001 §2): journal-resident roots route to the journal leg, everything
 // else to the legacy leg. A non-opted city (graphJournal nil) returns the exact
-// legacy pointer callers hold today, so it is byte-identical. rec stays ignored:
-// the graph store is event-silent by design.
+// legacy pointer callers hold today, so it is byte-identical. The router carries
+// cityPath so it can honor the P3.3 cutover marker when minting new roots. rec
+// stays ignored: the graph store is event-silent by design.
 func resolveGraphStore(workStore, graphJournal beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	legacy := resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
 	if graphJournal == nil {
 		return legacy
 	}
-	return newResidenceRoutingGraphStore(graphJournal, legacy)
+	return newResidenceRoutingGraphStoreForCity(graphJournal, legacy, cityPath)
 }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail

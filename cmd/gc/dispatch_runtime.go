@@ -574,7 +574,7 @@ func composeWorkflowServeQueue(agentCfg config.Agent, cityPath string, legacyQue
 	if journalFrontier == nil {
 		return legacyQueue, nil
 	}
-	mode := currentGraphFrontierMode()
+	mode := graphFrontierModeForCity(cityPath)
 	if mode == frontierModeLegacy {
 		return legacyQueue, nil
 	}

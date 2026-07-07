@@ -57,6 +57,14 @@ type residenceRoutingGraphStore struct {
 	// the JournalStore visibility gate (so residentBead already routes them
 	// legacy), and controller writes to such a root are blocked here.
 	residence beads.ResidenceStore
+
+	// cityPath is the city root this router serves, used only to stat the P3.3
+	// generational cutover marker (.gc/graph/cutover) when minting a NEW root. It
+	// is "" for a router with no city context (the legacy two-arg constructor and
+	// most unit tests), which reads as never-armed — so a new root mints legacy,
+	// byte-identical to the pre-P3.3 behavior. When it is set and the marker is
+	// present, new roots are born journal-resident (see newRootLeg).
+	cityPath string
 }
 
 var (
@@ -71,12 +79,23 @@ var (
 )
 
 // newResidenceRoutingGraphStore composes a journal leg and a legacy leg into a
-// residence-routing graph store. Constructed per accessor call (cheap, two
-// fields); the long-lived handles live on the controller state / one-shot
-// cache, so the reload-swap story keeps working without router invalidation.
+// residence-routing graph store with no city context (cityPath ""). New roots
+// mint legacy — the pre-P3.3 inert policy — which is what most unit tests want.
+// Constructed per accessor call (cheap); the long-lived handles live on the
+// controller state / one-shot cache, so the reload-swap story keeps working
+// without router invalidation.
 func newResidenceRoutingGraphStore(journal, legacy beads.Store) *residenceRoutingGraphStore {
+	return newResidenceRoutingGraphStoreForCity(journal, legacy, "")
+}
+
+// newResidenceRoutingGraphStoreForCity is newResidenceRoutingGraphStore that also
+// carries the city root, so the router can honor the P3.3 cutover marker when
+// minting new roots. Production resolveGraphStore uses this form; the cutover
+// marker is stat'd live per new-root create, keeping marker removal reversible
+// without a restart.
+func newResidenceRoutingGraphStoreForCity(journal, legacy beads.Store, cityPath string) *residenceRoutingGraphStore {
 	residence, _ := beads.ResidenceStoreFor(journal)
-	return &residenceRoutingGraphStore{journal: journal, legacy: legacy, residence: residence}
+	return &residenceRoutingGraphStore{journal: journal, legacy: legacy, residence: residence, cityPath: cityPath}
 }
 
 // guardNotMigrating blocks a controller-path write to a bead whose root is
@@ -335,16 +354,32 @@ func (s *residenceRoutingGraphStore) CloseAll(ids []string, metadata map[string]
 
 // --- creates ---------------------------------------------------------------
 
-// Create routes a child by its parent's residence (root-atomic co-residence);
-// a new root (no ParentID) mints in the legacy leg at P1.5. New-roots→journal
-// is the M2 generational cutover, expressly not P1: journal roots enter only
-// via the Lumen executor writing the journal leg directly, keeping P1 inert.
-// A child create under a `migrating` root is blocked with ErrRootMigrating, the
-// same fence the by-id mutations apply, so a new step cannot slip onto the old
-// leg mid-copy and be silently absent from the journal copy (BLOCKER-1).
+// newRootLeg returns the leg a brand-new root (no ParentID) is minted on. Before
+// the P3.3 generational cutover marker is armed it is the legacy leg — the
+// P1.5/P2 inert policy, byte-identical to the pre-cutover behavior. Once
+// `gc migrate graph-journal cutover --parity-verified` writes .gc/graph/cutover,
+// a new root is born journal-resident: it mints a genuinely journal-resident root
+// (a fresh gcg-j<seq> id) on the journal leg, with no residence record needed —
+// journal membership IS its residence (residentBead finds it on the journal leg
+// and every child co-resides there). The marker is stat'd here, per new-root
+// create, so removing it restores legacy minting immediately (generational — any
+// root already born on the journal leg stays journal).
+func (s *residenceRoutingGraphStore) newRootLeg() beads.Store {
+	if cityGraphCutoverArmed(s.cityPath) {
+		return s.journal
+	}
+	return s.legacy
+}
+
+// Create routes a child by its parent's residence (root-atomic co-residence); a
+// new root (no ParentID) mints on newRootLeg — legacy until the cutover marker
+// arms journal minting. A child create under a `migrating` root is blocked with
+// ErrRootMigrating, the same fence the by-id mutations apply, so a new step cannot
+// slip onto the old leg mid-copy and be silently absent from the journal copy
+// (BLOCKER-1).
 func (s *residenceRoutingGraphStore) Create(b beads.Bead) (beads.Bead, error) {
 	if b.ParentID == "" {
-		return s.legacy.Create(b)
+		return s.newRootLeg().Create(b)
 	}
 	if err := s.guardNotMigrating(b.ParentID); err != nil {
 		return beads.Bead{}, err
@@ -359,8 +394,12 @@ func (s *residenceRoutingGraphStore) Create(b beads.Bead) (beads.Bead, error) {
 // CreateWithStorage routes like Create and preserves the policy-selected storage
 // tier, delegating to the routed leg's StorageCreateStore when it asserts one.
 func (s *residenceRoutingGraphStore) CreateWithStorage(b beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
-	leg := s.legacy
-	if b.ParentID != "" {
+	var leg beads.Store
+	if b.ParentID == "" {
+		// Only a NEW root consults the cutover marker (an os.Stat inside newRootLeg);
+		// a child routes by its parent's residence, so it must not pay that stat.
+		leg = s.newRootLeg()
+	} else {
 		if err := s.guardNotMigrating(b.ParentID); err != nil {
 			return beads.Bead{}, err
 		}
@@ -740,8 +779,9 @@ func (s *residenceRoutingGraphStore) ConditionalVersionHandle() (beads.Condition
 }
 
 // graphRoutingApplier routes a graph-apply plan to the leg its anchors reside
-// on. An un-anchored plan (a brand-new root) applies to the legacy leg at P1.5,
-// the same new-root policy as Create.
+// on. An un-anchored plan (a brand-new root — the dominant molecule/formula-v2
+// root-mint path) applies to newRootLeg(): the journal leg once the P3.3 cutover
+// marker is armed, the legacy leg otherwise — the same new-root policy as Create.
 type graphRoutingApplier struct {
 	s *residenceRoutingGraphStore
 }
@@ -750,8 +790,9 @@ var _ beads.GraphApplyStore = graphRoutingApplier{}
 
 // ApplyGraphPlan resolves the residence of every existing-bead anchor in the
 // plan (node ParentIDs, edge FromIDs/ToIDs). Anchors that disagree are rejected
-// as cross-residence; an anchored plan routes to that leg; an un-anchored plan
-// routes to the legacy leg.
+// as cross-residence; an anchored plan routes to that leg; an un-anchored plan (a
+// new root) routes to newRootLeg() — journal when the cutover marker is armed,
+// legacy otherwise.
 func (a graphRoutingApplier) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
@@ -773,11 +814,17 @@ func (a graphRoutingApplier) ApplyGraphPlan(ctx context.Context, plan *beads.Gra
 	return applier.ApplyGraphPlan(ctx, plan)
 }
 
-// applyLeg returns the leg an anchored plan routes to. No anchors → legacy
-// (un-anchored new root). Anchors spanning both legs → cross-residence error.
+// applyLeg returns the leg a graph-apply plan routes to. No anchors means a
+// brand-new root — the dominant molecule/formula-v2 root-mint shape, whose
+// workflow root deliberately carries no ParentID anchor (graph_apply.go's
+// KindWorkflow rule) — so it mints on newRootLeg(): journal once the P3.3 cutover
+// marker is armed, legacy otherwise, MATCHING Create's new-root policy. An
+// all-journal or all-legacy anchor set routes to that leg (the plan's own
+// ParentKey children co-reside there); anchors spanning both legs →
+// cross-residence error.
 func (s *residenceRoutingGraphStore) applyLeg(anchors []string) (beads.Store, error) {
 	if len(anchors) == 0 {
-		return s.legacy, nil
+		return s.newRootLeg(), nil
 	}
 	var haveJournal, haveLegacy bool
 	for _, id := range anchors {

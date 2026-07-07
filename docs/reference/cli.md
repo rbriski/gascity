@@ -2412,7 +2412,56 @@ gc migrate graph-journal --root gcg-42 --force-recover
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc migrate graph-journal cutover](#gc-migrate-graph-journal-cutover) | Arm (or disarm) the generational cutover marker |
 | [gc migrate graph-journal init](#gc-migrate-graph-journal-init) | Opt the city into the graph-journal scope (idempotent) |
+
+## gc migrate graph-journal cutover
+
+Arm the generational cutover for this city.
+
+Arming writes &lt;city&gt;/.gc/graph/cutover. Its presence flips two behaviors, with
+zero data movement (generational, not a copy):
+
+  - NEW graph roots are born journal-resident (minted on the journal leg), while
+    every root that already exists stays exactly where it is.
+  - The control-dispatcher frontier defaults to serve for journal-resident roots.
+    GC_GRAPH_FRONTIER still overrides as the kill switch: an explicit "legacy"
+    forces legacy even while armed.
+
+Arming is control-plane-only: a born-journal root's CONTROL steps drain, but its
+WORKER steps are invisible to workers until P4 — do NOT arm a city running worker
+formulas yet.
+
+Parity gate: arming REFUSES unless you pass --parity-verified. That flag is your
+attestation that the P3.1 parity gate is green for THIS build. The gate is an
+integration test that cannot run at CLI time, so run it yourself first:
+
+    go test -tags integration -run TestControlFrontierParityAgainstRealBd ./cmd/gc/
+
+and only then re-run with --parity-verified.
+
+Reversal: --disarm removes the marker; new roots mint legacy again immediately.
+Roots already born on the journal leg stay journal — there is no un-migration.
+Their in-flight dispatch HALTS on disarm (the frontier defaults back to legacy):
+set GC_GRAPH_FRONTIER=serve or re-arm to resume, and prefer draining born-journal
+roots before disarming.
+Run "gc migrate graph-journal init" once to opt the city in before arming.
+
+```
+gc migrate graph-journal cutover [flags]
+```
+
+**Example:**
+
+```
+gc migrate graph-journal cutover --parity-verified
+gc migrate graph-journal cutover --disarm
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--disarm` | bool |  | remove the cutover marker (restore legacy minting) |
+| `--parity-verified` | bool |  | attest the P3.1 parity gate is green for this build (required to arm) |
 
 ## gc migrate graph-journal init
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 )
 
@@ -50,13 +49,11 @@ func parseGraphFrontierMode(raw string) graphFrontierMode {
 	}
 }
 
-// graphFrontierMode reads GC_GRAPH_FRONTIER once and returns the parsed mode.
-// It is read per serve tick (cheap: one os.Getenv + a switch) so an operator can
-// flip the mode without restarting the dispatcher, matching the reversibility the
-// P2 design requires.
-func currentGraphFrontierMode() graphFrontierMode {
-	return parseGraphFrontierMode(os.Getenv(graphFrontierModeEnvVar))
-}
+// The city-aware resolver graphFrontierModeForCity (graph_cutover.go) is the
+// single production entry point: it folds the GC_GRAPH_FRONTIER env kill switch
+// (parsed here) together with the P3.3 cutover marker's serve default. The env is
+// still read per serve tick so an operator can flip the mode without restarting
+// the dispatcher, matching the reversibility the P2 design requires.
 
 // String renders the mode for trace lines.
 func (m graphFrontierMode) String() string {

@@ -131,6 +131,7 @@ Run "gc migrate graph-journal init" once to opt the city in.`,
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a JSON summary")
 	cmd.Flags().BoolVar(&forceRecover, "force-recover", false, "reclaim a root left in the migrating state by a crashed migration (epoch-guarded discard + revert, then re-attempt)")
 	cmd.AddCommand(newMigrateGraphJournalInitCmd(stdout, stderr))
+	cmd.AddCommand(newMigrateGraphJournalCutoverCmd(stdout, stderr))
 	return cmd
 }
 
@@ -152,6 +153,98 @@ Idempotent — safe to run repeatedly.`,
 			return nil
 		},
 	}
+}
+
+// --- cutover arm -----------------------------------------------------------
+
+func newMigrateGraphJournalCutoverCmd(stdout, stderr io.Writer) *cobra.Command {
+	var (
+		parityVerified bool
+		disarm         bool
+	)
+	cmd := &cobra.Command{
+		Use:   "cutover",
+		Short: "Arm (or disarm) the generational cutover marker",
+		Long: `Arm the generational cutover for this city.
+
+Arming writes <city>/.gc/graph/cutover. Its presence flips two behaviors, with
+zero data movement (generational, not a copy):
+
+  - NEW graph roots are born journal-resident (minted on the journal leg), while
+    every root that already exists stays exactly where it is.
+  - The control-dispatcher frontier defaults to serve for journal-resident roots.
+    GC_GRAPH_FRONTIER still overrides as the kill switch: an explicit "legacy"
+    forces legacy even while armed.
+
+Arming is control-plane-only: a born-journal root's CONTROL steps drain, but its
+WORKER steps are invisible to workers until P4 — do NOT arm a city running worker
+formulas yet.
+
+Parity gate: arming REFUSES unless you pass --parity-verified. That flag is your
+attestation that the P3.1 parity gate is green for THIS build. The gate is an
+integration test that cannot run at CLI time, so run it yourself first:
+
+    go test -tags integration -run TestControlFrontierParityAgainstRealBd ./cmd/gc/
+
+and only then re-run with --parity-verified.
+
+Reversal: --disarm removes the marker; new roots mint legacy again immediately.
+Roots already born on the journal leg stay journal — there is no un-migration.
+Their in-flight dispatch HALTS on disarm (the frontier defaults back to legacy):
+set GC_GRAPH_FRONTIER=serve or re-arm to resume, and prefer draining born-journal
+roots before disarming.
+Run "gc migrate graph-journal init" once to opt the city in before arming.`,
+		Example: `  gc migrate graph-journal cutover --parity-verified
+  gc migrate graph-journal cutover --disarm`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if doMigrateGraphJournalCutover(disarm, parityVerified, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&parityVerified, "parity-verified", false, "attest the P3.1 parity gate is green for this build (required to arm)")
+	cmd.Flags().BoolVar(&disarm, "disarm", false, "remove the cutover marker (restore legacy minting)")
+	return cmd
+}
+
+func doMigrateGraphJournalCutover(disarm, parityVerified bool, stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc migrate graph-journal cutover: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return runMigrateGraphJournalCutover(cityPath, disarm, parityVerified, stdout, stderr)
+}
+
+// runMigrateGraphJournalCutover is the resolveCity-free core so tests can drive a
+// temp city directly. It enforces the parity gate on the arm path (refuse without
+// --parity-verified) and treats --disarm as an always-safe reversal.
+func runMigrateGraphJournalCutover(cityPath string, disarm, parityVerified bool, stdout, stderr io.Writer) int {
+	if disarm {
+		if parityVerified {
+			fmt.Fprintln(stderr, "gc migrate graph-journal cutover: --disarm and --parity-verified are mutually exclusive") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := migrateGraphJournalDisarmCutover(cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc migrate graph-journal cutover: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stdout, "graph-journal cutover disarmed at %s; new roots mint legacy again (already-born-journal roots stay journal)\n", graphScopeRoot(cityPath))                                                                                     //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, "warning: already-born-journal roots stay journal-resident but their in-flight dispatch HALTS (the frontier defaults back to legacy); set GC_GRAPH_FRONTIER=serve or re-arm to resume, and prefer draining before disarming") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	if !parityVerified {
+		fmt.Fprintln(stderr, cutoverParityRefusalMessage) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := migrateGraphJournalArmCutover(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc migrate graph-journal cutover: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "graph-journal cutover armed at %s; new roots are born journal-resident and the control frontier defaults to serve\n", graphScopeRoot(cityPath)) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // --- init arm --------------------------------------------------------------

@@ -230,6 +230,33 @@ func TestNewRemoteCityScopedClient_TLSAndHeaders(t *testing.T) {
 	})
 }
 
+// The core no-fallback property (gate G1): every error a LOCAL client would
+// fall back on is non-fallbackable for a REMOTE client, so a remote read/write
+// error is surfaced instead of silently rerouted to a local store. The guard is
+// on the client, not the error type, so one representative error proves it for
+// all types (the check returns before any errors.As inspection).
+func TestRemoteClientNeverFallsBack(t *testing.T) {
+	remote := &Client{isRemote: true}
+	conn := &connError{err: errors.New("connection refused")}
+
+	if ShouldFallback(remote, conn) {
+		t.Error("remote client must not fall back (ShouldFallback)")
+	}
+	if ShouldFallbackForRead(remote, conn) {
+		t.Error("remote client must not fall back (ShouldFallbackForRead)")
+	}
+	if got := FallbackReason(remote, conn); got != "remote" {
+		t.Errorf("FallbackReason = %q, want remote", got)
+	}
+	// Sanity: a nil (local) client still falls back on the very same error.
+	if !ShouldFallback(nil, conn) {
+		t.Error("nil/local client should still fall back on a conn error")
+	}
+	if !ShouldFallbackForRead(nil, conn) {
+		t.Error("nil/local client should still fall back for reads on a conn error")
+	}
+}
+
 // A cross-host redirect must be refused end-to-end (the second host never
 // receives the request, so a bearer cannot leak to it).
 func TestRemoteClient_RefusesCrossHostRedirect(t *testing.T) {

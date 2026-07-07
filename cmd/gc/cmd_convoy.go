@@ -345,18 +345,18 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut b
 				logRoute(stderr, cmdName, "api", "")
 				return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr)
 			}
-			if !api.ShouldFallbackForRead(progErr) {
+			if !api.ShouldFallbackForRead(c, progErr) {
 				logRoute(stderr, cmdName, "api", "error")
 				fmt.Fprintf(stderr, "gc convoy list: %v\n", progErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
-		case !api.ShouldFallbackForRead(err):
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, progErr))
+		case !api.ShouldFallbackForRead(c, err):
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		default:
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 		}
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
@@ -891,12 +891,12 @@ func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason strin
 			logRoute(stderr, cmdName, "api", "")
 			return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}

@@ -321,6 +321,14 @@ func openEventsScope(apiURLOverride string, stderr io.Writer) (eventsAPIScope, i
 }
 
 func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
+	// --api is an alias of --city-url: both name a remote terminus and share the
+	// flag tier, so combining them (or --api with --context) is a loud conflict
+	// rather than a silent shadow (gate G3, Decision 4). A remote target set
+	// WITHOUT --api is instead refused by the capability gate below, when
+	// resolveDashboardContext -> resolveCity resolves it.
+	if strings.TrimSpace(apiURLOverride) != "" && remoteFlagPresent() {
+		return eventsAPIScope{}, fmt.Errorf("cannot combine --api with --city-url/--context: both select a remote city; use one")
+	}
 	if override := strings.TrimSpace(apiURLOverride); override != "" {
 		localSupervisorAPI := matchesLocalSupervisorAPI(override)
 		// Try local city context for display (soft fail — no-city and remote-

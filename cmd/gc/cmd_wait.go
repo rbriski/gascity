@@ -350,12 +350,12 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 			logRoute(stderr, cmdName, "api", "")
 			return renderWaitListFromAPI(cityPath, cr, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -477,12 +477,12 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 			logRoute(stderr, cmdName, "api", "")
 			return renderWaitInspectFromAPI(cityPath, cr, waitID, jsonOutput, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}

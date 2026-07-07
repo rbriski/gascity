@@ -197,8 +197,19 @@ func IsServerError(err error) bool {
 // should fall back to direct bd. Read-path commands tolerate generic 5xx
 // server errors (IsServerError) in addition to the cases ShouldFallback
 // already covers.
-func ShouldFallbackForRead(err error) bool {
-	if ShouldFallback(err) {
+//
+// c is the client that produced err (nil-safe). Any error from a REMOTE client
+// is non-fallbackable regardless of type: a remote read has no local store to
+// fall back to, and silently reading a local store instead would be the exact
+// hazard the remote-city design exists to prevent (gate G1). errors.As unwraps
+// transport wrappers, so the remoteness of the error cannot be recovered from
+// err alone — it must come from the client. Pass the client you called; pass
+// nil for a pure error-classification check (treated as local).
+func ShouldFallbackForRead(c *Client, err error) bool {
+	if c.IsRemote() {
+		return false
+	}
+	if ShouldFallback(c, err) {
 		return true
 	}
 	return IsServerError(err)
@@ -209,8 +220,12 @@ func ShouldFallbackForRead(err error) bool {
 // failures (connection refused, timeout), read-only API rejections (server
 // bound to non-localhost, mutations disabled), client-init failures
 // (malformed base URL), and cache-not-live 503 responses during supervisor
-// priming.
-func ShouldFallback(err error) bool {
+// priming. Always false for a REMOTE client (gate G1); see ShouldFallbackForRead
+// for why the client, not the error, carries remoteness. c is nil-safe.
+func ShouldFallback(c *Client, err error) bool {
+	if c.IsRemote() {
+		return false
+	}
 	if IsConnError(err) {
 		return true
 	}
@@ -227,15 +242,21 @@ func ShouldFallback(err error) bool {
 }
 
 // FallbackReason returns a stable reason code for err when
-// ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
-// "read-only", "client-init", "conn-refused". Generic 5xx server errors
-// collapse to "conn-refused" since from the CLI's read-path perspective an
-// unhealthy server is equivalent to an unreachable one. Non-fallbackable error
-// types such as store_slow are intentionally absent from this set. Returns
-// "unknown" for non-fallbackable errors so callers that invoke FallbackReason
-// unconditionally produce a token instead of panicking; gate on
-// ShouldFallbackForRead first to avoid that sentinel.
-func FallbackReason(err error) string {
+// ShouldFallbackForRead(c, err) is true. The set is closed: "remote",
+// "cache-not-live", "read-only", "client-init", "conn-refused". A REMOTE client
+// yields "remote" — reported for observability, never used to pick a local path
+// (the caller gates on ShouldFallbackForRead first, which returns false for
+// remote, so a remote error is surfaced, not fallen back). Generic 5xx server
+// errors collapse to "conn-refused" since from the CLI's read-path perspective
+// an unhealthy server is equivalent to an unreachable one. Non-fallbackable
+// error types such as store_slow are intentionally absent from this set.
+// Returns "unknown" for non-fallbackable errors so callers that invoke
+// FallbackReason unconditionally produce a token instead of panicking; gate on
+// ShouldFallbackForRead first to avoid that sentinel. c is nil-safe.
+func FallbackReason(c *Client, err error) string {
+	if c.IsRemote() {
+		return "remote"
+	}
 	var cnl *cacheNotLiveError
 	if errors.As(err, &cnl) {
 		return "cache-not-live"

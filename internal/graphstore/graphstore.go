@@ -190,9 +190,22 @@ func mapSQLiteBusy(err error) error {
 // CityID returns the store's chain-genesis city id.
 func (s *Store) CityID() string { return s.cityID }
 
-// DB exposes the write handle for tests and sibling engine packages within
-// internal/graphstore. It is not part of any public contract.
+// DB exposes the single-connection write handle for tests and sibling engine
+// packages within internal/graphstore. internal/beads' JournalStore is now a
+// production dependent: it writes and mints through DB() but MUST route every
+// read through ReadDB(). A façade read issued on the write pool from inside a
+// write Tx would try to check out a second connection from a pool capped at one,
+// self-deadlocking on the city's only write connection. Not part of any public
+// contract.
 func (s *Store) DB() *sql.DB { return s.writeDB }
+
+// ReadDB exposes the pooled WAL read handle. It serves snapshot-consistent reads
+// concurrently with an in-flight write without contending for the single write
+// connection, so JournalStore routes all façade reads (Get/List/Ready/DepList/
+// Ping/Count/hydration) through it. A read here observes the last committed
+// state — reads inside a live write Tx therefore see the pre-commit snapshot,
+// matching the in-tree read-committed contract. Not part of any public contract.
+func (s *Store) ReadDB() *sql.DB { return s.readDB }
 
 // Close closes both underlying database handles.
 func (s *Store) Close() error {

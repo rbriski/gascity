@@ -293,6 +293,54 @@ func TestApplyDeltaErrorLeavesGateClosed(t *testing.T) {
 	}
 }
 
+// TestUpsertNodeRefusesFacadeOwnedCollision proves H2: a fold delta whose node id
+// collides with a façade-minted (fold_owned=0) row is refused loudly with
+// ErrProjectionIDCollision, and the façade row is left untouched — never silently
+// rewritten fold_owned=1 and write-closed under the beads.Store's feet.
+func TestUpsertNodeRefusesFacadeOwnedCollision(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed a façade-minted (fold_owned=0) row directly. Such rows are freely
+	// writable, so no write gate is needed to plant it.
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO nodes (id, title, status, created_at, fold_owned, stream_id)
+		 VALUES ('gcg-j7', 'facade bead', 'open', '2020-01-01T00:00:00Z', 0, '')`); err != nil {
+		t.Fatalf("seed facade row: %v", err)
+	}
+
+	// A fold delta that upserts the same id must be refused, not adopt the row.
+	delta := fold.Delta{NodeUpserts: []fold.NodeRow{{
+		ID: "gcg-j7", Title: "fold clobber", Status: "open", BeadType: "task",
+		CreatedAt: "2021-01-01T00:00:00Z", StorageTier: "history", StreamID: "gcg-root",
+	}}}
+	tx, err := s.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	applyErr := ApplyDelta(ctx, tx, delta)
+	if !errors.Is(applyErr, ErrProjectionIDCollision) {
+		_ = tx.Rollback()
+		t.Fatalf("ApplyDelta over a façade-owned row = %v, want ErrProjectionIDCollision", applyErr)
+	}
+	// Commit despite the error: upsertNode refuses before writing, so nothing in
+	// the delta persists and the row must survive intact. Committing (rather than
+	// rolling back) makes the untouched assertion non-vacuous.
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var title string
+	var owned int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT title, fold_owned FROM nodes WHERE id = 'gcg-j7'`).Scan(&title, &owned); err != nil {
+		t.Fatalf("read facade row: %v", err)
+	}
+	if title != "facade bead" || owned != 0 {
+		t.Fatalf("facade row = (title=%q, fold_owned=%d), want (\"facade bead\", 0) — fold delta leaked through", title, owned)
+	}
+}
+
 func frontierNodeIDs(t *testing.T, s *Store, streamID string) []string {
 	t.Helper()
 	rows, err := s.DB().QueryContext(context.Background(),

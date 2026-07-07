@@ -10,6 +10,13 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
+// ErrProjectionIDCollision reports that a fold delta tried to upsert a node whose
+// id already names a façade-minted (fold_owned=0) row. The fold path owns
+// fold_owned=1 rows only; adopting a façade row would silently rewrite it
+// fold_owned=1 and write-close the beads.Store's own bead, so the applier refuses
+// loudly instead (I-14).
+var ErrProjectionIDCollision = errors.New("fold node id collides with a façade-owned (fold_owned=0) row")
+
 // ApplyDelta writes one fold Delta to the Tier-A projection tables inside tx,
 // stamping every node row fold_owned=1 (I-14). It runs in the caller's write
 // transaction so the projection lands atomically with the journal append
@@ -243,6 +250,19 @@ func applyDeltaLocked(ctx context.Context, tx *sql.Tx, d fold.Delta) error {
 // metadata child sets. An empty metadata value clears the key (it is simply not
 // re-inserted), matching the node_metadata empty-clear contract.
 func upsertNode(ctx context.Context, tx *sql.Tx, n fold.NodeRow) error {
+	// A fold delta must never adopt a façade-minted (fold_owned=0) row. The
+	// ON CONFLICT(id) upsert below would otherwise rewrite it fold_owned=1 and
+	// write-close it, silently corrupting the beads.Store's own bead. Refuse
+	// loudly; an existing fold_owned=1 row upserts normally (idempotent refold).
+	var existingFoldOwned int
+	switch err := tx.QueryRowContext(ctx, `SELECT fold_owned FROM nodes WHERE id = ?`, n.ID).Scan(&existingFoldOwned); {
+	case errors.Is(err, sql.ErrNoRows):
+		// No existing row: a fresh fold insert.
+	case err != nil:
+		return fmt.Errorf("checking existing node %q: %w", n.ID, err)
+	case existingFoldOwned == 0:
+		return fmt.Errorf("node %q: %w", n.ID, ErrProjectionIDCollision)
+	}
 	tier := n.StorageTier
 	if tier == "" {
 		tier = "history"

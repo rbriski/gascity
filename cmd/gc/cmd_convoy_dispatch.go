@@ -388,7 +388,14 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				}
 				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
 			}
-			return nil, fmt.Errorf("rig %q not found in city config", name)
+			// A rig entry can be removed from city.toml while its workflows are
+			// still in flight. A hard error here would fall into the cmd-layer
+			// quarantine catch-all and terminally close the finalizer, stranding
+			// the workflow root AND the domain parent open forever with no retry
+			// handle. Classify as pending instead: the finalizer stays open,
+			// gc.last_finalize_error records the reason, and the chain heals the
+			// moment the rig is restored via `gc rig add`. Fail-loud-not-terminal.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}

@@ -4651,6 +4651,90 @@ func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 	}
 }
 
+// TestFinalize_RigRemovedFromConfig_RetriesNotQuarantines pins landmine #11: a
+// workflow-finalize whose source lives in a rig that has since been removed from
+// city.toml must keep the finalizer OPEN for retry (the rig can be re-added),
+// not terminally quarantine it. A quarantine would strand the workflow root and
+// the domain parent open forever with no retry handle.
+func TestFinalize_RigRemovedFromConfig_RetriesNotQuarantines(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   "ga-rig-parent",
+			"gc.source_store_ref": "rig:ghostrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{Title: "step", Type: "task", Metadata: map[string]string{"gc.outcome": "pass"}})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	finalizer, err := store.Create(beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create finalizer: %v", err)
+	}
+	if err := store.DepAdd(finalizer.ID, step.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(finalizer->step): %v", err)
+	}
+	if err := store.DepAdd(workflow.ID, finalizer.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(workflow->finalizer): %v", err)
+	}
+
+	// The rig the source lives in has been removed: cfg.Rigs is empty.
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	var stderr bytes.Buffer
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, finalizer, finalizer.ID, cfg, io.Discard, &stderr)
+	if err == nil {
+		t.Fatal("runControlDispatcherWithStoreAndConfig error = nil; want a retryable ErrControlPending (finalizer must not quarantine)")
+	}
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("error = %v, want errors.Is(err, dispatch.ErrControlPending)", err)
+	}
+
+	after, err := store.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open (retryable)", after.Status)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
+	}
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want no gc:control-quarantined", after.Labels)
+	}
+	if got := after.Metadata[beadmeta.LastFinalizeErrorMetadataKey]; !strings.Contains(got, `rig "ghostrig" not found`) {
+		t.Fatalf("gc.last_finalize_error = %q, want the rig-not-found reason recorded", got)
+	}
+	if root, err := store.Get(workflow.ID); err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	} else if root.Status != "open" {
+		t.Fatalf("workflow root status = %q, want open (retry can still complete the finalize)", root.Status)
+	}
+	if got := stderr.String(); strings.Contains(got, "control dispatch: quarantined bead="+finalizer.ID) {
+		t.Fatalf("stderr = %q, want NO quarantine message", got)
+	}
+}
+
 func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

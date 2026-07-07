@@ -282,6 +282,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newVersionCmd(stdout, stderr),
 		newDashboardCmd(stdout, stderr),
 		newGraphCmd(stdout, stderr),
+		newReadyCmd(stdout, stderr),
 		newRegisterCmd(stdout, stderr),
 		newUnregisterCmd(stdout, stderr),
 		newCitiesCmd(stdout, stderr),

@@ -58,29 +58,41 @@ Status: `broken-on-split` (open) · `fixed-on-deployed-branch` (proven port) ·
    the infra store (`cmd/gc/split_city_claim.go`). Test:
    `TestSplitCity_HookClaimFindsInfraStepBead` (integration, managed Dolt).
 
-### P1 — DAG-complete parent lifecycle + link integrity
-3. **Empty/mis-stamped `gc.source_store_ref` → silent `deleted_parent` no-op →
-   domain parent stranded open forever** — `internal/dispatch/runtime.go:850`;
-   writer `internal/sling/sling_core.go:658`, `cmd/gc/cmd_sling.go:1213`,
-   `cmd/gc/cmd_convoy_dispatch.go:239`.
-4. **`cook --attach` cross-store dep edge is fail-open** —
-   `cmd/gc/cmd_formula.go:915`. Parent shows READY mid-DAG (double-execute);
-   on `OutcomeFail` permanently blocked by an edge whose infra target can never
-   close in the work store. E3-migrated cities worse (FK `ON DELETE CASCADE`
-   drops work→infra blocking edges at migration).
-5. **Parent PROGRESS update does not exist anywhere** —
-   `internal/dispatch/runtime.go:1077`. Must be **built** (deployed branch is
-   close-only too). No progress key in `beadmeta`/`dispatch`/`sourceworkflow`;
-   `copyNonGCMetadata` strips all `gc.*` so even `failure_reason` never reaches
-   the parent.
-6. **`routes.jsonl` asymmetry** — `cmd/gc/rig_beads.go:95` (`collectRigRoutes`
-   HQ+rigs only, never infra); infra routes written only by `gc migrate
-   infra-store`. Fresh two-store-by-default cities have **no** infra routes →
-   no domain store resolves `gcg-` ids. Root-cause multiplier.
-7. **Drain convoy membership** — `internal/dispatch/drain.go:211`.
-   `ProcessOptions.MemberStores` set by no production caller; input convoy +
-   `tracks` edges created in the **work** store while drain reads the **graph**
-   store → fail-*closed* kills the workflow.
+### P1 — DAG-complete parent lifecycle + link integrity — ALL FIXED (this branch)
+3. **Cross-store source close silently stranded the domain parent** —
+   `closeSourceBeadChain`/`walkSourceBeadChain` (`internal/dispatch/runtime.go`)
+   returned nil when a cross-store `gc.source_store_ref` had no resolver.
+   **FIXED (`5b03f0686`):** the close (mutate) path fails loud (finalizer stays
+   open for retry); the read-only preflight keeps its no-op. Test:
+   `TestProcessWorkflowFinalizeFailsLoudWhenCrossStoreRefUnresolvable`.
+4. **`cook --attach` cross-store dep edge was fail-open** — `cmd/gc/cmd_formula.go`
+   wired a `blocks` edge on the work-store parent to a `gcg-` infra root; bd
+   stores it non-blocking → parent READY mid-DAG. **FIXED (`32bb…`, landmine #4
+   commit):** cross-store attach stamps `gc.attached_workflow_root` linkage
+   (fail-loud on absent root) and the composite `claimableStore.Ready` enforces
+   it (parent blocked until the root closes). Same-store keeps the local edge.
+   Tests: `TestClaimableReady_AttachParentBlockedWhileInfraRootOpen`,
+   `TestEnsureFormulaCookAttachDep_CrossStoreStampsLinkageNotDanglingEdge`.
+5. **Parent PROGRESS/failure propagation did not exist** — a failed DAG gave the
+   domain parent no cross-store signal. **FIXED (`69634ef7a`):** a failed
+   finalize stamps `gc.failure_reason/class/subject` on the domain parent
+   (`resolveFinalizeFailureDiagnostics` + `annotateSourceBeadFailure`), leaving
+   it open/redispatchable; fail-loud on a cross-store ref with no resolver. Test:
+   `TestProcessWorkflowFinalizeStampsFailureOnOpenDomainParent`. Mid-DAG progress
+   + the pass-path `gc.*` allowlist remain follow-ons.
+6. **`routes.jsonl` asymmetry** — `collectRigRoutes` emitted HQ+rigs only.
+   **FIXED (`917a2c1e6`):** `collectRigRoutes` adds the infra scope on a split
+   city (bidirectional via `writeAllRoutes`); rigless split cities write routes
+   at start; migrate is bidirectional; the API same-rig route fallback is
+   tightened so a `gcg` route falls through to the class arm. Tests:
+   `TestCollectRigRoutes_IncludesInfraScopeOnSplitCity`,
+   `TestBeadStoresForIDClassArmWinsOverGcgRouteInRig`.
+7. **Drain convoy membership** — drain read membership from the wrong store and
+   MemberStores was unset. **FIXED (`302fe258c`):** read membership from the
+   convoy's owning store, thread `MemberStores` into the unit-convoy tracks
+   write, wire `MemberStores` in the production drain caller, fail loud on an
+   invisible convoy. Tests: `TestDrain_CrossStoreConvoyMembership`,
+   `TestDrain_WorkStoreConvoyWithoutMemberStoresFailsLoud`.
 
 ### P1.5 — sling routes v1 molecules to the wrong store (found by manual testing)
 17. **v1 (plain) formula sling stranded work-class beads in the infra store** —
@@ -151,8 +163,12 @@ Fast-unit: `TestWalkSourceBeadChain_MissingRef_IsErrorNotSilentNoop` (3),
    (fail-on-split-first, then green). Commits `13626f769` (#1),
    `63235fe0a`/`2ed2fc961` (#2a/#2b), `3cc26e376` (gc ready passthrough),
    `4d99a00cc` (#2c).
-2. **P1** — `source_store_ref` no-op→error (3), routes.jsonl bidirectionality
-   (6), then BUILD progress + dep-unblocking (4, 5), drain membership (7).
+2. **P1 — DONE (this branch).** All five fixed: source_store_ref no-op→loud
+   error (3), routes.jsonl bidirectionality (6), cook --attach cross-store
+   linkage + composite enforcement (4), parent failure-marker propagation (5),
+   drain cross-store membership (7). Each TDD'd with fast-unit coverage; the
+   real-bd repros (parent READY mid-DAG, drain over managed Dolt) remain as E2E
+   anchors on the standing integration suite.
 3. **P2/P3** — the remaining reads/links, each a "route this read through the
    composite / the right store" change with its fast-unit guard.
 4. Land `TestSplitCity_EndToEndFormulaLifecycle` as the standing regression that

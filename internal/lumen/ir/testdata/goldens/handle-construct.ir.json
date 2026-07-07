@@ -1,0 +1,120 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+      "line": 2,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "settle",
+      "id": "h",
+      "name": "h",
+      "after": [],
+      "binder": "expr",
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+        "line": 3,
+        "col": 0
+      },
+      "outcome": "pass",
+      "value": {
+        "kind": "handleConstruct",
+        "typeName": "Bead",
+        "id": {
+          "kind": "literal",
+          "value": "bead-7"
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+          "line": 3,
+          "col": 10
+        }
+      }
+    },
+    {
+      "kind": "settle",
+      "id": "id",
+      "name": "id",
+      "after": [
+        "h"
+      ],
+      "binder": "expr",
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+        "line": 4,
+        "col": 0
+      },
+      "outcome": "pass",
+      "value": {
+        "kind": "member",
+        "base": {
+          "kind": "ref",
+          "name": "h",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+            "line": 4,
+            "col": 11
+          }
+        },
+        "name": "id"
+      }
+    },
+    {
+      "kind": "settle",
+      "id": "settle_3",
+      "after": [
+        "id"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+        "line": 5,
+        "col": 0
+      },
+      "outcome": "pass",
+      "value": {
+        "kind": "ref",
+        "name": "id",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+          "line": 5,
+          "col": 11
+        }
+      },
+      "publicOutcome": true
+    }
+  ],
+  "typeAliases": [
+    {
+      "name": "Bead",
+      "type": {
+        "kind": "handle",
+        "name": "Bead",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+          "line": 0,
+          "col": 5
+        }
+      },
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+        "line": 0,
+        "col": 5
+      }
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/handle-construct.formula",
+    "line": 2,
+    "col": 0
+  }
+}

@@ -1,0 +1,133 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "reviews",
+      "name": "reviews",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+        "line": 1,
+        "col": 0
+      },
+      "form": "members",
+      "members": [
+        {
+          "kind": "do",
+          "id": "gpt",
+          "name": "gpt",
+          "after": [],
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+            "line": 2,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+              "line": 2,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Review the diff.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Review the diff."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+              "line": 2,
+              "col": 0
+            }
+          }
+        },
+        {
+          "kind": "do",
+          "id": "claude",
+          "name": "claude",
+          "after": [],
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+            "line": 3,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+              "line": 3,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Review the diff.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Review the diff."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+              "line": 3,
+              "col": 0
+            }
+          }
+        }
+      ],
+      "on_fail": "continue"
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/scatter-members.formula",
+    "line": 0,
+    "col": 0
+  }
+}

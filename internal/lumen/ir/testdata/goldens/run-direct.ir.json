@@ -1,0 +1,87 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "lit",
+      "id": "msg",
+      "name": "msg",
+      "after": [],
+      "binder": "expr",
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+        "line": 1,
+        "col": 0
+      },
+      "type": {
+        "kind": "atomic",
+        "name": "string",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "value": "hello world"
+    },
+    {
+      "kind": "run",
+      "id": "run_2",
+      "after": [
+        "msg"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+        "line": 2,
+        "col": 0
+      },
+      "target": {
+        "kind": "by-name",
+        "name": "echo"
+      },
+      "environment": {
+        "fields": [
+          {
+            "name": "text",
+            "value": {
+              "kind": "expr",
+              "expr": {
+                "kind": "ref",
+                "name": "msg",
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+                  "line": 2,
+                  "col": 42
+                }
+              }
+            },
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+              "line": 2,
+              "col": 0
+            }
+          }
+        ]
+      },
+      "outcome": "transparent"
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/run-direct.formula",
+    "line": 0,
+    "col": 0
+  }
+}

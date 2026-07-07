@@ -1,0 +1,90 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "run",
+      "id": "out",
+      "name": "out",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+        "line": 1,
+        "col": 0
+      },
+      "target": {
+        "kind": "by-name",
+        "name": "child"
+      },
+      "environment": {
+        "fields": [
+          {
+            "name": "x",
+            "value": {
+              "kind": "expr",
+              "expr": {
+                "kind": "literal",
+                "value": 7
+              }
+            },
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+              "line": 1,
+              "col": 0
+            }
+          }
+        ]
+      },
+      "runInput": {
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+          "line": 1,
+          "col": 0
+        },
+        "detached": true
+      },
+      "outcome": "handle"
+    },
+    {
+      "kind": "settle",
+      "id": "settle_2",
+      "after": [
+        "out"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+        "line": 2,
+        "col": 0
+      },
+      "outcome": "pass",
+      "value": {
+        "kind": "ref",
+        "name": "out",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+          "line": 2,
+          "col": 11
+        }
+      },
+      "publicOutcome": true
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/run-detached.formula",
+    "line": 0,
+    "col": 0
+  }
+}

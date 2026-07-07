@@ -1,0 +1,196 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "recover",
+      "id": "recover_1",
+      "name": "charge",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+        "line": 2,
+        "col": 0
+      },
+      "guarded": {
+        "kind": "settle",
+        "id": "charge",
+        "name": "charge",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+          "line": 1,
+          "col": 0
+        },
+        "outcome": "failed",
+        "reason": "the card was declined",
+        "publicOutcome": true
+      },
+      "body": {
+        "kind": "do",
+        "id": "refund",
+        "name": "refund",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+          "line": 2,
+          "col": 14
+        },
+        "source": {
+          "kind": "prompt"
+        },
+        "interpreter": {
+          "kind": "agent",
+          "mode": {
+            "kind": "do"
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+            "line": 2,
+            "col": 14
+          }
+        },
+        "body": {
+          "raw": "Reverse anything from {{ error.reason }}.",
+          "template": {
+            "parts": [
+              {
+                "kind": "text",
+                "value": "Reverse anything from "
+              },
+              {
+                "kind": "interp",
+                "expr": {
+                  "kind": "member",
+                  "base": {
+                    "kind": "ref",
+                    "name": "error",
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+                      "line": 2,
+                      "col": 14
+                    }
+                  },
+                  "name": "reason"
+                },
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+                  "line": 2,
+                  "col": 14
+                }
+              },
+              {
+                "kind": "text",
+                "value": "."
+              }
+            ]
+          },
+          "source": {
+            "kind": "inline"
+          },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+            "line": 2,
+            "col": 14
+          }
+        }
+      },
+      "errorBinding": "error"
+    },
+    {
+      "kind": "cleanup",
+      "id": "cleanup_2",
+      "name": "work",
+      "after": [
+        "recover_1"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+        "line": 4,
+        "col": 0
+      },
+      "guarded": {
+        "kind": "do",
+        "id": "work",
+        "name": "work",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+          "line": 3,
+          "col": 0
+        },
+        "source": {
+          "kind": "prompt"
+        },
+        "interpreter": {
+          "kind": "agent",
+          "mode": {
+            "kind": "do"
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+            "line": 3,
+            "col": 0
+          }
+        },
+        "body": {
+          "raw": "Hold the lock and do the thing.",
+          "template": {
+            "parts": [
+              {
+                "kind": "text",
+                "value": "Hold the lock and do the thing."
+              }
+            ]
+          },
+          "source": {
+            "kind": "inline"
+          },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+            "line": 3,
+            "col": 0
+          }
+        }
+      },
+      "body": {
+        "kind": "settle",
+        "id": "unlock",
+        "name": "unlock",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+          "line": 4,
+          "col": 14
+        },
+        "outcome": "failed",
+        "reason": "could not release the lock",
+        "publicOutcome": true
+      }
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/recover-cleanup.formula",
+    "line": 0,
+    "col": 0
+  }
+}

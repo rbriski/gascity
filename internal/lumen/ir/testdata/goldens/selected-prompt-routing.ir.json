@@ -1,0 +1,121 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "lit",
+      "id": "msg",
+      "name": "msg",
+      "after": [],
+      "binder": "expr",
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+        "line": 1,
+        "col": 0
+      },
+      "type": {
+        "kind": "atomic",
+        "name": "string",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "value": "hello"
+    },
+    {
+      "kind": "do",
+      "id": "greet",
+      "name": "greet",
+      "after": [
+        "msg"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+        "line": 2,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "agent": {
+          "kind": "ref",
+          "name": "assistant",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+            "line": 2,
+            "col": 0
+          }
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+          "line": 2,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Hello {{ msg }}",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Hello "
+            },
+            {
+              "kind": "interp",
+              "expr": {
+                "kind": "ref",
+                "name": "msg",
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+                  "line": 2,
+                  "col": 31
+                }
+              },
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+                "line": 2,
+                "col": 31
+              }
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "quoted",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+          "line": 2,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/selected-prompt-routing.formula",
+    "line": 0,
+    "col": 0
+  }
+}

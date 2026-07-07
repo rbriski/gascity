@@ -1,0 +1,92 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.4",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "async-run-phantom",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "async",
+      "id": "h",
+      "name": "h",
+      "after": [],
+      "origin": {
+        "uri": "async-run-phantom",
+        "line": 1,
+        "col": 0
+      },
+      "body": {
+        "kind": "run",
+        "id": "run_101",
+        "after": [],
+        "origin": {
+          "uri": "async-run-phantom",
+          "line": 1,
+          "col": 0
+        },
+        "target": {
+          "kind": "by-name",
+          "name": "echo"
+        },
+        "environment": {
+          "fields": [
+            {
+              "name": "text",
+              "value": {
+                "kind": "expr",
+                "expr": {
+                  "kind": "literal",
+                  "value": "hi"
+                }
+              },
+              "origin": {
+                "uri": "async-run-phantom",
+                "line": 1,
+                "col": 0
+              }
+            }
+          ]
+        },
+        "outcome": "transparent",
+        "phantomField": "should-be-rejected"
+      }
+    },
+    {
+      "kind": "await",
+      "id": "done",
+      "name": "done",
+      "after": [
+        "h"
+      ],
+      "origin": {
+        "uri": "async-run-phantom",
+        "line": 2,
+        "col": 0
+      },
+      "target": {
+        "kind": "ref",
+        "name": "h",
+        "origin": {
+          "uri": "async-run-phantom",
+          "line": 2,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "async-run-phantom",
+    "line": 0,
+    "col": 0
+  }
+}

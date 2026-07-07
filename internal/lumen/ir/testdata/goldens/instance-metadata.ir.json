@@ -1,0 +1,157 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "do",
+      "id": "greeting",
+      "name": "greeting",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+        "line": 5,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+          "line": 5,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "say hi",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "say hi"
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "quoted",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+          "line": 5,
+          "col": 0
+        }
+      },
+      "metadata": {
+        "title": "greet the user",
+        "description": "emits a friendly greeting",
+        "owner": [
+          "donna",
+          "helen"
+        ]
+      }
+    },
+    {
+      "kind": "exec",
+      "id": "build",
+      "name": "build",
+      "after": [
+        "greeting"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+        "line": 7,
+        "col": 0
+      },
+      "interpreter": {
+        "kind": "shell",
+        "program": {
+          "kind": "exec"
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+          "line": 7,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "make",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "make"
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "bash",
+        "syntax": "quoted",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+          "line": 7,
+          "col": 0
+        }
+      },
+      "exitMap": {
+        "pass": [
+          0
+        ],
+        "retryable": []
+      },
+      "metadata": {
+        "title": "build the project"
+      }
+    },
+    {
+      "kind": "settle",
+      "id": "settle_3",
+      "after": [
+        "build"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+        "line": 8,
+        "col": 0
+      },
+      "outcome": "pass",
+      "value": {
+        "kind": "ref",
+        "name": "greeting",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+          "line": 8,
+          "col": 11
+        }
+      },
+      "publicOutcome": true
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/instance-metadata.formula",
+    "line": 0,
+    "col": 0
+  }
+}

@@ -1,0 +1,232 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "lit",
+      "id": "amount",
+      "name": "amount",
+      "after": [],
+      "binder": "expr",
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+        "line": 1,
+        "col": 0
+      },
+      "type": {
+        "kind": "atomic",
+        "name": "number",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "value": 64
+    },
+    {
+      "kind": "interp",
+      "id": "label",
+      "name": "label",
+      "after": [
+        "amount"
+      ],
+      "binder": "raw",
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+        "line": 2,
+        "col": 0
+      },
+      "type": {
+        "kind": "atomic",
+        "name": "string",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+          "line": 2,
+          "col": 0
+        }
+      },
+      "parts": [
+        {
+          "kind": "text",
+          "value": "release "
+        },
+        {
+          "kind": "interp",
+          "expr": {
+            "kind": "ref",
+            "name": "amount",
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+              "line": 2,
+              "col": 13
+            }
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+            "line": 2,
+            "col": 13
+          }
+        }
+      ]
+    },
+    {
+      "kind": "do",
+      "id": "summarize",
+      "name": "summarize",
+      "after": [
+        "label"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+        "line": 3,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+          "line": 3,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Summarize {{ label }}.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Summarize "
+            },
+            {
+              "kind": "interp",
+              "expr": {
+                "kind": "ref",
+                "name": "label",
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+                  "line": 3,
+                  "col": 20
+                }
+              },
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+                "line": 3,
+                "col": 20
+              }
+            },
+            {
+              "kind": "text",
+              "value": "."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+          "line": 3,
+          "col": 0
+        }
+      }
+    },
+    {
+      "kind": "do",
+      "id": "publish",
+      "name": "publish",
+      "after": [
+        "summarize"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+        "line": 4,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+          "line": 4,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Publish after {{ summarize }}.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Publish after "
+            },
+            {
+              "kind": "interp",
+              "expr": {
+                "kind": "ref",
+                "name": "summarize",
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+                  "line": 4,
+                  "col": 18
+                }
+              },
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+                "line": 4,
+                "col": 18
+              }
+            },
+            {
+              "kind": "text",
+              "value": "."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+          "line": 4,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/linear-do-after.formula",
+    "line": 0,
+    "col": 0
+  }
+}

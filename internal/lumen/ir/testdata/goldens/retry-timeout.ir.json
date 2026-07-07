@@ -1,0 +1,99 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "retry",
+      "id": "retry_1",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+        "line": 1,
+        "col": 0
+      },
+      "attempts": {
+        "kind": "literal",
+        "value": 3
+      },
+      "body": {
+        "kind": "timeout",
+        "id": "timeout_101",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+          "line": 1,
+          "col": 12
+        },
+        "duration": {
+          "kind": "literal",
+          "value": "30s"
+        },
+        "body": {
+          "kind": "do",
+          "id": "fetch",
+          "name": "fetch",
+          "after": [],
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+            "line": 1,
+            "col": 26
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+              "line": 1,
+              "col": 26
+            }
+          },
+          "body": {
+            "raw": "Fetch the data.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Fetch the data."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+              "line": 1,
+              "col": 26
+            }
+          }
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/retry-timeout.formula",
+    "line": 0,
+    "col": 0
+  }
+}

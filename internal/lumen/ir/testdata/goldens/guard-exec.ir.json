@@ -1,0 +1,153 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "exec",
+      "id": "deploy",
+      "name": "deploy",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+        "line": 1,
+        "col": 0
+      },
+      "interpreter": {
+        "kind": "shell",
+        "program": {
+          "kind": "exec"
+        },
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "exit 1",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "exit 1"
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "bash",
+        "syntax": "bare",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "exitMap": {
+        "pass": [
+          0
+        ],
+        "retryable": []
+      }
+    },
+    {
+      "kind": "guard",
+      "id": "page",
+      "name": "page",
+      "after": [
+        "deploy"
+      ],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+        "line": 2,
+        "col": 18
+      },
+      "cond": {
+        "kind": "operator",
+        "op": "==",
+        "operands": [
+          {
+            "kind": "ref",
+            "name": "deploy",
+            "field": "outcome",
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+              "line": 2,
+              "col": 18
+            }
+          },
+          {
+            "kind": "literal",
+            "value": "failed"
+          }
+        ]
+      },
+      "then": {
+        "kind": "do",
+        "id": "page.then",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+          "line": 2,
+          "col": 0
+        },
+        "source": {
+          "kind": "prompt"
+        },
+        "interpreter": {
+          "kind": "agent",
+          "mode": {
+            "kind": "do"
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+            "line": 2,
+            "col": 0
+          }
+        },
+        "body": {
+          "raw": "Page the on-call engineer.",
+          "template": {
+            "parts": [
+              {
+                "kind": "text",
+                "value": "Page the on-call engineer."
+              }
+            ]
+          },
+          "source": {
+            "kind": "inline"
+          },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+            "line": 2,
+            "col": 0
+          }
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/guard-exec.formula",
+    "line": 0,
+    "col": 0
+  }
+}

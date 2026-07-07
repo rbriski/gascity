@@ -1,0 +1,96 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "recover",
+      "id": "recover_1",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+        "line": 4,
+        "col": 3
+      },
+      "guarded": {
+        "kind": "block",
+        "id": "block_101",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+          "line": 1,
+          "col": 0
+        },
+        "members": [
+          {
+            "kind": "settle",
+            "id": "a",
+            "name": "a",
+            "after": [],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+              "line": 2,
+              "col": 0
+            },
+            "outcome": "pass",
+            "value": {
+              "kind": "literal",
+              "value": "1"
+            },
+            "publicOutcome": true
+          },
+          {
+            "kind": "settle",
+            "id": "b",
+            "name": "b",
+            "after": [
+              "a"
+            ],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+              "line": 3,
+              "col": 0
+            },
+            "outcome": "failed",
+            "reason": "kaboom",
+            "publicOutcome": true
+          }
+        ]
+      },
+      "body": {
+        "kind": "settle",
+        "id": "settle_102",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+          "line": 5,
+          "col": 0
+        },
+        "outcome": "pass",
+        "value": {
+          "kind": "literal",
+          "value": "saved"
+        },
+        "publicOutcome": true
+      },
+      "errorBinding": "error"
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/block-statement.formula",
+    "line": 0,
+    "col": 0
+  }
+}

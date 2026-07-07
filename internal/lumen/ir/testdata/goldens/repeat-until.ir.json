@@ -1,0 +1,101 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "repeat",
+      "id": "repeat_1",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+        "line": 1,
+        "col": 0
+      },
+      "body": {
+        "kind": "do",
+        "id": "draft",
+        "name": "draft",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+          "line": 1,
+          "col": 9
+        },
+        "source": {
+          "kind": "prompt"
+        },
+        "interpreter": {
+          "kind": "agent",
+          "mode": {
+            "kind": "do"
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+            "line": 1,
+            "col": 9
+          }
+        },
+        "body": {
+          "raw": "Draft the summary.",
+          "template": {
+            "parts": [
+              {
+                "kind": "text",
+                "value": "Draft the summary."
+              }
+            ]
+          },
+          "source": {
+            "kind": "inline"
+          },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+            "line": 1,
+            "col": 9
+          }
+        }
+      },
+      "cond": {
+        "kind": "operator",
+        "op": ">=",
+        "operands": [
+          {
+            "kind": "ref",
+            "name": "iteration",
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+              "line": 1,
+              "col": 48
+            }
+          },
+          {
+            "kind": "literal",
+            "value": 1
+          }
+        ]
+      },
+      "iterationName": "iteration"
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/repeat-until.formula",
+    "line": 0,
+    "col": 0
+  }
+}

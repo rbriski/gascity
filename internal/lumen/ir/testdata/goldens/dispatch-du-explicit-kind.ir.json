@@ -1,0 +1,427 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [
+      {
+        "name": "shape",
+        "type": {
+          "kind": "union",
+          "of": [
+            {
+              "kind": "record",
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": {
+                    "kind": "literal",
+                    "value": "circle",
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                      "line": 1,
+                      "col": 15
+                    }
+                  },
+                  "required": true,
+                  "body": false,
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 9
+                  }
+                },
+                {
+                  "name": "radius",
+                  "type": {
+                    "kind": "atomic",
+                    "name": "number",
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                      "line": 1,
+                      "col": 17
+                    }
+                  },
+                  "required": true,
+                  "body": false,
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 9
+                  }
+                }
+              ],
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                "line": 1,
+                "col": 9
+              }
+            },
+            {
+              "kind": "record",
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": {
+                    "kind": "literal",
+                    "value": "square",
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                      "line": 1,
+                      "col": 15
+                    }
+                  },
+                  "required": true,
+                  "body": false,
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 9
+                  }
+                },
+                {
+                  "name": "side",
+                  "type": {
+                    "kind": "atomic",
+                    "name": "number",
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                      "line": 1,
+                      "col": 15
+                    }
+                  },
+                  "required": true,
+                  "body": false,
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 9
+                  }
+                }
+              ],
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                "line": 1,
+                "col": 9
+              }
+            }
+          ],
+          "discriminant": "kind",
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+            "line": 1,
+            "col": 9
+          }
+        },
+        "required": true,
+        "body": false,
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+          "line": 1,
+          "col": 2
+        }
+      }
+    ],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "dispatch",
+      "id": "dispatch_1",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+        "line": 3,
+        "col": 0
+      },
+      "subject": {
+        "kind": "ref",
+        "name": "shape",
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+          "line": 3,
+          "col": 11
+        }
+      },
+      "discriminant": "kind",
+      "exhaustive": true,
+      "arms": [
+        {
+          "match": {
+            "kind": "variant",
+            "tag": "circle"
+          },
+          "body": {
+            "kind": "do",
+            "id": "c",
+            "name": "c",
+            "after": [],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+              "line": 4,
+              "col": 14
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                "line": 4,
+                "col": 14
+              }
+            },
+            "body": {
+              "raw": "A circle of radius {{ shape.radius }}.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "A circle of radius "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "member",
+                      "base": {
+                        "kind": "ref",
+                        "name": "shape",
+                        "origin": {
+                          "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                          "line": 4,
+                          "col": 14
+                        }
+                      },
+                      "name": "radius"
+                    },
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                      "line": 4,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": "."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                "line": 4,
+                "col": 14
+              }
+            }
+          },
+          "narrowsTo": {
+            "kind": "record",
+            "fields": [
+              {
+                "name": "kind",
+                "type": {
+                  "kind": "literal",
+                  "value": "circle",
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 15
+                  }
+                },
+                "required": true,
+                "body": false,
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                  "line": 1,
+                  "col": 9
+                }
+              },
+              {
+                "name": "radius",
+                "type": {
+                  "kind": "atomic",
+                  "name": "number",
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 17
+                  }
+                },
+                "required": true,
+                "body": false,
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                  "line": 1,
+                  "col": 9
+                }
+              }
+            ],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+              "line": 1,
+              "col": 9
+            }
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+            "line": 4,
+            "col": 0
+          }
+        },
+        {
+          "match": {
+            "kind": "variant",
+            "tag": "square"
+          },
+          "body": {
+            "kind": "do",
+            "id": "s",
+            "name": "s",
+            "after": [],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+              "line": 5,
+              "col": 14
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                "line": 5,
+                "col": 14
+              }
+            },
+            "body": {
+              "raw": "A square of side {{ shape.side }}.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "A square of side "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "member",
+                      "base": {
+                        "kind": "ref",
+                        "name": "shape",
+                        "origin": {
+                          "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                          "line": 5,
+                          "col": 14
+                        }
+                      },
+                      "name": "side"
+                    },
+                    "origin": {
+                      "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                      "line": 5,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": "."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                "line": 5,
+                "col": 14
+              }
+            }
+          },
+          "narrowsTo": {
+            "kind": "record",
+            "fields": [
+              {
+                "name": "kind",
+                "type": {
+                  "kind": "literal",
+                  "value": "square",
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 15
+                  }
+                },
+                "required": true,
+                "body": false,
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                  "line": 1,
+                  "col": 9
+                }
+              },
+              {
+                "name": "side",
+                "type": {
+                  "kind": "atomic",
+                  "name": "number",
+                  "origin": {
+                    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                    "line": 1,
+                    "col": 15
+                  }
+                },
+                "required": true,
+                "body": false,
+                "origin": {
+                  "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+                  "line": 1,
+                  "col": 9
+                }
+              }
+            ],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+              "line": 1,
+              "col": 9
+            }
+          },
+          "origin": {
+            "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+            "line": 5,
+            "col": 0
+          }
+        }
+      ]
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/dispatch-du-explicit-kind.formula",
+    "line": 0,
+    "col": 0
+  }
+}

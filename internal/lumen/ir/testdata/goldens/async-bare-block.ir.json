@@ -1,0 +1,94 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "async",
+      "id": "job",
+      "after": [],
+      "origin": {
+        "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+        "line": 1,
+        "col": 0
+      },
+      "body": {
+        "kind": "block",
+        "id": "block_101",
+        "after": [],
+        "origin": {
+          "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+          "line": 1,
+          "col": 0
+        },
+        "members": [
+          {
+            "kind": "do",
+            "id": "greet",
+            "name": "greet",
+            "after": [],
+            "origin": {
+              "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+              "line": 2,
+              "col": 0
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+                "line": 2,
+                "col": 0
+              }
+            },
+            "body": {
+              "raw": "Say hello.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "Say hello."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+                "line": 2,
+                "col": 0
+              }
+            }
+          }
+        ]
+      },
+      "name": "job"
+    }
+  ],
+  "origin": {
+    "uri": "conformance/goldens/lumen-v0-ir/async-bare-block.formula",
+    "line": 0,
+    "col": 0
+  }
+}

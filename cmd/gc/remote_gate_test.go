@@ -43,8 +43,10 @@ func TestResolveContext_RemoteGatedByDefault(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not support a remote city") {
 		t.Errorf("gate error = %q", err.Error())
 	}
-	if remoteReadsEnabled {
-		t.Fatalf("remoteReadsEnabled must be false during Slice 0 build-out")
+	// resolveContextAllowRemote, by contrast, returns the target (no gate).
+	raw, rerr := resolveContextAllowRemote()
+	if rerr != nil || raw.Remote == nil {
+		t.Fatalf("resolveContextAllowRemote must return the remote target: %+v err=%v", raw, rerr)
 	}
 }
 

@@ -108,15 +108,6 @@ func readRemoteSelection() remoteSelection {
 	}
 }
 
-// remoteReadsEnabled gates whether a resolved remote target is actually usable.
-// It stays false through Slice 0 Phases 1-3: the contexts CLI, resolver, flags,
-// and transport are built, but NO command operates a remote city until the
-// compiler-enforced no-fallback plane (gate G1) is in place — otherwise a
-// remote read error would silently fall back to a local store, the exact hazard
-// this design exists to prevent. Phase 4 flips this on together with the read
-// set and a command-aware capability table.
-var remoteReadsEnabled = false
-
 // remoteFlagPresent reports whether an explicit remote FLAG (--city-url or
 // --context) is set. Only a remote flag shares the flag tier with a positional
 // city argument, so this — not the presence of a lower-precedence remote env —
@@ -137,9 +128,10 @@ func resolveStickyDefaultTarget() (*remoteTarget, bool, error) {
 	return resolveStickyDefault(file)
 }
 
-// errRemoteNotSupportedYet is the capability-gate error returned while
-// remoteReadsEnabled is false: a remote target resolved, but no command may
-// operate it yet.
+// errRemoteNotSupportedYet is the capability-gate error: a remote target
+// resolved, but this command only operates a local city. Remote-capable READ
+// commands route through resolveContextAllowRemote + resolveReadRoute instead
+// and never reach this gate.
 func errRemoteNotSupportedYet() error {
 	return fmt.Errorf("this command does not support a remote city (--city-url/--context) yet; remote support is being enabled incrementally")
 }

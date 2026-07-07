@@ -135,6 +135,7 @@ After Slice 0: **checkpoint** and get sign-off before Slice 1 (the capstone: ful
 
 ## 6. Pointers
 
+- **NEXT SLICE:** `engdocs/plans/remote-gc-control-plane/PHASE-2-HANDOFF.md` — Group C (server-side `rig add --git-url` provisioning, G12–G23). Start there for the next session.
 - Design contract: `engdocs/plans/remote-gc-control-plane/DESIGN-BRIEF.md` (v2).
 - Design workflows (for reference/resume, not needed to continue): `.claude/wf-remote-gc-design.js`, `.claude/wf-remote-gc-council.js`.
 - Key seams (all cited with line numbers in brief §2): `cmd/gc/apiroute.go` (`apiClient`), `internal/api/client.go` (`newClient`, `ShouldFallback`, `waitForEvent`), `cmd/gc/main.go` (`resolveContext:463`, flags:233), `cmd/gc/cmd_events.go` (`eventsAPIScope.client:131`, `streamCityEventsOnce`), `internal/api/writeauth.go` + `internal/citywriteauth/` (verify-only grant plane), `internal/supervisor/registry.go:363-387` (atomic-write template), `cmd/gc/cmd_register.go` (the `gc context` UX model).

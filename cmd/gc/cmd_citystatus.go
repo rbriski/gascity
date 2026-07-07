@@ -402,6 +402,19 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 	// ga-cdmx6x). scopedStoreLike answers (nil, nil) for non-bd-CLI
 	// backends, which have no subprocess to leak — those keep reading
 	// through store directly, unchanged.
+	//
+	// SPLIT CAVEAT (must fix in cmd/gc/scoped_store.go before enabling the
+	// domain/infra split): scopedStoreLike is CLASS-BLIND — it unwraps to the
+	// backing *beads.BdStore and rebuilds a scoped clone from cityPath / the
+	// backing Dir(), never re-consulting resolveClassStore. Today that is
+	// byte-identical (cliSessionStore is identity, so store's backing Dir() ==
+	// cityPath). Once [beads.classes.sessions] relocates to a bd-CLI-backed
+	// store, this clone would silently re-point the session read at the WORK
+	// store, defeating the cliSessionStore seam above (the DI guard cannot catch
+	// it — the cliSessionStore( needle is still present). scopedStoreLike must be
+	// made class-preserving (clone what it unwrapped, or refuse to unwrap a
+	// relocated store so this keeps reading through the routed store) as part of
+	// the split, where a real infra store makes the fix testable.
 	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
 	defer cancel()
 	readStore := store

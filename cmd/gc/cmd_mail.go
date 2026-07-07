@@ -1151,9 +1151,16 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, store
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
 	if store != nil && cfg != nil {
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
+		// Route the session-ID resolve and the mailbox-identity bead read through
+		// the session coordination-class store so a [beads.classes.sessions]
+		// relocation reaches mail target resolution. Identity at the default
+		// backend. (Mirrors cmd_nudge's sessStore routing; the sibling resolvers
+		// resolveMailTargetsCached / resolveMailIdentityWithConfigCached carry the
+		// same pre-existing gap and are swept on the mail DI pass.)
+		sessStore := cliSessionStore(store, cfg, cityPath)
+		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
 		if err == nil {
-			b, err := store.Get(sessionID)
+			b, err := sessStore.Get(sessionID)
 			if err != nil {
 				return resolvedMailTarget{}, err
 			}

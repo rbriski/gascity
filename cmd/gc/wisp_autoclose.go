@@ -47,12 +47,22 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 
+	// cfg is loaded best-effort and quietly (io.Discard) for the graph-store
+	// route. A nil cfg (load failure or legacy city) leaves cliGraphStore an
+	// identity over the owning store, so the autoclose stays byte-identical to
+	// the pre-split single-store behavior. This is a bd on_close hook path, so a
+	// builtin-pack refresh is deliberately skipped.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+
 	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
-	// wisps instead of silently no-op'ing (#3411).
+	// wisps instead of silently no-op'ing (#3411). The just-closed work bead is
+	// read from its owning store, but its attached molecule/workflow roots live
+	// in the graph-class store, so pass cliGraphStore as the graph-store route —
+	// exactly the controller precedent at api_state.go runBeadCloseAutoclose.
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doWispAutocloseWith(store, beadID, stdout)
+		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, cfg, cityPath))
 		return
 	}
 
@@ -60,7 +70,7 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout)
+	doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, cfg, cityPath))
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and

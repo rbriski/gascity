@@ -428,3 +428,40 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 		}
 	}
 }
+
+// graphRelocationRoutedFiles are the E1.2-tail CLI roots that route their
+// GRAPH-class access (molecule/wisp autoclose graph walk, control-dispatch
+// processing + discovery, workflow-delete membership scan, formula cook/version
+// creates+reads) through cliGraphStore(store, cfg, cityPath) → resolveGraphStore,
+// so a split city (or a future [beads.classes.graph] relocation) reaches them.
+var graphRelocationRoutedFiles = []string{
+	"molecule_autoclose.go",
+	"wisp_autoclose.go",
+	"cmd_convoy_dispatch.go",
+	"cmd_formula.go",
+}
+
+// TestGraphRelocationRootsRouteThroughGraphClassStore pins the E1.2-tail graph
+// routing: each listed CLI root must reach its graph-class store through
+// cliGraphStore, never a raw store, so the graph op lands in the infra store on a
+// split city and stays byte-identical (identity) on a legacy single-store city.
+// It is a positive-tripwire regression canary — a substring guard cannot prove
+// every graph read/create was routed, but it catches the routing being silently
+// dropped from a root. Mirrors TestSessionRelocationRootsRouteThroughSessionClassStore.
+func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	for _, name := range graphRelocationRoutedFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		if !strings.Contains(string(data), "cliGraphStore(") {
+			t.Errorf("%s is listed as graph-relocation-routed but never calls cliGraphStore( — did the E1.2-tail graph routing get dropped?", name)
+		}
+	}
+}

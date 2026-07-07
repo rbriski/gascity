@@ -654,6 +654,18 @@ conflicting live workflow from the same source is an error.`,
 				}
 				if isGraphFormula {
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+					// The molecule explosion `gc formula cook --attach` creates —
+					// root-conflict scans (ListLiveRoots / existing-root / failed-root
+					// / input-convoy-root lookups), the recipe route decoration, and
+					// molecule.Instantiate — are graph-class operations, so route them
+					// through the graph-class store: on a split city the molecule root
+					// and steps land in the infra store; on a legacy single-store city
+					// cliGraphStore is identity over the formula-scope store, so this is
+					// byte-identical. The source WORK bead read (Get(attach)) and the
+					// attach dependency (ensureFormulaCookAttachDep wires a `blocks` dep
+					// ON the source bead) stay on the raw work-scope store — they are
+					// work-class, mirroring the E2.3 sling split.
+					graphStore := cliGraphStore(store, cfg, cityPath)
 					var result *molecule.Result
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
@@ -670,17 +682,17 @@ conflicting live workflow from the same source is an error.`,
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, graphStore, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
 							unlock := graphv2.LockKey(graphRootKey)
 							defer unlock()
 						}
-						if err := closeFormulaCookFailedGraphV2Roots(store, recipe); err != nil {
+						if err := closeFormulaCookFailedGraphV2Roots(graphStore, recipe); err != nil {
 							return err
 						}
-						existing, err := existingFormulaCookGraphV2Root(store, recipe)
+						existing, err := existingFormulaCookGraphV2Root(graphStore, recipe)
 						if err != nil {
 							return err
 						}
@@ -688,7 +700,7 @@ conflicting live workflow from the same source is an error.`,
 							result = existing
 							return ensureFormulaCookAttachDep(store, attach, result.RootID)
 						}
-						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
+						if roots, err := formulaCookLiveInputConvoyGraphRoots(graphStore, inv.InputConvoy, graphRootKey); err != nil {
 							return err
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -696,7 +708,7 @@ conflicting live workflow from the same source is an error.`,
 								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
 							}
 						}
-						if roots, err := sourceworkflow.ListLiveRoots(store, attach, storeRef, storeRef); err != nil {
+						if roots, err := sourceworkflow.ListLiveRoots(graphStore, attach, storeRef, storeRef); err != nil {
 							return fmt.Errorf("checking live workflows for %s: %w", attach, err)
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -708,14 +720,14 @@ conflicting live workflow from the same source is an error.`,
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
-						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+						result, err = molecule.Instantiate(cmd.Context(), graphStore, recipe, molecule.Options{
 							Title:            title,
 							Vars:             cookVars,
 							IdempotencyKey:   graphRootKey,
 							PriorityOverride: cloneFormulaCookPriority(source.Priority),
 						})
 						if err != nil {
-							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
+							if cleanupErr := closeFormulaCookFailedGraphV2Roots(graphStore, recipe); cleanupErr != nil {
 								return errors.Join(err, cleanupErr)
 							}
 							return err
@@ -764,6 +776,12 @@ conflicting live workflow from the same source is an error.`,
 					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				}
 
+				// v1 molecule.Attach both creates the sub-DAG (graph-class) and wires
+				// the blocking dependency ON the attach source (work-class) in a single
+				// store, so it cannot be split at this seam without an internal API
+				// change; it stays on the raw formula-scope store. The routed primary
+				// is the graph.v2 attach path above (isGraphFormula). On a legacy
+				// single-store city this is byte-identical either way.
 				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
@@ -805,7 +823,12 @@ conflicting live workflow from the same source is an error.`,
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
+			// The non-attach cook creates a fresh molecule root + steps (graph-class),
+			// so route the creation and the root-metadata stamp that follows through
+			// the graph-class store: infra store on a split city, identity on a legacy
+			// single-store city.
+			cookGraphStore := cliGraphStore(store, cfg, cityPath)
+			result, err := molecule.Cook(cmd.Context(), cookGraphStore, args[0], scope.searchPaths, molecule.Options{
 				Title: title,
 				Vars:  cookVars,
 			})
@@ -818,7 +841,7 @@ conflicting live workflow from the same source is an error.`,
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			if len(rootMeta) > 0 {
-				if err := store.SetMetadataBatch(result.RootID, rootMeta); err != nil {
+				if err := cookGraphStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
 					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
@@ -1146,7 +1169,12 @@ since it was spawned.`,
 				return err
 			}
 
-			bead, err := store.Get(beadID)
+			// The bead read here is a molecule/workflow (graph-class) bead whose
+			// gc.formula_hash is being checked, so route the read through the
+			// graph-class store: on a split city that is the infra store where the
+			// molecule lives; on a legacy city cliGraphStore is identity over the
+			// formula-scope store, byte-identical.
+			bead, err := cliGraphStore(store, cfg, cityPath).Get(beadID)
 			if err != nil {
 				return fmt.Errorf("reading bead %s: %w", beadID, err)
 			}

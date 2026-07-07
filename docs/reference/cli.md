@@ -3381,15 +3381,23 @@ is deleted afterward, so repeated runs of the same formula do not collide on
 the deterministic stream id. Use --db to run against a persistent store and
 --keep to retain the temp store for inspection.
 
+A formula with an agent 'do' step needs an agent command to run it: pass
+--agent-cmd (e.g. --agent-cmd claude --agent-prompt-flag -p). Without it, a do
+step is refused. GC_SESSION=fake selects the fake session provider for tests.
+
 ```
 gc run <lumen-file> [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--agent-cmd` | string |  | agent CLI to run 'do' steps (e.g. claude); enables agent steps |
+| `--agent-prompt-flag` | string |  | CLI flag the rendered prompt rides (e.g. -p) |
+| `--agent-timeout` | duration | `0s` | per 'do' step timeout (default: host default) |
 | `--db` | string |  | path to a persistent graphstore db (default: throwaway temp store) |
 | `--input` | string |  | run input as a JSON object (default: empty) |
 | `--keep` | bool |  | keep the throwaway temp store instead of deleting it |
+| `--session-provider` | string |  | session runtime provider for agent steps (default: GC_SESSION or subprocess) |
 
 ## gc runtime
 

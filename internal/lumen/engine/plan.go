@@ -35,8 +35,11 @@ type step struct {
 	// settle fields.
 	outcome string
 
-	// settle/lit/interp value evaluation; the raw node object, evaluated against
-	// the live scope at run time.
+	// do fields.
+	agentRef string // interpreter.agent name, "" = default
+
+	// settle/lit/interp/do value evaluation; the raw node object, evaluated
+	// against the live scope at run time (do renders body.raw / body.template).
 	raw map[string]json.RawMessage
 }
 
@@ -46,17 +49,21 @@ type step struct {
 // an ErrUnsupportedNode. The result is topologically ordered over each step's
 // `after` edges, with source order breaking ties, so a linear formula executes
 // in dependency order.
-func flatten(nodes []ir.Node) ([]step, error) {
+// flatten lowers the body to executable leaf steps. allowDo reports whether an
+// AgentHost is configured: when false, a `do` node is refused with
+// ErrUnsupportedNode before any effect runs — exactly as the pre-P4.1 skeleton
+// refused it — so a do-formula without a host behaves byte-identically to today.
+func flatten(nodes []ir.Node, allowDo bool) ([]step, error) {
 	var steps []step
 	for i := range nodes {
-		if err := flattenNode(nodes[i], &steps); err != nil {
+		if err := flattenNode(nodes[i], &steps, allowDo); err != nil {
 			return nil, err
 		}
 	}
 	return topoSort(steps)
 }
 
-func flattenNode(n ir.Node, out *[]step) error {
+func flattenNode(n ir.Node, out *[]step, allowDo bool) error {
 	switch n.Kind {
 	case ir.NodeBlock:
 		members, err := childNodes(n.Raw["members"])
@@ -64,7 +71,7 @@ func flattenNode(n ir.Node, out *[]step) error {
 			return fmt.Errorf("lumen: block %q: %w", n.ID, err)
 		}
 		for i := range members {
-			if err := flattenNode(members[i], out); err != nil {
+			if err := flattenNode(members[i], out, allowDo); err != nil {
 				return err
 			}
 		}
@@ -82,9 +89,60 @@ func flattenNode(n ir.Node, out *[]step) error {
 	case ir.NodeLit, ir.NodeInterp:
 		*out = append(*out, step{kind: n.Kind, id: n.ID, after: n.After, raw: n.Raw})
 		return nil
+	case ir.NodeDo:
+		if !allowDo {
+			return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
+		}
+		s, err := decodeDo(n)
+		if err != nil {
+			return err
+		}
+		*out = append(*out, s)
+		return nil
 	default:
 		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
 	}
+}
+
+// decodeDo lifts a do (agent) node into a step: it preserves the raw node so the
+// prompt (body.raw / body.template.parts) renders against the live scope at run
+// time, and extracts the optional interpreter.agent binding name.
+func decodeDo(n ir.Node) (step, error) {
+	s := step{kind: ir.NodeDo, id: n.ID, after: n.After, raw: n.Raw}
+	if raw, ok := n.Raw["interpreter"]; ok {
+		var interp struct {
+			Agent struct {
+				Name string `json:"name"`
+			} `json:"agent"`
+		}
+		if err := json.Unmarshal(raw, &interp); err != nil {
+			return step{}, fmt.Errorf("lumen: do %q interpreter: %w", n.ID, err)
+		}
+		s.agentRef = interp.Agent.Name
+	}
+	return s, nil
+}
+
+// renderPrompt renders a do node's body to the prompt string against scope. It
+// prefers the structured template.parts form (splicing values into prose) and
+// falls back to {{var}} interpolation of body.raw. An absent body is an empty
+// prompt.
+func renderPrompt(raw map[string]json.RawMessage, scope map[string]string) (string, error) {
+	bodyRaw, ok := raw["body"]
+	if !ok {
+		return "", nil
+	}
+	var body struct {
+		Raw      string          `json:"raw"`
+		Template json.RawMessage `json:"template"`
+	}
+	if err := json.Unmarshal(bodyRaw, &body); err != nil {
+		return "", fmt.Errorf("lumen: do body: %w", err)
+	}
+	if len(body.Template) > 0 {
+		return evalInterp(map[string]json.RawMessage{"template": body.Template}, scope)
+	}
+	return interpolate(body.Raw, scope), nil
 }
 
 func childNodes(raw json.RawMessage) ([]ir.Node, error) {

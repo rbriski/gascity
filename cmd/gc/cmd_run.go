@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
+	"github.com/gastownhall/gascity/internal/lumen/enginehost"
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 	"github.com/spf13/cobra"
 )
@@ -19,6 +25,15 @@ import (
 // registered city — `gc run` is deliberately standalone and never resolves one.
 const runDemoCityID = "gc-run-demo"
 
+// runAgentOptions carries the agent-`do` bridge flags for a run. When Command
+// is empty, no agent host is built and a do node is refused (today's behavior).
+type runAgentOptions struct {
+	Command    string        // --agent-cmd, the agent CLI (e.g. "claude")
+	PromptFlag string        // --agent-prompt-flag, the prompt flag (e.g. "-p")
+	Provider   string        // --session-provider override; else GC_SESSION; else subprocess
+	Timeout    time.Duration // --agent-timeout per-do-step bound
+}
+
 // newRunCmd builds the standalone `gc run <lumen-file>` command: the
 // proof-of-concept that executes a compiled Lumen formula on the native
 // graphstore journal substrate. It resolves and opens its own store and never
@@ -27,6 +42,7 @@ func newRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dbPath string
 	var keep bool
 	var inputJSON string
+	var agent runAgentOptions
 	cmd := &cobra.Command{
 		Use:   "run <lumen-file>",
 		Short: "Run a compiled Lumen formula on the graph substrate",
@@ -40,12 +56,16 @@ IR next to it. Compile a .lumen source to IR before running it.
 By default the run writes to a throwaway SQLite store in a temp directory that
 is deleted afterward, so repeated runs of the same formula do not collide on
 the deterministic stream id. Use --db to run against a persistent store and
---keep to retain the temp store for inspection.`,
+--keep to retain the temp store for inspection.
+
+A formula with an agent 'do' step needs an agent command to run it: pass
+--agent-cmd (e.g. --agent-cmd claude --agent-prompt-flag -p). Without it, a do
+step is refused. GC_SESSION=fake selects the fake session provider for tests.`,
 		Args:          cobra.ExactArgs(1),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if doRun(cmd, args[0], dbPath, keep, inputJSON, stdout, stderr) != 0 {
+			if doRun(cmd, args[0], dbPath, keep, inputJSON, agent, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -54,10 +74,52 @@ the deterministic stream id. Use --db to run against a persistent store and
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to a persistent graphstore db (default: throwaway temp store)")
 	cmd.Flags().BoolVar(&keep, "keep", false, "keep the throwaway temp store instead of deleting it")
 	cmd.Flags().StringVar(&inputJSON, "input", "", "run input as a JSON object (default: empty)")
+	cmd.Flags().StringVar(&agent.Command, "agent-cmd", "", "agent CLI to run 'do' steps (e.g. claude); enables agent steps")
+	cmd.Flags().StringVar(&agent.PromptFlag, "agent-prompt-flag", "", "CLI flag the rendered prompt rides (e.g. -p)")
+	cmd.Flags().StringVar(&agent.Provider, "session-provider", "", "session runtime provider for agent steps (default: GC_SESSION or subprocess)")
+	cmd.Flags().DurationVar(&agent.Timeout, "agent-timeout", 0, "per 'do' step timeout (default: host default)")
 	return cmd
 }
 
-func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, stdout, stderr io.Writer) int {
+// buildRunAgentHost constructs the agent host for a do-capable run. It is a
+// package var so tests can inject a deterministic host (e.g. a StubHost) without
+// spawning real sessions. The returned cleanup is always safe to call.
+var buildRunAgentHost = defaultRunAgentHost
+
+// runAgentProviderName resolves the session provider a run will use: the
+// --session-provider flag, else GC_SESSION, else the subprocess default.
+func runAgentProviderName(opts runAgentOptions) string {
+	name := strings.TrimSpace(opts.Provider)
+	if name == "" {
+		name = strings.TrimSpace(os.Getenv("GC_SESSION"))
+	}
+	if name == "" {
+		name = "subprocess"
+	}
+	return name
+}
+
+func defaultRunAgentHost(_ context.Context, opts runAgentOptions) (enginehost.AgentHost, func(), error) {
+	providerName := runAgentProviderName(opts)
+	provider, err := runtimeRegistry.New(providerName, config.SessionConfig{}, "", "")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("resolving session provider %q: %w", providerName, err)
+	}
+	host, err := enginehost.NewWorkerHost(enginehost.WorkerHostConfig{
+		Store:        beads.NewMemStore(),
+		Provider:     provider,
+		ProviderName: providerName,
+		Command:      opts.Command,
+		PromptFlag:   opts.PromptFlag,
+		MaxWait:      opts.Timeout,
+	})
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return host, func() {}, nil
+}
+
+func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, agentOpts runAgentOptions, stdout, stderr io.Writer) int {
 	irPath, err := resolveLumenIRPath(arg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -96,17 +158,59 @@ func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, 
 	}
 	defer store.Close() //nolint:errcheck // best-effort close of throwaway store
 
-	result, err := engine.Run(ctx, store, doc, input)
+	var opts engine.Options
+	if strings.TrimSpace(agentOpts.Command) != "" {
+		host, cleanup, hostErr := buildRunAgentHost(ctx, agentOpts)
+		if hostErr != nil {
+			fmt.Fprintf(stderr, "gc run: %v\n", hostErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer cleanup()
+		opts.Host = host
+	}
+
+	result, err := engine.RunWithOptions(ctx, store, doc, input, opts)
 	if err != nil {
+		if opts.Host == nil && errors.Is(err, engine.ErrUnsupportedNode) {
+			fmt.Fprintf(stderr, "gc run: %v\n", err)                                                                                                     //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc run: this formula has an agent step; pass --agent-cmd to run it (e.g. --agent-cmd claude --agent-prompt-flag -p)\n") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	printRunResult(stdout, doc, result)
+	if opts.Host != nil {
+		printAgentOutcomeCaveat(stderr, agentOpts, result)
+	}
 	if result.Outcome == engine.OutcomeFailed {
 		return 1
 	}
 	return 0
+}
+
+// printAgentOutcomeCaveat warns the demo user, when a run actually executed an
+// agent `do` step, that the do-step outcome came from the phase-based worker
+// boundary (any process exit ⇒ pass) so the agent must self-report gc.outcome
+// for a true pass/fail, and — under the default non-capturing subprocess
+// provider — that no output was captured for {{ref}} chaining. It prints
+// nothing for exec-only runs (no do step ran).
+func printAgentOutcomeCaveat(stderr io.Writer, agentOpts runAgentOptions, result engine.RunResult) {
+	ranDoStep := false
+	for _, ev := range result.Events {
+		if ev.Type == engine.EventEffectScheduled {
+			ranDoStep = true
+			break
+		}
+	}
+	if !ranDoStep {
+		return
+	}
+	fmt.Fprintln(stderr, "gc run: note: agent outcome is phase-based (process exit ⇒ pass); the agent must self-report gc.outcome for true pass/fail.") //nolint:errcheck // best-effort stderr
+	if runAgentProviderName(agentOpts) == "subprocess" {
+		fmt.Fprintln(stderr, "gc run: note: the subprocess provider captures no agent output, so {{ref}} chaining from a do step sees an empty value.") //nolint:errcheck // best-effort stderr
+	}
 }
 
 // resolveLumenIRPath resolves the compiled IR document to load from a user

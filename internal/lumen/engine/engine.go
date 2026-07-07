@@ -14,6 +14,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/graphstore/canon"
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
+	"github.com/gastownhall/gascity/internal/lumen/enginehost"
 	"github.com/gastownhall/gascity/internal/lumen/exechost"
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
@@ -57,13 +59,33 @@ func RegisterVocabulary(store *graphstore.Store) {
 	}
 }
 
-// Run executes doc as a linear formula against store, threading input into
-// {{var}} interpolation, and returns the run's outcome, per-step outputs, and
-// the committed journal. It is the single writer for the run's stream: it
-// acquires the writer lease, appends run.started, executes each flattened step
-// (folding a node.settled event and advancing the projection after each), then
-// appends run.closed with the aggregated outcome.
+// Options tune a run. The zero value (nil Host) reproduces the pre-P4.1 linear
+// skeleton exactly: a do node is refused with ErrUnsupportedNode and no effect
+// events are emitted.
+type Options struct {
+	// Host runs agent `do` steps. Nil refuses do nodes (byte-identical to the
+	// exec-only skeleton).
+	Host enginehost.AgentHost
+}
+
+// Run executes doc as a linear formula with no agent host — the exec-only path.
+// It is a thin wrapper over RunWithOptions with the zero Options, preserving the
+// original signature and behavior byte-for-byte for existing callers and goldens.
 func Run(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[string]any) (RunResult, error) {
+	return RunWithOptions(ctx, store, doc, input, Options{})
+}
+
+// RunWithOptions executes doc as a linear formula against store, threading input
+// into {{var}} interpolation, and returns the run's outcome, per-step outputs,
+// and the committed journal. It is the single writer for the run's stream: it
+// acquires the writer lease, appends run.started, executes each flattened step
+// (folding a node.settled event — and, for a do step, an effect.scheduled/settled
+// pair — and advancing the projection after each), then appends run.closed with
+// the aggregated outcome.
+//
+// When opts.Host is set, a do step runs through the host (agent session);
+// otherwise a do node is refused before any effect runs.
+func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[string]any, opts Options) (RunResult, error) {
 	if store == nil {
 		return RunResult{}, fmt.Errorf("lumen: nil store")
 	}
@@ -71,12 +93,12 @@ func Run(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[str
 		return RunResult{}, fmt.Errorf("lumen: nil IR document")
 	}
 
-	steps, err := flatten(doc.Nodes)
+	steps, err := flatten(doc.Nodes, opts.Host != nil)
 	if err != nil {
 		return RunResult{}, err
 	}
 
-	streamID := streamIDFor(doc.Name)
+	streamID := streamIDForRun(doc.Name, opts.Host != nil)
 	irVersion := doc.Contract.Version
 	RegisterVocabulary(store)
 
@@ -95,6 +117,7 @@ func Run(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[str
 		epoch:    lease.Epoch,
 		reducer:  reducer,
 		state:    reducer.Zero(streamID),
+		host:     opts.Host,
 	}
 
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -182,6 +205,7 @@ type driver struct {
 	reducer  lumenReducer
 	state    fold.State
 	head     uint64
+	host     enginehost.AgentHost
 }
 
 // append canonicalizes payload, commits it to the journal at head+1, folds the
@@ -283,8 +307,105 @@ func (d *driver) execStep(s step, scope map[string]string, _ map[string]string) 
 		}
 		return OutcomePass, value, false, nil
 
+	case ir.NodeDo:
+		return d.execDo(s, scope)
+
 	default:
 		return "", "", false, fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, s.kind, s.id)
+	}
+}
+
+// execDo runs one agent `do` step through the configured host under the
+// memoized-effect discipline (the at_most_once contract documented on
+// EventEffectScheduled in reducer.go): it appends effect.scheduled BEFORE
+// acting, calls host.RunDo (the only side-effecting line), then appends
+// effect.settled pairing the observed result — so a crash between the two
+// resumes to a failed settlement rather than silently re-acting. It returns the
+// step outcome, the captured output (for downstream {{ref}} interpolation), and
+// emit=true so the caller appends node.settled. A nil host is impossible here
+// (flatten refuses do without one), but is guarded defensively with the same
+// typed refusal.
+func (d *driver) execDo(s step, scope map[string]string) (outcome, output string, emit bool, err error) {
+	if d.host == nil {
+		return "", "", false, fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, s.kind, s.id)
+	}
+
+	prompt, err := renderPrompt(s.raw, scope)
+	if err != nil {
+		return "", "", false, fmt.Errorf("lumen: do %q prompt: %w", s.id, err)
+	}
+
+	activation := s.id + ":0"
+	effectIdem := d.streamID + ":" + s.id + ":do:1"
+
+	// Hash the CANONICAL effect spec (prompt + agent_ref), not the prompt alone,
+	// so a memoized-effect identity check (P4.3) detects an agent-binding change:
+	// the same prompt bound to a different interpreter.agent is a different
+	// effect and must not resume against the earlier settlement.
+	spec := effectSpec{Prompt: prompt, AgentRef: s.agentRef}
+	specBytes, err := canonPayload(spec)
+	if err != nil {
+		return "", "", false, fmt.Errorf("lumen: do %q spec hash: %w", s.id, err)
+	}
+	specHash := sha256.Sum256(specBytes)
+
+	if err := d.append(EventEffectScheduled, effectIdem+":sched", effectScheduledPayload{
+		Activation: activation,
+		Effect:     "do",
+		IdemToken:  effectIdem,
+		Policy:     PolicyAtMostOnce,
+		SpecHash:   hex.EncodeToString(specHash[:]),
+		Spec:       spec,
+	}); err != nil {
+		return "", "", false, err
+	}
+
+	result, runErr := d.host.RunDo(d.ctx, enginehost.DoRequest{
+		RunID:      d.streamID,
+		NodeID:     s.id,
+		Activation: activation,
+		IdemToken:  effectIdem,
+		Prompt:     prompt,
+		AgentRef:   s.agentRef,
+	})
+	nodeOutcome, effResult, detail, out, session := foldDoResult(result, runErr)
+
+	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
+		Activation: activation,
+		IdemToken:  effectIdem,
+		Result:     effResult,
+		Output:     out,
+		Session:    session,
+		Detail:     detail,
+	}); err != nil {
+		return "", "", false, err
+	}
+
+	return nodeOutcome, out, true, nil
+}
+
+// foldDoResult maps a host's DoResult (and any internal error) onto the step
+// outcome, the effect.settled result, and the settled fields. An internal host
+// error (result the host could not produce) settles the effect interrupted and
+// the node failed — a scheduled effect always gets a settled record.
+func foldDoResult(result enginehost.DoResult, runErr error) (nodeOutcome, effResult, detail, output, session string) {
+	if runErr != nil {
+		return OutcomeFailed, EffectResultInterrupted, "effect_interrupted: " + runErr.Error(), "", ""
+	}
+	switch result.Outcome {
+	case enginehost.OutcomeFailed:
+		return OutcomeFailed, EffectResultFailed, result.Detail, result.Output, result.SessionRef
+	case enginehost.OutcomeDegraded:
+		// Degraded is a partial SUCCESS: the effect completed and produced a
+		// usable result, so it settles ok even though the node outcome is
+		// degraded (surfaced for downstream / observer judgment, not a failure).
+		return OutcomeDegraded, EffectResultOK, result.Detail, result.Output, result.SessionRef
+	case enginehost.OutcomePass:
+		return OutcomePass, EffectResultOK, result.Detail, result.Output, result.SessionRef
+	default:
+		return OutcomeFailed, EffectResultFailed,
+			fmt.Sprintf("host returned unknown outcome %q", result.Outcome),
+			result.Output, result.SessionRef
 	}
 }
 
@@ -364,4 +485,24 @@ func canonPayload(v any) ([]byte, error) {
 func streamIDFor(name string) string {
 	sum := sha256.Sum256([]byte(name))
 	return "gcg-run-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// streamIDForRun derives the run's stream id. For exec-only runs (no host) it is
+// the pure hash of the formula name — byte-identical to the pre-P4.1 skeleton,
+// so exec-only goldens and stores are unchanged. For agent runs (host != nil) it
+// appends a per-run nonce, closing the documented collision caveat before any
+// persistent --db agent runs exist: two runs of one do-formula no longer contend
+// on a single stream.
+func streamIDForRun(name string, withNonce bool) string {
+	base := streamIDFor(name)
+	if !withNonce {
+		return base
+	}
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure is unrecoverable for a unique-stream guarantee;
+		// fall back to the base id (single-stream, as pre-P4.1).
+		return base
+	}
+	return base + "-" + hex.EncodeToString(b[:])
 }

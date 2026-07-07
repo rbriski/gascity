@@ -26,11 +26,43 @@ const (
 	// EventRunClosed closes the run with the root's aggregated outcome and clears
 	// the frontier.
 	EventRunClosed = "lumen.run.closed"
+	// EventEffectScheduled records that a side-effecting step (an agent `do`) is
+	// about to run: it is appended BEFORE the effect acts, carrying the idem
+	// token, the at-most-once policy, and the effect spec hash. This is the
+	// memoized-effect discipline — a crash between scheduled and settled resumes
+	// to a failed settlement rather than silently re-acting (P4.1 additive).
+	EventEffectScheduled = "lumen.effect.scheduled"
+	// EventEffectSettled pairs with EventEffectScheduled: it records the effect's
+	// observed result (ok/failed/interrupted), captured output, and session ref.
+	EventEffectSettled = "lumen.effect.settled"
 )
 
 // EventTypes is the provisional closed vocabulary in a stable order, for
-// registration against the journal store.
-var EventTypes = []string{EventRunStarted, EventNodeSettled, EventRunClosed}
+// registration against the journal store. The effect pair is additive over the
+// three coarse P1 control events: it appears in a stream only when a do step
+// runs, so an exec-only run's journal is byte-identical to before P4.1.
+var EventTypes = []string{
+	EventRunStarted, EventNodeSettled, EventRunClosed,
+	EventEffectScheduled, EventEffectSettled,
+}
+
+// Effect policy vocabulary. P4.1 emits only at_most_once (a crash between
+// scheduled and settled never silently re-prompts).
+const (
+	// PolicyAtMostOnce settles a crash-interrupted effect as failed rather than
+	// re-acting it.
+	PolicyAtMostOnce = "at_most_once"
+)
+
+// Effect result vocabulary for EventEffectSettled.
+const (
+	// EffectResultOK reports the effect produced a clean outcome.
+	EffectResultOK = "ok"
+	// EffectResultFailed reports the effect produced a non-clean outcome.
+	EffectResultFailed = "failed"
+	// EffectResultInterrupted reports the host could not produce an outcome.
+	EffectResultInterrupted = "interrupted"
+)
 
 // Outcome vocabulary. These mirror the emitted IR / execution-model outcome
 // names; the executor only ever produces pass, failed, degraded, or skipped.
@@ -63,6 +95,32 @@ type nodeSettledPayload struct {
 // runClosedPayload is the body of an EventRunClosed event.
 type runClosedPayload struct {
 	Outcome string `json:"outcome"`
+}
+
+// effectSpec captures the effect's inputs for provenance and hashing.
+type effectSpec struct {
+	Prompt   string `json:"prompt"`
+	AgentRef string `json:"agent_ref,omitempty"`
+}
+
+// effectScheduledPayload is the body of an EventEffectScheduled event.
+type effectScheduledPayload struct {
+	Activation string     `json:"activation"`
+	Effect     string     `json:"effect"`
+	IdemToken  string     `json:"idem_token"`
+	Policy     string     `json:"policy"`
+	SpecHash   string     `json:"spec_hash"`
+	Spec       effectSpec `json:"spec"`
+}
+
+// effectSettledPayload is the body of an EventEffectSettled event.
+type effectSettledPayload struct {
+	Activation string `json:"activation"`
+	IdemToken  string `json:"idem_token"`
+	Result     string `json:"result"`
+	Output     string `json:"output,omitempty"`
+	Session    string `json:"session,omitempty"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 // lumenReducer is the pure, total fold reducer for the linear executor's
@@ -183,6 +241,34 @@ func (lumenReducer) Apply(s fold.State, e fold.Event) (fold.State, fold.Delta, e
 			StreamID:    e.StreamID,
 		}}
 		delta.FrontierDelete = []string{next.RootID}
+
+	case EventEffectScheduled:
+		if next.RootID == "" {
+			return nil, fold.Delta{}, fmt.Errorf("lumen: effect.scheduled at seq %d before run.started", e.Seq)
+		}
+		var p effectScheduledPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			return nil, fold.Delta{}, fmt.Errorf("lumen: effect.scheduled payload at seq %d: %w", e.Seq, err)
+		}
+		if p.IdemToken == "" {
+			return nil, fold.Delta{}, fmt.Errorf("lumen: effect.scheduled at seq %d missing idem_token", e.Seq)
+		}
+		// The effect pair is journal bookkeeping for the memoized-effect
+		// discipline; the settling node's node.settled carries the Tier-A
+		// projection. No projection delta here keeps the node/frontier tables
+		// identical to the pre-effect skeleton.
+
+	case EventEffectSettled:
+		if next.RootID == "" {
+			return nil, fold.Delta{}, fmt.Errorf("lumen: effect.settled at seq %d before run.started", e.Seq)
+		}
+		var p effectSettledPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			return nil, fold.Delta{}, fmt.Errorf("lumen: effect.settled payload at seq %d: %w", e.Seq, err)
+		}
+		if p.IdemToken == "" {
+			return nil, fold.Delta{}, fmt.Errorf("lumen: effect.settled at seq %d missing idem_token", e.Seq)
+		}
 
 	default:
 		return nil, fold.Delta{}, fmt.Errorf("lumen: unknown event type %q at seq %d", e.Type, e.Seq)

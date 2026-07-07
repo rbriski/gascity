@@ -900,7 +900,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// syncSessionBeadsWithSnapshotAndRigStores / reconcileSessionBeadsAtPathWithNamedDemand,
 	// with rigStores as the per-rig WORK tail. That leading store is
 	// agentBuildParams.beadStore (creates/updates session beads) and the
-	// collectAllOpenSessionBeads "city" arm; it also still carries the city-work "city"
+	// collectAllOpenSessionInfos "city" arm; it also still carries the city-work "city"
 	// arm (collectAssignedWorkBeadsWithStores / cold-wake scale-check probes) — a dual
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so

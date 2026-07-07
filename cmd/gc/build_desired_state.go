@@ -505,18 +505,18 @@ func buildDesiredStateWithSessionBeads(
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
 
-	// Collect all open session beads from all stores to correctly count
+	// Collect all open session Infos from all stores to correctly count
 	// running sessions for each pool. A partial/failed collection is logged,
 	// not swallowed: undercounting running sessions can misclassify a pool as
 	// cold and trigger a spurious scale-from-zero probe.
 	subPhaseStart := time.Now()
-	allOpenSessionBeads, openSessionBeadsErr := collectAllOpenSessionBeads(cfg, store, rigStores, suspendedRigPaths)
+	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cfg, store, rigStores, suspendedRigPaths)
 	recordDemandSubPhase(trace, "demand_snapshot.collect_open_session_beads", subPhaseStart, map[string]any{
-		"beads":   len(allOpenSessionBeads),
+		"beads":   len(allOpenSessionInfos),
 		"partial": openSessionBeadsErr != nil,
 	})
 	if openSessionBeadsErr != nil {
-		fmt.Fprintf(stderr, "collectAllOpenSessionBeads: PARTIAL — %v (cold-pool detection may undercount running sessions)\n", openSessionBeadsErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "collectAllOpenSessionInfos: PARTIAL — %v (cold-pool detection may undercount running sessions)\n", openSessionBeadsErr) //nolint:errcheck
 	}
 
 	desired := make(map[string]TemplateParams)
@@ -576,10 +576,10 @@ func buildDesiredStateWithSessionBeads(
 		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
 		template := cfg.Agents[i].QualifiedName()
 		runningSessions := 0
-		for _, sb := range allOpenSessionBeads {
-			if isPoolManagedSessionBead(sb) && poolSessionIsLive(sb) {
+		for _, si := range allOpenSessionInfos {
+			if isPoolManagedSessionInfo(si) && poolSessionIsLiveInfo(si) {
 				// Match the qualified template by identity equivalence.
-				// allOpenSessionBeads is aggregated across the city + every rig
+				// allOpenSessionInfos is aggregated across the city + every rig
 				// store, and pool session beads store the qualified name
 				// (agent.QualifiedName(), see session_sleep.go); adopted beads may
 				// still carry a legacy bound form of the same identity, which must
@@ -588,7 +588,7 @@ func buildDesiredStateWithSessionBeads(
 				// an unqualified base name never normalizes to a dir-scoped agent,
 				// and a same-base-name pool in another rig (e.g. rigB/planner)
 				// normalizes to itself, so neither inflates this rig's count.
-				if agentTemplateIdentitiesEquivalent(cfg, sb.Metadata["template"], template) {
+				if agentTemplateIdentitiesEquivalent(cfg, si.Template, template) {
 					runningSessions++
 				}
 			}
@@ -1046,12 +1046,19 @@ func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string
 	return suspendedRigPaths
 }
 
-func collectAllOpenSessionBeads(
+// collectAllOpenSessionInfos gathers every open session bead across the city
+// and non-suspended rig stores and projects each onto session.Info at the
+// collection edge, so no raw *beads.Bead escapes into the running-session
+// counting loop. Closed beads are dropped (equivalently: projected Info with
+// .Closed true). Partial-result errors still contribute their partial slice and
+// join into the returned error; any hard error is returned with an empty slice
+// for that store.
+func collectAllOpenSessionInfos(
 	cfg *config.City,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-) ([]beads.Bead, error) {
+) ([]session.Info, error) {
 	// Sessions arm of the reconciler frame: iterate the session-class candidate
 	// fan-out (city + non-suspended rigs). CachingStore-wrapped stores are used
 	// when available. On a single-store city this hits the same store the work
@@ -1076,7 +1083,7 @@ func collectAllOpenSessionBeads(
 	}
 	wg.Wait()
 
-	var allBeads []beads.Bead
+	var allInfos []session.Info
 	var errs []error
 	for _, r := range results {
 		if r.err != nil {
@@ -1084,7 +1091,7 @@ func collectAllOpenSessionBeads(
 			if beads.IsPartialResult(r.err) {
 				for _, b := range r.beads {
 					if b.Status != "closed" {
-						allBeads = append(allBeads, b)
+						allInfos = append(allInfos, session.InfoFromPersistedBead(b))
 					}
 				}
 			}
@@ -1092,14 +1099,14 @@ func collectAllOpenSessionBeads(
 		}
 		for _, b := range r.beads {
 			if b.Status != "closed" {
-				allBeads = append(allBeads, b)
+				allInfos = append(allInfos, session.InfoFromPersistedBead(b))
 			}
 		}
 	}
 	if len(errs) > 0 {
-		return allBeads, errors.Join(errs...)
+		return allInfos, errors.Join(errs...)
 	}
-	return allBeads, nil
+	return allInfos, nil
 }
 
 func cloneDesiredState(src map[string]TemplateParams) map[string]TemplateParams {

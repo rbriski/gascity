@@ -687,8 +687,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"isPoolSessionSlotFreeable":       {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
 		"beadOwnsPoolSessionName":         {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
 		"sessionHasProviderTerminalError": {sessionHasProviderTerminalError, sessionHasProviderTerminalErrorInfo},
-		"poolSessionConsumesNewDemand":    {poolSessionConsumesNewDemand, poolSessionConsumesNewDemandInfo},
-		"poolSessionIsLive":               {poolSessionIsLive, poolSessionIsLiveInfo},
 		"isDrainAckStopPending":           {isDrainAckStopPending, isDrainAckStopPendingInfo},
 	}
 

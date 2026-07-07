@@ -30,25 +30,12 @@ func isDrainedSessionInfo(i sessionpkg.Info) bool {
 	return state == "asleep" && strings.TrimSpace(i.SleepReason) == "drained"
 }
 
-// poolSessionIsLive reports whether a pool session bead represents an
-// actively running session for the runningSessions counter in
-// build_desired_state. An asleep or drained bead is not live — it holds
-// no active process and must not suppress the isCold cross-store wake
-// probe.
-func poolSessionIsLive(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["state"]) == "asleep" {
-		return false
-	}
-	if isDrainedSessionBead(session) {
-		return false
-	}
-	return true
-}
-
-// poolSessionIsLiveInfo is the session.Info mirror of poolSessionIsLive. It
-// reads the RAW state metadata (Info.MetadataState) and delegates the
-// drained/asleep-drained check to isDrainedSessionInfo, matching the bead
-// form's untrimmed-key reads.
+// poolSessionIsLiveInfo reports whether a pool session represents an actively
+// running session for the runningSessions counter in build_desired_state. An
+// asleep or drained session is not live — it holds no active process and must
+// not suppress the isCold cross-store wake probe. It reads the RAW state
+// metadata (Info.MetadataState) and delegates the drained/asleep-drained check
+// to isDrainedSessionInfo, matching the untrimmed-key reads the bead carried.
 func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 	if strings.TrimSpace(i.MetadataState) == "asleep" {
 		return false

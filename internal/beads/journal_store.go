@@ -88,6 +88,14 @@ func NewJournalStore(gs *graphstore.Store) *JournalStore {
 // IDPrefix returns the bead ID prefix this store owns, without the trailing "-".
 func (s *JournalStore) IDPrefix() string { return journalIDPrefix }
 
+// CloseStore releases the underlying graphstore handles (both SQLite pools).
+// It implements the close interface closeBeadStoreHandle expects, so a handle
+// that loses the one-shot open race is actually closed instead of leaking its
+// SQLite connections for the life of the process.
+func (s *JournalStore) CloseStore() error {
+	return s.gs.Close()
+}
+
 // AtomicTx reports that Tx rolls the whole callback back on error: it runs in one
 // SQLite transaction.
 func (s *JournalStore) AtomicTx() bool { return true }

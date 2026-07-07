@@ -53,6 +53,34 @@ func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 	}
 }
 
+func TestOpenStoreAtForCityJournalProviderUsesInjectedJournalStore(t *testing.T) {
+	injected := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot: "/city/.gc/graph",
+		Provider:  "journal",
+		// PreflightChecker deliberately nil: the journal case must return from the
+		// leading switch before the bd/native preflight ladder is consulted.
+		OpenJournalStore: func() (Store, error) { return injected, nil },
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("OpenBdStore called for the journal provider")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for the journal provider")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity(journal) error = %v", err)
+	}
+	if result.Store != injected {
+		t.Fatalf("Store = %T, want the injected journal store", result.Store)
+	}
+	if result.Diagnostic.Store != storeNameJournalStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameJournalStore)
+	}
+}
+
 func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"

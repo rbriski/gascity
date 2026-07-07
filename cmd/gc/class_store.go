@@ -98,7 +98,7 @@ func (cs *controllerState) workBeadStores() map[string]beads.WorkStore {
 // Returned as the strongly-typed beads.GraphStore so the graph class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: resolveGraphStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return beads.GraphStore{Store: resolveGraphStore(cr.cityBeadStore(), cr.cityGraphJournalStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
@@ -271,12 +271,19 @@ func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath strin
 }
 
 // resolveGraphStore returns the beads.Store backing the GRAPH coordination
-// class. Identity today: the work store. When graph relocates, the dedicated
-// graph-store dispatch plugs in at resolveClassStore (graph uses its own legacy
-// .gc/ location and is event-silent by design, so rec is accepted for signature
-// parity with the other resolve*Store helpers and ignored here).
-func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
+// class. legacy = whatever the class resolver yields (identity → the work store
+// today). When the city has opted into a journal graph scope (graphJournal
+// non-nil), the residence router coexists the two stores root-atomically
+// (ADR-0001 §2): journal-resident roots route to the journal leg, everything
+// else to the legacy leg. A non-opted city (graphJournal nil) returns the exact
+// legacy pointer callers hold today, so it is byte-identical. rec stays ignored:
+// the graph store is event-silent by design.
+func resolveGraphStore(workStore, graphJournal beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	legacy := resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
+	if graphJournal == nil {
+		return legacy
+	}
+	return newResidenceRoutingGraphStore(graphJournal, legacy)
 }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail

@@ -119,6 +119,17 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 	}
 }
 
+// TestResolveGraphStoreIdentityWithoutJournal pins that a non-opted city (nil
+// journal leg) gets the exact legacy pointer back from resolveGraphStore — no
+// router wrapper, byte-identical to the pre-P1.5 seam.
+func TestResolveGraphStoreIdentityWithoutJournal(t *testing.T) {
+	work := beads.NewMemStore()
+	got := resolveGraphStore(work, nil, nil, "", nil)
+	if !sameStorePtr(got, work) {
+		t.Fatalf("resolveGraphStore(work, nil, …) = %p, want the exact work pointer %p", got, work)
+	}
+}
+
 // sameStorePtr reports pointer identity between two stores.
 func sameStorePtr(a, b beads.Store) bool {
 	ka, oka := storePointerKey(a)

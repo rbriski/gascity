@@ -247,6 +247,16 @@ func SortBeads(items []Bead, order SortOrder) {
 	sortBeadsForQuery(items, order)
 }
 
+// SortBeadsReady sorts items into the canonical ready order —
+// (COALESCE(priority, 2), created_at, id) ascending — that the SQL-backed ready
+// readers use. Callers that fan a Ready query out across multiple stores use it
+// to impose one deterministic global order on the merged set before truncating
+// to a limit, so a bounded ready read cuts the same prefix regardless of which
+// leg served each row (#3208).
+func SortBeadsReady(items []Bead) {
+	sortBeadsReadyOrder(items)
+}
+
 // sortBeadsReadyOrder sorts ready results into the canonical
 // (priority, created_at, id) ascending order used by the SQL-backed ready
 // readers (a nil priority sorts as 2, matching their COALESCE(i.priority, 2)),

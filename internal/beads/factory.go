@@ -21,11 +21,15 @@ const (
 	BeadsStoreNameExecStore = "ExecStore"
 	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
 	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+	// BeadsStoreNameJournalStore is the diagnostic store name for journal-backed
+	// graph stores.
+	BeadsStoreNameJournalStore = "JournalStore"
 
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore
 	storeNameNativeDoltStore = BeadsStoreNameNativeDoltStore
+	storeNameJournalStore    = BeadsStoreNameJournalStore
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
@@ -60,6 +64,7 @@ type StoreOpenOptions struct {
 	OpenFileStore    func() (Store, error)
 	OpenExecStore    func() (Store, error)
 	OpenNativeStore  func() (Store, error)
+	OpenJournalStore func() (Store, error)
 }
 
 // StoreOpenResult contains the selected Store plus native-selection diagnostics.
@@ -83,6 +88,12 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	case strings.HasPrefix(provider, "exec:") && !contract.ProviderUsesBDContract(provider):
 		store, err := callStoreOpen("exec store", opts.OpenExecStore)
 		return StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err
+	case provider == "journal":
+		// The journal graph store is opened explicitly by the graph-scope opener
+		// (never read from cfg.Beads.Provider), so it returns here before the
+		// bd/native preflight ladder — PreflightChecker may be nil for this open.
+		store, err := callStoreOpen("journal store", opts.OpenJournalStore)
+		return StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameJournalStore}}, err
 	}
 
 	if forceNativeFallback() {

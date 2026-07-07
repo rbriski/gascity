@@ -1,0 +1,174 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphstore"
+)
+
+// graphScopeRoot returns the on-disk scope of the city's journal graph store:
+// a single journal.db plus its provider marker under <city>/.gc/graph.
+func graphScopeRoot(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "graph")
+}
+
+// cityGraphScopePresence is the activation probe: it reports whether the graph
+// scope's provider marker is present. Only os.IsNotExist is authoritative "not
+// opted" (false, nil). A genuine absence takes exactly one os.Stat and is
+// byte-identical to today. Any OTHER stat error (EACCES, EMFILE, ENOTDIR, …) is
+// unknowable, not absence: it returns (false, err) so callers surface and retry
+// it rather than seeding a permanent bare-legacy routing for a city that is in
+// fact opted (MEDIUM-2 — a transient error must never be cached as absence).
+func cityGraphScopePresence(cityPath string) (bool, error) {
+	if strings.TrimSpace(cityPath) == "" {
+		return false, nil
+	}
+	_, err := os.Stat(filepath.Join(graphScopeRoot(cityPath), ".beads", "config.yaml"))
+	switch {
+	case err == nil:
+		return true, nil
+	case os.IsNotExist(err):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// cityHasGraphScope is the boolean activation boundary used on read/event hot
+// paths where there is no error channel to surface a transient probe failure.
+// A non-IsNotExist stat error yields false for this call only (the graph arm
+// goes inert and the event falls through to the legacy all-stores scan, which
+// is the safe pre-P1.5 behavior); it is never memoized, so the next call
+// retries. The authoritative opener path uses cityGraphScopePresence so a
+// transient error is surfaced rather than cached (MEDIUM-2).
+func cityHasGraphScope(cityPath string) bool {
+	present, _ := cityGraphScopePresence(cityPath)
+	return present
+}
+
+// graphScopeCityID derives the chain-genesis city id for the journal graph
+// store from the city's canonical project identity when present, else "" (the
+// store then adopts whatever city_id it already holds, or genesis-derives from
+// its stream id). Best-effort: any read error yields "".
+func graphScopeCityID(cityPath string) string {
+	if projectID, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, cityPath); err == nil && ok {
+		return strings.TrimSpace(projectID)
+	}
+	return ""
+}
+
+// openCityGraphJournalResultAt opens the journal graph store for a city that
+// has opted in. It returns (zero, false, nil) when the city has no graph scope
+// — callers treat absence as "route legacy" — and (result, true, nil) when the
+// store opened. The store is policy-wrapped to match the city-store open path;
+// it is deliberately not cache-wrapped at P1.5 (the graph class is event-silent
+// and the adapter is already an in-process SQLite read).
+func openCityGraphJournalResultAt(cityPath string) (beads.StoreOpenResult, bool, error) {
+	present, err := cityGraphScopePresence(cityPath)
+	if err != nil {
+		// Unknowable scope (transient stat error): surface it so the caller warns
+		// and retries later. present=true tags this as "not authoritative absence"
+		// so cachedCityGraphJournal declines to memoize it as a real miss (MEDIUM-2).
+		return beads.StoreOpenResult{}, true, fmt.Errorf("probing city graph scope %q: %w", cityPath, err)
+	}
+	if !present {
+		return beads.StoreOpenResult{}, false, nil
+	}
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot: graphScopeRoot(cityPath),
+		CityPath:  cityPath,
+		Provider:  "journal",
+		Logger:    slog.Default(),
+		OpenJournalStore: func() (beads.Store, error) {
+			gs, err := graphstore.Open(context.Background(),
+				filepath.Join(graphScopeRoot(cityPath), "journal.db"),
+				graphstore.Options{CityID: graphScopeCityID(cityPath)})
+			if err != nil {
+				return nil, err
+			}
+			return beads.NewJournalStore(gs), nil
+		},
+	})
+	if err != nil {
+		return beads.StoreOpenResult{}, true, err
+	}
+	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
+	return result, true, nil
+}
+
+// graphJournalCacheEntry memoizes an authoritative graph-journal lookup: a
+// successfully opened store, or a real absence (nil store). Transient open
+// errors are never cached.
+type graphJournalCacheEntry struct {
+	store beads.Store
+}
+
+// cityGraphJournalCache is the one-shot memo keyed by clean city path, mirroring
+// the city-store open memo: authoritative results only, LoadOrStore on the
+// concurrent-first-open race.
+var cityGraphJournalCache sync.Map // string(clean cityPath) -> *graphJournalCacheEntry
+
+// cachedCityGraphJournal returns the city's journal graph store (nil when the
+// city has no graph scope), memoizing the authoritative result. A transient
+// open error routes to the legacy store and is not cached, so a later call
+// retries.
+func cachedCityGraphJournal(cityPath string) beads.Store {
+	key := filepath.Clean(cityPath)
+	if v, ok := cityGraphJournalCache.Load(key); ok {
+		return v.(*graphJournalCacheEntry).store
+	}
+	opened, present, err := openCityGraphJournalResultAt(cityPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc: city graph journal store: %v (graph class routes to the work store)\n", err)
+		return nil
+	}
+	var store beads.Store
+	if present {
+		store = opened.Store
+	}
+	entry := &graphJournalCacheEntry{store: store}
+	if actual, loaded := cityGraphJournalCache.LoadOrStore(key, entry); loaded {
+		// Lost the concurrent-first-open race: close our just-opened handle and
+		// use the winner's memoized store.
+		if store != nil {
+			scheduleCloseBeadStoreHandle("city graph journal store", store)
+		}
+		return actual.(*graphJournalCacheEntry).store
+	}
+	return store
+}
+
+// newControllerStateOpenCityGraphJournal opens the city-level journal graph
+// store for newControllerState. Tests swap this seam to inject an in-memory
+// journal leg (or to assert it is never called on a non-opted city).
+var newControllerStateOpenCityGraphJournal = openCityGraphJournalResultAt
+
+// CityGraphJournalStore returns the controller's journal graph store, or nil
+// when the city has no .gc/graph scope. Mirrors CityBeadStore()'s locking.
+func (cs *controllerState) CityGraphJournalStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.cityGraphJournal
+}
+
+// cityGraphJournalStore returns the runtime's journal graph store: the
+// controller's handle when controller-managed, else the one-shot cache. Nil
+// unless the city has a .gc/graph scope, in which case resolveGraphStore returns
+// the legacy store unchanged.
+func (cr *CityRuntime) cityGraphJournalStore() beads.Store {
+	if cr.cs != nil {
+		return cr.cs.CityGraphJournalStore()
+	}
+	return cachedCityGraphJournal(cr.cityPath)
+}

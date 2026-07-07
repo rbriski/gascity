@@ -56,6 +56,7 @@ type controllerState struct {
 	cacheCtx               context.Context
 	beadStores             map[string]beads.Store
 	cityBeadStore          beads.Store // city-level store for session beads
+	cityGraphJournal       beads.Store // journal graph store; nil unless the city has a .gc/graph scope
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
@@ -162,6 +163,15 @@ func newControllerState(
 		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
+	}
+	// Open the city-level journal graph store when the city has opted into a
+	// .gc/graph scope (activation by presence). Absent scope leaves the handle
+	// nil and the graph class routes to the work store, byte-identical to today.
+	// An open error warns and routes legacy — never fatal.
+	if openedGraph, present, err := newControllerStateOpenCityGraphJournal(cityPath); err != nil {
+		fmt.Fprintf(os.Stderr, "api: city graph journal store: %v (graph class routes to the work store)\n", err)
+	} else if present {
+		cs.cityGraphJournal = openedGraph.Store
 	}
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
@@ -595,6 +605,27 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	// Graph-class arm: the graph class owns gcg-namespace ids on a graph-scoped
+	// city. When the journal leg IS loaded, the id routes through the residence
+	// router so a journal-resident event reaches the journal leg and a legacy-
+	// resident event reaches the legacy leg. When the journal leg is NOT loaded
+	// (open failed / mid-run opt-in), the event plane falls back to the LEGACY
+	// graph store — the same fallback GraphBeadStore() already makes on the
+	// read/write plane — so convoy/wisp/molecule autoclose stays reachable
+	// (HIGH-2). Returning (nil, true) here would strand the event: beadEventStores
+	// gates autoclose on a non-empty store set, so an owned-but-storeless result
+	// SILENTLY SKIPS autoclose — a known stall class. Applying a journal-resident
+	// close event to the legacy store is a harmless no-op when the id is absent
+	// there. A non-opted city (no .gc/graph scope) never enters this arm, so a
+	// gcg- id falls through to the all-stores scan exactly as today.
+	if p, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok &&
+		strings.HasPrefix(id, p+"-") && cityHasGraphScope(cs.cityPath) {
+		if cs.cityGraphJournal == nil {
+			match(p, resolveClassStore(cs.cityBeadStore, cs.cfg, cs.cityPath, config.BeadClassGraph, cs.eventProv))
+		} else {
+			match(p, resolveGraphStore(cs.cityBeadStore, cs.cityGraphJournal, cs.cfg, cs.cityPath, cs.eventProv))
+		}
 	}
 	return matchedStore, matchedLen >= 0
 }
@@ -1240,7 +1271,7 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cityGraphJournal, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.

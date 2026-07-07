@@ -79,7 +79,7 @@ func TestOpenSourceWorkflowStoresSkipsBrokenRigs(t *testing.T) {
 		return beads.NewMemStore(), nil
 	}
 
-	stores, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", openStore)
+	stores, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", false, openStore)
 	if err != nil {
 		t.Fatalf("openSourceWorkflowStoresWith returned err = %v; want tolerance of broken rig", err)
 	}
@@ -122,7 +122,7 @@ func TestOpenSourceWorkflowStoresFailsOnlyWhenEverythingBroken(t *testing.T) {
 		return nil, fmt.Errorf("every store at %s is broken", dir)
 	}
 
-	_, _, err := openSourceWorkflowStoresWith(cfg, cityPath, "", openStore)
+	_, _, err := openSourceWorkflowStoresWith(cfg, cityPath, "", false, openStore)
 	if err == nil {
 		t.Fatal("openSourceWorkflowStoresWith returned nil error; want underlying store failure")
 	}

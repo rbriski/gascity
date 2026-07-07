@@ -1,0 +1,74 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "hello",
+  "input": {
+    "name": "hello.input",
+    "fields": [],
+    "origin": {
+      "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "exec",
+      "id": "greet",
+      "name": "greet",
+      "after": [],
+      "origin": {
+        "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "interpreter": {
+        "kind": "shell",
+        "program": {
+          "kind": "exec"
+        },
+        "origin": {
+          "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "echo \"hello from Lumen on Gas City\"",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "echo \"hello from Lumen on Gas City\""
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "bash",
+        "syntax": "bare",
+        "origin": {
+          "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "exitMap": {
+        "pass": [
+          0
+        ],
+        "retryable": []
+      }
+    }
+  ],
+  "origin": {
+    "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

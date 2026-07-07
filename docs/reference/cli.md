@@ -63,6 +63,7 @@ gc [flags]
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
+| [gc run](#gc-run) | Run a compiled Lumen formula on the graph substrate |
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
@@ -3231,6 +3232,30 @@ gc rig suspend [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc run
+
+Run a compiled Lumen formula (lumen.ir) directly on the native
+graphstore journal substrate.
+
+The argument is a Lumen source file (e.g. hello.lumen) or a compiled IR
+document (hello.lumen.json). For a source file, gc looks for a sibling compiled
+IR next to it. Compile a .lumen source to IR before running it.
+
+By default the run writes to a throwaway SQLite store in a temp directory that
+is deleted afterward, so repeated runs of the same formula do not collide on
+the deterministic stream id. Use --db to run against a persistent store and
+--keep to retain the temp store for inspection.
+
+```
+gc run <lumen-file> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--db` | string |  | path to a persistent graphstore db (default: throwaway temp store) |
+| `--input` | string |  | run input as a JSON object (default: empty) |
+| `--keep` | bool |  | keep the throwaway temp store instead of deleting it |
 
 ## gc runtime
 

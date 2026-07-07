@@ -1,0 +1,3 @@
+formula hello {
+  greet: exec echo "hello from Lumen on Gas City"
+}

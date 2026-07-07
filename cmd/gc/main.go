@@ -238,6 +238,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
+		newRunCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
 		newReloadCmd(stdout, stderr),
 		newStopCmd(stdout, stderr),

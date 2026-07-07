@@ -82,6 +82,21 @@ Status: `broken-on-split` (open) · `fixed-on-deployed-branch` (proven port) ·
    `tracks` edges created in the **work** store while drain reads the **graph**
    store → fail-*closed* kills the workflow.
 
+### P1.5 — sling routes v1 molecules to the wrong store (found by manual testing)
+17. **v1 (plain) formula sling stranded work-class beads in the infra store** —
+    `internal/sling/sling.go` `InstantiateSlingFormula`. It materialized EVERY
+    molecule through `deps.graphStore()` (infra on a split city), but a plain v1
+    formula produces a WORK-class molecule (root type `molecule`, steps type
+    `step`, no graph markers), so its beads were stranded in the infra store,
+    violating the boundary. The per-class routing inside the policy store
+    (`createTarget`/`graphApplierFor`) is identity today, so nothing corrected it.
+    **FIXED (this branch):** the sling now routes the whole molecule by its
+    wholesale class (`recipeMaterializesInfraClass`, mirroring
+    `coordclass.ClassifyGraphPlan`): graph.v2/wisp/convergence → infra, plain v1 →
+    work. `IsCompiledGraphWorkflow` was rejected as the selector (workflow-only →
+    would misroute wisps). Tests: `TestRecipeMaterializesInfraClass`,
+    `TestInstantiateSlingFormulaRoutesMoleculeByClass` (internal/sling).
+
 ### P2 — medium
 8. CLI sling singleton/replacement scan excludes infra → duplicate workflows —
    `cmd/gc/cmd_sling.go:419`.

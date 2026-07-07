@@ -20,16 +20,16 @@ import (
 
 // Defines values for BindingStatus.
 const (
-	BindingStatusActive BindingStatus = "active"
-	BindingStatusEnded  BindingStatus = "ended"
+	Active BindingStatus = "active"
+	Ended  BindingStatus = "ended"
 )
 
 // Valid indicates whether the value is a known member of the BindingStatus enum.
 func (e BindingStatus) Valid() bool {
 	switch e {
-	case BindingStatusActive:
+	case Active:
 		return true
-	case BindingStatusEnded:
+	case Ended:
 		return true
 	default:
 		return false
@@ -103,6 +103,7 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
 	CityUnregister RequestFailedPayloadOperation = "city.unregister"
+	RigCreate      RequestFailedPayloadOperation = "rig.create"
 	SessionCreate  RequestFailedPayloadOperation = "session.create"
 	SessionMessage RequestFailedPayloadOperation = "session.message"
 	SessionSubmit  RequestFailedPayloadOperation = "session.submit"
@@ -115,6 +116,8 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 		return true
 	case CityUnregister:
 		return true
+	case RigCreate:
+		return true
 	case SessionCreate:
 		return true
 	case SessionMessage:
@@ -126,84 +129,21 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 	}
 }
 
-// Defines values for RunRefKind.
+// Defines values for RigCreateResponseBodyStatus.
 const (
-	Order RunRefKind = "order"
-	Sling RunRefKind = "sling"
+	Accepted RigCreateResponseBodyStatus = "accepted"
+	Created  RigCreateResponseBodyStatus = "created"
+	Exists   RigCreateResponseBodyStatus = "exists"
 )
 
-// Valid indicates whether the value is a known member of the RunRefKind enum.
-func (e RunRefKind) Valid() bool {
+// Valid indicates whether the value is a known member of the RigCreateResponseBodyStatus enum.
+func (e RigCreateResponseBodyStatus) Valid() bool {
 	switch e {
-	case Order:
+	case Accepted:
 		return true
-	case Sling:
+	case Created:
 		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for RunStatus.
-const (
-	RunStatusActive    RunStatus = "active"
-	RunStatusCanceled  RunStatus = "canceled"
-	RunStatusCanceling RunStatus = "canceling"
-	RunStatusCompleted RunStatus = "completed"
-	RunStatusFailed    RunStatus = "failed"
-	RunStatusPending   RunStatus = "pending"
-	RunStatusSkipped   RunStatus = "skipped"
-	RunStatusWaiting   RunStatus = "waiting"
-)
-
-// Valid indicates whether the value is a known member of the RunStatus enum.
-func (e RunStatus) Valid() bool {
-	switch e {
-	case RunStatusActive:
-		return true
-	case RunStatusCanceled:
-		return true
-	case RunStatusCanceling:
-		return true
-	case RunStatusCompleted:
-		return true
-	case RunStatusFailed:
-		return true
-	case RunStatusPending:
-		return true
-	case RunStatusSkipped:
-		return true
-	case RunStatusWaiting:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for RunStepStatus.
-const (
-	RunStepStatusActive    RunStepStatus = "active"
-	RunStepStatusBlocked   RunStepStatus = "blocked"
-	RunStepStatusCompleted RunStepStatus = "completed"
-	RunStepStatusFailed    RunStepStatus = "failed"
-	RunStepStatusPending   RunStepStatus = "pending"
-	RunStepStatusSkipped   RunStepStatus = "skipped"
-)
-
-// Valid indicates whether the value is a known member of the RunStepStatus enum.
-func (e RunStepStatus) Valid() bool {
-	switch e {
-	case RunStepStatusActive:
-		return true
-	case RunStepStatusBlocked:
-		return true
-	case RunStepStatusCompleted:
-		return true
-	case RunStepStatusFailed:
-		return true
-	case RunStepStatusPending:
-		return true
-	case RunStepStatusSkipped:
+	case Exists:
 		return true
 	default:
 		return false
@@ -233,16 +173,16 @@ func (e SubmitIntent) Valid() bool {
 
 // Defines values for SupervisorRequestPayloadPhase.
 const (
-	Complete SupervisorRequestPayloadPhase = "complete"
-	Start    SupervisorRequestPayloadPhase = "start"
+	SupervisorRequestPayloadPhaseComplete SupervisorRequestPayloadPhase = "complete"
+	SupervisorRequestPayloadPhaseStart    SupervisorRequestPayloadPhase = "start"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorRequestPayloadPhase enum.
 func (e SupervisorRequestPayloadPhase) Valid() bool {
 	switch e {
-	case Complete:
+	case SupervisorRequestPayloadPhaseComplete:
 		return true
-	case Start:
+	case SupervisorRequestPayloadPhaseStart:
 		return true
 	default:
 		return false
@@ -2687,28 +2627,64 @@ type RigActionBody struct {
 	Status string `json:"status"`
 }
 
-// RigCreateInputBody defines model for RigCreateInputBody.
-type RigCreateInputBody struct {
+// RigCreateBody defines model for RigCreateBody.
+type RigCreateBody struct {
 	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
 	DefaultBranch *string `json:"default_branch,omitempty"`
+
+	// GitUrl Git URL to clone (triggers async provisioning).
+	GitUrl *string `json:"git_url,omitempty"`
 
 	// Name Rig name.
 	Name string `json:"name"`
 
-	// Path Filesystem path.
-	Path string `json:"path"`
+	// Path Filesystem path (server-derived for git_url clones).
+	Path *string `json:"path,omitempty"`
 
 	// Prefix Session name prefix.
 	Prefix *string `json:"prefix,omitempty"`
+
+	// RequestId Client-supplied idempotency key; reuse across retries.
+	RequestId *string `json:"request_id,omitempty"`
 }
 
-// RigCreatedOutputBody defines model for RigCreatedOutputBody.
-type RigCreatedOutputBody struct {
-	// Rig Created rig name.
-	Rig string `json:"rig"`
+// RigCreateResponseBody defines model for RigCreateResponseBody.
+type RigCreateResponseBody struct {
+	// DefaultBranch Resolved mainline branch (created/exists).
+	DefaultBranch *string `json:"default_branch,omitempty"`
 
-	// Status Operation result.
-	Status string `json:"status"`
+	// EventCursor City event-stream cursor captured before accept (202 only); pass as after_seq to the events stream to receive request.result.rig.create / rig.provision.progress / request.failed without replaying unrelated backlog.
+	EventCursor *string `json:"event_cursor,omitempty"`
+
+	// Prefix Resolved session-name prefix (created/exists).
+	Prefix *string `json:"prefix,omitempty"`
+
+	// RequestId Correlation ID; echo of the request's request_id, or a server-minted id on 202.
+	RequestId *string `json:"request_id,omitempty"`
+
+	// Rig Rig name (created/exists).
+	Rig *string `json:"rig,omitempty"`
+
+	// Status created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).
+	Status RigCreateResponseBodyStatus `json:"status"`
+}
+
+// RigCreateResponseBodyStatus created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).
+type RigCreateResponseBodyStatus string
+
+// RigCreateSucceededPayload defines model for RigCreateSucceededPayload.
+type RigCreateSucceededPayload struct {
+	// DefaultBranch Resolved mainline branch.
+	DefaultBranch string `json:"default_branch"`
+
+	// Prefix Resolved session-name prefix.
+	Prefix string `json:"prefix"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
+
+	// Rig Rig name that was provisioned.
+	Rig string `json:"rig"`
 }
 
 // RigPatch defines model for RigPatch.
@@ -2738,6 +2714,24 @@ type RigPatchSetInputBody struct {
 
 	// Suspended Override suspended state.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// RigProvisionProgressPayload defines model for RigProvisionProgressPayload.
+type RigProvisionProgressPayload struct {
+	// Detail Human-readable step detail.
+	Detail *string `json:"detail,omitempty"`
+
+	// RequestId Correlation ID from the 202 response (empty on sync 201 provisions).
+	RequestId *string `json:"request_id,omitempty"`
+
+	// Rig Rig name being provisioned.
+	Rig string `json:"rig"`
+
+	// Step Provisioning step that completed (clone, beads-init, packs, config, routes, …).
+	Step string `json:"step"`
+
+	// Warn True when the step reports a warn-and-continue condition.
+	Warn *bool `json:"warn,omitempty"`
 }
 
 // RigResponse defines model for RigResponse.
@@ -2773,110 +2767,6 @@ type RotatedPayload struct {
 	PriorArchive  string `json:"prior_archive"`
 	PriorFirstSeq int64  `json:"prior_first_seq"`
 	PriorLastSeq  int64  `json:"prior_last_seq"`
-}
-
-// Run defines model for Run.
-type Run struct {
-	// Formula Formula name driving the run, when known.
-	Formula   *string       `json:"formula,omitempty"`
-	LastError *RunLastError `json:"last_error,omitempty"`
-
-	// RunId Stable run identifier (the run root bead id).
-	RunId string   `json:"run_id"`
-	Scope RunScope `json:"scope"`
-
-	// StartedAt RFC3339 run start time (root creation).
-	StartedAt *string `json:"started_at,omitempty"`
-
-	// Status Closed lifecycle state of a run.
-	Status RunStatus `json:"status"`
-
-	// Target Where the run is routed (rig/target), when known.
-	Target *string `json:"target,omitempty"`
-
-	// Title Human-readable run title.
-	Title string `json:"title"`
-
-	// UpdatedAt RFC3339 time of the run's most recent activity.
-	UpdatedAt *string `json:"updated_at,omitempty"`
-}
-
-// RunLastError defines model for RunLastError.
-type RunLastError struct {
-	// Code Machine-readable outcome code (e.g. fail, skipped, canceled).
-	Code string `json:"code"`
-
-	// Message Human-readable failure detail, when available.
-	Message *string `json:"message,omitempty"`
-}
-
-// RunRef defines model for RunRef.
-type RunRef struct {
-	// Kind Launch mechanism that produced the run.
-	Kind RunRefKind `json:"kind"`
-
-	// RunId Run identifier; GET /v0/city/{cityName}/runs/{run_id} for detail.
-	RunId string `json:"run_id"`
-
-	// Status Closed lifecycle state of a run.
-	Status RunStatus `json:"status"`
-}
-
-// RunRefKind Launch mechanism that produced the run.
-type RunRefKind string
-
-// RunScope defines model for RunScope.
-type RunScope struct {
-	// Kind Scope kind (city or rig), when resolved.
-	Kind *string `json:"kind,omitempty"`
-
-	// Ref Scope reference within the kind, when resolved.
-	Ref *string `json:"ref,omitempty"`
-}
-
-// RunStatus Closed lifecycle state of a run.
-type RunStatus string
-
-// RunStep defines model for RunStep.
-type RunStep struct {
-	// Assignee Current assignee, when set.
-	Assignee *string `json:"assignee,omitempty"`
-
-	// Id Step (child bead) identifier.
-	Id string `json:"id"`
-
-	// Kind Step kind (bead type).
-	Kind *string `json:"kind,omitempty"`
-
-	// Status Closed lifecycle state of a run step.
-	Status RunStepStatus `json:"status"`
-
-	// Title Step title.
-	Title string `json:"title"`
-}
-
-// RunStepStatus Closed lifecycle state of a run step.
-type RunStepStatus string
-
-// RunStepsOutputBody defines model for RunStepsOutputBody.
-type RunStepsOutputBody struct {
-	// RunId Run identifier the steps belong to.
-	RunId string `json:"run_id"`
-
-	// Steps Steps of the run.
-	Steps *[]RunStep `json:"steps"`
-}
-
-// RunsListOutputBody defines model for RunsListOutputBody.
-type RunsListOutputBody struct {
-	// Partial True when some runs could not be fully projected.
-	Partial *bool `json:"partial,omitempty"`
-
-	// PartialErrors Reasons the projection was partial.
-	PartialErrors *[]string `json:"partial_errors,omitempty"`
-
-	// Runs Runs in the city, newest activity first.
-	Runs *[]Run `json:"runs"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -3261,7 +3151,6 @@ type SlingResponse struct {
 	Formula      *string   `json:"formula,omitempty"`
 	Mode         *string   `json:"mode,omitempty"`
 	RootBeadId   *string   `json:"root_bead_id,omitempty"`
-	Run          *RunRef   `json:"run,omitempty"`
 	Status       string    `json:"status"`
 	Target       string    `json:"target"`
 	Warnings     *[]string `json:"warnings,omitempty"`
@@ -3605,6 +3494,9 @@ type SupervisorRequestPayload struct {
 
 	// RemoteAddrClass Network class of the remote address, not the raw address.
 	RemoteAddrClass SupervisorRequestPayloadRemoteAddrClass `json:"remote_addr_class"`
+
+	// RequestId The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line.
+	RequestId *string `json:"request_id,omitempty"`
 
 	// Status HTTP response status code. Start-phase records use 0 before the final response status is known.
 	Status int64 `json:"status"`
@@ -4420,6 +4312,21 @@ type TypedEventStreamEnvelopeRequestResultCityUnregister struct {
 	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRequestResultRigCreate defines model for TypedEventStreamEnvelopeRequestResultRigCreate.
+type TypedEventStreamEnvelopeRequestResultRigCreate struct {
+	Actor     string                    `json:"actor"`
+	Message   *string                   `json:"message,omitempty"`
+	Payload   RigCreateSucceededPayload `json:"payload"`
+	RunId     *string                   `json:"run_id,omitempty"`
+	Seq       int64                     `json:"seq"`
+	SessionId *string                   `json:"session_id,omitempty"`
+	StepId    *string                   `json:"step_id,omitempty"`
+	Subject   *string                   `json:"subject,omitempty"`
+	Ts        time.Time                 `json:"ts"`
+	Type      string                    `json:"type"`
+	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedEventStreamEnvelopeRequestResultSessionCreate.
 type TypedEventStreamEnvelopeRequestResultSessionCreate struct {
 	Actor     string                        `json:"actor"`
@@ -4463,6 +4370,21 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Ts        time.Time                     `json:"ts"`
 	Type      string                        `json:"type"`
 	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRigProvisionProgress defines model for TypedEventStreamEnvelopeRigProvisionProgress.
+type TypedEventStreamEnvelopeRigProvisionProgress struct {
+	Actor     string                      `json:"actor"`
+	Message   *string                     `json:"message,omitempty"`
+	Payload   RigProvisionProgressPayload `json:"payload"`
+	RunId     *string                     `json:"run_id,omitempty"`
+	Seq       int64                       `json:"seq"`
+	SessionId *string                     `json:"session_id,omitempty"`
+	StepId    *string                     `json:"step_id,omitempty"`
+	Subject   *string                     `json:"subject,omitempty"`
+	Ts        time.Time                   `json:"ts"`
+	Type      string                      `json:"type"`
+	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
@@ -5599,6 +5521,22 @@ type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister struct {
 	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeRequestResultRigCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultRigCreate.
+type TypedTaggedEventStreamEnvelopeRequestResultRigCreate struct {
+	Actor     string                    `json:"actor"`
+	City      string                    `json:"city"`
+	Message   *string                   `json:"message,omitempty"`
+	Payload   RigCreateSucceededPayload `json:"payload"`
+	RunId     *string                   `json:"run_id,omitempty"`
+	Seq       int64                     `json:"seq"`
+	SessionId *string                   `json:"session_id,omitempty"`
+	StepId    *string                   `json:"step_id,omitempty"`
+	Subject   *string                   `json:"subject,omitempty"`
+	Ts        time.Time                 `json:"ts"`
+	Type      string                    `json:"type"`
+	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionCreate.
 type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate struct {
 	Actor     string                        `json:"actor"`
@@ -5645,6 +5583,22 @@ type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Ts        time.Time                     `json:"ts"`
 	Type      string                        `json:"type"`
 	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRigProvisionProgress defines model for TypedTaggedEventStreamEnvelopeRigProvisionProgress.
+type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
+	Actor     string                      `json:"actor"`
+	City      string                      `json:"city"`
+	Message   *string                     `json:"message,omitempty"`
+	Payload   RigProvisionProgressPayload `json:"payload"`
+	RunId     *string                     `json:"run_id,omitempty"`
+	Seq       int64                       `json:"seq"`
+	SessionId *string                     `json:"session_id,omitempty"`
+	StepId    *string                     `json:"step_id,omitempty"`
+	Subject   *string                     `json:"subject,omitempty"`
+	Ts        time.Time                   `json:"ts"`
+	Type      string                      `json:"type"`
+	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
@@ -6403,9 +6357,6 @@ type GetV0CityByCityNameAgentsParamsRunning string
 type CreateAgentParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
-
-	// IdempotencyKey Idempotency key for safe retries.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // DeleteV0CityByCityNameBeadByIdParams defines parameters for DeleteV0CityByCityNameBeadById.
@@ -6538,9 +6489,6 @@ type GetV0CityByCityNameConvoysParams struct {
 type CreateConvoyParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
-
-	// IdempotencyKey Idempotency key for safe retries.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // GetV0CityByCityNameEventsParams defines parameters for GetV0CityByCityNameEvents.
@@ -6955,9 +6903,6 @@ type GetV0CityByCityNameOrdersHistoryParams struct {
 type AddPackParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
-
-	// IdempotencyKey Idempotency key for safe retries.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // DeleteV0CityByCityNamePacksByNameParams defines parameters for DeleteV0CityByCityNamePacksByName.
@@ -7033,9 +6978,6 @@ type PatchV0CityByCityNameProviderByNameParams struct {
 type CreateProviderParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
-
-	// IdempotencyKey Idempotency key for safe retries.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // GetV0CityByCityNameReadinessParams defines parameters for GetV0CityByCityNameReadiness.
@@ -7090,15 +7032,6 @@ type GetV0CityByCityNameRigsParams struct {
 type CreateRigParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
-
-	// IdempotencyKey Idempotency key for safe retries.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
-}
-
-// GetV0CityByCityNameRunsParams defines parameters for GetV0CityByCityNameRuns.
-type GetV0CityByCityNameRunsParams struct {
-	// Limit Maximum runs to return (0 uses the server default).
-	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // PostV0CityByCityNameServiceByNameRestartParams defines parameters for PostV0CityByCityNameServiceByNameRestart.
@@ -7432,7 +7365,7 @@ type CreateProviderJSONRequestBody = ProviderCreateInputBody
 type PatchV0CityByCityNameRigByNameJSONRequestBody = RigUpdateInputBody
 
 // CreateRigJSONRequestBody defines body for CreateRig for application/json ContentType.
-type CreateRigJSONRequestBody = RigCreateInputBody
+type CreateRigJSONRequestBody = RigCreateBody
 
 // PatchV0CityByCityNameSessionByIdJSONRequestBody defines body for PatchV0CityByCityNameSessionById for application/json ContentType.
 type PatchV0CityByCityNameSessionByIdJSONRequestBody = SessionPatchBody
@@ -7994,6 +7927,58 @@ func (t *EventPayload) FromRequestFailedPayload(v RequestFailedPayload) error {
 
 // MergeRequestFailedPayload performs a merge with any union data inside the EventPayload, using the provided RequestFailedPayload
 func (t *EventPayload) MergeRequestFailedPayload(v RequestFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRigCreateSucceededPayload returns the union data inside the EventPayload as a RigCreateSucceededPayload
+func (t EventPayload) AsRigCreateSucceededPayload() (RigCreateSucceededPayload, error) {
+	var body RigCreateSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRigCreateSucceededPayload overwrites any union data inside the EventPayload as the provided RigCreateSucceededPayload
+func (t *EventPayload) FromRigCreateSucceededPayload(v RigCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRigCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided RigCreateSucceededPayload
+func (t *EventPayload) MergeRigCreateSucceededPayload(v RigCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRigProvisionProgressPayload returns the union data inside the EventPayload as a RigProvisionProgressPayload
+func (t EventPayload) AsRigProvisionProgressPayload() (RigProvisionProgressPayload, error) {
+	var body RigProvisionProgressPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRigProvisionProgressPayload overwrites any union data inside the EventPayload as the provided RigProvisionProgressPayload
+func (t *EventPayload) FromRigProvisionProgressPayload(v RigProvisionProgressPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRigProvisionProgressPayload performs a merge with any union data inside the EventPayload, using the provided RigProvisionProgressPayload
+func (t *EventPayload) MergeRigProvisionProgressPayload(v RigProvisionProgressPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9992,6 +9977,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultCit
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRequestResultRigCreate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultRigCreate
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultRigCreate() (TypedEventStreamEnvelopeRequestResultRigCreate, error) {
+	var body TypedEventStreamEnvelopeRequestResultRigCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultRigCreate overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultRigCreate(v TypedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultRigCreate performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultRigCreate(v TypedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeRequestResultSessionCreate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultSessionCreate
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultSessionCreate() (TypedEventStreamEnvelopeRequestResultSessionCreate, error) {
 	var body TypedEventStreamEnvelopeRequestResultSessionCreate
@@ -10066,6 +10079,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultSess
 // MergeTypedEventStreamEnvelopeRequestResultSessionSubmit performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultSessionSubmit
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSessionSubmit(v TypedEventStreamEnvelopeRequestResultSessionSubmit) error {
 	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRigProvisionProgress returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRigProvisionProgress
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRigProvisionProgress() (TypedEventStreamEnvelopeRigProvisionProgress, error) {
+	var body TypedEventStreamEnvelopeRigProvisionProgress
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRigProvisionProgress overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRigProvisionProgress(v TypedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRigProvisionProgress performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProgress(v TypedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -10860,12 +10901,16 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultCityCreate()
 	case "request.result.city.unregister":
 		return t.AsTypedEventStreamEnvelopeRequestResultCityUnregister()
+	case "request.result.rig.create":
+		return t.AsTypedEventStreamEnvelopeRequestResultRigCreate()
 	case "request.result.session.create":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionCreate()
 	case "request.result.session.message":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "rig.provision.progress":
+		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -12271,6 +12316,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequ
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRequestResultRigCreate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultRigCreate() (TypedTaggedEventStreamEnvelopeRequestResultRigCreate, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultRigCreate overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultRigCreate(v TypedTaggedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultRigCreate performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultRigCreate(v TypedTaggedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate() (TypedTaggedEventStreamEnvelopeRequestResultSessionCreate, error) {
 	var body TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
@@ -12345,6 +12418,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeReque
 // MergeTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit(v TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) error {
 	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRigProvisionProgress returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRigProvisionProgress
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRigProvisionProgress() (TypedTaggedEventStreamEnvelopeRigProvisionProgress, error) {
+	var body TypedTaggedEventStreamEnvelopeRigProvisionProgress
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRigProvisionProgress overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRigProvisionProgress(v TypedTaggedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRigProvisionProgress performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigProvisionProgress(v TypedTaggedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13139,12 +13240,16 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultCityCreate()
 	case "request.result.city.unregister":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultCityUnregister()
+	case "request.result.rig.create":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultRigCreate()
 	case "request.result.session.create":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate()
 	case "request.result.session.message":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "rig.provision.progress":
+		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -13723,15 +13828,6 @@ type ClientInterface interface {
 	CreateRigWithBody(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0CityByCityNameRuns request
-	GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0CityByCityNameRunsByRunId request
-	GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0CityByCityNameRunsByRunIdSteps request
-	GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameServiceByName request
 	GetV0CityByCityNameServiceByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15769,42 +15865,6 @@ func (c *Client) CreateRig(ctx context.Context, cityName string, params *CreateR
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameRunsRequest(c.Server, cityName, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameRunsByRunIdRequest(c.Server, cityName, runId)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameRunsByRunIdStepsRequest(c.Server, cityName, runId)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
 func (c *Client) GetV0CityByCityNameServiceByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameServiceByNameRequest(c.Server, cityName, name)
 	if err != nil {
@@ -17417,17 +17477,6 @@ func NewCreateAgentRequestWithBody(server string, cityName string, params *Creat
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
-		if params.IdempotencyKey != nil {
-			var headerParam1 string
-
-			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("Idempotency-Key", headerParam1)
-		}
-
 	}
 
 	return req, nil
@@ -18880,17 +18929,6 @@ func NewCreateConvoyRequestWithBody(server string, cityName string, params *Crea
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
-
-		if params.IdempotencyKey != nil {
-			var headerParam1 string
-
-			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("Idempotency-Key", headerParam1)
-		}
 
 	}
 
@@ -22535,17 +22573,6 @@ func NewAddPackRequestWithBody(server string, cityName string, params *AddPackPa
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
-		if params.IdempotencyKey != nil {
-			var headerParam1 string
-
-			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("Idempotency-Key", headerParam1)
-		}
-
 	}
 
 	return req, nil
@@ -23638,17 +23665,6 @@ func NewCreateProviderRequestWithBody(server string, cityName string, params *Cr
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
-		if params.IdempotencyKey != nil {
-			var headerParam1 string
-
-			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("Idempotency-Key", headerParam1)
-		}
-
 	}
 
 	return req, nil
@@ -24148,155 +24164,6 @@ func NewCreateRigRequestWithBody(server string, cityName string, params *CreateR
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
-		if params.IdempotencyKey != nil {
-			var headerParam1 string
-
-			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("Idempotency-Key", headerParam1)
-		}
-
-	}
-
-	return req, nil
-}
-
-// NewGetV0CityByCityNameRunsRequest generates requests for GetV0CityByCityNameRuns
-func NewGetV0CityByCityNameRunsRequest(server string, cityName string, params *GetV0CityByCityNameRunsParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/runs", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Limit != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetV0CityByCityNameRunsByRunIdRequest generates requests for GetV0CityByCityNameRunsByRunId
-func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, runId string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetV0CityByCityNameRunsByRunIdStepsRequest generates requests for GetV0CityByCityNameRunsByRunIdSteps
-func NewGetV0CityByCityNameRunsByRunIdStepsRequest(server string, cityName string, runId string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s/steps", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
 	}
 
 	return req, nil
@@ -26962,15 +26829,6 @@ type ClientWithResponsesInterface interface {
 
 	CreateRigWithResponse(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
 
-	// GetV0CityByCityNameRunsWithResponse request
-	GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error)
-
-	// GetV0CityByCityNameRunsByRunIdWithResponse request
-	GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error)
-
-	// GetV0CityByCityNameRunsByRunIdStepsWithResponse request
-	GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error)
-
 	// GetV0CityByCityNameServiceByNameWithResponse request
 	GetV0CityByCityNameServiceByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameServiceByNameResponse, error)
 
@@ -28216,7 +28074,6 @@ type CreateConvoyResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 }
@@ -30443,17 +30300,12 @@ func (r GetV0CityByCityNameRigsResponse) StatusCode() int {
 }
 
 type CreateRigResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON201                   *RigCreatedOutputBody
-	ApplicationproblemJSON400 *ErrorModel
-	ApplicationproblemJSON401 *ErrorModel
-	ApplicationproblemJSON403 *ErrorModel
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON409 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON501 *ErrorModel
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *RigCreateResponseBody
+	JSON201                       *RigCreateResponseBody
+	JSON202                       *RigCreateResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -30466,83 +30318,6 @@ func (r CreateRigResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateRigResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0CityByCityNameRunsResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *RunsListOutputBody
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON503 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0CityByCityNameRunsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0CityByCityNameRunsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0CityByCityNameRunsByRunIdResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *Run
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON503 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0CityByCityNameRunsByRunIdResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0CityByCityNameRunsByRunIdResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0CityByCityNameRunsByRunIdStepsResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *RunStepsOutputBody
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON503 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0CityByCityNameRunsByRunIdStepsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0CityByCityNameRunsByRunIdStepsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -32840,33 +32615,6 @@ func (c *ClientWithResponses) CreateRigWithResponse(ctx context.Context, cityNam
 		return nil, err
 	}
 	return ParseCreateRigResponse(rsp)
-}
-
-// GetV0CityByCityNameRunsWithResponse request returning *GetV0CityByCityNameRunsResponse
-func (c *ClientWithResponses) GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error) {
-	rsp, err := c.GetV0CityByCityNameRuns(ctx, cityName, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0CityByCityNameRunsResponse(rsp)
-}
-
-// GetV0CityByCityNameRunsByRunIdWithResponse request returning *GetV0CityByCityNameRunsByRunIdResponse
-func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
-	rsp, err := c.GetV0CityByCityNameRunsByRunId(ctx, cityName, runId, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0CityByCityNameRunsByRunIdResponse(rsp)
-}
-
-// GetV0CityByCityNameRunsByRunIdStepsWithResponse request returning *GetV0CityByCityNameRunsByRunIdStepsResponse
-func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error) {
-	rsp, err := c.GetV0CityByCityNameRunsByRunIdSteps(ctx, cityName, runId, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0CityByCityNameRunsByRunIdStepsResponse(rsp)
 }
 
 // GetV0CityByCityNameServiceByNameWithResponse request returning *GetV0CityByCityNameServiceByNameResponse
@@ -35749,13 +35497,6 @@ func ParseCreateConvoyResponse(rsp *http.Response) (*CreateConvoyResponse, error
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -40857,14 +40598,28 @@ func ParseCreateRigResponse(rsp *http.Response) (*CreateRigResponse, error) {
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RigCreateResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest RigCreatedOutputBody
+		var dest RigCreateResponseBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest RigCreateResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
@@ -40919,161 +40674,6 @@ func ParseCreateRigResponse(rsp *http.Response) (*CreateRigResponse, error) {
 			return nil, err
 		}
 		response.ApplicationproblemJSON501 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0CityByCityNameRunsResponse parses an HTTP response from a GetV0CityByCityNameRunsWithResponse call
-func ParseGetV0CityByCityNameRunsResponse(rsp *http.Response) (*GetV0CityByCityNameRunsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0CityByCityNameRunsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest RunsListOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON503 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0CityByCityNameRunsByRunIdResponse parses an HTTP response from a GetV0CityByCityNameRunsByRunIdWithResponse call
-func ParseGetV0CityByCityNameRunsByRunIdResponse(rsp *http.Response) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0CityByCityNameRunsByRunIdResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Run
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON503 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0CityByCityNameRunsByRunIdStepsResponse parses an HTTP response from a GetV0CityByCityNameRunsByRunIdStepsWithResponse call
-func ParseGetV0CityByCityNameRunsByRunIdStepsResponse(rsp *http.Response) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0CityByCityNameRunsByRunIdStepsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest RunStepsOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON503 = &dest
 
 	}
 

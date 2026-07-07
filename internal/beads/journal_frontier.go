@@ -12,7 +12,8 @@ import (
 
 // ControlFrontier is the P2.1 indexed-SELECT replacement for the control
 // dispatcher's per-tick `bd | jq` frontier pipeline
-// (cmd/gc/dispatch_runtime.go:771-826). It reproduces that pipeline's exact
+// (workflowServeControlReadyQueryForBeads in cmd/gc/dispatch_runtime.go). It
+// reproduces that pipeline's exact
 // tier/readiness/filter/sort/dedupe semantics as one parameterized read over
 // the journal projection tables, with every runtime value bound as a `?`
 // argument — no shell, no jq, no string-assembled SQL. Only P2.1 defines and
@@ -53,42 +54,45 @@ import (
 // metadata keys) are passed explicitly so this substrate layer stays free of
 // dispatcher role/metadata constants.
 type ControlFrontierParams struct {
-	// AssigneeCandidates are the assignee-tier identities in tier order
-	// (dispatch_runtime.go:813-820: control session name, alias, target,
-	// session id, plus any derived legacy aliases). Each distinct, non-blank
-	// candidate yields one assignee tier; blanks and repeats are skipped, exactly
-	// as the shell's `$seen` dedupe file does. Deriving this ordered list
-	// (including the `*control-dispatcher` -> `*workflow-control` aliasing, and
-	// the id/legacy interleave the shell walks at dispatch_runtime.go:813-819) is
+	// AssigneeCandidates are the assignee-tier identities in tier order (the
+	// assignee `for id in ...` loop in workflowServeControlReadyQueryForBeads:
+	// control session name, alias, target, session id, plus any derived legacy
+	// aliases). Each distinct, non-blank candidate yields one assignee tier; blanks
+	// and repeats are skipped, exactly as the shell's `$seen` dedupe file does.
+	// Deriving this ordered list (including the `*control-dispatcher` ->
+	// `*workflow-control` aliasing, and the id/legacy interleave the shell walks) is
 	// the caller's job (the P2.2 controlFrontierInputs helper), not this layer's.
 	AssigneeCandidates []string
 
-	// Routes are the routed-tier routes in tier order (dispatch_runtime.go:821-823:
-	// GC_CONTROL_TARGET, the legacy workflow-control alias, the bare route). Each
-	// route yields one tier per RouteMetadataKey, in that key order.
+	// Routes are the routed-tier routes in tier order (the routed_ready calls in
+	// workflowServeControlReadyQueryForBeads: GC_CONTROL_TARGET, the legacy
+	// workflow-control alias, the bare route). Each route yields one tier per
+	// RouteMetadataKey, in that key order.
 	Routes []string
 
 	// RouteMetadataKeys are the metadata keys a routed tier matches a route
 	// against, in tier-precedence order. The serve tick passes
-	// {gc.run_target, gc.routed_to} (dispatch_runtime.go:810-811): the run_target
-	// tier is emitted before the routed_to tier so first-wins dedupe prefers a
-	// run_target match, mirroring the shell's call order.
+	// {gc.run_target, gc.routed_to} (the per-route emit order in
+	// workflowServeControlReadyQueryForBeads): the run_target tier is emitted before
+	// the routed_to tier so first-wins dedupe prefers a run_target match, mirroring
+	// the shell's call order.
 	RouteMetadataKeys []string
 
 	// InstantiatingMetadataKey names the metadata key whose non-empty value marks
 	// a half-materialized molecule bead to drop from the frontier
-	// (beadmeta.InstantiatingMetadataKey; the jq instantiating-filter,
-	// dispatch_runtime.go:781-783). Empty disables the drop.
+	// (beadmeta.InstantiatingMetadataKey; the jq instantiating-filter, the reduce
+	// filter in workflowServeControlReadyQueryForBeads). Empty disables the drop.
 	InstantiatingMetadataKey string
 
 	// IncludeEphemeral widens every tier to ephemeral/no-history rows, mirroring
-	// `--include-ephemeral` under UsesBD105ReadySemantics (dispatch_runtime.go:777-780).
-	// It maps to TierBoth; the zero value maps to TierIssues (ephemeral hidden).
+	// `--include-ephemeral` under UsesBD105ReadySemantics (the includeEphemeral
+	// toggle in workflowServeControlReadyQueryForBeads). It maps to TierBoth; the
+	// zero value maps to TierIssues (ephemeral hidden).
 	IncludeEphemeral bool
 
 	// LimitPerTier caps each individual tier SELECT, mirroring bd's
-	// `--limit=workflowServeScanLimit` (=20, dispatch_runtime.go:162). This is a
-	// PER-TIER cap, not a global one — the shell limits each `bd ready` call
+	// `--limit=workflowServeScanLimit` (the workflowServeScanLimit constant). This
+	// is a PER-TIER cap, not a global one — the shell limits each `bd ready` call
 	// independently, then jq merges. A value <= 0 disables the per-tier cap.
 	LimitPerTier int
 }
@@ -142,7 +146,8 @@ var _ ControlFrontierStore = (*JournalStore)(nil)
 // dispatcher's ready invocation. It is bd's built-in ready exclude set
 // (sqlbuild/ready.go:16-38 ReadyWorkExcludeTypes: merge-request, gate, molecule,
 // rig, plus domain.DefaultInfraTypes() = agent, role, message) PLUS the shell's
-// explicit `--exclude-type=epic` (dispatch_runtime.go:808,810,811).
+// explicit `--exclude-type=epic` (the `--exclude-type=epic` flags in
+// workflowServeControlReadyQueryForBeads).
 //
 // It deliberately does NOT include step/convoy/session or any label exclusion:
 // those live in IsReadyCandidateForTier for JournalStore.Ready, but bd's actual
@@ -172,7 +177,8 @@ var frontierExcludedTypes = map[string]bool{
 // itself is composed only from compile-time constants (journalNodeColumns,
 // journalTierClause, the fixed edge/nodes projection queries). No caller string
 // is interpolated into SQL — this is the injection-surface win over the escaped
-// jq/shell program the frontier used to be (dispatch_runtime.go:785-787).
+// jq/shell program the frontier used to be (the jq filter in
+// workflowServeControlReadyQueryForBeads).
 func (s *JournalStore) ControlFrontier(ctx context.Context, params ControlFrontierParams) ([]Bead, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -195,8 +201,9 @@ func (s *JournalStore) ControlFrontier(ctx context.Context, params ControlFronti
 
 	var merged []Bead
 
-	// Assignee tiers (dispatch_runtime.go:813-820). Candidate order preserved;
-	// blanks and repeats skipped like the shell's `$seen` file.
+	// Assignee tiers (the assignee loop in workflowServeControlReadyQueryForBeads).
+	// Candidate order preserved; blanks and repeats skipped like the shell's
+	// `$seen` file.
 	seenCand := make(map[string]bool)
 	for _, cand := range params.AssigneeCandidates {
 		cand = strings.TrimSpace(cand)
@@ -211,7 +218,8 @@ func (s *JournalStore) ControlFrontier(ctx context.Context, params ControlFronti
 		merged = append(merged, rows...)
 	}
 
-	// Routed tiers (dispatch_runtime.go:821-823). Per route, one tier per metadata
+	// Routed tiers (the routed_ready calls in workflowServeControlReadyQueryForBeads).
+	// Per route, one tier per metadata
 	// key in precedence order (run_target before routed_to), then the fold-owned
 	// frontier projection (Arm B) for that route.
 	for _, route := range params.Routes {
@@ -675,7 +683,8 @@ func capTierBeads(items []Bead, limit int) []Bead {
 	return items
 }
 
-// dedupeControlFrontier reproduces the jq merge filter (dispatch_runtime.go:781-787):
+// dedupeControlFrontier reproduces the jq merge filter (the jq reduce/merge
+// filter in workflowServeControlReadyQueryForBeads):
 //
 //	reduce add[] as $item ([];
 //	  if instantiating != "" then . elif seen(.id) then . else . + [$item] end)

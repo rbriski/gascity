@@ -152,7 +152,7 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return err
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	store, err := openControlStoreAtForCity(storePath, cityPath, cfg)
+	store, err := controlStoreForBead(storePath, cityPath, cfg, beadID)
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
@@ -423,6 +423,41 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 		}
 		return "", false
 	})
+}
+
+// controlStoreForBead selects the store the control dispatcher processes beadID
+// against. In GC_GRAPH_FRONTIER=serve mode, a journal-resident bead
+// (residence probe hits the city's journal graph leg) is processed against the
+// journal leg — the leg that actually holds it — instead of the legacy scoped
+// store, which would Get-miss and fail loudly (§2.2). Every other case (default
+// legacy/shadow mode, non-opted city, legacy-resident bead) resolves the exact
+// scoped control store as before, so the legacy path is byte-untouched: the
+// journal probe runs only under serve mode on an opted city.
+//
+// MEDIUM-2 — the residence probe classifies its error rather than swallowing it.
+// A genuine miss (ErrNotFound) means the bead is legacy-resident, so we fall
+// through to the scoped control store. Any OTHER journal error (a transient
+// lock/busy or I/O fault) is propagated: swallowing it would route a
+// journal-resident bead to the legacy store, which then Get-misses and fails
+// loudly with a misleading non-transient not-found that kills the follow loop.
+// A transient fault carries a message the drain's transient classifier
+// (dispatch.IsTransientControllerError) recognizes, so the drain retries it.
+func controlStoreForBead(storePath, cityPath string, cfg *config.City, beadID string) (beads.Store, error) {
+	if currentGraphFrontierMode() == frontierModeServe {
+		if journal := cachedCityGraphJournal(cityPath); journal != nil {
+			_, err := journal.Get(beadID)
+			switch {
+			case err == nil:
+				return journal, nil
+			case errors.Is(err, beads.ErrNotFound):
+				// Genuine miss: the bead is legacy-resident. Fall through to the
+				// scoped control store, its correct owner.
+			default:
+				return nil, fmt.Errorf("probing journal residence for %s: %w", beadID, err)
+			}
+		}
+	}
+	return openControlStoreAtForCity(storePath, cityPath, cfg)
 }
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {

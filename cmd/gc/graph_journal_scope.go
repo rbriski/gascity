@@ -119,19 +119,32 @@ type graphJournalCacheEntry struct {
 // concurrent-first-open race.
 var cityGraphJournalCache sync.Map // string(clean cityPath) -> *graphJournalCacheEntry
 
-// cachedCityGraphJournal returns the city's journal graph store (nil when the
-// city has no graph scope), memoizing the authoritative result. A transient
-// open error routes to the legacy store and is not cached, so a later call
-// retries.
-func cachedCityGraphJournal(cityPath string) beads.Store {
+// cachedCityGraphJournalResult returns the city's journal graph store together
+// with whether the city is OPTED into a graph scope and any open error,
+// memoizing only authoritative results. The three outcomes are distinct — a
+// caller that must not silently strand journal-resident work (the serve-mode
+// control frontier, MEDIUM-1) depends on telling them apart:
+//
+//   - (nil, false, nil): genuinely not opted (no .gc/graph scope). Byte-identical
+//     legacy routing.
+//   - (store, true, nil): opted and opened.
+//   - (nil, true, err):   opted but the leg could not be opened/probed (a
+//     transient stat/open failure). NEVER memoized, so a later call retries.
+//
+// A memoized entry is always authoritative (a real open or a real absence, never
+// a transient error), so "opted" is recovered exactly as store != nil.
+func cachedCityGraphJournalResult(cityPath string) (beads.Store, bool, error) {
 	key := filepath.Clean(cityPath)
 	if v, ok := cityGraphJournalCache.Load(key); ok {
-		return v.(*graphJournalCacheEntry).store
+		store := v.(*graphJournalCacheEntry).store
+		return store, store != nil, nil
 	}
 	opened, present, err := openCityGraphJournalResultAt(cityPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gc: city graph journal store: %v (graph class routes to the work store)\n", err)
-		return nil
+		// Opted-but-unopenable (present=true tags "not authoritative absence"):
+		// surface it and do not memoize, so a caller with a hard-fail discipline
+		// can react and a later call retries once the transient condition clears.
+		return nil, present, err
 	}
 	var store beads.Store
 	if present {
@@ -144,7 +157,24 @@ func cachedCityGraphJournal(cityPath string) beads.Store {
 		if store != nil {
 			scheduleCloseBeadStoreHandle("city graph journal store", store)
 		}
-		return actual.(*graphJournalCacheEntry).store
+		winner := actual.(*graphJournalCacheEntry).store
+		return winner, winner != nil, nil
+	}
+	return store, present, nil
+}
+
+// cachedCityGraphJournal returns the city's journal graph store (nil when the
+// city has no graph scope OR a transient open error routed it to legacy),
+// memoizing the authoritative result. This is the error-channel-free accessor for
+// read/event hot paths: a transient open error logs and degrades to the legacy
+// store rather than surfacing. Callers that must hard-fail on an opted-but-
+// unopenable leg (the serve-mode control frontier) use
+// cachedCityGraphJournalResult instead.
+func cachedCityGraphJournal(cityPath string) beads.Store {
+	store, _, err := cachedCityGraphJournalResult(cityPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc: city graph journal store: %v (graph class routes to the work store)\n", err)
+		return nil
 	}
 	return store
 }

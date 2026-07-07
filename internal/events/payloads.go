@@ -77,10 +77,43 @@ type BeadClaimRejectedPayload struct {
 // IsEventPayload marks BeadClaimRejectedPayload as an events.Payload variant.
 func (BeadClaimRejectedPayload) IsEventPayload() {}
 
+// FrontierShadowDivergencePayload is the typed payload for
+// frontier.shadow.divergence events. Emitted by the control-dispatcher serve
+// tick under GC_GRAPH_FRONTIER=shadow when the legacy `bd | jq` frontier and the
+// journal ControlFrontier SELECT disagree for one tick. Agent identifies the
+// control dispatcher whose frontier diverged; OnlyInLegacy / OnlyInJournal carry
+// the ready-bead ids present in exactly one leg; the counts are the two legs'
+// full frontier sizes for the tick, so a reader can size the divergence without
+// the id lists being complete.
+type FrontierShadowDivergencePayload struct {
+	Agent         string   `json:"agent"`
+	OnlyInLegacy  []string `json:"only_in_legacy,omitempty"`
+	OnlyInJournal []string `json:"only_in_journal,omitempty"`
+	LegacyCount   int      `json:"legacy_count"`
+	JournalCount  int      `json:"journal_count"`
+}
+
+// IsEventPayload marks FrontierShadowDivergencePayload as an events.Payload variant.
+func (FrontierShadowDivergencePayload) IsEventPayload() {}
+
+// FrontierShadowDivergencePayloadJSON builds the JSON wire form for attachment to
+// an Event.Payload field.
+func FrontierShadowDivergencePayloadJSON(agent string, onlyInLegacy, onlyInJournal []string, legacyCount, journalCount int) json.RawMessage {
+	b, _ := json.Marshal(FrontierShadowDivergencePayload{
+		Agent:         agent,
+		OnlyInLegacy:  onlyInLegacy,
+		OnlyInJournal: onlyInJournal,
+		LegacyCount:   legacyCount,
+		JournalCount:  journalCount,
+	})
+	return b
+}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
+	RegisterPayload(FrontierShadowDivergence, FrontierShadowDivergencePayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.

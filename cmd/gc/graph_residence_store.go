@@ -44,10 +44,11 @@ type residenceRoutingGraphStore struct {
 }
 
 var (
-	_ beads.Store                    = (*residenceRoutingGraphStore)(nil)
-	_ beads.GraphApplyHandleProvider = (*residenceRoutingGraphStore)(nil)
-	_ beads.CachedReader             = residenceRoutingReader{}
-	_ beads.LiveReader               = residenceRoutingReader{}
+	_ beads.Store                         = (*residenceRoutingGraphStore)(nil)
+	_ beads.GraphApplyHandleProvider      = (*residenceRoutingGraphStore)(nil)
+	_ beads.ControlFrontierHandleProvider = (*residenceRoutingGraphStore)(nil)
+	_ beads.CachedReader                  = residenceRoutingReader{}
+	_ beads.LiveReader                    = residenceRoutingReader{}
 )
 
 // newResidenceRoutingGraphStore composes a journal leg and a legacy leg into a
@@ -560,6 +561,18 @@ func (r residenceRoutingReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, 
 // routing instead of one fixed leg.
 func (s *residenceRoutingGraphStore) GraphApplyHandle() (beads.GraphApplyStore, bool) {
 	return graphRoutingApplier{s: s}, true
+}
+
+// ControlFrontierHandle exposes the JOURNAL leg's control-dispatcher frontier
+// read. ControlFrontier is a journal-only capability: it is an indexed SELECT
+// over the journal projection tables and never reads the legacy leg (legacy
+// roots keep the `bd | jq` serve-tick frontier). So the router forwards straight
+// to the journal leg's capability rather than composing both legs; the serve
+// tick unions the journal frontier with the legacy `bd | jq` frontier itself
+// (dispatch_journal_frontier.go). Returns (nil, false) when the journal leg does
+// not expose the capability.
+func (s *residenceRoutingGraphStore) ControlFrontierHandle() (beads.ControlFrontierStore, bool) {
+	return beads.ControlFrontierStoreFor(s.journal)
 }
 
 // graphRoutingApplier routes a graph-apply plan to the leg its anchors reside

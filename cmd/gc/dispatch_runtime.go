@@ -361,15 +361,23 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
 	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
+	// journalFrontier is the P2 injectable journal-frontier leg, built ONLY when
+	// the control-dispatcher `bd | jq` frontier is in use. It stays nil for every
+	// other agent's serve, so the drain loop's journal path is skipped wholesale
+	// there. Even when non-nil it is inert unless GC_GRAPH_FRONTIER activates it
+	// AND the city has a journal graph scope (INERT guarantee, §6).
+	var journalFrontier journalFrontierFunc
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
-		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+		controlSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName())
+		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, controlSessionName)
+		journalFrontier = makeJournalFrontierFn(cityPath, agentCfg, cfg.Beads, controlSessionName, workEnv)
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, journalFrontier, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, journalFrontier, stderr)
 }
 
 func requireWorkflowServeFollowSessionEnv() error {
@@ -468,12 +476,12 @@ type workflowServeDrainResult struct {
 // for a single invocation. Returns whether it advanced a control bead and
 // whether the queue still contains only pending work so the --follow caller
 // can distinguish blocked work from genuine idle.
-func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
+func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, journalFrontier journalFrontierFunc, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
-		queue, err := workflowServeList(serveQuery, storePath, workEnv)
+		legacyQueue, err := workflowServeList(serveQuery, storePath, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			// Surface a killed/timed-out control work query on the event
@@ -482,6 +490,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			emitCityWorkQueryFailure(cityPath, stderr,
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
+		}
+		queue, err := composeWorkflowServeQueue(agentCfg, cityPath, legacyQueue, journalFrontier, stderr)
+		if err != nil {
+			return result, err
 		}
 		if len(queue) == 0 {
 			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
@@ -541,7 +553,63 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
+// composeWorkflowServeQueue folds the P2 journal-frontier leg into the legacy
+// `bd | jq` frontier per the GC_GRAPH_FRONTIER kill switch. The legacy queue is
+// NEVER mutated here; it is returned verbatim in every path except serve-mode
+// merge. The journal leg is consulted only when a non-nil journalFrontier is
+// supplied (control dispatcher), the mode is not legacy, AND the city is opted
+// (journalFrontier reports opted). Any other case returns the legacy queue
+// unchanged — the INERT guarantee (§6): default mode or a non-opted city is
+// byte-identical to the pre-P2 serve tick.
+//
+// Error discipline (§2.2.4, HIGH-1): a journal read failure is handled per mode.
+// In SERVE mode — where the tick actually depends on the journal leg — it
+// HARD-FAILS exactly like a legacy query error: surfaced on the event bus and
+// returned, never flattened into "no journal work". In SHADOW mode — which is
+// zero-blast-radius observation and ALWAYS serves the legacy queue — a journal
+// fault (schema drift, corrupt journal.db, malformed defer_until) is logged for
+// observability and DEGRADED to legacy; it must never fail the tick and kill the
+// control-dispatcher follow loop.
+func composeWorkflowServeQueue(agentCfg config.Agent, cityPath string, legacyQueue []hookBead, journalFrontier journalFrontierFunc, stderr io.Writer) ([]hookBead, error) {
+	if journalFrontier == nil {
+		return legacyQueue, nil
+	}
+	mode := currentGraphFrontierMode()
+	if mode == frontierModeLegacy {
+		return legacyQueue, nil
+	}
+	journalQueue, opted, jerr := journalFrontier()
+	if jerr != nil {
+		workflowTracef("serve journal-query-error agent=%s mode=%s err=%v", agentCfg.QualifiedName(), mode, jerr)
+		if mode == frontierModeShadow {
+			// HIGH-1: shadow observation never fails the tick. Trace-log the fault
+			// (observability) and serve the legacy queue unchanged. We deliberately
+			// do NOT emit the work-query-failure escalation event here — that event
+			// drives reconciler escalation and would break the zero-blast-radius
+			// guarantee; only a real serve-mode failure escalates.
+			return legacyQueue, nil
+		}
+		emitCityWorkQueryFailure(cityPath, stderr,
+			os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), "journal-control-frontier", jerr)
+		return nil, fmt.Errorf("querying journal control frontier for %s: %w", agentCfg.QualifiedName(), jerr)
+	}
+	if !opted {
+		// Non-opted city: no journal leg. Byte-identical to legacy.
+		return legacyQueue, nil
+	}
+	switch mode {
+	case frontierModeShadow:
+		// Serve the legacy result; only tee a divergence signal.
+		emitFrontierShadowDivergence(cityPath, stderr, agentCfg.QualifiedName(), legacyQueue, journalQueue)
+		return legacyQueue, nil
+	case frontierModeServe:
+		return mergeDedupeHookBeads(legacyQueue, journalQueue), nil
+	default:
+		return legacyQueue, nil
+	}
+}
+
+func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, journalFrontier journalFrontierFunc, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -566,7 +634,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
+		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, journalFrontier, stderr)
 		if err != nil {
 			// A transient work-query/store failure — most commonly the
 			// work-query timeout (hookWorkQueryTimeout) when the bead store is

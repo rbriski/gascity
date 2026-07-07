@@ -33,3 +33,12 @@ func (c *CachingStore) ConditionalVersionHandle() (ConditionalVersionStore, bool
 func (c *CachingStore) WriterLeaseHandle() (WriterLeaseStore, bool) {
 	return WriterLeaseStoreFor(c.backing)
 }
+
+// ControlFrontierHandle returns the backing store's control-frontier read
+// capability when it has one. Like the other journal capabilities this is a
+// total forward: ControlFrontier reads the journal projection tables directly,
+// a data domain disjoint from the bead-row cache this store holds, so there is
+// nothing for the cache to mask and no stale read to serve.
+func (c *CachingStore) ControlFrontierHandle() (ControlFrontierStore, bool) {
+	return ControlFrontierStoreFor(c.backing)
+}

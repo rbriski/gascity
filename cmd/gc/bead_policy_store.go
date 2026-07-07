@@ -91,6 +91,16 @@ func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excl
 	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
 }
 
+// ControlFrontierHandle forwards the control-dispatcher frontier read capability
+// from the wrapped store. The policy wrapper embeds beads.Store as an interface,
+// so the optional ControlFrontier capability is not promoted automatically; this
+// explicit forward lets ControlFrontierStoreFor reach a JournalStore that sits
+// behind the policy wrapper (the journal residence leg is always policy-wrapped).
+// beadPolicyGraphStore embeds *beadPolicyStore, so it inherits this forward.
+func (s *beadPolicyStore) ControlFrontierHandle() (beads.ControlFrontierStore, bool) {
+	return beads.ControlFrontierStoreFor(s.Store)
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

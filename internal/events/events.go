@@ -203,6 +203,14 @@ const (
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
 	EmergencyAcked    = "emergency.acked"
+
+	// FrontierShadowDivergence fires from the control-dispatcher serve tick when
+	// running under GC_GRAPH_FRONTIER=shadow: the legacy `bd | jq` frontier and
+	// the journal ControlFrontier SELECT are computed for the same tick and their
+	// ready-bead id sets differ. It is the safety gate that must show zero
+	// divergence before the journal frontier can be promoted to `serve`. Carries
+	// the ids only-in-legacy / only-in-journal and the tick context.
+	FrontierShadowDivergence = "frontier.shadow.divergence"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -244,6 +252,7 @@ var KnownEventTypes = []string{
 	StoreDiskWarn, StoreDiskCritical,
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
+	FrontierShadowDivergence,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

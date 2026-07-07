@@ -1477,6 +1477,15 @@ type FormulaVarDefResponse struct {
 	Type        string      `json:"type"`
 }
 
+// FrontierShadowDivergencePayload defines model for FrontierShadowDivergencePayload.
+type FrontierShadowDivergencePayload struct {
+	Agent         string    `json:"agent"`
+	JournalCount  int64     `json:"journal_count"`
+	LegacyCount   int64     `json:"legacy_count"`
+	OnlyInJournal *[]string `json:"only_in_journal,omitempty"`
+	OnlyInLegacy  *[]string `json:"only_in_legacy,omitempty"`
+}
+
 // GitStatus defines model for GitStatus.
 type GitStatus struct {
 	Ahead        int64  `json:"ahead"`
@@ -3844,6 +3853,21 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeFrontierShadowDivergence defines model for TypedEventStreamEnvelopeFrontierShadowDivergence.
+type TypedEventStreamEnvelopeFrontierShadowDivergence struct {
+	Actor     string                          `json:"actor"`
+	Message   *string                         `json:"message,omitempty"`
+	Payload   FrontierShadowDivergencePayload `json:"payload"`
+	RunId     *string                         `json:"run_id,omitempty"`
+	Seq       int64                           `json:"seq"`
+	SessionId *string                         `json:"session_id,omitempty"`
+	StepId    *string                         `json:"step_id,omitempty"`
+	Subject   *string                         `json:"subject,omitempty"`
+	Ts        time.Time                       `json:"ts"`
+	Type      string                          `json:"type"`
+	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
 	Actor     string                   `json:"actor"`
@@ -4969,6 +4993,22 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts        time.Time                `json:"ts"`
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeFrontierShadowDivergence defines model for TypedTaggedEventStreamEnvelopeFrontierShadowDivergence.
+type TypedTaggedEventStreamEnvelopeFrontierShadowDivergence struct {
+	Actor     string                          `json:"actor"`
+	City      string                          `json:"city"`
+	Message   *string                         `json:"message,omitempty"`
+	Payload   FrontierShadowDivergencePayload `json:"payload"`
+	RunId     *string                         `json:"run_id,omitempty"`
+	Seq       int64                           `json:"seq"`
+	SessionId *string                         `json:"session_id,omitempty"`
+	StepId    *string                         `json:"step_id,omitempty"`
+	Subject   *string                         `json:"subject,omitempty"`
+	Ts        time.Time                       `json:"ts"`
+	Type      string                          `json:"type"`
+	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
@@ -7288,6 +7328,32 @@ func (t *EventPayload) MergeCityUnregisterSucceededPayload(v CityUnregisterSucce
 	return err
 }
 
+// AsFrontierShadowDivergencePayload returns the union data inside the EventPayload as a FrontierShadowDivergencePayload
+func (t EventPayload) AsFrontierShadowDivergencePayload() (FrontierShadowDivergencePayload, error) {
+	var body FrontierShadowDivergencePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromFrontierShadowDivergencePayload overwrites any union data inside the EventPayload as the provided FrontierShadowDivergencePayload
+func (t *EventPayload) FromFrontierShadowDivergencePayload(v FrontierShadowDivergencePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeFrontierShadowDivergencePayload performs a merge with any union data inside the EventPayload, using the provided FrontierShadowDivergencePayload
+func (t *EventPayload) MergeFrontierShadowDivergencePayload(v FrontierShadowDivergencePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
 func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
 	var body GroupCreatedEventPayload
@@ -8920,6 +8986,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeFrontierShadowDivergence returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeFrontierShadowDivergence
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeFrontierShadowDivergence() (TypedEventStreamEnvelopeFrontierShadowDivergence, error) {
+	var body TypedEventStreamEnvelopeFrontierShadowDivergence
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeFrontierShadowDivergence overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeFrontierShadowDivergence
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeFrontierShadowDivergence(v TypedEventStreamEnvelopeFrontierShadowDivergence) error {
+	v.Type = "frontier.shadow.divergence"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeFrontierShadowDivergence performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeFrontierShadowDivergence
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeFrontierShadowDivergence(v TypedEventStreamEnvelopeFrontierShadowDivergence) error {
+	v.Type = "frontier.shadow.divergence"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskCritical
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskCritical() (TypedEventStreamEnvelopeGcStoreDiskCritical, error) {
 	var body TypedEventStreamEnvelopeGcStoreDiskCritical
@@ -10304,6 +10398,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "frontier.shadow.divergence":
+		return t.AsTypedEventStreamEnvelopeFrontierShadowDivergence()
 	case "gc.store.disk_critical":
 		return t.AsTypedEventStreamEnvelopeGcStoreDiskCritical()
 	case "gc.store.disk_warn":
@@ -11129,6 +11225,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeFrontierShadowDivergence returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeFrontierShadowDivergence
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeFrontierShadowDivergence() (TypedTaggedEventStreamEnvelopeFrontierShadowDivergence, error) {
+	var body TypedTaggedEventStreamEnvelopeFrontierShadowDivergence
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeFrontierShadowDivergence overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeFrontierShadowDivergence
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeFrontierShadowDivergence(v TypedTaggedEventStreamEnvelopeFrontierShadowDivergence) error {
+	v.Type = "frontier.shadow.divergence"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeFrontierShadowDivergence performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeFrontierShadowDivergence
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeFrontierShadowDivergence(v TypedTaggedEventStreamEnvelopeFrontierShadowDivergence) error {
+	v.Type = "frontier.shadow.divergence"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12523,6 +12647,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "frontier.shadow.divergence":
+		return t.AsTypedTaggedEventStreamEnvelopeFrontierShadowDivergence()
 	case "gc.store.disk_critical":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical()
 	case "gc.store.disk_warn":

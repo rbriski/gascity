@@ -2225,6 +2225,9 @@
             "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/FrontierShadowDivergencePayload"
+          },
+          {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
           },
           {
@@ -3333,6 +3336,46 @@
         "required": [
           "name",
           "type"
+        ],
+        "type": "object"
+      },
+      "FrontierShadowDivergencePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "journal_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "legacy_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "only_in_journal": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "only_in_legacy": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent",
+          "legacy_count",
+          "journal_count"
         ],
         "type": "object"
       },
@@ -8257,6 +8300,7 @@
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
+            "frontier.shadow.divergence": "#/components/schemas/TypedEventStreamEnvelopeFrontierShadowDivergence",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone",
@@ -8384,6 +8428,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeFrontierShadowDivergence"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical"
@@ -9399,7 +9446,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "frontier.shadow.divergence"
               ]
             },
             "type": "string"
@@ -9977,6 +10025,57 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.unbound",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeFrontierShadowDivergence": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/FrontierShadowDivergencePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "frontier.shadow.divergence",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope frontier.shadow.divergence",
         "type": "object"
       },
       "TypedEventStreamEnvelopeGcStoreDiskCritical": {
@@ -12355,6 +12454,7 @@
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
+            "frontier.shadow.divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeFrontierShadowDivergence",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone",
@@ -12482,6 +12582,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeFrontierShadowDivergence"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical"
@@ -13560,7 +13663,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "frontier.shadow.divergence"
               ]
             },
             "type": "string"
@@ -14183,6 +14287,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.unbound",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeFrontierShadowDivergence": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/FrontierShadowDivergencePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "frontier.shadow.divergence",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope frontier.shadow.divergence",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeGcStoreDiskCritical": {

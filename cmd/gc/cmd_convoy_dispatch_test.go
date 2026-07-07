@@ -3696,6 +3696,57 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 	}
 }
 
+// TestControlStoreForBeadPropagatesNonNotFoundJournalError pins MED-2: in serve
+// mode a journal residence probe that fails with a NON-not-found error (a
+// transient lock/busy or I/O fault) must propagate, not be swallowed into a
+// legacy route. Swallowing it would send a journal-resident bead to the legacy
+// store, which Get-misses and fails loudly with a misleading non-transient
+// not-found, killing the control-dispatcher follow loop.
+func TestControlStoreForBeadPropagatesNonNotFoundJournalError(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv(graphFrontierModeEnvVar, "serve")
+	city := t.TempDir()
+	key := filepath.Clean(city)
+	sentinel := errors.New("database is locked")
+	cityGraphJournalCache.Store(key, &graphJournalCacheEntry{
+		store: &getErrStore{Store: beads.NewMemStore(), err: sentinel},
+	})
+	t.Cleanup(func() { cityGraphJournalCache.Delete(key) })
+
+	_, err := controlStoreForBead(city, city, &config.City{}, "gcg-j1")
+	if err == nil {
+		t.Fatal("controlStoreForBead swallowed a non-not-found journal probe error into a legacy route (MED-2)")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("controlStoreForBead err = %v, want it to wrap the journal probe error %v", err, sentinel)
+	}
+}
+
+// TestControlStoreForBeadNotFoundRoutesToLegacy pins the MED-2 complement: a
+// GENUINE journal miss (ErrNotFound) means the bead is legacy-resident, so the
+// probe must fall through to the scoped control store — not error, and not the
+// journal leg.
+func TestControlStoreForBeadNotFoundRoutesToLegacy(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv(graphFrontierModeEnvVar, "serve")
+	city := t.TempDir()
+	key := filepath.Clean(city)
+	journal := &getErrStore{Store: beads.NewMemStore(), err: beads.ErrNotFound}
+	cityGraphJournalCache.Store(key, &graphJournalCacheEntry{store: journal})
+	t.Cleanup(func() { cityGraphJournalCache.Delete(key) })
+
+	store, err := controlStoreForBead(city, city, &config.City{}, "l1")
+	if err != nil {
+		t.Fatalf("controlStoreForBead on a genuine journal miss should route to legacy, got err=%v", err)
+	}
+	if store == nil {
+		t.Fatal("controlStoreForBead returned a nil legacy store on a genuine miss")
+	}
+	if beads.Store(journal) == store {
+		t.Fatal("controlStoreForBead returned the journal leg for an ErrNotFound miss, want the legacy scoped store")
+	}
+}
+
 func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -4906,6 +4957,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 		t.TempDir(),
 		wfcAgent.EffectiveWorkQuery(),
 		nil,
+		nil,
 		io.Discard,
 	)
 	if err == nil || !strings.Contains(err.Error(), "synthetic dispatch failure") {
@@ -4985,7 +5037,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 
 	agent := config.Agent{Name: "control-dispatcher"}
-	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, nil, io.Discard)
 	if !errors.Is(err, stopErr) {
 		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
 	}
@@ -5075,7 +5127,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 	}
 
 	agent := config.Agent{Name: "control-dispatcher"}
-	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, nil, io.Discard)
 	if !errors.Is(err, watcherErr) {
 		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, watcherErr)
 	}
@@ -5126,7 +5178,7 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	}
 
 	agent := config.Agent{Name: "control-dispatcher"}
-	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, nil, io.Discard)
 	if !errors.Is(err, fatalErr) {
 		t.Fatalf("runWorkflowServeFollow err = %v, want fatal error after surviving the transient timeout", err)
 	}

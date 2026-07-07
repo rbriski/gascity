@@ -2005,9 +2005,12 @@ func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "gc mail peek: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		return doMailPeekFallback(args, jsonOut, stdout, stderr)
+	}
+	if isRemote {
+		return routeMailPeek("", args, remoteC, "", jsonOut, stdout, stderr)
 	}
 	c, reason := mailPeekAPIClient(cityPath)
 	return routeMailPeek(cityPath, args, c, reason, jsonOut, stdout, stderr)

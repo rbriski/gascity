@@ -312,10 +312,13 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 }
 
 func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	if isRemote {
+		return routeWaitList("", remoteC, "", stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 	}
 	c, reason := waitListAPIClient(cityPath)
 	return routeWaitList(cityPath, c, reason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
@@ -449,10 +452,13 @@ func writeWaitListTable(items []beads.Bead, stdout io.Writer) {
 }
 
 func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	if isRemote {
+		return routeWaitInspect("", remoteC, "", waitID, jsonOutput, stdout, stderr)
 	}
 	c, reason := waitInspectAPIClient(cityPath)
 	return routeWaitInspect(cityPath, c, reason, waitID, jsonOutput, stdout, stderr)

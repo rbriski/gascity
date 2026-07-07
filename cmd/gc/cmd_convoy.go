@@ -306,10 +306,13 @@ child issues.`,
 
 // cmdConvoyList is the CLI entry point for listing convoys.
 func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if isRemote {
+		return routeConvoyList("", remoteC, "", jsonOut, stdout, stderr)
 	}
 	c, reason := convoyListAPIClient(cityPath)
 	return routeConvoyList(cityPath, c, reason, jsonOut, stdout, stderr)
@@ -855,10 +858,13 @@ func cmdConvoyStatus(args []string, jsonOut bool, stdout, stderr io.Writer) int 
 		return doConvoyStatusWithJSON(nil, args, jsonOut, stdout, stderr)
 	}
 	convoyID := args[0]
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if isRemote {
+		return routeConvoyStatus("", convoyID, remoteC, "", jsonOut, stdout, stderr)
 	}
 	c, reason := convoyStatusAPIClient(cityPath)
 	return routeConvoyStatus(cityPath, convoyID, c, reason, jsonOut, stdout, stderr)

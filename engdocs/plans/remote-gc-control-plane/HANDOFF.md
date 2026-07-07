@@ -77,9 +77,19 @@ Slice 0's goal: `gc --context <name> status | beads list | session list/peek | c
 
 ---
 
-## 7. What is LEFT — the read-set enablement (Slice 0 final step)
+## 7. Read-set enablement — IN PROGRESS (remote reads now work)
 
-All Slice-0 **plumbing** is now built + committed (Phases 1–4). Nothing operates a remote city yet (`remoteReadsEnabled=false`). The remaining work is the **command-dispatch wiring** that flips the read set on:
+**Landed (`747cf8d39` + migration commit):** the gate is split — `resolveContext` is LOCAL-ONLY (errors on a remote target, so every non-migrated command stays safe), and `resolveContextAllowRemote` returns the remote target for remote-capable readers (the `remoteReadsEnabled` global is gone). `buildRemoteClient(target)` (`cmd/gc/remote_client.go`) constructs `api.NewRemoteCityScopedClient` wiring TLS + the bearer (from `credential_command` via a cached `clientauth.CredentialSource`, or an ad-hoc `GC_CITY_URL_TOKEN`). `resolveReadTarget()` returns a no-fallback remote client OR the local cityPath (so each command keeps its local seam). **Migrated read commands** (each routes remote with no fallback, local path unchanged): `beads list`, `beads show`, `convoy list`, `convoy status`, `mail peek`, `session list`, `session peek`, `wait list`, `wait inspect`. An end-to-end test drives `gc beads list` against an httptest TLS server (reaches `/v0/city/mc/beads` with `X-GC-Request`; the local seam is never called).
+
+**Remaining before Slice-0 ships:**
+- **Config-heavy reads** need bespoke handling (they load a local `*config.City`/orders/agents that a remote city lacks): `status`/`rig status` (cmd_status.go), `citystatus`, `mail check` (loads cfg + `citySuspended`), `order history` (loads cfg + orders). Decide per-command whether the API response is self-sufficient or the local-cfg dependency must move server-side. `convoy check` is deliberately local-only (its auto-close mutations must not run off cache-backed reads).
+- **Events remote path**: wire `eventsAPIScope` to build/use the remote transport (deferred from G6), and thread `CredentialSource.Refresh()` into the stream-401 `reauth` hook (G7) with an anti-spin cap.
+- **Target-echo + request-id**: emit the §5 `target: <city> @ <url> (…)` line on remote invocations, appending `RequestIDForError(resp.Header)` on failure (G9 client half).
+
+Then: **checkpoint + human sign-off before Slice 1** (the write capstone, G10–G23).
+
+_(Original enablement plan retained below for reference.)_
+The remaining work is the **command-dispatch wiring** that flips the read set on:
 
 1. **Build a remote client from a resolved `resolvedContext.Remote`** — a new seam (the local `apiClient(cityPath)` ladder never handles remote). Construct `api.NewRemoteCityScopedClient(target.BaseURL, target.CityName, RemoteOptions{…})`, deriving `RemoteOptions.Token` from either `target.Token` (ad-hoc `GC_CITY_URL_TOKEN`, a static source) or `target.Ctx.CredentialCommand` (a `clientauth.CredentialSource{}.Token`), plus `CAFile`/`TLSServerName`/`InsecureSkipVerify`/`Timeout` from the context.
 2. **Route the read set through it** — `status | citystatus | beads list/show | wait | session list/peek | convoy list/status/check | mail check/peek/count | order history | events --follow/--watch` call the remote client instead of the local ladder when `ctx.Remote != nil`, and flip `remoteReadsEnabled = true` (or replace it with a per-command capability table). Because of **G1**, any remote error is already non-fallbackable — so this flip is safe.

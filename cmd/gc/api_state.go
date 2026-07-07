@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,10 +26,12 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -1489,41 +1492,29 @@ func (cs *controllerState) DeleteAgent(name string) error {
 	})
 }
 
-// CreateRig adds a new rig to city.toml.
+// CreateRig provisions a rig through internal/rig.Provision (Decision 7) and
+// commits it to controller state through the standard mutateAndPoke handshake.
+//
+// Provision runs AS the mutateAndPoke mutate closure: a mid-provision failure
+// rolls back through Provision's own topology snapshot (mutateAndPoke returns
+// the mutate error without touching its config snapshot), while a post-write
+// refresh failure rolls back through mutateAndPoke's config snapshot. The two
+// restore layers never overlap. The whole handshake runs under
+// SerializeConfigWrite so a concurrent config edit cannot interleave with
+// Provision's read-modify-append of city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
-	r = detectRigDefaultBranch(cs.cityPath, r)
-	if err := cs.initializeRigStoreForCreate(r); err != nil {
-		return err
-	}
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.CreateRig(r)
-	})
-}
-
-func detectRigDefaultBranch(cityPath string, r config.Rig) config.Rig {
-	r.DefaultBranch = strings.TrimSpace(r.DefaultBranch)
-	if r.DefaultBranch != "" {
-		return r
-	}
 	rigPath := strings.TrimSpace(r.Path)
 	if rigPath == "" {
-		return r
+		return fmt.Errorf("%w: rig path is required", configedit.ErrValidation)
 	}
-	rigPath = resolveStoreScopeRoot(cityPath, rigPath)
-	if _, err := os.Stat(filepath.Join(rigPath, ".git")); err != nil {
-		return r
-	}
-	r.DefaultBranch = git.New(rigPath).ProbeDefaultBranch()
-	return r
-}
+	// Resolve against the city dir, never the daemon CWD, so a same-named rig
+	// in the controller's working directory can never win.
+	rigPath = resolveStoreScopeRoot(cs.cityPath, rigPath)
 
-func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
-	cityPath := strings.TrimSpace(cs.cityPath)
-	rigPath := strings.TrimSpace(r.Path)
-	if cityPath == "" || rigPath == "" {
-		return nil
-	}
-
+	// Duplicate-name guard preserving the API's 409-on-existing-name contract.
+	// Without it, Provision's re-add semantics would make same-name+same-path an
+	// idempotent success and same-name+different-path a plain 500. Config-level
+	// re-add idempotency is owned by the C4 request_id state machine.
 	cs.mu.RLock()
 	cfg := cs.cfg
 	cs.mu.RUnlock()
@@ -1535,9 +1526,111 @@ func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
 		}
 	}
 
-	scopeRoot := resolveStoreScopeRoot(cityPath, rigPath)
-	if _, err := controllerStateInitRigDirIfReady(cityPath, scopeRoot, r.EffectivePrefix()); err != nil {
-		return fmt.Errorf("initializing rig %q beads: %w", r.Name, err)
+	var postErr error
+	if err := cs.SerializeConfigWrite(func() error {
+		return cs.mutateAndPoke(func() error {
+			// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
+			// writing city.toml from the composed snapshot would bake expansions
+			// into the file.
+			editCfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			// Authoritative under-lock duplicate-name guard: the pre-lock check on
+			// the composed snapshot can be stale (a concurrent create, or a local
+			// `gc rig add` the reconciler has not reloaded). Matches the retired
+			// configedit.Editor.CreateRig 409-on-any-name-match contract; config-level
+			// re-add idempotency is owned by the C4 request_id state machine.
+			for _, existing := range editCfg.Rigs {
+				if existing.Name == r.Name {
+					return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
+				}
+			}
+			// Register the city dolt config so the beads-init path can read the
+			// process-global lifecycle fields — but only if absent: the controller
+			// owns a persistent boot-time registration (startBeadsLifecycle) that this
+			// per-request window must never delete. (The CLI wrapper registers
+			// unconditionally because it is a short-lived process that owns its map.)
+			if cityUsesBdStoreContract(cs.cityPath) && cityDoltConfigHasLifecycleFields(editCfg.Dolt) {
+				if registerCityDoltConfigIfAbsent(cs.cityPath, editCfg.Dolt) {
+					defer clearCityDoltConfig(cs.cityPath)
+				}
+			}
+
+			deps := rig.Deps{
+				FS:           fsys.OSFS{},
+				CityPath:     cs.cityPath,
+				Cfg:          editCfg,
+				InitStore:    controllerStateInitRigDirIfReady,
+				InitAndHook:  initAndHookDir,
+				ComposePacks: ensureBundledRigImportsInstalled,
+				WriteRoutes: func(cp string, c *config.City) error {
+					return writeAllRigRoutes(collectRigRoutes(cp, c))
+				},
+				ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+				NormalizeScopes: func(cp string, c *config.City) error {
+					return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
+				},
+				PrepareAdopt:  prepareRigAdoptProviderState,
+				StoreContract: cityUsesBdStoreContract,
+				DoltSkip:      gcDoltSkip,
+				PostProvision: func(pc rig.ProvisionContext) error {
+					// Rig-local infrastructure the CLI installs. Failures are
+					// warn-and-continue (best-effort), logged rather than printed to
+					// a CLI stderr. Deliberately DROPS the CLI's controller-reload +
+					// store-accessible wait: G17 forbids the controller dialing its
+					// own socket mid-request, and mutateAndPoke's refresh already
+					// makes the controller see the rig.
+					if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
+						log.Printf("api: rig create: writing .gitignore: %v", err)
+					}
+					if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
+						resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
+						if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
+							log.Printf("api: rig create: installing agent hooks: %v", err)
+						}
+					}
+					reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+					if reloadedCfg != nil {
+						layers, ok := reloadedCfg.FormulaLayers.Rigs[r.Name]
+						if !ok || len(layers) == 0 {
+							layers = reloadedCfg.FormulaLayers.City
+						}
+						if len(layers) > 0 {
+							if rfErr := ResolveFormulas(pc.RigPath, layers); rfErr != nil {
+								log.Printf("api: rig create: resolving formulas: %v", rfErr)
+							}
+						}
+					}
+					if err := writeBeadsEnvGTRoot(fsys.OSFS{}, pc.RigPath, cs.cityPath); err != nil {
+						log.Printf("api: rig create: writing .beads/.env: %v", err)
+					}
+					return nil
+				},
+			}
+
+			_, res, err := rig.Provision(deps, rig.ProvisionRequest{
+				Name:          r.Name,
+				Path:          rigPath,
+				Prefix:        r.Prefix,
+				DefaultBranch: r.DefaultBranch,
+			})
+			if err != nil {
+				return err
+			}
+			// Capture PostProvision's (best-effort) error and return nil so
+			// mutateAndPoke runs its refresh/poke — the rig IS committed to disk,
+			// so returning the error here would leave disk and controller state
+			// split-brained (mutateAndPoke treats a mutate error as "nothing
+			// committed").
+			postErr = res.PostProvisionErr
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	if postErr != nil {
+		log.Printf("api: rig create: post-provision: %v", postErr)
 	}
 	return nil
 }

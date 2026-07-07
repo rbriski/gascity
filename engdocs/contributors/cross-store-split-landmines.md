@@ -109,29 +109,94 @@ Status: `broken-on-split` (open) · `fixed-on-deployed-branch` (proven port) ·
     would misroute wisps). Tests: `TestRecipeMaterializesInfraClass`,
     `TestInstantiateSlingFormulaRoutesMoleculeByClass` (internal/sling).
 
-### P2 — medium
-8. CLI sling singleton/replacement scan excludes infra → duplicate workflows —
-   `cmd/gc/cmd_sling.go:419`.
-9. Cross-store parent close is event-silent + cache-invisible —
-   `internal/dispatch/runtime.go:1068`.
-10. Wisp-autoclose input-convoy reaping reads `tracks` from the wrong store —
-    `cmd/gc/wisp_autoclose.go:176`.
-11. Rig removed from `city.toml` → finalizer quarantined, parent open forever —
-    `cmd/gc/cmd_convoy_dispatch.go:269`.
-12. Cache-handle correlated staleness (whole-store dirty decline for
-    List/DepList + mandatory live Ready in reconciler) —
-    `internal/beads/caching_store_handles.go:233`.
-13. Partial-federation blindness outside the control lane (a partial read
-    omitting infra makes the whole DAG invisible with a 200) —
-    `internal/api/types_read.go:58`. **fixed-on-deployed-branch**.
+### P2 — medium — #8, #10, #11, #13 FIXED (this branch); #9, #12 handled-verify
+8. **FIXED (`34a9faf43`).** CLI sling singleton/replacement scan excluded infra
+   → duplicate workflows. The inline `SourceWorkflowStores` closure at
+   `cmd/gc/cmd_sling.go` used `openSourceWorkflowStores` (work-class); extracted
+   into a testable `slingSourceWorkflowStores` helper routed through the
+   graph-root opener (`openSourceWorkflowGraphStores`, includeInfra=true), fail
+   loud on a broken infra store, warn-and-continue on a broken rig. Tests:
+   `TestSlingSourceWorkflowStoresIncludesInfraOnSplitCity`,
+   `…FailsLoudOnBrokenInfra`, `…LegacyIsWorkOnly`.
+9. **handled-verify (no code change).** Cross-store parent close is event-silent
+   *at write time*, but the controller's CachingStore watchdog reconciler
+   synthesizes a verified `bead.closed` (actor `cache-reconcile`) within one
+   reconcile cadence (30–120s) and drives cache invalidation + the autoclose
+   cascade off it. Per-write event hooks were deliberately removed
+   (`cmd/gc/hooks.go`); every one-shot close (finalizer, quarantine, `gc close`)
+   is in the same eventual-consistency class, and the chain walk itself always
+   re-reads through raw (uncached) stores, so it is fail-safe, not fail-open.
+   Pinned by `TestReconcileEmitsCloseWhenGetReturnsClosed` +
+   `…FreshClosePayload…` (`internal/beads`).
+10. **FIXED (`3bfeaff84`).** Wisp-autoclose input-convoy reaping read `tracks`
+    from the graph store, but a post-split input convoy + tracks edge live in the
+    WORK store. `collectInputConvoyWorkflowRoots` now union-probes both owning
+    stores (work ∪ graph, fail-closed, migrated-legacy convoy still found); the
+    root `ListByMetadata` stays on the graph store. Tests:
+    `TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores`,
+    `…ViaMigratedInfraConvoy`.
+11. **FIXED (`a67c44ef7`).** Rig removed from `city.toml` → the resolver's plain
+    "rig not found" error hit the cmd-layer quarantine catch-all and terminally
+    closed the finalizer (root + parent stranded open forever). `makeStoreRefResolver`
+    now classifies rig-not-found as `dispatch.ErrControlPending` (retryable; heals
+    when the rig is re-added). Not split-specific. Test:
+    `TestFinalize_RigRemovedFromConfig_RetriesNotQuarantines`.
+12. **handled-verify on this branch (no code change) + merge-order guard.** No
+    fallback-free cached reader exists here (every `Cached.Ready`/`List` consumer
+    falls back to live; `Cached.DepList` has zero callers), the reconciler's ready
+    verdicts are mandatory-live-authoritative, and no decision path joins the two
+    stores' caches — so the whole-store dirty decline can only cause a
+    conservative fall-back-to-live, never a stale verdict. The real instance (the
+    supervisor-cached, fallback-free control-ready lane) exists only on the
+    deployed branch and was fixed there by `c2257d206` (per-bead dirty scoping).
+    **GUARD:** any future port of the supervisor-cached control-ready stack
+    (`d9a23e6fb`/`3c2173765`) MUST carry `c2257d206` and its tests, or the
+    fallback-free lane starves on a split city. Do NOT blanket per-bead-scope
+    `cachedListOnly`/`cachedDepListOnly` (fail-open for complete-list callers).
+13. **FIXED (`c224a9792`).** Partial-federation blindness: HTTP `/v0/beads/ready`
+    and `/v0/beads` federated city + rigs only, so a split city's whole graph DAG
+    was invisible behind an authoritative 200 (not even flagged Partial). Added
+    the infra federation arm to both handlers, gated like the by-id class arm; an
+    infra-leg hard failure is an authoritative 503 (not a degraded Partial 200),
+    a `PartialResultError` still flows as Partial. The deployed-branch label was
+    misleading — the fix lived in `coordrouter` (absent here), so it was written
+    new. Tests: `TestBeadReadyFederatesInfraStore`,
+    `TestFederatedReady_InfraPartialIsAuthoritativeFailure`,
+    `TestBeadListFederatesInfraStore`, `…HardFailIs503`, `…PartialPreservesRows`,
+    `TestBeadReadySingleStoreCityUnchanged`.
 
-### P3 — low
-14. `resolveRequiredArtifactWorktree` cross-store read with no resolver —
-    `internal/dispatch/retry.go:418`.
-15. Dangling cross-store `ParentID` on attach pours + unresolved convoy-member
-    placeholders in graph views — `internal/molecule/molecule.go:569`.
-16. Finalize close happy path + routed inventory — `internal/dispatch/runtime.go:711`
-    (**handled-verify**).
+### P3 — low — #14, #15(Half B) FIXED (this branch); #15(Half A), #16 handled
+14. **FIXED (`ebeba2a55`).** `resolveRequiredArtifactWorktree` point-read the
+    source bead through the ambient graph store; on a split city the source /
+    input convoy live in the work store, so it got ErrNotFound and misclassified
+    a passing retry as transient `missing_required_artifact_context` (fail-open,
+    burns retries). Now threads `ProcessOptions` and federates the source read
+    like `walkSourceBeadChain` (`gc.source_store_ref` via `ResolveStoreRef`, then
+    `storeref.Resolve` over `[sourceStore] + MemberStores`); `MemberStores` wired
+    for the `retry`/`retry-eval` control kinds. Tests:
+    `TestClassifyRetryAttemptWithPostconditionsResolvesSourceBeadAcrossStores`,
+    `…CrossStoreSourceWithoutResolverFailsLoud`, `…ResolvesInputConvoyViaMemberStores`.
+15. **Half B FIXED (`5fb0888cd`); Half A no live path (documented).**
+    - Half B (unresolved convoy-member placeholders in graph/convoy views):
+      `collectBeadGraph` + both API convoy views + the CLI `gc graph` convoy
+      expansion now probe the class complement (`Server.memberStoreComplement` /
+      `graph{Infra,Work}MemberStores`), and `openRigAwareStore` gained a
+      reserved-class arm so `gc graph gcg-…` opens the infra store instead of
+      NotFound. Tests: `TestCollectBeadGraph_CrossStoreConvoyMembersResolved`,
+      `TestMemberStoreComplement_SingleStoreIsNil`,
+      `TestResolveGraphInput_ExpandsCrossStoreConvoyMembers`.
+    - Half A (dangling cross-store `ParentID` at `molecule.go:569`): no live
+      producer on this branch — the workflow class that routes to infra is
+      guarded out of the `opts.ParentID` stamp, and `cook --attach` uses
+      `gc.attached_workflow_root` (landmine #4), not `ParentID`. Left as a
+      latent seam; optional one-line `Get`-guard noted but not landed (defends a
+      path with zero callers).
+16. **handled-verify confirmed (no code change).** The finalize happy path closes
+    the domain parent via `gc.source_store_ref` (`makeStoreRefResolver` → work
+    store) and the live-root "routed inventory" scan is federated work ∪ infra
+    (`openSourceWorkflowGraphStores`, gated on `cityHasInfraStore`), fail-loud on
+    a degraded scan. Pinned by `TestProcessWorkflowFinalizeClosesCrossStoreSourceBead`,
+    `…FailsLoudWhenCrossStoreRefUnresolvable`, `…LeavesAncestorOpenWhenLiveRootExistsInAnotherStore`.
 
 ## Conformance test suite (16) — TDD, must fail on a split city first
 
@@ -169,8 +234,13 @@ Fast-unit: `TestWalkSourceBeadChain_MissingRef_IsErrorNotSilentNoop` (3),
    drain cross-store membership (7). Each TDD'd with fast-unit coverage; the
    real-bd repros (parent READY mid-DAG, drain over managed Dolt) remain as E2E
    anchors on the standing integration suite.
-3. **P2/P3** — the remaining reads/links, each a "route this read through the
-   composite / the right store" change with its fast-unit guard.
+3. **P2/P3 — DONE (this branch).** Real read/link fixes landed for #8
+   (`34a9faf43`), #10 (`3bfeaff84`), #11 (`a67c44ef7`), #13 (`c224a9792`), #14
+   (`ebeba2a55`), #15 Half B (`5fb0888cd`), each TDD'd fast-unit. #9, #12, #16,
+   and #15 Half A are handled-verify / no-live-path (no code change), with a
+   merge-order guard recorded for #12. Investigated via a 9-agent parallel audit
+   (each: current trace → confirm/already-handled → minimal fix reusing existing
+   seams, fail-loud, gated on `cityHasInfraStore` → TDD plan).
 4. Land `TestSplitCity_EndToEndFormulaLifecycle` as the standing regression that
    a formula runs discovery→claim→drain→finalize→parent-close on a real split
    city.

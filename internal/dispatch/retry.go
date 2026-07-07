@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -283,7 +284,7 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	if result.Outcome != "pass" {
 		return result, nil
 	}
-	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat)
+	reason, err := validateRequiredArtifacts(store, subject, opts)
 	if err != nil {
 		return retryEvalResult{}, err
 	}
@@ -293,12 +294,13 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	return result, nil
 }
 
-func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error)) (string, error) {
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, opts ProcessOptions) (string, error) {
+	stat := opts.RequiredArtifactStat
 	if stat == nil {
 		stat = os.Stat
 	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
-		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath, opts)
 		if err != nil {
 			return "", err
 		}
@@ -347,13 +349,13 @@ func requiredArtifactTemplates(metadata map[string]string) []string {
 	return result
 }
 
-func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, opts ProcessOptions) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
 	worktree := strings.TrimSpace(subject.Metadata["work_dir"])
 
 	if worktree == "" {
-		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
+		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID, opts)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -415,7 +417,7 @@ func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
 	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
 }
 
-func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
+func resolveRequiredArtifactWorktree(store beads.Store, rootID string, opts ProcessOptions) (string, string, error) {
 	if rootID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
@@ -427,13 +429,40 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 		return "", "", fmt.Errorf("loading required artifact workflow root %s: %w", rootID, markTransientControllerBoundaryError(err))
 	}
 	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	fromSourceBead := sourceID != ""
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	}
 	if sourceID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
-	source, err := store.Get(sourceID)
+
+	// The workflow root lives in the graph store, but on a split city the source
+	// bead it was launched from lives in the work store (gc.source_bead_id hop)
+	// and the input convoy in the work store (gc.input_convoy_id hop). Reading
+	// the source through the ambient graph store gets a clean ErrNotFound and
+	// misclassifies a genuinely-passing attempt as missing_required_artifact_context,
+	// burning retries. Federate the source read exactly like walkSourceBeadChain:
+	// resolve gc.source_store_ref when present (fail loud if it names a ref but
+	// no resolver is wired), then probe [sourceStore] + opts.MemberStores.
+	sourceStore := store
+	if fromSourceBead {
+		if ref := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey]); ref != "" {
+			if opts.ResolveStoreRef == nil {
+				return "", "", fmt.Errorf("resolving required artifact source bead %s (ref %s): no store-ref resolver provided", sourceID, ref)
+			}
+			resolved, err := opts.ResolveStoreRef(ref)
+			if err != nil {
+				return "", "", fmt.Errorf("resolving required artifact source store %q: %w", ref, markTransientControllerBoundaryError(err))
+			}
+			if resolved == nil {
+				return "", "", fmt.Errorf("resolving required artifact source store %q: nil store", ref)
+			}
+			sourceStore = resolved
+		}
+	}
+	probe := append([]beads.Store{sourceStore}, opts.MemberStores...)
+	source, err := storeref.Resolve(sourceID, probe)
 	if errors.Is(err, beads.ErrNotFound) {
 		return "", "missing_required_artifact_context", nil
 	}

@@ -241,22 +241,23 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			// On a split city the drain control runs in the graph/infra store, but a
 			// v2 input convoy + its members + tracks edges live in the WORK store.
 			// Provide the work-class store tail so drain resolves membership and
-			// writes unit-convoy tracks across the boundary. openSourceWorkflowStores
-			// is work-class only (city HQ + rigs, never the infra store) — exactly
-			// the member tail. No-op on a single-store city.
-			if cityHasInfraStore(cityPath) {
-				memberViews, memberSkips, memberErr := openSourceWorkflowStores(cfg, cityPath, "")
-				if memberErr != nil {
-					return fmt.Errorf("opening drain member stores: %w", memberErr)
-				}
-				if len(memberSkips) > 0 {
-					return fmt.Errorf("drain member stores degraded: %s", formatSourceWorkflowStoreSkips(memberSkips))
-				}
-				for _, view := range memberViews {
-					opts.MemberStores = append(opts.MemberStores, view.store)
-				}
+			// writes unit-convoy tracks across the boundary. No-op on a single-store
+			// city.
+			memberStores, memberErr := crossStoreMemberStores(cityPath, cfg)
+			if memberErr != nil {
+				return memberErr
 			}
+			opts.MemberStores = memberStores
 		case "retry-eval":
+			// A retry-eval validating a required artifact resolves the artifact
+			// worktree through the workflow's source bead / input convoy, which
+			// live in the WORK store on a split city; supply the member tail so
+			// that cross-store source read succeeds. No-op on a single-store city.
+			memberStores, memberErr := crossStoreMemberStores(cityPath, cfg)
+			if memberErr != nil {
+				return memberErr
+			}
+			opts.MemberStores = memberStores
 			sp := dispatchControlSessionProvider()
 			opts.RecycleSession = func(subject beads.Bead) error {
 				if strings.TrimSpace(subject.Assignee) == "" {
@@ -266,6 +267,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			// Same cross-store required-artifact resolution as retry-eval.
+			memberStores, memberErr := crossStoreMemberStores(cityPath, cfg)
+			if memberErr != nil {
+				return memberErr
+			}
+			opts.MemberStores = memberStores
 			sp := dispatchControlSessionProvider()
 			opts.RecycleSession = func(subject beads.Bead) error {
 				if strings.TrimSpace(subject.Assignee) == "" {
@@ -400,6 +407,31 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
 	}
+}
+
+// crossStoreMemberStores returns the work-class store tail (city HQ + rigs,
+// never the infra store) that control kinds resolving cross-store source/convoy
+// beads must probe on a split city: drain reads convoy membership, and
+// retry/retry-eval resolve a required-artifact worktree through the source bead
+// or input convoy. Both live in the work store while the control bead runs in
+// the graph/infra store. Fail-loud on a degraded store so a partial member set
+// never silently misclassifies work. Returns nil (no-op) on a single-store city.
+func crossStoreMemberStores(cityPath string, cfg *config.City) ([]beads.Store, error) {
+	if !cityHasInfraStore(cityPath) {
+		return nil, nil
+	}
+	views, skips, err := openSourceWorkflowStores(cfg, cityPath, "")
+	if err != nil {
+		return nil, fmt.Errorf("opening cross-store member stores: %w", err)
+	}
+	if len(skips) > 0 {
+		return nil, fmt.Errorf("cross-store member stores degraded: %s", formatSourceWorkflowStoreSkips(skips))
+	}
+	stores := make([]beads.Store, 0, len(views))
+	for _, view := range views {
+		stores = append(stores, view.store)
+	}
+	return stores, nil
 }
 
 func makeSourceWorkflowLocker(ctx context.Context, cityPath string, cfg *config.City, defaultStorePath string) func(storeRef, sourceBeadID string, fn func() error) error {

@@ -112,7 +112,7 @@ func (s *Store) Append(ctx context.Context, streamID, engine string, expectedVer
 		e := events[idx]
 		seq++
 		payloadHash := canon.Hash(e.Payload)
-		chain := chainHash(prev, streamID, seq, engine, e.Type, e.IRContractVersion, payloadHash)
+		chain := chainHash(prev, streamID, seq, engine, e.Type, e.Substream, e.IRContractVersion, payloadHash)
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO journal
 			   (stream_id, seq, substream, engine, type, ir_contract_version,
@@ -210,7 +210,7 @@ func (s *Store) Verify(ctx context.Context, streamID string) error {
 		if got := canon.Hash(e.Payload); got != e.PayloadHash {
 			return fmt.Errorf("graphstore: verify %q seq %d: payload hash mismatch: %w", streamID, e.Seq, ErrChainBroken)
 		}
-		want := chainHash(prev, streamID, e.Seq, e.Engine, e.Type, e.IRContractVersion, e.PayloadHash)
+		want := chainHash(prev, streamID, e.Seq, e.Engine, e.Type, e.Substream, e.IRContractVersion, e.PayloadHash)
 		if want != e.ChainHash {
 			return fmt.Errorf("graphstore: verify %q seq %d: chain hash mismatch: %w", streamID, e.Seq, ErrChainBroken)
 		}
@@ -300,19 +300,25 @@ func nullableToken(token string) any {
 	return token
 }
 
-// chainHash computes chain_hash per D-SEC-1. The spec formula is
-// SHA256(prev.chain_hash || stream_id || seq || engine || type ||
-// ir_contract_version || payload_hash); to remove the boundary ambiguity of raw
-// concatenation over variable-length string fields, each variable-length field
-// is length-prefixed (8-byte big-endian) while the field order and the two fixed
-// 32-byte hashes are exactly as specified. This is the sole canonical framing.
+// chainHash computes chain_hash per D-SEC-1, as amended by the DDL-freeze S6
+// decision. The chained preimage is
 //
-// NOTE: substream is deliberately EXCLUDED from the chain-hash fields (the chain
-// binds the single per-root seq space, not the substream discriminator). Both
-// the field set here and the number format in canon.canonicalNumber (Go strconv
-// 'g') are pending DDL-freeze confirmation (01-architecture §7 S6/S7); do not
-// change the framing without that decision.
-func chainHash(prev [32]byte, streamID string, seq uint64, engine, typ, irVersion string, payloadHash [32]byte) [32]byte {
+//	SHA256(prev.chain_hash || stream_id || seq || engine || type ||
+//	       substream || ir_contract_version || payload_hash)
+//
+// To remove the boundary ambiguity of raw concatenation over variable-length
+// string fields, each variable-length field is length-prefixed (8-byte
+// big-endian) while the two fixed 32-byte hashes and the 8-byte seq are written
+// raw. This is the sole canonical framing.
+//
+// substream is folded into the chain immediately after type (S6, 01-architecture
+// §7 decision "leaning yes", adopted): substream is semantics-bearing (channel
+// routing), so a retention-gated delete+reinsert that changes only substream must
+// alter chain_hash and be caught by Verify. Its fixed length-prefixed position is
+// load-bearing — do not move it. The number format in canon.canonicalNumber (Go
+// strconv 'g') remains pending DDL-freeze confirmation (§7 S7); do not change that
+// framing without that decision.
+func chainHash(prev [32]byte, streamID string, seq uint64, engine, typ, substream, irVersion string, payloadHash [32]byte) [32]byte {
 	h := sha256.New()
 	h.Write(prev[:])
 	writeLenPrefixed(h, []byte(streamID))
@@ -321,6 +327,7 @@ func chainHash(prev [32]byte, streamID string, seq uint64, engine, typ, irVersio
 	h.Write(seqBuf[:])
 	writeLenPrefixed(h, []byte(engine))
 	writeLenPrefixed(h, []byte(typ))
+	writeLenPrefixed(h, []byte(substream))
 	writeLenPrefixed(h, []byte(irVersion))
 	h.Write(payloadHash[:])
 	var out [32]byte

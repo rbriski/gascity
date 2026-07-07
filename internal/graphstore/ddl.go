@@ -77,11 +77,134 @@ CREATE TABLE graph_meta (
 );
 `
 
+// schemaV2 adds the Tier-A projection tables (01-architecture §2.2), copied
+// verbatim: nodes (+ its four indexes), node_labels, node_metadata, edges (+
+// edges_reverse), the frontier (WITHOUT ROWID + its covering index),
+// defer_wakeups, and channel_cursors. Tier A is write-closed and rebuildable
+// (I-13/I-14): the fold applier in projection.go is the ONLY writer of
+// fold_owned=1 rows. The write-closure is enforced structurally here — the same
+// migration that creates nodes ships the tripwire triggers (DET-T-18), so the
+// table is never live without them, mirroring the journal's append-only triggers
+// (SEC-3). tier_a_write_gate is the projection's analog of retention_gate: the
+// fold applier opens it inside its own transaction, writes, and closes it, so any
+// non-fold writer of a fold_owned=1 row hits a closed gate and a loud ABORT.
+//
+// Scope of this slice's write-closure (honest narrowing): the trigger guard
+// covers `nodes` (fold_owned=1 rows) ONLY. It blocks INSERT/UPDATE/DELETE of a
+// fold-owned node while the gate is closed, INCLUDING the escalation path where
+// a non-fold writer inserts fold_owned=0 and then flips it to 1 (the UPDATE
+// guard fires on NEW.fold_owned=1 as well as OLD.fold_owned=1). The child and
+// sibling tables — edges, frontier, node_labels, node_metadata, defer_wakeups,
+// channel_cursors — are NOT yet trigger-guarded; a rogue writer can still mutate
+// them directly. Table-wide write-closure (a gate guard on every Tier-A table)
+// is a P2/P3 follow-up, not part of this slice.
+const schemaV2 = `
+CREATE TABLE nodes (
+  id           TEXT PRIMARY KEY,
+  title        TEXT    NOT NULL DEFAULT '',
+  status       TEXT    NOT NULL DEFAULT 'open',
+  bead_type    TEXT    NOT NULL DEFAULT 'task',
+  priority     INTEGER,
+  description  TEXT    NOT NULL DEFAULT '',
+  assignee     TEXT    NOT NULL DEFAULT '',
+  from_actor   TEXT    NOT NULL DEFAULT '',
+  parent_id    TEXT    NOT NULL DEFAULT '',
+  ref          TEXT    NOT NULL DEFAULT '',
+  created_at   TEXT    NOT NULL,
+  updated_at   TEXT    NOT NULL DEFAULT '',
+  defer_until  TEXT,
+  storage_tier TEXT    NOT NULL DEFAULT 'history'
+               CHECK (storage_tier IN ('history','no_history','ephemeral')),
+  is_blocked   INTEGER NOT NULL DEFAULT 0,
+  fold_owned   INTEGER NOT NULL DEFAULT 0,
+  stream_id    TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX nodes_status   ON nodes (status, bead_type);
+CREATE INDEX nodes_parent   ON nodes (parent_id)        WHERE parent_id <> '';
+CREATE INDEX nodes_assignee ON nodes (assignee, status) WHERE assignee <> '';
+CREATE INDEX nodes_stream   ON nodes (stream_id)        WHERE stream_id <> '';
+
+CREATE TABLE node_labels (
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  label   TEXT NOT NULL,
+  PRIMARY KEY (node_id, label)
+);
+CREATE INDEX node_labels_by_label ON node_labels (label);
+
+CREATE TABLE node_metadata (
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  key     TEXT NOT NULL,
+  value   TEXT NOT NULL,
+  PRIMARY KEY (node_id, key)
+);
+CREATE INDEX node_metadata_kv ON node_metadata (key, value);
+
+CREATE TABLE edges (
+  from_id  TEXT NOT NULL,
+  to_id    TEXT NOT NULL,
+  dep_type TEXT NOT NULL DEFAULT 'blocks',
+  metadata TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (from_id, to_id, dep_type),
+  FOREIGN KEY (from_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+CREATE INDEX edges_reverse ON edges (to_id);
+
+CREATE TABLE frontier (
+  node_id        TEXT PRIMARY KEY,
+  root_id        TEXT NOT NULL,
+  route          TEXT NOT NULL DEFAULT '',
+  ready_priority INTEGER NOT NULL DEFAULT 2,
+  created_at     TEXT NOT NULL,
+  id             TEXT NOT NULL,
+  defer_until    TEXT
+) WITHOUT ROWID;
+CREATE INDEX frontier_route_order
+  ON frontier (route, ready_priority, created_at, id);
+
+CREATE TABLE defer_wakeups (
+  node_id TEXT PRIMARY KEY,
+  wake_at TEXT NOT NULL
+);
+CREATE INDEX defer_wakeups_by_time ON defer_wakeups (wake_at, node_id);
+
+CREATE TABLE channel_cursors (
+  stream_id    TEXT NOT NULL,
+  substream    TEXT NOT NULL,
+  reader_key   TEXT NOT NULL,
+  position     INTEGER NOT NULL,
+  planted_seq  INTEGER NOT NULL,
+  advanced_seq INTEGER NOT NULL,
+  PRIMARY KEY (stream_id, substream, reader_key)
+);
+
+CREATE TABLE tier_a_write_gate (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+  open      INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO tier_a_write_gate(singleton, open) VALUES (0, 0);
+
+CREATE TRIGGER nodes_fold_owned_no_insert BEFORE INSERT ON nodes
+WHEN NEW.fold_owned = 1
+ AND NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'nodes: fold-owned row is write-closed (I-14)'); END;
+
+CREATE TRIGGER nodes_fold_owned_no_update BEFORE UPDATE ON nodes
+WHEN (OLD.fold_owned = 1 OR NEW.fold_owned = 1)
+ AND NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'nodes: fold-owned row is write-closed (I-14)'); END;
+
+CREATE TRIGGER nodes_fold_owned_no_delete BEFORE DELETE ON nodes
+WHEN OLD.fold_owned = 1
+ AND NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'nodes: fold-owned row is write-closed (I-14)'); END;
+`
+
 // migrations is the forward-only schema ladder. Index i applies to move the
 // database from schema_version i to i+1. Never edit an existing entry once it
 // has shipped; append a new one.
 var migrations = []string{
 	schemaV1,
+	schemaV2,
 }
 
 // schemaVersionLatest is the target schema_version after all migrations apply.

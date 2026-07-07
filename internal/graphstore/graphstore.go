@@ -54,6 +54,12 @@ type Store struct {
 
 	mu    sync.RWMutex
 	vocab map[vocabKey]struct{}
+
+	// rebuildAfterRead, when non-nil, is invoked inside RebuildTierA immediately
+	// after the from-genesis stream read and before the write transaction opens.
+	// It is a test-only seam for driving the read/write TOCTOU window
+	// deterministically; production leaves it nil.
+	rebuildAfterRead func()
 }
 
 type vocabKey struct {

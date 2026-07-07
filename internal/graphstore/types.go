@@ -58,6 +58,13 @@ var (
 	// silently against another city's ledger.
 	ErrCityMismatch = errors.New("graphstore: city id mismatch")
 
+	// ErrRebuildRaced is returned by RebuildTierA when a concurrent Append commits
+	// between the from-genesis stream read and the rebuild's write transaction:
+	// the folded prefix is stale, so re-applying it would project a torn view.
+	// The rebuild aborts (its transaction rolls back untouched) and the caller
+	// retries against the new head.
+	ErrRebuildRaced = errors.New("graphstore: tier-A rebuild raced a concurrent append")
+
 	// ErrBusy is a retryable sentinel wrapping SQLite SQLITE_BUSY / "database is
 	// locked": another writer holds the single write lock. Callers may retry;
 	// it does not mean the store is broken. The store is single-writer per

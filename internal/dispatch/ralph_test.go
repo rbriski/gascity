@@ -248,6 +248,131 @@ func TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence(t *testing.T) {
 	}
 }
 
+// TestRunRalphCheckReapedWorkDirResolvesAgainstDurableRoot covers the
+// gastownhall/gascity#3782 residuals that remain live after that fix's
+// fs.ErrNotExist fallback: a graph.v2 ralph control bead inherits a member
+// step's gc.work_dir, and by the time the controller runs the check that
+// worktree has been reaped (session drain). The durable check script lives
+// under the city/store root and reads only cwd-independent env, so it must
+// still evaluate to a pass.
+//
+// Pre-fix: #3782's fallback resolves the script against the store root, so the
+// script is FOUND, but runRalphCheck still hands the dead worktree to
+// RunCondition as the process cwd. cmd.Run's chdir ENOENTs → GateError
+// (residual A) — a spurious non-pass that burns an attempt.
+// Post-fix: the reaped work_dir is stat-and-blanked, so the script resolves
+// against the durable root and runs from an isolated cwd → GatePass.
+func TestRunRalphCheckReapedWorkDirResolvesAgainstDurableRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	// Durable, pack-shipped gate under the city/store root (the incident's
+	// design-review-approved.sh, which reads GC_MOLECULE_DIR — here it simply
+	// exits 0 since cwd/molecule state is irrelevant to the residual).
+	checkRel := filepath.Join(".gc", "scripts", "checks", "design-review-approved.sh")
+	durableScript := filepath.Join(cityPath, checkRel)
+	if err := os.MkdirAll(filepath.Dir(durableScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(durableScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Per-task worktree under the city root, created then reaped.
+	workDir := filepath.Join(cityPath, "worktrees", "task1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   filepath.ToSlash(checkRel),
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v (reaped work_dir must resolve against the durable root)", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass; a reaped work_dir must not read as GateError", result.Outcome, result.Stderr)
+	}
+}
+
+// TestRunRalphCheckReapedWorkDirCwdBoundGateFailsClosed is the false-PASS
+// guardrail. Blanking the reaped work_dir reverts script resolution to the
+// durable root, which is correct for cwd-independent gates. But a gate whose
+// verdict implicitly depends on the reaped worktree's cwd (e.g. `git diff` in
+// the worktree, modeled here as a marker-file probe) must NOT silently pass by
+// inspecting the durable tree in its place. The fix runs the reaped-workdir
+// check from a fresh empty scratch dir, so the cwd probe fails-closed even
+// though a same-named marker exists at the durable root.
+func TestRunRalphCheckReapedWorkDirCwdBoundGateFailsClosed(t *testing.T) {
+	cityPath := t.TempDir()
+	// Durable gate that keys off cwd contents, not durable env.
+	checkRel := filepath.Join(".gc", "scripts", "checks", "cwd-gate.sh")
+	durableScript := filepath.Join(cityPath, checkRel)
+	if err := os.MkdirAll(filepath.Dir(durableScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(durableScript, []byte("#!/bin/sh\n[ -f ./converged.marker ]\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Decoy at the durable root: if the check ran from storePath/cityPath (no
+	// guardrail) this marker would make the cwd probe pass spuriously.
+	if err := os.WriteFile(filepath.Join(cityPath, "converged.marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(cityPath, "worktrees", "task1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   filepath.ToSlash(checkRel),
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	// The gate must not read as converged: run from an empty scratch cwd, the
+	// marker probe exits non-zero → GateFail (fail-closed), never GatePass.
+	if result.Outcome == convergence.GatePass {
+		t.Fatalf("Outcome = GatePass (stderr=%q): a cwd-bound gate false-PASSED against the durable root instead of failing closed", result.Stderr)
+	}
+	if result.Outcome != convergence.GateFail {
+		t.Fatalf("Outcome = %q, want GateFail (fail-closed) for an unanswerable cwd-bound gate", result.Outcome)
+	}
+}
+
 // TestRunRalphCheckEnvTracksSubject pins gastownhall/gascity#2558 review
 // feedback: GC_BEAD_ID and the molecule/artifact dirs must describe the SAME
 // bead. The per-attempt agent runs on the subject (attempt) bead and writes

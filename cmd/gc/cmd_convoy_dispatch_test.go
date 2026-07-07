@@ -6459,3 +6459,125 @@ func TestFollowSleepDurationHandlesPathologicalInputs(t *testing.T) {
 		t.Errorf("followSleepDuration(-1) = %v, want base 1s", got)
 	}
 }
+
+// TestControlDispatchReapedWorkDirDoesNotQuarantine is the incident-baseline
+// integration test for the gastownhall/gascity#3782 residuals. A graph.v2
+// ralph control bead inherits a member step's gc.work_dir; by the time the
+// controller runs its gc.check_path gate the worktree has been reaped. The
+// durable gate script lives under the city root and is cwd-independent, so the
+// controller must converge (pass) — not hard-quarantine.
+//
+// The reaped worktree is modeled with an ENOTDIR path (a regular file stands
+// in for a parent path component), a deterministic, root-safe stand-in for the
+// residual-B error class (EACCES/ELOOP on a partially reaped worktree) that
+// #3782's fs.ErrNotExist-only fallback does not cover. os.Stat on that path
+// errors, so the fix blanks the work_dir and resolves the script against the
+// durable root.
+//
+// Pre-fix: ResolveConditionPath's EvalSymlinks hits the ENOTDIR, which is not
+// fs.ErrNotExist, so #3782's fallback is skipped and runRalphCheck returns a
+// hard error → dispatch quarantines the bead (gc:control-quarantined,
+// gc.control_quarantined=true, controller_error_class=hard).
+// Post-fix: the reaped work_dir is stat-and-blanked, the script resolves
+// against the durable root and passes, so the control closes as pass and is
+// never quarantined.
+func TestControlDispatchReapedWorkDirDoesNotQuarantine(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Durable, cwd-independent gate under the city root.
+	checkRel := filepath.Join(".gc", "scripts", "checks", "design-review-approved.sh")
+	durableScript := filepath.Join(cityPath, checkRel)
+	if err := os.MkdirAll(filepath.Dir(durableScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(durableScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reaped worktree: a regular file where a directory component is expected,
+	// so any stat/traversal of the work_dir yields ENOTDIR (not ErrNotExist).
+	reapedParent := filepath.Join(cityPath, "worktrees-file")
+	if err := os.WriteFile(reapedParent, []byte("reaped"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reapedWorkDir := filepath.Join(reapedParent, "task1")
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":          "ralph",
+			"gc.root_bead_id":  root.ID,
+			"gc.step_ref":      "mol-test.review-loop",
+			"gc.check_path":    filepath.ToSlash(checkRel),
+			"gc.work_dir":      reapedWorkDir,
+			"gc.max_attempts":  "3",
+			"gc.control_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iteration, err := store.Create(beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(iteration.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(control.ID, iteration.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+
+	controlBead, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Drive the real control dispatch path: ProcessControl, then the same
+	// error→quarantine handling as processControlDispatch (cmd_convoy_dispatch.go).
+	result, procErr := dispatch.ProcessControl(store, controlBead, dispatch.ProcessOptions{CityPath: cityPath})
+	if procErr != nil {
+		if !errors.Is(procErr, dispatch.ErrControlPending) && !dispatch.IsTransientControllerError(procErr) {
+			if qErr := quarantineControlFailureBead(store, control.ID, procErr); qErr != nil {
+				t.Fatalf("quarantineControlFailureBead: %v", qErr)
+			}
+		}
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if procErr != nil {
+		t.Fatalf("ProcessControl returned error %v; a reaped work_dir must not hard-quarantine (post-fix it resolves the durable gate and passes)", procErr)
+	}
+	if result.Action != "pass" {
+		t.Fatalf("control action = %q, want pass", result.Action)
+	}
+	if got := after.Metadata[beadmeta.ControlQuarantinedMetadataKey]; got == "true" {
+		t.Fatalf("gc.control_quarantined = %q, want != true (bead was quarantined)", got)
+	}
+	if got := after.Metadata[beadmeta.ControllerErrorClassMetadataKey]; got == beadmeta.FailureClassHard {
+		t.Fatalf("gc.controller_error_class = %q, want not hard", got)
+	}
+	for _, label := range after.Labels {
+		if label == "gc:control-quarantined" {
+			t.Fatalf("control bead carries gc:control-quarantined label; want not quarantined")
+		}
+	}
+}

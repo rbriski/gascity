@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -171,6 +172,10 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 
 	workDir := resolveInheritedMetadata(store, bead, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey)
 	resolvedWorkDir := ""
+	// checkCwd is the process cwd handed to RunCondition. It normally tracks
+	// resolvedWorkDir (worktree-local) but diverges when the worktree has been
+	// reaped — see the stat-and-blank block below.
+	checkCwd := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {
 			resolvedWorkDir = filepath.Clean(workDir)
@@ -183,6 +188,43 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// trusted roots below; for those, work_dir is only the process cwd.
 		if !filepath.IsAbs(checkPath) && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
 			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
+		}
+		checkCwd = resolvedWorkDir
+
+		// gastownhall/gascity#3782 residuals A+B. A graph.v2 ralph control
+		// bead inherits a member step's gc.work_dir as the base for both
+		// resolving AND running its gc.check_path gate. When that worktree is
+		// reaped (worktree removed on session drain,
+		// internal/runtime/t3bridge/provider.go) before the controller runs
+		// the check, resolvedWorkDir points at a path that no longer exists —
+		// or is only partially reaped (EACCES/ELOOP/ENOTDIR). Left in place it
+		// breaks two ways: as the script base a relative check_path ENOENTs
+		// (the pre-#3782 hard-quarantine), and as the process cwd cmd.Run
+		// fails its chdir → GateError, which burns an attempt / drives a
+		// spurious exhaustion-fail (residual A). os.Stat is error-class
+		// agnostic (residual B): any failure means the worktree can serve as
+		// neither base nor cwd, so blank it. Script resolution then reverts to
+		// storePath — exactly the durable base used when work_dir is empty,
+		// still subject to ResolveConditionPath's containment checks. #3782's
+		// fs.ErrNotExist fallback below is preserved for the distinct #3008
+		// case (worktree present but missing the pack tree).
+		if _, statErr := os.Stat(resolvedWorkDir); statErr != nil {
+			resolvedWorkDir = ""
+			// False-PASS guardrail: a gate whose verdict implicitly depends on
+			// the reaped worktree's cwd (e.g. `git diff` in the worktree) must
+			// not read as converged by inspecting storePath/cityPath in its
+			// place — the incident's real harm was a skipped verification
+			// reading as satisfied. Run it from a fresh empty scratch dir so
+			// such cwd-bound gates fail-closed (empty tree → non-zero exit),
+			// while gates that key off durable env (GC_CITY_PATH /
+			// GC_MOLECULE_DIR / GC_ARTIFACT_DIR, all cwd-independent) evaluate
+			// correctly. If the scratch dir cannot be created, fall back to
+			// the storePath/cityPath default cwd (condition.go).
+			checkCwd = ""
+			if scratch, mkErr := os.MkdirTemp("", "gc-reaped-check-"); mkErr == nil {
+				defer func() { _ = os.RemoveAll(scratch) }()
+				checkCwd = scratch
+			}
 		}
 	}
 	scriptBase := storePath
@@ -261,7 +303,7 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		Iteration:   attempt,
 		CityPath:    cityPath,
 		StorePath:   storePath,
-		WorkDir:     resolvedWorkDir,
+		WorkDir:     checkCwd,
 		MoleculeDir: moleculeDir,
 		ArtifactDir: artifactDir,
 	}, timeout, 0)

@@ -184,6 +184,18 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		warnLegacyWorkflowTracePath(cityPath, nil, stderr)
 	}
 
+	// The control bead is a graph-class bead: ProcessControl drives ApplyGraphPlan
+	// (graph step creation) and quarantineControlFailureBead writes the control
+	// bead's terminal disposition, all of which must land in the graph-class
+	// store. On a split city that is the infra store; cliGraphStore returns the
+	// SAME wrapped instance (never a re-wrap) so the GraphApplyFor/HandlesFor
+	// optional-capability assertions inside dispatch keep resolving. On a legacy
+	// single-store city cachedCityInfraStore is nil, so cliGraphStore is identity
+	// over the store the root resolved and this is byte-identical. The recipe
+	// decorators below read routing/session state through the same graph-class
+	// store; source-bead closes stay work-class via opts.ResolveStoreRef.
+	store = cliGraphStore(store, cfg, cityPath)
+
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
 	loadCfg := false
@@ -452,8 +464,19 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
 }
 
-// findBeadAcrossStores tries the city store first, then all rig stores,
-// returning the store and bead on first match.
+// controlDispatchInfraStore returns the city infra store used as an extra
+// discovery candidate for manual control dispatch on a split city, or nil when
+// the city has no infra store (legacy) or the open failed. It is a var so tests
+// can inject a two-store harness without spawning dolt; production reads the
+// shared cached infra store (the same instance the class resolvers use), so the
+// discovery scan sees exactly the store sling/order/cook wrote the control and
+// graph beads into. Mirrors sourceWorkflowInfraStore.
+var controlDispatchInfraStore = func(cityPath string) beads.Store {
+	return cachedCityInfraStore(cityPath, nil)
+}
+
+// findBeadAcrossStores tries the city store first, then the split-city infra
+// store, then all rig stores, returning the store and bead on first match.
 func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, string, error) {
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -464,6 +487,24 @@ func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (bea
 		return cityStore, b, cityPath, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
+	}
+
+	// Split-city graph coverage: a control/graph bead lives in the infra store on
+	// a split city, so scan it before the rig work stores. Absent (legacy
+	// single-store city) this is a no-op and byte-identical to the prior
+	// city-then-rigs scan. Routing the processing store in
+	// runControlDispatcherWithStoreAndConfig relocates where a control bead is
+	// PROCESSED; this relocates where it is DISCOVERED, so a manual
+	// `gc convoy control <id>` can find an infra-resident control bead at all.
+	if cityHasInfraStore(cityPath) {
+		if infraStore := controlDispatchInfraStore(cityPath); infraStore != nil {
+			infraDir := infraScopeRoot(cityPath)
+			if b, err := infraStore.Get(beadID); err == nil {
+				return infraStore, b, infraDir, nil
+			} else if !errors.Is(err, beads.ErrNotFound) {
+				return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q from %s: %w", beadID, infraDir, err)
+			}
+		}
 	}
 
 	// Try rig stores.
@@ -893,13 +934,28 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The gc.workflow_id / gc.root_bead_id membership reads and the CloseAll/delete
+	// that follow are graph-class operations. On a split city every store view
+	// routes through cliGraphStore to the SAME single infra store, so scanning
+	// each work-view separately would read and close the infra store once per rig
+	// and produce duplicate matches; dedup by the resolved graph store's identity
+	// so the split city scans the infra graph store exactly once. On a legacy
+	// single-store city cliGraphStore is identity, so each view resolves to its
+	// own distinct work store and the federated per-store scan is preserved
+	// byte-for-byte (the documented by-id sweep exception).
+	seenGraphStores := make(map[beads.Store]bool, len(stores))
 	for _, info := range stores {
-		found := findWorkflowBeads(info.store, workflowID)
+		graphView := cliGraphStore(info.store, cfg, cityPath)
+		if seenGraphStores[graphView] {
+			continue
+		}
+		seenGraphStores[graphView] = true
+		found := findWorkflowBeads(graphView, workflowID)
 		if len(found) == 0 {
 			continue
 		}
 		matches = append(matches, workflowStoreMatch{
-			store:  info.store,
+			store:  graphView,
 			beads:  found,
 			label:  workflowDeleteStoreLabel(cfg, cityPath, info.path),
 			path:   info.path,

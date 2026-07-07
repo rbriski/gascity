@@ -118,6 +118,18 @@ Pure mechanical commit first: move `doRigAdd`'s provisioning into `internal/rig`
 ### 7.3 `request_id` state machine (G13, spec-first)
 Key `(city, request_id)` + stored **body digest**, as a **bead label/metadata** (NOT a new bead type — a new DoltLite type hits the `invalid issue type` trap). Three states: `in_flight` → replay the original `202` + original `EventCursor`; `succeeded` → return existing ids; `failed+rolled_back` → **purge** so a same-id retry re-clones. Responses: `202` new / `202` same-id in-flight / `200`+existing / `409` body-mismatch. `request_id` echoed in success bodies. Cross-invocation dedupe of a *succeeded* provision is by rig **name** with a targeted collision error. This is what keeps Decisions 6 and 9 from contradicting.
 
+> **PINNED (C1).** The full state-machine contract is specified in
+> **[`G13-request-id-state-machine.md`](./G13-request-id-state-machine.md)** (adversarially
+> reviewed). Headlines: client-generated `request_id` (inverting the session server-mint
+> precedent); a `task` bead + `gc.idem.*` metadata durable record fronted by an **in-process
+> live index (§3.5)** that defeats the hosted ledger's read-after-write lag (a critical
+> double-clone hole a lock alone does not close); the deterministic body digest; **six** response
+> codes (adds `400 invalid_request_id` + `409 rig_name_conflict`); `rolled_back`-as-re-executable
+> with drop-then-mark rollback (boot **and** runtime); in-flight-replay gated on a live entry so
+> orphans re-clone; a **unified Huma output struct** + manual `op.Responses["200"|"202"]` (three
+> documented 2xx codes); and an **expanded C4 per-city caveat** (`city.toml` + routes +
+> `cityDoltConfigs`, a distinct non-reentrant per-city lock). Build C4/C6/C7 against that file.
+
 ### 7.4 Async provisioning + rollback + git hardening
 G14/G15/G16/G17/G20/G21 — staged temp-dir clone + rename; server-orchestration-layer atomic rollback (dir + Dolt DB + config); per-rig-name lock; StateMutator config reload with success-after-visible; Layer-0 git hardening; typed async events; heartbeat-anchored wait with minimal reconnect.
 

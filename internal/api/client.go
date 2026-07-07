@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
@@ -261,6 +262,34 @@ type Client struct {
 	baseURL  string // stored for SSE stream connections
 	cityName string // non-empty for city-scoped clients; passed to every per-city call
 	initErr  error  // set when NewClient failed to build the transport (malformed baseURL, etc.)
+
+	// Remote-city fields (set only by NewRemoteCityScopedClient). isRemote makes
+	// no-fallback a compiler-checkable instance property (gate G1): any error
+	// from a remote client is non-fallbackable regardless of type. streamClient
+	// is the dedicated SSE transport shape (Timeout:0 + CheckRedirect + TLS);
+	// tokenSource is called live before every request AND every SSE (re)connect
+	// so a per-attempt 401 re-mint takes effect (never captured once).
+	isRemote     bool
+	streamClient *http.Client
+	tokenSource  TokenSource
+	tokenMu      sync.Mutex
+}
+
+// IsRemote reports whether this client targets a remote city over the control
+// plane. Remote clients never fall back to a local store (gate G1).
+func (c *Client) IsRemote() bool { return c != nil && c.isRemote }
+
+// bearerToken returns the current transport bearer from the token source, or ""
+// when no source is configured. The call is serialized so a non-reentrant
+// source (e.g. one that execs a credential command) is safe under concurrent
+// REST + SSE use.
+func (c *Client) bearerToken() (string, error) {
+	if c == nil || c.tokenSource == nil {
+		return "", nil
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	return c.tokenSource()
 }
 
 const sessionMessageTimeout = 4 * time.Minute
@@ -312,14 +341,40 @@ func (c *Client) waitForEvent(ctx context.Context, requestID string, successType
 		}
 		streamURL += "?after_cursor=" + url.QueryEscape(cursor)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	// For a remote client, an idle watchdog cancels a stalled stream: the stream
+	// transport has no hard http.Client.Timeout (a long-lived SSE stream must
+	// not be capped), so a per-frame-reset timer is the only bound on a silent
+	// connection. Local clients keep the caller's context unchanged.
+	readCtx := ctx
+	var resetIdle func()
+	if c.streamClient != nil {
+		var cancel context.CancelFunc
+		readCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		idle := time.AfterFunc(remoteStreamIdleTimeout, cancel)
+		defer idle.Stop()
+		resetIdle = func() { idle.Reset(remoteStreamIdleTimeout) }
+	}
+
+	req, err := http.NewRequestWithContext(readCtx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build SSE request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("X-GC-Request", "true")
+	// Attach a fresh bearer per (re)connect so a rotated/re-minted credential
+	// takes effect on reconnect. No-op for a local client (nil token source).
+	if tok, terr := c.bearerToken(); terr != nil {
+		return nil, terr
+	} else if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 
-	resp, err := (&http.Client{}).Do(req)
+	httpClient := c.streamClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -340,6 +395,9 @@ func (c *Client) waitForEvent(ctx context.Context, requestID string, successType
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var current sseEvent
 	for scanner.Scan() {
+		if resetIdle != nil {
+			resetIdle() // a live connection (any frame, incl. keep-alives) defers the idle cancel
+		}
 		line := scanner.Text()
 		switch {
 		case strings.HasPrefix(line, "event:"):

@@ -54,11 +54,15 @@ var apiSlingStderr = func() io.Writer { return os.Stderr }
 // agent's session is asleep with reason runtime-missing. It powers the rig→city
 // control-dispatcher fallback (#3454) on the API sling graph-routing path.
 //
-// Session beads are city-scoped, so it reads the server's already-open city
+// Session beads are city-scoped, so it reads the server's already-open session
 // bead store directly — never openCityStoreAt — which keeps it off the
 // managed-Dolt spawn path and therefore leak-guard-safe on the sling hot path.
+// It routes through SessionsBeadStore() (not CityBeadStore()) so on a split city
+// the session-class beads are read from the infra store where they live;
+// SessionsBeadStore().Store == CityBeadStore() on a single-store city, so this
+// is byte-identical there.
 func (s *Server) controlDispatcherRuntimeMissing(qualifiedName string) bool {
-	return session.RuntimeMissingInStore(s.state.CityBeadStore(), qualifiedName)
+	return session.RuntimeMissingInStore(s.state.SessionsBeadStore().Store, qualifiedName)
 }
 
 // execSling calls the intent-based Sling API directly. The Huma handler
@@ -100,7 +104,19 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Cfg:      s.state.Config(),
 		SP:       s.state.SessionProvider(),
 		Store:    store,
-		StoreRef: storeRef,
+		// GraphStore routes the workflow/wisp molecule explosion to the graph
+		// coordination-class store, mirroring the CLI sling path
+		// (cmd/gc/cmd_sling.go slingSplitGraphStore). On a split city the graph
+		// class resolves to the infra store, so the molecule root + steps land
+		// there instead of the work/source store — otherwise a freshly slung
+		// molecule is written to the work store and the reconciler/graph reads
+		// (which resolve through GraphBeadStore()) never find it. On a legacy
+		// single-store city GraphBeadStore().Store == CityBeadStore(), so this
+		// is left nil and SlingDeps.graphStore() collapses onto Store exactly as
+		// before the seam — preserving the historical rig/work-store graph
+		// destination byte-for-byte.
+		GraphStore: s.slingSplitGraphStore(),
+		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},
@@ -269,6 +285,23 @@ func (s *Server) findSlingStore(rig string, agentCfg config.Agent, beadID string
 	return s.state.CityBeadStore()
 }
 
+// slingSplitGraphStore returns the graph coordination-class store for the API
+// sling path, or nil on a legacy single-store city. It is the API mirror of the
+// CLI's slingSplitGraphStore: on a split city GraphBeadStore() resolves to the
+// infra store (distinct from CityBeadStore()), so the molecule explosion lands
+// in the graph class; on a single-store city the two accessors return the same
+// concrete store, so returning nil leaves SlingDeps.graphStore() collapsed onto
+// deps.Store (the work/source store) — byte-identical to the pre-seam behavior,
+// and deliberately NOT the city store on a single-store city (which would move
+// new molecules off the rig store without a boundary to justify it).
+func (s *Server) slingSplitGraphStore() beads.Store {
+	graph := s.state.GraphBeadStore().Store
+	if graph == nil || graph == s.state.CityBeadStore() {
+		return nil
+	}
+	return graph
+}
+
 // slingStoreRef returns a store ref string for the sling context.
 func (s *Server) slingStoreRef(rig string, agentCfg config.Agent, beadID string) string {
 	if resolvedRig, cityScope := s.slingStoreScopeForBead(beadID); cityScope {
@@ -306,7 +339,7 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 }
 
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
-	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+1)
+	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	if cityStore := s.state.CityBeadStore(); cityStore != nil {
 		stores = append(stores, sling.SourceWorkflowStore{
 			Store:    cityStore,
@@ -321,6 +354,18 @@ func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 			Store:    store,
 			StoreRef: "rig:" + rigName,
 		})
+	}
+	// Split-city graph-root coverage, mirroring the CLI's openSourceWorkflowStores
+	// includeInfra arm: on a split city the workflow molecule roots live in the
+	// graph (infra) store, which is a distinct scope from every work-store
+	// candidate above, so the source-workflow singleton/recovery scan must reach
+	// it too — otherwise a duplicate workflow on a relocated graph goes undetected.
+	// The graph store carries an empty StoreRef here, matching the CLI (its infra
+	// dir resolves to "" via workflowStoreRefForDir); sling's dedup then scopes it
+	// by store index. On a single-store city GraphBeadStore().Store ==
+	// CityBeadStore(), so this arm is skipped and coverage is byte-identical.
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		stores = append(stores, sling.SourceWorkflowStore{Store: graph})
 	}
 	return stores
 }

@@ -74,7 +74,12 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	if recipient == "human" {
 		return recipient, nil
 	}
-	store := s.state.CityBeadStore()
+	// Mail recipient resolution reads session beads (live named-session lookup,
+	// session-target resolution, and the resolved bead's mailbox identity), so
+	// source from the session-class store — the infra store on a split city.
+	// Byte-identical on a single-store city where SessionsBeadStore().Store ==
+	// CityBeadStore().
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config()))
 		if err != nil {
@@ -116,7 +121,11 @@ func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, reci
 	if recipient == "human" {
 		return []string{"human"}
 	}
-	store := s.state.CityBeadStore()
+	// Query-recipient resolution reads session beads (named-session recipient
+	// listing and session-target resolution + mailbox readback), so source from
+	// the session-class store — the infra store on a split city. Byte-identical
+	// on a single-store city where SessionsBeadStore().Store == CityBeadStore().
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
 			if resolved == recipient {

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -164,5 +165,84 @@ func TestSplitCity_DispatcherDiscoversInfraControlBeads(t *testing.T) {
 	}
 	if !samePath(got[idx].store, infraScopeRoot(cityPath)) {
 		t.Fatalf("control bead %q served with storePath=%q, want infra scope %q", ctrl.ID, got[idx].store, infraScopeRoot(cityPath))
+	}
+}
+
+func TestSplitCity_HookClaimFindsInfraStepBead(t *testing.T) {
+	t.Setenv("GC_INFRA_STORE_SPLIT", "1")
+	cityPath, _ := setupManagedBdWaitTestCity(t)
+
+	// Register a plain worker. The routed-pool tier of the default work_query
+	// probes gc.routed_to=<worker qualified name>.
+	appendToCityToml(t, cityPath, "\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\nprompt_mode = \"none\"\nprocess_names = [\"gc\"]\n")
+	cfg := activateManagedSplitCity(t, cityPath)
+
+	agentCfg, ok := resolveAgentIdentity(cfg, "worker", currentRigContext(cfg))
+	if !ok {
+		t.Fatal("worker agent not found in config after append")
+	}
+	route := agentCfg.QualifiedName()
+
+	// Seed a READY, unassigned, routed graph step bead into the INFRA store.
+	// graph.v2 steps keep type "task", so bd/gc ready surfaces them.
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	graph := cliGraphStore(work, cfg, cityPath)
+	step, err := graph.Create(beads.Bead{
+		Title: "graph step",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:   route,
+			beadmeta.RootBeadIDMetadataKey: "gcg-root-formula",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed infra step bead: %v", err)
+	}
+	if !config.IsReservedClassPrefix(sling.BeadPrefix(step.ID)) {
+		t.Fatalf("seeded step %q is not infra-classed (want a %q-prefixed id)", step.ID, config.InfraScopePrefix)
+	}
+	if _, err := work.Get(step.ID); err == nil {
+		t.Fatalf("step %q leaked into the work store; seeding did not isolate to infra", step.ID)
+	}
+
+	// The work_query shells `gc ready`, so a gc binary must be on PATH.
+	gcDir := filepath.Dir(currentGCBinaryForTests(t))
+	t.Setenv("PATH", gcDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Worker runtime identity (matches the fake-bd claim test pattern).
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_ALIAS", "worker-1")
+	t.Setenv("GC_SESSION_ID", "session-id-1")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(--claim) = %d, want 0 (claim of infra step); stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Reason != "claimed" || result.BeadID != step.ID || result.Assignee != "worker-1" {
+		t.Fatalf("unexpected claim result: %+v (want claimed %s by worker-1)", result, step.ID)
+	}
+
+	// The claim mutation must have landed in the INFRA store, not the work store.
+	clearInfraStoreCacheKey(cityPath)
+	infra := cachedCityInfraStore(cityPath, cfg)
+	if infra == nil {
+		t.Fatal("infra store nil after claim")
+	}
+	claimed, err := infra.Get(step.ID)
+	if err != nil {
+		t.Fatalf("re-read claimed step from infra: %v", err)
+	}
+	if claimed.Assignee != "worker-1" {
+		t.Fatalf("infra step assignee = %q, want worker-1 (claim mutation did not land in infra)", claimed.Assignee)
 	}
 }

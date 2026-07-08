@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
@@ -47,12 +48,19 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 
+	// P5.4: an opted city records one coarse settlement.root per attached
+	// molecule/workflow root this on-close closer actually closes — the sibling of
+	// the reactive molecule-autoclose anchor, on the same event path. Opened lazily
+	// (LOW-3): most closes reap no attached root, so the journal opens only if a
+	// close actually emits; a non-opted city stays nil-inert.
+	emitter := newLazyCityGraphSettlementEmitter(cityPath)
+
 	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
 	// wisps instead of silently no-op'ing (#3411).
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doWispAutocloseWith(store, beadID, stdout)
+		doWispAutocloseWithEmitter(store, beadID, stdout, emitter)
 		return
 	}
 
@@ -60,7 +68,7 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout)
+	doWispAutocloseWithEmitter(store, beadID, stdout, emitter)
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and
@@ -72,15 +80,22 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // hook fires for closed and ephemeral-tier beads that cached or tier-narrow
 // raw reads can miss, and an attachment missed here outlives its parent — the
 // leak class this hook exists to drain.
-// doWispAutocloseWith reads the just-closed bead from store (the store that owns
-// it) and resolves/closes its attached molecule/workflow roots through the
-// graph-class store. A closed work bead in a rig store can own graph-workflow
-// attachments that live in the graph store, so the attachment collection,
-// parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
-// graph store. The graph store is supplied as an optional trailing argument;
-// when omitted it collapses to store, so single-store CLI and test callers
-// behave exactly as before the per-class seam.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
+// doWispAutocloseWith is the nil-emitter, single-store back-compat shim for test
+// callers (production wires an emitter and, where relevant, the graph-class store
+// through doWispAutocloseWithEmitter). It collapses the graph store onto store.
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
+	doWispAutocloseWithEmitter(store, beadID, stdout, nil)
+}
+
+// doWispAutocloseWithEmitter is the production implementation: it adds the coarse
+// settlement-provenance emitter (P5.4) that doWispAutocloseWith leaves nil for
+// back-compat and test callers. A nil emitter is completely inert. It anchors the
+// same close class the reactive molecule-autoclose anchors: each attached
+// molecule/workflow ROOT this closer actually closes yields exactly one coarse
+// settlement.root, strictly after the subtree close, engine derived from the
+// root's gc.formula_contract. An emit failure is loud-logged and swallowed and
+// never unwinds the close.
+func doWispAutocloseWithEmitter(store beads.Store, beadID string, stdout io.Writer, emitter dispatch.SettlementEmitter, graphStoreOpt ...beads.Store) {
 	graphStore := store
 	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
 		graphStore = graphStoreOpt[0]
@@ -104,6 +119,12 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			if err != nil || closed == 0 {
 				continue
 			}
+			// P5.4 provenance, strictly after the subtree close: one coarse
+			// settlement.root per genuine attached-root close (never per descendant
+			// swept), outcome read verbatim from gc.outcome (may be empty — a valid
+			// coarse "closed" fact). Nil emitter inert; an emit failure never unwinds
+			// the close.
+			emitCmdRootSettlement(emitter, attached.ID, attached, attached.Metadata[beadmeta.OutcomeMetadataKey])
 			fmt.Fprintf(stdout, "Auto-closed %s %s on %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort stdout
 		}
 	}

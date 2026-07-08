@@ -12,17 +12,21 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore"
 )
 
-// SettlementEmittingKinds is the authoritative set of control-bead kinds whose
-// ProcessControl handler emits a coarse settlement provenance event when it
-// reaches a terminal settle. It is the SINGLE source of truth for which kinds
-// need a SettlementEmitter constructed: the control dispatcher wires an emitter
-// iff EmitsSettlement reports true (cmd_convoy_dispatch.go), and
-// TestSettlementEmittingKindsTrackHandlers drives a real settling fixture
-// through ProcessControl for every member to prove the set tracks handler
-// reality. That closes the HIGH-1 class both ways — a kind wired for an emitter
-// whose handler never emits (a wasted emitter), and an anchor added to a handler
-// without wiring its kind (a nil emitter on a settling path) both fail the
-// lockstep test.
+// SettlementEmittingKinds is the per-handler ANCHOR INVENTORY: the set of
+// control-bead kinds whose ProcessControl handler contains a settlement anchor
+// (emits a coarse settlement provenance event when it reaches a terminal settle).
+// It is documentation and the expected set the lockstep test pins — NOT the cmd
+// wiring gate. The cmd control dispatcher wires a SettlementEmitter
+// UNCONDITIONALLY (cmd_convoy_dispatch.go), regardless of this set, because the
+// cross-cutting orphaned-control failure close (closeOrphanedControl) settles a
+// control bead of ANY kind whose workflow root vanished; a wired-but-unused
+// emitter for a non-settling kind simply never emits.
+//
+// TestSettlementEmittingKindsTrackHandlers drives a real settling fixture through
+// ProcessControl for every member to prove the inventory tracks handler reality.
+// That closes the HIGH-1 class both ways — a kind listed here whose handler never
+// emits (a stale inventory entry), and an anchor added to a handler without
+// listing its kind (a missing inventory entry) both fail the lockstep test.
 //
 // Membership rationale (see the handlers for the exact anchor sites):
 //   - check / retry-eval — the separate-eval topology: the eval/check control
@@ -32,8 +36,10 @@ import (
 //   - workflow-finalize — settles the workflow root and the finalizer
 //     (runtime.go), including the missing_root arm.
 //
-// fanout, drain, and scope-check never reach a root/attempt/workflow
-// settlement, so they are deliberately absent.
+// fanout, drain, and scope-check never reach a root/attempt/workflow settlement
+// through their own handler, so they are deliberately absent — an orphaned bead
+// of one of these kinds still settles via the cross-cutting closeOrphanedControl
+// anchor, which is why cmd wiring is unconditional rather than keyed to this set.
 var SettlementEmittingKinds = []string{
 	beadmeta.KindCheck,
 	beadmeta.KindRetryEval,
@@ -42,9 +48,11 @@ var SettlementEmittingKinds = []string{
 	beadmeta.KindWorkflowFinalize,
 }
 
-// EmitsSettlement reports whether a control bead of the given kind emits a coarse
-// settlement provenance event, i.e. whether the control dispatcher must build a
-// SettlementEmitter for it. Membership in SettlementEmittingKinds.
+// EmitsSettlement reports whether a control bead of the given kind carries a
+// settlement anchor in its own ProcessControl handler — membership in
+// SettlementEmittingKinds (the anchor inventory). It documents which handlers
+// emit; it is NOT a cmd wiring decision (the dispatcher wires the emitter
+// unconditionally). Used by the lockstep test and by handler-inventory queries.
 func EmitsSettlement(kind string) bool {
 	return slices.Contains(SettlementEmittingKinds, kind)
 }
@@ -129,6 +137,23 @@ func (opts ProcessOptions) emitRootSettled(rootID, outcome string) {
 	}
 	s := Settlement{Root: rootID, Bead: rootID, Outcome: outcome}
 	opts.reportSettlement("root", s, opts.Settlements.EmitRootSettled(opts.settleContext(), beads.SettlementEngineV2, s))
+}
+
+// emitRootSettledForBead emits a coarse settlement.root whose engine is DERIVED
+// from the settled bead's gc.formula_contract (graph.v2 → v2, else v1) rather than
+// fixed to v2 (P5.4). It is the seam for the cross-cutting failure-terminal closer
+// closeOrphanedControl, which fires for a control bead of ANY kind whose workflow
+// root vanished: a v2-contract control emits v2, a v1-contract one emits v1 — a
+// pure data mapping (beads.EngineForContract), no judgment. rootID is the
+// (missing) workflow root the per-root stream is keyed on; the closed control bead
+// is the settled bead. Same best-effort discipline as emitRootSettled.
+func (opts ProcessOptions) emitRootSettledForBead(bead beads.Bead, rootID, outcome string) {
+	if opts.Settlements == nil || rootID == "" {
+		return
+	}
+	engine := beads.EngineForContract(bead.Metadata[beadmeta.FormulaContractMetadataKey])
+	s := Settlement{Root: rootID, Bead: bead.ID, Kind: bead.Metadata[beadmeta.KindMetadataKey], Outcome: outcome}
+	opts.reportSettlement("root", s, opts.Settlements.EmitRootSettled(opts.settleContext(), engine, s))
 }
 
 // emitAttemptSettled emits a coarse settlement.attempt event after a v2 logical

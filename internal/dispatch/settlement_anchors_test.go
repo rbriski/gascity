@@ -657,8 +657,10 @@ func TestSettlementEmittingKindsTrackHandlers(t *testing.T) {
 	}
 
 	// 3. Every control kind NOT in the emitting set must report EmitsSettlement
-	// false — so the cmd control dispatcher never builds a wasted emitter for a
-	// non-settling kind (fanout, drain, scope-check).
+	// false — so the anchor inventory stays exact: fanout, drain, and scope-check
+	// carry no settlement anchor in their own handler. (The cmd dispatcher still
+	// wires the emitter unconditionally for the cross-cutting orphaned-control
+	// close; EmitsSettlement is inventory, not the wiring gate.)
 	for _, kind := range beadmeta.ControlKinds {
 		inSet := slices.Contains(SettlementEmittingKinds, kind)
 		if EmitsSettlement(kind) != inSet {

@@ -171,9 +171,10 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		return ControlResult{}, false, fmt.Errorf("%s: loading workflow root %s: %w", bead.ID, rootID, err)
 	}
 
-	// LOW-1 (P5.3): this orphaned/quarantine terminal close carries no coarse
-	// settlement provenance today — deferred to P5.4, whose v1 closer-class pass
-	// will anchor the failure-terminal closes (this and discardPartialRalphRetry).
+	// P5.4: this orphaned control is a failure-terminal close on the legacy/v1
+	// path. Anchor coarse settlement provenance AFTER the column write (below) —
+	// same discipline as the v2 finalize anchors, engine derived from the bead's
+	// gc.formula_contract.
 	opts.tracef("process-control bead=%s kind=%s close reason=missing_workflow_root root=%s store_ref=%s",
 		bead.ID, bead.Metadata[beadmeta.KindMetadataKey], rootID, rootStoreRef)
 	closeMetadata := map[string]string{
@@ -187,6 +188,9 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 	if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 		return ControlResult{}, true, fmt.Errorf("%s: closing orphaned control: %w", bead.ID, err)
 	}
+	// Provenance strictly after the projection-of-record close: keyed on the
+	// (missing) root, the orphaned control is the settled bead, outcome fail.
+	opts.emitRootSettledForBead(bead, rootID, beadmeta.OutcomeFail)
 	return ControlResult{Processed: true, Action: "orphaned-workflow"}, true, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -70,6 +71,15 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 	rec := openCityRecorderAt(cityPath, stderr)
+	// P5.4: an opted city records coarse settlement.root provenance for each
+	// molecule/graph-workflow root this reactive autoclose closes. The journal is
+	// opened LAZILY (LOW-3): most bead closes trigger no molecule autoclose, and
+	// the bd on_close hook subprocess's cachedCityGraphJournal memo never amortizes
+	// (a fresh process per hook), so opening the shared journal eagerly on every
+	// close would pay a loadCityConfig + SQLite WAL open for nothing. The lazy
+	// emitter opens it only if a close actually emits; a non-opted city stays a
+	// nil-inert no-op, byte-identical to pre-P5.
+	emitter := newLazyCityGraphSettlementEmitter(cityPath)
 
 	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
 	// (city) cwd/env, so resolve the store that actually owns the bead across
@@ -77,7 +87,7 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// rig-store closes autoclose their molecule roots instead of silently
 	// no-op'ing (#3411).
 	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
+		doMoleculeAutocloseWithEmitter(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, emitter)
 		return
 	}
 
@@ -85,7 +95,7 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
+	doMoleculeAutocloseWithEmitter(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout, emitter)
 }
 
 // autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
@@ -120,7 +130,14 @@ func autocloseStoreRef(storeRoot, cityPath string) string {
 // store is supplied as an optional trailing argument; when omitted it collapses
 // to store, so single-store CLI and test callers behave exactly as before the
 // per-class seam.
-func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
+func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer) {
+	doMoleculeAutocloseWithEmitter(store, storeRef, rec, beadID, stdout, nil)
+}
+
+// doMoleculeAutocloseWithEmitter is the production implementation: it adds the
+// coarse settlement-provenance emitter (P5.4) that doMoleculeAutocloseWith leaves
+// nil for back-compat and test callers. A nil emitter is completely inert.
+func doMoleculeAutocloseWithEmitter(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, emitter dispatch.SettlementEmitter, graphStoreOpt ...beads.Store) {
 	graphStore := store
 	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
 		graphStore = graphStoreOpt[0]
@@ -139,7 +156,7 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// orphans and is re-routed to a fresh worker indefinitely. Reverse-
 	// resolve any live workflow roots whose source bead is this bead and
 	// close them once their own subtree is terminal.
-	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout)
+	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout, emitter)
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
@@ -155,17 +172,17 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		if err != nil {
 			return
 		}
-		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout)
+		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout, emitter)
 		return
 	}
 	root, err := graphStore.Get(rootID)
 	if err != nil {
 		return
 	}
-	autocloseMoleculeIfComplete(graphStore, rec, root, stdout)
+	autocloseMoleculeIfComplete(graphStore, rec, root, stdout, emitter)
 }
 
-func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer) {
+func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer, emitter dispatch.SettlementEmitter) {
 	if mol.Type != "molecule" {
 		return
 	}
@@ -187,7 +204,7 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 		// wisp seen there is genuinely complete.
 		return
 	}
-	announceClosedMolecule(store, rec, mol, moleculeAutocloseReason, stdout)
+	announceClosedMolecule(store, rec, mol, moleculeAutocloseReason, stdout, emitter)
 }
 
 // autocloseRootsForSourceBead closes any live graph-workflow roots whose
@@ -203,14 +220,14 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 // can collide across stores, so a root in this store sourced from a same-ID
 // bead elsewhere (a different gc.source_store_ref) must not be closed here. An
 // empty storeRef falls back to matching on bead ID alone (single-store path).
-func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.Recorder, sourceBeadID string, stdout io.Writer) {
+func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.Recorder, sourceBeadID string, stdout io.Writer, emitter dispatch.SettlementEmitter) {
 	roots, err := sourceworkflow.ListLiveRoots(store, sourceBeadID, storeRef, storeRef)
 	if err != nil {
 		return
 	}
 	for _, root := range roots {
 		if terminal, _ := subtreeTerminalExcludingRoot(store, root.ID); terminal {
-			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout) {
+			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout, emitter) {
 				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(store, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
 			}
 		}
@@ -248,13 +265,20 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 // BeadClosed event, and prints the auto-close announcement to stdout. Shared
 // by the step-terminal and source-bead-close triggers. Best-effort: a close
 // failure aborts silently without recording or announcing.
-func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
+func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer, emitter dispatch.SettlementEmitter) bool {
 	// Capture the pre-close status before closeMoleculeWithReason transitions
 	// the root to closed — it is the from_status of the resolution record.
 	fromStatus := mol.Status
 	if err := closeMoleculeWithReason(store, mol.ID, reason); err != nil {
 		return false
 	}
+
+	// P5.4 provenance, strictly after the projection-of-record close: one coarse
+	// settlement.root per genuine root autoclose, engine from the root's contract
+	// (graph.v2 → v2, else v1), outcome read verbatim from gc.outcome (may be
+	// empty for a plain molecule close — a valid coarse "closed" fact). Nil emitter
+	// inert; an emit failure never unwinds the close.
+	emitCmdRootSettlement(emitter, mol.ID, mol, mol.Metadata[beadmeta.OutcomeMetadataKey])
 
 	rec.Record(events.Event{
 		Type:    events.BeadClosed,

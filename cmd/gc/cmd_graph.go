@@ -42,6 +42,8 @@ By default prints a table. Use --tree for a Unicode tree view or
 	cmd.Flags().BoolVar(&tree, "tree", false, "output Unicode dependency tree")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
 	cmd.MarkFlagsMutuallyExclusive("mermaid", "tree", "json")
+	// Hidden P5.4 provenance window: gc graph journal <root-id>.
+	cmd.AddCommand(newGraphJournalCmd(stdout, stderr))
 	return cmd
 }
 

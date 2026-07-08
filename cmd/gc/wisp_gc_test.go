@@ -58,7 +58,7 @@ func TestWispGCForConfigUsesMailRetentionTTL(t *testing.T) {
 	cfg.Daemon.WispGCInterval = "5m"
 	cfg.Mail.RetentionTTL = "1h"
 
-	wg := newWispGCForConfig(cfg)
+	wg := newWispGCForConfig(cfg, nil)
 	if wg == nil {
 		t.Fatal("newWispGCForConfig returned nil")
 	}

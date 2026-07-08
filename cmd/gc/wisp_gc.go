@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -114,6 +115,14 @@ type memoryWispGC struct {
 	ttl              time.Duration
 	mailRetentionTTL time.Duration
 	lastRun          time.Time
+	// settlementEmitter, when non-nil, records a coarse settlement.root provenance
+	// fact for each ABANDONED ROOT the sweep actually closes (P5.4). It is set by
+	// newWispGCForConfig from the city's shared graph journal; nil (a non-opted
+	// city, and the test/newWispGC default) is inert. Only the genuine
+	// abandoned-root close emits — the reap/purge arms delete already-closed beads,
+	// which are not settlements, so the emit stays coarse (one per root closed, not
+	// per wisp swept).
+	settlementEmitter dispatch.SettlementEmitter
 }
 
 // newWispGC creates a wisp GC tracker. Returns nil if disabled. The tracker
@@ -130,7 +139,7 @@ func newWispGC(interval, ttl, mailRetentionTTL time.Duration) wispGC {
 	}
 }
 
-func newWispGCForConfig(cfg *config.City) wispGC {
+func newWispGCForConfig(cfg *config.City, emitter dispatch.SettlementEmitter) wispGC {
 	if cfg == nil {
 		return nil
 	}
@@ -138,7 +147,13 @@ func newWispGCForConfig(cfg *config.City) wispGC {
 	if err != nil {
 		mailRetentionTTL = 0
 	}
-	return newWispGC(cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration(), mailRetentionTTL)
+	wg := newWispGC(cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration(), mailRetentionTTL)
+	// Attach the coarse-settlement provenance emitter (P5.4). newWispGC returns nil
+	// when GC is disabled, so guard the type assertion.
+	if m, ok := wg.(*memoryWispGC); ok {
+		m.settlementEmitter = emitter
+	}
+	return wg
 }
 
 func (m *memoryWispGC) shouldRun(now time.Time) bool {
@@ -170,7 +185,7 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// same tick when it has already aged past m.ttl (the purge gates on
 		// CreatedAt, not close time), or on a later tick otherwise. Best-effort:
 		// never fails the GC tick.
-		if abandonedErr := closeAbandonedRoots(store, now); abandonedErr != nil {
+		if abandonedErr := closeAbandonedRoots(store, now, m.settlementEmitter); abandonedErr != nil {
 			deleteErr = errors.Join(deleteErr, abandonedErr)
 		}
 
@@ -425,7 +440,7 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 //     GC tick.
 //  5. Dry-run default: unless closeAbandonedEnforced() returns true the sweep
 //     only logs/counts the candidates it WOULD close and mutates nothing.
-func closeAbandonedRoots(store beads.Store, now time.Time) error {
+func closeAbandonedRoots(store beads.Store, now time.Time, emitter dispatch.SettlementEmitter) error {
 	if store == nil {
 		return nil
 	}
@@ -480,6 +495,10 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 			continue
 		}
 		closed++
+		// P5.4 provenance, strictly after the projection-of-record close: exactly one
+		// coarse settlement.root per genuine abandoned-root close (NOT per wisp swept),
+		// engine from the root's contract, outcome read verbatim from gc.outcome.
+		emitCmdRootSettlement(emitter, root.ID, root, root.Metadata[beadmeta.OutcomeMetadataKey])
 		log.Printf("wisp gc: closed abandoned root %s (descendants=%d)", root.ID, descendants)
 	}
 

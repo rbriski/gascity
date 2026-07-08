@@ -186,18 +186,18 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
-	// Provenance (P5.3): a control kind that SETTLES a v2 root/attempt/workflow
-	// gets a coarse settlement emitter riding the city's shared graph journal.
-	// The set is dispatch.SettlementEmittingKinds — the SAME source of truth the
-	// handlers' anchors are keyed to — read via EmitsSettlement so the wiring can
-	// never drift from the emitting handlers (the HIGH-1 bug, where the switch
-	// listed ralph but not check, wired the emitter for the wrong kinds). A
-	// non-opted city (no .gc/graph scope) yields a nil journal ⇒ nil emitter ⇒
-	// byte-identical to pre-P5.3 (no journal open, no append). Ride the existing
-	// cachedCityGraphJournal memo; do not add a new opener.
-	if dispatch.EmitsSettlement(bead.Metadata[beadmeta.KindMetadataKey]) {
-		opts.Settlements = dispatch.NewJournalSettlementEmitter(cachedCityGraphJournal(cityPath))
-	}
+	// Provenance (P5.3/P5.4): an opted city records coarse settlement provenance
+	// for every terminal control close on its shared graph journal. The normal
+	// settling handlers (dispatch.SettlementEmittingKinds — the source of truth the
+	// handlers' anchors are keyed to, and which the dispatch lockstep test pins)
+	// emit root/attempt/workflow facts, but the cross-cutting orphaned-control
+	// failure close (dispatch.closeOrphanedControl, P5.4) settles a control bead of
+	// ANY kind whose workflow root vanished. So the emitter is wired unconditionally
+	// rather than gated on the kind — a wired-but-unused emitter for a non-settling
+	// kind costs nothing (its handler simply never emits). A non-opted city (no
+	// .gc/graph scope) yields a nil journal ⇒ nil emitter ⇒ byte-identical to
+	// pre-P5. Ride the existing cachedCityGraphJournal memo; do not add a new opener.
+	opts.Settlements = dispatch.NewJournalSettlementEmitter(cachedCityGraphJournal(cityPath))
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
 	// config loaded to resolve store-refs/formulas/sessions?), not a
@@ -269,6 +269,16 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		if quarantineErr := quarantineControlFailureBead(store, beadID, err); quarantineErr != nil {
 			return errors.Join(err, quarantineErr)
 		}
+		// P5.4: the control-quarantine is a failure-terminal close. Record coarse
+		// settlement.root provenance strictly after the quarantine's column write —
+		// keyed on the bead's workflow root (or the bead itself when it carries no
+		// root pointer), outcome fail, engine from its contract. Best-effort; a nil
+		// emitter (non-opted city) is inert.
+		quarantineRoot := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if quarantineRoot == "" {
+			quarantineRoot = bead.ID
+		}
+		emitCmdRootSettlement(opts.Settlements, quarantineRoot, bead, beadmeta.OutcomeFail)
 		_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
 		return nil
 	}

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/graphstore"
 )
 
@@ -35,6 +37,23 @@ const (
 	SettlementEngineV2 = "v2"
 	SettlementEngineV1 = "v1"
 )
+
+// EngineForContract maps a bead's gc.formula_contract metadata value to the
+// coarse-settlement engine tag: a graph.v2-contract root/bead settles under
+// engine v2, everything else (v1 poured molecules, wisps — which carry no
+// contract) under v1. It is a PURE DATA MAPPING — no judgment, no role names — and
+// is the formula_contract→engine mapping P5.3 deferred to land with its consumer
+// (the v1 and shared/failure-terminal closers in P5.4). Dispatch (ProcessControl)
+// processes only graph.v2 control beads, so it is definitionally v2 and never
+// needs this; the shared closers (molecule autoclose, wisp-GC abandoned-root
+// close, orphaned/quarantined control) use it to tag whichever contract the
+// closed bead actually carries.
+func EngineForContract(contract string) string {
+	if strings.TrimSpace(contract) == beadmeta.FormulaContractGraphV2 {
+		return SettlementEngineV2
+	}
+	return SettlementEngineV1
+}
 
 // Coarse settlement event types (closed vocabulary, registered on every
 // JournalStore so an emit is never rejected as an unknown (engine, type), I-5).

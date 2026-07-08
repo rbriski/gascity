@@ -20,6 +20,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -544,10 +545,16 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
+	// P5.4: the controller records coarse settlement.root provenance for each root
+	// the reactive wisp- and molecule-autoclose closers close, on the city's shared
+	// graph journal. The controller holds an already-open journal handle
+	// (CityGraphJournalStore), so it wires the emitter directly rather than lazily.
+	// Nil (a non-opted city) is inert.
+	settlementEmitter := dispatch.NewJournalSettlementEmitter(cs.CityGraphJournalStore())
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
+		doWispAutocloseWithEmitter(store, beadID, os.Stderr, settlementEmitter, graphStore.Store)
+		doMoleculeAutocloseWithEmitter(store, storeRef, rec, beadID, os.Stderr, settlementEmitter, graphStore.Store)
 	})
 }
 

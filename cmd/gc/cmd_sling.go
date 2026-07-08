@@ -212,6 +212,49 @@ func SetSlingTargetIndexForTest(fn func(n int) int) (restore func()) {
 	return func() { slingTargetIndex = prev }
 }
 
+// inferSling1ArgTarget resolves the routing target for a 1-arg `gc sling <bead>`
+// from the bead's rig default_sling_target(s), probing the existing source bead
+// for its prefix. It is the store-touching pre-core orchestration extracted from
+// cmdSlingWithJSON so it can be tested in isolation (deterministically via the
+// slingTargetIndex seam). On failure it returns a non-empty (errCode, errMsg)
+// pair for the caller's fail() path and leaves target empty.
+func inferSling1ArgTarget(cfg *config.City, cityPath, beadOrFormula string, isFormula bool) (target string, sourceBead existingSlingSourceBead, errCode, errMsg string) {
+	if isFormula {
+		return "", sourceBead, "invalid_arguments", "gc sling: --formula requires explicit target"
+	}
+	sourceBead, err := probeExistingSlingSourceBead(cfg, cityPath, beadOrFormula)
+	if err != nil {
+		return "", sourceBead, "source_bead_probe_failed", fmt.Sprintf("gc sling: %v", err)
+	}
+	if !canInferSlingDefaultTargetFromBead(cfg, beadOrFormula) && !sourceBead.exists {
+		return "", sourceBead, "invalid_arguments", fmt.Sprintf("gc sling: inline text requires explicit target; usage: gc sling <target> %q", beadOrFormula)
+	}
+	bp := sling.BeadPrefixForCity(cfg, beadOrFormula)
+	if sourceBead.prefix != "" {
+		bp = sourceBead.prefix
+	}
+	if bp == "" {
+		return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: cannot derive rig from bead %q (no prefix)", beadOrFormula)
+	}
+	rig, found := findRigByPrefix(cfg, bp)
+	if !found {
+		return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: no rig with prefix %q for bead %s", bp, beadOrFormula)
+	}
+	switch {
+	case len(rig.DefaultSlingTargets) > 0:
+		for _, t := range rig.DefaultSlingTargets {
+			if t == "" {
+				return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: rig %q has an empty entry in default_sling_targets", rig.Name)
+			}
+		}
+		return rig.DefaultSlingTargets[slingTargetIndex(len(rig.DefaultSlingTargets))], sourceBead, "", ""
+	case rig.DefaultSlingTarget != "":
+		return rig.DefaultSlingTarget, sourceBead, "", ""
+	default:
+		return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: rig %q has no default_sling_target or default_sling_targets", rig.Name)
+	}
+}
+
 // cmdSling is the CLI entry point for gc sling.
 func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
@@ -293,41 +336,15 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 			}
 		}
 	default:
-		// 1-arg: bead ID only, resolve target from rig's default_sling_target.
+		// 1-arg: bead ID only — resolve the target from the rig's
+		// default_sling_target(s). This store-touching pre-core orchestration is
+		// extracted into inferSling1ArgTarget so it can be tested in isolation
+		// (deterministically, via the slingTargetIndex seam).
 		beadOrFormula = args[0]
-		if isFormula {
-			return fail("invalid_arguments", "gc sling: --formula requires explicit target")
-		}
-		sourceBead, err = probeExistingSlingSourceBead(cfg, cityPath, beadOrFormula)
-		if err != nil {
-			return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", err))
-		}
-		if !canInferSlingDefaultTargetFromBead(cfg, beadOrFormula) && !sourceBead.exists {
-			return fail("invalid_arguments", fmt.Sprintf("gc sling: inline text requires explicit target; usage: gc sling <target> %q", beadOrFormula))
-		}
-		bp := sling.BeadPrefixForCity(cfg, beadOrFormula)
-		if sourceBead.prefix != "" {
-			bp = sourceBead.prefix
-		}
-		if bp == "" {
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: cannot derive rig from bead %q (no prefix)", beadOrFormula))
-		}
-		rig, found := findRigByPrefix(cfg, bp)
-		if !found {
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: no rig with prefix %q for bead %s", bp, beadOrFormula))
-		}
-		switch {
-		case len(rig.DefaultSlingTargets) > 0:
-			for _, t := range rig.DefaultSlingTargets {
-				if t == "" {
-					return fail("target_resolve_failed", fmt.Sprintf("gc sling: rig %q has an empty entry in default_sling_targets", rig.Name))
-				}
-			}
-			target = rig.DefaultSlingTargets[slingTargetIndex(len(rig.DefaultSlingTargets))]
-		case rig.DefaultSlingTarget != "":
-			target = rig.DefaultSlingTarget
-		default:
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: rig %q has no default_sling_target or default_sling_targets", rig.Name))
+		var errCode, errMsg string
+		target, sourceBead, errCode, errMsg = inferSling1ArgTarget(cfg, cityPath, beadOrFormula, isFormula)
+		if errCode != "" {
+			return fail(errCode, errMsg)
 		}
 	}
 

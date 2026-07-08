@@ -3,7 +3,20 @@ package main
 import (
 	"bytes"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+// TestInferSling1ArgTarget_FormulaRejected exercises the extracted 1-arg
+// target-inference helper directly (its pure --formula guard needs no store),
+// demonstrating that hoisting the store-touching pre-core orchestration out of
+// cmdSlingWithJSON makes it independently testable.
+func TestInferSling1ArgTarget_FormulaRejected(t *testing.T) {
+	target, _, errCode, errMsg := inferSling1ArgTarget(&config.City{}, "/tmp/nonexistent", "some-bead", true)
+	if target != "" || errCode != "invalid_arguments" || errMsg == "" {
+		t.Fatalf("isFormula 1-arg: got (target=%q code=%q msg=%q), want (\"\", invalid_arguments, non-empty)", target, errCode, errMsg)
+	}
+}
 
 // TestSlingTargetIndexSeam proves the injectable slingTargetIndex seam makes the
 // otherwise-random 1-arg default_sling_targets selection deterministic for tests

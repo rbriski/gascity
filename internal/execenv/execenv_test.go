@@ -24,6 +24,31 @@ func TestFilterInheritedStripsSensitiveEnv(t *testing.T) {
 	}
 }
 
+func TestIsSensitiveKeyTreatsDSNAsSensitive(t *testing.T) {
+	for _, key := range []string{"GC_GRAPH_PG_DSN", "DSN", "MY_dsn", "postgres_dsn"} {
+		if !IsSensitiveKey(key) {
+			t.Errorf("IsSensitiveKey(%q) = false, want true (a DSN embeds a DB password)", key)
+		}
+	}
+	// A DSN-carried password must not survive the inherited-env filter into a child
+	// process (bd subprocess, session spawns), nor appear in redacted log text.
+	filtered := strings.Join(FilterInherited([]string{
+		"PATH=/bin",
+		"GC_GRAPH_PG_DSN=postgres://user:SUPERSECRET@db.example/city",
+	}), "\n")
+	if strings.Contains(filtered, "SUPERSECRET") || strings.Contains(filtered, "GC_GRAPH_PG_DSN") {
+		t.Fatalf("FilterInherited leaked a DSN password into a child env: %q", filtered)
+	}
+	if !strings.Contains(filtered, "PATH=/bin") {
+		t.Fatalf("FilterInherited dropped a non-sensitive var: %q", filtered)
+	}
+	// RedactText scrubs a DSN assignment even without the env being supplied.
+	red := RedactText("connecting GC_GRAPH_PG_DSN=postgres://user:SUPERSECRET@db.example/city now")
+	if strings.Contains(red, "SUPERSECRET") {
+		t.Fatalf("RedactText leaked a DSN password: %q", red)
+	}
+}
+
 func TestMergeMapPreservesExplicitSensitiveOverrides(t *testing.T) {
 	got := MergeMap([]string{
 		"PATH=/bin",

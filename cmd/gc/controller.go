@@ -1333,6 +1333,14 @@ func runController(
 	// disabled. Standalone runtime still needs cached city/rig stores for
 	// session-bead sync and rig-scoped wake decisions.
 	cs := newControllerState(ctx, cfg, sp, eventProv, cityName, cityPath)
+	if cs.graphJournalStartupErr != nil {
+		// A durable (postgres) graph journal that could not be opened is fatal:
+		// running degraded would route graph-class writes to the work store and
+		// split-brain the journal. Abort loudly so a supervisor restarts once the
+		// backend/credentials recover.
+		fmt.Fprintf(stderr, "gc start: %v\n", cs.graphJournalStartupErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	cs.ct = cr.crashTrack()
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty

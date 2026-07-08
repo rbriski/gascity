@@ -22,8 +22,13 @@ import (
 // migrateGraphJournalConfigYAML is the activation-by-presence marker `gc migrate
 // graph-journal init` writes. Its mere presence at
 // <city>/.gc/graph/.beads/config.yaml opts the city into the graph-journal scope
-// (cityGraphScopePresence stats exactly this path); the content is a human-legible
-// provider tag, never parsed for routing.
+// (cityGraphScopePresence stats exactly this path). Since P6.4 the content is also
+// yaml-parsed for an OPTIONAL backend selector (loadGraphJournalBackendConfig): a
+// bare `provider: journal` mapping resolves to the byte-identical SQLite default,
+// while a non-mapping or otherwise unparseable marker is a loud error (never
+// silently treated as SQLite — that could mask a corrupted `backend: postgres`).
+// init only ever writes this SQLite-default mapping; the postgres stanza is
+// operator-hand-edited.
 const migrateGraphJournalConfigYAML = "provider: journal\n"
 
 // claimActiveStatuses are the non-terminal statuses a worker-claimable bead is in

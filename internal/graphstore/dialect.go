@@ -143,6 +143,13 @@ var pgKeywordPasswordRE = regexp.MustCompile(`(?i)password\s*=\s*('(?:[^']|'')*'
 // appears — including embedded in a larger error string.
 var pgURLUserinfoRE = regexp.MustCompile(`(postgres(?:ql)?://[^:/@\s]+):[^@/\s]+@`)
 
+// RedactDSN removes any embedded credential from s (a DSN, or any string that may
+// contain one) so it is safe to place in an error or a log. It is the identity on
+// a string with no credential. Exported for the hosted opener path
+// (cmd/gc/graph_journal_backend.go), so a Postgres credential helper's diagnostics
+// are scrubbed with the same tested logic OpenPostgres uses internally.
+func RedactDSN(s string) string { return redactDSN(s) }
+
 // redactDSN removes a credential from a DSN (or any string that may embed one)
 // before it appears in an error or a log. For a well-formed postgres:// URL it
 // returns the canonical redacted URL; otherwise it scrubs userinfo and

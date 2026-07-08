@@ -11,7 +11,7 @@ import (
 // Redacted is the replacement marker used when removing secrets from text.
 const Redacted = "[redacted]"
 
-var sensitiveAssignmentRE = regexp.MustCompile(`(?i)((?:[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|CREDENTIALS?|OAUTH|AUTH[_-]?JSON)[A-Z0-9_.-]*|--?[A-Z0-9_.-]*(?:token|secret|password|private-key|api-key|access-key|credential|oauth)[A-Z0-9_.-]*)\s*(?:=|:|\s)\s*)([^ \t\r\n,;]+)`)
+var sensitiveAssignmentRE = regexp.MustCompile(`(?i)((?:[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|CREDENTIALS?|OAUTH|AUTH[_-]?JSON|DSN)[A-Z0-9_.-]*|--?[A-Z0-9_.-]*(?:token|secret|password|private-key|api-key|access-key|credential|oauth|dsn)[A-Z0-9_.-]*)\s*(?:=|:|\s)\s*)([^ \t\r\n,;]+)`)
 
 // IsSensitiveKey reports whether an environment key is likely to contain a
 // secret. Callers should strip inherited values for these keys and require
@@ -35,6 +35,13 @@ func IsSensitiveKey(key string) bool {
 		"OAUTH",
 		"AUTH_JSON",
 		"AUTH-JSON",
+		// A DSN (Data Source Name / connection string) routinely embeds a database
+		// password inline — e.g. the graph journal's dsn_env (GC_GRAPH_PG_DSN)
+		// carries postgres://user:PASSWORD@host/db. Treat any *_DSN key as a secret
+		// so its value is stripped from inherited child environments (bd subprocess,
+		// session spawns) and redacted from logged command lines. gc's own process
+		// still reads the DSN directly via os.Getenv; only spawned children lose it.
+		"DSN",
 	} {
 		if strings.Contains(key, marker) {
 			return true

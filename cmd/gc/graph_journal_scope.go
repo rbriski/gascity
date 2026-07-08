@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/graphstore"
 )
 
 // graphScopeRoot returns the on-disk scope of the city's journal graph store:
@@ -84,6 +83,16 @@ func openCityGraphJournalResultAt(cityPath string) (beads.StoreOpenResult, bool,
 	if !present {
 		return beads.StoreOpenResult{}, false, nil
 	}
+	// Resolve the OPTIONAL backend selector from the scope marker. Absent/sqlite
+	// keeps the byte-identical embedded-SQLite path; backend=postgres opens the
+	// hosted Postgres engine. A malformed marker is opted-but-unopenable (present
+	// stays true so the caller surfaces and retries rather than memoizing a miss).
+	// The error never carries the DSN — the marker holds only the env-var name or
+	// the credential command, never the credential itself.
+	backend, err := loadGraphJournalBackendConfig(cityPath)
+	if err != nil {
+		return beads.StoreOpenResult{}, true, fmt.Errorf("resolving city graph backend %q: %w", cityPath, err)
+	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot: graphScopeRoot(cityPath),
@@ -91,9 +100,7 @@ func openCityGraphJournalResultAt(cityPath string) (beads.StoreOpenResult, bool,
 		Provider:  "journal",
 		Logger:    slog.Default(),
 		OpenJournalStore: func() (beads.Store, error) {
-			gs, err := graphstore.Open(context.Background(),
-				filepath.Join(graphScopeRoot(cityPath), "journal.db"),
-				graphstore.Options{CityID: graphScopeCityID(cityPath)})
+			gs, err := backend.openGraphStore(context.Background(), cityPath)
 			if err != nil {
 				return nil, err
 			}

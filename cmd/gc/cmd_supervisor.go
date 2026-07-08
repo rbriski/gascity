@@ -1992,7 +1992,11 @@ func reconcileCities(
 		var cs *controllerState
 		if err := runPostPrepareStep("opening_controller_state", func() error {
 			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
-			return nil
+			// A durable (postgres) graph journal that could not be opened is fatal
+			// for THIS city: skip it (the supervisor keeps managing the rest) rather
+			// than route its graph-class writes to the work store and split-brain the
+			// journal.
+			return cs.graphJournalStartupErr
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))

@@ -52,12 +52,20 @@ type controllerState struct {
 	// re-parsing city.toml per request. Refreshed on every cfg swap; left
 	// at its prior value if a refresh load fails so the read never falls
 	// back to a nil-raw heuristic on a transient error.
-	rawCfg                 *config.City
-	sp                     runtime.Provider
-	cacheCtx               context.Context
-	beadStores             map[string]beads.Store
-	cityBeadStore          beads.Store // city-level store for session beads
-	cityGraphJournal       beads.Store // journal graph store; nil unless the city has a .gc/graph scope
+	rawCfg           *config.City
+	sp               runtime.Provider
+	cacheCtx         context.Context
+	beadStores       map[string]beads.Store
+	cityBeadStore    beads.Store // city-level store for session beads
+	cityGraphJournal beads.Store // journal graph store; nil unless the city has a .gc/graph scope
+	// graphJournalStartupErr is non-nil when the city opted into a durable
+	// (postgres) graph journal — or one whose marker cannot be parsed to confirm the
+	// byte-identical SQLite default — that could not be opened at construction. The
+	// controller entry points treat it as a fatal, per-city startup error rather than
+	// silently routing graph-class writes to the legacy work store (which would
+	// split-brain the journal across two backends). A confirmed-SQLite open failure
+	// is NOT recorded here: it keeps the historical warn-and-degrade.
+	graphJournalStartupErr error
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
@@ -166,11 +174,20 @@ func newControllerState(
 		cs.extmsgSvc = &svc
 	}
 	// Open the city-level journal graph store when the city has opted into a
-	// .gc/graph scope (activation by presence). Absent scope leaves the handle
-	// nil and the graph class routes to the work store, byte-identical to today.
-	// An open error warns and routes legacy — never fatal.
+	// .gc/graph scope (activation by presence). Absent scope leaves the handle nil
+	// and the graph class routes to the work store, byte-identical to today. An open
+	// error is fatal for a durable (postgres) or unparseable-marker backend —
+	// silently routing graph-class writes to the work store while journal-resident
+	// beads live in Postgres would split-brain the journal — and only a
+	// confirmed-SQLite open failure keeps the historical warn-and-degrade. The
+	// controller entry points act on graphJournalStartupErr (abort this city's
+	// startup) rather than run degraded.
 	if openedGraph, present, err := newControllerStateOpenCityGraphJournal(cityPath); err != nil {
-		fmt.Fprintf(os.Stderr, "api: city graph journal store: %v (graph class routes to the work store)\n", err)
+		if graphJournalOpenFailureIsFatal(cityPath) {
+			cs.graphJournalStartupErr = fmt.Errorf("city graph journal store: %w (durable backend requires a live open; refusing to route graph-class beads to the work store)", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "api: city graph journal store: %v (graph class routes to the work store)\n", err)
+		}
 	} else if present {
 		cs.cityGraphJournal = openedGraph.Store
 	}

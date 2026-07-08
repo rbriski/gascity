@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // writeGraphScopeMarker creates the provider marker that opts a city into a
@@ -57,6 +59,58 @@ func TestBeadEventGraphClassOwnedButUnloaded(t *testing.T) {
 	if _, known := csUnscoped.beadEventConfiguredStoreLocked("gcg-j7"); known {
 		t.Fatalf("non-scoped gcg id known = true, want false")
 	}
+}
+
+// TestNewControllerStatePostgresOpenFailureIsFatal pins the HIGH wiring fix: when a
+// backend=postgres city's journal cannot be opened at controller construction,
+// newControllerState records a graphJournalStartupErr (which the controller entry
+// points abort on) instead of leaving the handle nil and silently routing graph-class
+// writes to the legacy work store — the cross-backend split-brain. A confirmed-SQLite
+// city that opens fine records no error, and a non-opted city records none either.
+func TestNewControllerStatePostgresOpenFailureIsFatal(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+
+	t.Run("postgres unresolvable is fatal", func(t *testing.T) {
+		city := t.TempDir()
+		writeGraphBackendMarker(t, city,
+			"backend: postgres\npostgres:\n  dsn_env: GC_GRAPH_CTRL_UNRESOLVABLE\n")
+		t.Setenv("GC_GRAPH_CTRL_UNRESOLVABLE", "") // named but empty ⇒ unresolvable
+
+		cs := newControllerState(context.Background(), &config.City{}, runtime.NewFake(), events.NewFake(), "pg-city", city)
+		if cs.graphJournalStartupErr == nil {
+			t.Fatal("a backend=postgres open failure must set graphJournalStartupErr, not warn-and-degrade")
+		}
+		if cs.cityGraphJournal != nil {
+			t.Fatal("cityGraphJournal must stay nil on a fatal postgres open failure")
+		}
+	})
+
+	t.Run("sqlite opens with no startup error", func(t *testing.T) {
+		city := t.TempDir()
+		writeGraphScopeMarker(t, city) // provider: journal ⇒ SQLite default
+
+		cs := newControllerState(context.Background(), &config.City{}, runtime.NewFake(), events.NewFake(), "sqlite-city", city)
+		if cs.graphJournalStartupErr != nil {
+			t.Fatalf("a healthy SQLite journal must not set graphJournalStartupErr: %v", cs.graphJournalStartupErr)
+		}
+		if cs.cityGraphJournal == nil {
+			t.Fatal("a healthy SQLite journal should be opened and attached")
+		}
+	})
+
+	t.Run("non-opted city has no startup error", func(t *testing.T) {
+		cs := newControllerState(context.Background(), &config.City{}, runtime.NewFake(), events.NewFake(), "plain-city", t.TempDir())
+		if cs.graphJournalStartupErr != nil {
+			t.Fatalf("a non-opted city must not set graphJournalStartupErr: %v", cs.graphJournalStartupErr)
+		}
+		if cs.cityGraphJournal != nil {
+			t.Fatal("a non-opted city must leave cityGraphJournal nil")
+		}
+	})
 }
 
 // TestBeadEventGraphClassUnloadedAutocloseNotSkipped proves the HIGH-2 fix at the

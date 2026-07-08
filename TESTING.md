@@ -191,6 +191,25 @@ listener bootstrap, socket paths — wires end-to-end through a real
 binary. Run with `make test-integration-huma` or
 `go test -tags integration -run TestHumaBinary ./test/integration/`.
 
+**Hosted-Postgres graph-journal gate** (`cmd/gc/graph_journal_backend_pg_integration_test.go`
+plus `internal/graphstore/pg_test.go`): the P6 EXIT gate — an opted city
+with `backend: postgres` opens its graph journal on real Postgres through
+the production opener, mints/reads a bead, keeps no on-disk SQLite journal,
+proves the row is physically resident in Postgres, and Verifies its
+hash-chain from Postgres. These tests are **DSN-gated**: they `t.Skip()`
+unless `GRAPHSTORE_PG_DSN` (or the `GC_GRAPH_TEST_PG_DSN` alias) points at a
+reachable Postgres, so a plain `make test-integration` green does NOT attest
+the P6 EXIT claim. Run the gate explicitly with:
+
+```
+GRAPHSTORE_PG_DSN='postgres://user:pw@127.0.0.1:5432/gc?sslmode=disable' \
+  make test-graph-journal-pg
+```
+
+The target refuses to run a no-op green when no DSN is set. A CI job that
+provisions a Postgres service container and invokes this target is a
+tracked follow-up so the gate cannot silently rot.
+
 **Supervisor API contract tests** (`test/integration/gc_live_contract_test.go`
 and focused cases in `test/integration/huma_binary_test.go`): build the real
 `gc` binary, start `gc supervisor run` against an isolated `GC_HOME` and

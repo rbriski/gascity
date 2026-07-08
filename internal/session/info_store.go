@@ -138,6 +138,20 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
 		ProviderKind:                   b.Metadata["provider_kind"],
+
+		// sleep-policy cluster (raw mirrors; see Info doc). The 7 key literals
+		// match the inline keys in cmd/gc/session_sleep.go today (they are inline
+		// literals there, not shared constants). The ApplyPatch reprojection oracle
+		// pins only the in-package InfoFromPersistedBead↔ApplyPatch parallelism —
+		// it does NOT catch a cmd/gc-side key rename, which surfaces when the sleep
+		// helpers migrate onto these fields (W6).
+		SleepPolicyFingerprint:       b.Metadata["sleep_policy_fingerprint"],
+		RequestedSleepAfterIdle:      b.Metadata["requested_sleep_after_idle"],
+		EffectiveSleepAfterIdle:      b.Metadata["effective_sleep_after_idle"],
+		SleepPolicySource:            b.Metadata["sleep_policy_source"],
+		SleepCapability:              b.Metadata["sleep_capability"],
+		SleepPolicyAdjustmentReason:  b.Metadata["sleep_policy_adjustment_reason"],
+		ConfigWakeSuppressedMetadata: b.Metadata["config_wake_suppressed"],
 	}
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n
@@ -284,6 +298,56 @@ func sessionMatchesFilters(b beads.Bead, stateFilter, templateFilter string) boo
 	}
 
 	if templateFilter != "" && b.Metadata["template"] != templateFilter {
+		return false
+	}
+	return true
+}
+
+// sessionMatchesFiltersInfo is the Info-taking twin of sessionMatchesFilters. It
+// recomputes the state from MetadataState (the RAW state metadata, NOT the
+// closed-blanked/normalized Info.State — the bead form derives `state` from
+// b.Metadata["state"] regardless of close), reads Closed for the open/closed
+// status compares, and Template for the template filter.
+//
+// ACCEPTED DELTA: the bead form compares the exact status string
+// (b.Status=="open"), while this twin has only Closed (== b.Status=="closed") to
+// work with — Info carries no raw Status. For the SDK's binary open/closed
+// invariant the two are identical; for a hypothetical out-of-band status
+// (e.g. "archived") the twin's `sf=="open"` (== !Closed) is WIDER than the bead
+// form's exact `b.Status=="open"`. They diverge ONLY on the "open" filter for a
+// non-open, non-closed status; everywhere else they agree.
+// TestSessionMatchesFiltersInfoEquivalence pins the byte-identity across the
+// open/closed corpus (including the closed-with-raw-state trap) AND pins this
+// documented open-filter delta against an exotic-status row.
+func sessionMatchesFiltersInfo(info Info, stateFilter, templateFilter string) bool {
+	state := normalizeInfoState(State(info.MetadataState))
+
+	switch {
+	case stateFilter != "" && stateFilter != "all":
+		match := false
+		for _, sf := range strings.Split(stateFilter, ",") {
+			switch {
+			case sf == "closed" && info.Closed:
+				match = true
+			case sf == "open" && !info.Closed:
+				match = true
+			case !info.Closed && sf == string(state):
+				match = true
+			}
+			if match {
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	case stateFilter == "":
+		if info.Closed {
+			return false
+		}
+	}
+
+	if templateFilter != "" && info.Template != templateFilter {
 		return false
 	}
 	return true

@@ -203,6 +203,20 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			}
 		case "provider_kind":
 			info.ProviderKind = v
+		case "sleep_policy_fingerprint":
+			info.SleepPolicyFingerprint = v
+		case "requested_sleep_after_idle":
+			info.RequestedSleepAfterIdle = v
+		case "effective_sleep_after_idle":
+			info.EffectiveSleepAfterIdle = v
+		case "sleep_policy_source":
+			info.SleepPolicySource = v
+		case "sleep_capability":
+			info.SleepCapability = v
+		case "sleep_policy_adjustment_reason":
+			info.SleepPolicyAdjustmentReason = v
+		case "config_wake_suppressed":
+			info.ConfigWakeSuppressedMetadata = v
 		case MetadataLastNudgeDeliveredAt:
 			info.LastNudgeDeliveredAt = time.Time{}
 			if raw := strings.TrimSpace(v); raw != "" {

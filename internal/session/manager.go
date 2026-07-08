@@ -373,6 +373,39 @@ type Info struct {
 	// raw value. Additive, internal-only (absent from the HTTP wire). Session-class
 	// periphery front-door migration.
 	ProviderKind string // provider_kind (raw)
+
+	// --- sleep-policy cluster (controller decision-read surface) ---
+	//
+	// Raw mirrors of the seven sleep-policy metadata keys persistSleepPolicyMetadata
+	// writes (session_sleep.go). They let that helper's change-detection diff and
+	// the sleep decision readers (configWakeSuppressed, recoverPendingIdleSleep)
+	// compute from Info without a re-Get. Each is the RAW projected value,
+	// verbatim; ConfigWakeSuppressedMetadata stays a raw string mirror (a
+	// "true"/"false" value written via boolMetadata) like ManualSessionMetadata.
+	// Additive, internal-only (absent from the HTTP wire). The ApplyPatch
+	// reprojection oracle pins the in-package InfoFromPersistedBead↔ApplyPatch
+	// parallelism; the cmd/gc keys are inline literals, so a cmd/gc-side rename is
+	// caught only when the sleep helpers migrate onto these fields (W6).
+
+	// SleepPolicyFingerprint is the RAW sleep_policy_fingerprint metadata — the
+	// decision-critical one: recoverPendingIdleSleep preserves it across an
+	// in-flight idle drain, persistSleepPolicyMetadata's preserve branch keeps it,
+	// and configWakeSuppressed compares it (exact) against the resolved policy
+	// fingerprint.
+	SleepPolicyFingerprint string // sleep_policy_fingerprint (raw)
+	// RequestedSleepAfterIdle / EffectiveSleepAfterIdle / SleepPolicySource /
+	// SleepCapability / SleepPolicyAdjustmentReason are the RAW policy-derived
+	// markers persistSleepPolicyMetadata batches; the change-detection diff
+	// compares each verbatim.
+	RequestedSleepAfterIdle     string // requested_sleep_after_idle (raw)
+	EffectiveSleepAfterIdle     string // effective_sleep_after_idle (raw)
+	SleepPolicySource           string // sleep_policy_source (raw)
+	SleepCapability             string // sleep_capability (raw)
+	SleepPolicyAdjustmentReason string // sleep_policy_adjustment_reason (raw)
+	// ConfigWakeSuppressedMetadata is the RAW config_wake_suppressed metadata,
+	// verbatim (a "true"/"false" string). Kept as a raw string mirror like
+	// ManualSessionMetadata so the persisted value round-trips exactly.
+	ConfigWakeSuppressedMetadata string // config_wake_suppressed (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a
@@ -510,6 +543,40 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 		}
 	}
 	if m.sp != nil && m.sp.IsRunning(sessName) {
+		return "", false
+	}
+	return "", false
+}
+
+// transportForInfo is the Info-taking twin of transportForBead: it derives the
+// session transport from the projected Info fields instead of the raw bead, so
+// the runtime overlay can enrich an Info the caller already holds. Every branch
+// reads an Info field that mirrors the exact bead metadata transportForBead
+// cracked (Provider/TransportMetadata, MCPIdentity/MCPServersSnapshot,
+// PendingCreateClaim, Template, SessionName), so the two are byte-identical.
+func (m *Manager) transportForInfo(info Info) (string, bool) {
+	transport := normalizeTransport(info.Provider, info.TransportMetadata)
+	if transport != "" {
+		return transport, false
+	}
+	if strings.TrimSpace(info.MCPIdentity) != "" ||
+		strings.TrimSpace(info.MCPServersSnapshot) != "" {
+		return "acp", false
+	}
+	if info.PendingCreateClaim {
+		transport, _ = m.resolveConfiguredTransport(info.Template, info.Provider)
+		if transport != "" {
+			return transport, true
+		}
+		return "", false
+	}
+	if detector, ok := m.sp.(transportDetector); ok {
+		transport = normalizeTransport(info.Provider, detector.DetectTransport(info.SessionName))
+		if transport != "" {
+			return transport, true
+		}
+	}
+	if m.sp != nil && m.sp.IsRunning(info.SessionName) {
 		return "", false
 	}
 	return "", false
@@ -1800,13 +1867,26 @@ func (m *Manager) Peek(id string, lines int) (string, error) {
 // detection, ACP routing, stale-state downgrade, attachment/last-active) lives
 // here, where the runtime provider is available.
 func (m *Manager) infoFromBead(b beads.Bead) Info {
-	info := InfoFromPersistedBead(b)
+	return m.EnrichInfo(InfoFromPersistedBead(b))
+}
+
+// EnrichInfo applies the live runtime overlay to a persisted Info projection:
+// transport detection, ACP routing, stale-active→asleep downgrade, and
+// attachment/last-active. It is the runtime half of infoFromBead extracted onto
+// an Info parameter, so a caller that already holds a persisted Info (e.g. from
+// Store.ListAll) can enrich it without a second bead read. infoFromBead is now
+// exactly EnrichInfo(InfoFromPersistedBead(b)); that refactoring identity, plus
+// the manager's existing Get/List tests, is the oracle.
+//
+// It reads only Info fields that mirror the exact bead metadata the raw overlay
+// cracked (via transportForInfo), so it is byte-identical to the raw overlay.
+func (m *Manager) EnrichInfo(info Info) Info {
 	sessName := info.SessionName
 
 	if !info.Closed {
-		transport, _ := m.transportForBead(b, sessName)
+		transport, _ := m.transportForInfo(info)
 		info.Transport = transport
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		_ = m.routeACPIfNeeded(info.Provider, transport, sessName)
 
 		// Surface stale "awake" / "active" beads as dormant immediately.
 		// The controller also heals metadata on the next tick.
@@ -1824,6 +1904,16 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	}
 
 	return info
+}
+
+// EnrichInfos applies EnrichInfo to each element in place and returns the same
+// slice, for the list read path (filter the persisted projection first, then
+// enrich the survivors — matching ListFullFromBeads' order).
+func (m *Manager) EnrichInfos(infos []Info) []Info {
+	for i := range infos {
+		infos[i] = m.EnrichInfo(infos[i])
+	}
+	return infos
 }
 
 // PersistSessionKey stores a provider resume key on an existing session when

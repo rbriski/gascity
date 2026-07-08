@@ -1479,6 +1479,28 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	} else {
 		delete(env, "BEADS_DOLT_PASSWORD")
 	}
+	// Carry the hosted beads-gateway credential command to every projected env.
+	// bd authenticates to the gateway by running the helper named in
+	// BEADS_DOLT_CREDENTIAL_COMMAND; without it bd falls back to the static/root
+	// user and the gateway rejects the connection with "access denied" (Error
+	// 1045). That key contains the substring CREDENTIAL, so
+	// execenv.FilterInherited strips it from every gc-spawned subprocess and
+	// agent session — the in-process native store still authenticates (it reads
+	// the un-filtered ambient env), but shell-out bd and spawned agents do not.
+	// The controller image also exports the same helper path under the
+	// non-sensitive GC_DOLT_CRED_CMD, which survives filtering, so mirror it back
+	// into BEADS_DOLT_CREDENTIAL_COMMAND here (map/GC_DOLT_CRED_CMD wins, else the
+	// ambient value of either key) so bd authenticates the same way the native
+	// store does.
+	if cred := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if cred := strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if ambient := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	}
 }
 
 // cityForStoreDir resolves ambient store contexts. GC_CITY intentionally wins

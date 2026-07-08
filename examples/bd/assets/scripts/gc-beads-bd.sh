@@ -1307,10 +1307,10 @@ write_config_yaml() {
             max_connections=256
             ;;
     esac
-    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-15000}
+    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-30000}
     case "$read_timeout_millis" in
         ''|*[!0-9]*|0)
-            read_timeout_millis=15000
+            read_timeout_millis=30000
             ;;
     esac
     write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
@@ -2703,6 +2703,25 @@ op_init() {
     # beads with that type. "step" is required for non-root formula step
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
+
+    # Hosted beads-gateway: when a credential command is configured, bd
+    # authenticates to the gateway via that command (EIA-as-username over TLS) and
+    # the gateway owns database routing. The managed-local-dolt path below (raw
+    # `dolt --no-tls` reachability probes, server lifecycle, CREATE DATABASE)
+    # cannot reach a TLS+EIA gateway, so defer to bd: it connects over the gateway
+    # and inits/adopts the (provisioner-created) project database itself. Only
+    # engages for hosted scopes; managed cities have no credential command and
+    # fall through to the unchanged path.
+    if [ -n "${BEADS_DOLT_CREDENTIAL_COMMAND:-}" ]; then
+        local hosted_host
+        hosted_host=$(connect_host)
+        if ! run_bd_pinned "$dir" ready >/dev/null 2>&1; then
+            run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$hosted_host" ""
+        fi
+        ensure_beads_dir_permissions "$dir"
+        ensure_types_custom_in_yaml "$dir" "$custom_types"
+        exit 0
+    fi
 
     if is_doltlite_backend; then
         local database already_ready

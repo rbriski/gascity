@@ -37,6 +37,50 @@ func TestReadSlingStdinBead(t *testing.T) {
 	}
 }
 
+// TestApplySlingInlineBead_FormulaPassThrough proves the extracted inline-text
+// helper is a silent pass-through in formula mode: no store touch (nil store is
+// safe), no output, bead unchanged, no error. Demonstrates the last pre-core
+// orchestration chunk is now independently testable.
+func TestApplySlingInlineBead_FormulaPassThrough(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	finalBead, inlineText, errCode, errMsg := applySlingInlineBead(
+		&config.City{}, "deploy-service", true /*isFormula*/, false /*dryRun*/, existingSlingSourceBead{},
+		nil /*store*/, "rig/store", "" /*stdinDesc*/, &stdout, &stderr)
+	if errCode != "" || errMsg != "" {
+		t.Fatalf("unexpected err: code=%q msg=%q", errCode, errMsg)
+	}
+	if finalBead != "deploy-service" || inlineText {
+		t.Fatalf("got (finalBead=%q inlineText=%v), want (deploy-service, false)", finalBead, inlineText)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("formula pass-through must be silent; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// TestApplySlingInlineBead_ExistingBeadWarns proves the helper emits the
+// "found existing bead … routing it instead of creating inline text" notice to
+// stderr (and leaves the bead unchanged) when a prose-looking argument matches an
+// existing source bead. Formula mode isolates the warning branch from the
+// store-create path (covered by the sling integration tests).
+func TestApplySlingInlineBead_ExistingBeadWarns(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	finalBead, inlineText, errCode, errMsg := applySlingInlineBead(
+		&config.City{}, "route this existing work", true /*isFormula*/, false, existingSlingSourceBead{exists: true},
+		nil /*store*/, "foundations/store", "", &stdout, &stderr)
+	if errCode != "" {
+		t.Fatalf("unexpected err: code=%q msg=%q", errCode, errMsg)
+	}
+	if finalBead != "route this existing work" || inlineText {
+		t.Fatalf("got (finalBead=%q inlineText=%v), want (unchanged, false)", finalBead, inlineText)
+	}
+	if !strings.Contains(stderr.String(), "found existing bead") {
+		t.Fatalf("stderr missing existing-bead notice: %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 // TestInferSling1ArgTarget_FormulaRejected exercises the extracted 1-arg
 // target-inference helper directly (its pure --formula guard needs no store),
 // demonstrating that hoisting the store-touching pre-core orchestration out of

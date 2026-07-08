@@ -295,6 +295,47 @@ func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead
 	return storeDir, store, "", ""
 }
 
+// applySlingInlineBead resolves inline-text mode: when the sling argument is prose
+// rather than a bead ID (and not a formula), it creates a task bead from the text
+// and returns the new bead ID, or under --dry-run marks it preview-only. It is the
+// last store-touching pre-core orchestration chunk extracted from cmdSlingWithJSON
+// so it can be tested in isolation, alongside resolveSlingTargetAndBead and
+// openSlingStore. finalBead is the (possibly newly created) bead/formula to route;
+// inlineText reports whether the text is preview-only. On failure it returns a
+// non-empty (errCode, errMsg) pair for the caller's fail() path. The "found
+// existing bead" notice and the "Created …" line are emitted here to preserve the
+// exact stderr/stdout ordering of the original inline block.
+func applySlingInlineBead(cfg *config.City, beadOrFormula string, isFormula, dryRun bool, sourceBead existingSlingSourceBead, store beads.Store, storeRef, stdinDescription string, humanStdout, stderr io.Writer) (finalBead string, inlineText bool, errCode, errMsg string) {
+	finalBead = beadOrFormula
+	if sourceBead.exists && looksLikeInlineText(cfg, finalBead) {
+		fmt.Fprintf(stderr, "gc sling: found existing bead %q in %s; routing it instead of creating inline text\n", finalBead, storeRef) //nolint:errcheck // best-effort stderr
+	}
+	// Inline text mode: if the argument doesn't look like a bead ID
+	// (and we're not in formula mode), create a task bead from the text.
+	// During dry-run, mark the text as preview-only instead of creating it.
+	if isFormula {
+		return finalBead, false, "", ""
+	}
+	inlineProbeStore := store
+	if !sourceBead.exists && sourceBead.checked && looksLikeInlineText(cfg, finalBead) {
+		inlineProbeStore = nil
+	}
+	createInlineBead, previewInlineText, err := resolveInlineBeadAction(cfg, finalBead, dryRun, inlineProbeStore)
+	if err != nil {
+		return finalBead, false, "inline_bead_resolve_failed", fmt.Sprintf("gc sling: %v", err)
+	}
+	inlineText = previewInlineText
+	if createInlineBead {
+		created, err := store.Create(beads.Bead{Title: finalBead, Description: stdinDescription, Type: "task"})
+		if err != nil {
+			return finalBead, false, "bead_create_failed", fmt.Sprintf("gc sling: creating bead: %v", err)
+		}
+		fmt.Fprintf(humanStdout, "Created %s — %q\n", created.ID, finalBead) //nolint:errcheck // best-effort stdout
+		finalBead = created.ID
+	}
+	return finalBead, inlineText, "", ""
+}
+
 // resolveSlingTargetAndBead resolves the (target, beadOrFormula, sourceBead)
 // triple for a sling from the three invocation shapes — --stdin, explicit 2-arg
 // (target + bead), and 1-arg (bead only, target inferred). It consolidates the
@@ -410,32 +451,10 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		fmt.Fprintf(stderr, "gc sling: building store env: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if sourceBead.exists && looksLikeInlineText(cfg, beadOrFormula) {
-		fmt.Fprintf(stderr, "gc sling: found existing bead %q in %s; routing it instead of creating inline text\n", beadOrFormula, storeRef) //nolint:errcheck // best-effort stderr
-	}
-
-	// Inline text mode: if the argument doesn't look like a bead ID
-	// (and we're not in formula mode), create a task bead from the text.
-	// During dry-run, mark the text as preview-only instead of creating it.
-	inlineText := false
-	if !isFormula {
-		inlineProbeStore := store
-		if !sourceBead.exists && sourceBead.checked && looksLikeInlineText(cfg, beadOrFormula) {
-			inlineProbeStore = nil
-		}
-		createInlineBead, previewInlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, inlineProbeStore)
-		if err != nil {
-			return fail("inline_bead_resolve_failed", fmt.Sprintf("gc sling: %v", err))
-		}
-		inlineText = previewInlineText
-		if createInlineBead {
-			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
-			if err != nil {
-				return fail("bead_create_failed", fmt.Sprintf("gc sling: creating bead: %v", err))
-			}
-			fmt.Fprintf(humanStdout, "Created %s — %q\n", created.ID, beadOrFormula) //nolint:errcheck // best-effort stdout
-			beadOrFormula = created.ID
-		}
+	var inlineText bool
+	beadOrFormula, inlineText, errCode, errMsg = applySlingInlineBead(cfg, beadOrFormula, isFormula, dryRun, sourceBead, store, storeRef, stdinDescription, humanStdout, stderr)
+	if errCode != "" {
+		return fail(errCode, errMsg)
 	}
 
 	opts := slingOpts{

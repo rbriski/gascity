@@ -101,9 +101,19 @@ func activationFor(nodeID string) string { return nodeID + ":0" }
 // buildUnits lowers a formula body to a topologically ordered plan. block nodes
 // are transparent; exec/settle/lit/interp/do become leaf units; scatter(members)
 // lowers to member leaves plus an aggregate; gather(authored) lowers to a gather
-// unit with an inline combine. allowDo gates the do arm on a configured host.
-func buildUnits(nodes []ir.Node, allowDo bool) ([]planUnit, error) {
-	l := &lowerer{allowDo: allowDo, scatterMembers: map[string][]string{}}
+// unit with an inline combine.
+//
+// allowDo gates whether a `do` node lowers at all: it is set when the run can
+// place a do somewhere — a configured Host (Run/Resume run it inline) OR a
+// PoolRouter (Advance materializes a TOP-LEVEL do as pool work). allowCombineDo
+// is the stricter gate for a do nested INSIDE a gather combine: a combine runs
+// inline inside runGather (runUnit -> runDo), so it needs a Host — pool
+// materialization only happens on the top-level walk. A pool-mode Advance with no
+// Host therefore sets allowDo=true but allowCombineDo=false, and a combine `do` is
+// refused HERE at lowering (before any append) rather than hard-failing late in
+// runGather after the scatter members already ran (M2).
+func buildUnits(nodes []ir.Node, allowDo, allowCombineDo bool) ([]planUnit, error) {
+	l := &lowerer{allowDo: allowDo, allowCombineDo: allowCombineDo, scatterMembers: map[string][]string{}}
 	if err := l.lowerNodes(nodes, ""); err != nil {
 		return nil, err
 	}
@@ -115,6 +125,7 @@ func buildUnits(nodes []ir.Node, allowDo bool) ([]planUnit, error) {
 
 type lowerer struct {
 	allowDo        bool
+	allowCombineDo bool
 	units          []planUnit
 	scatterMembers map[string][]string // scatter node id -> member activation keys (in order)
 }
@@ -304,7 +315,13 @@ func (l *lowerer) lowerCombine(n ir.Node) ([]planUnit, error) {
 		return nil, fmt.Errorf("lumen: gather %q combine members: %w", n.ID, err)
 	}
 	gatherAct := activationFor(n.ID)
-	sub := &lowerer{allowDo: l.allowDo, scatterMembers: map[string][]string{}}
+	// A combine runs inline inside runGather, so a `do` combine member needs a Host
+	// (allowCombineDo), NOT merely a PoolRouter: the top-level pool-materialization
+	// walk never reaches a combine member. Gating the sub-lowerer's do arm on
+	// allowCombineDo refuses a combine `do` (at any nesting depth) HERE at lowering
+	// with ErrUnsupportedNode, before the lease is taken or any event is appended —
+	// never as a late hard fail after the drained members ran (M2).
+	sub := &lowerer{allowDo: l.allowCombineDo, allowCombineDo: l.allowCombineDo, scatterMembers: map[string][]string{}}
 	if err := sub.lowerNodes(members, gatherAct); err != nil {
 		return nil, err
 	}
@@ -326,8 +343,19 @@ func (l *lowerer) lowerCombine(n ir.Node) ([]planUnit, error) {
 // resolveDeps maps each unit's IR `after` node ids to activation keys, splitting
 // blocking `after` gates from drain member dependencies (H1). A dangling `after`
 // reference to an unknown node is a real lowering/IR bug and is refused loudly
-// (M3) rather than silently dropped. Silent (lit/interp) deps are elided (they
-// never settle, so they cannot gate a dependent).
+// (M3) rather than silently dropped.
+//
+// A silent (lit/interp) dep emits no journal event and never settles, so it cannot
+// itself gate a dependent. But the REAL nodes a silent dep interpolates its value
+// from must: a dependent that consumes a silent dep transitively depends on those
+// nodes. So when a silent dep is elided, its TRANSITIVE non-silent dep closure is
+// substituted in the dependent's afterDeps (H2). This is what makes Advance DEFER
+// such a dependent until the silent chain's real inputs settle — so its {{ref}}
+// interpolation resolves to the same value the synchronous Run produces, instead
+// of running early against an unresolved ref (HIGH-2). It also gives the dependent
+// a genuine topo edge to those inputs. Bare-elision was safe only for Run's
+// synchronous walk, which happens to visit deps before dependents by source order;
+// Advance's parking walk defers on afterDeps, so the closure must be explicit.
 func (l *lowerer) resolveDeps() error {
 	byNodeID := make(map[string]string, len(l.units))
 	silent := make(map[string]bool, len(l.units))
@@ -335,29 +363,58 @@ func (l *lowerer) resolveDeps() error {
 		byNodeID[u.nodeID] = u.activation
 		silent[u.activation] = u.silent
 	}
-	for i := range l.units {
-		u := &l.units[i]
-		seen := map[string]bool{}
-		var afterDeps []string
-		add := func(act string) {
-			if act == "" || seen[act] || silent[act] {
-				return
-			}
-			seen[act] = true
-			afterDeps = append(afterDeps, act)
-		}
+	// Resolve every unit's raw `after` node ids to activation keys once, so the
+	// silent-closure walk can follow a silent dep's own dependencies. A dangling
+	// reference is refused here, before any dependent is resolved (M3).
+	rawDeps := make(map[string][]string, len(l.units))
+	for _, u := range l.units {
+		deps := make([]string, 0, len(u.rawAfter))
 		for _, dep := range u.rawAfter {
 			act, ok := byNodeID[dep]
 			if !ok {
 				return fmt.Errorf("lumen: node %q has an `after` reference to unknown node %q", u.nodeID, dep)
 			}
+			deps = append(deps, act)
+		}
+		rawDeps[u.activation] = deps
+	}
+	for i := range l.units {
+		u := &l.units[i]
+		seen := map[string]bool{}
+		var afterDeps []string
+		// addClosure adds a non-silent dependency directly; for a silent dep it
+		// recurses into that dep's own dependencies, substituting its transitive
+		// non-silent closure. guard breaks any (degenerate) silent cycle so the walk
+		// terminates; a silent cycle has no settleable input, so it contributes none.
+		var addClosure func(act string, guard map[string]bool)
+		addClosure = func(act string, guard map[string]bool) {
+			if act == "" {
+				return
+			}
+			if silent[act] {
+				if guard[act] {
+					return
+				}
+				guard[act] = true
+				for _, d := range rawDeps[act] {
+					addClosure(d, guard)
+				}
+				return
+			}
+			if seen[act] {
+				return
+			}
+			seen[act] = true
+			afterDeps = append(afterDeps, act)
+		}
+		for _, dep := range rawDeps[u.activation] {
 			// The scatter a gather drains is a drain dependency (memberDeps below),
 			// not a blocking gate — the whole point of a gather is to collect the
 			// scatter regardless of its outcome.
-			if u.kind == unitGather && act == u.overScatter {
+			if u.kind == unitGather && dep == u.overScatter {
 				continue
 			}
-			add(act)
+			addClosure(dep, map[string]bool{})
 		}
 		u.afterDeps = afterDeps
 

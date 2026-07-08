@@ -192,6 +192,13 @@ func ClaimTierBWork(ctx context.Context, store *graphstore.Store, streamID, acti
 		if errors.Is(err, graphstore.ErrWrongExpectedVersion) || errors.Is(err, graphstore.ErrIdemTokenReuse) {
 			return fmt.Errorf("lumen tier-b: claim of %q by %q lost the race: %w", node.id, assignee, ErrTierBClaimConflict)
 		}
+		// L2: a raw graphstore.ErrLeaseFenced propagates here UNWRAPPED. It means the
+		// driver (Advance) re-acquired the writer lease and bumped the epoch between
+		// this claim's CurrentLeaseEpoch read and its append (a re-acquire race), so
+		// this cooperative append was fenced. It is RETRYABLE — the controller loop
+		// must re-read the head/epoch and re-claim, exactly as it retries
+		// ErrTierBClaimConflict — NOT surface it as a terminal claim failure. Mapping
+		// ErrLeaseFenced onto a typed retryable claim error is L2 controller-loop work.
 		return err
 	}
 	return nil
@@ -261,11 +268,23 @@ func isSettleableOutcome(o string) bool {
 // then re-derives the Tier-A projection by folding the journal — a drop+refold,
 // never a direct column write. This is what keeps the projection a pure fold and
 // write-closed for Tier-B beads, and is why a claim/settle is byte-identical to a
-// from-genesis rebuild (DET-T-17). leaseEpoch is 0: the standalone mechanism
-// appends unfenced; the full path routes the claim through the root's lease
-// holder (controller-mediated) and passes the held epoch.
+// from-genesis rebuild (DET-T-17).
+//
+// The append carries the stream's CURRENT lease epoch (blueprint correction #1),
+// NOT a hardcoded 0. A claim/settle is a cross-process cooperative append onto a
+// stream the driver (engine.Advance) leases per-Advance: a stale epoch 0 would be
+// PERMANENTLY fenced on any stream the driver has ever driven (its lease row's
+// epoch is >= 1, preserved across release), wedging every future claim. Reading
+// the live epoch makes the append a same-generation cooperative write; a driver
+// re-acquire that bumps the epoch fences a racing claim loudly (ErrLeaseFenced),
+// which the caller re-reads and retries. An unfenced stream (no lease row) reads
+// epoch 0 and appends exactly as before.
 func appendAndProject(ctx context.Context, store *graphstore.Store, streamID string, expectedVersion uint64, ev graphstore.JournalEvent) (graphstore.AppendResult, error) {
-	res, err := store.Append(ctx, streamID, Engine, expectedVersion, 0, []graphstore.JournalEvent{ev})
+	epoch, err := store.CurrentLeaseEpoch(ctx, streamID)
+	if err != nil {
+		return graphstore.AppendResult{}, err
+	}
+	res, err := store.Append(ctx, streamID, Engine, expectedVersion, epoch, []graphstore.JournalEvent{ev})
 	if err != nil {
 		return res, err
 	}

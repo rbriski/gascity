@@ -1,0 +1,430 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/graphstore"
+	"github.com/gastownhall/gascity/internal/lumen/ir"
+)
+
+// maxPromptBytes caps a pool-mode do's rendered prompt. It mirrors the frozen
+// 16 KiB journal payload budget (blueprint §3.1.3): the driver REFUSES an
+// oversize prompt with a typed error at materialization rather than minting an
+// event the store would reject downstream. A spec-ref indirection (prompt blob
+// in the IR CAS) is the deferred escape hatch if dogfood hits the cap.
+const maxPromptBytes = 16 * 1024
+
+var (
+	// ErrNoPoolRoute reports that a pool-mode do node's agent binding resolved to
+	// no pool route (PoolRouter returned ok=false). It is a loud config error, not
+	// a silent inline fallback — a do the caller declared pool-mode has nowhere to
+	// run.
+	ErrNoPoolRoute = errors.New("lumen: no pool route resolved for pool-mode do node")
+
+	// ErrPromptTooLarge reports that a rendered do prompt exceeds the 16 KiB
+	// payload cap (blueprint §3.1.3). It is raised at materialization, before any
+	// append.
+	ErrPromptTooLarge = errors.New("lumen: rendered do prompt exceeds the 16 KiB payload cap")
+
+	// ErrAdvanceStalled reports that a pass left pending units with no pool-mode
+	// work in flight — a run that cannot progress and cannot seal. Pool
+	// settlements are the only async progress source, so a park with nothing in
+	// flight is a bug (a dangling dep, a lowering error), surfaced loudly rather
+	// than as a silent forever-park.
+	//
+	// UNREACHABLE by construction for the P4.2 node kinds, and kept as a defensive
+	// guard: the pass walks units in topo order, and every ready unit that is not a
+	// pool do settles synchronously in the same pass (engine-inline runs, silent
+	// computes, skip-cascade settles). A unit therefore stays pending ONLY because
+	// a dependency has not settled, and the sole dependency an in-pass walk cannot
+	// settle is an in-flight pool node — so a pending unit always has a pool node in
+	// flight (inFlight non-empty). If a future async node kind (async/await/detached
+	// run) can leave a non-pool dependency unsettled across a pass, THIS is the
+	// guard that must be widened to include it rather than silently forever-parking.
+	ErrAdvanceStalled = errors.New("lumen: advance stalled with pending units and no pool work in flight")
+)
+
+// PoolWork is one pool-mode do activation the driver materialized as a claimable
+// Tier-B work bead and is now awaiting an owned.settled from the claiming worker.
+// The controller loop (L2) uses this to track and, if the claimant strands, to
+// firewall-settle (§2.4).
+type PoolWork struct {
+	// Activation is the activation key (the claim/settle handle).
+	Activation string
+	// NodeID is the do-node id (the claimable work bead's projected id).
+	NodeID string
+	// Route is the pool the work is routed to (the frontier route / gc.routed_to).
+	Route string
+	// Prompt is the rendered agent prompt (projected into nodes.description).
+	Prompt string
+}
+
+// AdvanceResult reports one Advance pass. Exactly one of Sealed / Parked is true
+// on a nil-error return.
+type AdvanceResult struct {
+	// Sealed is set when the run reached run.closed this pass (or was already
+	// sealed on entry). Run is valid only then.
+	Sealed bool
+	// Parked is set when pending pool-mode work remains: the lease was released and
+	// the run advances on the next Advance after a settlement lands.
+	Parked bool
+	// Run is the completed run's result — valid only when Sealed.
+	Run RunResult
+	// InFlight lists the materialized pool activations awaiting owned.settled, in
+	// canonical activation order — valid when Parked.
+	InFlight []PoolWork
+	// Head is the journal head observed at return: the level-trigger cursor the
+	// controller compares against on the next tick to decide whether to re-Advance.
+	Head uint64
+}
+
+// Advance drives a run one re-entrant, level-triggered, parking pass — the
+// asynchronous generalization of Resume (blueprint §2.1). It:
+//
+//  1. acquires the writer lease (LIVE epoch — every driver append it makes, and
+//     every worker claim/settle threaded through CurrentLeaseEpoch, carries a
+//     non-zero fencing token, never the permanently-fenced 0);
+//  2. seeds run.started if the stream is fresh, else rebuilds run state from the
+//     journal (the shared rebuildDriver core Resume uses), absorbing any
+//     owned.settled a worker appended since the last Advance;
+//  3. walks the units in topo order, where — unlike Run/Resume — a unit whose
+//     dependencies have not all settled is DEFERRED (left for a later Advance)
+//     instead of blocking, and a ready pool-mode do is MATERIALIZED as a
+//     claimable Tier-B work bead and NOT waited on;
+//  4. seals the run (run.closed) when every unit has settled, or PARKS (releasing
+//     the lease) when pending pool-mode work remains.
+//
+// It is a pure function of (journal, IR, input): calling it repeatedly converges,
+// and a crash mid-Advance + re-Advance re-derives only the missing facts. Two
+// Advances never double-emit a pool-do node.activated — the append is idem-token
+// write-once and the re-rendered payload is byte-identical over the stable
+// settled scope, so a re-offer dedupes to a no-op. Run (P4.1) is unchanged and
+// coexists: Advance is a peer driver over the SAME fold, journal, and vocabulary.
+func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID string, input map[string]any, opts Options) (AdvanceResult, error) {
+	if store == nil {
+		return AdvanceResult{}, fmt.Errorf("lumen: advance: nil store")
+	}
+	if doc == nil {
+		return AdvanceResult{}, fmt.Errorf("lumen: advance: nil IR document")
+	}
+	if streamID == "" {
+		return AdvanceResult{}, fmt.Errorf("lumen: advance: empty stream id")
+	}
+	// The stream id IS the run root node id, and ':' is the activation-key
+	// delimiter (activationNodeID strips the trailing ':index' segment). A
+	// colon-bearing stream id would make the root frontier row's projected node_id
+	// (activationNodeID(RootID)) disagree with the id applyRunStarted inserts,
+	// diverging the root frontier row on a drop+refold. Refuse it loudly at entry
+	// (LOW-2). Run derives its stream id from a hash and never contains ':'.
+	if strings.ContainsRune(streamID, ':') {
+		return AdvanceResult{}, fmt.Errorf("lumen: advance: stream id %q must not contain ':' (it is the run root node id; ':' is the activation-key delimiter)", streamID)
+	}
+
+	units, err := buildUnits(doc.Nodes, opts.Host != nil || opts.PoolRouter != nil, opts.Host != nil)
+	if err != nil {
+		return AdvanceResult{}, err
+	}
+	RegisterVocabulary(store)
+
+	// The writer lease carries the LIVE fencing epoch for every append this
+	// Advance makes, and fences a concurrent driver loudly. It is released on
+	// return (park OR seal): between Advances the stream is unheld, so a pool
+	// worker's claim/settle appends cooperatively at the released-but-preserved
+	// epoch (correction #1).
+	lease, err := store.AcquireWriterLease(ctx, streamID, leaseHolder, leaseTTL)
+	if err != nil {
+		return AdvanceResult{}, fmt.Errorf("lumen: advance: acquire writer lease %q: %w", streamID, err)
+	}
+	defer func() { _ = store.ReleaseWriterLease(ctx, lease) }()
+
+	head, err := store.Head(ctx, streamID)
+	if err != nil {
+		return AdvanceResult{}, err
+	}
+
+	var (
+		d           *driver
+		scope       map[string]string
+		nodeOutputs map[string]string
+	)
+	if head == 0 {
+		// Fresh run: seed run.started exactly as Run does (stamping ir/input hashes
+		// so a later Advance's rebuild guard refuses a foreign doc/input). A crash
+		// after this point re-enters through the rebuild path below.
+		reducer := lumenReducer{}
+		d = &driver{
+			ctx:           ctx,
+			store:         store,
+			streamID:      streamID,
+			irVer:         doc.Contract.Version,
+			epoch:         lease.Epoch,
+			reducer:       reducer,
+			state:         reducer.Zero(streamID),
+			host:          opts.Host,
+			snapshotEvery: opts.SnapshotEvery,
+		}
+		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if err := d.append(EventRunStarted, streamID+":run:started", runStartedPayload{
+			RootID:    streamID,
+			Name:      doc.Name,
+			IRHash:    irHash(doc),
+			InputHash: inputHash(input),
+			CreatedAt: createdAt,
+		}); err != nil {
+			return AdvanceResult{}, err
+		}
+		if err := d.crashAt(crashAfterRunStarted, streamID); err != nil {
+			return AdvanceResult{}, err
+		}
+		scope = baseScope(input)
+		nodeOutputs = map[string]string{}
+	} else {
+		// Re-entrant: rebuild state from the journal (the same restore core as
+		// Resume), which folds in any owned.settled a worker appended since the last
+		// Advance and reconciles the projection.
+		d, scope, nodeOutputs, err = rebuildDriver(ctx, store, doc, streamID, input, lease.Epoch, opts)
+		if err != nil {
+			return AdvanceResult{}, err
+		}
+	}
+
+	// Already sealed (an Advance of a finished run): idempotent no-op read. The
+	// projection was reconciled inside rebuildDriver (H1), so this returns cleanly.
+	if d.st().Closed {
+		full, err := store.ReadStream(ctx, streamID, 1, 0)
+		if err != nil {
+			return AdvanceResult{}, fmt.Errorf("lumen: advance %q: read stream: %w", streamID, err)
+		}
+		return AdvanceResult{
+			Sealed: true,
+			Run:    RunResult{StreamID: streamID, Outcome: d.st().Outcome, NodeOutputs: nodeOutputs, Events: full},
+			Head:   d.head,
+		}, nil
+	}
+
+	// One parking pass over the topo-ordered units.
+	for i := range units {
+		if err := d.advanceUnit(units[i], scope, nodeOutputs, opts); err != nil {
+			return AdvanceResult{}, err
+		}
+	}
+
+	if d.allUnitsSettled(units) {
+		// Seal: every unit that can settle has. run.closed freezes the run outcome
+		// and clears the frontier (identical seal to Run/Resume).
+		runOutcome := d.st().runOutcome()
+		if err := d.maybeSnapshot(true); err != nil {
+			return AdvanceResult{}, err
+		}
+		if err := d.crashAt(crashBeforeRunClosed, streamID); err != nil {
+			return AdvanceResult{}, err
+		}
+		if err := d.append(EventRunClosed, streamID+":run:closed", runClosedPayload{Outcome: runOutcome}); err != nil {
+			return AdvanceResult{}, err
+		}
+		events, err := store.ReadStream(ctx, streamID, 1, 0)
+		if err != nil {
+			return AdvanceResult{}, fmt.Errorf("lumen: advance %q: read stream: %w", streamID, err)
+		}
+		return AdvanceResult{
+			Sealed: true,
+			Run:    RunResult{StreamID: streamID, Outcome: runOutcome, NodeOutputs: nodeOutputs, Events: events},
+			Head:   d.head,
+		}, nil
+	}
+
+	// Park: pending units remain. They must be waiting on pool-mode work (the only
+	// async settlement source); a stall with no in-flight pool work is a loud bug,
+	// never a silent forever-park.
+	inFlight := d.inFlightPoolWork()
+	if len(inFlight) == 0 {
+		return AdvanceResult{}, fmt.Errorf("%w: stream %q", ErrAdvanceStalled, streamID)
+	}
+	parkedHead, err := store.Head(ctx, streamID)
+	if err != nil {
+		return AdvanceResult{}, err
+	}
+	return AdvanceResult{Parked: true, InFlight: inFlight, Head: parkedHead}, nil
+}
+
+// advanceUnit drives one unit through Advance's parking cycle. It reloads an
+// already-settled unit, evaluates a ready silent unit, DEFERS a unit whose deps
+// have not settled, materializes a ready pool-mode do (without waiting), or runs
+// a ready engine-inline unit through the SAME path a fresh Run does.
+func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	// Reload an already-settled unit (a pool node a worker closed, or an engine
+	// node settled in a prior pass) plus the at-most-once effect memoization,
+	// exactly as Resume does. On a fresh pass these maps are empty and this is a
+	// no-op, so a not-yet-run unit falls through.
+	handled, err := d.resumeMemoized(u, scope, nodeOutputs)
+	if err != nil || handled {
+		return err
+	}
+
+	if u.silent {
+		// A pure lit/interp: compute its scope value once its deps have settled;
+		// otherwise DEFER, so its {{ref}} interpolation sees the settled outputs on a
+		// later pass. (Silent units emit no journal events; scope is re-derived each
+		// Advance, matching Run/Resume.)
+		if !d.depsSettled(u) {
+			return nil
+		}
+		val, err := evalSilent(u.leaf, scope)
+		if err != nil {
+			return err
+		}
+		scope[u.nodeID] = val
+		nodeOutputs[u.nodeID] = val
+		return nil
+	}
+
+	// DEFER a unit whose dependencies have not all settled — it is neither ready
+	// nor doomed this pass. A later Advance (after the pool settlement lands) sees
+	// them settled and drives it. This is the sole new behavior over Run/Resume,
+	// whose synchronous topo walk guarantees every dep settled before a unit.
+	if !d.depsSettled(u) {
+		return nil
+	}
+
+	// Materialize a READY pool-mode do as claimable work. A pool node whose
+	// blocking dep failed is NOT offered to the pool — it skip-cascades through
+	// runUnit below (blocked() settles it skipped), exactly like an engine node,
+	// so a doomed activation never becomes claimable.
+	if poolMode(u, opts) && !d.blocked(u) {
+		return d.materializePoolWork(u, scope, opts)
+	}
+
+	// Engine-inline ready unit — OR a skip-cascading unit of any kind: run it
+	// through the SAME path a fresh Run does (appendActivated, skip-cascade /
+	// aggregate-skip, then run and settle) with the per-unit snapshot cadence. A
+	// blocked pool do reaches here and settles skipped without touching the host.
+	if err := d.runUnit(u, scope, nodeOutputs); err != nil {
+		return err
+	}
+	return d.maybeSnapshot(false)
+}
+
+// materializePoolWork emits the pool-mode node.activated for a ready pool-mode do
+// and does NOT wait: the fold projects a claimable Tier-B work bead the session
+// pool claims and settles asynchronously; a later Advance sees the owned.settled
+// and continues.
+//
+// A node already materialized in the fold state and not yet settled is a TRUE
+// NO-OP for this pass — it is already claimable (open) or claimed (in_progress),
+// and it must NOT be re-rendered or re-appended (HIGH-1). The write-once
+// activation idem token assumes a byte-identical re-render, but a prompt {{ref}}
+// to a node that is NOT a declared `after` dep renders DIFFERENTLY once that node
+// settles; re-offering the same token with a divergent payload trips
+// ErrIdemTokenReuse and wedges the driver permanently. Skipping the re-render
+// makes re-Advance a true no-op for any in-flight pool node regardless of prompt
+// determinism: the first-rendered prompt stands (carried in the folded n.Route /
+// n.Prompt and reported via inFlightPoolWork), and no non-transient error class
+// survives — every Advance re-run error is retryable. (An already-SETTLED node is
+// intercepted earlier by resumeMemoized, so it never reaches here.)
+func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts Options) error {
+	if n := d.st().Nodes[u.activation]; n != nil && !n.Settled {
+		return nil
+	}
+	route, ok := opts.PoolRouter(u.leaf.agentRef)
+	if !ok {
+		return fmt.Errorf("%w: node %q (agent %q)", ErrNoPoolRoute, u.nodeID, u.leaf.agentRef)
+	}
+	prompt, err := renderPrompt(u.leaf.raw, scope)
+	if err != nil {
+		return fmt.Errorf("lumen: advance: do %q prompt: %w", u.nodeID, err)
+	}
+	if len(prompt) > maxPromptBytes {
+		return fmt.Errorf("%w: node %q (%d bytes)", ErrPromptTooLarge, u.nodeID, len(prompt))
+	}
+	// Crash boundary (a): after the decide phase picked this pool do, before its
+	// node.activated append. Test-only; inert in production (crashHook is nil).
+	if err := d.crashAt(crashBeforeActivate, u.activation); err != nil {
+		return err
+	}
+	return d.appendPoolActivated(u, route, prompt)
+}
+
+// appendPoolActivated emits a pool-mode node.activated: the plain engine
+// activation payload (node id, DAG edges, kind) plus the Tier-B claim-contract
+// fields (dispatch_mode=pool, route, prompt). Its idem token matches the
+// engine-mode appendActivated (streamID:activation:act), and a given activation
+// is either pool OR engine — never both — so there is no collision. This is
+// reached only for the FIRST materialization of an activation: an already
+// in-flight pool node is short-circuited to a no-op in materializePoolWork before
+// any re-render, so a divergent re-render can never reach a duplicate append.
+func (d *driver) appendPoolActivated(u planUnit, route, prompt string) error {
+	return d.append(EventNodeActivated, d.streamID+":"+u.activation+":act", nodeActivatedPayload{
+		NodeID:           u.nodeID,
+		Activation:       u.activation,
+		ParentActivation: u.parent,
+		MemberIndex:      u.memberIndex,
+		After:            u.afterDeps,
+		Members:          u.memberDeps,
+		Kind:             string(u.irKind),
+		DispatchMode:     DispatchModePool,
+		Route:            route,
+		Prompt:           prompt,
+	})
+}
+
+// depsSettled reports whether every one of u's dependencies (blocking `after`
+// gates and drain members alike) has settled — the DEFER predicate. It reads the
+// same afterDeps/memberDeps the topo sort and readiness fold use, so Advance's
+// defer decision is consistent with Run's ordering and the reducer's ready().
+func (d *driver) depsSettled(u planUnit) bool {
+	st := d.st()
+	for _, dep := range u.afterDeps {
+		if _, settled := st.outcomeOf(dep); !settled {
+			return false
+		}
+	}
+	for _, m := range u.memberDeps {
+		if _, settled := st.outcomeOf(m); !settled {
+			return false
+		}
+	}
+	return true
+}
+
+// poolMode reports whether u is a do leaf that Advance materializes as pool work
+// rather than running inline — true exactly when a PoolRouter is configured.
+// ZERO role names: the decision is a do-kind + config-seam test, not a role check.
+func poolMode(u planUnit, opts Options) bool {
+	return opts.PoolRouter != nil && u.kind == unitLeaf && u.leaf.kind == ir.NodeDo
+}
+
+// inFlightPoolWork returns, in canonical activation order, every pool-mode node
+// that is materialized but not yet settled — the work the run is parked on.
+func (d *driver) inFlightPoolWork() []PoolWork {
+	st := d.st()
+	var out []PoolWork
+	for _, act := range st.activationKeys() {
+		n := st.Nodes[act]
+		if n.DispatchMode == DispatchModePool && !n.Settled {
+			out = append(out, PoolWork{Activation: act, NodeID: n.NodeID, Route: n.Route, Prompt: n.Prompt})
+		}
+	}
+	return out
+}
+
+// allUnitsSettled reports whether every non-silent top-level unit has settled —
+// the seal condition. A skip-cascaded unit counts as settled (outcome skipped),
+// and an engine-inline scatter/gather settles its aggregate inline in one pass,
+// so its top-level activation settling implies its members/combine ran.
+func (d *driver) allUnitsSettled(units []planUnit) bool {
+	st := d.st()
+	for i := range units {
+		if units[i].silent {
+			continue
+		}
+		n := st.Nodes[units[i].activation]
+		if n == nil || !n.Settled {
+			return false
+		}
+	}
+	return true
+}

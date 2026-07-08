@@ -182,6 +182,23 @@ const (
 	// existing journal and snapshot folds and re-marshals byte-identically. The
 	// arms are additive live behavior over never-before-seen events, not a change
 	// to how any persisted state folds.
+	//
+	// L0 DECISION — stays at v2 despite a frontier RE-KEYING (MED-1). L0 changed the
+	// leaf frontier row's node_id/id from the activation key to the BARE node id
+	// (activationNodeID), so the frontier is a claim surface hydratable via
+	// `nodes WHERE id IN (...)`. This changes the fold's emitted FRONTIER deltas for
+	// a pre-L0 stream: a persisted pre-L0 stream that seeded an activation-keyed
+	// frontier row (e.g. "x:0") and is resumed under L0 emits FrontierDelete "x"
+	// (bare) on settle, which does NOT delete the stale "x:0" row — leaving a phantom
+	// ready row until a RebuildTierA rewrites the whole frontier from state. A version
+	// bump is NOT taken because (a) the pre-L0 lumen frontier was an observer-only
+	// dead path — activation-keyed rows hydrated to nothing through Arm B's
+	// `nodes WHERE id IN (...)` join, so nothing ever claimed off them — and (b) there
+	// are NO persisted pre-L0 lumen streams in any real deployment (this branch is
+	// unpushed local dev), so a bump would only force a resnapshot of snapshots that
+	// do not exist. ANY pre-L0 stream that somehow survives MUST be given a one-time
+	// RebuildTierA (which rewrites the frontier from state, dropping the stale
+	// activation-keyed rows) before its L0 frontier is trusted.
 	reducerVersion = 2
 	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped with the
 	// v2 state shape; no v1 snapshot ever persisted (blueprint §2), so there is
@@ -214,6 +231,15 @@ type runStartedPayload struct {
 // appends (tier_b_claim.go), and the fold projects it with a dispatch_mode
 // marker so a serve/claim surface can select it. It is additive and omitempty,
 // so a stream that never set it folds byte-identically to the pre-P4.5 reducer.
+//
+// Route and Prompt are the L0 pool-claim-contract fields the driver
+// (engine.Advance) stamps when it materializes a pool-mode do: Route is the pool
+// the work is routed to (projected onto both the node's gc.routed_to metadata and
+// the frontier row's route column, so the dormant frontier_route_order index
+// becomes the demand/claim SELECT); Prompt is the rendered agent prompt
+// (projected onto nodes.description so a claiming worker reads it without a
+// store-blind bd show). Both additive and omitempty, so an engine-driven node —
+// or a pre-L0 pool node minted by MaterializeTierBWork — folds byte-identically.
 type nodeActivatedPayload struct {
 	NodeID           string   `json:"node_id"`
 	Activation       string   `json:"activation"`
@@ -223,6 +249,8 @@ type nodeActivatedPayload struct {
 	Members          []string `json:"members,omitempty"`
 	Kind             string   `json:"kind"`
 	DispatchMode     string   `json:"dispatch_mode,omitempty"`
+	Route            string   `json:"route,omitempty"`
+	Prompt           string   `json:"prompt,omitempty"`
 }
 
 // nodeDecisionPayload is the body of EventNodeDecision.

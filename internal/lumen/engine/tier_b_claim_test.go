@@ -644,11 +644,13 @@ func nodeMeta(t *testing.T, store *graphstore.Store, nodeID, key string) string 
 }
 
 // inFrontier reports whether an activation sits in the stream's Tier-A frontier.
+// Frontier rows key by the BARE node id (nodes.id), so the activation is
+// translated before the lookup.
 func inFrontier(t *testing.T, store *graphstore.Store, streamID, activation string) bool {
 	t.Helper()
 	var n int
 	if err := store.DB().QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM frontier WHERE root_id = ? AND node_id = ?`, streamID, activation).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM frontier WHERE root_id = ? AND node_id = ?`, streamID, engine.ActivationNodeID(activation)).Scan(&n); err != nil {
 		t.Fatalf("query frontier: %v", err)
 	}
 	return n > 0

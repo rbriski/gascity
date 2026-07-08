@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/graphstore/canon"
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
@@ -46,6 +47,13 @@ type nodeState struct {
 	// serializes exactly as it did pre-P4.5.
 	DispatchMode string `json:"dispatch_mode,omitempty"`
 	Assignee     string `json:"assignee,omitempty"`
+	// Route and Prompt are the L0 pool-claim-contract fields (dispatch_mode=pool
+	// only): Route projects onto gc.routed_to metadata + the frontier row's route
+	// column, Prompt onto nodes.description. Carried in state so a drop+refold
+	// reproduces the claimable projection byte-identically (DET-T-17). Both
+	// omitempty, so an engine-driven node re-marshals exactly as pre-L0.
+	Route  string `json:"route,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // clone deep-copies the state so Apply never mutates its input (R-PURE).
@@ -287,6 +295,12 @@ func nodeProjectedMeta(act string, n *nodeState) map[string]string {
 	if n.DispatchMode != "" {
 		meta[DispatchModeMetaKey] = n.DispatchMode
 	}
+	// A pool-mode node carries gc.routed_to (the canonical claim-routing key) so
+	// the worker claim surface's route match (hookCandidateClaimable) selects it.
+	// The frontier row's route column carries the same value for the demand SELECT.
+	if n.DispatchMode == DispatchModePool && n.Route != "" {
+		meta[beadmeta.RoutedToMetadataKey] = n.Route
+	}
 	return meta
 }
 
@@ -299,11 +313,23 @@ func nodeRowFor(s *lumenState, act string, n *nodeState, streamID string) fold.N
 	if n.ParentActivation != "" {
 		parentID = activationNodeID(n.ParentActivation)
 	}
+	// A pool-mode node projects as `task`, not `step`: `step` is in the worker
+	// claim surface's ready-exclude set (internal/beads.readyExcludeTypes), so a
+	// step-typed row is never claimable — "bead-compatible on the surface" made
+	// literal. Its rendered prompt lands in nodes.description. An engine-driven
+	// node stays `step` with no description.
+	beadType := "step"
+	description := ""
+	if n.DispatchMode == DispatchModePool {
+		beadType = "task"
+		description = n.Prompt
+	}
 	return fold.NodeRow{
 		ID:          n.NodeID,
 		Title:       n.NodeID,
 		Status:      nodeProjectedStatus(n),
-		BeadType:    "step",
+		BeadType:    beadType,
+		Description: description,
 		ParentID:    parentID,
 		Assignee:    n.Assignee,
 		CreatedAt:   s.CreatedAt,

@@ -153,6 +153,8 @@ func applyNodeActivated(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 		After:            append([]string(nil), p.After...),
 		Members:          append([]string(nil), p.Members...),
 		DispatchMode:     p.DispatchMode,
+		Route:            p.Route,
+		Prompt:           p.Prompt,
 	}
 	next.Nodes[p.Activation] = n
 
@@ -213,7 +215,7 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 
 	delta := fold.Delta{
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Activation, n, e.StreamID)},
-		FrontierDelete: []string{p.Activation},
+		FrontierDelete: []string{activationNodeID(p.Activation)},
 	}
 	// Readiness propagation: a dependent that just became ready enters the
 	// frontier; a dependent still blocked (this settle was blocking) stays out —
@@ -288,7 +290,7 @@ func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 	n.InFrontier = false
 	return next, fold.Delta{
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
-		FrontierDelete: []string{p.Handle},
+		FrontierDelete: []string{activationNodeID(p.Handle)},
 	}, nil
 }
 
@@ -328,7 +330,7 @@ func applyOwnedSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta, 
 	n.InFrontier = false
 	delta := fold.Delta{
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
-		FrontierDelete: []string{p.Handle},
+		FrontierDelete: []string{activationNodeID(p.Handle)},
 	}
 	for _, depKey := range next.dependentsOf(p.Handle) {
 		d := next.Nodes[depKey]
@@ -365,10 +367,15 @@ func applyRunClosed(next *lumenState, e fold.Event) (fold.State, fold.Delta, err
 			StreamID:    e.StreamID,
 		}},
 	}
-	// Clear the whole frontier for the stream: the root plus any activation that
-	// was left ready. Deleting an absent node_id is a no-op, so an upcast P1
-	// journal (no leaf frontier rows) clears exactly the root — identical to v1.
-	delta.FrontierDelete = append([]string{next.RootID}, next.activationKeys()...)
+	// Clear the whole frontier for the stream: the root plus every activation's
+	// projected frontier node_id (the BARE node id — frontier rows key by nodes.id,
+	// not the activation key). Deleting an absent node_id is a no-op, so an upcast
+	// P1 journal (no leaf frontier rows) clears exactly the root — identical to v1.
+	frontierDelete := []string{next.RootID}
+	for _, act := range next.activationKeys() {
+		frontierDelete = append(frontierDelete, activationNodeID(act))
+	}
+	delta.FrontierDelete = frontierDelete
 	return next, delta, nil
 }
 
@@ -430,15 +437,42 @@ func (s *lumenState) ProjectDelta(streamID string) fold.Delta {
 	return delta
 }
 
-// frontierRowFor builds the Tier-A frontier row for an activation. The row id
-// is the activation key (unique within a run), which the frontier index orders
-// deterministically after (route, ready_priority, created_at).
+// L4-BLOCKER (run-namespaced projected ids required before multi-run pools):
+// nodes.id and frontier.node_id are GLOBAL primary keys, but executor node ids are
+// IR-local (not run-namespaced), and FrontierDelete keys on the bare node_id
+// WITHOUT a root_id scope. So two concurrent runs of the SAME IR (identical node
+// ids) would collide in Tier-A — one run's settle deleting the other run's frontier
+// row, one run's node upsert clobbering the other's. Single-run L3 is unaffected
+// (one run owns its node ids). Before multi-run pools land, the projected node id
+// must be run-namespaced (e.g. streamID-scoped) and FrontierDelete must be
+// root-scoped. readTierBNode already scopes its READ by stream_id (MED-2); the
+// write side (this row + the FrontierDelete sites in applyOutcomeSettled /
+// applyOwnedSettled / applyRunClosed) is the remaining half.
+//
+// frontierRowFor builds the Tier-A frontier row for an activation. Its node_id is
+// the BARE node id (activationNodeID), NOT the activation key: the frontier is a
+// claim surface, and the claimable-pool-work SELECT (frontierProjectionTier,
+// internal/beads/journal_frontier.go) reads `frontier.node_id` and hydrates
+// `nodes WHERE id IN (...)` — so the frontier node_id must equal nodes.id or the
+// row hydrates to nothing. The root's activation is the stream id (no ':' suffix),
+// so it is already bare. A pool-mode node carries its route so the
+// frontier_route_order index (route, ready_priority, created_at, id) IS the
+// claim SELECT: rows with route=<pool> are exactly the open+ready+unassigned pool
+// set. The run root and engine-driven nodes carry route "" and never match a pool
+// SELECT. (One activation per node in P4.2, so the bare id is unique per run; a
+// per-attempt frontier key is a retry-slice concern, blueprint correction #3.)
 func frontierRowFor(s *lumenState, activation string) fold.FrontierRow {
+	route := ""
+	if n := s.Nodes[activation]; n != nil {
+		route = n.Route
+	}
+	nodeID := activationNodeID(activation)
 	return fold.FrontierRow{
-		NodeID:        activation,
+		NodeID:        nodeID,
 		RootID:        s.RootID,
+		Route:         route,
 		ReadyPriority: 2,
 		CreatedAt:     s.CreatedAt,
-		ID:            activation,
+		ID:            nodeID,
 	}
 }

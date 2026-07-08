@@ -121,6 +121,30 @@ func (s *Store) ReleaseWriterLease(ctx context.Context, lease WriterLease) error
 	return nil
 }
 
+// CurrentLeaseEpoch returns the current fencing epoch of streamID's writer
+// lease, or 0 when no lease row exists (the stream is unfenced). A cross-process
+// append that is NOT the lease holder — a pool worker's Tier-B claim/settle
+// routed through the journal — must carry this epoch so it is a cooperative
+// same-generation append: a concurrent driver re-acquire bumps the epoch, and
+// checkLeaseEpoch then fences the stale claim loudly (ErrLeaseFenced) rather than
+// letting it silently overwrite. It is a liveness read (safety is expectedVersion
+// + the in-transaction epoch check), so it reads the pooled WAL handle. Epochs
+// are preserved across ReleaseWriterLease, so a parked driver's released lease
+// still reports the epoch a claim must match.
+func (s *Store) CurrentLeaseEpoch(ctx context.Context, streamID string) (uint64, error) {
+	var epoch uint64
+	err := s.readDB.QueryRowContext(ctx,
+		`SELECT epoch FROM writer_lease WHERE stream_id = ?`, streamID,
+	).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("graphstore: current lease epoch of %q: %w", streamID, s.dialect.mapError(err))
+	}
+	return epoch, nil
+}
+
 // expired reports whether an RFC3339Nano expiry string is at or before now.
 // A malformed timestamp is treated as expired (fail-open on liveness only;
 // safety never depends on the clock).

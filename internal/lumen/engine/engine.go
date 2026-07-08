@@ -84,6 +84,15 @@ type Options struct {
 	// event folds to a no-op — so enabling them never changes the Tier-A projection,
 	// only bounds the journal and enables Resume.
 	SnapshotEvery int
+	// PoolRouter is the L0 pool seam consulted ONLY by Advance. When non-nil, every
+	// `do` node lowers pool-mode: Advance materializes it as a claimable Tier-B work
+	// bead a session POOL claims and settles asynchronously, and PARKS instead of
+	// blocking on a Host. agentRef selects the pool ("" = the run's default route);
+	// ok=false is a loud config error (a pool-mode do with no resolvable route),
+	// never a silent inline fallback. Run/RunWithOptions/Resume ignore this field
+	// and run every do inline through Host. ZERO role names: a route is a
+	// config-resolved pool target, exactly like gc.routed_to.
+	PoolRouter func(agentRef string) (route string, ok bool)
 }
 
 // Run executes doc with no agent host — the exec-only path.
@@ -105,7 +114,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		return RunResult{}, fmt.Errorf("lumen: nil IR document")
 	}
 
-	units, err := buildUnits(doc.Nodes, opts.Host != nil)
+	units, err := buildUnits(doc.Nodes, opts.Host != nil, opts.Host != nil)
 	if err != nil {
 		return RunResult{}, err
 	}

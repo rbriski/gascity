@@ -153,7 +153,7 @@ func Resume(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 		return RunResult{}, fmt.Errorf("lumen: resume: empty stream id")
 	}
 
-	units, err := buildUnits(doc.Nodes, opts.Host != nil)
+	units, err := buildUnits(doc.Nodes, opts.Host != nil, opts.Host != nil)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -165,135 +165,16 @@ func Resume(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 	}
 	defer func() { _ = store.ReleaseWriterLease(ctx, lease) }()
 
-	reducer := lumenReducer{}
-
-	snap, hasSnap, err := store.LatestSnapshot(ctx, streamID)
+	// Rebuild run state from the journal (snapshot + surviving-tail fold, the
+	// ir/input hash pins, the at-most-once effect memoization, and the projection
+	// reconcile) — the shared restore core Advance also enters through. The
+	// reconcile runs BEFORE the sealed early-return below (H1): a crash after
+	// run.closed's append but before its projection commit is repaired here.
+	d, scope, nodeOutputs, err := rebuildDriver(ctx, store, doc, streamID, input, lease.Epoch, opts)
 	if err != nil {
 		return RunResult{}, err
 	}
-	var (
-		snapPtr *fold.Snapshot
-		fromSeq uint64 = 1
-	)
-	if hasSnap {
-		// A rotted snapshot blob is a loud refusal with no fallback: once the prefix
-		// is truncated the snapshot is the only rebuild source, so the mitigation is
-		// upstream — TruncateBelowAnchor re-hashes the covering blob BEFORE deleting
-		// the prefix (H2), so a resume never faces a truncated stream whose only
-		// anchor has rotted (M2).
-		if canon.Hash(snap.State) != snap.StateHash {
-			return RunResult{}, fmt.Errorf("lumen: resume %q: snapshot@%d: %w", streamID, snap.CoveredSeq, graphstore.ErrSnapshotHashMismatch)
-		}
-		snapPtr = &snap
-		fromSeq = snap.CoveredSeq + 1
-	}
-
-	stored, err := store.ReadStream(ctx, streamID, fromSeq, 0)
-	if err != nil {
-		return RunResult{}, err
-	}
-	// Defense-in-depth (M1): the snapshot's blob is self-consistent above
-	// (Hash(blob) == stored_hash), but a forgery (state', hash(state')) planted
-	// through the snapshot write gate is self-consistent too. Cross-check the blob
-	// hash against the snapshot.anchored event's state_hash at covered_seq+1 — that
-	// event is in the hash chain (Verify protects it), so a blob that disagrees
-	// with it is corruption, never a valid resume anchor.
-	if hasSnap {
-		if err := crossCheckAnchor(stored, snap); err != nil {
-			return RunResult{}, fmt.Errorf("lumen: resume %q: %w", streamID, err)
-		}
-	}
-	tail := make([]fold.Event, len(stored))
-	for i, e := range stored {
-		tail[i] = storedToFoldEvent(e)
-	}
-	state, tailDeltas, err := fold.Fold(reducer, snapPtr, tail)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("lumen: resume %q: fold: %w", streamID, err)
-	}
-	ls := state.(*lumenState)
-	if ls.RootID == "" {
-		return RunResult{}, fmt.Errorf("lumen: resume %q: no run.started in journal — nothing to resume", streamID)
-	}
-	if ls.IRHash != "" && ls.IRHash != irHash(doc) {
-		return RunResult{}, fmt.Errorf("lumen: resume %q: journal ir_hash %s != doc %s: %w", streamID, ls.IRHash, irHash(doc), ErrIRHashMismatch)
-	}
-	// Pin the input (M2): a run.started that pinned an input_hash may only resume
-	// with the same input, so interpolation scope is identical. An unpinned run
-	// (empty input at start) imposes no constraint.
-	if ls.InputHash != "" && ls.InputHash != inputHash(input) {
-		return RunResult{}, fmt.Errorf("lumen: resume %q: journal input_hash %s != input %s: %w", streamID, ls.InputHash, inputHash(input), ErrInputHashMismatch)
-	}
-
-	head, err := store.Head(ctx, streamID)
-	if err != nil {
-		return RunResult{}, err
-	}
-
-	// NOTE (deferred P4.3 red-team follow-ups, lower severity):
-	//   - L4: the reducer-version gate on a LOADED snapshot IS enforced — fold.Fold
-	//     rejects a snapshot whose stamped reducer_version differs from the running
-	//     reducer with ErrReducerVersionSkew (fold.go), so a reducer bump strands an
-	//     old snapshot loudly rather than folding it best-effort.
-	//   - L5: snapshot retention is caller-driven (TruncateBelowAnchor); no
-	//     automatic cadence prunes superseded snapshots.
-	//   - N1: the folded Tier-A frontier remains observer-only — the single-writer
-	//     resume drives its own topo loop and never reads it for execution control.
-
-	// A committed effect/outcome event with a malformed payload is journal
-	// corruption, not a droppable row: surface it loudly rather than silently
-	// skipping a settlement (which would re-act a memoized effect or re-run a
-	// settled node) (L2).
-	crashInterrupted, err := interruptedEffects(stored)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("lumen: resume %q: %w", streamID, err)
-	}
-	recordedEffects, err := settledEffects(stored)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("lumen: resume %q: %w", streamID, err)
-	}
-
-	d := &driver{
-		ctx:              ctx,
-		store:            store,
-		streamID:         streamID,
-		irVer:            doc.Contract.Version,
-		epoch:            lease.Epoch,
-		reducer:          reducer,
-		state:            state,
-		head:             head,
-		host:             opts.Host,
-		snapshotEvery:    opts.SnapshotEvery,
-		crashInterrupted: crashInterrupted,
-		settledEffects:   recordedEffects,
-	}
-
-	// Reconstruct the resume seeds from the settled nodes carried in the rebuilt
-	// state, replaying the genesis record() rule so a resumed step's {{ref}}
-	// interpolation sees exactly the upstream outputs genesis did — no more (a
-	// skipped node / aggregate is NOT seeded), no less (B1). NodeOutputs and the
-	// scope are seeded separately: aggregates land in NodeOutputs but never scope.
-	nodeOutputs, scopeSeed := reconstructOutputs(ls)
-	scope := baseScope(input)
-	for id, out := range scopeSeed {
-		scope[id] = out
-	}
-
-	// Sync the Tier-A projection to the journal. The driver appends an event and
-	// projects it in two transactions, so a crash can land between them, leaving a
-	// committed event unprojected; re-applying the folded tail deltas (idempotent
-	// upserts) closes that window and projects any prefix a crash left entirely
-	// unprojected. Snapshot-covered events were projected at their unit boundary,
-	// so re-applying only the tail suffices.
-	//
-	// This runs BEFORE the sealed early-return (H1): a crash after run.closed's
-	// journal append but before its projection commit leaves Tier-A with the root
-	// still `open` and the frontier uncleared. Resume IS the repair path for that
-	// window, so a sealed stream must still reconcile its projection — returning a
-	// no-op here would strand the projection forever.
-	if err := d.reapplyDeltas(tailDeltas); err != nil {
-		return RunResult{}, err
-	}
+	ls := d.st()
 
 	// Already sealed before the crash: resume is a no-op read of the finished run
 	// (its projection is now reconciled above). Events is the full surviving journal
@@ -335,6 +216,144 @@ func Resume(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 		return RunResult{}, fmt.Errorf("lumen: resume %q: read stream: %w", streamID, err)
 	}
 	return RunResult{StreamID: streamID, Outcome: runOutcome, NodeOutputs: nodeOutputs, Events: events}, nil
+}
+
+// rebuildDriver restores a run's driver from its journal: it loads the latest
+// durable snapshot, folds ONLY the surviving tail after it (R-RESUME:
+// byte-identical to a genesis fold), verifies the ir/input hash pins run.started
+// stamped, reconstructs the interpolation scope and node outputs by replaying the
+// genesis record() rule over the rebuilt state, primes the at-most-once effect
+// memoization (crash-interrupted + settled-but-unrecorded), and reconciles the
+// Tier-A projection to the journal. It is the shared "rebuild state from journal
+// → re-drive with memoization" core of Resume (which then drives to completion,
+// blocking) and Advance (which drives one parking pass). The caller supplies the
+// live lease epoch it already acquired so every subsequent driver append carries
+// it. It does NOT drive units and does NOT seal — the returned driver's state may
+// be already-Closed (a resume/advance of a sealed stream), which the caller
+// detects via d.st().Closed after the projection reconcile.
+func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID string, input map[string]any, epoch uint64, opts Options) (*driver, map[string]string, map[string]string, error) {
+	reducer := lumenReducer{}
+
+	snap, hasSnap, err := store.LatestSnapshot(ctx, streamID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var (
+		snapPtr *fold.Snapshot
+		fromSeq uint64 = 1
+	)
+	if hasSnap {
+		// A rotted snapshot blob is a loud refusal with no fallback: once the prefix
+		// is truncated the snapshot is the only rebuild source, so the mitigation is
+		// upstream — TruncateBelowAnchor re-hashes the covering blob BEFORE deleting
+		// the prefix (H2), so a resume never faces a truncated stream whose only
+		// anchor has rotted (M2).
+		if canon.Hash(snap.State) != snap.StateHash {
+			return nil, nil, nil, fmt.Errorf("lumen: resume %q: snapshot@%d: %w", streamID, snap.CoveredSeq, graphstore.ErrSnapshotHashMismatch)
+		}
+		snapPtr = &snap
+		fromSeq = snap.CoveredSeq + 1
+	}
+
+	stored, err := store.ReadStream(ctx, streamID, fromSeq, 0)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Defense-in-depth (M1): the snapshot's blob is self-consistent above
+	// (Hash(blob) == stored_hash), but a forgery (state', hash(state')) planted
+	// through the snapshot write gate is self-consistent too. Cross-check the blob
+	// hash against the snapshot.anchored event's state_hash at covered_seq+1 — that
+	// event is in the hash chain (Verify protects it), so a blob that disagrees
+	// with it is corruption, never a valid resume anchor.
+	if hasSnap {
+		if err := crossCheckAnchor(stored, snap); err != nil {
+			return nil, nil, nil, fmt.Errorf("lumen: resume %q: %w", streamID, err)
+		}
+	}
+	tail := make([]fold.Event, len(stored))
+	for i, e := range stored {
+		tail[i] = storedToFoldEvent(e)
+	}
+	state, tailDeltas, err := fold.Fold(reducer, snapPtr, tail)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("lumen: resume %q: fold: %w", streamID, err)
+	}
+	ls := state.(*lumenState)
+	if ls.RootID == "" {
+		return nil, nil, nil, fmt.Errorf("lumen: resume %q: no run.started in journal — nothing to resume", streamID)
+	}
+	if ls.IRHash != "" && ls.IRHash != irHash(doc) {
+		return nil, nil, nil, fmt.Errorf("lumen: resume %q: journal ir_hash %s != doc %s: %w", streamID, ls.IRHash, irHash(doc), ErrIRHashMismatch)
+	}
+	// Pin the input (M2): a run.started that pinned an input_hash may only resume
+	// with the same input, so interpolation scope is identical. An unpinned run
+	// (empty input at start) imposes no constraint.
+	if ls.InputHash != "" && ls.InputHash != inputHash(input) {
+		return nil, nil, nil, fmt.Errorf("lumen: resume %q: journal input_hash %s != input %s: %w", streamID, ls.InputHash, inputHash(input), ErrInputHashMismatch)
+	}
+
+	head, err := store.Head(ctx, streamID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// NOTE (deferred P4.3 red-team follow-ups, lower severity):
+	//   - L4: the reducer-version gate on a LOADED snapshot IS enforced — fold.Fold
+	//     rejects a snapshot whose stamped reducer_version differs from the running
+	//     reducer with ErrReducerVersionSkew (fold.go), so a reducer bump strands an
+	//     old snapshot loudly rather than folding it best-effort.
+	//   - L5: snapshot retention is caller-driven (TruncateBelowAnchor); no
+	//     automatic cadence prunes superseded snapshots.
+
+	// A committed effect/outcome event with a malformed payload is journal
+	// corruption, not a droppable row: surface it loudly rather than silently
+	// skipping a settlement (which would re-act a memoized effect or re-run a
+	// settled node) (L2).
+	crashInterrupted, err := interruptedEffects(stored)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("lumen: resume %q: %w", streamID, err)
+	}
+	recordedEffects, err := settledEffects(stored)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("lumen: resume %q: %w", streamID, err)
+	}
+
+	d := &driver{
+		ctx:              ctx,
+		store:            store,
+		streamID:         streamID,
+		irVer:            doc.Contract.Version,
+		epoch:            epoch,
+		reducer:          reducer,
+		state:            state,
+		head:             head,
+		host:             opts.Host,
+		snapshotEvery:    opts.SnapshotEvery,
+		crashInterrupted: crashInterrupted,
+		settledEffects:   recordedEffects,
+	}
+
+	// Reconstruct the resume seeds from the settled nodes carried in the rebuilt
+	// state, replaying the genesis record() rule so a resumed step's {{ref}}
+	// interpolation sees exactly the upstream outputs genesis did — no more (a
+	// skipped node / aggregate is NOT seeded), no less (B1). NodeOutputs and the
+	// scope are seeded separately: aggregates land in NodeOutputs but never scope.
+	nodeOutputs, scopeSeed := reconstructOutputs(ls)
+	scope := baseScope(input)
+	for id, out := range scopeSeed {
+		scope[id] = out
+	}
+
+	// Sync the Tier-A projection to the journal. The driver appends an event and
+	// projects it in two transactions, so a crash can land between them, leaving a
+	// committed event unprojected; re-applying the folded tail deltas (idempotent
+	// upserts) closes that window and projects any prefix a crash left entirely
+	// unprojected. Snapshot-covered events were projected at their unit boundary,
+	// so re-applying only the tail suffices.
+	if err := d.reapplyDeltas(tailDeltas); err != nil {
+		return nil, nil, nil, err
+	}
+	return d, scope, nodeOutputs, nil
 }
 
 // reapplyDeltas re-projects a run's folded tail deltas to Tier-A in one

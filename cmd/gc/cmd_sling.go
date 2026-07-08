@@ -255,6 +255,27 @@ func inferSling1ArgTarget(cfg *config.City, cityPath, beadOrFormula string, isFo
 	}
 }
 
+// readSlingStdinBead reads --stdin bead text (first line = title, rest =
+// description) via the injectable slingStdin() seam. Extracted from
+// cmdSlingWithJSON so the parse is independently testable. On failure it returns
+// a non-empty (errCode, errMsg) pair for the caller's fail() path.
+func readSlingStdinBead() (title, description, errCode, errMsg string) {
+	data, err := io.ReadAll(slingStdin())
+	if err != nil {
+		return "", "", "stdin_read_failed", fmt.Sprintf("gc sling: reading stdin: %v", err)
+	}
+	content := strings.TrimRight(string(data), "\n")
+	if content == "" {
+		return "", "", "invalid_arguments", "gc sling: --stdin: no input received"
+	}
+	lines := strings.SplitN(content, "\n", 2)
+	title = lines[0]
+	if len(lines) > 1 {
+		description = strings.TrimSpace(lines[1])
+	}
+	return title, description, "", ""
+}
+
 // cmdSling is the CLI entry point for gc sling.
 func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
@@ -290,21 +311,11 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	}
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
-	var stdinDescription string
-	var stdinTitle string
+	var stdinDescription, stdinTitle string
 	if fromStdin {
-		data, err := io.ReadAll(slingStdin())
-		if err != nil {
-			return fail("stdin_read_failed", fmt.Sprintf("gc sling: reading stdin: %v", err))
-		}
-		content := strings.TrimRight(string(data), "\n")
-		if content == "" {
-			return fail("invalid_arguments", "gc sling: --stdin: no input received")
-		}
-		lines := strings.SplitN(content, "\n", 2)
-		stdinTitle = lines[0]
-		if len(lines) > 1 {
-			stdinDescription = strings.TrimSpace(lines[1])
+		var errCode, errMsg string
+		if stdinTitle, stdinDescription, errCode, errMsg = readSlingStdinBead(); errCode != "" {
+			return fail(errCode, errMsg)
 		}
 	}
 

@@ -2,10 +2,40 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+// TestReadSlingStdinBead exercises the extracted --stdin parser directly via the
+// slingStdin seam: first line is the title, the rest (trimmed) is the
+// description, and empty input is an error. Demonstrates that hoisting the parse
+// out of cmdSlingWithJSON made it independently testable.
+func TestReadSlingStdinBead(t *testing.T) {
+	prev := slingStdin
+	t.Cleanup(func() { slingStdin = prev })
+	for _, tc := range []struct {
+		name, input, wantTitle, wantDesc, wantErr string
+	}{
+		{"title-only", "just a title", "just a title", "", ""},
+		{"title-and-desc", "the title\nthe description\nmore", "the title", "the description\nmore", ""},
+		{"trailing-newline-trimmed", "title\n", "title", "", ""},
+		{"empty", "", "", "", "invalid_arguments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slingStdin = func() io.Reader { return strings.NewReader(tc.input) }
+			title, desc, code, _ := readSlingStdinBead()
+			if code != tc.wantErr {
+				t.Fatalf("errCode = %q, want %q", code, tc.wantErr)
+			}
+			if code == "" && (title != tc.wantTitle || desc != tc.wantDesc) {
+				t.Fatalf("got (title=%q desc=%q), want (%q, %q)", title, desc, tc.wantTitle, tc.wantDesc)
+			}
+		})
+	}
+}
 
 // TestInferSling1ArgTarget_FormulaRejected exercises the extracted 1-arg
 // target-inference helper directly (its pure --formula guard needs no store),

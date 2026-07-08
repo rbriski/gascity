@@ -405,6 +405,49 @@ func TestRouteBeadsShow_SixRowMatrix(t *testing.T) {
 	}
 }
 
+// TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient locks the ordering that a
+// Fable red-team caught (2026-07-08): the missing-id guard must fire BEFORE the
+// local beadsShowAPIClient seam. That seam's apiClient() call has observable
+// side effects — a GC_NO_API-unrecognized warning to os.Stderr, a
+// controller-liveness probe, and a config.Load — none of which the old
+// hand-written cmdBeadsShow performed on the no-id path. Folding the guard into
+// routeReadCmd's route closure ran the seam first (routeReadCmd calls localSeam
+// before the closure), reintroducing a warning line ahead of the missing-id
+// error. This asserts the structural invariant directly: no bead id => the seam
+// is never consulted, and stderr is exactly the missing-id line.
+func TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"beads-show-order\"\n")
+
+	prev := beadsShowAPIClient
+	t.Cleanup(func() { beadsShowAPIClient = prev })
+	seamConsulted := false
+	beadsShowAPIClient = func(string) (*api.Client, string) {
+		seamConsulted = true
+		return nil, "seam-should-not-run"
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdBeadsShow(nil, &stdout, &stderr) // no bead id
+
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if seamConsulted {
+		t.Fatal("beadsShowAPIClient ran before the missing-id guard — ordering regression: " +
+			"the guard must precede the local seam so its side effects stay off the no-id path")
+	}
+	if got := stderr.String(); got != "gc beads show: missing bead id\n" {
+		t.Fatalf("stderr = %q, want exactly \"gc beads show: missing bead id\\n\"", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 func TestRouteBeadsList_APIJSONIncludesCacheAge(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)

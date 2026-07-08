@@ -176,16 +176,51 @@ func NewStore(store beads.SessionStore) *Store {
 }
 
 // Get returns the persisted session.Info for the given id. It returns
-// ErrSessionNotFound when no session bead exists for the id.
+// ErrSessionNotFound when the bead EXISTS but is not a session bead (or carries
+// an empty id); an ABSENT id surfaces the store's not-found error wrapped as
+// `loading session %q` (NOT ErrSessionNotFound). Callers must not
+// errors.Is(err, ErrSessionNotFound) to detect absence — check for the wrapped
+// beads.ErrNotFound instead. See validatedBead.
 func (s *Store) Get(id string) (Info, error) {
-	b, err := s.store.Get(id)
+	b, err := s.validatedBead(id)
 	if err != nil {
-		return Info{}, fmt.Errorf("loading session %q: %w", id, err)
-	}
-	if strings.TrimSpace(b.ID) == "" || !IsSessionBeadOrRepairable(b) {
-		return Info{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
+		return Info{}, err
 	}
 	return InfoFromPersistedBead(b), nil
+}
+
+// GetPersistedResponse returns the persisted session.Info paired with the
+// persisted-response projection (status + metadata) for id, in a single store
+// fetch. It is the Store-side twin of Manager.GetWithPersistedResponse for the
+// PERSISTED view: the caller gets both projections without a raw *beads.Bead
+// crossing the boundary and without a second store.Get. It shares Get's exact
+// error contract (both route through validatedBead): ErrSessionNotFound for a
+// present-but-non-session bead, and the wrapped store not-found error (NOT
+// ErrSessionNotFound) for an absent id.
+func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return Info{}, PersistedResponse{}, err
+	}
+	return InfoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+}
+
+// validatedBead loads the session bead for id. A load failure (including an
+// absent id) is wrapped with `loading session %q` context; a loaded bead that is
+// not a session bead (or has an empty id) is rejected with ErrSessionNotFound. It
+// is the shared read behind Get and GetPersistedResponse so the two agree on
+// validation and error text (a single source of truth for "is this a session
+// bead"). Note the split: absence yields the wrapped store error, NOT
+// ErrSessionNotFound — that sentinel is reserved for a present non-session bead.
+func (s *Store) validatedBead(id string) (beads.Bead, error) {
+	b, err := s.store.Get(id)
+	if err != nil {
+		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, err)
+	}
+	if strings.TrimSpace(b.ID) == "" || !IsSessionBeadOrRepairable(b) {
+		return beads.Bead{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
+	}
+	return b, nil
 }
 
 // List returns the persisted session.Info for all session beads, applying the

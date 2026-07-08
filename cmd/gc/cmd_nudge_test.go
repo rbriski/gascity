@@ -2854,14 +2854,14 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, fresh); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore(fresh): %v", err)
 	}
-	staleBead, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, stale.ID)
+	staleBead, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(stale.ID)
 	if err != nil || !ok {
-		t.Fatalf("findQueuedNudgeBead(stale) = %v, ok=%v", err, ok)
+		t.Fatalf("nudgeFrontDoor.Find(stale) = %v, ok=%v", err, ok)
 	}
 	// Terminal-marking the stale item's backing bead fails (store flake).
 	// Dead-lettering bookkeeping for stale items must not block delivery
 	// of the fence-matching item.
-	store.failID = staleBead.ID
+	store.failID = staleBead.BeadID
 
 	var warnings bytes.Buffer
 	origWarn := nudgeWarningWriter
@@ -2930,11 +2930,11 @@ func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
 	}
-	itemBead, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, item.ID)
+	itemBead, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(item.ID)
 	if err != nil || !ok {
-		t.Fatalf("findQueuedNudgeBead = %v, ok=%v", err, ok)
+		t.Fatalf("nudgeFrontDoor.Find = %v, ok=%v", err, ok)
 	}
-	store.failID = itemBead.ID
+	store.failID = itemBead.BeadID
 
 	claimed, err := claimDueWorkerNudges(dir)
 	if err != nil {
@@ -2966,9 +2966,9 @@ func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing
 
 	// The backing bead missed its terminal state; the dead-letter repair
 	// pass owns convergence from here (see pruneDeadQueuedNudges).
-	b, err := store.Get(itemBead.ID)
+	b, err := store.Get(itemBead.BeadID)
 	if err != nil {
-		t.Fatalf("Get(%q): %v", itemBead.ID, err)
+		t.Fatalf("Get(%q): %v", itemBead.BeadID, err)
 	}
 	if b.Metadata["state"] != "queued" {
 		t.Fatalf("bead state = %q, want still queued after failed terminal mark", b.Metadata["state"])
@@ -3949,15 +3949,15 @@ func TestFindQueuedNudgeBead_IgnoresClosedRollbackBead(t *testing.T) {
 		t.Fatalf("close nudge bead: %v", err)
 	}
 
-	found, ok, err := findQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).Find("test")
 	if err != nil {
-		t.Fatalf("findQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.Find: %v", err)
 	}
 	if !ok {
-		t.Fatal("findQueuedNudgeBead returned not found, want open bead")
+		t.Fatal("nudgeFrontDoor.Find returned not found, want open bead")
 	}
-	if found.ID != open.ID {
-		t.Fatalf("findQueuedNudgeBead = %s, want %s", found.ID, open.ID)
+	if found.BeadID != open.ID {
+		t.Fatalf("nudgeFrontDoor.Find = %s, want %s", found.BeadID, open.ID)
 	}
 }
 
@@ -3975,8 +3975,8 @@ func TestFindQueuedNudgeBead_UsesBoundedLookup(t *testing.T) {
 	}
 	store := &waitListQueryCaptureStore{Store: mem}
 
-	if _, _, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, "test"); err != nil {
-		t.Fatalf("findQueuedNudgeBead: %v", err)
+	if _, _, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find("test"); err != nil {
+		t.Fatalf("nudgeFrontDoor.Find: %v", err)
 	}
 	if len(store.queries) != 1 {
 		t.Fatalf("List calls = %d, want 1", len(store.queries))
@@ -4004,8 +4004,8 @@ func TestFindQueuedNudgeBead_AllowsExactLookupLimit(t *testing.T) {
 		}
 	}
 
-	if _, ok, err := findQueuedNudgeBead(store, "test"); err != nil || !ok {
-		t.Fatalf("findQueuedNudgeBead ok=%v err=%v, want found with no error", ok, err)
+	if _, ok, err := nudgeFrontDoor(store).Find("test"); err != nil || !ok {
+		t.Fatalf("nudgeFrontDoor.Find ok=%v err=%v, want found with no error", ok, err)
 	}
 }
 
@@ -4027,25 +4027,25 @@ func TestFindQueuedNudgeBead_ReturnsVisibleOpenBeadBeforeLookupLimit(t *testing.
 		newest = created
 	}
 
-	found, ok, err := findQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).Find("test")
 	if err != nil {
-		t.Fatalf("findQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.Find: %v", err)
 	}
 	if !ok {
-		t.Fatal("findQueuedNudgeBead returned not found, want visible open bead")
+		t.Fatal("nudgeFrontDoor.Find returned not found, want visible open bead")
 	}
-	if found.ID != newest.ID {
-		t.Fatalf("findQueuedNudgeBead = %s, want newest visible %s", found.ID, newest.ID)
+	if found.BeadID != newest.ID {
+		t.Fatalf("nudgeFrontDoor.Find = %s, want newest visible %s", found.BeadID, newest.ID)
 	}
 }
 
 func TestFindQueuedNudgeBead_ReportsLookupLimitWithoutUsableCandidate(t *testing.T) {
-	_, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: unusableCappedNudgeStore{Store: beads.NewMemStore()}}, "test")
+	_, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: unusableCappedNudgeStore{Store: beads.NewMemStore()}}).Find("test")
 	if ok {
-		t.Fatal("findQueuedNudgeBead found a bead, want lookup-limit failure")
+		t.Fatal("nudgeFrontDoor.Find found a bead, want lookup-limit failure")
 	}
 	if !beads.IsLookupLimitError(err) {
-		t.Fatalf("findQueuedNudgeBead error = %v, want lookup limit", err)
+		t.Fatalf("nudgeFrontDoor.Find error = %v, want lookup limit", err)
 	}
 }
 
@@ -4101,15 +4101,15 @@ func TestFindAnyQueuedNudgeBead_ReturnsVisibleTerminalBeforeLookupLimit(t *testi
 		newestTerminal = created
 	}
 
-	found, ok, err := findAnyQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("test")
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead returned not found, want visible terminal bead")
+		t.Fatal("nudgeFrontDoor.FindIncludingTerminal returned not found, want visible terminal bead")
 	}
-	if found.ID != newestTerminal.ID {
-		t.Fatalf("findAnyQueuedNudgeBead = %s, want newest terminal %s", found.ID, newestTerminal.ID)
+	if found.BeadID != newestTerminal.ID {
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal = %s, want newest terminal %s", found.BeadID, newestTerminal.ID)
 	}
 }
 
@@ -4144,15 +4144,15 @@ func TestFindAnyQueuedNudgeBead_PrefersTerminalClosedBeadOverRollbackArtifact(t 
 		t.Fatalf("close terminal nudge bead: %v", err)
 	}
 
-	found, ok, err := findAnyQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("test")
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead returned not found")
+		t.Fatal("nudgeFrontDoor.FindIncludingTerminal returned not found")
 	}
-	if found.ID != terminal.ID {
-		t.Fatalf("findAnyQueuedNudgeBead = %s, want %s", found.ID, terminal.ID)
+	if found.BeadID != terminal.ID {
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal = %s, want %s", found.BeadID, terminal.ID)
 	}
 }
 
@@ -4351,18 +4351,18 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	// Verify the superseded nudge has a terminal bead record with state "superseded".
 	store := openNudgeBeadStore(dir)
 	if store.Store != nil {
-		b, ok, err := findAnyQueuedNudgeBead(store, "n-first")
+		b, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first")
 		if err != nil {
-			t.Fatalf("findAnyQueuedNudgeBead(n-first): %v", err)
+			t.Fatalf("nudgeFrontDoor.FindIncludingTerminal(n-first): %v", err)
 		}
 		if !ok {
 			t.Fatal("expected bead record for superseded nudge n-first")
 		}
-		if got := b.Metadata["state"]; got != "superseded" {
-			t.Fatalf("superseded bead state = %q, want \"superseded\"", got)
+		if got := b.State; got != "superseded" {
+			t.Fatalf("superseded shadow state = %q, want \"superseded\"", got)
 		}
-		if got := b.Metadata["terminal_reason"]; got != "superseded" {
-			t.Fatalf("superseded bead terminal_reason = %q, want \"superseded\"", got)
+		if got := b.TerminalReason; got != "superseded" {
+			t.Fatalf("superseded shadow terminal_reason = %q, want \"superseded\"", got)
 		}
 	}
 }
@@ -4600,18 +4600,18 @@ func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
 		t.Fatal("enqueueQueuedNudgeWithStore: expected error from corrupt queue state")
 	}
 
-	bead, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead: bead not found; rollback should leave a closed bead, not delete it")
+		t.Fatal("rollback nudge bead not found; rollback should leave a closed bead, not delete it")
 	}
-	if bead.Status != "closed" {
-		t.Fatalf("bead.Status = %q, want closed (rollback should have closed via store.Close)", bead.Status)
+	if shadow.Open {
+		t.Fatalf("shadow open = true, want closed (rollback should have closed via store.Close)")
 	}
-	if got := bead.Metadata["close_reason"]; got != nudgeEnqueueRollbackCloseReason {
-		t.Errorf("close_reason = %q, want %q", got, nudgeEnqueueRollbackCloseReason)
+	if shadow.CloseReason != nudgeEnqueueRollbackCloseReason {
+		t.Errorf("close_reason = %q, want %q", shadow.CloseReason, nudgeEnqueueRollbackCloseReason)
 	}
 	// Belt-and-braces: the canonical reason itself meets the validator
 	// floor. If someone shortens it without thinking, this guard fires.

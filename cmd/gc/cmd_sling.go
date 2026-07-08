@@ -198,6 +198,20 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 	return string(out), nil
 }
 
+// slingTargetIndex selects an index into a rig's default_sling_targets. It is a
+// package seam (default: math/rand) so tests and future sling characterization
+// can make the otherwise-random target selection deterministic — mirroring the
+// clock-injection seam (Phase 0.2). See SetSlingTargetIndexForTest.
+var slingTargetIndex = rand.Intn //nolint:gosec // random target selection, not security-critical
+
+// SetSlingTargetIndexForTest overrides slingTargetIndex and returns a restore
+// func. Test/characterization only.
+func SetSlingTargetIndexForTest(fn func(n int) int) (restore func()) {
+	prev := slingTargetIndex
+	slingTargetIndex = fn
+	return func() { slingTargetIndex = prev }
+}
+
 // cmdSling is the CLI entry point for gc sling.
 func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
@@ -309,7 +323,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 					return fail("target_resolve_failed", fmt.Sprintf("gc sling: rig %q has an empty entry in default_sling_targets", rig.Name))
 				}
 			}
-			target = rig.DefaultSlingTargets[rand.Intn(len(rig.DefaultSlingTargets))] //nolint:gosec // random target selection, not security-critical
+			target = rig.DefaultSlingTargets[slingTargetIndex(len(rig.DefaultSlingTargets))]
 		case rig.DefaultSlingTarget != "":
 			target = rig.DefaultSlingTarget
 		default:

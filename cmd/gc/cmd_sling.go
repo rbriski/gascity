@@ -970,6 +970,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			Merge:      opts.Merge,
 			NoConvoy:   opts.NoConvoy,
 			Owned:      opts.Owned,
+			Reassign:   opts.Reassign,
 			Nudge:      opts.Nudge,
 			Force:      opts.Force,
 			SkipPoke:   opts.SkipPoke,

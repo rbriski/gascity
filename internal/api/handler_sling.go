@@ -141,6 +141,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 		Force:     body.Force,
+		Reassign:  body.Reassign,
 	}
 
 	// Dispatch to the right intent-based method.

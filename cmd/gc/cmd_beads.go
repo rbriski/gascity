@@ -123,27 +123,20 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	const cmdName = "beads list"
-	if c != nil {
-		cr, err := c.ListBeads(api.ListBeadsOpts{
-			Label:  filters.label,
-			Status: filters.status,
-			All:    filters.all,
-		})
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderBeadsListFromAPI(cr, format, filters, stdout)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doBeadsListFallback(cityPath, format, filters, stdout, stderr)
+	var cr api.CachedRead[[]beads.Bead]
+	return routeRead(c, "beads list", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListBeads(api.ListBeadsOpts{
+				Label:  filters.label,
+				Status: filters.status,
+				All:    filters.all,
+			})
+			return err
+		},
+		func() int { return renderBeadsListFromAPI(cr, format, filters, stdout) },
+		func() int { return doBeadsListFallback(cityPath, format, filters, stdout, stderr) },
+	)
 }
 
 // renderBeadsListFromAPI formats the API-sourced bead list using the same
@@ -217,23 +210,16 @@ var beadsShowAPIClient = func(cityPath string) (*api.Client, string) {
 // routeBeadsShow dispatches `beads show <id>` to the supervisor API and
 // falls back otherwise. Exactly one route=... line per exit path.
 func routeBeadsShow(cityPath string, c *api.Client, nilReason, beadID, format string, stdout, stderr io.Writer) int {
-	const cmdName = "beads show"
-	if c != nil {
-		cr, err := c.GetBead(beadID)
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderBeadsShowFromAPI(cr, format, stdout)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doBeadsShowFallback(cityPath, beadID, format, stdout, stderr)
+	var cr api.CachedRead[beads.Bead]
+	return routeRead(c, "beads show", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetBead(beadID)
+			return err
+		},
+		func() int { return renderBeadsShowFromAPI(cr, format, stdout) },
+		func() int { return doBeadsShowFallback(cityPath, beadID, format, stdout, stderr) },
+	)
 }
 
 func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, stdout io.Writer) int {

@@ -129,6 +129,23 @@ func assignedWorkDrainCancelReason(session beads.Bead, sp runtime.Provider, dt *
 	return "orphaned"
 }
 
+// assignedWorkDrainCancelReasonInfo is the session.Info sibling of
+// assignedWorkDrainCancelReason for the reconciler forward pass. It reads the
+// session id off Info (dt keying) and the generation via
+// reconcilerDrainAckMatchesSessionInfo; the drain tracker and provider are shared
+// verbatim, so it is byte-identical to the raw form.
+func assignedWorkDrainCancelReasonInfo(info sessionpkg.Info, sp runtime.Provider, dt *drainTracker, name string) string {
+	if dt != nil {
+		if ds := dt.get(info.ID); ds != nil && assignedWorkDrainReasonCancelable(ds.reason) {
+			return ds.reason
+		}
+	}
+	if reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ok && assignedWorkDrainReasonCancelable(reason) {
+		return reason
+	}
+	return "orphaned"
+}
+
 func resetPendingCommittedAt(session beads.Bead) (string, time.Time, bool) {
 	if strings.TrimSpace(session.Metadata["continuation_reset_pending"]) != "true" {
 		return "", time.Time{}, false

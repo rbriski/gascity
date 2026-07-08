@@ -384,6 +384,34 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 	return reason, true
 }
 
+// reconcilerDrainAckMatchesSessionInfo is the session.Info sibling of
+// reconcilerDrainAckMatchesSession for the reconciler forward pass. The only
+// session-bead read is the generation (Info.Generation); everything else is
+// provider metadata (sp) and the caller-supplied name, shared verbatim with the
+// raw form — so it is byte-identical, pinned by the sessionGeneration oracle row.
+func reconcilerDrainAckMatchesSessionInfo(info sessions.Info, sp runtime.Provider, name string) (string, bool) {
+	if sp == nil || name == "" {
+		return "", false
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	if err != nil || source != reconcilerDrainAckSourceValue {
+		return "", false
+	}
+	reason, err := sp.GetMeta(name, reconcilerDrainAckReasonKey)
+	if err != nil || reason == "" {
+		return "", false
+	}
+	expectedGeneration, err := sp.GetMeta(name, reconcilerDrainAckGenerationKey)
+	if err != nil || expectedGeneration == "" {
+		return "", false
+	}
+	currentGeneration := strings.TrimSpace(info.Generation)
+	if currentGeneration == "" || currentGeneration != expectedGeneration {
+		return "", false
+	}
+	return reason, true
+}
+
 func staleReconcilerDrainAck(session beads.Bead, sp runtime.Provider, name string) bool {
 	if sp == nil || name == "" {
 		return false
@@ -400,6 +428,26 @@ func staleReconcilerDrainAck(session beads.Bead, sp runtime.Provider, name strin
 	return currentGeneration == "" || currentGeneration != expectedGeneration
 }
 
+// staleReconcilerDrainAckInfo is the session.Info sibling of
+// staleReconcilerDrainAck: the only session-bead read is the generation
+// (Info.Generation), matching the raw form byte-for-byte (sessionGeneration
+// oracle row).
+func staleReconcilerDrainAckInfo(info sessions.Info, sp runtime.Provider, name string) bool {
+	if sp == nil || name == "" {
+		return false
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	if err != nil || source != reconcilerDrainAckSourceValue {
+		return false
+	}
+	expectedGeneration, err := sp.GetMeta(name, reconcilerDrainAckGenerationKey)
+	if err != nil || expectedGeneration == "" {
+		return true
+	}
+	currentGeneration := strings.TrimSpace(info.Generation)
+	return currentGeneration == "" || currentGeneration != expectedGeneration
+}
+
 func staleOrLegacyDrainAckBeforeStart(session beads.Bead, sp runtime.Provider, name string) bool {
 	if sp == nil || name == "" {
 		return false
@@ -410,6 +458,25 @@ func staleOrLegacyDrainAckBeforeStart(session beads.Bead, sp runtime.Provider, n
 	}
 	if err == nil && source == reconcilerDrainAckSourceValue {
 		return staleReconcilerDrainAck(session, sp, name)
+	}
+	acked, err := sp.GetMeta(name, "GC_DRAIN_ACK")
+	return err == nil && acked == "1"
+}
+
+// staleOrLegacyDrainAckBeforeStartInfo is the session.Info sibling of
+// staleOrLegacyDrainAckBeforeStart: it defers to staleReconcilerDrainAckInfo for
+// the reconciler-owned branch (the only session-bead read, Info.Generation) and
+// otherwise reads provider metadata only, so it is byte-identical to the raw form.
+func staleOrLegacyDrainAckBeforeStartInfo(info sessions.Info, sp runtime.Provider, name string) bool {
+	if sp == nil || name == "" {
+		return false
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	if err == nil && source == drainAckSourceAgentValue {
+		return false
+	}
+	if err == nil && source == reconcilerDrainAckSourceValue {
+		return staleReconcilerDrainAckInfo(info, sp, name)
 	}
 	acked, err := sp.GetMeta(name, "GC_DRAIN_ACK")
 	return err == nil && acked == "1"

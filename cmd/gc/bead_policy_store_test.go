@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -72,6 +73,30 @@ func TestBeadPolicyStorePreservesConditionalAssignmentReleaser(t *testing.T) {
 	}
 	if got.Status != "open" || got.Assignee != "" {
 		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+}
+
+// TestBeadPolicyStoreForwardsTierBClaimSurface pins that the Tier-B claim-surface
+// capability probes TRUE through the policy wrapper — the known dropped-handle bug
+// class (beadPolicyStore has silently dropped ListGraphOnlyHandle before). A pool
+// worker's claim/close/show legs reach the JournalStore through the policy wrapper
+// (the journal residence leg is always policy-wrapped), so a dropped forward would
+// make every Lumen bead unclaimable.
+func TestBeadPolicyStoreForwardsTierBClaimSurface(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "graph.db")
+	gs, err := graphstore.Open(context.Background(), path, graphstore.Options{CityID: "test-city"})
+	if err != nil {
+		t.Fatalf("open graphstore: %v", err)
+	}
+	t.Cleanup(func() { _ = gs.Close() })
+	js := beads.NewJournalStore(gs)
+
+	if _, ok := beads.TierBClaimSurfaceStoreFor(js); !ok {
+		t.Fatal("bare JournalStore does not expose the Tier-B claim surface")
+	}
+	wrapped := wrapStoreWithBeadPolicies(js, nil)
+	if _, ok := beads.TierBClaimSurfaceStoreFor(wrapped); !ok {
+		t.Fatal("policy-wrapped JournalStore dropped the Tier-B claim-surface handle")
 	}
 }
 

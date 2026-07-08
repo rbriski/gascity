@@ -51,6 +51,14 @@ const (
 	// root vanished from the store (see closeOrphanedControl in
 	// internal/dispatch/runtime.go).
 	OutcomeMissingRoot = "missing_root"
+
+	// OutcomeDegraded is a Lumen-native gc.outcome value: a partial-success close
+	// (some but not all sub-work passed). It is NOT part of the control-plane
+	// dispatcher vocabulary (pass/fail/skipped) — it is recognized only by the
+	// Lumen Tier-B close firewall (engine.LumenOutcomeForGCOutcome), which passes it
+	// through to the engine's degraded outcome. Declared here for discoverability;
+	// it is a value, never a metadata key.
+	OutcomeDegraded = "degraded"
 )
 
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record

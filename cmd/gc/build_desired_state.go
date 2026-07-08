@@ -755,6 +755,13 @@ func buildDesiredStateWithSessionBeads(
 		// awake/scale accounting wakes for it can actually surface and claim it
 		// (the agent-side work_query/claim path matches identities by raw string).
 		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// Lumen preserve tier (S11): append claimed (in_progress) fold-owned pool
+		// rows AFTER the stamp/canonicalize writers above — a fold row is write-closed
+		// and those writers would hit ErrFoldOwnedWriteClosed on it — and BEFORE pool
+		// demand / drain-suppression consume the slices below, so the reconciler keeps
+		// a mid-do Lumen worker's session alive instead of draining it. No-op for a
+		// city with no graph scope.
+		appendTierBAssignedWork(cityPath, &assignedWorkBeads, &assignedWorkStores, &assignedWorkStoreRefs, stderr)
 		// Re-home open, unassigned work still routed to a legacy bound form of a
 		// now-unbound pool agent. This is the demand/claim half of the migration:
 		// empty-assignee open work never enters the assigned-work collection above,

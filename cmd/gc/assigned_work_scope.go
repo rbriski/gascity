@@ -80,6 +80,19 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	if agentIsCrossStoreEligible(agentCfg) {
 		return true
 	}
+	// A fold-owned journal row (S11 preserve tier, appendTierBAssignedWork) is
+	// route-addressed, not store-addressed: it reaches this check only AFTER the
+	// caller matched it to this agent — filterAssignedWorkBeadsForPoolDemand
+	// resolves agentCfg from the row's own gc.routed_to via findAgentByTemplate,
+	// and the namedWorkReady caller (build_desired_state.go) gates on
+	// Assignee == identity before calling in. Its journal store ref
+	// (tierBHookStoreName) never equals any configured rig name, so the
+	// store-ref compare below would always drop it and DRAIN a mid-do Lumen
+	// worker (the exact failure S11 exists to prevent). The route/assignment
+	// match the caller already performed IS its reachability.
+	if storeRefs[index] == tierBHookStoreName {
+		return true
+	}
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 

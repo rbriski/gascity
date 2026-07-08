@@ -10,9 +10,28 @@ import (
 
 // hookStore is one store the hook work_query runs against: a working dir and
 // the rig/city-scoped subprocess env that points bd at that store.
+//
+// A federated leg that is not a bd store — the Tier-B journal leg — sets name,
+// query, and claim instead of relying on the shell runner: query reads the
+// fold-owned claim surface in-process, and claim translates a worker's claim into
+// a journal owned.admitted append. Because query/claim are func fields (not
+// comparable), such a store's identity for sameHookStore/isZeroHookStore is its
+// name (+ dir/env), never a struct compare.
 type hookStore struct {
-	dir string
-	env []string
+	dir   string
+	env   []string
+	name  string
+	query func() (string, error)
+	claim hookClaimFunc
+}
+
+// runHookStoreQuery runs st's work query: its in-process query func when set (the
+// Tier-B journal leg), else the shell bd runner against st's dir/env.
+func runHookStoreQuery(st hookStore, command string, run hookStoreRunner) (string, error) {
+	if st.query != nil {
+		return st.query()
+	}
+	return run(command, st.dir, st.env)
 }
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
@@ -164,7 +183,7 @@ func firstStoreWithWork(command string, stores []hookStore, primary hookStore, r
 	var ownStoreOut string
 	var ownStoreErr error
 	for _, st := range stores {
-		out, err := run(command, st.dir, st.env)
+		out, err := runHookStoreQuery(st, command, run)
 		if err == nil {
 			ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), time.Now())
 			if workQueryHasReadyWork(ready) {
@@ -200,7 +219,7 @@ func firstStoreWithWork(command string, stores []hookStore, primary hookStore, r
 // best-effort and falls through to re-selection, mirroring firstStoreWithWork's
 // emit-on-timeout contract so a flaky rig store can't wedge the claim.
 func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
-	selectedOut, err := run(command, selected.dir, selected.env)
+	selectedOut, err := runHookStoreQuery(selected, command, run)
 	if err != nil {
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err
@@ -215,9 +234,10 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that firstStoreWithWork
-// returns when no store has ready work (no dir and no env).
+// returns when no store has ready work (no name, dir, env, or seams).
 func isZeroHookStore(s hookStore) bool {
-	return strings.TrimSpace(s.dir) == "" && len(s.env) == 0
+	return strings.TrimSpace(s.name) == "" && strings.TrimSpace(s.dir) == "" &&
+		len(s.env) == 0 && s.query == nil && s.claim == nil
 }
 
 // removeHookStore returns stores with the first entry equal to target removed.
@@ -240,6 +260,9 @@ func removeHookStore(stores []hookStore, target hookStore) []hookStore {
 // sameHookStore reports whether two stores address the same dir and env, so the
 // federated claim loop can drop the exact store it just exhausted.
 func sameHookStore(a, b hookStore) bool {
+	if a.name != b.name {
+		return false
+	}
 	if a.dir != b.dir || len(a.env) != len(b.env) {
 		return false
 	}

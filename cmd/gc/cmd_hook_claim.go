@@ -62,14 +62,20 @@ type (
 )
 
 type hookClaimJSONResult struct {
-	SchemaVersion        string   `json:"schema_version"`
-	OK                   bool     `json:"ok"`
-	Command              string   `json:"command"`
-	Action               string   `json:"action"`
-	Reason               string   `json:"reason,omitempty"`
-	BeadID               string   `json:"bead_id,omitempty"`
-	Assignee             string   `json:"assignee,omitempty"`
-	Route                string   `json:"route,omitempty"`
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Command       string `json:"command"`
+	Action        string `json:"action"`
+	Reason        string `json:"reason,omitempty"`
+	BeadID        string `json:"bead_id,omitempty"`
+	Assignee      string `json:"assignee,omitempty"`
+	Route         string `json:"route,omitempty"`
+	// Description carries the claimed bead's rendered work text so a worker reads
+	// its prompt straight off the claim JSON. Load-bearing for Tier-B journal work,
+	// whose prompt lives in nodes.description and is invisible to a store-blind
+	// `bd show`; benignly populated for ordinary bd candidates too. CLI JSON only —
+	// not a Huma wire field, so adding it is a zero-contract, additive change.
+	Description          string   `json:"description,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
@@ -238,12 +244,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			BeadID:        claimed.ID,
 			Assignee:      claimed.Assignee,
 			Route:         hookClaimRoute(claimed),
+			Description:   claimed.Description,
 		}
 		if result.BeadID == "" {
 			result.BeadID = candidate.ID
 		}
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
+		}
+		if result.Description == "" {
+			result.Description = candidate.Description
 		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
 	}
@@ -284,6 +294,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 				BeadID:        candidate.ID,
 				Assignee:      candidate.Assignee,
 				Route:         hookClaimRoute(candidate),
+				Description:   candidate.Description,
 			}
 			return result, candidate, true
 		}
@@ -300,6 +311,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 				BeadID:        candidate.ID,
 				Assignee:      candidate.Assignee,
 				Route:         hookClaimRoute(candidate),
+				Description:   candidate.Description,
 			}
 			return result, candidate, true
 		}

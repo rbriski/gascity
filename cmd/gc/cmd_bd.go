@@ -230,6 +230,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
+	// Tier-B close shim: a close of a fold-owned pool work bead settles it via a
+	// journal append. It runs BEFORE the provider check — a graph-scoped city's
+	// work-store provider may be non-bd, and real bd cannot see the journal — and
+	// falls through byte-identically for any non-Tier-B close.
+	if code, handled := interceptTierBClose(cityPath, bdArgs, stdout, stderr); handled {
+		return code
+	}
+	// Tier-B show read leg: a read-only `gc bd show <fold-id>` serves the hydrated
+	// journal row real bd cannot see. It runs BEFORE the provider check for the
+	// same reason as the close shim — a graph-scoped city's work store may be
+	// non-bd, yet the fold row is always readable from the journal — so a show of a
+	// Lumen bead succeeds wherever the close of one does. Falls through for a
+	// non-fold id.
+	if code, handled := interceptTierBShow(cityPath, bdArgs, stdout, stderr); handled {
+		return code
+	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {

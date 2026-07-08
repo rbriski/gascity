@@ -24,7 +24,9 @@ type Capture struct {
 	Exit          int
 	Stdout        []byte
 	Stderr        []byte
-	JSON          []byte   // optional; present only for a --json run
+	JSONExit      int      // exit code of the --json run (distinct invocation)
+	JSON          []byte   // stdout of the --json run
+	JSONStderr    []byte   // stderr of the --json run (route line, warnings, errors)
 	Events        []string // canonicalized, sorted by the harness
 	StoreReadback []string // canonicalized, sorted by the harness
 	Counts        []Count  // boundary counts the harness actually measured, in a fixed order
@@ -38,15 +40,18 @@ type Count struct {
 	N    int
 }
 
-// Golden renders the capture to its deterministic sectioned byte form.
+// Golden renders the capture to its deterministic sectioned byte form. The
+// human run (Exit/Stdout/Stderr) and the --json run (JSONExit/JSON/JSONStderr)
+// are both frozen in full, so a refactor that changes only the --json path's
+// exit, route line, or stderr is still caught.
 func (c Capture) Golden() []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "=== exit ===\n%d\n", c.Exit)
-	fmt.Fprintf(&b, "=== stdout ===\n%s", withTrailingNewline(c.Stdout))
-	fmt.Fprintf(&b, "=== stderr ===\n%s", withTrailingNewline(c.Stderr))
-	if c.JSON != nil {
-		fmt.Fprintf(&b, "=== json ===\n%s", withTrailingNewline(c.JSON))
-	}
+	writeStreamSection(&b, "stdout", c.Stdout)
+	writeStreamSection(&b, "stderr", c.Stderr)
+	fmt.Fprintf(&b, "=== json_exit ===\n%d\n", c.JSONExit)
+	writeStreamSection(&b, "json", c.JSON)
+	writeStreamSection(&b, "json_stderr", c.JSONStderr)
 	fmt.Fprintf(&b, "=== events ===\n")
 	for _, e := range c.Events {
 		fmt.Fprintf(&b, "%s\n", e)
@@ -62,11 +67,16 @@ func (c Capture) Golden() []byte {
 	return b.Bytes()
 }
 
-func withTrailingNewline(b []byte) []byte {
-	if len(b) == 0 || b[len(b)-1] == '\n' {
-		return b
+// writeStreamSection emits a byte stream verbatim under its header, encoding the
+// trailing-newline boundary EXPLICITLY (git-diff style) rather than normalizing
+// it away — presence/absence of a final newline is observable CLI behavior the
+// harness must freeze.
+func writeStreamSection(b *bytes.Buffer, name string, data []byte) {
+	fmt.Fprintf(b, "=== %s ===\n", name)
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteString("\n\\ No newline at end of section\n")
 	}
-	return append(b, '\n')
 }
 
 // CompareGolden compares got against the golden at path, or rewrites it when

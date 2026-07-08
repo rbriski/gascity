@@ -19,6 +19,16 @@ func TestDefaultRules_CanonicalizesMintedNotStable(t *testing.T) {
 	}
 }
 
+func TestDefaultRules_ZeroTimeIsDistinctFromRealTime(t *testing.T) {
+	// A real timestamp and the "unset" zero sentinel must NOT collapse to the
+	// same placeholder — else a real->zero (dropped-field) regression hides.
+	c := chartest.NewCanonicalizer(chartest.DefaultRules()...)
+	got := string(c.Canonicalize([]byte(`created=2026-07-08T12:00:00Z updated=0001-01-01T00:00:00Z`)))
+	if got != "created=T-1 updated=TZERO-1" {
+		t.Errorf("zero-time not distinguished: got %q", got)
+	}
+}
+
 func TestDefaultRules_LeavesStableIdentifiersAlone(t *testing.T) {
 	c := chartest.NewCanonicalizer(chartest.DefaultRules()...)
 	for _, stable := range []string{

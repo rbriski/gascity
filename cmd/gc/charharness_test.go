@@ -111,25 +111,38 @@ func countingHandler(counter *atomic.Int64, next http.Handler) http.Handler {
 	})
 }
 
-// captureLane drives routeConvoyList for one lane (human + json runs), reads the
-// store back, and canonicalizes every surface with one Canonicalizer so bead
-// ids stay identical across stdout/json/store within the lane.
-func (h *charHarness) captureLane(t *testing.T, lane charLane) chartest.Capture {
-	t.Helper()
-
-	var ho, he bytes.Buffer
+// run drives one routeConvoyList invocation and returns its exit code and the
+// number of API requests it made (0 for the serverless lane).
+func (h *charHarness) run(lane charLane, jsonOut bool, stdout, stderr *bytes.Buffer) (exit int, reqDelta int64) {
 	var before int64
 	if lane.reqs != nil {
 		before = lane.reqs.Load()
 	}
-	exit := routeConvoyList(h.cityPath, lane.client, lane.nilReason, false, &ho, &he)
-	var reqDelta int64
+	exit = routeConvoyList(h.cityPath, lane.client, lane.nilReason, jsonOut, stdout, stderr)
 	if lane.reqs != nil {
 		reqDelta = lane.reqs.Load() - before
 	}
+	return exit, reqDelta
+}
+
+// captureLane drives routeConvoyList for one lane in both the human and --json
+// modes, capturing EACH run's full surface (exit, stderr, request count — not
+// just the human run's), reads the store back, records only THIS lane's new
+// events (delta against the shared provider), and canonicalizes every surface
+// with one Canonicalizer so bead ids stay identical across stdout/json/store.
+func (h *charHarness) captureLane(t *testing.T, lane charLane) chartest.Capture {
+	t.Helper()
+
+	var evSeqBefore uint64
+	if fake, ok := h.cs.EventProvider().(*events.Fake); ok {
+		evSeqBefore, _ = fake.LatestSeq()
+	}
+
+	var ho, he bytes.Buffer
+	humanExit, humanReqs := h.run(lane, false, &ho, &he)
 
 	var jo, je bytes.Buffer
-	_ = routeConvoyList(h.cityPath, lane.client, lane.nilReason, true, &jo, &je)
+	jsonExit, jsonReqs := h.run(lane, true, &jo, &je)
 
 	store, err := openCityStoreAt(h.cityPath)
 	if err != nil {
@@ -145,26 +158,33 @@ func (h *charHarness) captureLane(t *testing.T, lane charLane) chartest.Capture 
 		storeLines[i] = fmt.Sprintf("%s type=%s status=%s title=%q", b.ID, b.Type, b.Status, b.Title)
 	}
 
+	// Every lane's event surface is measured (empty is a fact worth freezing);
+	// only events emitted DURING this lane's runs count (delta vs the snapshot).
 	var eventLines []string
-	if lane.client != nil {
-		if fake, ok := h.cs.EventProvider().(*events.Fake); ok {
-			evs, _ := fake.List(events.Filter{})
-			for _, e := range evs {
+	if fake, ok := h.cs.EventProvider().(*events.Fake); ok {
+		evs, _ := fake.List(events.Filter{})
+		for _, e := range evs {
+			if e.Seq > evSeqBefore {
 				eventLines = append(eventLines, fmt.Sprintf("type=%s subject=%s", e.Type, e.Subject))
 			}
-			sort.Strings(eventLines)
 		}
+		sort.Strings(eventLines)
 	}
 
 	c := chartest.NewCanonicalizer(chartest.DefaultRules()...)
 	return chartest.Capture{
-		Exit:          exit,
+		Exit:          humanExit,
 		Stdout:        c.Canonicalize(ho.Bytes()),
+		Stderr:        c.Canonicalize(he.Bytes()),
+		JSONExit:      jsonExit,
 		JSON:          c.Canonicalize(jo.Bytes()),
+		JSONStderr:    c.Canonicalize(je.Bytes()),
 		StoreReadback: canonLines(c, storeLines),
 		Events:        canonLines(c, eventLines),
-		Stderr:        c.Canonicalize(he.Bytes()),
-		Counts:        []chartest.Count{{Name: "api_requests", N: int(reqDelta)}},
+		Counts: []chartest.Count{
+			{Name: "api_requests_human", N: int(humanReqs)},
+			{Name: "api_requests_json", N: int(jsonReqs)},
+		},
 	}
 }
 

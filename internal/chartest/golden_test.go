@@ -1,6 +1,7 @@
 package chartest_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,9 @@ func TestCapture_GoldenIsDeterministicAndSectioned(t *testing.T) {
 		Exit:          0,
 		Stdout:        []byte("frontend/worker\n"),
 		Stderr:        []byte("route=api\n"),
-		JSON:          []byte(`{"rig":"BEAD-1"}`),
+		JSONExit:      0,
+		JSON:          []byte(`{"rig":"BEAD-1"}` + "\n"),
+		JSONStderr:    []byte("route=api\n"),
 		Events:        []string{"bead.created BEAD-1"},
 		StoreReadback: []string{"BEAD-1 open"},
 		Counts:        []chartest.Count{{Name: "api_requests", N: 1}},
@@ -24,7 +27,9 @@ func TestCapture_GoldenIsDeterministicAndSectioned(t *testing.T) {
 		"=== exit ===\n0\n",
 		"=== stdout ===\nfrontend/worker\n",
 		"=== stderr ===\nroute=api\n",
+		"=== json_exit ===\n0\n",
 		"=== json ===\n{\"rig\":\"BEAD-1\"}\n",
+		"=== json_stderr ===\nroute=api\n",
 		"=== events ===\nbead.created BEAD-1\n",
 		"=== store ===\nBEAD-1 open\n",
 		"=== counts ===\napi_requests=1\n",
@@ -39,10 +44,17 @@ func TestCapture_GoldenIsDeterministicAndSectioned(t *testing.T) {
 	}
 }
 
-func TestCapture_GoldenOmitsJSONSectionWhenAbsent(t *testing.T) {
-	capt := chartest.Capture{Exit: 1, Stdout: []byte("x")}
-	if strings.Contains(string(capt.Golden()), "=== json ===") {
-		t.Fatal("json section should be omitted when JSON is nil")
+func TestCapture_GoldenEncodesTrailingNewlineExplicitly(t *testing.T) {
+	withNL := chartest.Capture{Stdout: []byte("foo\n")}.Golden()
+	noNL := chartest.Capture{Stdout: []byte("foo")}.Golden()
+	if bytes.Equal(withNL, noNL) {
+		t.Fatal("streams with and without a trailing newline must render distinct goldens")
+	}
+	if !strings.Contains(string(noNL), `\ No newline at end of section`) {
+		t.Errorf("missing no-newline marker:\n%s", noNL)
+	}
+	if strings.Contains(string(withNL), "No newline at end of section") {
+		t.Errorf("marker must be absent when the stream ends in a newline:\n%s", withNL)
 	}
 }
 

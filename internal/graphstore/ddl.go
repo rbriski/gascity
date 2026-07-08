@@ -286,34 +286,35 @@ var migrations = []string{
 	schemaV4,
 }
 
-// schemaVersionLatest is the target schema_version after all migrations apply.
-var schemaVersionLatest = len(migrations)
-
-// migrate brings db up to schemaVersionLatest, applying each pending migration
-// in its own transaction and recording the new schema_version in graph_meta.
-func migrate(ctx context.Context, db *sql.DB) error {
-	current, err := currentSchemaVersion(ctx, db)
+// migrate brings db up to the dialect's latest schema version, applying each
+// pending migration in its own transaction and recording the new schema_version
+// in graph_meta. The dialect supplies the DDL ladder and the existence probe;
+// the version numbering is shared across dialects. The default sqliteDialect
+// reproduces the pre-P6 behavior exactly.
+func migrate(ctx context.Context, db *sql.DB, d dialect) error {
+	latest := len(d.migrations())
+	current, err := currentSchemaVersion(ctx, db, d)
 	if err != nil {
 		return err
 	}
-	if current > schemaVersionLatest {
-		return fmt.Errorf("graphstore: database schema_version %d is newer than this binary supports (%d)", current, schemaVersionLatest)
+	if current > latest {
+		return fmt.Errorf("graphstore: database schema_version %d is newer than this binary supports (%d)", current, latest)
 	}
-	for v := current; v < schemaVersionLatest; v++ {
-		if err := applyMigration(ctx, db, v); err != nil {
+	for v := current; v < latest; v++ {
+		if err := applyMigration(ctx, db, v, d); err != nil {
 			return fmt.Errorf("graphstore: applying migration to schema_version %d: %w", v+1, err)
 		}
 	}
 	return nil
 }
 
-func applyMigration(ctx context.Context, db *sql.DB, index int) error {
+func applyMigration(ctx context.Context, db *sql.DB, index int, d dialect) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, migrations[index]); err != nil {
+	if _, err := tx.ExecContext(ctx, d.migrations()[index]); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -327,12 +328,11 @@ func applyMigration(ctx context.Context, db *sql.DB, index int) error {
 }
 
 // currentSchemaVersion reads the recorded schema_version, treating an absent
-// graph_meta table or key as version 0.
-func currentSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+// graph_meta table or key as version 0. The dialect supplies the existence
+// probe (sqlite_master for SQLite, information_schema for Postgres).
+func currentSchemaVersion(ctx context.Context, db *sql.DB, d dialect) (int, error) {
 	var present int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='graph_meta'`,
-	).Scan(&present); err != nil {
+	if err := db.QueryRowContext(ctx, d.schemaProbe()).Scan(&present); err != nil {
 		return 0, fmt.Errorf("graphstore: probing graph_meta: %w", err)
 	}
 	if present == 0 {

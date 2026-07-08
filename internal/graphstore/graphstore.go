@@ -49,7 +49,13 @@ type Options struct {
 type Store struct {
 	writeDB *sql.DB
 	readDB  *sql.DB
-	path    string
+	// path is the SQLite file path or, for a Postgres store, the connection DSN.
+	// It may carry a credential, so every error/log use routes through redactDSN.
+	path string
+	// dialect is the backend seam. Open defaults it to sqliteDialect{}, so every
+	// existing SQLite call site and test is byte-for-byte unchanged; openPostgres
+	// sets postgresDialect{}.
+	dialect dialect
 	cityID  string
 
 	mu    sync.RWMutex
@@ -102,7 +108,7 @@ func openStore(ctx context.Context, path string, opts Options, busyTimeoutMS int
 		_ = readDB.Close()
 		return nil, fmt.Errorf("graphstore: connecting %q: %w", path, err)
 	}
-	if err := migrate(ctx, writeDB); err != nil {
+	if err := migrate(ctx, writeDB, sqliteDialect{}); err != nil {
 		_ = writeDB.Close()
 		_ = readDB.Close()
 		return nil, err
@@ -117,6 +123,7 @@ func openStore(ctx context.Context, path string, opts Options, busyTimeoutMS int
 		writeDB: writeDB,
 		readDB:  readDB,
 		path:    path,
+		dialect: sqliteDialect{},
 		cityID:  cityID,
 		vocab:   make(map[vocabKey]struct{}),
 	}, nil
@@ -212,10 +219,10 @@ func (s *Store) Close() error {
 	werr := s.writeDB.Close()
 	rerr := s.readDB.Close()
 	if werr != nil {
-		return fmt.Errorf("graphstore: closing %q (write): %w", s.path, werr)
+		return fmt.Errorf("graphstore: closing %q (write): %w", redactDSN(s.path), werr)
 	}
 	if rerr != nil {
-		return fmt.Errorf("graphstore: closing %q (read): %w", s.path, rerr)
+		return fmt.Errorf("graphstore: closing %q (read): %w", redactDSN(s.path), rerr)
 	}
 	return nil
 }

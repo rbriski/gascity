@@ -225,15 +225,25 @@ func (s *JournalStore) mintID(ctx context.Context, tx *sql.Tx) (string, error) {
 	); err != nil {
 		return "", fmt.Errorf("journal store: seeding id sequence: %w", err)
 	}
+	// The counter lives in a TEXT column; two casts keep this one statement
+	// portable and byte-identical across backends:
+	//   - inner CAST(value AS BIGINT) parses the text counter as an integer. It is
+	//     BIGINT, not INTEGER, because on PostgreSQL INTEGER is int4 and the gcg-j
+	//     counter would overflow (SQLSTATE 22003) at 2^31; BIGINT is int8. On
+	//     SQLite BIGINT carries INTEGER affinity, so the parsed value — and the
+	//     text written back — is unchanged from the INTEGER form.
+	//   - outer CAST(… AS TEXT) renders the increment back to text explicitly:
+	//     PostgreSQL has no implicit int→text assignment cast, and SQLite stores
+	//     the same bytes into the TEXT-affinity column either way.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE graph_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = ?`,
+		`UPDATE graph_meta SET value = CAST(CAST(value AS BIGINT) + 1 AS TEXT) WHERE key = ?`,
 		journalIDSeqKey,
 	); err != nil {
 		return "", fmt.Errorf("journal store: advancing id sequence: %w", err)
 	}
 	var n int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT CAST(value AS INTEGER) FROM graph_meta WHERE key = ?`, journalIDSeqKey,
+		`SELECT CAST(value AS BIGINT) FROM graph_meta WHERE key = ?`, journalIDSeqKey,
 	).Scan(&n); err != nil {
 		return "", fmt.Errorf("journal store: reading id sequence: %w", err)
 	}

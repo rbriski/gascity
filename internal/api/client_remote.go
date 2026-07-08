@@ -123,6 +123,42 @@ func NewRemoteCityScopedClient(baseURL, cityName string, opts RemoteOptions) (*C
 	return c, nil
 }
 
+// NewRemoteEventsClient builds a genclient for the events feed against a remote
+// city. It is backed by the NO-TIMEOUT stream HTTP client — a --follow SSE
+// stream must not be cut by the bounded REST timeout — and carries the same auth
+// as the REST client: the X-GC-Request CSRF header, an Authorization bearer from
+// opts.Token, and a 401 re-mint via opts.RefreshToken (wrapped into the stream
+// transport by newRemoteHTTPClients). It is the events path's authenticated
+// client for a --context/--city-url remote target. No X-GC-City-Write grant: the
+// events feed is read-only.
+func NewRemoteEventsClient(baseURL string, opts RemoteOptions) (*genclient.ClientWithResponses, error) {
+	_, stream, err := newRemoteHTTPClients(opts)
+	if err != nil {
+		return nil, err
+	}
+	genOpts := []genclient.ClientOption{
+		genclient.WithHTTPClient(stream),
+		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-GC-Request", "true")
+			return nil
+		}),
+	}
+	if opts.Token != nil {
+		tok := opts.Token
+		genOpts = append(genOpts, genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			t, terr := tok()
+			if terr != nil {
+				return terr
+			}
+			if t != "" {
+				req.Header.Set("Authorization", "Bearer "+t)
+			}
+			return nil
+		}))
+	}
+	return genclient.NewClientWithResponses(baseURL, genOpts...)
+}
+
 // remoteAuthEditor returns a genclient request editor that attaches a fresh
 // bearer (from the client's token source) to every REST request. It closes over
 // the client so the token is fetched live, not captured at construction.

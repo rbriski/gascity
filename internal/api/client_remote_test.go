@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
 
@@ -451,5 +452,35 @@ func TestReauthRoundTripper_SkipsGrantedRequest(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want 1 (granted request must not retry)", calls)
+	}
+}
+
+// TestNewRemoteEventsClientAttachesAuth proves the events client (used by
+// `gc events --context`) carries the X-GC-Request CSRF header and an
+// Authorization bearer from opts.Token — so the events feed authenticates to a
+// remote edge like the REST client does.
+func TestNewRemoteEventsClientAttachesAuth(t *testing.T) {
+	var gotAuth, gotCSRF string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCSRF = r.Header.Get("X-GC-Request")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	gen, err := NewRemoteEventsClient(srv.URL, RemoteOptions{
+		Token: func() (string, error) { return "tok", nil },
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteEventsClient: %v", err)
+	}
+	if _, err := gen.StreamEvents(context.Background(), "mc", &genclient.StreamEventsParams{}); err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want Bearer tok", gotAuth)
+	}
+	if gotCSRF != "true" {
+		t.Fatalf("X-GC-Request = %q, want true", gotCSRF)
 	}
 }

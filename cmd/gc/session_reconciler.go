@@ -81,29 +81,32 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 }
 
 // markDrainAckStopPending persists the drain-ack stop-pending transition through
-// the session front door, reading the session identity/name from the typed Info
-// snapshot (front-door migration Step 5b). It no longer mirrors the patch onto a
-// raw *beads.Bead: the two reconciler callers reconstruct DrainAckStopPendingPatch
-// and fold it onto infoByID themselves, and no later this-tick reader consumes the
-// raw bead for these keys — a drain-acked session `continue`s before the
-// wakeTargets/startCandidates append, and the post-loop scans read only ordered[i].ID.
-func markDrainAckStopPending(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) bool {
+// the session front door and returns the refreshed Info as a LOCAL fold
+// (write-returns-Info, Step 6d): ApplyPatchInfo emits DrainAckStopPendingPatch and
+// folds the same patch onto the caller's coherent snapshot Info in one step, so
+// the two callers assign the returned Info directly instead of reconstructing the
+// patch. It no longer mirrors onto a raw *beads.Bead: no later this-tick reader
+// consumes the raw bead for these keys — a drain-acked session `continue`s before
+// the wakeTargets/startCandidates append, and the post-loop scans read only
+// ordered[i].ID. On a persist error the input Info is returned unchanged with a
+// false ok, so the caller skips the fold (identical to the old bool-return).
+func markDrainAckStopPending(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) (sessionpkg.Info, bool) {
 	if info.ID == "" || sessFront == nil {
-		return false
+		return info, false
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	batch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+	updated, err := sessFront.ApplyPatchInfo(info, sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
+	if err != nil {
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
 			name = info.ID
 		}
 		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
-		return false
+		return info, false
 	}
-	return true
+	return updated, true
 }
 
 func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
@@ -320,15 +323,22 @@ func recordDrainAckAssignedWorkEvent(
 // value is a no-op — the call mutated nothing (async/early-return/persist-error)
 // so applyTo returns the snapshot Info unchanged.
 type drainAckFinalizeResult struct {
-	// batch is the metadata patch mirrored onto the session bead this call: the
-	// close ClosePatch (Path A) or the AcknowledgeDrain/CompleteDrain patch (the
-	// non-close drain-ack path). nil when the call wrote no metadata.
+	// batch is the metadata patch for the Path-A close (ClosePatch), whose persist
+	// happens inside closeSessionBeadIfReachableStoreUnassigned (a helper); the
+	// caller folds it onto the snapshot via ApplyPatch. nil when the call took no
+	// close/metadata path.
 	batch sessionpkg.MetadataPatch
 	// closed reports that the call closed the bead in memory
 	// (session.Status = "closed"); the snapshot must fold that status close via
 	// MarkClosed, which no metadata patch can carry (Info.Closed derives from
 	// Status, not metadata).
 	closed bool
+	// folded carries the coherent post-write Info for the non-close drain-ack path:
+	// finalizeDrainAckStoppedSession persists the drain-ack batch through
+	// ApplyPatchInfo and folds it onto the pre-call snapshot in one step
+	// (write-returns-Info, Step 6d), so the caller assigns this Info directly
+	// instead of re-folding a returned batch. nil on the close/witness/no-op paths.
+	folded *sessionpkg.Info
 	// witnessInfo carries a full reprojection for the NDI witness close, where the
 	// call adopts the store's authoritative metadata wholesale
 	// (session.Metadata = latest.Metadata) rather than applying a known patch, so
@@ -338,15 +348,19 @@ type drainAckFinalizeResult struct {
 
 // applyTo folds the finalize result onto the coherent pre-call snapshot Info,
 // byte-identically to re-projecting the mutated bead (the raw refreshSessionInfo
-// path): the witness reprojection wins outright; otherwise the metadata patch
-// folds via ApplyPatch and an in-memory close folds via MarkClosed. The caller
-// must pass the session's coherent snapshot entry — infoByID[id] equal to the
-// pre-call InfoFromPersistedBead(*session) — which holds at every finalize call
-// site (top-of-loop / post-heal / post-zombie refresh, no un-refreshed *session
-// mutation reaches the call).
+// path): the witness reprojection wins outright; the non-close folded Info
+// (already ApplyPatchInfo-folded inside the call) wins next; otherwise the Path-A
+// ClosePatch folds via ApplyPatch and its in-memory close folds via MarkClosed.
+// The caller must pass the session's coherent snapshot entry — infoByID[id] equal
+// to the pre-call InfoFromPersistedBead(*session) — which holds at every finalize
+// call site (top-of-loop / post-heal / post-zombie refresh, no un-refreshed
+// *session mutation reaches the call).
 func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
 	if r.witnessInfo != nil {
 		return *r.witnessInfo
+	}
+	if r.folded != nil {
+		return *r.folded
 	}
 	if r.batch != nil {
 		info = info.ApplyPatch(r.batch)
@@ -477,14 +491,16 @@ func finalizeDrainAckStoppedSession(
 	if info.RestartRequested == "true" {
 		batch["restart_requested"] = ""
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
+	foldedInfo, err := sessionFrontDoor(store).ApplyPatchInfo(info, batch)
+	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
 		// Store write failed, so nothing changed — the snapshot must stay unchanged
 		// (zero result → applyTo no-op).
 		return drainAckFinalizeResult{}
 	}
-	// The raw metadata mirror loop is dropped (Step 5b): the caller folds the
-	// returned batch onto infoByID, and no later this-tick reader consumes the raw
+	// The raw metadata mirror loop is dropped (Step 5b): ApplyPatchInfo persisted
+	// the drain-ack batch and folded it onto the caller's coherent Info in one step
+	// (write-returns-Info, Step 6d), and no later this-tick reader consumes the raw
 	// bead metadata for these keys (a drain-acked session `continue`s before the
 	// wakeTargets/startCandidates append; recordStopped/recordDrainAckAssignedWorkEvent
 	// below read identity + store-query results, not the drain-ack batch keys).
@@ -499,9 +515,8 @@ func finalizeDrainAckStoppedSession(
 	if hasAssignedWork {
 		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, template, template, name, rec, stderr)
 	}
-	// Non-close drain-ack: the snapshot fold is ApplyPatch(the drain-ack batch just
-	// mirrored) with no status close.
-	return drainAckFinalizeResult{batch: batch}
+	// Non-close drain-ack: the snapshot fold is the ApplyPatchInfo result above.
+	return drainAckFinalizeResult{folded: &foldedInfo}
 }
 
 func reconcileDrainAckStopPending(
@@ -1817,15 +1832,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = infoPostHeal.Template
 							}
-							if markDrainAckStopPending(infoByID[session.ID], sessFront, clk, stderr) {
-								// Fold the stop-pending transition onto the snapshot (Step 6d):
-								// markDrainAckStopPending mirrors DrainAckStopPendingPatch only on
-								// this true return; its Info keys (state=draining,
-								// state_reason=drain-ack-stop-pending, cleared pending_create_*) are
-								// time-independent, so reconstructing the patch reproduces the
-								// mirror (drain_at is non-Info). Cross-session isDrainAckStopPendingInfo
-								// reader. Pre-pass-masked (STEP6-PREPASS-AUDIT group 3).
-								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
+							if updated, ok := markDrainAckStopPending(infoByID[session.ID], sessFront, clk, stderr); ok {
+								// markDrainAckStopPending persisted the stop-pending transition and
+								// returned the folded snapshot Info (write-returns-Info, Step 6d) —
+								// assign it directly. Cross-session isDrainAckStopPendingInfo reader.
+								// Pre-pass-masked (STEP6-PREPASS-AUDIT group 3).
+								infoByID[session.ID] = updated
 								clearDrainTrackerForStopPending(session, dt)
 								queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 								if trace != nil {
@@ -2168,11 +2180,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
-						if markDrainAckStopPending(infoByID[session.ID], sessFront, clk, stderr) {
-							// Fold the stop-pending transition onto the snapshot (Step 6d);
-							// deterministic DrainAckStopPendingPatch reconstruction, same as the
-							// orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
-							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
+						if updated, ok := markDrainAckStopPending(infoByID[session.ID], sessFront, clk, stderr); ok {
+							// markDrainAckStopPending persisted + folded the stop-pending
+							// transition (write-returns-Info, Step 6d) — assign the returned Info,
+							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
+							infoByID[session.ID] = updated
 							clearDrainTrackerForStopPending(session, dt)
 							queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 							if trace != nil {
@@ -2737,8 +2749,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						switch {
 						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
-							// backfill the hash without running anything.
-							_ = sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
+							// backfill the hash without running anything. Persist + fold in one
+							// step (Step 6d write-returns-Info): started_live_hash is
+							// Info-projected, so the backfill folds onto the snapshot too — a fold
+							// this site lacked while the blanket pre-pass masked it.
+							infoByID[session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[session.ID], sessionpkg.MetadataPatch{
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
@@ -2768,7 +2783,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if err := sp.RunLive(name, agentCfg); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck
 							} else {
-								_ = sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
+								// Persist + fold in one step (Step 6d write-returns-Info):
+								// started_live_hash is Info-projected, so the re-apply folds onto the
+								// snapshot too — a fold this site lacked while the pre-pass masked it.
+								infoByID[session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[session.ID], sessionpkg.MetadataPatch{
 									"live_hash":         currentLive,
 									"started_live_hash": currentLive,
 								})
@@ -2916,26 +2934,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					})
 					telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					_ = sessionFrontDoor(store).ApplyPatch(session.ID, batch)
 					if session.Metadata == nil {
 						session.Metadata = make(map[string]string, len(batch))
 					}
+					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
+					// loop is RETAINED. The max-age kill falls through to the wakeTargets
+					// append below and the same-tick re-wake can reach startCandidates,
+					// where the start executor reads last_woke_at (cleared by SleepPatch)
+					// off the raw bead via wakeFairnessTime before it re-Gets from the
+					// store; dropping the mirror would perturb ordering. It dies with the
+					// other start-coupled mirrors in WI-6.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
-					// Fold the sleep onto the snapshot (Step 6d write-returns-Info): this
-					// max-age kill falls through to the wakeTargets append below, whose
-					// awake-scan read of state=asleep drives a same-tick re-wake — so the
-					// snapshot must carry the sleep. Base is coherent (the aggregating
-					// refresh @~2692 synced it and the intervening drift blocks `continue`).
-					// A pre-pass-masked writer (STEP6-PREPASS-AUDIT group 11).
-					//
-					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop above is RETAINED. The same-tick re-wake can reach
-					// startCandidates, and the start executor reads last_woke_at (cleared
-					// by SleepPatch) off the raw bead via wakeFairnessTime before it
-					// re-Gets from the store; dropping the mirror would perturb ordering.
-					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(batch)
+					// Persist + fold the sleep onto the snapshot in one step (Step 6d
+					// write-returns-Info): the same-tick re-wake's awake-scan read of
+					// state=asleep needs the sleep on the snapshot. Base is coherent (the
+					// aggregating refresh @~2692 synced it and the intervening drift blocks
+					// `continue`). A pre-pass-masked writer (STEP6-PREPASS-AUDIT group 11).
+					infoByID[session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[session.ID], batch)
 					alive = false
 				}
 			}
@@ -3003,24 +3020,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// last_woke_at and setting state to asleep. The wake logic
 					// below will pick it up.
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					_ = sessionFrontDoor(store).ApplyPatch(session.ID, batch)
 					if session.Metadata == nil {
 						session.Metadata = make(map[string]string, len(batch))
 					}
+					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
+					// loop is RETAINED — same rationale as the max-age kill: the same-tick
+					// re-wake reads last_woke_at (cleared by SleepPatch) off the raw bead via
+					// wakeFairnessTime before the start executor re-Gets it. Dies with the
+					// other start-coupled mirrors in WI-6.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
-					// Fold the sleep onto the snapshot (Step 6d write-returns-Info): the
-					// idle kill falls through to the wakeTargets append below, whose
-					// awake-scan read of state=asleep drives a same-tick re-wake. Base
-					// coherent (aggregating refresh @~2692 + intervening `continue`s). A
-					// pre-pass-masked writer (STEP6-PREPASS-AUDIT group 12).
-					//
-					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop above is RETAINED — same rationale as the max-age kill: the
-					// same-tick re-wake reads last_woke_at (cleared by SleepPatch) off the
-					// raw bead via wakeFairnessTime before the start executor re-Gets it.
-					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(batch)
+					// Persist + fold the sleep onto the snapshot in one step (Step 6d
+					// write-returns-Info): the idle kill falls through to the wakeTargets
+					// append below, whose awake-scan read of state=asleep drives a same-tick
+					// re-wake. Base coherent (aggregating refresh @~2692 + intervening
+					// `continue`s). A pre-pass-masked writer (STEP6-PREPASS-AUDIT group 12).
+					infoByID[session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[session.ID], batch)
 					alive = false
 				}
 			}
@@ -3253,13 +3269,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			cancelSessionDrainInfo(info, sp, dt)
 			clearCompletedIdleProbe(target.session.ID, dt)
 			if info.SleepIntent == "idle-stop-pending" {
-				// Persist the intent clear to the store and the typed snapshot. This
-				// runs on an ALIVE session (the shouldWake && alive arm), which never
+				// Persist + fold the intent clear in one step (Step 6d write-returns-Info).
+				// This runs on an ALIVE session (the shouldWake && alive arm), which never
 				// enters startCandidates, and sleep_intent is not read off the raw
 				// session bead anywhere downstream this tick — so Step 5c dropped the
 				// raw session.Metadata mirror.
-				_ = sessionFrontDoor(store).SetMarker(target.session.ID, "sleep_intent", "")
-				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(sessionpkg.MetadataPatch{"sleep_intent": ""})
+				// The single-key clear now rides ApplyPatchInfo's SetMetadataBatch
+				// (empty-string clear), byte-equivalent to the raw SetMetadata it replaced.
+				infoByID[target.session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[target.session.ID], sessionpkg.MetadataPatch{"sleep_intent": ""})
 			}
 		}
 

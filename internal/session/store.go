@@ -44,6 +44,37 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	return s.store.SetMetadataBatch(id, map[string]string(patch))
 }
 
+// ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
+// refreshed Info as a LOCAL fold — info.ApplyPatch(patch) — never a re-Get. It
+// is the write-returns-Info chokepoint the reconciler routes its direct
+// write+fold two-steps through: a store Get per patch would blow the tick budget
+// under Dolt (~2s/bd-op; the reconciler does ~57-61 patch writes per tick), and
+// the coherent caller-held Info already carries the pre-image the fold needs, so
+// no read is required.
+//
+// An empty patch is a no-op: it returns info unchanged with no write (matching
+// ApplyPatch's len==0 short-circuit). On a persist error the INPUT info is
+// returned UNCHANGED with the error — the snapshot never advances past a write
+// the store rejected, so an error-ignoring caller stays consistent with the
+// store and an error-checking caller can bail.
+//
+// The fold is byte-identical to re-projecting the patched bead
+// (TestInfoApplyPatchMatchesReprojection is the equivalence oracle). It cannot
+// express a status close: patches never flip Info.Closed (see info_apply_patch.go),
+// so in-memory closes fold via MarkClosed instead, and the one NDI witness close
+// (finalizeDrainAckStoppedSession) is the single documented Store.Get refresh.
+// The handle-only ApplyPatch(id, patch) form remains for callers that hold no
+// coherent Info snapshot.
+func (s *Store) ApplyPatchInfo(info Info, patch MetadataPatch) (Info, error) {
+	if len(patch) == 0 {
+		return info, nil
+	}
+	if err := s.ApplyPatch(info.ID, patch); err != nil {
+		return info, err
+	}
+	return info.ApplyPatch(patch), nil
+}
+
 // SetState heals a session to the given lifecycle state with a state_reason.
 // It replaces the canonical state-heal SetMetadataBatch(id, {state, state_reason})
 // in session_reconcile.go (healState / healStateWithRollback).

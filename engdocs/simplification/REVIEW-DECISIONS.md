@@ -214,6 +214,13 @@ _Live doc for the walkthrough (started 2026-07-07). Records Julian's decision + 
 
 ---
 
+## §D — Unblocked follow-on PRs (post-merge, dispatched)
+Julian: "create new PRs for the unblocked ones with label status/needs-review-auto." Follow-ons of MERGED items, buildable on current `main`, via graduate-hard pipeline → label-PR:
+- **S04b** — table-driven `Effective*Query` resolver + rehome Agent helpers (follow-on to merged S04 #4030). → ✅ **PR #4060** (approve-with-nits; byte-identity proven — zero golden churn, existing tests unedited; `-race` green).
+- **S09b** — table-driven Info codec (⚠ parity-gated) + `cmd/gc` sleep-reason migration (follow-on to merged S09 #4033). → ✅ **PR #4062** (approve-with-nits; Info codec BYTE-IDENTICAL parity held, `-race` + pre-push suite green; molecule_id readers repointed). Build correctly LEFT non-sleep_reason vocabularies (`state`/drain-reason/wake-blocker/drain-ack/`sleep_intent`) as-is — the spec over-enumerated; converting them would mislabel. Future **S09c**: fold the 2 other projection maps.
+- **S26b** — finish the typed trace surface: pool-cap rejection + remaining outcome strings (follow-on to merged S26 #4036). → ✅ **PR #4061** (approve-with-nits; behavior-preserving, `-race` green). Remaining: Group-C reason casts (candidate **S26c**) + 1 legitimate CLI-boundary dynamic conversion.
+- **S08-step0** — PURE DELETES ONLY (dead trace symbols + `LegacyArms`); wire-or-delete JUDGMENT stays HELD. → ✅ **PR #4059** (approve, clean; behavior-preserved, `-race` green; compiled with only the enumerated deletions = no missed refs). Optional follow-up deferred: 2 sibling dead consts (`TraceEvaluationDependencyBlocked`/`StorePartial`).
+
 ## Action queue (executed after the full walkthrough)
 
 ### A1 · S16 → PR (label `status/needs-review-auto`)

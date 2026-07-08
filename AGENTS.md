@@ -264,15 +264,15 @@ the canonical route, not the legacy route.
   must route through `worker.Handle` — enforced by
   `TestGCNonTestFilesStayOnWorkerBoundary` in
   `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
-  files from importing `session.NewManagerWithOptions(`,
-  `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
-  `cmd/gc`. The remaining manager-construction/direct-create bypasses
-  are split by category: `internal/api/session_manager.go` constructs
-  `session.Manager` values for API handlers, and
-  `internal/api/session_resolution.go` still calls
-  `mgr.CreateSession(...)` directly. Session creation goes through the
-  single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
-  point (`NewManagerWithOptions` is the sole Manager constructor). This
+  files from importing `session.NewManager(`, `worker.SessionHandle`,
+  `sessionlog`, and similar bypass paths in `cmd/gc`. The remaining
+  manager-construction/direct-create bypasses are split by category:
+  `internal/api/session_manager.go` constructs `session.Manager` values
+  for API handlers. (`internal/api/session_resolution.go`'s named-session
+  create was converted to the worker boundary — it now routes through
+  `worker.Handle.Create(ctx, worker.CreateModeStarted)` via
+  `newResolvedWorkerSessionHandle`, no longer calling
+  `mgr.CreateAliasedNamedWithTransportAndMetadata(...)` directly.) This
   list is not a sessionlog read-site inventory; stream and transcript
   readers in `internal/api/` and `internal/session/` still read
   session logs directly. Package-internal helpers in `internal/session/`

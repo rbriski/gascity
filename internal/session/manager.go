@@ -1916,6 +1916,37 @@ func (m *Manager) EnrichInfos(infos []Info) []Info {
 	return infos
 }
 
+// persistedStore wraps the manager's underlying store as the session-domain
+// front door for persisted reads (Store.ListAll / Store.GetPersistedResponse /
+// Store.RepairType). The wrapper holds the exact store value the manager uses,
+// so reads observe the same backing and caching as the manager's own store.List;
+// per-call construction of the one-field wrapper is safe (spec §7).
+func (m *Manager) persistedStore() *Store {
+	return NewStore(beads.SessionStore{Store: m.store})
+}
+
+// ListFromInfos filters a pre-loaded persisted Info feed by state and template
+// and applies the live runtime overlay to the survivors, returning the enriched
+// list. It is the typed pre-fed listing — the Info analog of the retired
+// ListFullFromBeads: callers that already hold the union Info feed (the CLI
+// session snapshot) reuse it instead of re-scanning the store. Filter-then-enrich
+// order matches ListFullFromBeads exactly (the persisted state filter runs on the
+// persisted projection, before the runtime stale-active downgrade), and the
+// IsSessionBeadOrRepairableInfo guard mirrors the old defensive filter.
+func (m *Manager) ListFromInfos(infos []Info, stateFilter, templateFilter string) []Info {
+	result := make([]Info, 0, len(infos))
+	for _, info := range infos {
+		if !IsSessionBeadOrRepairableInfo(info) {
+			continue
+		}
+		if !sessionMatchesFiltersInfo(info, stateFilter, templateFilter) {
+			continue
+		}
+		result = append(result, info)
+	}
+	return m.EnrichInfos(result)
+}
+
 // PersistSessionKey stores a provider resume key on an existing session when
 // the key is learned after creation (for example from transcript evidence).
 // Existing non-empty keys are preserved.

@@ -60,6 +60,15 @@ func (c *SessionCatalog) ListFullFromBeads(all []beads.Bead, stateFilter, templa
 	return c.manager.ListFullFromBeads(all, stateFilter, templateFilter)
 }
 
+// ListFromInfos filters a pre-loaded persisted Info feed by state and template
+// and applies the live runtime overlay to the survivors. It is the typed
+// pre-fed listing the CLI session snapshot feeds (the Info analog of the retired
+// ListFullFromBeads), keeping cmd/gc on the worker boundary while it lists off a
+// snapshot it already loaded.
+func (c *SessionCatalog) ListFromInfos(infos []SessionInfo, stateFilter, templateFilter string) []SessionInfo {
+	return c.manager.ListFromInfos(infos, stateFilter, templateFilter)
+}
+
 // SubmissionCapabilities reports whether the session can accept submit-style input.
 func (c *SessionCatalog) SubmissionCapabilities(id string) (SessionSubmissionCapabilities, error) {
 	return c.manager.SubmissionCapabilities(id)

@@ -66,3 +66,43 @@ func sessionReadModelRows(store beads.Store) ([]beads.Bead, []string, error) {
 	}
 	return nil, nil, err
 }
+
+// sessionReadModelListings is the typed read-model feed: the cache-first union
+// (session.Store.ListAllWithResponses) projected to (Info, PersistedResponse)
+// rows, wrapped in the same partial-result envelope as sessionReadModelRows. It
+// is the typed twin of sessionReadModelRows — the pre-joined pair per row means
+// the response builder never needs a bead index to re-attach the persisted
+// projection. The cache-first tier (#3939/#3941) is preserved inside
+// Store.ListAll: a warm cachedListStore serves the whole list with zero
+// store.List calls (pinned by TestSessionReadModelListingsWarmCacheZeroStoreList).
+func sessionReadModelListings(sessFront *session.Store) ([]session.ListedSession, []string, error) {
+	rows, err := sessFront.ListAllWithResponses(session.ListAllOptions{
+		Sort:       beads.SortCreatedDesc,
+		CacheFirst: true,
+	})
+	if err == nil {
+		return rows, nil, nil
+	}
+	if beads.IsPartialResult(err) && len(rows) > 0 {
+		return rows, []string{err.Error()}, nil
+	}
+	return nil, nil, err
+}
+
+// sessionReadModelInfos is the Info-only variant of sessionReadModelListings for
+// read-model consumers that do not need the persisted-response projection (the
+// status snapshot and the city-pending aggregate filter and probe by Info alone).
+// Same cache-first tier and partial-result envelope.
+func sessionReadModelInfos(sessFront *session.Store) ([]session.Info, []string, error) {
+	rows, err := sessFront.ListAll(session.ListAllOptions{
+		Sort:       beads.SortCreatedDesc,
+		CacheFirst: true,
+	})
+	if err == nil {
+		return rows, nil, nil
+	}
+	if beads.IsPartialResult(err) && len(rows) > 0 {
+		return rows, []string{err.Error()}, nil
+	}
+	return nil, nil, err
+}

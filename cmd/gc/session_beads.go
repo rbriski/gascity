@@ -644,6 +644,53 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 	}
 }
 
+// sessionAssignmentIdentifiersForConfigInfo is the session.Info form of
+// sessionAssignmentIdentifiersForConfig: it reads the identity/name/template
+// through typed Info fields (ConfiguredNamedSession, ConfiguredNamedIdentity,
+// SessionNameMetadata, Template) instead of cracking the raw bead, staying
+// byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
+func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
+	raw := sessionAssignmentIdentifierRawInfo(info)
+	if cfg == nil ||
+		!info.ConfiguredNamedSession ||
+		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
+		return compactSessionAssignmentIdentifiers(raw)
+	}
+
+	sessionName := strings.TrimSpace(info.SessionNameMetadata)
+	if sessionName == "" {
+		return compactSessionAssignmentIdentifiers(raw)
+	}
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	cityName := config.EffectiveCityName(cfg, "")
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) != sessionName {
+			continue
+		}
+		backingTemplate := cfg.NamedSessions[i].TemplateQualifiedName()
+		if template != "" && backingTemplate != "" && template != backingTemplate {
+			continue
+		}
+		raw = append(raw, identity)
+	}
+	return compactSessionAssignmentIdentifiers(raw)
+}
+
+func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
+	return []string{
+		strings.TrimSpace(info.ID),
+		strings.TrimSpace(info.SessionNameMetadata),
+		strings.TrimSpace(info.ConfiguredNamedIdentity),
+	}
+}
+
 func compactSessionAssignmentIdentifiers(raw []string) []string {
 	seen := make(map[string]struct{}, len(raw))
 	identifiers := make([]string, 0, len(raw))

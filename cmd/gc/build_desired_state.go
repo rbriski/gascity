@@ -2610,11 +2610,22 @@ func realizePoolDesiredSessions(
 			used[item.sessionBead.ID] = true
 		}
 		sessionBead := item.sessionBead
-		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sessionBead, item.request); err != nil {
+		// bindPoolSessionTriggerBead takes/returns typed session.Info (WI-5 W3).
+		// Project once at this boundary; the boundInfo it returns is consumed once
+		// the downstream resolveTemplateForSessionBead chain takes Info (W4), so for
+		// now mirror the applied patch onto the raw sessionBead copy the chain still
+		// reads. The projection here is the transitional boundary cost W4 retires.
+		if _, patch, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, session.InfoFromPersistedBead(sessionBead), item.request); err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sessionBead.ID, item.request.WorkBeadID, err) //nolint:errcheck
-		} else {
-			sessionBead = bound
-			item.sessionBead = bound
+		} else if len(patch) > 0 {
+			sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
+			if sessionBead.Metadata == nil {
+				sessionBead.Metadata = map[string]string{}
+			}
+			for key, value := range patch {
+				sessionBead.Metadata[key] = value
+			}
+			item.sessionBead = sessionBead
 		}
 		slot := item.slot
 		manualSession := isManualSessionBeadForAgent(sessionBead, cfgAgent)
@@ -2659,86 +2670,95 @@ func realizePoolDesiredSessions(
 	}
 }
 
-func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, sessionBead beads.Bead, request SessionRequest) (beads.Bead, error) {
+// computePoolTriggerBindingPatch is the pure key-diff at the heart of
+// bindPoolSessionTriggerBead: given the session's current typed Info, the
+// dispatch request, and the already-resolved trigger work dir, it returns the
+// session-metadata patch that reconciles the trigger/pack/workspace/work-dir
+// cluster to the request. Byte-identical to the raw inline diff the function
+// used to compute against sessionBead.Metadata; a dedicated oracle
+// (TestComputePoolTriggerBindingPatchMatchesRaw) pins it across the clear,
+// reassign, store-ref, pack, workspace, and workdir request shapes. An empty
+// patch means no change.
+func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, workDir string) session.MetadataPatch {
 	workBeadID := strings.TrimSpace(request.WorkBeadID)
-	if sessionBead.ID == "" {
-		return sessionBead, nil
-	}
-	metadata := map[string]string{}
+	metadata := session.MetadataPatch{}
 	if workBeadID == "" {
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey]) != "" {
+		// Clear: a re-pointed session drops its prior trigger/store-ref and, so it
+		// does not inherit the prior fork's "warm" provenance, its parent sid.
+		if strings.TrimSpace(info.TriggerBeadID) != "" {
 			metadata[beadmeta.TriggerBeadIDMetadataKey] = ""
 		}
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != "" {
+		if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
 			metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
 		}
-		// Q1: a re-pointed session is a new work item; it must not silently
-		// inherit the prior fork's "warm" provenance. Clear the parent sid so the
-		// selection layer must re-stamp it deterministically to stay warm.
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.BrainParentSIDMetadataKey]) != "" {
+		if strings.TrimSpace(info.BrainParentSID) != "" {
 			metadata[beadmeta.BrainParentSIDMetadataKey] = ""
 		}
-		if len(metadata) == 0 {
-			return sessionBead, nil
-		}
-		if bp != nil && bp.beadStore != nil {
-			if err := bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
-				return sessionBead, err
-			}
-		}
-		sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
-		for key, value := range metadata {
-			sessionBead.Metadata[key] = value
-		}
-		return sessionBead, nil
+		return metadata
 	}
-	oldWorkBeadID := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	oldWorkBeadID := strings.TrimSpace(info.TriggerBeadID)
 	if oldWorkBeadID != workBeadID {
 		metadata[beadmeta.TriggerBeadIDMetadataKey] = workBeadID
-		// Q1: on a genuine reassign to a different work bead, reconcile the fork
-		// parent to the new work's value (set when the new bead carries one,
-		// clear otherwise) so a re-pointed session never inherits the old fork.
+		// On a genuine reassign to a different work bead, reconcile the fork parent
+		// to the new work's value (set when the new bead carries one, clear
+		// otherwise) so a re-pointed session never inherits the old fork.
 		newParentSID := strings.TrimSpace(request.BrainParentSID)
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.BrainParentSIDMetadataKey]) != newParentSID {
+		if strings.TrimSpace(info.BrainParentSID) != newParentSID {
 			metadata[beadmeta.BrainParentSIDMetadataKey] = newParentSID
 		}
 	}
 	workStoreRef := strings.TrimSpace(request.WorkStoreRef)
-	if workStoreRef != "" && strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != workStoreRef {
+	if workStoreRef != "" && strings.TrimSpace(info.TriggerBeadStoreRef) != workStoreRef {
 		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = workStoreRef
-	} else if workStoreRef == "" && oldWorkBeadID != workBeadID && strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != "" {
+	} else if workStoreRef == "" && oldWorkBeadID != workBeadID && strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
 		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
 	}
-	if pack := strings.TrimSpace(request.WorkPack); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackMetadataKey]) != pack {
+	if pack := strings.TrimSpace(request.WorkPack); strings.TrimSpace(info.Pack) != pack {
 		metadata[beadmeta.PackMetadataKey] = pack
 	}
-	if workspace := packWorkspaceSlug(request); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackWorkspaceMetadataKey]) != workspace {
+	if workspace := packWorkspaceSlug(request); strings.TrimSpace(info.PackWorkspace) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+	if workDir != "" {
+		if strings.TrimSpace(info.WorkDirCanonical) != workDir {
 			metadata[beadmeta.WorkDirMetadataKey] = workDir
 		}
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
+		if strings.TrimSpace(info.WorkDir) != workDir {
 			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
 		}
 	}
-	if len(metadata) == 0 {
-		return sessionBead, nil
+	return metadata
+}
+
+// bindPoolSessionTriggerBead reconciles a pool session bead's trigger/pack/
+// workspace/work-dir cluster to its dispatch request. The SESSION side is typed
+// session.Info (WI-5 W3): it computes the byte-identical key diff via
+// computePoolTriggerBindingPatch and — the write-routing fix — persists it
+// through the session front door (Store.ApplyPatchInfo → SetMetadataBatch). The
+// persisted bead write is byte-identical to the beadStore.Update it replaced
+// (same sorted --set-metadata args); only the FAILURE-path error text changes,
+// now carrying the front door's wrap ("setting metadata on..." vs "updating
+// bead..."). The patch folds onto the returned Info in the same step. It
+// returns the bound Info plus the applied patch; the caller mirrors the patch
+// onto its raw bead copy for the still-raw resolveTemplateForSessionBead chain
+// (retired in W4). A dry-run build with no store folds locally without a write.
+func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, session.MetadataPatch, error) {
+	if info.ID == "" {
+		return info, nil, nil
 	}
-	if bp != nil && bp.beadStore != nil {
-		if err := bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
-			return sessionBead, err
-		}
+	workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	patch := computePoolTriggerBindingPatch(info, request, workDir)
+	if len(patch) == 0 {
+		return info, nil, nil
 	}
-	sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
-	if sessionBead.Metadata == nil {
-		sessionBead.Metadata = map[string]string{}
+	if bp == nil || bp.beadStore == nil {
+		return info.ApplyPatch(patch), patch, nil
 	}
-	for key, value := range metadata {
-		sessionBead.Metadata[key] = value
+	boundInfo, err := sessionFrontDoor(bp.beadStore).ApplyPatchInfo(info, patch)
+	if err != nil {
+		return info, nil, err
 	}
-	return sessionBead, nil
+	return boundInfo, patch, nil
 }
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
@@ -3895,6 +3915,31 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 	return false
 }
 
+// sessionBeadHasAssignedWorkInfo is the per-parameter split of
+// sessionBeadHasAssignedWork: the SESSION side reads typed Info fields (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays
+// raw (ClassWork — Bead is the domain object). Byte-identical to the raw form,
+// pinned by TestSessionBeadHasAssignedWorkInfoMatchesRaw.
+//
+// WI-5 W4: reusablePoolSessionBead (the raw-bead reuse predicate at ~:3730) is the
+// production call site; it migrates onto this Info form when that predicate moves
+// to OpenInfos(). Until then this twin's only caller is its oracle.
+func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
+			return true
+		}
+		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
+			return true
+		}
+	}
+	return false
+}
+
 // sessionAssigneeMatch is an entry in the assignee-identity index: the session
 // a work bead's Assignee resolves to, or ambiguous=true when more than one open
 // session claims the same identity (a transient duplicate-alias state). An
@@ -3903,32 +3948,33 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 // fail-on-conflict posture (internal/session.ResolveSession) in a non-fatal
 // form.
 type sessionAssigneeMatch struct {
-	bead      beads.Bead
+	info      session.Info
 	ambiguous bool
 }
 
 // buildSessionAssigneeIndex maps every assignment identity an open session can
-// be claimed under to that session, computed once per reconcile. Open() copies
-// the session slice, so resolving per work bead would otherwise cost
-// O(workBeads × openSessions). Identities come from sessionBeadAssigneeIdentities
+// be claimed under to that session, computed once per reconcile. OpenInfos()
+// copies the session slice, so resolving per work bead would otherwise cost
+// O(workBeads × openSessions). Identities come from sessionBeadAssigneeIdentitiesInfo
 // — bead ID, session_name, configured named identity, current alias, AND prior
 // aliases (alias_history) — so a bead assigned under a since-rotated pool alias
 // still resolves. An identity claimed by two different sessions is marked
-// ambiguous.
+// ambiguous. The SESSION side is typed session.Info (WI-5 W3): OpenInfos()[i] is
+// byte-identical to the Info projection of Open()[i].
 func buildSessionAssigneeIndex(sessionBeads *sessionBeadSnapshot) map[string]sessionAssigneeMatch {
 	index := make(map[string]sessionAssigneeMatch)
 	if sessionBeads == nil {
 		return index
 	}
-	for _, sb := range sessionBeads.Open() {
-		for _, identity := range sessionBeadAssigneeIdentities(sb) {
+	for _, sb := range sessionBeads.OpenInfos() {
+		for _, identity := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			if existing, ok := index[identity]; ok {
-				if !existing.ambiguous && existing.bead.ID != sb.ID {
+				if !existing.ambiguous && existing.info.ID != sb.ID {
 					index[identity] = sessionAssigneeMatch{ambiguous: true}
 				}
 				continue
 			}
-			index[identity] = sessionAssigneeMatch{bead: sb}
+			index[identity] = sessionAssigneeMatch{info: sb}
 		}
 	}
 	return index
@@ -3942,6 +3988,19 @@ func buildSessionAssigneeIndex(sessionBeads *sessionBeadSnapshot) map[string]ses
 func sessionBeadIdentifier(sb beads.Bead) string {
 	for _, key := range []string{"session_name", "alias", "configured_named_identity"} {
 		if v := strings.TrimSpace(sb.Metadata[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// sessionBeadIdentifierInfo is the session.Info form of sessionBeadIdentifier:
+// it reads the RAW session_name (Info.SessionNameMetadata, no sessionNameFor
+// fallback), then alias, then configured named identity — byte-identical to the
+// raw form (oracle-pinned).
+func sessionBeadIdentifierInfo(info session.Info) string {
+	for _, v := range []string{info.SessionNameMetadata, info.Alias, info.ConfiguredNamedIdentity} {
+		if v := strings.TrimSpace(v); v != "" {
 			return v
 		}
 	}
@@ -3987,9 +4046,9 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		if !ok || match.ambiguous {
 			continue
 		}
-		sb := match.bead
-		sessionName := sessionBeadIdentifier(sb)
-		workDir := strings.TrimSpace(sb.Metadata["work_dir"])
+		sbInfo := match.info
+		sessionName := sessionBeadIdentifierInfo(sbInfo)
+		workDir := strings.TrimSpace(sbInfo.WorkDir)
 		if sessionName == "" && workDir == "" {
 			continue
 		}

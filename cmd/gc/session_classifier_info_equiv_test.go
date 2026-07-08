@@ -787,6 +787,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionBeadAgentName":         {sessionBeadAgentName, sessionBeadAgentNameInfo},
 		"namedSessionIdentity":         {namedSessionIdentity, namedSessionIdentityInfo},
 		"stampedPoolQualifiedIdentity": {stampedPoolQualifiedIdentity, stampedPoolQualifiedIdentityInfo},
+		"sessionBeadIdentifier":        {sessionBeadIdentifier, sessionBeadIdentifierInfo},
 		// generation has no named classifier — it is read inline via Atoi/TrimSpace
 		// in the drain/wake path — so this pins the raw codec mirror directly.
 		"sessionGeneration": {
@@ -987,6 +988,34 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		},
 	}
 
+	// assigneeCfg declares a "worker" agent plus a "mayor" named session backed by
+	// a "mayor" agent so both the plain-template and named-session-fallback arms of
+	// sessionAssignmentIdentifiersForConfig(Info) are exercised across fixtures,
+	// and sessionAgentConfig(Info)'s findAgentByTemplate resolves for the worker/
+	// mayor templates rather than only the nil-agent fallthrough.
+	assigneeCfg := &config.City{
+		Agents:        []config.Agent{{Name: "worker"}, {Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor"}},
+	}
+	cfgSliceChecks := map[string]struct {
+		bead func(beads.Bead) []string
+		info func(session.Info) []string
+	}{
+		"sessionAssignmentIdentifiersForConfig": {
+			func(b beads.Bead) []string { return sessionAssignmentIdentifiersForConfig(b, assigneeCfg) },
+			func(i session.Info) []string { return sessionAssignmentIdentifiersForConfigInfo(i, assigneeCfg) },
+		},
+	}
+	cfgAgentChecks := map[string]struct {
+		bead func(beads.Bead) *config.Agent
+		info func(session.Info) *config.Agent
+	}{
+		"sessionAgentConfig": {
+			func(b beads.Bead) *config.Agent { return sessionAgentConfig(assigneeCfg, b) },
+			func(i session.Info) *config.Agent { return sessionAgentConfigInfo(assigneeCfg, i) },
+		},
+	}
+
 	const leaseStartupTimeout = 90 * time.Second
 	// leaseCfg resolves template "worker" to a live (non-suspended) agent so
 	// pendingCreateSessionStillLeased's agent-resolved tail (`return !agent.Suspended`)
@@ -1141,6 +1170,16 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			}
 			for name, c := range sliceChecks {
 				if got, want := c.info(info), c.bead(b); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s: info=%v bead=%v", name, got, want)
+				}
+			}
+			for name, c := range cfgSliceChecks {
+				if got, want := c.info(info), c.bead(b); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s: info=%v bead=%v", name, got, want)
+				}
+			}
+			for name, c := range cfgAgentChecks {
+				if got, want := c.info(info), c.bead(b); got != want {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
 				}
 			}

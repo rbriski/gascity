@@ -256,7 +256,7 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 		t.Fatalf("Create city work: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, session)
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Create rig work: %v", err)
 	}
-	has, err = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, session)
+	has, err = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatalf("mark rig work in progress: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, session)
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatal("city-scoped session must see its rig-store work across stores (close/drain guard)")
 	}
 
-	awake, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, session)
+	awake, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasAwakeAssignedWorkForReachableStore: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatal("city-scoped session's in-progress rig-store work must keep it awake (recycle guard)")
 	}
 
-	bead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, session)
+	bead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("firstOpenAssignedWorkBeadForReachableStore: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestSessionHasOpenAssignedWorkMatchesConfiguredNamedSessionRuntimeFallback(
 		t.Fatalf("Create named work: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore("", cfg, store, nil, session)
+	has, err := sessionHasOpenAssignedWorkForReachableStore("", cfg, store, nil, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestSessionHasOpenAssignedWorkIncludesReachableAssignedWisp(t *testing.T) {
 		t.Fatalf("mark rig wisp in progress: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, session)
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, sessionpkg.InfoFromPersistedBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}

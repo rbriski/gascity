@@ -320,35 +320,23 @@ var waitListAPIClient = func(cityPath string) (*api.Client, string) {
 // store leg for connection/cache errors (rung 3). Exactly one route=... line per
 // exit path (gated on GC_DEBUG).
 func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "wait list"
-	if c != nil {
-		cr, err := c.ListWaits(stateFilter, sessionFilter)
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			emitWaitListPartialNotice(stderr, cr.Body)
-			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
-		}
-		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
-		// serve via the generic gc:wait beads endpoint instead.
-		if api.IsRouteMissing(err) {
-			lr, lerr := c.ListWaitsViaBeads()
-			if lerr == nil {
-				logRoute(stderr, cmdName, "api-legacy", "route-missing")
-				emitWaitListPartialNotice(stderr, lr.Body)
-				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
-			}
-			err = lerr
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]beads.Bead]
+	return routeRead(c, "wait list", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListBeads(api.ListBeadsOpts{
+				Label: sessionpkg.WaitBeadLabel,
+				Limit: 1000,
+			})
+			return err
+		},
+		func() int {
+			return renderWaitListFromAPI(cityPath, cr, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+		},
+		func() int {
+			return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+		},
+	)
 }
 
 // emitWaitListPartialNotice surfaces a degraded (partial) wait read on stderr

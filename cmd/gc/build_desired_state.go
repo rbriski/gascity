@@ -3190,6 +3190,29 @@ func canonicalSessionIdentityWithConfig(cfg *config.City, cfgAgent *config.Agent
 	return instanceAgent, qualifiedInstance
 }
 
+// canonicalSessionIdentityWithConfigInfo is the session.Info form of
+// canonicalSessionIdentityWithConfig: it resolves the (agent, qualifiedName) pair
+// from the typed projection, deferring the pool-slot lookup to
+// existingPoolSlotWithConfigInfo. Byte-identical to the raw form, oracle-pinned by
+// TestCanonicalSessionIdentityWithConfigInfoMatchesRaw.
+func canonicalSessionIdentityWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) (*config.Agent, string) {
+	if cfgAgent == nil {
+		return nil, ""
+	}
+	if isNamedSessionInfo(info) {
+		return cfgAgent, cfgAgent.QualifiedName()
+	}
+	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return cfgAgent, cfgAgent.QualifiedName()
+	}
+	slot := existingPoolSlotWithConfigInfo(cfg, cfgAgent, info)
+	if slot <= 0 {
+		return cfgAgent, cfgAgent.QualifiedName()
+	}
+	instanceAgent, qualifiedInstance, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+	return instanceAgent, qualifiedInstance
+}
+
 func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []config.Rig, sessionBead beads.Bead) string {
 	if cfgAgent == nil {
 		return ""
@@ -3219,6 +3242,49 @@ func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []co
 		*cfgAgent,
 		rigs,
 		strings.TrimSpace(sessionBead.Metadata["alias"]),
+		explicitName,
+	)
+	if qualifiedName != "" {
+		return qualifiedName
+	}
+	return cfgAgent.QualifiedName()
+}
+
+// sessionBeadQualifiedNameInfo is the session.Info form of
+// sessionBeadQualifiedName: it recovers a manual/pooled session's persisted
+// qualified identity from the typed projection (agent_name via
+// sessionBeadAgentNameInfo, session_name_explicit, alias, raw session_name)
+// instead of cracking the raw bead. Byte-identical to the raw form, oracle-pinned
+// by TestSessionBeadQualifiedNameInfoMatchesRaw.
+func sessionBeadQualifiedNameInfo(cityPath string, cfgAgent *config.Agent, rigs []config.Rig, info session.Info) string {
+	if cfgAgent == nil {
+		return ""
+	}
+	persistedAgentName := normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentNameInfo(info))
+	if persistedAgentName != "" {
+		if !cfgAgent.SupportsMultipleSessions() || persistedAgentName != cfgAgent.QualifiedName() {
+			return persistedAgentName
+		}
+	}
+	explicitName := ""
+	if strings.TrimSpace(info.SessionNameExplicit) == boolMetadata(true) {
+		explicitName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	// Legacy aliasless pooled beads predate agent_name/session_name_explicit
+	// backfills. Their persisted session_name is the only stable concrete
+	// identity we can recover during rediscovery, even when it used the
+	// historical s-<id> form.
+	if explicitName == "" && strings.TrimSpace(info.Alias) == "" && persistedAgentName == cfgAgent.QualifiedName() && cfgAgent.SupportsMultipleSessions() {
+		explicitName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	if explicitName == "" && strings.TrimSpace(info.Alias) == "" && persistedAgentName == "" && cfgAgent.SupportsMultipleSessions() {
+		explicitName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	qualifiedName := workdirutil.SessionQualifiedName(
+		cityPath,
+		*cfgAgent,
+		rigs,
+		strings.TrimSpace(info.Alias),
 		explicitName,
 	)
 	if qualifiedName != "" {
@@ -3415,6 +3481,74 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 	}
 	if sessionBead.Metadata["pool_slot"] != "" {
 		if slot, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata["pool_slot"])); err == nil && slot > 0 {
+			if agentSlot > 0 && agentSlot != slot && usablePoolIdentitySlot(cfgAgent, agentSlot) {
+				return agentSlot
+			}
+			if !storedTemplateMatches && agentSlot == 0 && aliasSlot == 0 {
+				return 0
+			}
+			if !inBoundsPoolSlot(cfgAgent, slot) {
+				if usablePoolIdentitySlot(cfgAgent, agentSlot) {
+					return agentSlot
+				}
+				if usablePoolIdentitySlot(cfgAgent, aliasSlot) {
+					return aliasSlot
+				}
+				if usablePoolIdentitySlot(cfgAgent, sessionNameSlot) {
+					return sessionNameSlot
+				}
+				if poolSlotHasConfiguredBound(cfgAgent) {
+					return 0
+				}
+			}
+			return slot
+		}
+	}
+	if poolSlotHasConfiguredBound(cfgAgent) {
+		if !usablePoolIdentitySlot(cfgAgent, agentSlot) {
+			agentSlot = 0
+		}
+		if !usablePoolIdentitySlot(cfgAgent, aliasSlot) {
+			aliasSlot = 0
+		}
+		if !usablePoolIdentitySlot(cfgAgent, sessionNameSlot) {
+			sessionNameSlot = 0
+		}
+	}
+	if agentSlot > 0 {
+		return agentSlot
+	}
+	if aliasSlot > 0 {
+		return aliasSlot
+	}
+	if sessionNameSlot > 0 {
+		return sessionNameSlot
+	}
+	return 0
+}
+
+// existingPoolSlotWithConfigInfo is the session.Info form of
+// existingPoolSlotWithConfig: it resolves a pool bead's persisted slot from the
+// typed projection (stored template via sessionBeadStoredTemplateInfo, agent_name
+// via sessionBeadAgentNameInfo, alias, session_name, pool_slot) rather than the
+// raw bead. Byte-identical to the raw form, oracle-pinned by
+// TestExistingPoolSlotWithConfigInfoMatchesRaw.
+func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	if cfgAgent == nil {
+		return 0
+	}
+	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
+	sessionNameSlot := 0
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
+	}
+	if info.PoolSlot != "" {
+		if slot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); err == nil && slot > 0 {
 			if agentSlot > 0 && agentSlot != slot && usablePoolIdentitySlot(cfgAgent, agentSlot) {
 				return agentSlot
 			}

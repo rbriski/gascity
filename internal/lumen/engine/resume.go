@@ -45,6 +45,12 @@ func (d *driver) maybeSnapshot(force bool) error {
 		return nil
 	}
 
+	// Crash boundary: a snapshot is due but not yet written (no snapshots row, no
+	// snapshot.anchored event). Resume folds from the prior anchor, or genesis.
+	if err := d.crashAt(crashBeforeSnapshot, d.streamID); err != nil {
+		return err
+	}
+
 	st := d.st()
 	blob, err := st.MarshalSnapshot()
 	if err != nil {
@@ -108,7 +114,9 @@ func (d *driver) maybeSnapshot(force bool) error {
 	}
 	d.head = anchorSeq
 	d.sinceSnapshot = 0
-	return nil
+	// Crash boundary: the snapshot.anchored event and its state blob are durable —
+	// resume loads this anchor and folds only the tail after it.
+	return d.crashAt(crashAfterSnapshot, d.streamID)
 }
 
 // Resume restarts a crashed run of doc on streamID and drives it to completion

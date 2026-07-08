@@ -117,6 +117,11 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	if err != nil {
 		return RunResult{}, fmt.Errorf("lumen: acquire writer lease %q: %w", streamID, err)
 	}
+	// NOTE (crash-harness fidelity): an injected crash (crashHook error) unwinds
+	// through this defer and RELEASES the lease, whereas a real SIGKILL leaves it
+	// held until leaseTTL (~30s). That difference is behaviorally invisible to
+	// resume: AcquireWriterLease steals a same-holder row regardless of expiry
+	// (lease.go), so resume re-acquires as leaseHolder either way.
 	defer func() { _ = store.ReleaseWriterLease(ctx, lease) }()
 
 	reducer := lumenReducer{}
@@ -143,6 +148,11 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		return RunResult{}, err
 	}
 
+	// Crash boundary: after run.started, before the first unit (test-only, inert).
+	if err := d.crashAt(crashAfterRunStarted, streamID); err != nil {
+		return RunResult{}, err
+	}
+
 	nodeOutputs := make(map[string]string)
 	scope := baseScope(input)
 
@@ -159,6 +169,10 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	// Seal snapshot: anchor the final state before run.closed so a resume of a
 	// sealed stream loads the whole run from one snapshot plus the closed marker.
 	if err := d.maybeSnapshot(true); err != nil {
+		return RunResult{}, err
+	}
+	// Crash boundary: work done and sealed-snapshot anchored, before run.closed.
+	if err := d.crashAt(crashBeforeRunClosed, streamID); err != nil {
 		return RunResult{}, err
 	}
 	if err := d.append(EventRunClosed, streamID+":run:closed", runClosedPayload{Outcome: runOutcome}); err != nil {
@@ -232,6 +246,12 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		return err
 	}
 
+	// Crash boundary (a): after the decide phase picked this unit, before its
+	// first append (node.activated). Test-only; inert in production.
+	if err := d.crashAt(crashBeforeActivate, u.activation); err != nil {
+		return err
+	}
+
 	if err := d.appendActivated(u); err != nil {
 		return err
 	}
@@ -244,7 +264,7 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		if err := d.appendSettled(u.activation, OutcomeSkipped, "", "skipped: upstream dependency did not pass"); err != nil {
 			return err
 		}
-		return nil
+		return d.crashAt(crashAfterSettle, u.activation) // boundary (d)
 	}
 
 	// Drain-aggregate skip-cascade (N-1): a scatter aggregate or gather whose
@@ -257,19 +277,26 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		if err := d.appendSettled(u.activation, OutcomeSkipped, "", "skipped: every drain member skipped (nothing ran)"); err != nil {
 			return err
 		}
-		return nil
+		return d.crashAt(crashAfterSettle, u.activation) // boundary (d)
 	}
 
+	var runErr error
 	switch u.kind {
 	case unitLeaf:
-		return d.runLeaf(u, scope, nodeOutputs)
+		runErr = d.runLeaf(u, scope, nodeOutputs)
 	case unitScatterAgg:
-		return d.runScatter(u, nodeOutputs)
+		runErr = d.runScatter(u, nodeOutputs)
 	case unitGather:
-		return d.runGather(u, scope, nodeOutputs)
+		runErr = d.runGather(u, scope, nodeOutputs)
 	default:
-		return fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
+		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
+	if runErr != nil {
+		return runErr
+	}
+	// Crash boundary (d): after the unit's outcome.settled committed, before the
+	// next unit. Test-only; inert in production.
+	return d.crashAt(crashAfterSettle, u.activation)
 }
 
 // blocked reports whether any of a unit's blocking `after` deps settled with a
@@ -311,9 +338,18 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 	switch u.leaf.kind {
 	case ir.NodeExec:
 		script := interpolate(u.leaf.script, scope)
+		// Crash boundary (b): after node.activated, before the shell runs.
+		if err := d.crashAt(crashBeforeAct, u.activation); err != nil {
+			return err
+		}
 		stdout, _, exitCode, runErr := exechost.Run(d.ctx, u.leaf.program, script, u.leaf.cwd, u.leaf.env)
 		if runErr != nil {
 			return fmt.Errorf("lumen: exec %q: %w", u.nodeID, runErr)
+		}
+		// Crash boundary (c): after the shell ran, before outcome.settled. On
+		// resume the exec re-runs (at-least-once) — it carries no effect record.
+		if err := d.crashAt(crashAfterAct, u.activation); err != nil {
+			return err
 		}
 		output := strings.TrimRight(stdout, "\n")
 		if err := d.appendSettled(u.activation, outcomeForExit(exitCode, u.leaf.passCodes), output, ""); err != nil {
@@ -385,6 +421,13 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 		return err
 	}
 
+	// Crash boundary (b): after effect.scheduled, before the agent runs. On resume
+	// the scheduled-but-unsettled effect settles FAILED without re-invoking the
+	// host — the at-most-once contract (host called 0 times across this crash).
+	if err := d.crashAt(crashBeforeAct, u.activation); err != nil {
+		return err
+	}
+
 	result, runErr := d.host.RunDo(d.ctx, enginehost.DoRequest{
 		RunID:      d.streamID,
 		NodeID:     u.nodeID,
@@ -393,6 +436,12 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 		Prompt:     prompt,
 		AgentRef:   u.leaf.agentRef,
 	})
+	// Crash boundary (c): the agent ran (host called exactly once) but its
+	// settlement is not yet recorded. On resume the effect settles FAILED without
+	// re-invoking the host — at-most-once (host called ≤1 across this crash).
+	if err := d.crashAt(crashAfterAct, u.activation); err != nil {
+		return err
+	}
 	nodeOutcome, effResult, detail, out, session := foldDoResult(result, runErr)
 
 	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
@@ -464,6 +513,11 @@ func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 // members (L2): those never settle, so a fold checkpoint over them is
 // meaningless — the exclusion happens at lowering (scatterMembers).
 func (d *driver) runGather(u planUnit, scope, nodeOutputs map[string]string) error {
+	// NOTE (crash-harness fidelity): the in-process seam fires only BETWEEN these
+	// appends, but a real kill can truncate the head-of-line node.decision suffix
+	// mid-loop. Convergence composes per-event: resume re-emits these checkpoints in
+	// order and the append dedup short-circuit (append, "Idempotent replay") skips
+	// the ones that committed and lands the missing tail, so a partial suffix heals.
 	for _, m := range u.gatherMembers {
 		if err := d.append(EventNodeDecision, d.streamID+":"+u.activation+":ckpt:"+m, nodeDecisionPayload{
 			Activation:     u.activation,

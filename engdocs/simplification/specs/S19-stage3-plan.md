@@ -98,21 +98,25 @@ Status:
   pin (3d).
 - **[RESOLVED in plan] Per-tick equality unreachable** → replay/window
   comparator (3b) and "zero divergences that survive replay" bar (3c).
-- **[NEEDS JULIAN — Q1] primedEnv observability**: this plan excludes the
-  priming family from real-city shadow. The alternative (a shadow-only,
-  batched, read-only env probe as a declared exception to "no new probes")
-  buys Stage-3 coverage at probe cost. Decide before the harness PR.
-- **[NEEDS JULIAN — Q2] Flag substrate vs D7**: the kill-switch below uses a
-  per-city durable bead-metadata key. Spec D7 says "NO config flag" (it was
-  aimed at `config.Agent`/genschema churn, which this avoids), and AGENTS.md
-  bans *status files* (this is intent, not liveness — but the spec text must
-  be amended to say so explicitly). One of D7 or this plan must be amended in
-  writing before the flip PR.
-- **[NEEDS JULIAN — Q3] Divergence event type**: stay counters-only through
-  Stage 5 (spec-compliant, chosen here) or amend §8/R3 now.
+- **[RESOLVED — Q1: EXCLUDE] primedEnv observability** (Julian, 2026-07-08):
+  the priming action family is EXCLUDED from real-city shadow in Stage 3 (no
+  new env probe). Priming is fixture/crash-fake validated in Stage 3; real-city
+  priming coverage begins at Stage 4.
+- **[RESOLVED — Q2: AMEND D7] Flag substrate** (Julian, 2026-07-08): the
+  per-city durable intent-metadata kill-switch is APPROVED. **D7 AMENDMENT:**
+  D7's "no config flag / no status file" is scoped to `config.Agent`/genschema
+  flags and stale-on-crash *liveness* status files; a **per-city durable
+  intent-metadata kill-switch, read fail-closed**, is explicitly PERMITTED — it
+  is intent (not liveness), survives crash correctly, and adds no genschema
+  churn. (Reflect this amendment in the S19 spec's D7 text.)
+- **[RESOLVED — Q3: COUNTERS-ONLY] Divergence signal** (Julian, 2026-07-08):
+  counters-only through Stage 5, no new event type. §8/R3 unchanged.
 
-Stage 3 implementation may start once Q1/Q2 have answers; Q3 can trail until
-the flip PR.
+**All blocking gaps resolved.** Stage-3 **shadow-harness** implementation
+(3a–3c: build facts, in-process recorder + state-diff oracle + replay
+comparator, comparator self-tests) is UNBLOCKED and may start. The **flip**
+(3d double-write) remains gated on: harness soak meeting the evidence-based bar
+(3c) + a SEPARATE flip PR + a final explicit go.
 
 ---
 

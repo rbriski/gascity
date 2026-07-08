@@ -862,16 +862,9 @@ func sessionViewLastActive(lastActive string) string {
 // through the supervisor API when a controller is up and falls back to the
 // local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeSessionList("", stateFilter, templateFilter, remoteC, "", jsonOutput, stdout, stderr)
-	}
-	c, reason := sessionListAPIClient(cityPath)
-	return routeSessionList(cityPath, stateFilter, templateFilter, c, reason, jsonOutput, stdout, stderr)
+	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)
+	})
 }
 
 // sortSessionsCreatedDesc orders a session listing newest-first, in place. It is
@@ -2155,16 +2148,9 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 // through the supervisor API when a controller is up and falls back to the
 // local runtime provider otherwise.
 func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeSessionPeek("", args[0], lines, remoteC, "", jsonOutput, stdout, stderr)
-	}
-	c, reason := sessionPeekAPIClient(cityPath)
-	return routeSessionPeek(cityPath, args[0], lines, c, reason, jsonOutput, stdout, stderr)
+	return routeReadCmd("session peek", stderr, sessionPeekAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeSessionPeek(cityPath, args[0], lines, c, nilReason, jsonOutput, stdout, stderr)
+	})
 }
 
 // doSessionPeekFallback is the direct runtime-provider path for

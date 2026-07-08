@@ -2161,7 +2161,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
 	phaseStart := time.Now()
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.Open(), result, rigStores)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
@@ -2701,7 +2701,7 @@ func sweepUndesiredPoolSessionBeads(
 		return 0
 	}
 	startupTimeout := cfg.Session.StartupTimeoutDuration()
-	var candidates []beads.Bead
+	var candidates []sessionpkg.Info
 	for _, info := range sessionBeads.OpenInfos() {
 		if info.Closed {
 			continue
@@ -2792,15 +2792,10 @@ func sweepUndesiredPoolSessionBeads(
 		if running, err := poolSessionBeadRuntimeRunningInfo(info, sp, processNames); err == nil && running {
 			continue
 		}
-		// The candidate is threaded raw into GCSweepSessionBeads (a store close
-		// op, rule 3); recover the source bead by ID from the same snapshot. The
-		// projection is index-stable (OpenInfos()[i] == InfoFromPersistedBead(
-		// Open()[i])), so FindByID(info.ID) returns exactly this info's bead.
-		bead, ok := sessionBeads.FindByID(info.ID)
-		if !ok {
-			continue
-		}
-		candidates = append(candidates, bead)
+		// The candidate is a session-class close op; GCSweepSessionBeads takes the
+		// typed session.Info directly and routes the close through the session
+		// front door.
+		candidates = append(candidates, info)
 	}
 	return len(GCSweepSessionBeads(store.Store, rigStores, candidates))
 }

@@ -38,6 +38,19 @@ func w4OracleSessionBeads() []beads.Bead {
 		mk("ga-slot-alias", map[string]string{"template": "worker", "session_name": "worker-3", "pool_slot": "3", "alias": "worker-3"}),
 		mk("ga-slot-mismatch", map[string]string{"template": "worker", "session_name": "worker-4", "pool_slot": "9", "agent_name": "worker-2"}),
 		mk("ga-explicit", map[string]string{"template": "worker", "session_name": "chosen", "session_name_explicit": "true"}),
+		// agent:<name> label fallback: no agent_name metadata, so the identity is
+		// recovered from the agent: label (pins the label arm of
+		// sessionBeadAgentName(Info) that the qualified-name/slot chains read).
+		{
+			ID: "ga-agentlabel", Type: session.BeadType, Status: "open",
+			Labels:   []string{session.LabelSession, "agent:worker-7"},
+			Metadata: map[string]string{"template": "worker", "session_name": "worker-7", "pool_slot": "7"},
+		},
+		// Legacy aliasless pooled bead: agent_name equals the agent's own qualified
+		// name, with a session_name but no alias/explicit — sessionBeadQualifiedName
+		// recovers session_name as the concrete identity via the
+		// SupportsMultipleSessions legacy branch.
+		mk("ga-legacy-aliasless", map[string]string{"template": "worker", "agent_name": "worker", "session_name": "worker-legacy"}),
 	}
 	return append(oracleSessionBeadShapes(), extra...)
 }

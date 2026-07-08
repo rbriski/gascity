@@ -48,6 +48,39 @@ func closeSessionBeadIfUnassigned(
 	return closeBead(store, session.ID, reason, now, stderr)
 }
 
+// closeSessionInfoIfUnassigned is the session.Info form of
+// closeSessionBeadIfUnassigned: it closes the session identified by info only when
+// the live cross-store query confirms no open or in-progress work is assigned to
+// it. The identity/close reads route through the typed projection and the session
+// front door (closeBead / closeFailedCreateBead, which funnel writes through
+// sessionFrontDoor and run the extmsg/orphaned-work release cascade). Byte-
+// identical to the raw form for the GCSweep close op.
+func closeSessionInfoIfUnassigned(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	cfg *config.City,
+	info sessionpkg.Info,
+	reason string,
+	now time.Time,
+	stderr io.Writer,
+) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(store, rigStores, info, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
+		return false
+	}
+	if hasAssignedWork {
+		return false
+	}
+	if isFailedCreateSessionInfo(info) {
+		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+	}
+	return closeBead(store, info.ID, reason, now, stderr)
+}
+
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
 // the live store scope its configured agent can query has no open or
 // in-progress work assigned to the session. It returns whether the close

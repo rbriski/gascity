@@ -535,23 +535,16 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 // escape hatch is set, or the API returns a fallbackable error. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "rig list"
-	if c != nil {
-		cr, err := c.ListRigs()
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, jsonOutput, stdout, stderr)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doRigList(fsys.OSFS{}, cityPath, jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]api.RigView]
+	return routeRead(c, "rig list", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListRigs()
+			return err
+		},
+		func() int { return renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, jsonOutput, stdout, stderr) },
+		func() int { return doRigList(fsys.OSFS{}, cityPath, jsonOutput, stdout, stderr) },
+	)
 }
 
 // renderRigListFromAPI formats the API-sourced rig list to match doRigList

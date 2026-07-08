@@ -727,23 +727,16 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local iterator. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "session list"
-	if c != nil {
-		cr, err := c.ListSessions(stateFilter, templateFilter, false)
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderSessionListFromAPI(cr, jsonOutput, stdout)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]api.SessionView]
+	return routeRead(c, "session list", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListSessions(stateFilter, templateFilter, false)
+			return err
+		},
+		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
+		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
+	)
 }
 
 // sessionListJSONEnvelope is the API-path --json output shape for

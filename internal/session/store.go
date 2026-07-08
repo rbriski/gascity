@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -292,6 +293,16 @@ func (s *Store) RepairType(id string) error {
 		return err
 	}
 	return nil
+}
+
+// RepairTypeBestEffort re-issues RepairType and logs any failure instead of
+// returning it, for read paths that heal a type-lost session bead as a side
+// effect. The heal must not abort the current operation, but the failure still
+// needs to be visible.
+func (s *Store) RepairTypeBestEffort(id string) {
+	if err := s.RepairType(id); err != nil {
+		log.Printf("session %s: repairing empty bead type: %v", id, err)
+	}
 }
 
 // Store returns the embedded strongly-typed session-class bead store. It is a

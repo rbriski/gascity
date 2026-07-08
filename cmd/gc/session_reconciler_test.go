@@ -5520,7 +5520,8 @@ func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 // TestReconcileSessionBeads_FailedCreateNotDesiredClosed verifies that a bead
 // in the failed-create state is recognized by the reconciler (not skipped as
 // unknown) and closed when it is not in the desired set and not running.
-// Regression: previously failed-create was missing from knownSessionStates,
+// Regression: previously failed-create was missing from the known session
+// state set,
 // so dead pool beads blocked slots forever.
 func TestReconcileSessionBeads_FailedCreateNotDesiredClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
@@ -9878,13 +9879,13 @@ func TestResolveSessionCommand(t *testing.T) {
 }
 
 func TestDrainedIsKnownState(t *testing.T) {
-	if !knownSessionStates["drained"] {
+	if !SessionStateDrained.Known() {
 		t.Fatal("drained must be a known session state")
 	}
 }
 
 func TestFailedCreateIsKnownState(t *testing.T) {
-	if !knownSessionStates[string(sessionpkg.StateFailedCreate)] {
+	if !SessionStateFailedCreate.Known() {
 		t.Fatal("failed-create must be a known session state")
 	}
 }

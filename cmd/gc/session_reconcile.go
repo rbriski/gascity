@@ -1253,24 +1253,49 @@ func topoOrder(sessions []beads.Bead, deps map[string][]string) []beads.Bead {
 	return result
 }
 
-// knownSessionStates is the set of bead metadata "state" values that the
-// current reconciler understands. Beads with unrecognized states are skipped
-// during reconciliation to allow forward-compatible rollback from newer
-// versions that add states like "draining" or "archived".
-var knownSessionStates = map[string]bool{
-	"active":                             true,
-	"asleep":                             true,
-	"awake":                              true,
-	"stopped":                            true,
-	"suspended":                          true,
-	"orphaned":                           true,
-	"closed":                             true,
-	"quarantined":                        true,
-	string(sessionpkg.StateStartPending): true,
-	"creating":                           true,
-	"drained":                            true,
-	string(sessionpkg.StateFailedCreate): true, // processed so skip/orphan-close can release the slot
-	"":                                   true, // empty state is valid (legacy beads)
+// SessionState is the set of raw bead metadata state values that the current
+// reconciler understands. Beads with unrecognized states are skipped during
+// reconciliation to allow forward-compatible rollback from newer versions that
+// add states like "draining" or "archived".
+type SessionState string
+
+const (
+	SessionStateEmpty        SessionState = ""
+	SessionStateActive       SessionState = "active"
+	SessionStateAsleep       SessionState = "asleep"
+	SessionStateAwake        SessionState = "awake"
+	SessionStateStopped      SessionState = "stopped"
+	SessionStateSuspended    SessionState = "suspended"
+	SessionStateOrphaned     SessionState = "orphaned"
+	SessionStateClosed       SessionState = "closed"
+	SessionStateQuarantined  SessionState = "quarantined"
+	SessionStateStartPending SessionState = SessionState(sessionpkg.StateStartPending)
+	SessionStateCreating     SessionState = "creating"
+	SessionStateDrained      SessionState = "drained"
+	// SessionStateFailedCreate is processed so skip/orphan-close can release the slot.
+	SessionStateFailedCreate SessionState = SessionState(sessionpkg.StateFailedCreate)
+)
+
+// Known reports whether the reconciler understands this raw metadata state.
+func (s SessionState) Known() bool {
+	switch s {
+	case SessionStateEmpty,
+		SessionStateActive,
+		SessionStateAsleep,
+		SessionStateAwake,
+		SessionStateStopped,
+		SessionStateSuspended,
+		SessionStateOrphaned,
+		SessionStateClosed,
+		SessionStateQuarantined,
+		SessionStateStartPending,
+		SessionStateCreating,
+		SessionStateDrained,
+		SessionStateFailedCreate:
+		return true
+	default:
+		return false
+	}
 }
 
 // isKnownStateInfo returns true if the session's metadata state is recognized by
@@ -1278,7 +1303,7 @@ var knownSessionStates = map[string]bool{
 // prevent panics during rollback. It keys off the RAW metadata state
 // (Info.MetadataState, untrimmed).
 func isKnownStateInfo(i sessionpkg.Info) bool {
-	return knownSessionStates[i.MetadataState]
+	return SessionState(strings.TrimSpace(i.MetadataState)).Known()
 }
 
 // reverseBeads returns a reversed copy of the bead slice.

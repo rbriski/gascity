@@ -2430,25 +2430,68 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 	}
 }
 
-// --- isKnownStateInfo tests (Phase 0b: forward compatibility) ---
+// --- SessionState and isKnownStateInfo tests (Phase 0b: forward compatibility) ---
 
-func TestIsKnownState_KnownStates(t *testing.T) {
-	known := []string{
-		"active", "asleep", "awake", "stopped", "suspended",
-		"orphaned", "closed", "quarantined", "creating", string(sessionpkg.StateFailedCreate), "",
+func TestSessionStateKnown(t *testing.T) {
+	known := []SessionState{
+		SessionStateEmpty,
+		SessionStateActive,
+		SessionStateAsleep,
+		SessionStateAwake,
+		SessionStateStopped,
+		SessionStateSuspended,
+		SessionStateOrphaned,
+		SessionStateClosed,
+		SessionStateQuarantined,
+		SessionStateCreating,
+		SessionStateDrained,
+		SessionStateStartPending,
+		SessionStateFailedCreate,
 	}
 	for _, state := range known {
-		session := makeBead("b1", map[string]string{"state": state})
+		if !state.Known() {
+			t.Errorf("state %q should be known", state)
+		}
+	}
+}
+
+func TestSessionStateUnknown(t *testing.T) {
+	unknown := []SessionState{"draining", "archived", "future-state"}
+	for _, state := range unknown {
+		if state.Known() {
+			t.Errorf("state %q should be unknown", state)
+		}
+	}
+}
+
+func TestIsKnownStateInfo_KnownStates(t *testing.T) {
+	known := []SessionState{
+		SessionStateEmpty,
+		SessionStateActive,
+		SessionStateAsleep,
+		SessionStateAwake,
+		SessionStateStopped,
+		SessionStateSuspended,
+		SessionStateOrphaned,
+		SessionStateClosed,
+		SessionStateQuarantined,
+		SessionStateCreating,
+		SessionStateDrained,
+		SessionStateStartPending,
+		SessionStateFailedCreate,
+	}
+	for _, state := range known {
+		session := makeBead("b1", map[string]string{"state": string(state)})
 		if !isKnownStateInfo(sessionpkg.InfoFromPersistedBead(session)) {
 			t.Errorf("state %q should be known", state)
 		}
 	}
 }
 
-func TestIsKnownState_UnknownStates(t *testing.T) {
-	unknown := []string{"draining", "archived", "future-state"}
+func TestIsKnownStateInfo_UnknownStates(t *testing.T) {
+	unknown := []SessionState{"draining", "archived", "future-state"}
 	for _, state := range unknown {
-		session := makeBead("b1", map[string]string{"state": state})
+		session := makeBead("b1", map[string]string{"state": string(state)})
 		if isKnownStateInfo(sessionpkg.InfoFromPersistedBead(session)) {
 			t.Errorf("state %q should be unknown", state)
 		}

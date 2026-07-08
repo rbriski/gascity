@@ -171,45 +171,6 @@ func splitWaitDepIDs(value string) []string {
 	return out
 }
 
-// ListSessionWaits returns the WaitInfo projection of open durable wait beads for
-// one session. It is a thin delegate to Store.WaitsForSession during the
-// front-door migration window (WI-4); consumers move to the method and this
-// package func is then deleted.
-func ListSessionWaits(store beads.Store, sessionID string) ([]WaitInfo, error) {
-	return NewStore(beads.SessionStore{Store: store}).WaitsForSession(sessionID)
-}
-
-// WaitNudgeIDs returns queued nudge IDs for the session's currently open waits.
-// Thin delegate to Store.WaitNudgeIDs during the WI-4 migration window.
-func WaitNudgeIDs(store beads.Store, sessionID string) ([]string, error) {
-	return NewStore(beads.SessionStore{Store: store}).WaitNudgeIDs(sessionID)
-}
-
-// CancelWaitsAndCollectNudgeIDs marks all waits for the session terminal and
-// returns every queued wait-nudge ID discovered across capped lookup pages. Thin
-// delegate to Store.CancelWaits during the WI-4 migration window.
-func CancelWaitsAndCollectNudgeIDs(store beads.Store, sessionID string, now time.Time) ([]string, bool, error) {
-	return NewStore(beads.SessionStore{Store: store}).CancelWaits(sessionID, now)
-}
-
-// ReassignWaits moves open non-terminal waits from one session bead ID to
-// another during canonical session repair. Thin delegate to Store.ReassignWaits
-// during the WI-4 migration window.
-func ReassignWaits(store beads.Store, oldSessionID, newSessionID string) error {
-	return NewStore(beads.SessionStore{Store: store}).ReassignWaits(oldSessionID, newSessionID)
-}
-
-// WakeSession clears hold/quarantine state and cancels open waits, returning
-// any queued wait-nudge IDs that should be eagerly withdrawn. Thin delegate to
-// Store.wakeSessionFromBead during the WI-4 migration window; the fused
-// Store.WakeSession(id, now, opts) is the canonical entry point consumers move to.
-func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]string, error) {
-	if store == nil || sessionBead.ID == "" {
-		return nil, nil
-	}
-	return NewStore(beads.SessionStore{Store: store}).wakeSessionFromBead(sessionBead, now)
-}
-
 // StampWaitLookupCapMetadata adds the shared durable wait lookup cap
 // diagnostic metadata to batch.
 func StampWaitLookupCapMetadata(batch map[string]string, label string, limit int, now time.Time, source string) {
@@ -223,13 +184,6 @@ func StampWaitLookupCapMetadata(batch map[string]string, label string, limit int
 	batch["wait_lookup_capped_label"] = label
 	batch["wait_lookup_capped_limit"] = strconv.Itoa(limit)
 	batch["wait_lookup_capped_source"] = source
-}
-
-// CancelWaits marks all non-terminal waits for the session as canceled. Thin
-// delegate to Store.CancelWaits during the WI-4 migration window.
-func CancelWaits(store beads.Store, sessionID string, now time.Time) error {
-	_, _, err := CancelWaitsAndCollectNudgeIDs(store, sessionID, now)
-	return err
 }
 
 func beadHasLabel(b beads.Bead, want string) bool {

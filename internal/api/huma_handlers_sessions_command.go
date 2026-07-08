@@ -866,28 +866,25 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		return nil, humaResolveError(err)
 	}
 
-	b, err := store.Get(id)
+	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
-		return nil, humaStoreError(err)
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, huma.Error400BadRequest(id + " is not a session")
-	}
-	session.RepairEmptyType(store.Store, &b)
-	if b.Status == "closed" {
-		return nil, huma.Error409Conflict("session " + id + " is closed")
-	}
-
-	nudgeIDs, err := session.WakeSession(store.Store, b, time.Now().UTC())
-	if err != nil {
+		if errors.Is(err, session.ErrNotSessionBead) {
+			return nil, huma.Error400BadRequest(id + " is not a session")
+		}
+		if state, conflict := session.WakeConflictState(err); conflict {
+			return nil, huma.Error409Conflict("session " + id + " is " + state)
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, humaStoreError(err)
+		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	// Nudge withdrawal reads the nudges class, so it sources the typed
 	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), res.NudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
-	sessionName := b.Metadata["session_name"]
+	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}

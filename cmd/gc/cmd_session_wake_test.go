@@ -89,7 +89,7 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 				t.Fatalf("store.Create(): %v", err)
 			}
 
-			if _, err := session.WakeSession(store, b, time.Now()); err != nil {
+			if _, err := session.NewStore(beads.SessionStore{Store: store}).WakeSession(b.ID, time.Now(), session.WakeOpts{}); err != nil {
 				t.Fatalf("WakeSession: %v", err)
 			}
 

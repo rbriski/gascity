@@ -123,7 +123,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/cmd_nudge.go":                  2,
 		"cmd/gc/cmd_prime.go":                  2,
 		"cmd/gc/cmd_session.go":                2,
-		"cmd/gc/cmd_session_wake.go":           2,
 		"cmd/gc/cmd_wait.go":                   1,
 		"cmd/gc/mcp_integration.go":            1,
 		"cmd/gc/session_bead_snapshot.go":      3,
@@ -141,6 +140,15 @@ var typedClassCodecCensus = map[string]map[string]int{
 	"SessionInfoFromBead(": {
 		"internal/worker/factory.go": 1,
 	},
+	// WI-4 A2 leaves three WaitInfoFromBead call sites in cmd_wait.go: the two
+	// generic-beads API render legs (renderWaitListFromAPI / renderWaitInspectFromAPI)
+	// and the local inspect fallback (doWaitInspectFallback). All three read raw
+	// beads.Bead off the generic /beads + /bead endpoints; WI-4 commit B (the
+	// /v0/waits wire + client_waits.go) converts them to typed session.WaitInfo at
+	// the internal/api edge and ratchets this needle back to interior-zero.
+	"WaitInfoFromBead(": {
+		"cmd/gc/cmd_wait.go": 3,
+	},
 	"ListAllSessionBeads(": {
 		"cmd/gc/adoption_barrier.go":         2,
 		"cmd/gc/build_desired_state.go":      1,
@@ -154,10 +162,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/session_resolve.go":          1,
 		"internal/api/cache_read_model.go":   1,
 		"internal/api/session_resolution.go": 1,
-	},
-	"ListSessionWaitBeads(": {
-		"cmd/gc/cmd_wait.go":      1,
-		"cmd/gc/session_beads.go": 1,
 	},
 	"PersistedResponseFromBead(": {
 		"internal/api/handler_sessions.go": 1,

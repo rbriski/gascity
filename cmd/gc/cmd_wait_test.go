@@ -632,7 +632,7 @@ func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {
 	}
 	store := &waitListQueryCaptureStore{Store: mem}
 
-	waits, err := loadWaitsByLabel(store)
+	waits, err := sessionFrontDoor(store).ListWaits("", "")
 	if err != nil {
 		t.Fatalf("loadWaitsByLabel: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestLoadWaitBeadsByLabelAllowsExactLookupLimit(t *testing.T) {
 		}
 	}
 
-	waits, err := loadWaitsByLabel(mem)
+	waits, err := sessionFrontDoor(mem).ListWaits("", "")
 	if err != nil {
 		t.Fatalf("loadWaitsByLabel: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestLoadWaitBeadsByLabelAllowsExactLookupLimit(t *testing.T) {
 }
 
 func TestLoadWaitBeadsByLabelReportsLookupLimit(t *testing.T) {
-	_, err := loadWaitsByLabel(waitLookupLimitStore{Store: beads.NewMemStore()})
+	_, err := sessionFrontDoor(waitLookupLimitStore{Store: beads.NewMemStore()}).ListWaits("", "")
 	if err == nil || !strings.Contains(err.Error(), "wait lookup hit limit") {
 		t.Fatalf("loadWaitsByLabel error = %v, want wait lookup limit", err)
 	}
@@ -736,7 +736,7 @@ provider = "file"
 }
 
 func TestReadyWaitSetForList_ReturnsSetAndCapError(t *testing.T) {
-	ready, err := readyWaitSetForList(waitGlobalListLimitStore{Store: beads.NewMemStore()})
+	ready, err := readyWaitSetForList(sessionFrontDoor(waitGlobalListLimitStore{Store: beads.NewMemStore()}))
 	if err == nil || !strings.Contains(err.Error(), "wait lookup hit limit") {
 		t.Fatalf("readyWaitSetForList error = %v, want wait lookup limit", err)
 	}
@@ -1601,177 +1601,6 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 	}
 }
 
-func TestRetryClosedWait_CreatesReplacement(t *testing.T) {
-	store := beads.NewMemStore()
-	sessionBead, err := store.Create(beads.Bead{
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       "worker",
-			"continuation_epoch": "2",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
-	}
-	wait, err := store.Create(beads.Bead{
-		Type:        waitBeadType,
-		Title:       "wait:worker",
-		Description: "Retry me.",
-		Labels:      []string{waitBeadLabel, "session:" + sessionBead.ID},
-		Metadata: map[string]string{
-			"session_id":       sessionBead.ID,
-			"session_name":     "worker",
-			"kind":             "deps",
-			"state":            waitStateFailed,
-			"registered_epoch": "1",
-			"delivery_attempt": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create wait bead: %v", err)
-	}
-	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(wait))
-	nudge, err := store.Create(beads.Bead{
-		Type:   nudgeBeadType,
-		Title:  "nudge:" + nudgeID,
-		Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
-		Metadata: map[string]string{
-			"nudge_id": nudgeID,
-			"state":    "failed",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create nudge bead: %v", err)
-	}
-	if err := store.Close(nudge.ID); err != nil {
-		t.Fatalf("close nudge bead: %v", err)
-	}
-	if err := store.Close(wait.ID); err != nil {
-		t.Fatalf("close wait bead: %v", err)
-	}
-
-	retried, err := retryClosedWait(store, beads.NudgesStore{Store: store}, wait, time.Now().UTC().Format(time.RFC3339))
-	if err != nil {
-		t.Fatalf("retryClosedWait: %v", err)
-	}
-	if retried.ID == wait.ID {
-		t.Fatal("retryClosedWait reused original wait ID")
-	}
-	if retried.Type != waitBeadType {
-		t.Fatalf("retried type = %q, want %q", retried.Type, waitBeadType)
-	}
-	if retried.Metadata["state"] != waitStateReady {
-		t.Fatalf("retried state = %q, want %q", retried.Metadata["state"], waitStateReady)
-	}
-	if retried.Metadata["delivery_attempt"] != "2" {
-		t.Fatalf("retried attempt = %q, want 2", retried.Metadata["delivery_attempt"])
-	}
-	if retried.Metadata["registered_epoch"] != "2" {
-		t.Fatalf("retried registered_epoch = %q, want 2", retried.Metadata["registered_epoch"])
-	}
-	if retried.Metadata["retried_from_wait"] != wait.ID {
-		t.Fatalf("retried_from_wait = %q, want %q", retried.Metadata["retried_from_wait"], wait.ID)
-	}
-	if retried.Status == "closed" {
-		t.Fatalf("retried wait status = %q, want open", retried.Status)
-	}
-}
-
-func TestRetryClosedWait_DropsInternalMetadata(t *testing.T) {
-	store := beads.NewMemStore()
-	wait, err := store.Create(beads.Bead{
-		Type:        waitBeadType,
-		Title:       "wait:worker",
-		Description: "Retry me.",
-		Labels:      []string{waitBeadLabel},
-		Metadata: map[string]string{
-			"session_id":         "gc-session",
-			"session_name":       "worker",
-			"kind":               "deps",
-			"state":              waitStateFailed,
-			"dep_ids":            "gc-1",
-			"dep_mode":           "all",
-			"registered_epoch":   "1",
-			"delivery_attempt":   "1",
-			"created_by_session": "gc-origin",
-			"nudge_id":           "wait-gc-1-1-1",
-			"last_error":         "boom",
-			"synced_at":          "2026-03-16T10:00:00Z",
-			"future_internal":    "should-not-carry",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create wait bead: %v", err)
-	}
-	if err := store.Close(wait.ID); err != nil {
-		t.Fatalf("close wait bead: %v", err)
-	}
-
-	retried, err := retryClosedWait(store, beads.NudgesStore{Store: store}, wait, time.Now().UTC().Format(time.RFC3339))
-	if err != nil {
-		t.Fatalf("retryClosedWait: %v", err)
-	}
-	if retried.Metadata["dep_ids"] != "gc-1" {
-		t.Fatalf("dep_ids = %q, want gc-1", retried.Metadata["dep_ids"])
-	}
-	if retried.Metadata["created_by_session"] != "gc-origin" {
-		t.Fatalf("created_by_session = %q, want gc-origin", retried.Metadata["created_by_session"])
-	}
-	if retried.Metadata["nudge_id"] != "" {
-		t.Fatalf("nudge_id = %q, want cleared", retried.Metadata["nudge_id"])
-	}
-	if retried.Metadata["last_error"] != "" {
-		t.Fatalf("last_error = %q, want cleared", retried.Metadata["last_error"])
-	}
-	if retried.Metadata["synced_at"] != "" {
-		t.Fatalf("synced_at = %q, want omitted", retried.Metadata["synced_at"])
-	}
-	if retried.Metadata["future_internal"] != "" {
-		t.Fatalf("future_internal = %q, want omitted", retried.Metadata["future_internal"])
-	}
-}
-
-func TestRetryClosedWait_PreservesNonDepsMetadata(t *testing.T) {
-	store := beads.NewMemStore()
-	wait, err := store.Create(beads.Bead{
-		Type:        waitBeadType,
-		Title:       "wait:worker",
-		Description: "Retry me.",
-		Labels:      []string{waitBeadLabel},
-		Metadata: map[string]string{
-			"session_id":       "gc-session",
-			"session_name":     "worker",
-			"kind":             "probe",
-			"state":            waitStateFailed,
-			"registered_epoch": "1",
-			"delivery_attempt": "1",
-			"probe_name":       "github-pr-approval",
-			"probe_target":     "owner/repo#123",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create wait bead: %v", err)
-	}
-	if err := store.Close(wait.ID); err != nil {
-		t.Fatalf("close wait bead: %v", err)
-	}
-
-	retried, err := retryClosedWait(store, beads.NudgesStore{Store: store}, wait, time.Now().UTC().Format(time.RFC3339))
-	if err != nil {
-		t.Fatalf("retryClosedWait: %v", err)
-	}
-	if retried.Metadata["kind"] != "probe" {
-		t.Fatalf("kind = %q, want probe", retried.Metadata["kind"])
-	}
-	if retried.Metadata["probe_name"] != "github-pr-approval" {
-		t.Fatalf("probe_name = %q, want github-pr-approval", retried.Metadata["probe_name"])
-	}
-	if retried.Metadata["probe_target"] != "owner/repo#123" {
-		t.Fatalf("probe_target = %q, want owner/repo#123", retried.Metadata["probe_target"])
-	}
-}
-
 func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
@@ -2326,7 +2155,7 @@ func TestCancelWaitsForSession(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	if err := cancelWaitsForSession(store, sessionBead.ID); err != nil {
+	if err := cancelWaitsForSession(sessionFrontDoor(store), sessionBead.ID); err != nil {
 		t.Fatalf("cancelWaitsForSession: %v", err)
 	}
 	updated, err := store.Get(waitBead.ID)
@@ -2366,7 +2195,7 @@ func TestCancelWaitsForSessionReturnsNilAfterCappedConvergence(t *testing.T) {
 		waitIDs = append(waitIDs, waitBead.ID)
 	}
 
-	if err := cancelWaitsForSession(store, sessionBead.ID); err != nil {
+	if err := cancelWaitsForSession(sessionFrontDoor(store), sessionBead.ID); err != nil {
 		t.Fatalf("cancelWaitsForSession: %v", err)
 	}
 	for _, id := range waitIDs {
@@ -2402,7 +2231,7 @@ func TestLoadSessionWaitBeads_IncludesLegacyWaitType(t *testing.T) {
 		t.Fatalf("create legacy wait bead: %v", err)
 	}
 
-	waits, err := loadSessionWaits(store, sessionID)
+	waits, err := sessionFrontDoor(store).WaitsForSession(sessionID)
 	if err != nil {
 		t.Fatalf("loadSessionWaits: %v", err)
 	}
@@ -2440,7 +2269,7 @@ func TestClearSessionWaitHoldIfIdle_UsesSessionWaitLookup(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	if err := clearSessionWaitHoldIfIdle(store, sessionBead.ID); err != nil {
+	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), sessionBead.ID); err != nil {
 		t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
 	}
 
@@ -2467,7 +2296,7 @@ func TestClearSessionWaitHoldIfIdle_PropagatesWaitLoadError(t *testing.T) {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	if err := clearSessionWaitHoldIfIdle(store, sessionBead.ID); err == nil {
+	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), sessionBead.ID); err == nil {
 		t.Fatal("expected clearSessionWaitHoldIfIdle to return load error")
 	}
 

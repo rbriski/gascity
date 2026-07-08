@@ -1605,14 +1605,14 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	if updatedWait.Metadata["session_id"] != winner.ID {
 		t.Fatalf("loser wait session_id = %q, want winner %q", updatedWait.Metadata["session_id"], winner.ID)
 	}
-	nudges, err := session.WaitNudgeIDs(store, winner.ID)
+	nudges, err := session.NewStore(beads.SessionStore{Store: store}).WaitNudgeIDs(winner.ID)
 	if err != nil {
 		t.Fatalf("WaitNudgeIDs(winner): %v", err)
 	}
 	if len(nudges) != 1 || nudges[0] != "nudge-loser" {
 		t.Fatalf("winner wait nudges = %#v, want [nudge-loser]", nudges)
 	}
-	oldNudges, err := session.WaitNudgeIDs(store, loser.ID)
+	oldNudges, err := session.NewStore(beads.SessionStore{Store: store}).WaitNudgeIDs(loser.ID)
 	if err != nil {
 		t.Fatalf("WaitNudgeIDs(loser): %v", err)
 	}

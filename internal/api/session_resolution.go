@@ -187,7 +187,7 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 		if err := reassignOpenWorkAssignedToSession(store, b.ID, replacementID); err != nil {
 			return err
 		}
-		if err := session.ReassignWaits(store, b.ID, replacementID); err != nil {
+		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(b.ID, replacementID); err != nil {
 			return fmt.Errorf("reassign waits from retired session %s to %s: %w", b.ID, replacementID, err)
 		}
 		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {

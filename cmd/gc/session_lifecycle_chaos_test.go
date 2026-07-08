@@ -1349,7 +1349,7 @@ func (h *sessionChaosHarness) wakeSession() {
 	if !ok || b.Status == "closed" {
 		return
 	}
-	if _, err := sessionpkg.WakeSession(h.env.store, b, h.env.clk.Now().UTC()); err != nil {
+	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: h.env.store}).WakeSession(b.ID, h.env.clk.Now().UTC(), sessionpkg.WakeOpts{}); err != nil {
 		h.record("wake skipped: %v", err)
 		return
 	}

@@ -28,6 +28,12 @@ func waitBeadFixture(id, status, sessionID string, meta map[string]string) beads
 	}
 }
 
+// waitStoreOver wraps a raw store as the session front door for wait tests that
+// exercise the typed methods directly.
+func waitStoreOver(store beads.Store) *Store {
+	return NewStore(beads.SessionStore{Store: store})
+}
+
 // recordingWaitStore seeds beads verbatim into a recording-fake store and
 // returns the front door plus recorder for op-stream equivalence assertions.
 func recordingWaitStore(t *testing.T, seed ...beads.Bead) (*Store, *beadstest.RecordingStore) {
@@ -546,8 +552,8 @@ func TestWakeSession_HappyPathBatchEqualsPackageFunc(t *testing.T) {
 		t.Fatalf("fused emitted %d batches, want 1", len(fusedBatch))
 	}
 	rec.Reset()
-	if _, err := WakeSession(rec, pkg, waitStoreNow); err != nil {
-		t.Fatalf("package WakeSession: %v", err)
+	if _, err := waitStoreOver(rec).wakeSessionFromBead(pkg, waitStoreNow); err != nil {
+		t.Fatalf("wakeSessionFromBead: %v", err)
 	}
 	pkgBatch := rec.CallsForOp("SetMetadataBatch")
 	if len(pkgBatch) != 1 {

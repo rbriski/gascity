@@ -910,7 +910,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		waitCh = make(chan waitResult, 1)
 
 		go func() {
-			set, err := readyWaitSetForList(sessStore)
+			set, err := readyWaitSetForList(sessionFrontDoor(sessStore))
 			waitCh <- waitResult{set: set, err: err}
 		}()
 	}

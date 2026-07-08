@@ -153,6 +153,10 @@ func renderBeadsListFromAPI(cr api.CachedRead[[]beads.Bead], format string, filt
 // doBeadsListFallback is the direct-bd path for "gc beads list". Opens every
 // rig store plus the city store, collects beads, applies the filters, and
 // renders using the shared bead_format.go helpers.
+//
+// This lane is UNBOUNDED: the store list uses Limit 0 (unlimited), so every
+// matching bead is returned. api.Client.ListBeads follows next_cursor to match
+// this coverage on the API/remote lanes (previously it truncated to page 1).
 func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads list")
 	if stores == nil {

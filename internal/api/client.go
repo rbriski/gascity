@@ -985,8 +985,12 @@ type ListBeadsOpts struct {
 	Label    string
 	Assignee string
 	Rig      string
-	Limit    int
-	All      bool
+	// Limit is a client-side TOTAL bound on the number of beads returned across
+	// all pages. 0 means "drain every page" (unbounded), matching the offline
+	// direct-bd lane (beads.ListQuery.Limit 0 = unlimited) so the two lanes have
+	// the same coverage. A positive value stops paginating once reached.
+	Limit int
+	All   bool
 }
 
 // ListBeads fetches beads across all rigs via
@@ -1015,28 +1019,75 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	if opts.Rig != "" {
 		params.Rig = &opts.Rig
 	}
-	if opts.Limit > 0 {
-		lim := int64(opts.Limit)
-		params.Limit = &lim
-	}
 	if opts.All {
 		t := true
 		params.All = &t
 	}
-	resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
-	if err != nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	// Follow next_cursor to drain every page. Without this the server's page
+	// default (50) silently truncated the result, so an offline `gc beads list`
+	// in a >50-bead city showed only the first page while the direct-bd lane
+	// returned everything. AgeSeconds comes from the first page.
+	var all []beads.Bead
+	var ageSeconds float64
+	var prevCursor string
+	// Cursors are non-snapshot offsets into a created_at-DESC list rebuilt per
+	// request, so a bead created mid-drain can shift the tail and re-appear at a
+	// page boundary. Dedupe by ID so JSON/table output never carries a duplicate
+	// (a closed/deleted bead can still be skipped — inherent to offset paging
+	// without a snapshot token; the drain is still strictly better than the old
+	// page-1 truncation).
+	seen := make(map[string]bool)
+	for page := 0; ; page++ {
+		pageLimit := maxPaginationLimit
+		if opts.Limit > 0 {
+			remaining := opts.Limit - len(all)
+			if remaining <= 0 {
+				break
+			}
+			if remaining < pageLimit {
+				pageLimit = remaining
+			}
+		}
+		lim := int64(pageLimit)
+		params.Limit = &lim
+
+		resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
+		if err != nil {
+			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		}
+		if resp == nil {
+			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+		}
+		if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+			return CachedRead[[]beads.Bead]{}, err
+		}
+		if page == 0 {
+			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
+		}
+		for _, b := range beadsFromGenList(resp.JSON200) {
+			if seen[b.ID] {
+				continue
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
+
+		next := ""
+		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
+			next = *resp.JSON200.NextCursor
+		}
+		if next == "" {
+			break
+		}
+		// Cursors are strictly-increasing encoded offsets; a repeat means a buggy
+		// server that would loop forever. Fail loudly instead of hanging.
+		if next == prevCursor {
+			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor did not advance (%q); aborting", next)
+		}
+		prevCursor = next
+		params.Cursor = &next
 	}
-	if resp == nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
-	}
-	return CachedRead[[]beads.Bead]{
-		Body:       beadsFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return CachedRead[[]beads.Bead]{Body: all, AgeSeconds: ageSeconds}, nil
 }
 
 // GetBead fetches one bead by ID via

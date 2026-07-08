@@ -1,8 +1,27 @@
 # Formula as the Unit of Work in Gas City
 
-**Status:** exploration / design synthesis — no code yet
+**Status:** design + shipped Slice 1/2a + a **verified end-to-end demo** (see below)
 **Date:** 2026-07-08
 **Method:** 20-agent workflow — 9 Opus explorers (architecture, source-grounded) → 6 Fable designers → 4 Fable red-teamers. Raw agent outputs in `_raw/`.
+
+---
+
+## 0. Verified end-to-end (2026-07-08)
+
+A real formula was driven to completion in a **transient, supervisor-isolated** city, with a real provider in the loop — the true e2e the `gc run` execution slice productizes:
+
+```
+$ bash engdocs/plans/formula-as-unit/demo/oneshot-e2e-demo.sh
+1/5 manufacture isolated Dolt city (no supervisor)…
+2/5 start the STANDALONE controller…
+3/5 sling mol-do-work (1-member convoy)…   workflow root: ci-a4e
+4/5 drive to completion…
+5/5 SUCCESS: workflow root ci-a4e closed with gc.outcome=pass
+```
+
+**The proven recipe** (what `gc run <formula>` will do in-process): `gc init --no-start` mints a Dolt-backed city that **never registers with the shared supervisor**; `gc start --controller` runs the **standalone** controller (own lock+socket); it spawns a real **subprocess** worker + a providerless **control-dispatcher** (`gc convoy control --serve`); the worker claims and closes the routed step bead with `gc.outcome=pass`; `workflow-finalize` closes the root; the city is stopped and reaped. Every phase — manufacture → run → finalize → teardown — executed against a real store with real processes; maintainer-city was untouched throughout. The completion signal is exactly the finalize-close watch (`cmd/gc/run_execute.go:watchWorkflowRoot`) the in-process executor uses. Formulas that need an agent to *reason* swap the deterministic worker for an LLM provider; the orchestration is identical.
+
+Key lessons banked from the demo: (a) `gc init` touches the **shared** supervisor — the transient path MUST use `--no-start` + the standalone controller; (b) the file bead provider cannot back a self-closing agent worker (`bd`/`gc bd` are Dolt-only), so a real run needs the Dolt provider; (c) a worker must discover routed work via `bd ready --json` filtered on `gc.routed_to` (the `--assignee=<name>` fast-path errors for named sessions).
 
 ---
 

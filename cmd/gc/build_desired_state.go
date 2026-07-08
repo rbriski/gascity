@@ -2231,13 +2231,12 @@ func discoverSessionBeadsWithRoots(
 		//     the bead (agent_name / explicit session_name / alias), even when
 		//     that identity is not a numbered pool slot.
 		//
-		// The identity-resolution chain below (sessionBeadQualifiedName,
-		// canonicalSessionIdentityWithConfig, resolveTemplateForSessionBead)
-		// operates on the raw *beads.Bead (contract rule 3), so recover the
-		// source bead by ID from the same snapshot. The projection is
-		// index-stable (OpenInfos()[i] == InfoFromPersistedBead(Open()[i])), so
-		// FindByID(info.ID) returns exactly this info's bead.
-		b, ok := sessionBeads.FindByID(info.ID)
+		// The identity-resolution chain below (sessionBeadQualifiedNameInfo,
+		// canonicalSessionIdentityWithConfigInfo, resolveTemplateForSessionBeadInfo)
+		// reads the session through session.Info. Recover this info's snapshot entry
+		// by ID (index-stable: FindInfoByID(info.ID) returns exactly this info), so a
+		// bead absent from the snapshot is skipped exactly as the raw path did.
+		bInfo, ok := sessionBeads.FindInfoByID(info.ID)
 		if !ok {
 			continue
 		}
@@ -2246,7 +2245,7 @@ func discoverSessionBeadsWithRoots(
 			sessionQualifiedName string
 		)
 		if isManualSessionInfoForAgent(info, cfgAgent) {
-			sessionQualifiedName = sessionBeadQualifiedName(bp.cityPath, cfgAgent, bp.rigs, b)
+			sessionQualifiedName = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, bInfo)
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
 		} else {
 			// Canonicalize agent identity before calling resolveTemplate so a
@@ -2258,10 +2257,10 @@ func discoverSessionBeadsWithRoots(
 			// inputs aligned across buildDesiredState paths. Named beads
 			// intentionally pass through with the base shape (see
 			// canonicalSessionIdentity).
-			resolveAgent, sessionQualifiedName = canonicalSessionIdentityWithConfig(cfg, cfgAgent, b)
+			resolveAgent, sessionQualifiedName = canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, bInfo)
 		}
 		fpExtra := buildFingerprintExtra(resolveAgent)
-		tp, err := resolveTemplateForSessionBead(bp, resolveAgent, sessionQualifiedName, fpExtra, b)
+		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, sessionQualifiedName, fpExtra, bInfo)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: bead %s template %q: %v (skipping)\n", info.ID, template, err) //nolint:errcheck
 			continue
@@ -2375,12 +2374,16 @@ func ensureDependencyOnlyTemplate(
 		fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 		return
 	}
+	// selectOrCreateDependencyPoolSessionBead can freshly CREATE this bead, so it is
+	// not guaranteed to be in the typed snapshot; project it once here (the raw
+	// dependency-floor boundary) and read the identity chain through session.Info.
+	sbInfo := session.InfoFromPersistedBead(sessionBead)
 	// Env/fingerprint resolution, on the other hand, must use the same
 	// canonical-or-instance identity as both the no-store dependency-floor
 	// path above and realizePoolDesiredSessions. Otherwise GC_ALIAS can
 	// oscillate across ticks and trigger the reconciler's config-drift drain
 	// on the live dependency-floor session.
-	resolveAgent, resolveQN := canonicalSessionIdentityWithConfig(cfg, cfgAgent, sessionBead)
+	resolveAgent, resolveQN := canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, sbInfo)
 	// Dep-floor slot-1 fallback. The guard triggers when the helper returned
 	// the BASE form — meaning no pool_slot was stamped yet. Keying off
 	// resolveQN (a stable value) rather than pointer identity keeps the
@@ -2390,7 +2393,7 @@ func ensureDependencyOnlyTemplate(
 	// (dependency_only beads are never named), but the guard keeps intent
 	// explicit so a future change that relaxes that filter can't silently
 	// overwrite a named identity with "rig/<agent>-1".
-	if cfgAgent.SupportsInstanceExpansion() && !cfgAgent.UsesCanonicalSingletonPoolIdentity() && resolveQN == cfgAgent.QualifiedName() && !isNamedSessionBead(sessionBead) {
+	if cfgAgent.SupportsInstanceExpansion() && !cfgAgent.UsesCanonicalSingletonPoolIdentity() && resolveQN == cfgAgent.QualifiedName() && !isNamedSessionInfo(sbInfo) {
 		// No pool_slot stamp yet on this freshly-created dep-floor bead.
 		// Default to slot 1, mirroring the no-store path above.
 		instanceName := poolInstanceName(cfgAgent.Name, 1, cfgAgent)
@@ -2400,13 +2403,13 @@ func ensureDependencyOnlyTemplate(
 		resolveQN = qualifiedInstance
 	}
 	fpExtra := buildFingerprintExtra(resolveAgent)
-	tp, err := resolveTemplateForSessionBead(bp, resolveAgent, resolveQN, fpExtra, sessionBead)
+	tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, resolveQN, fpExtra, sbInfo)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 		return
 	}
 	tp.Alias = ""
-	tp.InstanceName = sessionBead.Metadata["session_name"]
+	tp.InstanceName = sbInfo.SessionNameMetadata
 	tp.DependencyOnly = true
 	installAgentSideEffects(bp, resolveAgent, tp, stderr)
 	desired[tp.SessionName] = tp
@@ -2610,22 +2613,26 @@ func realizePoolDesiredSessions(
 			used[item.sessionBead.ID] = true
 		}
 		sessionBead := item.sessionBead
-		// bindPoolSessionTriggerBead takes/returns typed session.Info (WI-5 W3).
-		// Project once at this boundary; the boundInfo it returns is consumed once
-		// the downstream resolveTemplateForSessionBead chain takes Info (W4), so for
-		// now mirror the applied patch onto the raw sessionBead copy the chain still
-		// reads. The projection here is the transitional boundary cost W4 retires.
-		if _, patch, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, session.InfoFromPersistedBead(sessionBead), item.request); err != nil {
+		// bindPoolSessionTriggerBead takes/returns typed session.Info. item.sessionBead
+		// is a freshly-created-or-reused raw bead not guaranteed to be in the typed
+		// snapshot, so project it once here (the raw pool-loop boundary) and fold the
+		// returned boundInfo. The downstream resolveTemplateForSessionBeadInfo chain now
+		// takes Info, so the trigger patch flows through boundInfo — the W3 transitional
+		// raw-metadata mirror onto sessionBead is dropped, because every downstream raw
+		// read of sessionBead touches a read set DISJOINT from the bind-written keys
+		// (trigger_bead_id/store_ref, brain_parent_sid, pack, pack_workspace, work_dir,
+		// legacy work_dir):
+		//   - isManualSessionBeadForAgent → session_origin / pool_managed /
+		//     dependency_only / template / agent_name;
+		//   - poolRuntimeAliasIsDeferred → alias, the alias-conflict key,
+		//     pending_create_claim, state;
+		//   - setPoolTemplateRuntimeIdentity + the manual-alias/qualified-name reads
+		//     → alias, pool_slot, session_name.
+		sbInfo := session.InfoFromPersistedBead(sessionBead)
+		if bound, _, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sessionBead.ID, item.request.WorkBeadID, err) //nolint:errcheck
-		} else if len(patch) > 0 {
-			sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
-			if sessionBead.Metadata == nil {
-				sessionBead.Metadata = map[string]string{}
-			}
-			for key, value := range patch {
-				sessionBead.Metadata[key] = value
-			}
-			item.sessionBead = sessionBead
+		} else {
+			sbInfo = bound
 		}
 		slot := item.slot
 		manualSession := isManualSessionBeadForAgent(sessionBead, cfgAgent)
@@ -2635,13 +2642,13 @@ func realizePoolDesiredSessions(
 			poolSlot          int
 		)
 		if manualSession {
-			qualifiedInstance = sessionBeadQualifiedName(bp.cityPath, cfgAgent, bp.rigs, sessionBead)
+			qualifiedInstance = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, sbInfo)
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, qualifiedInstance)
 		} else {
 			resolveAgent, qualifiedInstance, poolSlot = poolDesiredRequestIdentity(cfgAgent, slot)
 		}
 		fpExtra := buildFingerprintExtra(resolveAgent)
-		tp, err := resolveTemplateForSessionBead(bp, resolveAgent, qualifiedInstance, fpExtra, sessionBead)
+		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sessionBead.ID, err) //nolint:errcheck
 			continue
@@ -2739,9 +2746,10 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 // (same sorted --set-metadata args); only the FAILURE-path error text changes,
 // now carrying the front door's wrap ("setting metadata on..." vs "updating
 // bead..."). The patch folds onto the returned Info in the same step. It
-// returns the bound Info plus the applied patch; the caller mirrors the patch
-// onto its raw bead copy for the still-raw resolveTemplateForSessionBead chain
-// (retired in W4). A dry-run build with no store folds locally without a write.
+// returns the bound Info plus the applied patch; the caller folds the returned
+// boundInfo into the Info-taking resolveTemplateForSessionBeadInfo chain (WI-5 W4
+// dropped the former raw-bead mirror and retired the raw wrapper). A dry-run build
+// with no store folds locally without a write.
 func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, session.MetadataPatch, error) {
 	if info.ID == "" {
 		return info, nil, nil
@@ -3098,19 +3106,12 @@ func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
 	tp.EnvIdentityStamped = true
 }
 
-func resolveTemplateForSessionBead(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	qualifiedName string,
-	fpExtra map[string]string,
-	sessionBead beads.Bead,
-) (TemplateParams, error) {
-	return resolveTemplateForSessionBeadInfo(bp, cfgAgent, qualifiedName, fpExtra, session.InfoFromPersistedBead(sessionBead))
-}
-
-// resolveTemplateForSessionBeadInfo is the typed core of resolveTemplateForSessionBead.
-// It reads only session_name, the two trigger keys, and pack — all verbatim raw
-// mirrors on session.Info — so it is byte-identical to the raw-bead form it backs.
+// resolveTemplateForSessionBeadInfo resolves the TemplateParams for a session bead
+// from its session.Info. It reads only session_name, the two trigger keys, and
+// pack — all verbatim raw mirrors on session.Info. Its callers hold the Info
+// directly (from the typed snapshot via FindInfoByID, or a single boundary
+// projection at the raw dependency-floor / pool-create seams); the former raw
+// resolveTemplateForSessionBead wrapper was retired in WI-5 W4.
 func resolveTemplateForSessionBeadInfo(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -3143,7 +3144,7 @@ func resolveTemplateForSessionBeadInfo(
 
 // canonicalSessionIdentity returns the agent and qualified name to use when
 // resolving a pool-managed session bead through resolveTemplate /
-// resolveTemplateForSessionBead. Scoped to the pool case on purpose:
+// resolveTemplateForSessionBeadInfo. Scoped to the pool case on purpose:
 // realizePoolDesiredSessions uses a deep-copied instance agent +
 // qualifiedInstance, and this helper is what makes the other pool-backed
 // paths (rediscovery, store-backed dependency-floor) agree. GC_ALIAS and
@@ -3190,6 +3191,29 @@ func canonicalSessionIdentityWithConfig(cfg *config.City, cfgAgent *config.Agent
 	return instanceAgent, qualifiedInstance
 }
 
+// canonicalSessionIdentityWithConfigInfo is the session.Info form of
+// canonicalSessionIdentityWithConfig: it resolves the (agent, qualifiedName) pair
+// from the typed projection, deferring the pool-slot lookup to
+// existingPoolSlotWithConfigInfo. Byte-identical to the raw form, oracle-pinned by
+// TestCanonicalSessionIdentityWithConfigInfoMatchesRaw.
+func canonicalSessionIdentityWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) (*config.Agent, string) {
+	if cfgAgent == nil {
+		return nil, ""
+	}
+	if isNamedSessionInfo(info) {
+		return cfgAgent, cfgAgent.QualifiedName()
+	}
+	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return cfgAgent, cfgAgent.QualifiedName()
+	}
+	slot := existingPoolSlotWithConfigInfo(cfg, cfgAgent, info)
+	if slot <= 0 {
+		return cfgAgent, cfgAgent.QualifiedName()
+	}
+	instanceAgent, qualifiedInstance, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+	return instanceAgent, qualifiedInstance
+}
+
 func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []config.Rig, sessionBead beads.Bead) string {
 	if cfgAgent == nil {
 		return ""
@@ -3219,6 +3243,49 @@ func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []co
 		*cfgAgent,
 		rigs,
 		strings.TrimSpace(sessionBead.Metadata["alias"]),
+		explicitName,
+	)
+	if qualifiedName != "" {
+		return qualifiedName
+	}
+	return cfgAgent.QualifiedName()
+}
+
+// sessionBeadQualifiedNameInfo is the session.Info form of
+// sessionBeadQualifiedName: it recovers a manual/pooled session's persisted
+// qualified identity from the typed projection (agent_name via
+// sessionBeadAgentNameInfo, session_name_explicit, alias, raw session_name)
+// instead of cracking the raw bead. Byte-identical to the raw form, oracle-pinned
+// by TestSessionBeadQualifiedNameInfoMatchesRaw.
+func sessionBeadQualifiedNameInfo(cityPath string, cfgAgent *config.Agent, rigs []config.Rig, info session.Info) string {
+	if cfgAgent == nil {
+		return ""
+	}
+	persistedAgentName := normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentNameInfo(info))
+	if persistedAgentName != "" {
+		if !cfgAgent.SupportsMultipleSessions() || persistedAgentName != cfgAgent.QualifiedName() {
+			return persistedAgentName
+		}
+	}
+	explicitName := ""
+	if strings.TrimSpace(info.SessionNameExplicit) == boolMetadata(true) {
+		explicitName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	// Legacy aliasless pooled beads predate agent_name/session_name_explicit
+	// backfills. Their persisted session_name is the only stable concrete
+	// identity we can recover during rediscovery, even when it used the
+	// historical s-<id> form.
+	if explicitName == "" && strings.TrimSpace(info.Alias) == "" && persistedAgentName == cfgAgent.QualifiedName() && cfgAgent.SupportsMultipleSessions() {
+		explicitName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	if explicitName == "" && strings.TrimSpace(info.Alias) == "" && persistedAgentName == "" && cfgAgent.SupportsMultipleSessions() {
+		explicitName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	qualifiedName := workdirutil.SessionQualifiedName(
+		cityPath,
+		*cfgAgent,
+		rigs,
+		strings.TrimSpace(info.Alias),
 		explicitName,
 	)
 	if qualifiedName != "" {
@@ -3415,6 +3482,74 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 	}
 	if sessionBead.Metadata["pool_slot"] != "" {
 		if slot, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata["pool_slot"])); err == nil && slot > 0 {
+			if agentSlot > 0 && agentSlot != slot && usablePoolIdentitySlot(cfgAgent, agentSlot) {
+				return agentSlot
+			}
+			if !storedTemplateMatches && agentSlot == 0 && aliasSlot == 0 {
+				return 0
+			}
+			if !inBoundsPoolSlot(cfgAgent, slot) {
+				if usablePoolIdentitySlot(cfgAgent, agentSlot) {
+					return agentSlot
+				}
+				if usablePoolIdentitySlot(cfgAgent, aliasSlot) {
+					return aliasSlot
+				}
+				if usablePoolIdentitySlot(cfgAgent, sessionNameSlot) {
+					return sessionNameSlot
+				}
+				if poolSlotHasConfiguredBound(cfgAgent) {
+					return 0
+				}
+			}
+			return slot
+		}
+	}
+	if poolSlotHasConfiguredBound(cfgAgent) {
+		if !usablePoolIdentitySlot(cfgAgent, agentSlot) {
+			agentSlot = 0
+		}
+		if !usablePoolIdentitySlot(cfgAgent, aliasSlot) {
+			aliasSlot = 0
+		}
+		if !usablePoolIdentitySlot(cfgAgent, sessionNameSlot) {
+			sessionNameSlot = 0
+		}
+	}
+	if agentSlot > 0 {
+		return agentSlot
+	}
+	if aliasSlot > 0 {
+		return aliasSlot
+	}
+	if sessionNameSlot > 0 {
+		return sessionNameSlot
+	}
+	return 0
+}
+
+// existingPoolSlotWithConfigInfo is the session.Info form of
+// existingPoolSlotWithConfig: it resolves a pool bead's persisted slot from the
+// typed projection (stored template via sessionBeadStoredTemplateInfo, agent_name
+// via sessionBeadAgentNameInfo, alias, session_name, pool_slot) rather than the
+// raw bead. Byte-identical to the raw form, oracle-pinned by
+// TestExistingPoolSlotWithConfigInfoMatchesRaw.
+func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	if cfgAgent == nil {
+		return 0
+	}
+	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
+	sessionNameSlot := 0
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
+	}
+	if info.PoolSlot != "" {
+		if slot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); err == nil && slot > 0 {
 			if agentSlot > 0 && agentSlot != slot && usablePoolIdentitySlot(cfgAgent, agentSlot) {
 				return agentSlot
 			}
@@ -3921,9 +4056,13 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 // raw (ClassWork — Bead is the domain object). Byte-identical to the raw form,
 // pinned by TestSessionBeadHasAssignedWorkInfoMatchesRaw.
 //
-// WI-5 W4: reusablePoolSessionBead (the raw-bead reuse predicate at ~:3730) is the
-// production call site; it migrates onto this Info form when that predicate moves
-// to OpenInfos(). Until then this twin's only caller is its oracle.
+// WI-6: reusablePoolSessionBead (the raw-bead reuse predicate below) is the
+// production call site. reusablePoolSessionBeads returns []beads.Bead consumed by
+// the raw pool selection/creation path (selectOrPlanPoolSessionBead →
+// normalizeNonExpandingPoolSessionBeadForSelection → the raw item.sessionBead), so
+// the predicate stays raw until that whole path is typed in WI-6 — converting only
+// the predicate would force a per-bead projection (census UP) while the return type
+// must stay bead-shaped. Until then this twin's only caller is its oracle.
 func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)

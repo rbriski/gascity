@@ -88,7 +88,7 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 // patch. It no longer mirrors onto a raw *beads.Bead: no later this-tick reader
 // consumes the raw bead for these keys — a drain-acked session `continue`s before
 // the wakeTargets/startCandidates append, and the post-loop scans read only
-// ordered[i].ID. On a persist error the input Info is returned unchanged with a
+// orderedBeads[i].ID. On a persist error the input Info is returned unchanged with a
 // false ok, so the caller skips the fold (identical to the old bool-return).
 func markDrainAckStopPending(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) (sessionpkg.Info, bool) {
 	if info.ID == "" || sessFront == nil {
@@ -1358,6 +1358,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		healExpiredTimers(&sessions[i], sessionpkg.InfoFromPersistedBead(sessions[i]), sessFront, clk)
 	}
 	if cfg != nil {
+		// WI-6: the duplicate-retire feed map stays raw. It runs in Phase 0 (before
+		// the coherent snapshot exists) and its map VALUE must be a raw *beads.Bead —
+		// retireDuplicateConfiguredNamedSessionBeads' internals are session_beads.go
+		// repair-lane code that WI-6 owns. Projecting each bead here only to read the
+		// session_name key would add a boundary projection for zero benefit (the raw
+		// map[session_name] key crack is not a codec-edge read); it moves onto Info
+		// when the retire path itself is typed in WI-6.
 		bySessionName := make(map[string]beads.Bead, len(sessions))
 		indexBySessionName := make(map[string]int, len(sessions))
 		for i, b := range sessions {
@@ -1378,11 +1385,58 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	})
 
 	// Topo-order sessions by template dependencies.
+	//
+	// orderedBeads is the tick's raw working set, in topo order. After the W2-W4
+	// leaf/identity migrations its remaining raw-bead consumers are exactly four
+	// (in-code census; this is a mixed file, not a Tier-2 codec edge):
+	//   1. snapshot construction — the infoByID/orderedIDs/orderedInfos build
+	//      immediately below projects each bead once (the load edge).
+	//   2. the forward pass's write-helper raw-mirror parameter (&orderedBeads[i]
+	//      threaded into the mutating heal/rollback/close helpers) — dies in W5
+	//      when those helpers collapse onto ApplyPatchInfo.
+	//   3. the start-execution feed (startCandidate.session / wakeTarget.session
+	//      raw pointers) — dies in WI-6 when startCandidate is typed.
+	//   4. Phase 0.5 circuit-breaker restore/reset — reads orderedBeads[i].Metadata
+	//      via sessionpkg.CircuitStateFromMetadata (below), a DISTINCT typed codec on
+	//      the bead, not the session.Info projection. It stays raw by design (the
+	//      breaker cluster is a separate concern from Info); W5 must not fold it into
+	//      the Info snapshot when it shrinks orderedBeads.
+	// No session.Info-DOMAIN decision read reaches into orderedBeads[i] any more:
+	// order-sensitive rebuilds walk orderedIDs and read infoByID; the only remaining
+	// interior read is the CircuitState codec in (4).
 	phaseStart = time.Now()
-	ordered := topoOrder(sessions, deps)
+	orderedBeads := topoOrder(sessions, deps)
 	recordPhase(TraceSiteSessionReconcileTopoOrder, "session_reconcile.topo_order", phaseStart, map[string]any{
-		"ordered_session_count": len(ordered),
+		"ordered_session_count": len(orderedBeads),
 	})
+
+	// Coherent typed snapshot of the tick's working set, projected once here
+	// (front-door migration Phase 5). Reconciler decision reads route through
+	// infoByID rather than a per-iteration re-derive; it is the typed replacement
+	// for the raw session.Metadata[k]=v lockstep, kept in lockstep with it until
+	// every dependent read has moved onto the snapshot (Step 6). Built from
+	// orderedBeads (post-Phase-0, pre-Phase-0.5): Phase 0.5 only persists circuit
+	// state to the store and never mutates orderedBeads in memory, and Phase 1
+	// mutates only the current iteration's session, so every entry is byte-
+	// identical to a fresh projection of that bead at loop entry. Entries are
+	// refreshed via local folds (ApplyPatch/ApplyPatchInfo/MarkClosed) after a
+	// mutation — never a re-Get (WI-5 tick budget).
+	//
+	// orderedIDs carries the tick's topo order as plain session IDs (Step 5e). The
+	// order-sensitive decision-domain rebuilds (the awake-scan sessionInfos feed and
+	// the preserve-template feed) walk it, never `range infoByID` — ComputeAwakeSet
+	// resolves the non-unique SessionName last-write-wins, so topo order is load-
+	// bearing. orderedInfos is the same projection in slice order, feeding Phase 0.5.
+	orderedIDs := make([]string, len(orderedBeads))
+	orderedInfos := make([]sessionpkg.Info, len(orderedBeads))
+	infoByID := make(map[string]sessionpkg.Info, len(orderedBeads))
+	for i := range orderedBeads {
+		id := orderedBeads[i].ID
+		info := sessionpkg.InfoFromPersistedBead(orderedBeads[i])
+		orderedIDs[i] = id
+		orderedInfos[i] = info
+		infoByID[id] = info
+	}
 
 	phaseStart = time.Now()
 	cbNow := clk.Now().UTC()
@@ -1397,47 +1451,40 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// restarts accumulate. See session_circuit_breaker.go.
 		cb = defaultSessionCircuitBreaker()
 		cb.configure(cbCfg)
-		circuitIDByIdentity = make(map[string]string, len(ordered))
-		for i := range ordered {
-			identity := namedSessionIdentity(ordered[i])
+		circuitIDByIdentity = make(map[string]string, len(orderedInfos))
+		for i := range orderedInfos {
+			identity := namedSessionIdentityInfo(orderedInfos[i])
 			if identity == "" {
 				continue
 			}
-			circuitIDByIdentity[identity] = ordered[i].ID
+			circuitIDByIdentity[identity] = orderedInfos[i].ID
 			// Read the persisted breaker cluster through the typed CircuitState
-			// front door instead of cracking ordered[i].Metadata inline. This runs
-			// in Phase 0.5, before the reconciler's coherent infoByID snapshot
-			// exists (and CircuitState is a distinct concern from Info anyway), so
-			// it projects per bead — the same shape computeNamedSessionProgressSignatures
-			// uses. The projection is pure, so it is byte-identical to the raw reads.
-			if err := cb.observeResetGenerationFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(ordered[i].Metadata)); err != nil {
+			// front door. CircuitState is a distinct typed projection from the
+			// session Info, so it reads orderedBeads[i].Metadata (raw) directly — the
+			// projection is pure, so it is byte-identical to the raw reads. The
+			// session identity reads come off the coherent orderedInfos snapshot.
+			if err := cb.observeResetGenerationFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(orderedBeads[i].Metadata)); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: loading session circuit breaker reset generation for %s: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			}
 		}
-		for i := range ordered {
-			identity := namedSessionIdentity(ordered[i])
+		for i := range orderedInfos {
+			identity := namedSessionIdentityInfo(orderedInfos[i])
 			if identity == "" {
 				continue
 			}
-			if reset, err := cb.restoreFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(ordered[i].Metadata), cbNow); err != nil {
+			if reset, err := cb.restoreFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(orderedBeads[i].Metadata), cbNow); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: loading session circuit breaker state for %s: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			} else if reset {
-				if err := persistSessionCircuitBreakerMetadata(sessFront, ordered[i].ID, cb, identity, cbNow); err != nil {
+				if err := persistSessionCircuitBreakerMetadata(sessFront, orderedInfos[i].ID, cb, identity, cbNow); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 				}
 			}
 		}
 		// computeNamedSessionProgressSignatures takes the SESSION side as typed
-		// []session.Info (WI-5 W3 per-parameter split). Phase 0.5 runs before the
-		// coherent infoByID snapshot is built, so project `ordered` per bead here at
-		// the boundary; the projection is pure, so it is byte-identical to the raw
-		// reads. W4 replaces this boundary projection with the reconciler's typed
-		// feed once Phase 0.5 consumes Infos directly.
-		progressInfos := make([]sessionpkg.Info, len(ordered))
-		for i := range ordered {
-			progressInfos[i] = sessionpkg.InfoFromPersistedBead(ordered[i])
-		}
-		for identity, sig := range computeNamedSessionProgressSignatures(progressInfos, assignedWorkBeads) {
+		// []session.Info (WI-5 W3 per-parameter split); W4 feeds it the coherent
+		// orderedInfos snapshot directly, retiring the transitional boundary
+		// re-projection.
+		for identity, sig := range computeNamedSessionProgressSignatures(orderedInfos, assignedWorkBeads) {
 			if cb.ObserveProgressSignature(identity, sig, cbNow) {
 				if id := circuitIDByIdentity[identity]; id != "" {
 					if err := persistSessionCircuitBreakerMetadata(sessFront, id, cb, identity, cbNow); err != nil {
@@ -1450,33 +1497,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	recordPhase(TraceSiteSessionReconcileCircuitBreaker, "session_reconcile.circuit_breaker_restore", phaseStart, map[string]any{
 		"enabled":       cbEnabled,
-		"session_count": len(ordered),
+		"session_count": len(orderedBeads),
 	})
 
-	// Coherent typed snapshot of the tick's working set, loaded once (front-door
-	// migration Phase 5, Step 2). Reconciler decision reads route through this
-	// instead of a per-iteration InfoFromPersistedBead(*session) re-derive: it is
-	// the typed replacement for the raw session.Metadata[k]=v lockstep, which is
-	// kept in lockstep with it until every dependent read has moved onto the
-	// snapshot (Step 6). Built here from `ordered` (post-Phase-0.5), so each entry
-	// is byte-identical to a fresh projection of that session's bead at loop entry
-	// — Phase 1 mutates only the current iteration's session, so no entry goes
-	// stale before it is visited. Entries are refreshed from the store (via Get)
-	// after a mutation as the post-mutation reads migrate onto them (Step 3+).
-	infoByID := make(map[string]sessionpkg.Info, len(ordered))
-	// orderedIDs carries the tick's topo order as plain session IDs (Step 5e). The
-	// order-sensitive decision-domain rebuilds (the awake-scan `sessionInfos` feed
-	// and the preserve-template feed) walk it instead of the raw `ordered` beads,
-	// so those rebuilds no longer reach into `ordered[i]` — `ordered` is demoted to
-	// the load-time slice that builds this snapshot and carries raw beads into the
-	// documented raw-by-design / start-execution consumers. Order is load-bearing:
-	// ComputeAwakeSet resolves the non-unique SessionName last-write-wins, so these
-	// rebuilds must stay in topo order and never `range infoByID`.
-	orderedIDs := make([]string, len(ordered))
-	for i := range ordered {
-		orderedIDs[i] = ordered[i].ID
-		infoByID[ordered[i].ID] = sessionpkg.InfoFromPersistedBead(ordered[i])
-	}
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
@@ -1517,16 +1540,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		return rollbackPendingCreate(session, sessFront, clk.Now().UTC(), stderr)
 	}
 	phaseStart = time.Now()
-	for i := range ordered {
+	for i := range orderedBeads {
 		if ctx != nil && ctx.Err() != nil {
 			return 0
 		}
-		session := &ordered[i]
+		session := &orderedBeads[i]
 		// Typed projection for this iteration's mutation-free preamble decision
 		// reads (session_name, reset-pending, known-state, and the unknown-state
 		// trace), read from the coherent snapshot loaded above rather than a fresh
 		// per-iteration re-derive. The snapshot entry equals InfoFromPersistedBead
-		// (*session) at this point: it was built from `ordered` at loop entry and
+		// (*session) at this point: it was built from `orderedBeads` at loop entry and
 		// Phase 1 mutates only the current session, so no earlier iteration could
 		// have staled it. reconcileDrainAckStopPending below only mutates on its
 		// true/continue paths, so when control falls through to the known-state
@@ -1651,7 +1674,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if preserveNamed {
 				// Feed the preserve template resolver from the live mid-tick
 				// infoByID snapshot in topo (orderedIDs) order (front-door
-				// Step 4/5e), not the raw `ordered` working set. Byte-identical
+				// Step 4/5e), not the raw `orderedBeads` working set. Byte-identical
 				// today (every pre-call close still writes raw Status in lockstep,
 				// so membership matches) and forward-correct once that lockstep
 				// drops. The only reachable snapshot read is OpenInfos().
@@ -3073,7 +3096,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
-		"ordered_session_count":  len(ordered),
+		"ordered_session_count":  len(orderedBeads),
 		"wake_target_count":      len(wakeTargets),
 		"rollback_count":         rollbacksThisTick,
 		"rollback_budget":        maxRollbacksPerTick,
@@ -3092,7 +3115,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// snapshot via write-returns-Info (STEP6-PREPASS-AUDIT groups 1-12), so the
 	// snapshot is already coherent here without re-projecting the raw beads.
 	phaseStart = time.Now()
-	// Build the awake-scan domain from the coherent typed snapshot in `ordered`
+	// Build the awake-scan domain from the coherent typed snapshot in `orderedBeads`
 	// slice order (load-bearing — ComputeAwakeSet resolves SessionName
 	// last-write-wins over a non-unique key, so map iteration order must not
 	// leak in). Every orderedIDs entry keys infoByID (built at tick entry, only
@@ -3448,7 +3471,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Phase 2: Advance all in-flight drains. The drain scan reads the coherent
 	// typed snapshot (write-returns-Info keeps it current through Phase 1), not
 	// the raw working beads — so it observes the same post-forward-pass state the
-	// old &ordered[i] aliases carried, without holding a raw pointer map.
+	// old &orderedBeads[i] aliases carried, without holding a raw pointer map.
 	phaseStart = time.Now()
 	infoLookup := func(id string) (sessionpkg.Info, bool) {
 		info, ok := infoByID[id]
@@ -3457,7 +3480,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	recordPhase(TraceSiteSessionReconcileDrainAdvance, "session_reconcile.advance_drains", phaseStart, map[string]any{
-		"ordered_session_count": len(ordered),
+		"ordered_session_count": len(orderedBeads),
 		"wake_eval_count":       len(wakeEvals),
 	})
 
@@ -4615,7 +4638,7 @@ func clearCompletedIdleProbe(beadID string, dt *drainTracker) {
 // the tick's working set. It uses infoByID purely as a presence oracle: an id
 // absent from the snapshot is a session no longer under reconciliation, so its
 // stale probe must be cleared. infoByID carries exactly the ids of the raw
-// working set (both are built 1:1 from `ordered`, the snapshot is never keyed
+// working set (both are built 1:1 from `orderedBeads`, the snapshot is never keyed
 // beyond it, and refresh only updates existing entries), so routing this off the
 // typed snapshot instead of the raw beadByID pointer map is presence-identical
 // (front-door migration Step 6c: retire a read-side raw working-set consumer).

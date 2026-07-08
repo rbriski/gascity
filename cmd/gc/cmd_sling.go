@@ -415,7 +415,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	if err != nil {
 		return fail("config_load_failed", fmt.Sprintf("gc sling: %v", err))
 	}
-	emitLoadCityConfigWarnings(stderr, prov)
+	emitLoadCityConfigWarnings(configWarnWriter(jsonOutput, stderr), prov)
 	applyFeatureFlags(cfg)
 	cityName := loadedCityName(cfg, cityPath)
 

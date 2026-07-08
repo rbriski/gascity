@@ -41,9 +41,21 @@ func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
 	for _, sf := range []string{"", "asleep", "active", "all", "closed", "active,asleep"} {
 		for _, tf := range []string{"", "polecat", "sky"} {
 			got := mgr.ListFromInfos(infos, sf, tf)
-			want := mgr.ListFullFromBeads(corpus, sf, tf).Sessions
+			// want reproduces the retired ListFullFromBeads exactly: the bead-form
+			// filter (IsSessionBeadOrRepairable + sessionMatchesFilters) then the
+			// runtime overlay (infoFromBead == EnrichInfo(InfoFromPersistedBead)).
+			want := []Info{}
+			for _, b := range corpus {
+				if !IsSessionBeadOrRepairable(b) {
+					continue
+				}
+				if !sessionMatchesFilters(b, sf, tf) {
+					continue
+				}
+				want = append(want, mgr.EnrichInfo(InfoFromPersistedBead(b)))
+			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("ListFromInfos(state=%q,template=%q) diverged from ListFullFromBeads:\n got = %+v\nwant = %+v", sf, tf, got, want)
+				t.Errorf("ListFromInfos(state=%q,template=%q) diverged from the retired bead-form listing:\n got = %+v\nwant = %+v", sf, tf, got, want)
 			}
 		}
 	}

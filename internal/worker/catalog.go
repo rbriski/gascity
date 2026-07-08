@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type (
 	// SessionInfo describes a single session as exposed through the worker catalog.
 	SessionInfo = sessionpkg.Info
-	// SessionListResult carries a bead-backed catalog listing result.
-	SessionListResult = sessionpkg.ListResult
 	// SessionPruneResult reports the outcome of catalog pruning.
 	SessionPruneResult = sessionpkg.PruneResult
 	// SessionSubmissionCapabilities describes submit/nudge support for a session.
@@ -49,15 +46,24 @@ func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 
 // GetWithPersistedResponse loads one session by ID, returning the
 // runtime-enriched Info plus the persisted-response projection (status +
-// metadata) in a single fetch, so the API response path avoids a redundant raw
-// store.Get beside Get.
+// metadata) in a single fetch. It composes the persisted read
+// (session.Store.GetPersistedResponse) with the runtime overlay
+// (Manager.EnrichInfo) — the read-model shape — rather than cracking the raw
+// bead, preserving the read-path empty-type heal (RepairType writes only when
+// the type is empty). Errors surface in the session.Store form
+// (ErrSessionNotFound / "loading session %q"); callers that need the HTTP error
+// contract bridge them at their boundary.
 func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, SessionPersistedResponse, error) {
-	return c.manager.GetWithPersistedResponse(id)
-}
-
-// ListFullFromBeads expands a bead set into full session listing results.
-func (c *SessionCatalog) ListFullFromBeads(all []beads.Bead, stateFilter, templateFilter string) *SessionListResult {
-	return c.manager.ListFullFromBeads(all, stateFilter, templateFilter)
+	front := c.manager.PersistedStore()
+	info, pr, err := front.GetPersistedResponse(id)
+	if err != nil {
+		return SessionInfo{}, SessionPersistedResponse{}, err
+	}
+	if info.Type == "" {
+		_ = front.RepairType(id)
+		info.Type = sessionpkg.BeadType
+	}
+	return c.manager.EnrichInfo(info), pr, nil
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template

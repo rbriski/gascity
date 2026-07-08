@@ -244,7 +244,7 @@ func (s *Store) validatedBead(id string) (beads.Bead, error) {
 func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	// IncludeClosed so the in-memory filter below can honor state=closed and
 	// state=all; sessionMatchesFilters drops closed beads for the default and
-	// non-closed filters, matching Manager.ListFullFromBeads semantics.
+	// non-closed filters, matching the shared session-list filtering semantics.
 	all, err := s.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		Sort:          beads.SortCreatedDesc,
@@ -268,7 +268,8 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 
 // sessionMatchesFilters reports whether a session bead passes the state and
 // template filters. It is the single predicate for session-list filtering,
-// shared by both InfoStore listing and Manager.ListFullFromBeads.
+// shared by the Store.List projection and (via sessionMatchesFiltersInfo) the
+// Info-fed listing.
 func sessionMatchesFilters(b beads.Bead, stateFilter, templateFilter string) bool {
 	state := normalizeInfoState(State(b.Metadata["state"]))
 

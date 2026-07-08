@@ -193,17 +193,6 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 	return r
 }
 
-// persistedResponseForBead projects a (possibly nil) session bead onto the
-// PersistedResponse the response builder consumes. A nil bead — a session
-// present in the listing but absent from the bead index — yields the zero
-// projection, which sessionResponseWithReason treats as "no persisted facts".
-func persistedResponseForBead(b *beads.Bead) session.PersistedResponse {
-	if b == nil {
-		return session.PersistedResponse{}
-	}
-	return session.PersistedResponseFromBead(*b)
-}
-
 // filterMetadataAllowedKeys lists non-real_world_app_ metadata keys that are safe to expose.
 var filterMetadataAllowedKeys = map[string]bool{
 	"template_overrides": true,
@@ -249,11 +238,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	catalog, err := s.workerSessionCatalog(store.Store)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
+	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -261,24 +246,17 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	listResult := catalog.ListFullFromBeads(all, stateFilter, templateFilter)
-	sessions := listResult.Sessions
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	for i := range listResult.Beads {
-		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
-	}
+	sessions, responseByID := filterEnrichReadModel(mgr, listings, stateFilter, templateFilter)
 
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, s.state.SessionProvider(), hasDeferredQueue)
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
@@ -314,11 +292,6 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	catalog, err := s.workerSessionCatalog(store.Store)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
 	cfg := s.state.Config()
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
@@ -326,7 +299,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	info, pr, err := catalog.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -545,12 +518,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	catalog, err := s.workerSessionCatalog(store.Store)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	info, pr, err := catalog.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -754,7 +722,10 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
+		// agent_name is read straight off the already-validated, type-healed bead
+		// (b) loaded above — the controller-managed-alias gate; identical to the
+		// retired codec projection of the persisted agent_name field.
+		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
 			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
 			return
 		}
@@ -773,7 +744,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, pr, err := catalog.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

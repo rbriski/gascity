@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -915,9 +916,12 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		}()
 	}
 
-	allSessionBeads, err := session.ListAllSessionBeads(sessStore, beads.ListQuery{
-		Sort: beads.SortCreatedDesc,
-	})
+	// One union scan feeds the whole command: the provider snapshot, the typed
+	// session list, and the raw-bead index the reason projection still reads.
+	// loadSessionBeadSnapshot routes the type+label union through the session
+	// snapshot loader (front-door migration keeps ListAllSessionBeads out of the
+	// CLI); it loads unsorted, so restore the created-desc order below.
+	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
@@ -926,7 +930,6 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		return 1
 	}
 
-	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
 	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
 	catalog, err := workerSessionCatalogWithConfig("", sessStore, sp, providerCtx.cfg)
 	if err != nil {
@@ -936,16 +939,21 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
-	sessions := listResult.Sessions
+	sessions := catalog.ListFromInfos(sessionBeads.OpenInfos(), stateFilter, templateFilter)
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	})
 
 	if jsonOutput {
 		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
 	}
 
-	// Build bead index from the beads already fetched by ListFull (no duplicate query).
-	beadIndex := make(map[string]beads.Bead, len(listResult.Beads))
-	for _, b := range listResult.Beads {
+	// Build the bead index for the per-session reason projection from the
+	// snapshot's raw open beads (no duplicate query). WI-6 W4: the reason
+	// classifiers still read the raw bead here; they move onto Info in a later wave.
+	openBeads := sessionBeads.Open()
+	beadIndex := make(map[string]beads.Bead, len(openBeads))
+	for _, b := range openBeads {
 		beadIndex[b.ID] = b
 	}
 
@@ -1312,6 +1320,10 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	// full wake reasons (including WakeConfig).
 	if cfg != nil {
 		reasons := wakeReasons(b, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
+		// pin-awake is read from the reason source of truth — the persisted bead
+		// (beadIndex[s.ID]) — not the display Info s, which callers may pass minimally
+		// populated. WI-6 W4: this whole reason projection moves onto Info when the
+		// wakeReasons/lifecycle classifiers gain Info-taking twins.
 		if pinAwakeWakeReasonVisible(session.InfoFromPersistedBead(b), cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
 			reasons = append(reasons, WakePin)
 		}

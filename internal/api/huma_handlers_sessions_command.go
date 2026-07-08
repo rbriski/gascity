@@ -430,7 +430,10 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
+		// agent_name off the already-validated, type-healed bead (b) — the
+		// controller-managed-alias gate; identical to the retired codec projection
+		// of the persisted agent_name field.
+		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
 			return nil, huma.Error403Forbidden("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
@@ -445,7 +448,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -524,7 +527,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	s.state.Poke()
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -940,7 +943,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

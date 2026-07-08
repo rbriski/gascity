@@ -1802,50 +1802,22 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) Runtim
 	return obs
 }
 
-// ListResult holds the results of a ListFull call, including the raw beads
-// to avoid redundant store queries.
-type ListResult struct {
-	Sessions []Info
-	Beads    []beads.Bead // All session beads (unfiltered by state/template)
-}
-
-// List returns all chat sessions, optionally filtered by state and template.
+// List returns all chat sessions, optionally filtered by state and template,
+// with the live runtime overlay applied. It is composed over the type+label
+// union feed (Store.ListAll) plus the shared filter-then-enrich (ListFromInfos).
+//
+// This is a deliberate semantic UPGRADE over the retired ListFull, which queried
+// by the gc:session label only and silently dropped session beads that had lost
+// their label after a crash or schema migration; the union feed surfaces those
+// repairable type-lost beads. Every former ListFull/ListFullFromBeads caller
+// already pre-fed union rows (via ListAllSessionBeads / the session snapshot), so
+// their behavior is unchanged — only a bare List now also sees the type-lost beads.
 func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error) {
-	r, err := m.ListFull(stateFilter, templateFilter)
-	if err != nil {
-		return nil, err
-	}
-	return r.Sessions, nil
-}
-
-// ListFull is like List but also returns the raw session beads to avoid
-// redundant store queries by the caller (e.g., for building a bead index).
-func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResult, error) {
-	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
-		Sort:  beads.SortCreatedDesc,
-	})
+	infos, err := m.PersistedStore().ListAll(ListAllOptions{Sort: beads.SortCreatedDesc})
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
-	return m.ListFullFromBeads(all, stateFilter, templateFilter), nil
-}
-
-// ListFullFromBeads is like ListFull but reuses a caller-supplied slice of
-// session-labeled beads. Callers that already loaded session beads can avoid
-// a second store scan by passing the same slice here.
-func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
-	result := make([]Info, 0, len(all))
-	for _, b := range all {
-		if !IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
-			continue
-		}
-		result = append(result, m.infoFromBead(b))
-	}
-	return &ListResult{Sessions: result, Beads: all}
+	return m.ListFromInfos(infos, stateFilter, templateFilter), nil
 }
 
 // Peek captures the last N lines of output from the session.
@@ -1916,12 +1888,14 @@ func (m *Manager) EnrichInfos(infos []Info) []Info {
 	return infos
 }
 
-// persistedStore wraps the manager's underlying store as the session-domain
+// PersistedStore wraps the manager's underlying store as the session-domain
 // front door for persisted reads (Store.ListAll / Store.GetPersistedResponse /
 // Store.RepairType). The wrapper holds the exact store value the manager uses,
 // so reads observe the same backing and caching as the manager's own store.List;
-// per-call construction of the one-field wrapper is safe (spec §7).
-func (m *Manager) persistedStore() *Store {
+// per-call construction of the one-field wrapper is safe (spec §7). It is the
+// persisted read half of the read model — pair it with EnrichInfo for the live
+// overlay (the worker catalog's Get composes exactly that).
+func (m *Manager) PersistedStore() *Store {
 	return NewStore(beads.SessionStore{Store: m.store})
 }
 

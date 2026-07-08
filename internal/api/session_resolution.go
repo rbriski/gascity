@@ -163,7 +163,11 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			retired = append(retired, b)
 			continue
 		}
-		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
+		// Raw-lane read: this loop iterates the raw ExactMetadataSessionCandidates
+		// feed (retired in WI-7 with the named_config raw surfaces). session_name is
+		// the verbatim metadata Info.SessionNameMetadata mirrors, so the direct read
+		// is byte-identical without projecting the whole bead through the codec.
+		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
 				_ = handle.Kill(context.Background())
 			}
@@ -418,28 +422,28 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 	if identifier == "" {
 		return "", false, nil
 	}
-	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := session.NewStore(beads.SessionStore{Store: store}).ListAll(session.ListAllOptions{})
 	if err != nil {
 		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
 	}
-	var best beads.Bead
+	var best session.Info
 	found := false
-	for _, b := range all {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if apiIsNamedSessionBead(b) {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if session.IsNamedSessionInfo(info) {
 			continue
 		}
-		if strings.TrimSpace(b.Title) != identifier {
+		if strings.TrimSpace(info.Title) != identifier {
 			continue
 		}
 		// MetadataState is the RAW state mirror; Info.State is normalizeInfoState-
 		// folded (awake->active), which would change this predicate.
-		state := session.State(session.InfoFromPersistedBead(b).MetadataState)
+		state := session.State(info.MetadataState)
 		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
 			continue
 		}
-		if !found || b.CreatedAt.After(best.CreatedAt) {
-			best = b
+		if !found || info.CreatedAt.After(best.CreatedAt) {
+			best = info
 			found = true
 		}
 	}

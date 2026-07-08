@@ -245,6 +245,140 @@ func (s *partialAssignedWorkStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 	return rows, nil
 }
 
+// partialSessionListStore returns a PartialResultError from every List so the
+// session collection can be exercised on its degraded-but-non-empty path.
+type partialSessionListStore struct {
+	*beads.MemStore
+}
+
+func (s *partialSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	return rows, &beads.PartialResultError{Op: "bd list", Err: errors.New("skipped corrupt session bead")}
+}
+
+// TestCollectAllOpenSessionInfos pins the collection edge that projects session
+// beads onto session.Info: closed beads are dropped, the projected fields carry
+// the bead metadata verbatim, a partial-result store still contributes its
+// partial non-closed slice while joining its error, and suspended rig stores
+// are skipped.
+func TestCollectAllOpenSessionInfos(t *testing.T) {
+	t.Run("filters_closed_and_projects_fields_verbatim", func(t *testing.T) {
+		cityStore := beads.NewMemStore()
+		open, err := cityStore.Create(beads.Bead{
+			Status: "open", Type: sessionBeadType,
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "active",
+				"pool_managed": "true",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create open session bead: %v", err)
+		}
+		closedBead, err := cityStore.Create(beads.Bead{
+			Type:     sessionBeadType,
+			Metadata: map[string]string{"template": "worker", "state": "asleep"},
+		})
+		if err != nil {
+			t.Fatalf("create session bead to close: %v", err)
+		}
+		if err := cityStore.Close(closedBead.ID); err != nil {
+			t.Fatalf("close session bead: %v", err)
+		}
+
+		infos, err := collectAllOpenSessionInfos(&config.City{}, cityStore, nil, nil)
+		if err != nil {
+			t.Fatalf("collectAllOpenSessionInfos: %v", err)
+		}
+		if len(infos) != 1 {
+			t.Fatalf("collectAllOpenSessionInfos returned %d infos, want 1 (closed filtered): %#v", len(infos), infos)
+		}
+		got := infos[0]
+		if got.ID != open.ID {
+			t.Fatalf("projected ID = %q, want %q", got.ID, open.ID)
+		}
+		if got.Template != "worker" {
+			t.Fatalf("projected Template = %q, want %q", got.Template, "worker")
+		}
+		if !got.PoolManaged {
+			t.Fatal("projected PoolManaged = false, want true")
+		}
+		if got.MetadataState != "active" {
+			t.Fatalf("projected MetadataState = %q, want %q", got.MetadataState, "active")
+		}
+	})
+
+	t.Run("partial_result_contributes_slice_and_joins_error", func(t *testing.T) {
+		backing := beads.NewMemStore()
+		created, err := backing.Create(beads.Bead{
+			Status: "open", Type: sessionBeadType,
+			Metadata: map[string]string{"template": "worker", "state": "active"},
+		})
+		if err != nil {
+			t.Fatalf("create session bead: %v", err)
+		}
+		store := &partialSessionListStore{MemStore: backing}
+
+		infos, err := collectAllOpenSessionInfos(&config.City{}, store, nil, nil)
+		if err == nil {
+			t.Fatal("collectAllOpenSessionInfos returned nil error on a partial-result store")
+		}
+		if !beads.IsPartialResult(err) {
+			t.Fatalf("collectAllOpenSessionInfos error = %v, want a joined PartialResultError", err)
+		}
+		if len(infos) != 1 {
+			t.Fatalf("collectAllOpenSessionInfos returned %d infos, want 1 partial contribution: %#v", len(infos), infos)
+		}
+		if infos[0].ID != created.ID {
+			t.Fatalf("partial contribution ID = %q, want %q", infos[0].ID, created.ID)
+		}
+	})
+
+	t.Run("skips_suspended_rig_stores", func(t *testing.T) {
+		rigPath := filepath.Clean("/c/rigs/rig-A")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "rig-A", Path: rigPath}}}
+
+		cityStore := beads.NewMemStore()
+		cityBead, err := cityStore.Create(beads.Bead{
+			Status: "open", Type: sessionBeadType,
+			Metadata: map[string]string{"template": "worker", "state": "active"},
+		})
+		if err != nil {
+			t.Fatalf("create city session bead: %v", err)
+		}
+		rigStore := beads.NewMemStore()
+		if _, err := rigStore.Create(beads.Bead{
+			Status: "open", Type: sessionBeadType,
+			Metadata: map[string]string{"template": "rig-A/worker", "state": "active"},
+		}); err != nil {
+			t.Fatalf("create rig session bead: %v", err)
+		}
+		rigStores := map[string]beads.Store{"rig-A": rigStore}
+
+		// Control: with the rig live, both sessions are collected.
+		liveInfos, err := collectAllOpenSessionInfos(cfg, cityStore, rigStores, nil)
+		if err != nil {
+			t.Fatalf("collectAllOpenSessionInfos (live rig): %v", err)
+		}
+		if len(liveInfos) != 2 {
+			t.Fatalf("collectAllOpenSessionInfos (live rig) returned %d infos, want 2: %#v", len(liveInfos), liveInfos)
+		}
+
+		// Suspending the rig drops its store from the fan-out.
+		suspended := map[string]bool{rigPath: true}
+		infos, err := collectAllOpenSessionInfos(cfg, cityStore, rigStores, suspended)
+		if err != nil {
+			t.Fatalf("collectAllOpenSessionInfos (suspended rig): %v", err)
+		}
+		if len(infos) != 1 || infos[0].ID != cityBead.ID {
+			t.Fatalf("collectAllOpenSessionInfos returned %#v, want only the city session (suspended rig skipped)", infos)
+		}
+	})
+}
+
 func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T) {
 	store := beads.NewMemStore()
 	handoff, err := store.Create(beads.Bead{
@@ -11229,7 +11363,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 
 	// Criterion #6 (ga-4qbgqf.3): fresh in-flight creates (pending_create_claim=true)
 	// are retained in desired state and in the retained count during a partial tick.
-	// poolPartialAlive is true via isPendingPoolCreate, so the narrow guard keeps them.
+	// poolPartialAlive is true via isPendingPoolCreateInfo, so the narrow guard keeps them.
 	t.Run("fresh pending_create_claim creating bead retained during partial tick", func(t *testing.T) {
 		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 		freshCreate := beads.Bead{

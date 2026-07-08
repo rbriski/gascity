@@ -2924,7 +2924,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into
-	// agentBuildParams.beadStore and the collectAllOpenSessionBeads "city" arm)
+	// agentBuildParams.beadStore and the collectAllOpenSessionInfos "city" arm)
 	// and the per-rig work tail (work). The session-sync and reconcile arms below
 	// take the same sessions store. Split into the class accessors so a future
 	// per-class backend routes each role independently; both collapse to the same
@@ -3158,7 +3158,7 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// The desired-state build threads two store roles: the session-bead store the
 	// build-fn's leading store param flows into (sessions — it becomes
 	// agentBuildParams.beadStore, which creates and updates session beads, and the
-	// collectAllOpenSessionBeads "city" arm) and the per-rig work tail. Split the
+	// collectAllOpenSessionInfos "city" arm) and the per-rig work tail. Split the
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()

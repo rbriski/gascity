@@ -564,9 +564,9 @@ func finalizeDrainAckStopPendingSessions(
 	finalized := 0
 	for i := range sessions {
 		session := &sessions[i]
-		// Boundary per-bead projection (same pattern as the advanceSessionDrains
-		// wrappers): this non-reconciler pass loads its own []beads.Bead, so it
-		// projects Info here and feeds the drain-ack helpers off it.
+		// Boundary per-bead projection (same pattern as the drain scan): this
+		// non-reconciler pass loads its own []beads.Bead, so it projects Info here
+		// and feeds the drain-ack helpers off it.
 		info := sessionpkg.InfoFromPersistedBead(*session)
 		if !isDrainAckStopPendingInfo(info) {
 			continue
@@ -1320,7 +1320,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Phase 0: Heal expired timers on all sessions.
 	phaseStart = time.Now()
 	for i := range sessions {
-		healExpiredTimers(&sessions[i], sessFront, clk)
+		// Phase 0 runs before the coherent infoByID snapshot exists (built at
+		// ~1421), so project this session's bead directly; healExpiredTimers keeps
+		// the raw mirror so that later snapshot build stays coherent.
+		healExpiredTimers(&sessions[i], sessionpkg.InfoFromPersistedBead(sessions[i]), sessFront, clk)
 	}
 	if cfg != nil {
 		bySessionName := make(map[string]beads.Bead, len(sessions))
@@ -1562,7 +1565,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						template = info.Template
 					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, nil)
-					rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, cfg, providerAlive, dt, sessFront, clk, peek)
+					rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, info, cfg, providerAlive, dt, sessFront, clk, peek)
 					if rateLimitHit || rateLimitErr != nil {
 						// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 						// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -1619,7 +1622,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
-					rateLimitHit, rlBatchNamed, rateLimitErr = checkRateLimitStability(session, cfg, rateLimitAlive, dt, sessFront, clk, peek)
+					rateLimitHit, rlBatchNamed, rateLimitErr = checkRateLimitStability(session, info, cfg, rateLimitAlive, dt, sessFront, clk, peek)
 				}
 			}
 			if rateLimitHit || rateLimitErr != nil {
@@ -2041,7 +2044,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
 			if pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout) {
-				rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
+				rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, infoPostZombie, cfg, alive, dt, sessFront, clk, peek)
 				if rateLimitHit || rateLimitErr != nil {
 					// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 					// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -2387,7 +2390,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
-		rateLimitHit, rlBatchFwd, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek)
+		rateLimitHit, rlBatchFwd, rateLimitErr := checkRateLimitStability(session, infoByID[session.ID], cfg, alive, dt, sessFront, clk, peek)
 		if rateLimitHit || rateLimitErr != nil {
 			// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 			// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -2440,7 +2443,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
 		// nil (no-op) when no stability event was recorded.
 		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stab, stabBatch := checkStability(session, cfg, alive, dt, sessFront, clk, nil); stab {
+		if stab, stabBatch := checkStability(session, infoByID[session.ID], cfg, alive, dt, sessFront, clk, nil); stab {
 			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(stabBatch)
 			continue // rapid exit recorded, skip further processing
 		}
@@ -2452,7 +2455,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info)
 		// regardless of the bool — ExitProductiveDeath may clear churn_count.
 		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
-		churn, churnBatch := checkChurn(session, cfg, alive, dt, sessFront, clk)
+		churn, churnBatch := checkChurn(session, infoByID[session.ID], cfg, alive, dt, sessFront, clk)
 		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(churnBatch)
 		if churn {
 			continue // churn recorded, skip further processing
@@ -2461,14 +2464,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Clear wake failures for sessions that have been stable long enough.
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
 		// nil (no-op) when nothing was cleared. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
-		if alive && stableLongEnough(*session, clk) {
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearWakeFailures(session, sessFront))
+		if alive && stableLongEnoughInfo(infoByID[session.ID], clk) {
+			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearWakeFailures(session, infoByID[session.ID], sessFront))
 		}
 		// Clear churn counter for sessions that have been productive.
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
 		// nil (no-op) when churn_count was already absent/zero. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
-		if alive && productiveLongEnough(*session, clk) {
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearChurn(session, sessFront))
+		if alive && productiveLongEnoughInfo(infoByID[session.ID], clk) {
+			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearChurn(session, infoByID[session.ID], sessFront))
 		}
 		if alive && shouldRollbackPendingCreate(session) {
 			switch stateBeforeHeal {

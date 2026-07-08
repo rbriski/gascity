@@ -54,19 +54,12 @@ const (
 	sessionProviderTerminalErrorAtKey       = "provider_terminal_error_at"
 )
 
-// Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
-// superseded by ComputeAwakeSet (compute_awake_set.go). The production
-// reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
-// awakeSetToWakeEvals for all wake/drain decisions. These functions are
-// only called by computeWakeEvaluations (used as a nil-guard fallback
-// in advanceSessionDrains, which never fires because the reconciler
-// always passes non-nil wakeEvals) and by legacy tests.
-//
-// DO NOT add new wake logic here — it will have NO EFFECT on production
-// behavior. All wake/sleep changes must go through ComputeAwakeSet.
-//
-// TODO: Remove these functions and migrate remaining tests to
-// ComputeAwakeSet. Tracked as tech debt.
+// wakeReasons and evaluateWakeReasons are the CLI `gc session` REASON-column
+// display helpers ONLY. They compute the multi-reason, comma-joined cell shown
+// to operators; their sole production caller is sessionReason in cmd_session.go.
+// Production wake/sleep decisions come exclusively from ComputeAwakeSet
+// (compute_awake_set.go) via awakeSetToWakeEvals — do NOT add wake logic here,
+// it has no effect on reconciler behavior.
 
 func wakeReasons(
 	session beads.Bead,
@@ -263,176 +256,6 @@ func sessionMetadataStateInfo(i sessionpkg.Info) string {
 	}
 }
 
-func computeWakeEvaluations(
-	sessions []beads.Bead,
-	cfg *config.City,
-	sp runtime.Provider,
-	poolDesired map[string]int,
-	workSet map[string]bool,
-	readyWaitSet map[string]bool,
-	clk clock.Clock,
-) map[string]wakeEvaluation {
-	evals := make(map[string]wakeEvaluation, len(sessions))
-	for _, session := range sessions {
-		evals[session.ID] = evaluateWakeReasons(session, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
-	}
-	applyDependencyWakeReasons(sessions, cfg, evals)
-	capWakeConfigByDemand(sessions, cfg, evals, poolDesired)
-	return evals
-}
-
-// capWakeConfigByDemand removes WakeConfig from excess sessions so that
-// at most poolDesired[template] sessions get WakeConfig per template.
-//
-// Priority: sessions that are already alive or have resume-tier reasons
-// (WakeSession, WakeAttached) keep their WakeConfig. Excess asleep
-// sessions lose it. Sessions in creating/awake state that don't have
-// assigned work count against the budget (they're "in-flight new"
-// sessions that haven't claimed yet).
-func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[string]wakeEvaluation, poolDesired map[string]int) {
-	// Group sessions by template and count how many already need to be awake.
-	type templateBudget struct {
-		desired int
-		active  int      // creating/awake — already consuming a slot
-		wakeIDs []string // sessions with WakeConfig that are asleep
-	}
-	budgets := make(map[string]*templateBudget)
-
-	for _, session := range sessions {
-		eval, ok := evals[session.ID]
-		if !ok {
-			continue
-		}
-		if !containsWakeReason(eval.Reasons, WakeConfig) {
-			continue
-		}
-		// Named sessions with mode=always are not pool-managed — skip capping.
-		if isNamedSessionBead(session) && namedSessionMode(session) == "always" {
-			continue
-		}
-		// Manual sessions (user-created via API/UI) bypass pool demand — they
-		// should stay alive until explicitly closed.
-		if isManualSessionBead(session) {
-			continue
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template == "" {
-			continue
-		}
-
-		b := budgets[template]
-		if b == nil {
-			b = &templateBudget{desired: poolDesired[template]}
-			budgets[template] = b
-		}
-
-		state := sessionMetadataState(session)
-		switch state {
-		case "active", "start-pending", "creating":
-			// Already running or starting — counts against desired.
-			b.active++
-		default:
-			// Asleep — candidate for wake, subject to budget.
-			b.wakeIDs = append(b.wakeIDs, session.ID)
-		}
-	}
-
-	// For each template, only allow enough asleep→wake transitions to
-	// fill the gap between active and desired.
-	for _, b := range budgets {
-		slotsAvailable := b.desired - b.active
-		if slotsAvailable < 0 {
-			slotsAvailable = 0
-		}
-		// Keep the first slotsAvailable asleep sessions, strip WakeConfig from the rest.
-		for i, id := range b.wakeIDs {
-			if i >= slotsAvailable {
-				eval := evals[id]
-				eval.Reasons = removeWakeReason(eval.Reasons, WakeConfig)
-				evals[id] = eval
-			}
-		}
-	}
-}
-
-func removeWakeReason(reasons []WakeReason, remove WakeReason) []WakeReason {
-	var result []WakeReason
-	for _, r := range reasons {
-		if r != remove {
-			result = append(result, r)
-		}
-	}
-	return result
-}
-
-func applyDependencyWakeReasons(sessions []beads.Bead, cfg *config.City, evals map[string]wakeEvaluation) {
-	if cfg == nil || len(evals) == 0 {
-		return
-	}
-	roots := make(map[string]bool)
-	for _, session := range sessions {
-		eval, ok := evals[session.ID]
-		if !ok || !hasDependencyWakeRoot(eval.Reasons) {
-			continue
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template != "" {
-			roots[template] = true
-		}
-	}
-	if len(roots) == 0 {
-		return
-	}
-	preferred := preferredDependencySessions(sessions, cfg)
-	visited := make(map[string]bool)
-	var visit func(template string)
-	visit = func(template string) {
-		if template == "" || visited[template] {
-			return
-		}
-		visited[template] = true
-		agent := findAgentByTemplate(cfg, template)
-		if agent == nil {
-			return
-		}
-		for _, dep := range agent.DependsOn {
-			if session, ok := preferred[dep]; ok {
-				eval := evals[session.ID]
-				if session.Metadata["held_until"] == "" && session.Metadata["quarantined_until"] == "" && !containsWakeReason(eval.Reasons, WakeDependency) {
-					eval.Reasons = append(eval.Reasons, WakeDependency)
-					evals[session.ID] = eval
-				}
-			}
-			visit(dep)
-		}
-	}
-	for template := range roots {
-		visit(template)
-	}
-}
-
-func preferredDependencySessions(sessions []beads.Bead, cfg *config.City) map[string]beads.Bead {
-	preferred := make(map[string]beads.Bead)
-	for _, session := range sessions {
-		if isDrainedSessionBead(session) {
-			continue
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template == "" {
-			continue
-		}
-		existing, ok := preferred[template]
-		if !ok || compareDependencyCandidate(session, existing) < 0 {
-			preferred[template] = session
-		}
-	}
-	return preferred
-}
-
-func compareDependencyCandidate(a, b beads.Bead) int {
-	return strings.Compare(a.Metadata["session_name"], b.Metadata["session_name"])
-}
-
 func containsWakeReason(reasons []WakeReason, want WakeReason) bool {
 	for _, reason := range reasons {
 		if reason == want {
@@ -440,17 +263,6 @@ func containsWakeReason(reasons []WakeReason, want WakeReason) bool {
 		}
 	}
 	return false
-}
-
-func hasDependencyWakeRoot(reasons []WakeReason) bool {
-	return containsWakeReason(reasons, WakeConfig) ||
-		containsWakeReason(reasons, WakeWork) ||
-		containsWakeReason(reasons, WakeWait) ||
-		containsWakeReason(reasons, WakeCreate) ||
-		containsWakeReason(reasons, WakeSession) ||
-		containsWakeReason(reasons, WakeAttached) ||
-		containsWakeReason(reasons, WakePending) ||
-		containsWakeReason(reasons, WakePin)
 }
 
 // computeWorkSet runs legacy controller-side work_query commands and returns
@@ -608,21 +420,29 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 }
 
 // healExpiredTimers clears expired held_until and quarantined_until.
-// Separate from wakeReasons() to keep that function pure.
-func healExpiredTimers(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock) {
-	if h := session.Metadata["held_until"]; h != "" {
+// Separate from wakeReasons() to keep that function pure. Decision reads route
+// through the typed info snapshot, which must equal InfoFromPersistedBead(*session)
+// at call time; the raw session.Metadata mirror loops are kept because the Phase-0
+// caller runs before the coherent infoByID snapshot exists and later reads still
+// project from the mutated bead.
+func healExpiredTimers(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) {
+	if h := info.HeldUntil; h != "" {
 		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])
+			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
 			if err := sessFront.ApplyPatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
 				}
+				// Fold the hold-clear batch onto the local Info so the quarantine
+				// block below reads the post-hold sleep_reason (ClearExpiredHoldPatch
+				// can blank it) exactly as the raw session.Metadata read did today.
+				info = info.ApplyPatch(batch)
 			}
 		}
 	}
-	if q := session.Metadata["quarantined_until"]; q != "" {
+	if q := info.QuarantinedUntil; q != "" {
 		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])
+			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
 			if err := sessFront.ApplyPatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
@@ -649,14 +469,18 @@ func healExpiredTimers(session *beads.Bead, sessFront *sessionpkg.Store, clk clo
 // forward-pass caller can fold it via ApplyPatch (front-door migration Step 6d,
 // STEP6-PREPASS-AUDIT group 2). Returns (false, nil) otherwise; ApplyPatch(nil)
 // is a no-op.
-func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string) {
-	if handled, rlBatch, err := checkRateLimitStability(session, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
+//
+// Coherence precondition: info must equal InfoFromPersistedBead(*session) at
+// call time — the Step-6d fold invariant the forward-pass caller maintains by
+// folding every prior in-iteration write onto the snapshot before this call.
+func checkStability(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string) {
+	if handled, rlBatch, err := checkRateLimitStability(session, info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return true, rlBatch
 	}
-	if sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
+	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return false, nil
 	}
-	wfBatch := recordWakeFailure(session, sessFront, clk, sessionAgentMetricIdentity(*session, cfg))
+	wfBatch := recordWakeFailure(session, info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 	clearBatch := clearLastWokeAt(session, sessFront)
 	return true, mergeMetadataPatch(wfBatch, clearBatch)
 }
@@ -677,11 +501,11 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 // ApplyPatch (front-door migration Step 6d, STEP6-PREPASS-AUDIT group 1).
 // batch is nil on every path that mirrors nothing (no-hit, nil session, or
 // persist error); ApplyPatch(nil) is a no-op.
-func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string, error) {
+func checkRateLimitStability(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string, error) {
 	if session == nil {
 		return false, nil, nil
 	}
-	facts := sessionExitFacts(session, cfg, alive, dt, clk)
+	facts := sessionExitFactsInfo(info, cfg, alive, dt, clk)
 	facts.ScreenAvailable = peek != nil
 	dec := sessionpkg.DecideSessionExit(facts)
 	for dec == sessionpkg.ExitGatherScreen {
@@ -728,6 +552,33 @@ func sessionExitFacts(session *beads.Bead, cfg *config.City, alive bool, dt *dra
 		PendingCreateStartInFlight: pendingCreateStartInFlight(*session, clk, startupTimeout),
 		SleepReason:                session.Metadata["sleep_reason"],
 		LastWokeAt:                 session.Metadata["last_woke_at"],
+		Now:                        clk.Now(),
+		StabilityThreshold:         stabilityThreshold,
+		ProductivityThreshold:      churnProductivityThreshold,
+	}
+}
+
+// sessionExitFactsInfo is the session.Info sibling of sessionExitFacts, reading
+// the typed exit-decision mirrors instead of raw bead metadata. Info already
+// applies the identical TrimSpace=="true" for PendingCreateClaim, and its
+// SleepReason/LastWokeAt fields are verbatim raw mirrors, so the two forms
+// produce byte-identical ExitFacts for any info == InfoFromPersistedBead(*session)
+// (equivalence-proven, TestSessionClassifierInfoEquivalence).
+func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) sessionpkg.ExitFacts {
+	var startupTimeout time.Duration
+	subprocess := false
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+		subprocess = cfg.Session.Provider == "subprocess"
+	}
+	return sessionpkg.ExitFacts{
+		Alive:                      alive,
+		SubprocessProvider:         subprocess,
+		DrainPending:               dt != nil && dt.get(info.ID) != nil,
+		PendingCreateClaim:         info.PendingCreateClaim,
+		PendingCreateStartInFlight: pendingCreateStartInFlightInfo(info, clk, startupTimeout),
+		SleepReason:                info.SleepReason,
+		LastWokeAt:                 info.LastWokeAt,
 		Now:                        clk.Now(),
 		StabilityThreshold:         stabilityThreshold,
 		ProductivityThreshold:      churnProductivityThreshold,
@@ -838,8 +689,12 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // Returns nil only when no keys were mirrored (a quarantined accrual whose
 // persist failed is excluded from the batch). agentIdentity is the
 // start-path-joinable agent label for gc.agent.quarantines.total.
-func recordWakeFailure(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) map[string]string {
-	attempts, _ := strconv.Atoi(session.Metadata["wake_attempts"])
+func recordWakeFailure(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) map[string]string {
+	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
+	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
+	// same clamped value the old strconv.Atoi(session.Metadata[...]) path did —
+	// byte-identical, mirroring how recordChurn treats info.ChurnCount.
+	attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
@@ -856,7 +711,7 @@ func recordWakeFailure(session *beads.Bead, sessFront *sessionpkg.Store, clk clo
 	// recovery remains correct in that call order and for any skewed state
 	// left behind by older builds.
 	var merged map[string]string
-	if session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "" {
+	if info.SessionKey != "" || info.StartedConfigHash != "" {
 		reset := sessionpkg.ConversationResetPatch(true)
 		_ = sessFront.ApplyPatch(session.ID, reset)
 		for k, v := range reset {
@@ -886,12 +741,14 @@ func recordWakeFailure(session *beads.Bead, sessFront *sessionpkg.Store, clk clo
 // Returns the mirrored batch on the persist path, nil when there is nothing to
 // clear (both fields already absent/zero). The caller folds the returned batch
 // onto the typed snapshot via ApplyPatch (nil is a no-op).
-func clearWakeFailures(session *beads.Bead, sessFront *sessionpkg.Store) map[string]string {
+func clearWakeFailures(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store) map[string]string {
 	batch := make(map[string]string, 2)
-	if session.Metadata["wake_attempts"] != "" && session.Metadata["wake_attempts"] != "0" {
+	// WakeAttemptsMetadata (the raw string mirror), not the parsed WakeAttempts int:
+	// the != "0" distinction distinguishes an absent counter from a persisted "0".
+	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		batch["wake_attempts"] = "0"
 	}
-	if session.Metadata["quarantined_until"] != "" {
+	if info.QuarantinedUntil != "" {
 		batch["quarantined_until"] = ""
 	}
 	if len(batch) == 0 {
@@ -920,10 +777,10 @@ func clearWakeFailures(session *beads.Bead, sessFront *sessionpkg.Store) map[str
 // so the caller can fold it via ApplyPatch regardless of the bool return
 // (front-door migration Step 6d, STEP6-PREPASS-AUDIT group 5).
 // batch is nil when nothing was mirrored. ApplyPatch(nil) is a no-op.
-func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (bool, map[string]string) {
-	switch sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) {
+func checkChurn(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (bool, map[string]string) {
+	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		churnBatch := recordChurn(session, sessFront, clk, sessionAgentMetricIdentity(*session, cfg))
+		churnBatch := recordChurn(session, info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
 		clearBatch := clearLastWokeAt(session, sessFront)
@@ -931,7 +788,7 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	case sessionpkg.ExitProductiveDeath:
 		// Session was productive — clear any stale churn count so it
 		// doesn't carry over and cause premature quarantine next time.
-		return false, clearChurn(session, sessFront)
+		return false, clearChurn(session, info, sessFront)
 	default:
 		// Rapid crashes belong to checkStability, which ran first.
 		return false, nil
@@ -956,8 +813,8 @@ func isDeliberateSleepReason(reason string) bool {
 //   - {"churn_count": next} on the non-quarantine path
 //
 // agentIdentity is the start-path-joinable agent label for gc.agent.quarantines.total.
-func recordChurn(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) map[string]string {
-	count, _ := strconv.Atoi(session.Metadata["churn_count"])
+func recordChurn(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) map[string]string {
+	count, _ := strconv.Atoi(info.ChurnCount)
 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
@@ -967,7 +824,7 @@ func recordChurn(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clo
 	// conversation itself is the problem. A fresh conversation avoids
 	// re-hitting the same wall.
 	var merged map[string]string
-	if session.Metadata["session_key"] != "" {
+	if info.SessionKey != "" {
 		reset := sessionpkg.ConversationResetPatch(false)
 		_ = sessFront.ApplyPatch(session.ID, reset)
 		for k, v := range reset {
@@ -998,8 +855,8 @@ func recordChurn(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clo
 // Returns the mirrored batch {"churn_count":"0"} when a clear is persisted, nil
 // when churn_count is already absent or zero (no-op). The caller folds the
 // returned batch onto the typed snapshot via ApplyPatch (nil is a no-op).
-func clearChurn(session *beads.Bead, sessFront *sessionpkg.Store) map[string]string {
-	if session.Metadata["churn_count"] == "" || session.Metadata["churn_count"] == "0" {
+func clearChurn(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store) map[string]string {
+	if info.ChurnCount == "" || info.ChurnCount == "0" {
 		return nil
 	}
 	_ = sessFront.SetMarker(session.ID, "churn_count", "0")
@@ -1034,15 +891,49 @@ func stableLongEnough(session beads.Bead, clk clock.Clock) bool {
 	return clk.Now().Sub(t) >= stabilityThreshold
 }
 
+// productiveLongEnoughInfo is the session.Info sibling of productiveLongEnough,
+// reading info.LastWokeAt (the verbatim raw last_woke_at mirror) instead of raw
+// bead metadata. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+func productiveLongEnoughInfo(info sessionpkg.Info, clk clock.Clock) bool {
+	lastWoke := info.LastWokeAt
+	if lastWoke == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	return clk.Now().Sub(t) >= churnProductivityThreshold
+}
+
+// stableLongEnoughInfo is the session.Info sibling of stableLongEnough, reading
+// info.LastWokeAt (the verbatim raw last_woke_at mirror) instead of raw bead
+// metadata. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+func stableLongEnoughInfo(info sessionpkg.Info, clk clock.Clock) bool {
+	lastWoke := info.LastWokeAt
+	if lastWoke == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	return clk.Now().Sub(t) >= stabilityThreshold
+}
+
 // sessionWakeAttempts returns the current wake attempt count.
 func sessionWakeAttempts(session beads.Bead) int {
 	n, _ := strconv.Atoi(session.Metadata["wake_attempts"])
 	return n
 }
 
-// sessionWakeAttemptsInfo is the session.Info mirror of sessionWakeAttempts.
+// sessionWakeAttemptsInfo is the session.Info mirror of sessionWakeAttempts. It
+// parses the raw WakeAttemptsMetadata string (rather than returning the
+// pre-parsed i.WakeAttempts, which zeroes on strconv.ErrRange) so it stays
+// byte-identical to sessionWakeAttempts even for an out-of-range counter.
 func sessionWakeAttemptsInfo(i sessionpkg.Info) int {
-	return i.WakeAttempts
+	n, _ := strconv.Atoi(i.WakeAttemptsMetadata)
+	return n
 }
 
 // sessionIsQuarantined returns true if the session has an active quarantine.

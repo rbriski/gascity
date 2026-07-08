@@ -2114,7 +2114,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// tp.DisplayName() is the exact identity the start counter records, so a
 	// quarantine triggered by repeated start failures joins the start series
 	// even for a namepool-themed pool instance whose bead predates agent_name.
-	recordWakeFailure(session, sessFront, clk, tp.DisplayName())
+	// Fresh projection is coherent: the SetMarker success path above mirrored
+	// last_woke_at="" onto session.Metadata before this call.
+	recordWakeFailure(session, sessionpkg.InfoFromPersistedBead(*session), sessFront, clk, tp.DisplayName())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),

@@ -667,6 +667,39 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"stranded_event_emitted_at":          pastRFC3339,
 			},
 		},
+		"rapid-crash-candidate": {
+			// Dead crash candidate: awake with a recent last_woke_at (well within
+			// stabilityThreshold), no deliberate sleep_reason and no pending-create
+			// claim, so DecideSessionExit on sessionExitFacts(alive=false) classifies
+			// it ExitRapidCrash. Drives the sessionExitFacts ↔ sessionExitFactsInfo
+			// struct-equivalence block through the real crash lane, not a trivial
+			// both-ExitNone pass.
+			ID:     "ga-rapidcrash",
+			Type:   session.BeadType,
+			Title:  "rapidcrash",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "awake",
+				"last_woke_at": clk.Now().Add(-15 * time.Second).UTC().Format(time.RFC3339),
+			},
+		},
+		"wake-attempts-overflow": {
+			// wake_attempts beyond int64 range: strconv.Atoi returns the clamped
+			// value together with ErrRange. Pins the recordWakeFailure counter lane,
+			// which parses the raw WakeAttemptsMetadata string (not the pre-parsed
+			// WakeAttempts int, which zeroes on ErrRange), so sessionWakeAttempts and
+			// sessionWakeAttemptsInfo must still agree here while WakeAttemptsMetadata
+			// keeps the raw bytes verbatim.
+			ID:     "ga-wakeoverflow",
+			Type:   session.BeadType,
+			Title:  "wakeoverflow",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":      "worker",
+				"wake_attempts": "999999999999999999999",
+			},
+		},
 	}
 
 	const tmpl = "worker"
@@ -675,23 +708,19 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
 	}{
-		"isPoolManagedSessionBead":            {isPoolManagedSessionBead, isPoolManagedSessionInfo},
-		"isEphemeralSessionBead":              {isEphemeralSessionBead, isEphemeralSessionInfo},
-		"isManualSessionBead":                 {isManualSessionBead, isManualSessionInfo},
-		"isNamedSessionBead":                  {isNamedSessionBead, isNamedSessionInfo},
-		"isDrainedSessionBead":                {isDrainedSessionBead, isDrainedSessionInfo},
-		"isFailedCreateSessionBead":           {isFailedCreateSessionBead, isFailedCreateSessionInfo},
-		"shouldRollbackPendingCreate":         {func(b beads.Bead) bool { return shouldRollbackPendingCreate(&b) }, shouldRollbackPendingCreateInfo},
-		"isPendingPoolCreate":                 {isPendingPoolCreate, isPendingPoolCreateInfo},
-		"isStaleCreating":                     {isStaleCreating, isStaleCreatingInfo},
-		"isKnownState":                        {isKnownState, isKnownStateInfo},
-		"isPoolSessionSlotFreeable":           {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
-		"beadOwnsPoolSessionName":             {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
-		"sessionHasProviderTerminalError":     {sessionHasProviderTerminalError, sessionHasProviderTerminalErrorInfo},
-		"poolSessionConsumesNewDemand":        {poolSessionConsumesNewDemand, poolSessionConsumesNewDemandInfo},
-		"scaleCheckPartialSessionRetainable":  {scaleCheckPartialSessionRetainable, scaleCheckPartialSessionRetainableInfo},
-		"scaleCheckPartialSessionPreservable": {scaleCheckPartialSessionPreservable, scaleCheckPartialSessionPreservableInfo},
-		"isDrainAckStopPending":               {isDrainAckStopPending, isDrainAckStopPendingInfo},
+		"isPoolManagedSessionBead":        {isPoolManagedSessionBead, isPoolManagedSessionInfo},
+		"isEphemeralSessionBead":          {isEphemeralSessionBead, isEphemeralSessionInfo},
+		"isManualSessionBead":             {isManualSessionBead, isManualSessionInfo},
+		"isNamedSessionBead":              {isNamedSessionBead, isNamedSessionInfo},
+		"isDrainedSessionBead":            {isDrainedSessionBead, isDrainedSessionInfo},
+		"isFailedCreateSessionBead":       {isFailedCreateSessionBead, isFailedCreateSessionInfo},
+		"shouldRollbackPendingCreate":     {func(b beads.Bead) bool { return shouldRollbackPendingCreate(&b) }, shouldRollbackPendingCreateInfo},
+		"isStaleCreating":                 {isStaleCreating, isStaleCreatingInfo},
+		"isKnownState":                    {isKnownState, isKnownStateInfo},
+		"isPoolSessionSlotFreeable":       {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
+		"beadOwnsPoolSessionName":         {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
+		"sessionHasProviderTerminalError": {sessionHasProviderTerminalError, sessionHasProviderTerminalErrorInfo},
+		"isDrainAckStopPending":           {isDrainAckStopPending, isDrainAckStopPendingInfo},
 	}
 
 	// Agent-dependent classifiers. A bare pool agent (no instance-expansion, no
@@ -1020,6 +1049,14 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				return pendingResumePreservingNamedRestartInfo(i, clk, leaseStartupTimeout)
 			},
 		},
+		"stableLongEnough": {
+			func(b beads.Bead) bool { return stableLongEnough(b, clk) },
+			func(i session.Info) bool { return stableLongEnoughInfo(i, clk) },
+		},
+		"productiveLongEnough": {
+			func(b beads.Bead) bool { return productiveLongEnough(b, clk) },
+			func(i session.Info) bool { return productiveLongEnoughInfo(i, clk) },
+		},
 	}
 
 	// The "pending-resume-preserve" fixture must hit the true branch under
@@ -1038,6 +1075,19 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// branch so its equivalence case is a real comparison, not a both-empty pass.
 	if lifecycleTimerBlocker(beadsByShape["hold-and-quarantine"].Metadata, clk.Now()) == "" {
 		t.Fatal(`lifecycleTimerBlocker(hold-and-quarantine) = ""; fixture no longer exercises the blocker branch`)
+	}
+	// The rapid-crash-candidate fixture must classify ExitRapidCrash under
+	// alive=false so the sessionExitFacts ↔ sessionExitFactsInfo struct-equivalence
+	// block exercises the crash lane, not a trivial both-ExitNone pass.
+	rapidCrash := beadsByShape["rapid-crash-candidate"]
+	if got := session.DecideSessionExit(sessionExitFacts(&rapidCrash, leaseCfg, false, nil, clk)); got != session.ExitRapidCrash {
+		t.Fatalf("DecideSessionExit(rapid-crash-candidate, alive=false) = %v; want ExitRapidCrash — fixture no longer exercises the crash lane", got)
+	}
+	// stableLongEnough must be true on the old-marker fixture (pastRFC3339
+	// last_woke_at) so its clkBoolChecks equivalence case is a real true-branch
+	// comparison, not a trivial both-false pass.
+	if !stableLongEnough(beadsByShape["pending-create-claim-old-markers"], clk) {
+		t.Fatal("stableLongEnough(pending-create-claim-old-markers) = false; fixture no longer exercises the stable-long-enough true branch")
 	}
 
 	for shape, b := range beadsByShape {
@@ -1100,6 +1150,18 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			infoS, infoT, infoOK := resetPendingCommittedAtInfo(info)
 			if rawS != infoS || !rawT.Equal(infoT) || rawOK != infoOK {
 				t.Errorf("resetPendingCommittedAt: info=(%q,%v,%v) bead=(%q,%v,%v)", infoS, infoT, infoOK, rawS, rawT, rawOK)
+			}
+			// sessionExitFacts ↔ sessionExitFactsInfo must produce byte-identical
+			// ExitFacts for every shape under both liveness values — the struct-level
+			// analogue of the scalar checks above. nil dt ⇒ DrainPending false on both
+			// forms; the alive=true pass proves the Alive field threads identically.
+			bb := b
+			for _, alive := range []bool{false, true} {
+				rawFacts := sessionExitFacts(&bb, leaseCfg, alive, nil, clk)
+				infoFacts := sessionExitFactsInfo(info, leaseCfg, alive, nil, clk)
+				if !reflect.DeepEqual(rawFacts, infoFacts) {
+					t.Errorf("sessionExitFacts(alive=%v): bead=%+v info=%+v", alive, rawFacts, infoFacts)
+				}
 			}
 		})
 	}

@@ -921,8 +921,8 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
-				`sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])`,
-				`sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])`,
+				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,
+				`sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)`,
 			},
 			forbidden: []string{
 				`batch := map[string]string{"held_until": ""}`,

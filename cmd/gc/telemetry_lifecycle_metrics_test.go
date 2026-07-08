@@ -416,7 +416,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gascity--gc__worker",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -438,7 +438,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "worker-1",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 		if session.Metadata["quarantined_until"] != "" {
 			t.Fatal("fixture must not quarantine below threshold")
@@ -457,7 +457,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gc-city-dog-1",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog-1"}) {
@@ -482,7 +482,7 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 		"session_name": "gascity--gc__worker",
 	})
 
-	recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["quarantined_until"] == "" {
 		t.Fatal("fixture must quarantine at max churn cycles")
@@ -892,7 +892,7 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-dog-3-legacy",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -919,7 +919,7 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-fenrir-legacy",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordWakeFailure(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -950,7 +950,7 @@ func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name": "s-dog-3-legacy",
 		})
 
-		recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordChurn(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max churn cycles")
@@ -977,7 +977,7 @@ func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name": "s-wolf-legacy",
 		})
 
-		recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordChurn(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max churn cycles")

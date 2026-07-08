@@ -276,6 +276,34 @@ func readSlingStdinBead() (title, description, errCode, errMsg string) {
 	return title, description, "", ""
 }
 
+// resolveSlingTargetAndBead resolves the (target, beadOrFormula, sourceBead)
+// triple for a sling from the three invocation shapes — --stdin, explicit 2-arg
+// (target + bead), and 1-arg (bead only, target inferred). It consolidates the
+// store-touching pre-core target resolution into one independently-testable unit
+// (the 1-arg path via inferSling1ArgTarget). On failure it returns a non-empty
+// (errCode, errMsg) pair for the caller's fail() path.
+func resolveSlingTargetAndBead(cfg *config.City, cityPath string, args []string, fromStdin, isFormula bool, stdinTitle string) (target, beadOrFormula string, sourceBead existingSlingSourceBead, errCode, errMsg string) {
+	switch {
+	case fromStdin:
+		return args[0], stdinTitle, sourceBead, "", ""
+	case len(args) == 2:
+		target, beadOrFormula = args[0], args[1]
+		if !isFormula {
+			var err error
+			if sourceBead, err = probeExistingSlingSourceBead(cfg, cityPath, beadOrFormula); err != nil {
+				return "", "", sourceBead, "source_bead_probe_failed", fmt.Sprintf("gc sling: %v", err)
+			}
+		}
+		return target, beadOrFormula, sourceBead, "", ""
+	default:
+		// 1-arg: bead ID only — resolve the target from the rig's
+		// default_sling_target(s), deterministically via the slingTargetIndex seam.
+		beadOrFormula = args[0]
+		target, sourceBead, errCode, errMsg = inferSling1ArgTarget(cfg, cityPath, beadOrFormula, isFormula)
+		return target, beadOrFormula, sourceBead, errCode, errMsg
+	}
+}
+
 // cmdSling is the CLI entry point for gc sling.
 func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
@@ -331,32 +359,9 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	applyFeatureFlags(cfg)
 	cityName := loadedCityName(cfg, cityPath)
 
-	var target, beadOrFormula string
-	var sourceBead existingSlingSourceBead
-	switch {
-	case fromStdin:
-		target = args[0]
-		beadOrFormula = stdinTitle
-	case len(args) == 2:
-		target = args[0]
-		beadOrFormula = args[1]
-		if !isFormula {
-			sourceBead, err = probeExistingSlingSourceBead(cfg, cityPath, beadOrFormula)
-			if err != nil {
-				return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", err))
-			}
-		}
-	default:
-		// 1-arg: bead ID only — resolve the target from the rig's
-		// default_sling_target(s). This store-touching pre-core orchestration is
-		// extracted into inferSling1ArgTarget so it can be tested in isolation
-		// (deterministically, via the slingTargetIndex seam).
-		beadOrFormula = args[0]
-		var errCode, errMsg string
-		target, sourceBead, errCode, errMsg = inferSling1ArgTarget(cfg, cityPath, beadOrFormula, isFormula)
-		if errCode != "" {
-			return fail(errCode, errMsg)
-		}
+	target, beadOrFormula, sourceBead, errCode, errMsg := resolveSlingTargetAndBead(cfg, cityPath, args, fromStdin, isFormula, stdinTitle)
+	if errCode != "" {
+		return fail(errCode, errMsg)
 	}
 
 	// Ensure rig paths are absolute before agent/rig context resolution.

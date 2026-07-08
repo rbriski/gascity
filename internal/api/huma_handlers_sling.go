@@ -31,6 +31,7 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		ScopeKind:      input.Body.ScopeKind,
 		ScopeRef:       input.Body.ScopeRef,
 		Force:          input.Body.Force,
+		Reassign:       input.Body.Reassign,
 	}
 
 	if body.Target == "" {

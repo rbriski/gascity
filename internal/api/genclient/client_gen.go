@@ -3122,6 +3122,9 @@ type SlingInputBody struct {
 	// Formula Formula name for workflow launch.
 	Formula *string `json:"formula,omitempty"`
 
+	// Reassign Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.
+	Reassign *bool `json:"reassign,omitempty"`
+
 	// Rig Rig name.
 	Rig *string `json:"rig,omitempty"`
 

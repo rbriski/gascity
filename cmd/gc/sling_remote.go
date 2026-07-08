@@ -40,7 +40,6 @@ func cmdSlingRemote(c *api.Client, args []string, isFormula, doNudge, force bool
 		{merge != "", "--merge"},
 		{noConvoy, "--no-convoy"},
 		{owned, "--owned"},
-		{reassign, "--reassign"},
 		{onFormula != "", "--on"},
 		{noFormula, "--no-formula"},
 	} {
@@ -77,6 +76,7 @@ func cmdSlingRemote(c *api.Client, args []string, isFormula, doNudge, force bool
 		ScopeKind: scopeKind,
 		ScopeRef:  scopeRef,
 		Force:     force,
+		Reassign:  reassign,
 	}
 	if isFormula {
 		req.Formula = args[1]

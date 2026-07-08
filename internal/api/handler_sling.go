@@ -34,6 +34,7 @@ type slingBody struct {
 	ScopeKind      string            `json:"scope_kind"`
 	ScopeRef       string            `json:"scope_ref"`
 	Force          bool              `json:"force"`
+	Reassign       bool              `json:"reassign"`
 }
 
 type slingResponse struct {
@@ -166,10 +167,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		attachedBeadID = strings.TrimSpace(body.Bead)
 		formulaName = agentCfg.EffectiveDefaultSlingFormula()
 		// Default formula: route the bead and let the domain apply the default.
-		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force, Reassign: body.Reassign})
 
 	default:
-		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force, Reassign: body.Reassign})
 	}
 
 	if err != nil {

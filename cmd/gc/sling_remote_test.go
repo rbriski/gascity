@@ -118,6 +118,31 @@ func TestCmdSlingRemote_RoutesBead(t *testing.T) {
 	}
 }
 
+// A 2-arg bead sling with --reassign forwards reassign:true to the server. It is
+// no longer refused now that RouteOpts + SlingInput carry the field end-to-end
+// (RouteOpts.Reassign -> SlingOpts.Reassign -> DoSling), closing the one sling
+// envelope gap the execution plan named for Phase 3.
+func TestCmdSlingRemote_ForwardsReassign(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"routed","target":"mayor","bead":"BL-7"}`))
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), []string{"mayor", "BL-7"},
+		false, false, false /*force*/, "", nil, "", false, false, true /*reassign*/, "", false, false, false, "", "", false, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(gotBody, `"reassign":true`) {
+		t.Errorf("request body missing reassign: %q", gotBody)
+	}
+}
+
 // --json emits a machine-readable object.
 func TestCmdSlingRemote_JSONOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

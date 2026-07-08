@@ -838,16 +838,9 @@ func cmdConvoyStatus(args []string, jsonOut bool, stdout, stderr io.Writer) int 
 		return doConvoyStatusWithJSON(nil, args, jsonOut, stdout, stderr)
 	}
 	convoyID := args[0]
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeConvoyStatus("", convoyID, remoteC, "", jsonOut, stdout, stderr)
-	}
-	c, reason := convoyStatusAPIClient(cityPath)
-	return routeConvoyStatus(cityPath, convoyID, c, reason, jsonOut, stdout, stderr)
+	return routeReadCmd("convoy status", stderr, convoyStatusAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeConvoyStatus(cityPath, convoyID, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // convoyStatusAPIClient returns (client, "") when the API path is available,

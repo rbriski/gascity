@@ -276,6 +276,25 @@ func readSlingStdinBead() (title, description, errCode, errMsg string) {
 	return title, description, "", ""
 }
 
+// openSlingStore selects and opens the store the sling writes to: the source
+// bead's own store when it already exists, else the store resolved from the
+// target agent/bead. Store-touching pre-core orchestration extracted from
+// cmdSlingWithJSON. On failure it returns a non-empty (errCode, errMsg) pair.
+func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead existingSlingSourceBead, a config.Agent) (storeDir string, store beads.Store, errCode, errMsg string) {
+	if sourceBead.exists {
+		s, err := openStoreAtForCity(sourceBead.storeDir, cityPath)
+		if err != nil {
+			return "", nil, "store_open_failed", fmt.Sprintf("gc sling: opening store %s: %v", sourceBead.storeDir, err)
+		}
+		return sourceBead.storeDir, s, "", ""
+	}
+	storeDir, store, err := openSlingStoreForSource(cfg, cityPath, beadOrFormula, a)
+	if err != nil {
+		return "", nil, "store_open_failed", fmt.Sprintf("gc sling: %v", err)
+	}
+	return storeDir, store, "", ""
+}
+
 // resolveSlingTargetAndBead resolves the (target, beadOrFormula, sourceBead)
 // triple for a sling from the three invocation shapes — --stdin, explicit 2-arg
 // (target + bead), and 1-arg (bead only, target inferred). It consolidates the
@@ -381,19 +400,9 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 
 	sp := newSessionProvider()
 
-	var storeDir string
-	var store beads.Store
-	if sourceBead.exists {
-		storeDir = sourceBead.storeDir
-		store, err = openStoreAtForCity(storeDir, cityPath)
-		if err != nil {
-			return fail("store_open_failed", fmt.Sprintf("gc sling: opening store %s: %v", storeDir, err))
-		}
-	} else {
-		storeDir, store, err = openSlingStoreForSource(cfg, cityPath, beadOrFormula, a)
-		if err != nil {
-			return fail("store_open_failed", fmt.Sprintf("gc sling: %v", err))
-		}
+	storeDir, store, errCode, errMsg := openSlingStore(cfg, cityPath, beadOrFormula, sourceBead, a)
+	if errCode != "" {
+		return fail(errCode, errMsg)
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
 	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)

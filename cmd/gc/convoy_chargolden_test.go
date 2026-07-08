@@ -1,10 +1,9 @@
 package main
 
 import (
-	"path/filepath"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/chartest"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestConvoyList_CharacterizationGolden freezes the current per-lane behavior of
@@ -19,17 +18,17 @@ import (
 // stable). The pilot therefore seeds a single convoy — enough to prove the
 // harness (cross-surface identity, A==B, lane telemetry, boundary counts);
 // distinct-token numbering is unit-tested in internal/chartest. Multi-element
-// JSON list-order is a shape-comparison concern for the differ (Phase 0.7) and
-// must be pinned when convoy list actually migrates (Phase 2) — either the
-// unified path sorts --json deterministically, or the differ compares the array
-// order-insensitively under the locked "JSON shape+additive" safety bar.
+// JSON list-order is a shape-comparison concern for the differ (chartest.
+// JSONShapeDiff) and must be pinned when convoy list actually migrates.
 func TestConvoyList_CharacterizationGolden(t *testing.T) {
-	h := newCharHarness(t, "Alpha convoy")
-	for _, lane := range h.lanes(t) {
-		t.Run(lane.name, func(t *testing.T) {
-			got := h.captureLane(t, lane).Golden()
-			path := filepath.Join("testdata", "chargolden", "convoy-list-"+lane.name+".golden")
-			chartest.CompareGolden(t, path, got)
-		})
-	}
+	h := newCharCity(t, charCityBasic, func(t *testing.T, store beads.Store) {
+		if _, err := store.Create(beads.Bead{Title: "Alpha convoy", Type: "convoy"}); err != nil {
+			t.Fatalf("seed convoy: %v", err)
+		}
+	})
+	h.runCharGolden(t, charCommand{
+		name:     "convoy-list",
+		route:    routeConvoyList,
+		readback: convoyReadback,
+	})
 }

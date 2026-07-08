@@ -15,7 +15,7 @@ Open PRs from the earlier leak-cleanup fold into this plan (do NOT double-build)
 
 ---
 
-## WI-0 — CI census ratchet (enforcement baseline) `[ ]`
+## WI-0 — CI census ratchet (enforcement baseline) `[x]`
 `cmd/gc/typedclass_edge_guard_test.go`, Tier-1 only (§6.1). Checked-in
 `map[file]count` of typed-class codec/raw-export needles across the interior dirs,
 excluding the edge set; increase or new file fails; decrease fails until ratcheted.

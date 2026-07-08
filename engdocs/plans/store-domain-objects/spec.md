@@ -120,9 +120,12 @@ Same `runtime.Caller` file-scan style as `frontdoor_di_guard_test.go`. Three tie
    OFF this list with in-code censuses (a substring guard can't tell a work bead
    from a session bead).
 3. **Compiler endgame** — when a class's census hits zero, unexport its codec
-   (`InfoFromPersistedBead` → `infoFromPersistedBead`, `DecodeShadow` deleted,
+   (`InfoFromPersistedBead` → `infoFromPersistedBead`, `PersistedResponseFromBead`
+   → `persistedResponseFromBead`, `PollerKeyFromBead` → `pollerKeyFromBead`,
+   `WaitInfoFromBead` → `waitInfoFromBead`, `DecodeShadow` deleted,
    `RunFromTrackingBead` → `runFromTrackingBead`); cracking a typed bead in the
-   interior becomes untypeable.
+   interior becomes untypeable. (These exact names are also the WI-0 census
+   needles — keep them in sync.)
 
 Header documents the permanent exemptions from §5.
 

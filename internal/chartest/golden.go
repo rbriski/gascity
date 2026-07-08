@@ -27,8 +27,15 @@ type Capture struct {
 	JSON          []byte   // optional; present only for a --json run
 	Events        []string // canonicalized, sorted by the harness
 	StoreReadback []string // canonicalized, sorted by the harness
-	APIRequests   int      // # HTTP requests the lane made (remote/alive)
-	StoreOpens    int      // # local store opens the lane made (serverless)
+	Counts        []Count  // boundary counts the harness actually measured, in a fixed order
+}
+
+// Count is one named boundary measurement (e.g. api_requests=1). Only counts the
+// harness genuinely instruments are recorded, so a golden never asserts an
+// unmeasured invariant as zero.
+type Count struct {
+	Name string
+	N    int
 }
 
 // Golden renders the capture to its deterministic sectioned byte form.
@@ -48,7 +55,10 @@ func (c Capture) Golden() []byte {
 	for _, s := range c.StoreReadback {
 		fmt.Fprintf(&b, "%s\n", s)
 	}
-	fmt.Fprintf(&b, "=== counts ===\napi_requests=%d store_opens=%d\n", c.APIRequests, c.StoreOpens)
+	fmt.Fprintf(&b, "=== counts ===\n")
+	for _, ct := range c.Counts {
+		fmt.Fprintf(&b, "%s=%d\n", ct.Name, ct.N)
+	}
 	return b.Bytes()
 }
 

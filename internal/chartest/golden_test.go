@@ -17,8 +17,7 @@ func TestCapture_GoldenIsDeterministicAndSectioned(t *testing.T) {
 		JSON:          []byte(`{"rig":"BEAD-1"}`),
 		Events:        []string{"bead.created BEAD-1"},
 		StoreReadback: []string{"BEAD-1 open"},
-		APIRequests:   1,
-		StoreOpens:    0,
+		Counts:        []chartest.Count{{Name: "api_requests", N: 1}},
 	}
 	got := string(capt.Golden())
 	for _, section := range []string{
@@ -28,7 +27,7 @@ func TestCapture_GoldenIsDeterministicAndSectioned(t *testing.T) {
 		"=== json ===\n{\"rig\":\"BEAD-1\"}\n",
 		"=== events ===\nbead.created BEAD-1\n",
 		"=== store ===\nBEAD-1 open\n",
-		"=== counts ===\napi_requests=1 store_opens=0\n",
+		"=== counts ===\napi_requests=1\n",
 	} {
 		if !strings.Contains(got, section) {
 			t.Errorf("golden missing section %q in:\n%s", section, got)

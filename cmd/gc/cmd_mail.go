@@ -2524,20 +2524,23 @@ var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local mail-provider path.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCount(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "mail count"
 	recipient := defaultMailIdentity()
 	if len(args) > 0 {
 		recipient = strings.TrimSpace(args[0])
 	}
-	if c != nil {
-		cr, err := c.CountMail(recipient, "")
-		if err == nil {
-			if mailCountHasPartial(cr.Body) {
-				logRoute(stderr, cmdName, "api", "error")
-				fmt.Fprintf(stderr, "gc mail count: %s\n", mailCountPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
-				return 1
+	var cr api.CachedRead[api.MailCountView]
+	return routeRead(c, "mail count", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.CountMail(recipient, ""); err != nil {
+				return err
 			}
-			logRoute(stderr, cmdName, "api", "")
+			if mailCountHasPartial(cr.Body) {
+				return errorAfterFetch{Detail: mailCountPartialErrorDetail(cr.Body)}
+			}
+			return nil
+		},
+		func() int {
 			if jsonOut {
 				if err := writeCLIJSONLine(stdout, mailCountJSONResult{
 					SchemaVersion: "1",
@@ -2556,17 +2559,9 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 			}
 			return 0
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doMailCountFallback(args, jsonOut, stdout, stderr)
+		},
+		func() int { return doMailCountFallback(args, jsonOut, stdout, stderr) },
+	)
 }
 
 // doMailCountFallback is the direct-bd path for `gc mail count`.

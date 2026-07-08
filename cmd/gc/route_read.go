@@ -17,6 +17,14 @@ type fallbackAfterFetch struct{ Reason string }
 
 func (f fallbackAfterFetch) Error() string { return "fallback-after-fetch: " + f.Reason }
 
+// errorAfterFetch is a sentinel an apiFetch closure may return to force a hard
+// api error (route=api reason=error, exit 1) AFTER a successful round-trip — for
+// a response that is itself an error condition (e.g. mail count partial results).
+// routeRead prints "gc <cmd>: <Detail>", bypassing fallback classification.
+type errorAfterFetch struct{ Detail string }
+
+func (e errorAfterFetch) Error() string { return e.Detail }
+
 // routeRead runs the canonical read-path routing ladder shared by every routed
 // read command, so the "try the API, classify the error, fall back to the local
 // path" fork lives in ONE place instead of being copy-pasted per command. It is
@@ -47,7 +55,8 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 		logRoute(stderr, cmdName, "fallback", faf.Reason)
 		return localRender()
 	}
-	if !api.ShouldFallbackForRead(c, err) {
+	var eaf errorAfterFetch
+	if errors.As(err, &eaf) || !api.ShouldFallbackForRead(c, err) {
 		logRoute(stderr, cmdName, "api", "error")
 		fmt.Fprintf(stderr, "gc %s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return 1

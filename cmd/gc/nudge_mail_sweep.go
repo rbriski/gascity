@@ -95,35 +95,24 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		result.NudgeClosed++
 	}
 
-	// Phase 2: close read mail beads.
+	// Phase 2: close read mail beads. The candidate query + close-with-reason
+	// loop live inside the messaging edge (beadmail); only the shared close
+	// budget is passed in. mailBudget is the remaining share of the combined
+	// limit, so a fatal listing failure early-returns (discarding accumulated
+	// per-bead errors) exactly as the inline loop did.
 	mailCutoff := now.Add(-mailTTL)
 	remaining := limit - result.NudgeClosed - result.MailClosed
 	if limit == 0 || remaining > 0 {
-		mailQueryLimit := remaining
+		mailBudget := remaining
 		if limit == 0 {
-			mailQueryLimit = 0
+			mailBudget = 0
 		}
-		mailCandidates, err := beadmail.ReadMessagesBefore(mailStore.Store, mailCutoff, mailQueryLimit)
-		if err != nil {
-			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", err)
+		mailClosed, mailCloseErrs, mailListErr := beadmail.SweepReadMessagesBefore(mailStore, mailCutoff, mailBudget, nudgeMailSweepMailCloseReason)
+		if mailListErr != nil {
+			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", mailListErr)
 		}
-		for _, b := range mailCandidates {
-			if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
-				break
-			}
-			if b.Status != "open" {
-				continue
-			}
-			if err := mailStore.SetMetadata(b.ID, "close_reason", nudgeMailSweepMailCloseReason); err != nil {
-				beadErrs = append(beadErrs, fmt.Errorf("mail %s: set close_reason: %w", b.ID, err))
-				continue
-			}
-			if err := mailStore.Close(b.ID); err != nil {
-				beadErrs = append(beadErrs, fmt.Errorf("mail %s: close: %w", b.ID, err))
-				continue
-			}
-			result.MailClosed++
-		}
+		result.MailClosed += mailClosed
+		beadErrs = append(beadErrs, mailCloseErrs...)
 	}
 
 	return result, errors.Join(beadErrs...)
@@ -165,23 +154,15 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	mailCutoff := now.Add(-mailTTL)
 	remaining := limit - result.NudgeClosed - result.MailClosed
 	if limit == 0 || remaining > 0 {
-		mailQueryLimit := remaining
+		mailBudget := remaining
 		if limit == 0 {
-			mailQueryLimit = 0
+			mailBudget = 0
 		}
-		mailCandidates, err := beadmail.ReadMessagesBefore(mailStore.Store, mailCutoff, mailQueryLimit)
+		mailCount, err := beadmail.CountReadMessagesBefore(mailStore, mailCutoff, mailBudget)
 		if err != nil {
 			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
 		}
-		for _, b := range mailCandidates {
-			if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
-				break
-			}
-			if b.Status != "open" {
-				continue
-			}
-			result.MailClosed++
-		}
+		result.MailClosed += mailCount
 	}
 	return result, nil
 }

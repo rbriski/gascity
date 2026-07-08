@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -1677,7 +1678,7 @@ func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
 // are reaped on their own TTL, so they must not keep the single-flight open-work
 // gate "open" and block the order from re-dispatching (#2893, de-noise).
 func isTransientNotificationBead(b beads.Bead) bool {
-	if b.Type == "message" {
+	if beadmail.IsMessageBead(b) {
 		return true
 	}
 	return b.Type == nudgeBeadType && beadLabelsContain(b.Labels, nudgeBeadLabel)

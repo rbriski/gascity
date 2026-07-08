@@ -2211,18 +2211,18 @@ func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(beads.NudgesStore{Store: store}, item.ID)
+	nudge, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(item.ID)
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead returned not found")
+		t.Fatal("nudgeFrontDoor.FindIncludingTerminal returned not found")
 	}
-	if nudge.Status != "closed" {
-		t.Fatalf("nudge status = %q, want closed", nudge.Status)
+	if nudge.Open {
+		t.Fatalf("nudge open = true, want closed/terminal")
 	}
-	if nudge.Metadata["terminal_reason"] != "wait-canceled" {
-		t.Fatalf("terminal_reason = %q, want wait-canceled", nudge.Metadata["terminal_reason"])
+	if nudge.TerminalReason != "wait-canceled" {
+		t.Fatalf("terminal_reason = %q, want wait-canceled", nudge.TerminalReason)
 	}
 }
 

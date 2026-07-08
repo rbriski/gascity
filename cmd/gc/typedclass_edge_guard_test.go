@@ -120,6 +120,7 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/build_desired_state.go":        2,
 		"cmd/gc/city_runtime.go":               1,
 		"cmd/gc/city_status_snapshot.go":       1,
+		"cmd/gc/cmd_nudge.go":                  2, // WI-1 fold-in (O8): session debt, closes with sessions (WI-4/5/6)
 		"cmd/gc/cmd_prime.go":                  2,
 		"cmd/gc/cmd_session.go":                2,
 		"cmd/gc/cmd_session_wake.go":           2,
@@ -167,9 +168,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 	"MaxSeqFromLabels(": {
 		"cmd/gc/cmd_order.go":                  1,
 		"internal/api/huma_handlers_orders.go": 1,
-	},
-	"StaleCandidatesBefore(": {
-		"cmd/gc/nudge_mail_sweep.go": 2,
 	},
 	".ReadMessagesBefore(": {
 		"cmd/gc/nudge_mail_sweep.go": 2,

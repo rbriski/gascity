@@ -28,7 +28,7 @@ Rework O8. Add `NudgeShadow.Open` (bead-authoritative) + `Store.StaleShadowsBefo
 **Residual (blocked on WI-4):** `blockedQueuedNudgeReason`, `nextWaitDeliveryAttempt` crack session-class wait beads → close when `WaitInfo` ships.
 **Acceptance:** nudges census → 0 for its needles (minus the documented session residual); typed reads pin `NudgeShadow` fields; byte-identical terminal writes.
 
-## WI-2 — Messaging class `[ ]`
+## WI-2 — Messaging class `[x]`
 Add whole-operation retention methods to `beadmail` returning **counts**:
 `SweepReadMessagesBefore(cutoff, limit, closeReason)`, `CountReadMessagesBefore(cutoff, limit)`, `PurgeReadMessageWisps(cutoff)`. Export an `IsMessageBead` predicate (or use `coordclass.Classify`). Migrate `nudge_mail_sweep.go` mail phases + split the mail arm OUT of `wisp_gc.go`'s graph-owned `purgeExpiredBeadRoots` onto `PurgeReadMessageWisps`; swap `order_dispatch.go:1680` inline `Type=="message"` for the predicate. Delete `beadmail.ReadMessagesBefore`/`ReadMessageWispEntries`.
 **Residual (owned by WI-4/6):** mail identity/recipient resolution over raw session beads in `cmd_mail.go`/`handler_mail.go` converges on the typed session mailbox surface (O7 vocabulary).

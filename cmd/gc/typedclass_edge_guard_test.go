@@ -169,12 +169,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/cmd_order.go":                  1,
 		"internal/api/huma_handlers_orders.go": 1,
 	},
-	".ReadMessagesBefore(": {
-		"cmd/gc/nudge_mail_sweep.go": 2,
-	},
-	"ReadMessageWispEntries(": {
-		"cmd/gc/wisp_gc.go": 1,
-	},
 }
 
 // scanCodecCensusAt walks scanDirs under root and counts each needle per

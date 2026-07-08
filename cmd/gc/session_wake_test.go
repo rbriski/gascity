@@ -679,7 +679,7 @@ func TestBeginSessionDrain(t *testing.T) {
 		"generation":   "5",
 	})
 
-	if transitioned := beginSessionDrain(session, sp, dt, "idle", clk, 30*time.Second); !transitioned {
+	if transitioned := beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt, "idle", clk, 30*time.Second); !transitioned {
 		t.Fatal("first beginSessionDrain = false, want true (state transition)")
 	}
 
@@ -711,10 +711,10 @@ func TestBeginSessionDrain_AlreadyDraining(t *testing.T) {
 		"generation":   "5",
 	})
 
-	if transitioned := beginSessionDrain(session, sp, dt, "idle", clk, 30*time.Second); !transitioned {
+	if transitioned := beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt, "idle", clk, 30*time.Second); !transitioned {
 		t.Fatal("first beginSessionDrain = false, want true (state transition)")
 	}
-	if transitioned := beginSessionDrain(session, sp, dt, "config-drift", clk, 60*time.Second); transitioned {
+	if transitioned := beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt, "config-drift", clk, 60*time.Second); transitioned {
 		t.Error("second beginSessionDrain = true, want false (already draining)")
 	}
 
@@ -737,7 +737,7 @@ func TestCancelSessionDrain(t *testing.T) {
 		"generation": "5",
 	})
 
-	if !cancelSessionDrain(session, sp, dt) {
+	if !cancelSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt) {
 		t.Error("expected cancel to succeed")
 	}
 	if dt.get("b1") != nil {
@@ -762,7 +762,7 @@ func TestCancelSessionDrain_ClearsAck(t *testing.T) {
 		"generation":   "5",
 	})
 
-	if !cancelSessionDrain(session, sp, dt) {
+	if !cancelSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt) {
 		t.Error("expected cancel to succeed")
 	}
 	// GC_DRAIN_ACK should be cleared.
@@ -784,7 +784,7 @@ func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
 		"generation": "6", // re-woken
 	})
 
-	if cancelSessionDrain(session, sp, dt) {
+	if cancelSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt) {
 		t.Error("cancel should fail when generation doesn't match")
 	}
 }
@@ -801,7 +801,7 @@ func TestCancelSessionDrain_NonCancelableReason(t *testing.T) {
 		"generation": "5",
 	})
 
-	if cancelSessionDrain(session, sp, dt) {
+	if cancelSessionDrainInfo(sessionpkg.InfoFromPersistedBead(session), sp, dt) {
 		t.Error("cancel should fail for non-cancelable drain reason")
 	}
 	if ds := dt.get("b1"); ds == nil || ds.reason != "orphaned" {
@@ -995,10 +995,10 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	})
 
 	// beginSessionDrain no longer sends Ctrl-C immediately.
-	beginSessionDrain(makeWakeBead(b.ID, map[string]string{
+	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(makeWakeBead(b.ID, map[string]string{
 		"session_name": "test-session",
 		"generation":   "3",
-	}), sp, dt, "orphaned", clk, 30*time.Second)
+	})), sp, dt, "orphaned", clk, 30*time.Second)
 
 	// No interrupt should have been sent yet.
 	for _, c := range sp.Calls {
@@ -1227,10 +1227,10 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 	})
 
 	// Begin a cancelable drain (no-wake-reason).
-	beginSessionDrain(makeWakeBead(b.ID, map[string]string{
+	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(makeWakeBead(b.ID, map[string]string{
 		"session_name": "test-session",
 		"generation":   "3",
-	}), sp, dt, "no-wake-reason", clk, 30*time.Second)
+	})), sp, dt, "no-wake-reason", clk, 30*time.Second)
 
 	// No interrupt yet.
 	for _, c := range sp.Calls {

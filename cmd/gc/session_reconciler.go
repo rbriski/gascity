@@ -129,6 +129,23 @@ func assignedWorkDrainCancelReason(session beads.Bead, sp runtime.Provider, dt *
 	return "orphaned"
 }
 
+// assignedWorkDrainCancelReasonInfo is the session.Info sibling of
+// assignedWorkDrainCancelReason for the reconciler forward pass. It reads the
+// session id off Info (dt keying) and the generation via
+// reconcilerDrainAckMatchesSessionInfo; the drain tracker and provider are shared
+// verbatim, so it is byte-identical to the raw form.
+func assignedWorkDrainCancelReasonInfo(info sessionpkg.Info, sp runtime.Provider, dt *drainTracker, name string) string {
+	if dt != nil {
+		if ds := dt.get(info.ID); ds != nil && assignedWorkDrainReasonCancelable(ds.reason) {
+			return ds.reason
+		}
+	}
+	if reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ok && assignedWorkDrainReasonCancelable(reason) {
+		return reason
+	}
+	return "orphaned"
+}
+
 func resetPendingCommittedAt(session beads.Bead) (string, time.Time, bool) {
 	if strings.TrimSpace(session.Metadata["continuation_reset_pending"]) != "true" {
 		return "", time.Time{}, false
@@ -164,7 +181,7 @@ func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool)
 }
 
 func recordResetStallIfDue(
-	session beads.Bead,
+	info sessionpkg.Info,
 	template string,
 	name string,
 	alive bool,
@@ -175,10 +192,10 @@ func recordResetStallIfDue(
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) {
-	resetCommittedAt, committedAt, pending := resetPendingCommittedAt(session)
+	resetCommittedAt, committedAt, pending := resetPendingCommittedAtInfo(info)
 	if !pending {
 		if dt != nil {
-			dt.clearResetStall(session.ID)
+			dt.clearResetStall(info.ID)
 		}
 		return
 	}
@@ -189,7 +206,7 @@ func recordResetStallIfDue(
 	if elapsed <= startupTimeout {
 		return
 	}
-	if dt != nil && !dt.markResetStall(session.ID) {
+	if dt != nil && !dt.markResetStall(info.ID) {
 		return
 	}
 	if stderr == nil {
@@ -198,7 +215,7 @@ func recordResetStallIfDue(
 	elapsedSeconds := int(elapsed / time.Second)
 	msg := fmt.Sprintf(
 		"session reconciler: reset stalled for %s: elapsed_s=%d reset_committed_at=%s bead_id=%s",
-		name, elapsedSeconds, resetCommittedAt, session.ID,
+		name, elapsedSeconds, resetCommittedAt, info.ID,
 	)
 	fmt.Fprintln(stderr, msg) //nolint:errcheck
 
@@ -208,7 +225,7 @@ func recordResetStallIfDue(
 			Actor:     "gc",
 			Subject:   name,
 			Message:   msg,
-			SessionID: session.ID,
+			SessionID: info.ID,
 			Payload:   events.SessionResetStalledPayloadJSON(name, template, resetCommittedAt, elapsedSeconds),
 		})
 	}
@@ -220,7 +237,7 @@ func recordResetStallIfDue(
 			template,
 			name,
 			map[string]any{
-				"bead_id":            session.ID,
+				"bead_id":            info.ID,
 				"elapsed_s":          elapsedSeconds,
 				"reset_committed_at": resetCommittedAt,
 				"startup_timeout_s":  int(startupTimeout / time.Second),
@@ -411,7 +428,7 @@ func finalizeDrainAckStoppedSession(
 		// dedupe downstream by session id) but must not inflate the monotonic
 		// action counter.
 		if performedStop {
-			telemetry.RecordAgentStop(context.Background(), name, sessionAgentMetricIdentity(*session, cfg), "drain-ack", nil)
+			telemetry.RecordAgentStop(context.Background(), name, sessionAgentMetricIdentityInfo(info, cfg), "drain-ack", nil)
 		}
 		if rec == nil {
 			return
@@ -551,7 +568,7 @@ func reconcileDrainAckStopPending(
 	}
 	return true, finalizeDrainAckStoppedSession(
 		cityPath, cfg, store, rigStores, session, info, tp.TemplateName,
-		!desired || isPoolManagedSessionBead(*session),
+		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
 }
@@ -598,7 +615,7 @@ func finalizeDrainAckStopPendingSessions(
 		finalizeDrainAckStoppedSession(
 			cityPath, cfg, store, rigStores, session, info,
 			normalizedSessionTemplateInfo(info, cfg),
-			isPoolManagedSessionBead(*session),
+			isPoolManagedSessionInfo(info),
 			dops, dt, clk, rec, stderr,
 		)
 		finalized++
@@ -1806,15 +1823,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
-						ackReason := assignedWorkDrainCancelReason(*session, sp, dt, name)
+						ackReason := assignedWorkDrainCancelReasonInfo(infoPostHeal, sp, dt, name)
 						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
 						}
 						if providerAlive && hasAssignedWork {
-							if cancelSessionDrainForAssignedWork(*session, sp, dt) ||
-								cancelRecoveredDrainForAssignedWork(*session, sp, name) {
+							if cancelSessionDrainForAssignedWorkInfo(infoPostHeal, sp, dt) ||
+								cancelRecoveredDrainForAssignedWorkInfo(infoPostHeal, sp, name) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 								if template == "" {
@@ -1926,7 +1943,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 					}
-					if beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout) {
+					if beginSessionDrainInfo(infoPostHeal, sp, dt, reason, clk, defaultDrainTimeout) {
 						if trace != nil {
 							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 							if template == "" {
@@ -1981,7 +1998,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// and activity are probed by the narrower branches that use them.
 		running, alive := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
-		recordResetStallIfDue(*session, tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
+		recordResetStallIfDue(infoByID[session.ID], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// terminalErrBatch carries the markProviderTerminalError mirror (if it ran) out
@@ -2023,7 +2040,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// — terminalErrBatch is the only session.Metadata mutation on the paths that
 		// reach this point. Only two path shapes arrive: the desired fast path (skips
 		// the `if !desired` block and mutates nothing but the drain tracker via
-		// recordResetStallIfDue, which takes the bead by value), and the ONE
+		// recordResetStallIfDue, which takes the coherent Info snapshot), and the ONE
 		// non-continue arm of that block — the post-heal `case preserveNamed:` — whose
 		// body sets local tp/desired and records a trace only, and which was
 		// heal-folded just above (~1713). (Every drain/drain-ack/orphan-close arm of
@@ -2037,7 +2054,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
 		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(terminalErrBatch)
 		infoPostZombie := infoByID[session.ID]
-		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && !runningSessionMatchesPendingCreate(session, name, sp) {
+		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && !runningSessionMatchesPendingCreateInfo(infoPostZombie, name, sp) {
 			// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 			// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
 			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
@@ -2076,17 +2093,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// worker wave until the stale awake bead ages out.
 		if dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
-				if !alive && staleOrLegacyDrainAckBeforeStart(*session, sp, name) {
+				if !alive && staleOrLegacyDrainAckBeforeStartInfo(infoByID[session.ID], sp, name) {
 					_ = clearReconcilerDrainAckMetadata(sp, name)
 				} else {
-					if staleReconcilerDrainAck(*session, sp, name) {
+					if staleReconcilerDrainAckInfo(infoByID[session.ID], sp, name) {
 						_ = clearReconcilerDrainAckMetadata(sp, name)
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonStaleGeneration, TraceOutcomeClear, tp.TemplateName, name, nil)
 						}
 						continue
 					}
-					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSessionInfo(infoByID[session.ID], sp, name)
 					// gc-kkgak: a reconciler-owned drain ack is minted from the
 					// desired-state / assigned-work view. During a partial store
 					// query that view is unreliable, so defer the reconciler-owned
@@ -2111,7 +2128,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							hasAssignedWork = true
 						}
 						if alive && hasAssignedWork &&
-							(cancelSessionDrainForAssignedWork(*session, sp, dt) || cancelRecoveredDrainForAssignedWork(*session, sp, name)) {
+							(cancelSessionDrainForAssignedWorkInfo(infoByID[session.ID], sp, dt) || cancelRecoveredDrainForAssignedWorkInfo(infoByID[session.ID], sp, name)) {
 							_ = dops.clearDrain(name)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ackReason), TraceOutcomeCancelAssignedWork, tp.TemplateName, name, nil)
@@ -2130,7 +2147,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
-							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[session.ID], sp, dt)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
@@ -2148,7 +2165,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 								}
 							}
-							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[session.ID], sp, dt)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
@@ -2160,7 +2177,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						if driftKey != "" && recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
-							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[session.ID], sp, dt)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
@@ -2173,7 +2190,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					if pendingInteractionKeepsAwake(*session, sp, name, clk) &&
-						(cancelReconcilerAckedDrain(*session, sp, dt) || cancelRecoveredReconcilerAckedDrain(*session, sp, name)) {
+						(cancelReconcilerAckedDrainInfo(infoByID[session.ID], sp, dt) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[session.ID], sp, name)) {
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonPending, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
 						}
@@ -2199,7 +2216,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					result := finalizeDrainAckStoppedSession(
 						cityPath, cfg, store, rigStores, session, infoByID[session.ID], tp.TemplateName,
-						isPoolManagedSessionBead(*session),
+						isPoolManagedSessionInfo(infoByID[session.ID]),
 						dops, finalizeDT,
 						clk, rec, stderr,
 					)
@@ -2231,7 +2248,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
 				exempt := pendingInteractionKeepsAwake(*session, sp, name, clk) ||
-					pendingCreateStartInFlight(*session, clk, startupTimeout)
+					pendingCreateStartInFlightInfo(infoByID[session.ID], clk, startupTimeout)
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
 					if attachErr != nil {
@@ -2326,7 +2343,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 				}
-				if identity := namedSessionIdentity(*session); identity != "" {
+				if identity := namedSessionIdentityInfo(infoByID[session.ID]); identity != "" {
 					if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: clearing session circuit breaker for restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
@@ -2485,10 +2502,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if alive && productiveLongEnoughInfo(infoByID[session.ID], clk) {
 			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearChurn(session, infoByID[session.ID], sessFront))
 		}
-		if alive && shouldRollbackPendingCreate(session) {
+		if alive && shouldRollbackPendingCreateInfo(infoByID[session.ID]) {
 			switch stateBeforeHeal {
 			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
-				if pendingCreateStartInFlight(*session, clk, startupTimeout) {
+				if pendingCreateStartInFlightInfo(infoByID[session.ID], clk, startupTimeout) {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
 					}
@@ -2525,7 +2542,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if alive {
 			template := tp.TemplateName
 			if template == "" {
-				template = normalizedSessionTemplate(*session, cfg)
+				template = normalizedSessionTemplateInfo(infoByID[session.ID], cfg)
 			}
 			// Use started_config_hash for drift detection — it records
 			// what config the session actually started with. Before it's
@@ -2599,7 +2616,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if err := recordSessionAttachedConfigDriftDeferral(*session, sessFront, clk, driftKey); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 							}
-							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[session.ID], sp, dt)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredAttached, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason":  "attached",
@@ -2670,7 +2687,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if pendingInteractionKeepsAwake(*session, sp, name, clk) {
 								drainCancelled := false
 								if dt != nil {
-									drainCancelled = cancelSessionDrainForPending(*session, sp, dt)
+									drainCancelled = cancelSessionDrainForPendingInfo(infoByID[session.ID], sp, dt)
 								}
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonPending, TraceOutcomeDeferredPending, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
@@ -2719,7 +2736,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if ddt <= 0 {
 								ddt = defaultDrainTimeout
 							}
-							if beginSessionDrain(*session, sp, dt, "config-drift", clk, ddt) {
+							if beginSessionDrainInfo(infoByID[session.ID], sp, dt, "config-drift", clk, ddt) {
 								fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDrain, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
@@ -2822,7 +2839,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if !alive && isNamedSessionBead(*session) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
-				template = normalizedSessionTemplate(*session, cfg)
+				template = normalizedSessionTemplateInfo(infoByID[session.ID], cfg)
 			}
 			storedHash := infoByID[session.ID].StartedConfigHash
 			if template != "" && storedHash != "" {
@@ -2991,7 +3008,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if dec.CancelDrain {
 					drainCancelled := false
 					if dt != nil {
-						drainCancelled = cancelSessionDrain(*session, sp, dt)
+						drainCancelled = cancelSessionDrainInfo(infoByID[session.ID], sp, dt)
 					}
 					payload = traceRecordPayload{"drain_canceled": drainCancelled}
 				}
@@ -4280,13 +4297,8 @@ func traceHealClearedPendingCreateLease(
 	})
 }
 
-func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {
-	applyTemplateOverridesToConfigInfo(agentCfg, sessionpkg.InfoFromPersistedBead(session), tp)
-}
-
-// applyTemplateOverridesToConfigInfo is the session.Info form of
-// applyTemplateOverridesToConfig: byte-identical logic reading the parsed
-// template overrides directly off Info instead of re-projecting a raw bead.
+// applyTemplateOverridesToConfigInfo applies a session's parsed template
+// overrides onto the launch runtime.Config, reading them directly off Info.
 func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpkg.Info, tp TemplateParams) {
 	if agentCfg == nil {
 		return

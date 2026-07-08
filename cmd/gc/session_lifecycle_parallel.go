@@ -2297,6 +2297,49 @@ func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string,
 	return expectedToken != "" && liveToken == expectedToken
 }
 
+// runningSessionMatchesPendingCreateInfo is the session.Info sibling of
+// runningSessionMatchesPendingCreate for the reconciler forward pass. The
+// session-bead reads are the id (Info.ID), instance_token (Info.InstanceToken)
+// and generation (Info.Generation); the provider probes and session name are
+// shared verbatim, so it is byte-identical to the raw form (sessionInstanceToken
+// / sessionGeneration oracle rows). The raw form stays for the async-start
+// commit protocol, which threads a freshly re-Got *beads.Bead (§5).
+func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName string, sp runtime.Provider) bool {
+	if sp == nil {
+		return false
+	}
+	liveID := ""
+	if value, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+		liveID = strings.TrimSpace(value)
+		if liveID != "" && liveID != info.ID {
+			return false
+		}
+	}
+	expectedToken := strings.TrimSpace(info.InstanceToken)
+	liveToken := ""
+	if value, err := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN"); err == nil {
+		liveToken = value
+		liveToken = strings.TrimSpace(liveToken)
+		if liveToken != "" && liveToken != expectedToken {
+			liveGeneration, _ := sp.GetMeta(sessionName, "GC_RUNTIME_EPOCH")
+			expectedGeneration := strings.TrimSpace(info.Generation)
+			if strings.TrimSpace(liveGeneration) != "" && expectedGeneration != "" && strings.TrimSpace(liveGeneration) != expectedGeneration {
+				return false
+			}
+			if liveID == "" {
+				return false
+			}
+		}
+	}
+	if liveID != "" {
+		return liveID == info.ID
+	}
+	if expectedToken == "" {
+		return false
+	}
+	return expectedToken != "" && liveToken == expectedToken
+}
+
 // rollbackPendingCreate returns the metadata batch it mirrored onto the raw bead
 // (last_woke_at="" + conditional session_name="") so the reconciler can fold it
 // onto the typed snapshot (Step 6d write-returns-Info). NOTE: closeBead is

@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -57,7 +58,7 @@ func TestApplyTemplateOverridesToConfig_ParseSeam(t *testing.T) {
 			agentCfg := runtime.Config{Command: baseCommand}
 			session := beads.Bead{Metadata: tt.metadata}
 			tp := TemplateParams{Command: baseCommand, ResolvedProvider: tt.provider}
-			applyTemplateOverridesToConfig(&agentCfg, session, tp)
+			applyTemplateOverridesToConfigInfo(&agentCfg, sessionpkg.InfoFromPersistedBead(session), tp)
 			if agentCfg.Command != tt.wantCommand {
 				t.Fatalf("Command = %q, want %q", agentCfg.Command, tt.wantCommand)
 			}
@@ -71,7 +72,7 @@ func TestApplyTemplateOverridesToConfig_DefaultsPreservedAlongsideOverride(t *te
 	agentCfg := runtime.Config{Command: "claude"}
 	session := beads.Bead{Metadata: map[string]string{"template_overrides": `{"model":"sonnet"}`}}
 	tp := TemplateParams{Command: "claude", ResolvedProvider: provider}
-	applyTemplateOverridesToConfig(&agentCfg, session, tp)
+	applyTemplateOverridesToConfigInfo(&agentCfg, sessionpkg.InfoFromPersistedBead(session), tp)
 	want := "claude --model claude-sonnet-4-6 --effort low"
 	if agentCfg.Command != want {
 		t.Fatalf("Command = %q, want %q", agentCfg.Command, want)

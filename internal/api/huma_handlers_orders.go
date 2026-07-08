@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -101,9 +102,10 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			cr.LastRun = &ts
 		}
 		if len(history) > 0 {
-			outcome := lastRunOutcomeFromLabels(history[0].bead.Labels)
-			if outcome != "" {
-				cr.LastRunOutcome = &outcome
+			if run, ok := orders.RunFromTrackingBead(history[0].bead); ok {
+				if outcome := run.Outcome.Display(); outcome != "" {
+					cr.LastRunOutcome = &outcome
+				}
 			}
 		}
 		checks = append(checks, cr)
@@ -140,7 +142,7 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
 		if fresh {
-			cursorFn = orders.CursorAcrossStores(storesFromWorkflowInfos(infos)...)
+			cursorFn = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
@@ -254,16 +256,14 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
 
-		if b.Metadata != nil {
-			if v, ok := b.Metadata["convergence.gate_duration_ms"]; ok && v != "" {
-				entry.DurationMs = &v
-			}
-			if v, ok := b.Metadata["convergence.gate_exit_code"]; ok && v != "" {
-				entry.ExitCode = &v
-			}
+		gate := convergence.GateOutputFromMetadata(b.Metadata)
+		if gate.DurationMs != "" {
+			entry.DurationMs = &gate.DurationMs
 		}
-
-		entry.HasOutput = entry.CaptureOutput || orderRunHasOutput(b)
+		if gate.ExitCode != "" {
+			entry.ExitCode = &gate.ExitCode
+		}
+		entry.HasOutput = entry.CaptureOutput || gate.HasOutput()
 
 		entries = append(entries, entry)
 		if len(entries) >= limit {
@@ -276,13 +276,6 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	}
 	out.Body.Entries = entries
 	return out, nil
-}
-
-func orderRunHasOutput(b beads.Bead) bool {
-	if b.Metadata == nil {
-		return false
-	}
-	return b.Metadata["convergence.gate_stdout"] != "" || b.Metadata["convergence.gate_stderr"] != ""
 }
 
 // orderHistoryEntry is a single entry in the order history response.
@@ -328,18 +321,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	}
 	b := result.bead
 
-	output := ""
-	if b.Metadata != nil {
-		if stdout := b.Metadata["convergence.gate_stdout"]; stdout != "" {
-			output = stdout
-		}
-		if stderr := b.Metadata["convergence.gate_stderr"]; stderr != "" {
-			if output != "" {
-				output += "\n"
-			}
-			output += stderr
-		}
-	}
+	output := convergence.GateOutputFromMetadata(b.Metadata).CombinedOutput()
 
 	return &struct {
 		Body orderHistoryDetailResponse
@@ -395,14 +377,21 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 	return infos, nil
 }
 
-func storesFromWorkflowInfos(infos []workflowStoreInfo) []beads.Store {
-	stores := make([]beads.Store, 0, len(infos))
+// orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
+// order front doors for the mixed orders+graph Cursor read. Each store is used
+// as both the orders leg and the graph leg (single-store colocation dedups to one
+// read); a graph-store split would supply a distinct graph leg here.
+func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store {
+	out := make([]*orders.Store, 0, len(infos))
 	for _, info := range infos {
 		if info.store != nil {
-			stores = append(stores, info.store)
+			out = append(out, orders.NewStoreWithGraph(
+				beads.OrdersStore{Store: info.store},
+				beads.GraphStore{Store: info.store},
+			))
 		}
 	}
-	return stores
+	return out
 }
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {

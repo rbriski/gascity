@@ -55,19 +55,6 @@ func ensureQueuedNudgeBead(store beads.NudgesStore, item queuedNudge) (string, b
 	return nudgeFrontDoor(store).Save(item)
 }
 
-// findQueuedNudgeBead resolves the OPEN nudge shadow bead for nudgeID through
-// the front door. Thin adapter retained for cmd/gc callers/tests that inspect
-// the raw bead; new logic should prefer nudgeFrontDoor(store).Find.
-func findQueuedNudgeBead(store beads.NudgesStore, nudgeID string) (beads.Bead, bool, error) {
-	return nudgeFrontDoor(store).FindBead(nudgeID)
-}
-
-// findAnyQueuedNudgeBead resolves the nudge shadow bead for nudgeID including
-// terminal/closed beads, through the front door.
-func findAnyQueuedNudgeBead(store beads.NudgesStore, nudgeID string) (beads.Bead, bool, error) {
-	return nudgeFrontDoor(store).FindBeadIncludingTerminal(nudgeID)
-}
-
 // nudgeCanonicalCloseReason maps a terminalization state to the canonical
 // close_reason. Thin adapter over the front door's codec, retained for the
 // cmd/gc test that guards the >=20 char validator floor.

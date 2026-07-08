@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -57,30 +56,23 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	liveIDs := liveNudgeIDSet(nudgeState)
 	nq := nudgequeue.NewStore(nudgeStore)
 
-	// Phase 1: close stale nudge beads.
+	// Phase 1: close stale nudge beads. The live flock-queue exclusion is carried
+	// inside StaleShadowsBefore; the cross-phase close budget stays in this loop.
 	nudgeCutoff := now.Add(-nudgeTTL)
-	nudgeQueryLimit := limit
-	if nudgeQueryLimit < 0 {
-		nudgeQueryLimit = 0
-	}
-	// nudge/mail beads are NoHistory (wisp-tier); read both tiers explicitly.
-	nudgeCandidates, err := nudgequeue.StaleCandidatesBefore(nudgeStore, nudgeCutoff, nudgeQueryLimit)
+	// nudge/mail beads are NoHistory (wisp-tier); StaleShadowsBefore reads both tiers.
+	nudgeShadows, err := nq.StaleShadowsBefore(nudgeCutoff, limit, liveIDs)
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep: listing stale nudge beads: %w", err)
 	}
 
-	for _, b := range nudgeCandidates {
+	for _, shadow := range nudgeShadows {
 		if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !shadow.Open {
 			continue
 		}
-		nudgeID := strings.TrimSpace(nudgequeue.DecodeShadow(b).ID)
-		if nudgeID != "" && liveIDs[nudgeID] {
-			continue
-		}
-		if err := nq.SweepStale(b.ID, nudgeMailSweepNudgeCloseReason, now); err != nil {
+		if err := nq.SweepStale(shadow.BeadID, nudgeMailSweepNudgeCloseReason, now); err != nil {
 			beadErrs = append(beadErrs, err)
 			continue
 		}
@@ -130,25 +122,19 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	var result nudgeMailSweepResult
 
 	liveIDs := liveNudgeIDSet(nudgeState)
+	nq := nudgequeue.NewStore(nudgeStore)
 
+	// Dry-run twin of the sweep: same typed read, same cross-phase budget, no writes.
 	nudgeCutoff := now.Add(-nudgeTTL)
-	nudgeQueryLimit := limit
-	if nudgeQueryLimit < 0 {
-		nudgeQueryLimit = 0
-	}
-	nudgeCandidates, err := nudgequeue.StaleCandidatesBefore(nudgeStore, nudgeCutoff, nudgeQueryLimit)
+	nudgeShadows, err := nq.StaleShadowsBefore(nudgeCutoff, limit, liveIDs)
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing stale nudge beads: %w", err)
 	}
-	for _, b := range nudgeCandidates {
+	for _, shadow := range nudgeShadows {
 		if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
 			break
 		}
-		if b.Status != "open" {
-			continue
-		}
-		nudgeID := strings.TrimSpace(nudgequeue.DecodeShadow(b).ID)
-		if nudgeID != "" && liveIDs[nudgeID] {
+		if !shadow.Open {
 			continue
 		}
 		result.NudgeClosed++

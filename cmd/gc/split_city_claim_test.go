@@ -3,8 +3,8 @@ package main
 import "testing"
 
 func TestClaimRoutesInfraMutationByPrefix(t *testing.T) {
-	split := markSplitCity(t)   // has the .gc/infra activation marker
-	single := t.TempDir()       // no marker
+	split := markSplitCity(t) // has the .gc/infra activation marker
+	single := t.TempDir()     // no marker
 
 	cases := []struct {
 		name     string

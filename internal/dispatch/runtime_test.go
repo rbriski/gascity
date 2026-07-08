@@ -9741,13 +9741,19 @@ func TestProcessWorkflowFinalizeFailAnnotationFailsLoudWithoutResolver(t *testin
 	rigStore := beads.NewMemStore()
 	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
 		Title: "wf", Type: "task",
-		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
-			"gc.source_bead_id": "ga-parent", "gc.source_store_ref": "city:test"},
+		Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			"gc.source_bead_id": "ga-parent", "gc.source_store_ref": "city:test",
+		},
 	})
-	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{Title: "step", Type: "task", Status: "closed",
-		Metadata: map[string]string{"gc.outcome": "fail"}})
-	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{Title: "fin", Type: "task",
-		Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID}})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "step", Type: "task", Status: "closed",
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "fin", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+	})
 	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 

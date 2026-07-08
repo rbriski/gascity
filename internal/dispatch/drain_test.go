@@ -1938,13 +1938,19 @@ func TestDrain_WorkStoreConvoyWithoutMemberStoresFailsLoud(t *testing.T) {
 	if err := convoycore.TrackItem(work, convoy.ID, member.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := graph.Create(beads.Bead{ID: "gcg-root", Title: "workflow", Type: "task",
-		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.input_convoy_id": convoy.ID}}); err != nil {
+	if _, err := graph.Create(beads.Bead{
+		ID: "gcg-root", Title: "workflow", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.input_convoy_id": convoy.ID},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	drain, _ := graph.Create(beads.Bead{ID: "gcg-drain", Title: "drain", Type: "task",
-		Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": "gcg-root",
-			"gc.drain_context": "separate", "gc.drain_formula": "drain-item", "gc.drain_member_access": "read"}})
+	drain, _ := graph.Create(beads.Bead{
+		ID: "gcg-drain", Title: "drain", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind": "drain", "gc.root_bead_id": "gcg-root",
+			"gc.drain_context": "separate", "gc.drain_formula": "drain-item", "gc.drain_member_access": "read",
+		},
+	})
 
 	_, err := ProcessControl(graph, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}) // NO MemberStores
 	if err == nil {

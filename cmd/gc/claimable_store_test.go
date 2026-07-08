@@ -118,9 +118,9 @@ func TestClaimableStoreCollapsesSingleStore(t *testing.T) {
 func TestSortReadyBeadsCanonical(t *testing.T) {
 	p0, p2 := 0, 2
 	items := []beads.Bead{
-		{ID: "b", Priority: nil},  // nil priority sorts as 2
-		{ID: "a", Priority: &p0},  // priority 0 → first
-		{ID: "c", Priority: &p2},  // priority 2
+		{ID: "b", Priority: nil}, // nil priority sorts as 2
+		{ID: "a", Priority: &p0}, // priority 0 → first
+		{ID: "c", Priority: &p2}, // priority 2
 	}
 	sortReadyBeadsCanonical(items)
 	got := []string{items[0].ID, items[1].ID, items[2].ID}
@@ -137,8 +137,10 @@ func TestSortReadyBeadsCanonical(t *testing.T) {
 func TestClaimableReady_AttachParentBlockedWhileInfraRootOpen(t *testing.T) {
 	work := beads.NewMemStoreHonoringIDs()
 	infra := beads.NewMemStoreHonoringIDs()
-	mustCreateBead(t, work, beads.Bead{ID: "ga-parent", Title: "attach parent", Type: "task",
-		Metadata: beads.StringMap{beadmeta.AttachedWorkflowRootMetadataKey: "gcg-root"}})
+	mustCreateBead(t, work, beads.Bead{
+		ID: "ga-parent", Title: "attach parent", Type: "task",
+		Metadata: beads.StringMap{beadmeta.AttachedWorkflowRootMetadataKey: "gcg-root"},
+	})
 	mustCreateBead(t, infra, beads.Bead{ID: "gcg-root", Title: "workflow root", Type: "task"})
 	cs := &claimableStore{work: work, infra: infra}
 
@@ -167,8 +169,10 @@ func TestClaimableReady_AttachParentBlockedWhileInfraRootOpen(t *testing.T) {
 func TestClaimableReady_DanglingAttachRootFailsLoud(t *testing.T) {
 	work := beads.NewMemStoreHonoringIDs()
 	infra := beads.NewMemStoreHonoringIDs()
-	mustCreateBead(t, work, beads.Bead{ID: "ga-parent", Title: "p", Type: "task",
-		Metadata: beads.StringMap{beadmeta.AttachedWorkflowRootMetadataKey: "gcg-missing"}})
+	mustCreateBead(t, work, beads.Bead{
+		ID: "ga-parent", Title: "p", Type: "task",
+		Metadata: beads.StringMap{beadmeta.AttachedWorkflowRootMetadataKey: "gcg-missing"},
+	})
 	cs := &claimableStore{work: work, infra: infra}
 	if _, err := cs.Ready(beads.ReadyQuery{}); err == nil {
 		t.Fatal("a dangling gc.attached_workflow_root must fail loud, not fall open")

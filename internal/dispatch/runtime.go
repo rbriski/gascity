@@ -749,11 +749,12 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
-	if outcome == beadmeta.OutcomePass {
+	switch outcome {
+	case beadmeta.OutcomePass:
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))
 		}
-	} else if outcome == beadmeta.OutcomeFail {
+	case beadmeta.OutcomeFail:
 		// Failures leave the domain parent OPEN (a human investigates via the
 		// human-visible queue), but on a split city the parent got NO signal at
 		// all — the DAG closed in the infra store and nothing crossed the boundary.

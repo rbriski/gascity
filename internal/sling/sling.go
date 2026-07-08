@@ -1282,6 +1282,11 @@ func recipeMaterializesInfraClass(recipe *formula.Recipe) bool {
 	return false
 }
 
+// InstantiateSlingFormula compiles the named formula and materializes its
+// molecule for a sling, routing the whole molecule to the store its wholesale
+// class implies: a graph.v2/wisp/convergence recipe lands in deps.graphStore()
+// (the infra store on a split city), a plain v1 recipe in deps.Store (the work
+// store). It returns the materialized molecule result.
 func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
 	if opts.PriorityOverride == nil && sourceBeadID != "" {

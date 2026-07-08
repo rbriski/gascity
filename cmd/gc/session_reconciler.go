@@ -369,7 +369,7 @@ type drainAckFinalizeResult struct {
 // (already ApplyPatchInfo-folded inside the call) wins next; otherwise the Path-A
 // ClosePatch folds via ApplyPatch and its in-memory close folds via MarkClosed.
 // The caller must pass the session's coherent snapshot entry — infoByID[id] equal
-// to the pre-call InfoFromPersistedBead(*session) — which holds at every finalize
+// to the pre-call Info projection of *session — which holds at every finalize
 // call site (top-of-loop / post-heal / post-zombie refresh, no un-refreshed
 // *session mutation reaches the call).
 func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
@@ -410,8 +410,8 @@ func finalizeDrainAckStoppedSession(
 	// 5b); the raw *session is retained only for the whole-bead raw-by-design
 	// helpers below (sessionHasOpenAssignedWorkForReachableStore,
 	// closeSessionBeadIfReachableStoreUnassigned, recordDrainAckAssignedWorkEvent,
-	// sessionAgentMetricIdentity) and the store.Get witness reprojection. Callers
-	// pass the coherent infoByID[session.ID] (== InfoFromPersistedBead(*session)).
+	// sessionAgentMetricIdentity) and the front-door Get witness refresh. Callers
+	// pass the coherent infoByID[session.ID] (== the Info projection of *session).
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if template == "" {
 		template = normalizedSessionTemplateInfo(info, cfg)
@@ -466,9 +466,18 @@ func finalizeDrainAckStoppedSession(
 			// not a Metadata bracket write, and asserted by the telemetry close-path test).
 			return drainAckFinalizeResult{batch: closePatch, closed: true}
 		}
-		if latest, err := store.Get(session.ID); err == nil && latest.Status == "closed" {
-			session.Status = latest.Status
-			session.Metadata = latest.Metadata
+		if witnessInfo, err := sessionFrontDoor(store).Get(session.ID); err == nil && witnessInfo.Closed {
+			// NDI witness close: another observer already closed the bead. The
+			// session-front-door Get returns the authoritative closed Info directly —
+			// the one documented status-close Store.Get refresh (a metadata patch
+			// cannot express a status close, so no local fold reproduces it). It is a
+			// rare non-fast-path branch, so it does not affect the tick Get budget.
+			// The raw session.Status="closed" struct-field set stays (asserted by the
+			// telemetry close-path test); the raw metadata adoption
+			// (session.Metadata = latest.Metadata) is gone with the lockstep (W5) —
+			// no later this-tick reader consumes the raw bead metadata here (the
+			// session `continue`s and the post-loop scans read only orderedBeads[i].ID).
+			session.Status = "closed"
 			if dops != nil {
 				_ = dops.clearDrain(name)
 			}
@@ -477,12 +486,6 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(session.ID)
 			}
 			recordStopped(false)
-			// NDI witness close: another observer already closed the bead and this
-			// call adopted its authoritative metadata wholesale, so the post-Info is
-			// a full reprojection, not a patch fold. This is the one finalize path
-			// still reading the raw bead; it is byte-identical to the old
-			// refreshSessionInfo and is reworked when the lockstep drops.
-			witnessInfo := sessionpkg.InfoFromPersistedBead(*session)
 			return drainAckFinalizeResult{witnessInfo: &witnessInfo}
 		}
 		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)

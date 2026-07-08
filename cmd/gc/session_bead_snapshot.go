@@ -209,6 +209,15 @@ func (s *sessionBeadSnapshot) add(bead beads.Bead) {
 	s.replaceOpenLocked(open)
 }
 
+// WI-6: the raw-bead half of sessionBeadSnapshot (Open / FindByID /
+// FindSessionBeadByTemplate / FindSessionBeadByNamedIdentity /
+// FindSessionNameByNamedIdentity and the raw stampedPoolQualifiedIdentity used by
+// the constructor) survives WI-5. The W4 typed-half migration retired every
+// reconciler-owned consumer, but the raw-half deletion is blocked by the two
+// non-front-door Open() call sites in cmd_start.go (doStartStandalone) plus the
+// WI-6-owned FindByID (city_runtime.go, cmd_wait.go) and
+// FindSessionNameByNamedIdentity (providers.go) callers. It deletes when those
+// move to OpenInfos()/FindInfoByID()/FindInfoByNamedIdentity() in WI-6.
 func (s *sessionBeadSnapshot) Open() []beads.Bead {
 	if s == nil {
 		return nil

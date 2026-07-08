@@ -421,7 +421,7 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 
 // healExpiredTimers clears expired held_until and quarantined_until.
 // Separate from wakeReasons() to keep that function pure. Decision reads route
-// through the typed info snapshot, which must equal InfoFromPersistedBead(*session)
+// through the typed info snapshot, which must equal the Info projection of *session
 // at call time; the raw session.Metadata mirror loops are kept because the Phase-0
 // caller runs before the coherent infoByID snapshot exists and later reads still
 // project from the mutated bead.
@@ -470,7 +470,7 @@ func healExpiredTimers(session *beads.Bead, info sessionpkg.Info, sessFront *ses
 // STEP6-PREPASS-AUDIT group 2). Returns (false, nil) otherwise; ApplyPatch(nil)
 // is a no-op.
 //
-// Coherence precondition: info must equal InfoFromPersistedBead(*session) at
+// Coherence precondition: info must equal the Info projection of *session at
 // call time — the Step-6d fold invariant the forward-pass caller maintains by
 // folding every prior in-iteration write onto the snapshot before this call.
 func checkStability(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string) {
@@ -562,7 +562,7 @@ func sessionExitFacts(session *beads.Bead, cfg *config.City, alive bool, dt *dra
 // the typed exit-decision mirrors instead of raw bead metadata. Info already
 // applies the identical TrimSpace=="true" for PendingCreateClaim, and its
 // SleepReason/LastWokeAt fields are verbatim raw mirrors, so the two forms
-// produce byte-identical ExitFacts for any info == InfoFromPersistedBead(*session)
+// produce byte-identical ExitFacts for any info projected from the same bead
 // (equivalence-proven, TestSessionClassifierInfoEquivalence).
 func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) sessionpkg.ExitFacts {
 	var startupTimeout time.Duration

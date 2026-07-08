@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -871,7 +872,7 @@ func RunConditionalMetadataTestsConcurrent(t *testing.T, newStore func() beads.S
 
 func runConditionalMetadataTests(t *testing.T, newStore func() beads.Store, concurrentSafe bool) {
 	t.Helper()
-	const key = "gc.control_epoch" // a dotted key: pins that stores treat it as one key
+	const key = beadmeta.ControlEpochMetadataKey // a dotted key: pins that stores treat it as one key
 
 	casFor := func(t *testing.T, s beads.Store) beads.ConditionalMetadataStore {
 		t.Helper()

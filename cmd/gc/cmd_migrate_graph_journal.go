@@ -561,7 +561,7 @@ func migrateRoot(ctx context.Context, deps migrateGraphJournalDeps, rootID strin
 	// Best-effort epoch bump so the level-triggered dispatcher parks the root. The
 	// legacy leg is written directly (never the router), so this never self-blocks;
 	// re-verify is the backstop when it loses.
-	_ = deps.legacy.SetMetadata(rootID, "gc.control_epoch", fmt.Sprintf("%d", fenceEpoch))
+	_ = deps.legacy.SetMetadata(rootID, beadmeta.ControlEpochMetadataKey, fmt.Sprintf("%d", fenceEpoch))
 	if err := deps.fire(deps.hooks.afterParkFn()); err != nil {
 		return out, err
 	}
@@ -754,7 +754,7 @@ func ensureTombstone(deps migrateGraphJournalDeps, rootID string) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("reading legacy root %q: %w", rootID, err)
 	}
-	if legRoot.Metadata["gc.migrated"] == "1" {
+	if legRoot.Metadata[beadmeta.MigratedMetadataKey] == "1" {
 		return true, nil // already tombstoned; idempotent no-op
 	}
 	// Read the authoritative journal copy first so the legacy read the guard hashes
@@ -797,7 +797,7 @@ func ensureTombstone(deps migrateGraphJournalDeps, rootID string) (bool, error) 
 	if canonicalSubtreeHashExcludingStatus(postCloseSub) != preCloseHash {
 		return false, fmt.Errorf("%w: root %q (external write during the tombstone close loop)", errPostFlipExternalWrite, rootID)
 	}
-	if err := deps.legacy.SetMetadata(rootID, "gc.migrated", "1"); err != nil {
+	if err := deps.legacy.SetMetadata(rootID, beadmeta.MigratedMetadataKey, "1"); err != nil {
 		return false, fmt.Errorf("marking legacy root %q migrated: %w", rootID, err)
 	}
 	return true, nil

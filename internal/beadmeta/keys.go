@@ -121,6 +121,7 @@ const (
 	LastHeartbeatAtMetadataKey           = "gc.last_heartbeat_at"
 	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
 	MaxAttemptsMetadataKey               = "gc.max_attempts"
+	MigratedMetadataKey                  = "gc.migrated"
 	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
 	ModelMetadataKey                     = "gc.model"
 	NextAttemptMetadataKey               = "gc.next_attempt"
@@ -330,6 +331,7 @@ var KnownMetadataKeys = []string{
 	LastHeartbeatAtMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,
+	MigratedMetadataKey,
 	MissingRootBeadIDMetadataKey,
 	ModelMetadataKey,
 	NextAttemptMetadataKey,

@@ -1470,9 +1470,9 @@ func TestStableLongEnough(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"last_woke_at": tt.lastWoke,
 			})
-			got := stableLongEnough(session, clk)
+			got := stableLongEnoughInfo(sessionpkg.InfoFromPersistedBead(session), clk)
 			if got != tt.want {
-				t.Errorf("stableLongEnough = %v, want %v", got, tt.want)
+				t.Errorf("stableLongEnoughInfo = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1498,9 +1498,9 @@ func TestSessionIsQuarantined(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"quarantined_until": tt.qVal,
 			})
-			got := sessionIsQuarantined(session, clk)
+			got := sessionIsQuarantinedInfo(sessionpkg.InfoFromPersistedBead(session), clk)
 			if got != tt.want {
-				t.Errorf("sessionIsQuarantined = %v, want %v", got, tt.want)
+				t.Errorf("sessionIsQuarantinedInfo = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -2346,9 +2346,9 @@ func TestSessionWakeAttempts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		session := makeBead("b1", map[string]string{"wake_attempts": tt.val})
-		got := sessionWakeAttempts(session)
+		got := sessionWakeAttemptsInfo(sessionpkg.InfoFromPersistedBead(session))
 		if got != tt.want {
-			t.Errorf("sessionWakeAttempts(%q) = %d, want %d", tt.val, got, tt.want)
+			t.Errorf("sessionWakeAttemptsInfo(%q) = %d, want %d", tt.val, got, tt.want)
 		}
 	}
 }
@@ -2430,7 +2430,7 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 	}
 }
 
-// --- isKnownState tests (Phase 0b: forward compatibility) ---
+// --- isKnownStateInfo tests (Phase 0b: forward compatibility) ---
 
 func TestIsKnownState_KnownStates(t *testing.T) {
 	known := []string{
@@ -2439,7 +2439,7 @@ func TestIsKnownState_KnownStates(t *testing.T) {
 	}
 	for _, state := range known {
 		session := makeBead("b1", map[string]string{"state": state})
-		if !isKnownState(session) {
+		if !isKnownStateInfo(sessionpkg.InfoFromPersistedBead(session)) {
 			t.Errorf("state %q should be known", state)
 		}
 	}
@@ -2449,7 +2449,7 @@ func TestIsKnownState_UnknownStates(t *testing.T) {
 	unknown := []string{"draining", "archived", "future-state"}
 	for _, state := range unknown {
 		session := makeBead("b1", map[string]string{"state": state})
-		if isKnownState(session) {
+		if isKnownStateInfo(sessionpkg.InfoFromPersistedBead(session)) {
 			t.Errorf("state %q should be unknown", state)
 		}
 	}
@@ -2820,8 +2820,8 @@ func TestProductiveLongEnough(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"last_woke_at": now.Add(-tt.wokeAgo).Format(time.RFC3339),
 			})
-			if got := productiveLongEnough(session, clk); got != tt.want {
-				t.Errorf("productiveLongEnough(%v ago) = %v, want %v", tt.wokeAgo, got, tt.want)
+			if got := productiveLongEnoughInfo(sessionpkg.InfoFromPersistedBead(session), clk); got != tt.want {
+				t.Errorf("productiveLongEnoughInfo(%v ago) = %v, want %v", tt.wokeAgo, got, tt.want)
 			}
 		})
 	}
@@ -2830,7 +2830,7 @@ func TestProductiveLongEnough(t *testing.T) {
 func TestProductiveLongEnough_NoLastWokeAt(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	session := makeBead("b1", map[string]string{})
-	if productiveLongEnough(session, clk) {
+	if productiveLongEnoughInfo(sessionpkg.InfoFromPersistedBead(session), clk) {
 		t.Error("should return false when last_woke_at is empty")
 	}
 }

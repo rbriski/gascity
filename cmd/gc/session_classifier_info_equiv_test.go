@@ -670,10 +670,9 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"rapid-crash-candidate": {
 			// Dead crash candidate: awake with a recent last_woke_at (well within
 			// stabilityThreshold), no deliberate sleep_reason and no pending-create
-			// claim, so DecideSessionExit on sessionExitFacts(alive=false) classifies
-			// it ExitRapidCrash. Drives the sessionExitFacts ↔ sessionExitFactsInfo
-			// struct-equivalence block through the real crash lane, not a trivial
-			// both-ExitNone pass.
+			// claim, so DecideSessionExit on the exit facts (alive=false) classifies
+			// it ExitRapidCrash. Retained as a representative shape for the Info-form
+			// classifiers now that the raw sessionExitFacts equivalence block is gone.
 			ID:     "ga-rapidcrash",
 			Type:   session.BeadType,
 			Title:  "rapidcrash",
@@ -688,9 +687,9 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			// wake_attempts beyond int64 range: strconv.Atoi returns the clamped
 			// value together with ErrRange. Pins the recordWakeFailure counter lane,
 			// which parses the raw WakeAttemptsMetadata string (not the pre-parsed
-			// WakeAttempts int, which zeroes on ErrRange), so sessionWakeAttempts and
-			// sessionWakeAttemptsInfo must still agree here while WakeAttemptsMetadata
-			// keeps the raw bytes verbatim.
+			// WakeAttempts int, which zeroes on ErrRange), so sessionWakeAttemptsInfo
+			// clamps identically here while WakeAttemptsMetadata keeps the raw bytes
+			// verbatim.
 			ID:     "ga-wakeoverflow",
 			Type:   session.BeadType,
 			Title:  "wakeoverflow",
@@ -708,19 +707,16 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
 	}{
-		"isPoolManagedSessionBead":        {isPoolManagedSessionBead, isPoolManagedSessionInfo},
-		"isEphemeralSessionBead":          {isEphemeralSessionBead, isEphemeralSessionInfo},
-		"isManualSessionBead":             {isManualSessionBead, isManualSessionInfo},
-		"isNamedSessionBead":              {isNamedSessionBead, isNamedSessionInfo},
-		"isDrainedSessionBead":            {isDrainedSessionBead, isDrainedSessionInfo},
-		"isFailedCreateSessionBead":       {isFailedCreateSessionBead, isFailedCreateSessionInfo},
-		"shouldRollbackPendingCreate":     {func(b beads.Bead) bool { return shouldRollbackPendingCreate(&b) }, shouldRollbackPendingCreateInfo},
-		"isStaleCreating":                 {isStaleCreating, isStaleCreatingInfo},
-		"isKnownState":                    {isKnownState, isKnownStateInfo},
-		"isPoolSessionSlotFreeable":       {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
-		"beadOwnsPoolSessionName":         {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
-		"sessionHasProviderTerminalError": {sessionHasProviderTerminalError, sessionHasProviderTerminalErrorInfo},
-		"isDrainAckStopPending":           {isDrainAckStopPending, isDrainAckStopPendingInfo},
+		"isPoolManagedSessionBead":    {isPoolManagedSessionBead, isPoolManagedSessionInfo},
+		"isEphemeralSessionBead":      {isEphemeralSessionBead, isEphemeralSessionInfo},
+		"isManualSessionBead":         {isManualSessionBead, isManualSessionInfo},
+		"isNamedSessionBead":          {isNamedSessionBead, isNamedSessionInfo},
+		"isDrainedSessionBead":        {isDrainedSessionBead, isDrainedSessionInfo},
+		"isFailedCreateSessionBead":   {isFailedCreateSessionBead, isFailedCreateSessionInfo},
+		"shouldRollbackPendingCreate": {func(b beads.Bead) bool { return shouldRollbackPendingCreate(&b) }, shouldRollbackPendingCreateInfo},
+		"isStaleCreating":             {isStaleCreating, isStaleCreatingInfo},
+		"isPoolSessionSlotFreeable":   {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
+		"beadOwnsPoolSessionName":     {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
 	}
 
 	// Agent-dependent classifiers. A bare pool agent (no instance-expansion, no
@@ -814,13 +810,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) string { return b.Metadata["held_until"] },
 			func(i session.Info) string { return i.HeldUntil },
 		},
-		// lifecycleTimerBlocker feeds the max-age / idle-timeout blocker fact in
-		// the reconciler forward pass; its Info sibling reads Info.HeldUntil /
-		// Info.QuarantinedUntil (clk captured for the metadataTimeInFuture rule).
-		"lifecycleTimerBlocker": {
-			func(b beads.Bead) string { return lifecycleTimerBlocker(b.Metadata, clk.Now()) },
-			func(i session.Info) string { return lifecycleTimerBlockerInfo(i, clk.Now()) },
-		},
 		"sessionWaitHold": {
 			func(b beads.Bead) string { return b.Metadata["wait_hold"] },
 			func(i session.Info) string { return i.WaitHold },
@@ -909,13 +898,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) string { return b.Metadata["wake_attempts"] },
 			func(i session.Info) string { return i.WakeAttemptsMetadata },
 		},
-	}
-
-	intChecks := map[string]struct {
-		bead func(beads.Bead) int
-		info func(session.Info) int
-	}{
-		"sessionWakeAttempts": {sessionWakeAttempts, sessionWakeAttemptsInfo},
 	}
 
 	sliceChecks := map[string]struct {
@@ -1038,10 +1020,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) bool { return pendingCreateSessionStillLeased(b, leaseCfg, clk) },
 			func(i session.Info) bool { return pendingCreateSessionStillLeasedInfo(i, leaseCfg, clk) },
 		},
-		"sessionIsQuarantined": {
-			func(b beads.Bead) bool { return sessionIsQuarantined(b, clk) },
-			func(i session.Info) bool { return sessionIsQuarantinedInfo(i, clk) },
-		},
 		"pendingCreateAttemptStale": {
 			func(b beads.Bead) bool { return pendingCreateAttemptStale(b, clk) },
 			func(i session.Info) bool { return pendingCreateAttemptStaleInfo(i, clk) },
@@ -1078,14 +1056,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				return pendingResumePreservingNamedRestartInfo(i, clk, leaseStartupTimeout)
 			},
 		},
-		"stableLongEnough": {
-			func(b beads.Bead) bool { return stableLongEnough(b, clk) },
-			func(i session.Info) bool { return stableLongEnoughInfo(i, clk) },
-		},
-		"productiveLongEnough": {
-			func(b beads.Bead) bool { return productiveLongEnough(b, clk) },
-			func(i session.Info) bool { return productiveLongEnoughInfo(i, clk) },
-		},
 	}
 
 	// The "pending-resume-preserve" fixture must hit the true branch under
@@ -1095,28 +1065,25 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	if !pendingResumePreservingNamedRestart(beadsByShape["pending-resume-preserve"], clk, leaseStartupTimeout) {
 		t.Fatal("pendingResumePreservingNamedRestart(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
 	}
-	// The drain-ack fixture must hit the true branch so isDrainAckStopPending's
-	// equivalence case is a real comparison, not a trivial both-false pass.
-	if !isDrainAckStopPending(beadsByShape["drain-ack-stop-pending"]) {
-		t.Fatal("isDrainAckStopPending(drain-ack-stop-pending) = false; fixture no longer exercises the true branch")
+	// The drain-ack fixture must hit the true branch so isDrainAckStopPendingInfo
+	// is exercised on a real stop-pending shape, not a trivial both-false pass.
+	if !isDrainAckStopPendingInfo(session.InfoFromPersistedBead(beadsByShape["drain-ack-stop-pending"])) {
+		t.Fatal("isDrainAckStopPendingInfo(drain-ack-stop-pending) = false; fixture no longer exercises the true branch")
 	}
-	// The hold/quarantine fixture must drive lifecycleTimerBlocker's non-empty
-	// branch so its equivalence case is a real comparison, not a both-empty pass.
-	if lifecycleTimerBlocker(beadsByShape["hold-and-quarantine"].Metadata, clk.Now()) == "" {
-		t.Fatal(`lifecycleTimerBlocker(hold-and-quarantine) = ""; fixture no longer exercises the blocker branch`)
+	// The hold/quarantine fixture must drive lifecycleTimerBlockerInfo's non-empty
+	// branch so it is exercised on a real blocker shape, not a both-empty pass.
+	if lifecycleTimerBlockerInfo(session.InfoFromPersistedBead(beadsByShape["hold-and-quarantine"]), clk.Now()) == "" {
+		t.Fatal(`lifecycleTimerBlockerInfo(hold-and-quarantine) = ""; fixture no longer exercises the blocker branch`)
 	}
-	// The rapid-crash-candidate fixture must classify ExitRapidCrash under
-	// alive=false so the sessionExitFacts ↔ sessionExitFactsInfo struct-equivalence
-	// block exercises the crash lane, not a trivial both-ExitNone pass.
-	rapidCrash := beadsByShape["rapid-crash-candidate"]
-	if got := session.DecideSessionExit(sessionExitFacts(&rapidCrash, leaseCfg, false, nil, clk)); got != session.ExitRapidCrash {
+	// The rapid-crash-candidate fixture must classify ExitRapidCrash under alive=false
+	// so sessionExitFactsInfo is exercised on the crash lane, not a both-ExitNone pass.
+	if got := session.DecideSessionExit(sessionExitFactsInfo(session.InfoFromPersistedBead(beadsByShape["rapid-crash-candidate"]), leaseCfg, false, nil, clk)); got != session.ExitRapidCrash {
 		t.Fatalf("DecideSessionExit(rapid-crash-candidate, alive=false) = %v; want ExitRapidCrash — fixture no longer exercises the crash lane", got)
 	}
-	// stableLongEnough must be true on the old-marker fixture (pastRFC3339
-	// last_woke_at) so its clkBoolChecks equivalence case is a real true-branch
-	// comparison, not a trivial both-false pass.
-	if !stableLongEnough(beadsByShape["pending-create-claim-old-markers"], clk) {
-		t.Fatal("stableLongEnough(pending-create-claim-old-markers) = false; fixture no longer exercises the stable-long-enough true branch")
+	// stableLongEnoughInfo must be true on the old-marker fixture (past RFC3339
+	// last_woke_at) so its true branch is exercised, not a trivial both-false pass.
+	if !stableLongEnoughInfo(session.InfoFromPersistedBead(beadsByShape["pending-create-claim-old-markers"]), clk) {
+		t.Fatal("stableLongEnoughInfo(pending-create-claim-old-markers) = false; fixture no longer exercises the stable-long-enough true branch")
 	}
 
 	for shape, b := range beadsByShape {
@@ -1163,11 +1130,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 					t.Errorf("%s: info=%q bead=%q", name, got, want)
 				}
 			}
-			for name, c := range intChecks {
-				if got, want := c.info(info), c.bead(b); got != want {
-					t.Errorf("%s: info=%d bead=%d", name, got, want)
-				}
-			}
 			for name, c := range sliceChecks {
 				if got, want := c.info(info), c.bead(b); !reflect.DeepEqual(got, want) {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
@@ -1183,25 +1145,125 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
 				}
 			}
-			// resetPendingCommittedAt returns a (raw, parsed-time, pending) tuple,
-			// so it can't ride the scalar check maps — compare all three fields.
-			rawS, rawT, rawOK := resetPendingCommittedAt(b)
-			infoS, infoT, infoOK := resetPendingCommittedAtInfo(info)
-			if rawS != infoS || !rawT.Equal(infoT) || rawOK != infoOK {
-				t.Errorf("resetPendingCommittedAt: info=(%q,%v,%v) bead=(%q,%v,%v)", infoS, infoT, infoOK, rawS, rawT, rawOK)
+		})
+	}
+}
+
+// The four tests below give the Info twins whose raw sibling (and its equivalence
+// row) was deleted in WI-5 W5 direct table coverage, so their logic is pinned even
+// though the byte-identical oracle above no longer carries them.
+
+func TestLifecycleTimerBlockerInfo(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	tests := []struct {
+		name string
+		md   map[string]string
+		want string
+	}{
+		{"none", map[string]string{}, ""},
+		{"hold", map[string]string{"held_until": future}, "user_hold"},
+		{"quarantine", map[string]string{"quarantined_until": future}, "quarantine"},
+		{"hold wins", map[string]string{"held_until": future, "quarantined_until": future}, "user_hold"},
+		{"expired hold", map[string]string{"held_until": past}, ""},
+		{"expired quarantine", map[string]string{"quarantined_until": past}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := session.InfoFromPersistedBead(makeBead("b1", tt.md))
+			if got := lifecycleTimerBlockerInfo(info, now); got != tt.want {
+				t.Errorf("lifecycleTimerBlockerInfo = %q, want %q", got, tt.want)
 			}
-			// sessionExitFacts ↔ sessionExitFactsInfo must produce byte-identical
-			// ExitFacts for every shape under both liveness values — the struct-level
-			// analogue of the scalar checks above. nil dt ⇒ DrainPending false on both
-			// forms; the alive=true pass proves the Alive field threads identically.
-			bb := b
-			for _, alive := range []bool{false, true} {
-				rawFacts := sessionExitFacts(&bb, leaseCfg, alive, nil, clk)
-				infoFacts := sessionExitFactsInfo(info, leaseCfg, alive, nil, clk)
-				if !reflect.DeepEqual(rawFacts, infoFacts) {
-					t.Errorf("sessionExitFacts(alive=%v): bead=%+v info=%+v", alive, rawFacts, infoFacts)
+		})
+	}
+}
+
+func TestResetPendingCommittedAtInfo(t *testing.T) {
+	const valid = "2026-03-08T12:00:00Z"
+	tests := []struct {
+		name    string
+		md      map[string]string
+		wantRaw string
+		wantOK  bool
+	}{
+		{"not pending", map[string]string{session.ResetCommittedAtKey: valid}, "", false},
+		{"pending + valid", map[string]string{"continuation_reset_pending": "true", session.ResetCommittedAtKey: valid}, valid, true},
+		{"pending + empty marker", map[string]string{"continuation_reset_pending": "true"}, "", false},
+		{"pending + invalid", map[string]string{"continuation_reset_pending": "true", session.ResetCommittedAtKey: "not-a-time"}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := session.InfoFromPersistedBead(makeBead("b1", tt.md))
+			raw, ts, ok := resetPendingCommittedAtInfo(info)
+			if raw != tt.wantRaw || ok != tt.wantOK {
+				t.Fatalf("resetPendingCommittedAtInfo = (%q, %v, %v), want raw=%q ok=%v", raw, ts, ok, tt.wantRaw, tt.wantOK)
+			}
+			if tt.wantOK {
+				want, _ := time.Parse(time.RFC3339, valid)
+				if !ts.Equal(want) {
+					t.Errorf("parsed committedAt = %v, want %v", ts, want)
 				}
 			}
 		})
+	}
+}
+
+func TestSessionHasProviderTerminalErrorInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		md   map[string]string
+		want bool
+	}{
+		{"none", map[string]string{}, false},
+		{"explicit terminal error", map[string]string{sessionProviderTerminalErrorMetadataKey: "boom"}, true},
+		{"unhealthy drainable reason", map[string]string{
+			sessionHealthStateMetadataKey:  "unhealthy",
+			sessionDrainableMetadataKey:    boolMetadata(true),
+			sessionHealthReasonMetadataKey: "why",
+		}, true},
+		{"unhealthy missing reason", map[string]string{
+			sessionHealthStateMetadataKey: "unhealthy",
+			sessionDrainableMetadataKey:   boolMetadata(true),
+		}, false},
+		{"unhealthy not drainable", map[string]string{
+			sessionHealthStateMetadataKey:  "unhealthy",
+			sessionHealthReasonMetadataKey: "why",
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := session.InfoFromPersistedBead(makeBead("b1", tt.md))
+			if got := sessionHasProviderTerminalErrorInfo(info); got != tt.want {
+				t.Errorf("sessionHasProviderTerminalErrorInfo = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSessionExitFactsInfo(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{}
+	recent := now.Add(-15 * time.Second).UTC().Format(time.RFC3339)
+	info := session.InfoFromPersistedBead(makeBead("b1", map[string]string{
+		"state":        "awake",
+		"last_woke_at": recent,
+	}))
+	// Field threading: liveness and the verbatim last_woke_at mirror.
+	dead := sessionExitFactsInfo(info, cfg, false, nil, clk)
+	if dead.Alive {
+		t.Error("Alive should thread false")
+	}
+	if dead.LastWokeAt != recent {
+		t.Errorf("LastWokeAt = %q, want %q", dead.LastWokeAt, recent)
+	}
+	if !sessionExitFactsInfo(info, cfg, true, nil, clk).Alive {
+		t.Error("Alive should thread true")
+	}
+	// A dead session that woke recently, with no deliberate sleep and no pending
+	// create, is a rapid crash.
+	if got := session.DecideSessionExit(dead); got != session.ExitRapidCrash {
+		t.Errorf("DecideSessionExit(dead recent-woke) = %v, want ExitRapidCrash", got)
 	}
 }

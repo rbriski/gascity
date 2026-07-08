@@ -2246,6 +2246,10 @@ func pendingCreateResidueFold(session *beads.Bead) map[string]string {
 	return fold
 }
 
+// WI-6: raw form retained — the start-execution path (executePlannedStarts /
+// commitStartFailure) still calls it on raw start-candidate beads; the
+// shouldRollbackPendingCreateInfo twin is oracle-pinned. Migrates with the
+// start-execution feed in WI-6.
 func shouldRollbackPendingCreate(session *beads.Bead) bool {
 	if session == nil {
 		return false

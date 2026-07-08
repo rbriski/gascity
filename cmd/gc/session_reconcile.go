@@ -177,6 +177,8 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	return agent, poolDesired[template] > 0
 }
 
+// WI-6: raw form retained — prod reconciler callers still pass raw beads; the
+// sessionStartRequestedInfo twin is oracle-pinned. Migrates when those type.
 func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
 	if strings.TrimSpace(session.Metadata["state"]) == string(sessionpkg.StateStartPending) {
 		return true
@@ -228,6 +230,9 @@ const staleCreatingStateTimeout = time.Minute
 // out from under the reconciler's still-active never-started lease.
 const stalePendingCreateTimeout = 5 * time.Minute
 
+// WI-6: raw form retained — its non-oracle callers include the WI-6-owned
+// cmd_stop.go and session_name_lookup.go lanes plus the reconciler; the
+// sessionMetadataStateInfo twin is oracle-pinned. Migrates when those type.
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
 	case "awake":
@@ -534,36 +539,11 @@ func checkRateLimitStability(session *beads.Bead, info sessionpkg.Info, cfg *con
 	return true, rlBatch, nil
 }
 
-// sessionExitFacts gathers the cheap facts for the exit-classification
-// decider. The provider-screen fact is gathered on demand by checkStability
-// when the decider asks for it.
-func sessionExitFacts(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) sessionpkg.ExitFacts {
-	var startupTimeout time.Duration
-	subprocess := false
-	if cfg != nil {
-		startupTimeout = cfg.Session.StartupTimeoutDuration()
-		subprocess = cfg.Session.Provider == "subprocess"
-	}
-	return sessionpkg.ExitFacts{
-		Alive:                      alive,
-		SubprocessProvider:         subprocess,
-		DrainPending:               dt != nil && dt.get(session.ID) != nil,
-		PendingCreateClaim:         strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true",
-		PendingCreateStartInFlight: pendingCreateStartInFlight(*session, clk, startupTimeout),
-		SleepReason:                session.Metadata["sleep_reason"],
-		LastWokeAt:                 session.Metadata["last_woke_at"],
-		Now:                        clk.Now(),
-		StabilityThreshold:         stabilityThreshold,
-		ProductivityThreshold:      churnProductivityThreshold,
-	}
-}
-
-// sessionExitFactsInfo is the session.Info sibling of sessionExitFacts, reading
-// the typed exit-decision mirrors instead of raw bead metadata. Info already
-// applies the identical TrimSpace=="true" for PendingCreateClaim, and its
-// SleepReason/LastWokeAt fields are verbatim raw mirrors, so the two forms
-// produce byte-identical ExitFacts for any info projected from the same bead
-// (equivalence-proven, TestSessionClassifierInfoEquivalence).
+// sessionExitFactsInfo gathers the cheap facts for the exit-classification
+// decider from the typed exit-decision mirrors. Info applies the identical
+// TrimSpace=="true" for PendingCreateClaim, and its SleepReason/LastWokeAt fields
+// are verbatim raw mirrors. The provider-screen fact is gathered on demand by
+// checkStability when the decider asks for it.
 func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) sessionpkg.ExitFacts {
 	var startupTimeout time.Duration
 	subprocess := false
@@ -658,18 +638,8 @@ func markProviderTerminalError(session *beads.Bead, sessFront *sessionpkg.Store,
 	return batch, nil
 }
 
-func sessionHasProviderTerminalError(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata[sessionProviderTerminalErrorMetadataKey]) != "" {
-		return true
-	}
-	return strings.TrimSpace(session.Metadata[sessionHealthStateMetadataKey]) == "unhealthy" &&
-		strings.TrimSpace(session.Metadata[sessionDrainableMetadataKey]) == boolMetadata(true) &&
-		strings.TrimSpace(session.Metadata[sessionHealthReasonMetadataKey]) != ""
-}
-
-// sessionHasProviderTerminalErrorInfo is the session.Info sibling of
-// sessionHasProviderTerminalError, reading the typed health/terminal-error
-// mirrors instead of raw bead metadata. Equivalence-proven.
+// sessionHasProviderTerminalErrorInfo reads the typed health/terminal-error
+// mirrors to report whether a session recorded a non-retryable provider error.
 func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 	if strings.TrimSpace(info.ProviderTerminalError) != "" {
 		return true
@@ -864,36 +834,9 @@ func clearChurn(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg
 	return map[string]string{"churn_count": "0"}
 }
 
-// productiveLongEnough returns true if the session has been alive past
-// churnProductivityThreshold — long enough to have done useful work.
-func productiveLongEnough(session beads.Bead, clk clock.Clock) bool {
-	lastWoke := session.Metadata["last_woke_at"]
-	if lastWoke == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, lastWoke)
-	if err != nil {
-		return false
-	}
-	return clk.Now().Sub(t) >= churnProductivityThreshold
-}
-
-// stableLongEnough returns true if the session has been alive past stabilityThreshold.
-func stableLongEnough(session beads.Bead, clk clock.Clock) bool {
-	lastWoke := session.Metadata["last_woke_at"]
-	if lastWoke == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, lastWoke)
-	if err != nil {
-		return false
-	}
-	return clk.Now().Sub(t) >= stabilityThreshold
-}
-
-// productiveLongEnoughInfo is the session.Info sibling of productiveLongEnough,
-// reading info.LastWokeAt (the verbatim raw last_woke_at mirror) instead of raw
-// bead metadata. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+// productiveLongEnoughInfo returns true if the session has been alive past
+// churnProductivityThreshold — long enough to have done useful work — reading
+// info.LastWokeAt (the verbatim raw last_woke_at mirror).
 func productiveLongEnoughInfo(info sessionpkg.Info, clk clock.Clock) bool {
 	lastWoke := info.LastWokeAt
 	if lastWoke == "" {
@@ -906,9 +849,9 @@ func productiveLongEnoughInfo(info sessionpkg.Info, clk clock.Clock) bool {
 	return clk.Now().Sub(t) >= churnProductivityThreshold
 }
 
-// stableLongEnoughInfo is the session.Info sibling of stableLongEnough, reading
-// info.LastWokeAt (the verbatim raw last_woke_at mirror) instead of raw bead
-// metadata. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+// stableLongEnoughInfo returns true if the session has been alive past
+// stabilityThreshold, reading info.LastWokeAt (the verbatim raw last_woke_at
+// mirror).
 func stableLongEnoughInfo(info sessionpkg.Info, clk clock.Clock) bool {
 	lastWoke := info.LastWokeAt
 	if lastWoke == "" {
@@ -921,35 +864,17 @@ func stableLongEnoughInfo(info sessionpkg.Info, clk clock.Clock) bool {
 	return clk.Now().Sub(t) >= stabilityThreshold
 }
 
-// sessionWakeAttempts returns the current wake attempt count.
-func sessionWakeAttempts(session beads.Bead) int {
-	n, _ := strconv.Atoi(session.Metadata["wake_attempts"])
-	return n
-}
-
-// sessionWakeAttemptsInfo is the session.Info mirror of sessionWakeAttempts. It
-// parses the raw WakeAttemptsMetadata string (rather than returning the
-// pre-parsed i.WakeAttempts, which zeroes on strconv.ErrRange) so it stays
-// byte-identical to sessionWakeAttempts even for an out-of-range counter.
+// sessionWakeAttemptsInfo returns the current wake attempt count. It parses the
+// raw WakeAttemptsMetadata string (rather than the pre-parsed i.WakeAttempts,
+// which zeroes on strconv.ErrRange) so an out-of-range counter clamps identically
+// to the historical strconv.Atoi(metadata) read.
 func sessionWakeAttemptsInfo(i sessionpkg.Info) int {
 	n, _ := strconv.Atoi(i.WakeAttemptsMetadata)
 	return n
 }
 
-// sessionIsQuarantined returns true if the session has an active quarantine.
-func sessionIsQuarantined(session beads.Bead, clk clock.Clock) bool {
-	q := session.Metadata["quarantined_until"]
-	if q == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, q)
-	if err != nil {
-		return false
-	}
-	return clk.Now().Before(t)
-}
-
-// sessionIsQuarantinedInfo is the session.Info mirror of sessionIsQuarantined.
+// sessionIsQuarantinedInfo returns true if the session has an active quarantine,
+// reading info.QuarantinedUntil.
 func sessionIsQuarantinedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	q := i.QuarantinedUntil
 	if q == "" {
@@ -1178,6 +1103,9 @@ func emptyNil(batch map[string]string) map[string]string {
 //  2. session.CreatedAt — fallback for fresh pool beads minted before
 //     this metadata key was introduced, and for any caller that creates
 //     a bead in state=creating without going through the helpers above.
+//
+// WI-6: raw form retained — sessionStartRequested (raw) still calls it; the
+// staleCreatingStateInfo twin is oracle-pinned. Migrates when that caller types.
 func staleCreatingState(session beads.Bead, clk clock.Clock) bool {
 	if clk == nil {
 		return false
@@ -1205,6 +1133,9 @@ func staleCreatingStateInfo(i sessionpkg.Info, clk clock.Clock) bool {
 // has aged past staleCreatingStateTimeout, regardless of the bead's current
 // projected state. This lets the reconciler keep never-started pending-create
 // leases alive after healState has already rewritten state=creating to asleep.
+//
+// WI-6: raw form retained — the reconciler forward pass and staleCreatingState
+// (raw) still call it; the pendingCreateAttemptStaleInfo twin is oracle-pinned.
 func pendingCreateAttemptStale(session beads.Bead, clk clock.Clock) bool {
 	if clk == nil {
 		return false
@@ -1342,15 +1273,10 @@ var knownSessionStates = map[string]bool{
 	"":                                   true, // empty state is valid (legacy beads)
 }
 
-// isKnownState returns true if the bead's metadata state is recognized by
-// the current reconciler. Unknown states (from a newer version) are skipped
-// to prevent panics during rollback.
-func isKnownState(session beads.Bead) bool {
-	return knownSessionStates[session.Metadata["state"]]
-}
-
-// isKnownStateInfo is the session.Info mirror of isKnownState. It keys off the
-// RAW metadata state (Info.MetadataState, untrimmed), exactly as the bead form does.
+// isKnownStateInfo returns true if the session's metadata state is recognized by
+// the current reconciler. Unknown states (from a newer version) are skipped to
+// prevent panics during rollback. It keys off the RAW metadata state
+// (Info.MetadataState, untrimmed).
 func isKnownStateInfo(i sessionpkg.Info) bool {
 	return knownSessionStates[i.MetadataState]
 }

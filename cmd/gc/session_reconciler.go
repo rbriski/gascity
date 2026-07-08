@@ -40,21 +40,9 @@ type wakeTarget struct {
 	alive   bool
 }
 
-func lifecycleTimerBlocker(metadata map[string]string, now time.Time) string {
-	switch {
-	case metadataTimeInFuture(metadata["held_until"], now):
-		return "user_hold"
-	case metadataTimeInFuture(metadata["quarantined_until"], now):
-		return "quarantine"
-	default:
-		return ""
-	}
-}
-
-// lifecycleTimerBlockerInfo is the session.Info sibling of lifecycleTimerBlocker:
-// it reports the active lifecycle timer blocker (user hold / quarantine) from the
-// typed Info.HeldUntil / Info.QuarantinedUntil mirrors, using the same
-// metadataTimeInFuture rule. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+// lifecycleTimerBlockerInfo reports the active lifecycle timer blocker (user hold /
+// quarantine) from the typed Info.HeldUntil / Info.QuarantinedUntil mirrors, using
+// the metadataTimeInFuture rule.
 func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	switch {
 	case metadataTimeInFuture(info.HeldUntil, now):
@@ -66,15 +54,9 @@ func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	}
 }
 
-func isDrainAckStopPending(session beads.Bead) bool {
-	return strings.TrimSpace(session.Metadata["state"]) == string(sessionpkg.StateDraining) &&
-		strings.TrimSpace(session.Metadata["state_reason"]) == sessionpkg.DrainAckStopPendingReason
-}
-
-// isDrainAckStopPendingInfo is the session.Info sibling of isDrainAckStopPending:
-// it reports whether a session is parked in the drain-ack stop-pending state from
-// the typed Info.MetadataState (raw "state") / Info.StateReason mirrors, with the
-// same TrimSpace compares. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+// isDrainAckStopPendingInfo reports whether a session is parked in the drain-ack
+// stop-pending state from the typed Info.MetadataState (raw "state") /
+// Info.StateReason mirrors, with TrimSpace compares.
 func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 	return strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateDraining) &&
 		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
@@ -146,25 +128,9 @@ func assignedWorkDrainCancelReasonInfo(info sessionpkg.Info, sp runtime.Provider
 	return "orphaned"
 }
 
-func resetPendingCommittedAt(session beads.Bead) (string, time.Time, bool) {
-	if strings.TrimSpace(session.Metadata["continuation_reset_pending"]) != "true" {
-		return "", time.Time{}, false
-	}
-	raw := strings.TrimSpace(session.Metadata[sessionpkg.ResetCommittedAtKey])
-	if raw == "" {
-		return "", time.Time{}, false
-	}
-	committedAt, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return "", time.Time{}, false
-	}
-	return raw, committedAt, true
-}
-
-// resetPendingCommittedAtInfo is the session.Info mirror of
-// resetPendingCommittedAt: it reads the raw continuation_reset_pending and
+// resetPendingCommittedAtInfo reads the raw continuation_reset_pending and
 // reset_committed_at markers (Info.ContinuationResetPending / Info.ResetCommittedAt)
-// with the same trim + RFC3339 parse rules.
+// with trim + RFC3339 parse rules.
 func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool) {
 	if strings.TrimSpace(info.ContinuationResetPending) != "true" {
 		return "", time.Time{}, false
@@ -477,6 +443,13 @@ func finalizeDrainAckStoppedSession(
 			// (session.Metadata = latest.Metadata) is gone with the lockstep (W5) —
 			// no later this-tick reader consumes the raw bead metadata here (the
 			// session `continue`s and the post-loop scans read only orderedBeads[i].ID).
+			// This is behaviorally equivalent to the old raw store.Get + reproject on
+			// well-formed session beads, with two intentional front-door deltas: Get
+			// applies the IsSessionBeadOrRepairable class gate (a corrupt non-session
+			// bead admitted only by a stale session label now errs → falls through to
+			// the assigned-work close gate instead of witnessing) and projects the
+			// fully-latest bead fields rather than *session's carried-forward ones —
+			// both confined to corrupt-class / concurrent-mutation edges.
 			session.Status = "closed"
 			if dops != nil {
 				_ = dops.clearDrain(name)
@@ -799,6 +772,9 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	return false
 }
 
+// WI-6: raw form retained — the reconciler forward pass and lifecycle-parallel
+// still call it on raw beads; the pendingCreateStartInFlightInfo twin is
+// oracle-pinned and already used where the caller holds an Info.
 func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" &&
 		sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) != sessionpkg.StateCreating {

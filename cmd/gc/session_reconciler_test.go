@@ -5379,7 +5379,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 	if err != nil {
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
-	if !isDrainAckStopPending(got) {
+	if !isDrainAckStopPendingInfo(sessionpkg.InfoFromPersistedBead(got)) {
 		t.Fatalf("session metadata = %+v, want drain-ack stop-pending", got.Metadata)
 	}
 }
@@ -7935,7 +7935,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckAttachmentErrorDefersStop(t *t
 	if err != nil {
 		t.Fatalf("Get after reconcile: %v", err)
 	}
-	if isDrainAckStopPending(after) {
+	if isDrainAckStopPendingInfo(sessionpkg.InfoFromPersistedBead(after)) {
 		t.Fatalf("attachment observation error should not mark drain-ack stop pending; metadata=%v", after.Metadata)
 	}
 	if !env.sp.IsRunning("worker") {

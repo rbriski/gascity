@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/graphstore/canon"
+	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
 // lumenState is the reducer v2 carried-forward state (blueprint §2.1): the run
@@ -39,6 +40,12 @@ type nodeState struct {
 	Outcome          string   `json:"outcome,omitempty"`
 	Output           string   `json:"output,omitempty"`
 	InFrontier       bool     `json:"in_frontier,omitempty"`
+	// DispatchMode is the Tier-B claimability marker (DispatchModePool for a
+	// worker-claimable node). Assignee is the worker that claimed it, folded from
+	// a Tier-B owned.admitted (P4.5). Both omitempty, so a non-Tier-B node
+	// serializes exactly as it did pre-P4.5.
+	DispatchMode string `json:"dispatch_mode,omitempty"`
+	Assignee     string `json:"assignee,omitempty"`
 }
 
 // clone deep-copies the state so Apply never mutates its input (R-PURE).
@@ -242,6 +249,67 @@ func statusForOutcome(outcome string) string {
 		return "skipped"
 	default:
 		return "done"
+	}
+}
+
+// nodeProjectedStatus is the Tier-A `nodes.status` a fold projects for n. It is
+// shared by the incremental appliers and ProjectDelta so an incremental fold and
+// a drop+refold project byte-identical rows (DET-T-17). A settled node takes its
+// outcome status; an unsettled node a worker has claimed (Tier-B) reads
+// StatusClaimed (in_progress); everything else is open.
+func nodeProjectedStatus(n *nodeState) string {
+	switch {
+	case n.Settled:
+		return statusForOutcome(n.Outcome)
+	case n.Assignee != "":
+		return StatusClaimed
+	default:
+		return "open"
+	}
+}
+
+// nodeProjectedMeta is the Tier-A `node_metadata` a fold projects for the
+// activation act in state n, shared by the incremental appliers and ProjectDelta.
+// A settled node carries {outcome, output}; an unsettled node carries
+// {kind, activation}. Either way a Tier-B claimable node keeps its dispatch_mode
+// marker, so a SETTLED pool bead retains its provenance and readTierBNode still
+// recognizes it as pool-mode — that is what lets a byte-identical re-settle
+// dedupe to idempotent success rather than tripping the not-claimable guard
+// (MED-1). An empty value clears its key at the applier, matching the incremental
+// fold.
+func nodeProjectedMeta(act string, n *nodeState) map[string]string {
+	var meta map[string]string
+	if n.Settled {
+		meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
+	} else {
+		meta = map[string]string{"kind": n.Kind, "activation": act}
+	}
+	if n.DispatchMode != "" {
+		meta[DispatchModeMetaKey] = n.DispatchMode
+	}
+	return meta
+}
+
+// nodeRowFor builds the Tier-A node upsert for the activation act in state s,
+// the single source of truth for a step node's projected row. The incremental
+// appliers (activated / claimed / settled) and ProjectDelta all route through it,
+// so the incremental fold and a drop+refold are byte-identical (DET-T-17).
+func nodeRowFor(s *lumenState, act string, n *nodeState, streamID string) fold.NodeRow {
+	parentID := s.RootID
+	if n.ParentActivation != "" {
+		parentID = activationNodeID(n.ParentActivation)
+	}
+	return fold.NodeRow{
+		ID:          n.NodeID,
+		Title:       n.NodeID,
+		Status:      nodeProjectedStatus(n),
+		BeadType:    "step",
+		ParentID:    parentID,
+		Assignee:    n.Assignee,
+		CreatedAt:   s.CreatedAt,
+		StorageTier: "history",
+		StreamID:    streamID,
+		Metadata:    nodeProjectedMeta(act, n),
 	}
 }
 

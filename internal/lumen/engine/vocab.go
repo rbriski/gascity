@@ -142,6 +142,28 @@ const (
 	DecisionFoldCkpt = "fold_ckpt"
 )
 
+// Tier-B (P4.5) claim-as-append vocabulary. A pool-mode node materializes as a
+// worker-claimable Tier-B work bead; a claim is a CAS EventOwnedAdmitted with
+// kind=OwnedKindTierB (write-once per handle), a close is an EventOwnedSettled.
+// The projection (assignee/status) is a pure fold of those events — never a raw
+// column write (B1/08, blueprint §6). ZERO hardcoded roles: worker-class is
+// keyed by DispatchModePool, not a role name.
+const (
+	// DispatchModePool is the node.activated dispatch_mode marking a node
+	// worker-claimable (vs the default "" engine-driven path).
+	DispatchModePool = "pool"
+	// OwnedKindTierB is the owned.admitted/owned.settled kind for a claimed
+	// Tier-B work handle, distinguishing it from the deferred async/detached-run
+	// handle kinds that share the type.
+	OwnedKindTierB = "tier_b"
+	// DispatchModeMetaKey is the projected node-metadata key carrying a claimable
+	// node's dispatch mode, so a serve/claim surface can select Tier-B work.
+	DispatchModeMetaKey = "dispatch_mode"
+	// StatusClaimed is the projected status of a claimed-but-unsettled Tier-B
+	// work bead — bead-compatible with the worker view (in_progress + assignee).
+	StatusClaimed = "in_progress"
+)
+
 const (
 	// reducerVersion is bumped on any semantic change to the fold or upcasters.
 	// v2 replaces the P1 minimal fold with the DAG fold (blueprint §2).
@@ -152,6 +174,14 @@ const (
 	// journal without input_hash folds identically (the omitempty field decodes to
 	// "", the pre-P4.3 value). A bump would only strand snapshots that do not exist,
 	// so it is unnecessary.
+	//
+	// P4.5 also stays at v2: the Tier-B claim/settle arms (owned.admitted/
+	// owned.settled with kind=tier_b) only fold event patterns that NO pre-P4.5
+	// stream or snapshot contains (owned.* was inert no-op bookkeeping; nothing
+	// emitted it), and the new nodeState/payload fields are omitempty, so every
+	// existing journal and snapshot folds and re-marshals byte-identically. The
+	// arms are additive live behavior over never-before-seen events, not a change
+	// to how any persisted state folds.
 	reducerVersion = 2
 	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped with the
 	// v2 state shape; no v1 snapshot ever persisted (blueprint §2), so there is
@@ -177,6 +207,13 @@ type runStartedPayload struct {
 // resolved blocking dependency edges (a failed one skip-cascades this node);
 // Members carries drain dependencies (a scatter aggregate / gather waits for
 // them to settle with any outcome). Together they are THE DAG, in the journal.
+//
+// DispatchMode is the P4.5 Tier-B knob (default "" = engine-driven; "pool" =
+// worker-claimable). It is kind/label-keyed, never a role name: a pool node
+// materializes as a claimable Tier-B work bead whose claim/settle are journal
+// appends (tier_b_claim.go), and the fold projects it with a dispatch_mode
+// marker so a serve/claim surface can select it. It is additive and omitempty,
+// so a stream that never set it folds byte-identically to the pre-P4.5 reducer.
 type nodeActivatedPayload struct {
 	NodeID           string   `json:"node_id"`
 	Activation       string   `json:"activation"`
@@ -185,6 +222,7 @@ type nodeActivatedPayload struct {
 	After            []string `json:"after,omitempty"`
 	Members          []string `json:"members,omitempty"`
 	Kind             string   `json:"kind"`
+	DispatchMode     string   `json:"dispatch_mode,omitempty"`
 }
 
 // nodeDecisionPayload is the body of EventNodeDecision.
@@ -289,17 +327,29 @@ type cancelSweptPayload struct {
 	SessionsStopped int    `json:"sessions_stopped"`
 }
 
-// ownedAdmittedPayload is the body of EventOwnedAdmitted.
+// ownedAdmittedPayload is the body of EventOwnedAdmitted. For P4.5 Tier-B it is
+// the CAS `claimed` fact: kind=OwnedKindTierB and Assignee names the worker that
+// claimed the handle (the activation of a pool-mode node). Assignee is additive
+// and omitempty, so the async/detached-run uses of this type (kind=async|
+// detached_run, deferred) fold byte-identically without it.
 type ownedAdmittedPayload struct {
 	Handle     string `json:"handle"`
 	Activation string `json:"activation"`
 	Kind       string `json:"kind"`
+	Assignee   string `json:"assignee,omitempty"`
 }
 
-// ownedSettledPayload is the body of EventOwnedSettled.
+// ownedSettledPayload is the body of EventOwnedSettled. For P4.5 Tier-B it is
+// the `settled` fact translated from the worker's close: Kind=OwnedKindTierB
+// marks it a Tier-B settle (the discriminant, symmetric with ownedAdmittedPayload
+// so an async/detached settle can never fold as one — MED-3), Outcome carries the
+// mapped gc.outcome and Output the captured result. Output is additive and
+// omitempty for the deferred async/detached-run uses.
 type ownedSettledPayload struct {
 	Handle  string `json:"handle"`
+	Kind    string `json:"kind"`
 	Outcome string `json:"outcome"`
+	Output  string `json:"output,omitempty"`
 }
 
 // snapshotAnchoredPayload is the body of EventSnapshotAnchored.

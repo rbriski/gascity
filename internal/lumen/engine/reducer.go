@@ -69,6 +69,15 @@ func (lumenReducer) Apply(s fold.State, e fold.Event) (fold.State, fold.Delta, e
 	case EventRunClosed:
 		return applyRunClosed(next, e)
 
+	// Tier-B claim-as-append (P4.5): a claim is a CAS owned.admitted, a close an
+	// owned.settled — both with kind=tier_b. The projection (assignee/status) is a
+	// pure fold of these events. A non-Tier-B owned handle (async / detached_run)
+	// stays deferred no-op bookkeeping inside these arms.
+	case EventOwnedAdmitted:
+		return applyOwnedAdmitted(next, e)
+	case EventOwnedSettled:
+		return applyOwnedSettled(next, e)
+
 	// Bookkeeping and not-yet-emitting arms: total transitions with no Tier-A
 	// delta. They guard the run has started (corruption detection) and fold to a
 	// no-op projection, so the fold is total (R-TOTAL) over the frozen vocabulary
@@ -77,8 +86,7 @@ func (lumenReducer) Apply(s fold.State, e fold.Event) (fold.State, fold.Delta, e
 	case EventNodeDecision, EventEffectScheduled, EventEffectSettled,
 		EventAttemptMinted, EventChannelOpened, EventChannelEmit,
 		EventChannelCursorPlanted, EventChannelCursorAdvanced, EventChannelSealed,
-		EventCancelRequested, EventCancelSwept, EventOwnedAdmitted,
-		EventOwnedSettled, EventSnapshotAnchored:
+		EventCancelRequested, EventCancelSwept, EventSnapshotAnchored:
 		if next.RootID == "" {
 			return nil, fold.Delta{}, fmt.Errorf("lumen: %s at seq %d before run.started", e.Type, e.Seq)
 		}
@@ -144,25 +152,12 @@ func applyNodeActivated(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 		MemberIndex:      p.MemberIndex,
 		After:            append([]string(nil), p.After...),
 		Members:          append([]string(nil), p.Members...),
+		DispatchMode:     p.DispatchMode,
 	}
 	next.Nodes[p.Activation] = n
 
-	parentID := next.RootID
-	if p.ParentActivation != "" {
-		parentID = activationNodeID(p.ParentActivation)
-	}
 	delta := fold.Delta{
-		NodeUpserts: []fold.NodeRow{{
-			ID:          p.NodeID,
-			Title:       p.NodeID,
-			Status:      "open",
-			BeadType:    "step",
-			ParentID:    parentID,
-			CreatedAt:   next.CreatedAt,
-			StorageTier: "history",
-			StreamID:    e.StreamID,
-			Metadata:    map[string]string{"kind": p.Kind, "activation": p.Activation},
-		}},
+		NodeUpserts: []fold.NodeRow{nodeRowFor(next, p.Activation, n, e.StreamID)},
 	}
 	// Edges: one per dependency, keyed on bare node ids. In topo order the
 	// dependency's node row already exists, so the edge FK resolves. Both blocking
@@ -216,22 +211,8 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 	n.Output = p.Output
 	n.InFrontier = false
 
-	parentID := next.RootID
-	if n.ParentActivation != "" {
-		parentID = activationNodeID(n.ParentActivation)
-	}
 	delta := fold.Delta{
-		NodeUpserts: []fold.NodeRow{{
-			ID:          n.NodeID,
-			Title:       n.NodeID,
-			Status:      statusForOutcome(p.Outcome),
-			BeadType:    "step",
-			ParentID:    parentID,
-			CreatedAt:   next.CreatedAt,
-			StorageTier: "history",
-			StreamID:    e.StreamID,
-			Metadata:    map[string]string{"outcome": p.Outcome, "output": p.Output},
-		}},
+		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Activation, n, e.StreamID)},
 		FrontierDelete: []string{p.Activation},
 	}
 	// Readiness propagation: a dependent that just became ready enters the
@@ -244,6 +225,112 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 	// it is currently dead — it goes live when a claim/serve surface reads the
 	// frontier (P4.5).
 	for _, depKey := range next.dependentsOf(p.Activation) {
+		d := next.Nodes[depKey]
+		if d.InFrontier || d.Settled {
+			continue
+		}
+		if next.ready(d) {
+			d.InFrontier = true
+			delta.FrontierInsert = append(delta.FrontierInsert, frontierRowFor(next, depKey))
+		}
+	}
+	next.Outcome = next.runOutcome()
+	return next, delta, nil
+}
+
+// applyOwnedAdmitted folds a Tier-B claim (P4.5): a worker admitted an owned
+// work handle (kind=tier_b) — the claim-as-append the JournalStore's beads.Store
+// claim write translates into. The projection sets the node's assignee and moves
+// it to StatusClaimed (in_progress) and out of the frontier — a PURE FOLD of the
+// event, never a raw column write. A non-Tier-B handle (async / detached_run)
+// remains deferred no-op bookkeeping. Loud-CAS one-winner selection lives in the
+// append (tier_b_claim.go): the reducer only reflects the committed fact.
+//
+// The fold is TOTAL (R-TOTAL): every legal appended event folds to a DEFINED
+// state, so it can NEVER return an error that breaks RebuildTierA/Resume. A claim
+// that cannot take effect — an unactivated / non-pool / already-settled handle, or
+// an empty assignee — folds to a no-op ("late claim loses"): the prior fact stands
+// and the ineffective claim leaves the projection unchanged. Only genuinely
+// structural corruption (an event before run.started, or an unparseable payload)
+// is a typed error, consistent with the rest of the reducer.
+func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta, error) {
+	if next.RootID == "" {
+		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.admitted at seq %d before run.started", e.Seq)
+	}
+	var p ownedAdmittedPayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.admitted payload at seq %d: %w", e.Seq, err)
+	}
+	if p.Kind != OwnedKindTierB {
+		// A non-Tier-B owned handle (async / detached_run) is deferred no-op
+		// bookkeeping. kind is the Tier-B discriminant, symmetric with the settle
+		// arm (MED-3), so an async admit whose handle collides with a pool
+		// activation can never fold as a claim.
+		return next, fold.Delta{}, nil
+	}
+	if p.Handle == "" || p.Assignee == "" {
+		// A handle-less or assignee-less claim holds the bead for nobody: it cannot
+		// take effect, so it folds to a no-op — the node stays claimable, never
+		// orphaned (LOW-2).
+		return next, fold.Delta{}, nil
+	}
+	n := next.Nodes[p.Handle]
+	if n == nil || n.DispatchMode != DispatchModePool || n.Settled {
+		// Late claim loses (HIGH-1 totality): an unactivated / non-pool / terminal
+		// handle cannot be claimed. The prior fact (an unclaimed settle, an
+		// engine-driven node) stands and the claim is recorded as ineffective — a
+		// DEFINED no-op, never an error that would poison the stream forever. The
+		// losing worker still learns it lost: the API-level guard/CAS in
+		// ClaimTierBWork rejects it loudly.
+		return next, fold.Delta{}, nil
+	}
+	n.Assignee = p.Assignee
+	n.InFrontier = false
+	return next, fold.Delta{
+		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
+		FrontierDelete: []string{p.Handle},
+	}, nil
+}
+
+// applyOwnedSettled folds a Tier-B close (P4.5): the worker settled a claimed
+// work handle. It mirrors applyOutcomeSettled — the node settles to its outcome
+// status (assignee retained for provenance), leaves the frontier, and propagates
+// readiness so the settle drives the rest of the run's DAG. A handle that is not
+// a claimable Tier-B node (a deferred async / detached_run handle) is no-op
+// bookkeeping.
+//
+// The fold is TOTAL (R-TOTAL), symmetric with applyOwnedAdmitted: kind is the
+// Tier-B discriminant (an async/detached settle whose handle collides with a pool
+// activation folds as deferred bookkeeping, never a Tier-B settle; MED-3), and a
+// settle that cannot take effect — an unactivated / non-pool / already-settled
+// handle, or a missing outcome — folds to a DEFINED idempotent no-op. The first
+// settle stands; a divergent re-settle is rejected loudly at the append (idem
+// token), and reaching the fold with a redundant settle (a re-sliced or crafted
+// stream) must never error and poison RebuildTierA/Resume.
+func applyOwnedSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta, error) {
+	if next.RootID == "" {
+		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.settled at seq %d before run.started", e.Seq)
+	}
+	var p ownedSettledPayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.settled payload at seq %d: %w", e.Seq, err)
+	}
+	if p.Kind != OwnedKindTierB {
+		return next, fold.Delta{}, nil
+	}
+	n := next.Nodes[p.Handle]
+	if n == nil || n.DispatchMode != DispatchModePool || n.Settled || p.Outcome == "" {
+		return next, fold.Delta{}, nil
+	}
+	n.Settled = true
+	n.Outcome = p.Outcome
+	n.Output = p.Output
+	n.InFrontier = false
+	delta := fold.Delta{
+		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
+		FrontierDelete: []string{p.Handle},
+	}
+	for _, depKey := range next.dependentsOf(p.Handle) {
 		d := next.Nodes[depKey]
 		if d.InFrontier || d.Settled {
 			continue
@@ -320,33 +407,10 @@ func (s *lumenState) ProjectDelta(streamID string) fold.Delta {
 
 	for _, act := range s.activationKeys() {
 		n := s.Nodes[act]
-		parentID := s.RootID
-		if n.ParentActivation != "" {
-			parentID = activationNodeID(n.ParentActivation)
-		}
-		// A settled node carries its outcome/output metadata (the applyOutcomeSettled
-		// upsert replaces the activated {kind, activation} set); an activated-only
-		// node carries {kind, activation}. Empty metadata values clear their key at
-		// the applier, matching the incremental fold exactly.
-		status := "open"
-		var meta map[string]string
-		if n.Settled {
-			status = statusForOutcome(n.Outcome)
-			meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
-		} else {
-			meta = map[string]string{"kind": n.Kind, "activation": act}
-		}
-		delta.NodeUpserts = append(delta.NodeUpserts, fold.NodeRow{
-			ID:          n.NodeID,
-			Title:       n.NodeID,
-			Status:      status,
-			BeadType:    "step",
-			ParentID:    parentID,
-			CreatedAt:   s.CreatedAt,
-			StorageTier: "history",
-			StreamID:    streamID,
-			Metadata:    meta,
-		})
+		// nodeRowFor is the single source of truth for a step node's projected row
+		// (status/assignee/metadata across activated → claimed → settled), so this
+		// full-state projection matches the incremental fold byte-for-byte (H1).
+		delta.NodeUpserts = append(delta.NodeUpserts, nodeRowFor(s, act, n, streamID))
 		for _, dep := range n.After {
 			delta.EdgeUpserts = append(delta.EdgeUpserts, fold.EdgeRow{
 				FromID: activationNodeID(dep), ToID: n.NodeID, DepType: "after",

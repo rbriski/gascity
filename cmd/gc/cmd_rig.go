@@ -530,6 +530,15 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
+// rigListHQRunning reports whether the city's controller is running, for the
+// HQ row of the API-render rig list. Indirected through a var so tests pin both
+// outcomes without a live controller. controllerStatusForCity (not bare
+// controllerAlive) is supervisor-aware: on the supervisor sub-lane
+// controllerAlive==0 by construction while the city IS running.
+var rigListHQRunning = func(cityPath string) bool {
+	return controllerStatusForCity(cityPath).Running
+}
+
 // routeRigList dispatches the `rig list` read to the supervisor API when
 // available, falling back to doRigList when the controller is down, the
 // escape hatch is set, or the API returns a fallbackable error. Emits
@@ -573,6 +582,16 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
 	}
 
+	// HQ running is derived from controllerStatusForCity (supervisor-aware),
+	// not a hardcoded true — it flips to false only if the controller actually
+	// died between the ListRigs fetch and this render. Computed for --json only:
+	// renderRigListText ignores Running and the probe costs a socket/supervisor
+	// dial (mirrors doRigList's guard). No wire field — rig list is not
+	// remote-wired, and "the server handling the request IS the controller".
+	hqRunning := true
+	if jsonOutput {
+		hqRunning = rigListHQRunning(cityPath)
+	}
 	cacheAgeS := cr.AgeSeconds
 	result := RigListJSON{
 		SchemaVersion: "1",
@@ -584,7 +603,7 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Path:    cityPath,
 			Prefix:  hqPrefix,
 			HQ:      true,
-			Running: true,
+			Running: hqRunning,
 			Beads:   rigBeadsStatus(fs, cityPath),
 		}},
 	}

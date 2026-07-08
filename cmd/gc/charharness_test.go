@@ -124,9 +124,22 @@ func countingHandler(counter *atomic.Int64, next http.Handler) http.Handler {
 	})
 }
 
+// clearBuiltinImportWarningCache resets the process-global sync.Map that dedups
+// the "missing required builtin pack" warning to once per cityPath. Each harness
+// run models a separate CLI process (a fresh cache), so clearing it before every
+// invocation keeps that warning from being emitted only by the first lane —
+// which would otherwise make A==B spuriously fail for config-reading commands.
+func clearBuiltinImportWarningCache() {
+	builtinImportWarningCache.Range(func(k, _ any) bool {
+		builtinImportWarningCache.Delete(k)
+		return true
+	})
+}
+
 // run drives one command invocation and returns its exit code and the number of
 // API requests it made (0 for the serverless lane).
 func (h *charHarness) run(lane charLane, cmd charCommand, jsonOut bool, stdout, stderr *bytes.Buffer) (exit int, reqDelta int64) {
+	clearBuiltinImportWarningCache()
 	var before int64
 	if lane.reqs != nil {
 		before = lane.reqs.Load()
@@ -179,14 +192,20 @@ func (h *charHarness) captureLane(t *testing.T, lane charLane, cmd charCommand) 
 		sort.Strings(eventLines)
 	}
 
+	// Redact the throwaway city path (a t.TempDir) to a stable token BEFORE
+	// canonicalizing — DefaultRules deliberately does not touch temp paths, so a
+	// path-emitting command (rig list, status) would otherwise flake per run.
 	c := chartest.NewCanonicalizer(chartest.DefaultRules()...)
+	redactCanon := func(b []byte) []byte {
+		return c.Canonicalize(bytes.ReplaceAll(b, []byte(h.cityPath), []byte("<CITY>")))
+	}
 	return chartest.Capture{
 		Exit:          humanExit,
-		Stdout:        c.Canonicalize(ho.Bytes()),
-		Stderr:        c.Canonicalize(he.Bytes()),
+		Stdout:        redactCanon(ho.Bytes()),
+		Stderr:        redactCanon(he.Bytes()),
 		JSONExit:      jsonExit,
-		JSON:          c.Canonicalize(jo.Bytes()),
-		JSONStderr:    c.Canonicalize(je.Bytes()),
+		JSON:          redactCanon(jo.Bytes()),
+		JSONStderr:    redactCanon(je.Bytes()),
 		StoreReadback: canonLines(c, storeLines),
 		Events:        canonLines(c, eventLines),
 		Counts: []chartest.Count{

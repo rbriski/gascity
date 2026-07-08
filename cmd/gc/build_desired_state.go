@@ -2659,6 +2659,66 @@ func realizePoolDesiredSessions(
 	}
 }
 
+// computePoolTriggerBindingPatch is the pure key-diff at the heart of
+// bindPoolSessionTriggerBead: given the session's current typed Info, the
+// dispatch request, and the already-resolved trigger work dir, it returns the
+// session-metadata patch that reconciles the trigger/pack/workspace/work-dir
+// cluster to the request. Byte-identical to the raw inline diff the function
+// used to compute against sessionBead.Metadata; a dedicated oracle
+// (TestComputePoolTriggerBindingPatchMatchesRaw) pins it across the clear,
+// reassign, store-ref, pack, workspace, and workdir request shapes. An empty
+// patch means no change.
+func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, workDir string) session.MetadataPatch {
+	workBeadID := strings.TrimSpace(request.WorkBeadID)
+	metadata := session.MetadataPatch{}
+	if workBeadID == "" {
+		// Clear: a re-pointed session drops its prior trigger/store-ref and, so it
+		// does not inherit the prior fork's "warm" provenance, its parent sid.
+		if strings.TrimSpace(info.TriggerBeadID) != "" {
+			metadata[beadmeta.TriggerBeadIDMetadataKey] = ""
+		}
+		if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+			metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+		}
+		if strings.TrimSpace(info.BrainParentSID) != "" {
+			metadata[beadmeta.BrainParentSIDMetadataKey] = ""
+		}
+		return metadata
+	}
+	oldWorkBeadID := strings.TrimSpace(info.TriggerBeadID)
+	if oldWorkBeadID != workBeadID {
+		metadata[beadmeta.TriggerBeadIDMetadataKey] = workBeadID
+		// On a genuine reassign to a different work bead, reconcile the fork parent
+		// to the new work's value (set when the new bead carries one, clear
+		// otherwise) so a re-pointed session never inherits the old fork.
+		newParentSID := strings.TrimSpace(request.BrainParentSID)
+		if strings.TrimSpace(info.BrainParentSID) != newParentSID {
+			metadata[beadmeta.BrainParentSIDMetadataKey] = newParentSID
+		}
+	}
+	workStoreRef := strings.TrimSpace(request.WorkStoreRef)
+	if workStoreRef != "" && strings.TrimSpace(info.TriggerBeadStoreRef) != workStoreRef {
+		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = workStoreRef
+	} else if workStoreRef == "" && oldWorkBeadID != workBeadID && strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+	}
+	if pack := strings.TrimSpace(request.WorkPack); strings.TrimSpace(info.Pack) != pack {
+		metadata[beadmeta.PackMetadataKey] = pack
+	}
+	if workspace := packWorkspaceSlug(request); strings.TrimSpace(info.PackWorkspace) != workspace {
+		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
+	}
+	if workDir != "" {
+		if strings.TrimSpace(info.WorkDirCanonical) != workDir {
+			metadata[beadmeta.WorkDirMetadataKey] = workDir
+		}
+		if strings.TrimSpace(info.WorkDir) != workDir {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		}
+	}
+	return metadata
+}
+
 func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, sessionBead beads.Bead, request SessionRequest) (beads.Bead, error) {
 	workBeadID := strings.TrimSpace(request.WorkBeadID)
 	if sessionBead.ID == "" {
@@ -3895,6 +3955,27 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 	return false
 }
 
+// sessionBeadHasAssignedWorkInfo is the per-parameter split of
+// sessionBeadHasAssignedWork: the SESSION side reads typed Info fields (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays
+// raw (ClassWork — Bead is the domain object). Byte-identical to the raw form;
+// TestSessionClassifierInfoEquivalence-style oracle pins it.
+func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
+			return true
+		}
+		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
+			return true
+		}
+	}
+	return false
+}
+
 // sessionAssigneeMatch is an entry in the assignee-identity index: the session
 // a work bead's Assignee resolves to, or ambiguous=true when more than one open
 // session claims the same identity (a transient duplicate-alias state). An
@@ -3942,6 +4023,19 @@ func buildSessionAssigneeIndex(sessionBeads *sessionBeadSnapshot) map[string]ses
 func sessionBeadIdentifier(sb beads.Bead) string {
 	for _, key := range []string{"session_name", "alias", "configured_named_identity"} {
 		if v := strings.TrimSpace(sb.Metadata[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// sessionBeadIdentifierInfo is the session.Info form of sessionBeadIdentifier:
+// it reads the RAW session_name (Info.SessionNameMetadata, no sessionNameFor
+// fallback), then alias, then configured named identity — byte-identical to the
+// raw form (oracle-pinned).
+func sessionBeadIdentifierInfo(info session.Info) string {
+	for _, v := range []string{info.SessionNameMetadata, info.Alias, info.ConfiguredNamedIdentity} {
+		if v := strings.TrimSpace(v); v != "" {
 			return v
 		}
 	}

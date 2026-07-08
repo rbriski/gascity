@@ -172,6 +172,18 @@ type Info struct {
 	TriggerBeadStoreRef string // gc.trigger_bead_store_ref (raw)
 	BrainParentSID      string // gc.brain_parent_sid (raw)
 	Pack                string // gc.pack (raw); resolveTemplateForSessionBead threads it into GC_PACKER_PACK
+	// PackWorkspace is the RAW gc.pack_workspace metadata (beadmeta.PackWorkspaceMetadataKey),
+	// the pack workspace slug bindPoolSessionTriggerBead stamps alongside gc.pack.
+	// The pool-trigger binding diff compares it (trimmed) against the request's
+	// workspace slug, so the mirror keeps the raw value. Additive, internal-only
+	// (absent from the HTTP wire).
+	PackWorkspace string // gc.pack_workspace (raw)
+	// WorkDirCanonical is the RAW gc.work_dir metadata (beadmeta.WorkDirMetadataKey),
+	// the canonical work-dir key distinct from the legacy "work_dir" key that
+	// Info.WorkDir already mirrors. bindPoolSessionTriggerBead diffs BOTH keys
+	// independently, so the Info form needs a mirror for each; this one carries the
+	// canonical value verbatim. Additive, internal-only (absent from the HTTP wire).
+	WorkDirCanonical string // gc.work_dir (raw)
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//

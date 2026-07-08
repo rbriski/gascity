@@ -45,6 +45,27 @@ func sessionAgentConfig(cfg *config.City, session beads.Bead) *config.Agent {
 	return findAgentByTemplate(cfg, template)
 }
 
+// sessionAgentConfigInfo is the session.Info form of sessionAgentConfig: it
+// resolves the backing agent from the typed template/common_name Info fields
+// instead of cracking the raw bead, staying byte-identical to the raw form
+// (TestSessionClassifierInfoEquivalence pins it).
+func sessionAgentConfigInfo(cfg *config.City, info sessionpkg.Info) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	if template == "" {
+		template = strings.TrimSpace(info.CommonName)
+	}
+	if template == "" {
+		return nil
+	}
+	return findAgentByTemplate(cfg, template)
+}
+
 // openSessionReachableStoreRef returns the store-ref under which an open session
 // bead owns assigned work, for makeOpenSessionStoreRefIndex. A cross-store
 // eligible (city-scoped) session federates across every store (vp-kvp), so it is

@@ -282,6 +282,25 @@ Design invariants (new, enforced by the test plan):
   flag (avoids `config.Agent` sync surface and genschema churn). Stage flips
   are code changes reviewed as such.
 
+  **D7 amendment (Stage 3, Julian 2026-07-08 — Q2 resolved).** D7's "no config
+  flag" is scoped to two things: (a) `config.Agent` / genschema flags (the
+  `AgentPatch` / `AgentOverride` sync surface and generated-schema churn D7
+  exists to protect), and (b) stale-on-crash *liveness* status files (the
+  "query live state, no status files" rule). It is NOT a blanket ban on all
+  runtime-readable state. A **per-city durable fail-closed intent-metadata
+  kill-switch** — the double-write / shadow enable stored as bead-metadata on a
+  coordination-class store front door, read once per reconcile pass and latched
+  per tick, defaulting hard-OFF on any read error / absence / unparseable value
+  — is explicitly PERMITTED. It is declared *intent*, not liveness: it survives
+  a crash correctly (a status file goes stale; an intent record does not), it
+  adds no `config.Agent` field and no genschema churn, and it is the mechanism
+  that makes a per-city revert with a bounded SLO possible. The Stage-3 shadow
+  *observer* may additionally be gated by a fail-closed process env latch
+  (`GC_CONVERGE_SHADOW`), which is likewise neither a `config.Agent` field nor a
+  status file. Stage flips of the *derivation/executor* code remain code changes
+  reviewed as such; the flag governs only *activation*, not behavior selection
+  scattered through Go.
+
 ---
 
 ## 6. Migration plan — staged, each stage builds and lands independently

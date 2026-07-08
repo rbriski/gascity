@@ -580,103 +580,110 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
 	}
 
-	if jsonOutput {
-		cacheAgeS := cr.AgeSeconds
-		result := RigListJSON{
-			SchemaVersion: "1",
-			CityPath:      cityPath,
-			CityName:      cityName,
-			CacheAgeS:     &cacheAgeS,
-			Rigs: []RigListItem{{
-				Name:    cityName,
-				Path:    cityPath,
-				Prefix:  hqPrefix,
-				HQ:      true,
-				Running: true,
-				Beads:   rigBeadsStatus(fs, cityPath),
-			}},
-		}
-		for _, rig := range cr.Body {
-			path := rig.Path
-			prefix := rig.Prefix
-			defaultBranch := rig.DefaultBranch
-			defaultSlingTarget := ""
-			var defaultSlingTargets []string
-			if cfgRig, ok := rigsByName[rig.Name]; ok {
-				path = cfgRig.Path
-				prefix = cfgRig.EffectivePrefix()
-				defaultBranch = cfgRig.EffectiveDefaultBranch()
-				defaultSlingTarget = cfgRig.DefaultSlingTarget
-				defaultSlingTargets = cfgRig.DefaultSlingTargets
-			}
-			result.Rigs = append(result.Rigs, RigListItem{
-				Name:                rig.Name,
-				Path:                path,
-				Prefix:              prefix,
-				DefaultBranch:       defaultBranch,
-				Suspended:           rig.Suspended,
-				Running:             rig.RunningCount > 0,
-				DefaultSlingTarget:  defaultSlingTarget,
-				DefaultSlingTargets: defaultSlingTargets,
-				Beads:               rigBeadsStatus(fs, path),
-			})
-		}
-		result.Summary.Total = len(result.Rigs)
-		for _, rig := range result.Rigs {
-			if rig.Suspended {
-				result.Summary.Suspended++
-			}
-			if rig.Running {
-				result.Summary.Running++
-			}
-		}
-		if err := writeCLIJSONLine(stdout, result); err != nil {
-			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
+	cacheAgeS := cr.AgeSeconds
+	result := RigListJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      cityName,
+		CacheAgeS:     &cacheAgeS,
+		Rigs: []RigListItem{{
+			Name:    cityName,
+			Path:    cityPath,
+			Prefix:  hqPrefix,
+			HQ:      true,
+			Running: true,
+			Beads:   rigBeadsStatus(fs, cityPath),
+		}},
 	}
-
-	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
-	w("")
-	w(fmt.Sprintf("Rigs in %s:", cityPath))
-
-	hqBeads := rigBeadsStatus(fs, cityPath)
-	displayName := loadedCityName(cfg, cityPath)
-	w("")
-	w(fmt.Sprintf("  %s (HQ):", displayName))
-	w(fmt.Sprintf("    Prefix: %s", hqPrefix))
-	w(fmt.Sprintf("    Beads:  %s", hqBeads))
-
 	for _, rig := range cr.Body {
 		path := rig.Path
 		prefix := rig.Prefix
 		defaultBranch := rig.DefaultBranch
+		defaultSlingTarget := ""
+		var defaultSlingTargets []string
 		if cfgRig, ok := rigsByName[rig.Name]; ok {
 			path = cfgRig.Path
 			prefix = cfgRig.EffectivePrefix()
 			defaultBranch = cfgRig.EffectiveDefaultBranch()
+			defaultSlingTarget = cfgRig.DefaultSlingTarget
+			defaultSlingTargets = cfgRig.DefaultSlingTargets
 		}
-		beads := rigBeadsStatus(fs, path)
+		result.Rigs = append(result.Rigs, RigListItem{
+			Name:                rig.Name,
+			Path:                path,
+			Prefix:              prefix,
+			DefaultBranch:       defaultBranch,
+			Suspended:           rig.Suspended,
+			Running:             rig.RunningCount > 0,
+			DefaultSlingTarget:  defaultSlingTarget,
+			DefaultSlingTargets: defaultSlingTargets,
+			Beads:               rigBeadsStatus(fs, path),
+		})
+	}
+
+	if jsonOutput {
+		return renderRigListJSON(result, stdout, stderr)
+	}
+	renderRigListText(loadedCityName(cfg, cityPath), result, stdout)
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintln(stdout, "")                                                               //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+// renderRigListJSON finalizes the summary counts and writes result as one JSON
+// line. Shared by the API-render and serverless rig-list paths so their JSON is
+// single-sourced.
+func renderRigListJSON(result RigListJSON, stdout, stderr io.Writer) int {
+	result.Summary.Total = len(result.Rigs)
+	result.Summary.Suspended = 0
+	result.Summary.Running = 0
+	for _, rig := range result.Rigs {
+		if rig.Suspended {
+			result.Summary.Suspended++
+		}
+		if rig.Running {
+			result.Summary.Running++
+		}
+	}
+	if err := writeCLIJSONLine(stdout, result); err != nil {
+		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+// renderRigListText renders the human rig-list table from result. displayName is
+// the HQ header name (loadedCityName), which intentionally differs from the HQ
+// item's JSON Name (EffectiveCityName). Shared by both rig-list paths; the
+// API-render path appends its own cache-age banner after calling this.
+func renderRigListText(displayName string, result RigListJSON, stdout io.Writer) {
+	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
+	w("")
+	w(fmt.Sprintf("Rigs in %s:", result.CityPath))
+	if len(result.Rigs) == 0 {
+		return
+	}
+	hq := result.Rigs[0]
+	w("")
+	w(fmt.Sprintf("  %s (HQ):", displayName))
+	w(fmt.Sprintf("    Prefix: %s", hq.Prefix))
+	w(fmt.Sprintf("    Beads:  %s", hq.Beads))
+	for _, rig := range result.Rigs[1:] {
 		header := rig.Name
 		if rig.Suspended {
 			header += " (suspended)"
 		}
 		w("")
 		w(fmt.Sprintf("  %s:", header))
-		w(fmt.Sprintf("    Path:   %s", path))
-		w(fmt.Sprintf("    Prefix: %s", prefix))
-		if defaultBranch != "" {
-			w(fmt.Sprintf("    Default branch: %s", defaultBranch))
+		w(fmt.Sprintf("    Path:   %s", rig.Path))
+		w(fmt.Sprintf("    Prefix: %s", rig.Prefix))
+		if rig.DefaultBranch != "" {
+			w(fmt.Sprintf("    Default branch: %s", rig.DefaultBranch))
 		}
-		w(fmt.Sprintf("    Beads:  %s", beads))
+		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}
-
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		w("")
-		w(fmt.Sprintf("(cache age: %.0fs — reconciler may be lagging)", cr.AgeSeconds))
-	}
-	return 0
 }
 
 // cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
@@ -746,88 +753,54 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
 
+	result := RigListJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      cityName,
+	}
+	// Running-status detection (controllerAlive + the per-rig session provider)
+	// is computed for --json ONLY: the session provider forks tmux probes and
+	// scales O(rigs), and the human table does not display running status
+	// (renderRigListText ignores the Running field). Guarding it here preserves
+	// the historical text-path fast path (~7x faster than --json for many rigs).
+	hqRunning := false
 	if jsonOutput {
-		result := RigListJSON{
-			SchemaVersion: "1",
-			CityPath:      cityPath,
-			CityName:      cityName,
-		}
-		hqRunning := controllerAlive(cityPath) != 0
-		result.Rigs = append(result.Rigs, RigListItem{
-			Name:    cityName,
-			Path:    cityPath,
-			Prefix:  hqPrefix,
-			HQ:      true,
-			Running: hqRunning,
-			Beads:   rigBeadsStatus(fs, cityPath),
-		})
-		// Build the session provider once and share it across rigs:
-		// constructing it per rig reopened the session store and re-forked
-		// tmux probes, making --json scale O(rigs) in subprocesses (~7x
-		// slower than the text path, which skips running-status detection).
-		var sp runtime.Provider
-		if len(cfg.Rigs) > 0 {
-			sp = rigListSessionProvider()
-		}
-		for i := range cfg.Rigs {
-			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
-			result.Rigs = append(result.Rigs, RigListItem{
-				Name:                cfg.Rigs[i].Name,
-				Path:                cfg.Rigs[i].Path,
-				Prefix:              cfg.Rigs[i].EffectivePrefix(),
-				DefaultBranch:       cfg.Rigs[i].EffectiveDefaultBranch(),
-				Suspended:           suspNames[cfg.Rigs[i].Name],
-				Running:             running,
-				DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
-				DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
-				Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
-			})
-		}
-		result.Summary.Total = len(result.Rigs)
-		for _, rig := range result.Rigs {
-			if rig.Suspended {
-				result.Summary.Suspended++
-			}
-			if rig.Running {
-				result.Summary.Running++
-			}
-		}
-		if err := writeCLIJSONLine(stdout, result); err != nil {
-			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
+		hqRunning = controllerAlive(cityPath) != 0
 	}
-
-	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
-	w("")
-	w(fmt.Sprintf("Rigs in %s:", cityPath))
-
-	// HQ rig (the city itself).
-	hqBeads := rigBeadsStatus(fs, cityPath)
-	displayName := loadedCityName(cfg, cityPath)
-	w("")
-	w(fmt.Sprintf("  %s (HQ):", displayName))
-	w(fmt.Sprintf("    Prefix: %s", hqPrefix))
-	w(fmt.Sprintf("    Beads:  %s", hqBeads))
-
-	// Configured rigs.
+	result.Rigs = append(result.Rigs, RigListItem{
+		Name:    cityName,
+		Path:    cityPath,
+		Prefix:  hqPrefix,
+		HQ:      true,
+		Running: hqRunning,
+		Beads:   rigBeadsStatus(fs, cityPath),
+	})
+	var sp runtime.Provider
+	if jsonOutput && len(cfg.Rigs) > 0 {
+		sp = rigListSessionProvider()
+	}
 	for i := range cfg.Rigs {
-		prefix := cfg.Rigs[i].EffectivePrefix()
-		beads := rigBeadsStatus(fs, cfg.Rigs[i].Path)
-		header := cfg.Rigs[i].Name
-		if suspNames[cfg.Rigs[i].Name] {
-			header += " (suspended)"
+		running := false
+		if jsonOutput {
+			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
-		w("")
-		w(fmt.Sprintf("  %s:", header))
-		w(fmt.Sprintf("    Path:   %s", cfg.Rigs[i].Path))
-		w(fmt.Sprintf("    Prefix: %s", prefix))
-		if branch := cfg.Rigs[i].EffectiveDefaultBranch(); branch != "" {
-			w(fmt.Sprintf("    Default branch: %s", branch))
-		}
-		w(fmt.Sprintf("    Beads:  %s", beads))
+		result.Rigs = append(result.Rigs, RigListItem{
+			Name:                cfg.Rigs[i].Name,
+			Path:                cfg.Rigs[i].Path,
+			Prefix:              cfg.Rigs[i].EffectivePrefix(),
+			DefaultBranch:       cfg.Rigs[i].EffectiveDefaultBranch(),
+			Suspended:           suspNames[cfg.Rigs[i].Name],
+			Running:             running,
+			DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
+			DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
+			Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
+		})
 	}
+
+	if jsonOutput {
+		return renderRigListJSON(result, stdout, stderr)
+	}
+	renderRigListText(loadedCityName(cfg, cityPath), result, stdout)
 	return 0
 }
 

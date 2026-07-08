@@ -559,7 +559,15 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 // lives on the API response); configured rigs come from the API with an
 // _cache_age_s envelope field (JSON) or staleness banner (human).
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
-	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
+	// CLI-unification Move-1: mirror doRigList — suppress advisory config
+	// warnings (e.g. missing builtin-pack import) in --json mode so both the
+	// API-render and serverless paths keep --json stderr clean for scripting.
+	// Human mode still surfaces them. Characterized by TestRigList_CharacterizationGolden.
+	warningWriter := stderr
+	if jsonOutput {
+		warningWriter = io.Discard
+	}
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), warningWriter)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

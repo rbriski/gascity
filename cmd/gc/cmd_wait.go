@@ -311,23 +311,28 @@ var waitListAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // routeWaitList dispatches `gc wait list` through the supervisor API when a
-// controller is up; otherwise falls back to the local store iterator.
-// Exactly one route=... line per exit path (gated on GC_DEBUG).
-//
-// Wait beads are located via the generic beads endpoint using the
-// sessionpkg.WaitBeadLabel contract: GET /v0/city/{name}/beads?label=gc:wait.
-// The label constant is the shared invariant between CLI and server, so
-// callers reference it rather than inlining the string.
+// controller is up; otherwise falls back to the local store iterator. It is a
+// three-rung ladder: the typed /v0/waits endpoint (rung 1), the legacy
+// generic-beads leg when an old server lacks that route (rung 2), and the local
+// store leg for connection/cache errors (rung 3). Exactly one route=... line per
+// exit path (gated on GC_DEBUG).
 func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	const cmdName = "wait list"
 	if c != nil {
-		cr, err := c.ListBeads(api.ListBeadsOpts{
-			Label: sessionpkg.WaitBeadLabel,
-			Limit: 1000,
-		})
+		cr, err := c.ListWaits(stateFilter, sessionFilter)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
-			return renderWaitListFromAPI(cityPath, cr, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+		}
+		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
+		// serve via the generic gc:wait beads endpoint instead.
+		if api.IsRouteMissing(err) {
+			if lr, lerr := c.ListWaitsViaBeads(); lerr == nil {
+				logRoute(stderr, cmdName, "api-legacy", "route-missing")
+				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+			} else {
+				err = lerr
+			}
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -341,29 +346,19 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 	return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 }
 
-// renderWaitListFromAPI applies the same IsWaitBead + closed-excluded filter
-// as the fallback path. The beads endpoint filters by label, not by type, so
-// a stray non-wait bead tagged gc:wait would otherwise leak through. IsWaitBead
-// also covers the legacy "wait" type for back-compat with older stores.
-func renderWaitListFromAPI(cityPath string, cr api.CachedRead[[]beads.Bead], stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	items := make([]sessionpkg.WaitInfo, 0, len(cr.Body))
-	for _, item := range cr.Body {
-		if item.Status == "closed" {
-			continue
-		}
-		if !sessionpkg.IsWaitBead(item) {
-			continue
-		}
-		items = append(items, sessionpkg.WaitInfoFromBead(item))
-	}
+// renderWaitList applies the idempotent client-side stable ascending sort and
+// state/session filter over already-projected WaitInfo, so the typed rung, the
+// legacy rung, and the local fallback produce byte-identical output.
+func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds float64, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	items := append([]sessionpkg.WaitInfo(nil), waits...)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
 	filtered := filterWaitListItems(items, stateFilter, sessionFilter)
 	if jsonOutput {
 		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
 	}
 	writeWaitListTable(filtered, stdout)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if ageSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
 	}
 	return 0
 }
@@ -448,16 +443,35 @@ var waitInspectAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // routeWaitInspect dispatches `gc wait inspect <id>` through the supervisor
-// API and falls back to a direct store lookup otherwise. Keeps the
-// sessionpkg.IsWaitBead type guard on both paths so a non-wait bead ID does
-// not render as a wait.
+// API and falls back to a direct store lookup otherwise. Three-rung ladder like
+// routeWaitList; a not-a-wait answer (from either the typed not_a_wait 404 or a
+// legacy IsWaitBead rejection) is definitive and never triggers a fallback.
 func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	const cmdName = "wait inspect"
 	if c != nil {
-		cr, err := c.GetBead(waitID)
+		cr, err := c.GetWait(waitID)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
-			return renderWaitInspectFromAPI(cityPath, cr, waitID, jsonOutput, stdout, stderr)
+			return renderWaitInspect(cityPath, cr.Body, cr.AgeSeconds, jsonOutput, stdout, stderr)
+		}
+		var naw *api.NotAWaitError
+		if errors.As(err, &naw) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+			return 1
+		}
+		if api.IsRouteMissing(err) {
+			lr, lerr := c.GetWaitViaBead(waitID)
+			if lerr == nil {
+				logRoute(stderr, cmdName, "api-legacy", "route-missing")
+				return renderWaitInspect(cityPath, lr.Body, lr.AgeSeconds, jsonOutput, stdout, stderr)
+			}
+			if errors.As(lerr, &naw) {
+				logRoute(stderr, cmdName, "api-legacy", "error")
+				fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+				return 1
+			}
+			err = lerr
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -471,18 +485,13 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 	return doWaitInspectFallback(cityPath, waitID, jsonOutput, stdout, stderr)
 }
 
-func renderWaitInspectFromAPI(cityPath string, cr api.CachedRead[beads.Bead], waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	if !sessionpkg.IsWaitBead(cr.Body) {
-		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
-		return 1
-	}
-	wait := sessionpkg.WaitInfoFromBead(cr.Body)
+func renderWaitInspect(cityPath string, wait sessionpkg.WaitInfo, ageSeconds float64, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeWaitInspectJSON(stdout, stderr, cityPath, wait)
 	}
 	writeWaitDetail(wait, stdout)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if ageSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
 	}
 	return 0
 }
@@ -499,17 +508,16 @@ func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, std
 	}
 	// Route SESSION/wait access to the session coordination-class store; identity today.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	b, err := sessStore.Get(waitID)
+	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+	wait, err := sessFront.GetWait(waitID)
 	if err != nil {
+		if errors.Is(err, sessionpkg.ErrNotAWait) {
+			fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if !sessionpkg.IsWaitBead(b) {
-		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
-		return 1
-	}
-	wait := sessionpkg.WaitInfoFromBead(b)
 	if jsonOutput {
 		return writeWaitInspectJSON(stdout, stderr, cityPath, wait)
 	}

@@ -2646,81 +2646,147 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 }
 
 // ---------------------------------------------------------------------------
-// Six-row read-path routing matrix for `gc wait list` and `gc wait inspect`
-// (ADR 0001, ga-h6w, ga-2fr). Each row exercises one branch of routeWaitList
-// / routeWaitInspect. The matrix is enforced by scripts/check-routed-test-rows.sh:
+// Read-path routing matrix for `gc wait list` and `gc wait inspect`. Since
+// WI-4 the CLI is a three-rung ladder: the typed /v0/waits endpoint (rung 1),
+// the legacy gc:wait beads endpoint when an old server lacks that route
+// (rung 2), and the local store leg (rung 3). The six canonical rows below
+// (enforced by scripts/check-routed-test-rows.sh) cover rungs 1 and 3; the two
+// route-missing rows cover rung 2's old-server fallback.
 //
-//   api-happy-path       API returns 200 with items         route=api, exit 0
-//   api-cache-not-live   API returns 503 cache_not_live     fallback, exit 0
-//   api-500-fallback     API returns generic 500            fallback (conn-refused), exit 0
-//   api-404-error        API returns 404                    no fallback, exit 1
-//   controller-down      apiClient returns nil (no env)     fallback (controller-down), exit 0
-//   escape-hatch         GC_NO_API truthy                   fallback (escape-hatch), exit 0
-//
-// Wait beads are located via the existing beads endpoint using the
-// sessionpkg.WaitBeadLabel contract — no new server surface exists for waits.
+//   api-happy-path       typed /v0/waits 200            route=api, exit 0
+//   api-cache-not-live   typed 503 cache_not_live       fallback, exit 0
+//   api-500-fallback     typed generic 500              fallback (conn-refused)
+//   api-404-error        typed 404 problem+json         no fallback, exit 1
+//   controller-down      apiClient returns nil          fallback (controller-down)
+//   escape-hatch         GC_NO_API truthy               fallback (escape-hatch)
+//   route-missing-legacy typed plain 404 -> /beads 200  route=api-legacy, exit 0
+//   route-missing-local  typed plain 404 -> /beads 500  fallback (conn-refused)
 // ---------------------------------------------------------------------------
 
 type waitMatrixHandler func(t *testing.T) http.Handler
 
-// okWaitListHandler returns a 200 with one gc:wait-labeled gate bead, mirroring
-// what the supervisor would emit for GET /v0/city/{name}/beads?label=gc:wait.
+// okWaitListHandler serves the typed /v0/waits endpoint with one wait.
 func okWaitListHandler(_ *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/beads") {
+		if !strings.HasSuffix(r.URL.Path, "/waits") {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("X-GC-Cache-Age-S", "2")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"items": []map[string]any{
-				{
-					"id":         "ga-wait-1",
-					"title":      "wait:worker",
-					"issue_type": sessionpkg.WaitBeadType,
-					"status":     "open",
-					"labels":     []string{sessionpkg.WaitBeadLabel, "session:ga-sess-1"},
-					"metadata": map[string]string{
-						"session_id": "ga-sess-1",
-						"state":      waitStatePending,
-						"kind":       "deps",
-					},
-					"description": "wait note",
-				},
-			},
-			"total": 1,
+			"waits": []map[string]any{{
+				"id":         "ga-wait-1",
+				"session_id": "ga-sess-1",
+				"kind":       "deps",
+				"state":      waitStatePending,
+				"status":     "open",
+				"note":       "wait note",
+			}},
+			"capped": false,
 		})
 	})
 }
 
-// okWaitInspectHandler returns a 200 for a single wait bead, mirroring GET
-// /v0/city/{name}/bead/{id}.
+// okWaitInspectHandler serves the typed /v0/wait/{id} endpoint.
 func okWaitInspectHandler(_ *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.Path, "/bead/") {
+		if !strings.Contains(r.URL.Path, "/wait/") {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("X-GC-Cache-Age-S", "3")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":         "ga-wait-1",
-			"title":      "wait:worker",
-			"issue_type": sessionpkg.WaitBeadType,
-			"status":     "open",
-			"labels":     []string{sessionpkg.WaitBeadLabel, "session:ga-sess-1"},
-			"metadata": map[string]string{
-				"session_id":       "ga-sess-1",
-				"state":            waitStatePending,
-				"kind":             "deps",
-				"dep_ids":          "gc-1",
-				"dep_mode":         "all",
-				"registered_epoch": "1",
-				"delivery_attempt": "1",
-			},
-			"description": "wait note",
+			"id":               "ga-wait-1",
+			"session_id":       "ga-sess-1",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"status":           "open",
+			"dep_ids":          []string{"gc-1"},
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+			"note":             "wait note",
 		})
+	})
+}
+
+// legacyWaitBeadItem is the generic-beads projection of the sample wait, served
+// by the rung-2 legacy leg.
+func legacyWaitBeadItem() map[string]any {
+	return map[string]any{
+		"id":         "ga-wait-1",
+		"title":      "wait:worker",
+		"issue_type": sessionpkg.WaitBeadType,
+		"status":     "open",
+		"labels":     []string{sessionpkg.WaitBeadLabel, "session:ga-sess-1"},
+		"metadata": map[string]string{
+			"session_id": "ga-sess-1",
+			"state":      waitStatePending,
+			"kind":       "deps",
+		},
+		"description": "wait note",
+	}
+}
+
+// waitRouteMissingListHandler emulates an OLD server: /v0/waits returns a
+// plain-text 404 (no problem+json body), while the generic /beads endpoint still
+// serves the label read. The plain 404 is what drives routeMissing classification.
+func waitRouteMissingListHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/waits"):
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.Path, "/beads"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{legacyWaitBeadItem()}, "total": 1})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// waitRouteMissingListConnErrHandler is the old-server shape where the legacy
+// /beads leg also fails (500), so the CLI drops to the local store leg.
+func waitRouteMissingListConnErrHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/waits"):
+			http.NotFound(w, r)
+		default:
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": 500, "title": "Internal Server Error", "detail": "explode"})
+		}
+	})
+}
+
+// waitRouteMissingInspectHandler is the inspect analog: /wait/{id} plain 404,
+// /bead/{id} serves the wait bead.
+func waitRouteMissingInspectHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/bead/"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(legacyWaitBeadItem())
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// waitRouteMissingInspectConnErrHandler: /wait/{id} plain 404, /bead/{id} 500.
+func waitRouteMissingInspectConnErrHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/bead/"):
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": 500, "title": "Internal Server Error", "detail": "explode"})
+		default:
+			http.NotFound(w, r)
+		}
 	})
 }
 
@@ -2738,21 +2804,14 @@ func waitProblemHandler(status int, detail string) waitMatrixHandler {
 	}
 }
 
-// writeWaitTestCity prepares a file-provider city for fallback path tests.
-// Mirrors writeBeadsTestCity but tagged for wait tests; kept separate so either
-// file can evolve its city.toml independently.
+// writeWaitTestCity prepares a file-provider city for the local fallback leg.
 func writeWaitTestCity(t *testing.T) string {
 	t.Helper()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cityToml := `[workspace]
-name = "test-city"
-
-[[agent]]
-name = "mayor"
-`
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2772,53 +2831,14 @@ func TestRouteWaitList_SixRowMatrix(t *testing.T) {
 		wantStderr   string
 		wantStdout   string
 	}{
-		{
-			name:       "api-happy-path",
-			handler:    okWaitListHandler,
-			wantExit:   0,
-			wantRoute:  "api",
-			wantStdout: "ga-wait-1",
-		},
-		{
-			name:       "api-cache-not-live",
-			handler:    waitProblemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
-			wantExit:   0,
-			wantRoute:  "fallback",
-			wantReason: "cache-not-live",
-			wantStdout: "WAIT",
-		},
-		{
-			name:       "api-500-fallback",
-			handler:    waitProblemHandler(http.StatusInternalServerError, "internal: explode"),
-			wantExit:   0,
-			wantRoute:  "fallback",
-			wantReason: "conn-refused",
-			wantStdout: "WAIT",
-		},
-		{
-			name:       "api-404-error",
-			handler:    waitProblemHandler(http.StatusNotFound, "not_found: city missing"),
-			wantExit:   1,
-			wantStderr: "not_found",
-		},
-		{
-			name:         "controller-down",
-			useNilClient: true,
-			nilReason:    "controller-down",
-			wantExit:     0,
-			wantRoute:    "fallback",
-			wantReason:   "controller-down",
-			wantStdout:   "WAIT",
-		},
-		{
-			name:         "escape-hatch",
-			useNilClient: true,
-			nilReason:    "escape-hatch",
-			wantExit:     0,
-			wantRoute:    "fallback",
-			wantReason:   "escape-hatch",
-			wantStdout:   "WAIT",
-		},
+		{name: "api-happy-path", handler: okWaitListHandler, wantExit: 0, wantRoute: "api", wantStdout: "ga-wait-1"},
+		{name: "api-cache-not-live", handler: waitProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"), wantExit: 0, wantRoute: "fallback", wantReason: "cache-not-live", wantStdout: "WAIT"},
+		{name: "api-500-fallback", handler: waitProblemHandler(http.StatusInternalServerError, "internal: explode"), wantExit: 0, wantRoute: "fallback", wantReason: "conn-refused", wantStdout: "WAIT"},
+		{name: "api-404-error", handler: waitProblemHandler(http.StatusNotFound, "not_found: city missing"), wantExit: 1, wantStderr: "not_found"},
+		{name: "route-missing-legacy", handler: waitRouteMissingListHandler, wantExit: 0, wantRoute: "api-legacy", wantReason: "route-missing", wantStdout: "ga-wait-1"},
+		{name: "route-missing-local", handler: waitRouteMissingListConnErrHandler, wantExit: 0, wantRoute: "fallback", wantReason: "conn-refused", wantStdout: "WAIT"},
+		{name: "controller-down", useNilClient: true, nilReason: "controller-down", wantExit: 0, wantRoute: "fallback", wantReason: "controller-down", wantStdout: "WAIT"},
+		{name: "escape-hatch", useNilClient: true, nilReason: "escape-hatch", wantExit: 0, wantRoute: "fallback", wantReason: "escape-hatch", wantStdout: "WAIT"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2872,53 +2892,14 @@ func TestRouteWaitInspect_SixRowMatrix(t *testing.T) {
 		wantStderr   string
 		wantStdout   string
 	}{
-		{
-			name:       "api-happy-path",
-			handler:    okWaitInspectHandler,
-			wantExit:   0,
-			wantRoute:  "api",
-			wantStdout: "ga-wait-1",
-		},
-		{
-			name:       "api-cache-not-live",
-			handler:    waitProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"),
-			wantExit:   1,
-			wantRoute:  "fallback",
-			wantReason: "cache-not-live",
-			wantStderr: "not found",
-		},
-		{
-			name:       "api-500-fallback",
-			handler:    waitProblemHandler(http.StatusInternalServerError, "explode"),
-			wantExit:   1,
-			wantRoute:  "fallback",
-			wantReason: "conn-refused",
-			wantStderr: "not found",
-		},
-		{
-			name:       "api-404-error",
-			handler:    waitProblemHandler(http.StatusNotFound, "not_found: bead missing"),
-			wantExit:   1,
-			wantStderr: "not_found",
-		},
-		{
-			name:         "controller-down",
-			useNilClient: true,
-			nilReason:    "controller-down",
-			wantExit:     1,
-			wantRoute:    "fallback",
-			wantReason:   "controller-down",
-			wantStderr:   "not found",
-		},
-		{
-			name:         "escape-hatch",
-			useNilClient: true,
-			nilReason:    "escape-hatch",
-			wantExit:     1,
-			wantRoute:    "fallback",
-			wantReason:   "escape-hatch",
-			wantStderr:   "not found",
-		},
+		{name: "api-happy-path", handler: okWaitInspectHandler, wantExit: 0, wantRoute: "api", wantStdout: "ga-wait-1"},
+		{name: "api-cache-not-live", handler: waitProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"), wantExit: 1, wantRoute: "fallback", wantReason: "cache-not-live", wantStderr: "not found"},
+		{name: "api-500-fallback", handler: waitProblemHandler(http.StatusInternalServerError, "explode"), wantExit: 1, wantRoute: "fallback", wantReason: "conn-refused", wantStderr: "not found"},
+		{name: "api-404-error", handler: waitProblemHandler(http.StatusNotFound, "not_found: bead missing"), wantExit: 1, wantStderr: "not_found"},
+		{name: "route-missing-legacy", handler: waitRouteMissingInspectHandler, wantExit: 0, wantRoute: "api-legacy", wantReason: "route-missing", wantStdout: "ga-wait-1"},
+		{name: "route-missing-local", handler: waitRouteMissingInspectConnErrHandler, wantExit: 1, wantRoute: "fallback", wantReason: "conn-refused", wantStderr: "not found"},
+		{name: "controller-down", useNilClient: true, nilReason: "controller-down", wantExit: 1, wantRoute: "fallback", wantReason: "controller-down", wantStderr: "not found"},
+		{name: "escape-hatch", useNilClient: true, nilReason: "escape-hatch", wantExit: 1, wantRoute: "fallback", wantReason: "escape-hatch", wantStderr: "not found"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2960,20 +2941,25 @@ func TestRouteWaitInspect_SixRowMatrix(t *testing.T) {
 	}
 }
 
-// TestRouteWaitList_PassesWaitBeadLabelConstant locks in the architect's §5.1
-// guardrail: the CLI must pass sessionpkg.WaitBeadLabel through to
-// ListBeadsOpts.Label. Renaming the constant or inlining "gc:wait" on either
-// side breaks the locator contract without a loud test.
+// TestRouteWaitList_PassesWaitBeadLabelConstant locks the locator contract for
+// the rung-2 legacy leg: when the typed route is missing, the CLI must query the
+// generic beads endpoint with sessionpkg.WaitBeadLabel.
 func TestRouteWaitList_PassesWaitBeadLabelConstant(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeWaitTestCity(t)
 
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Query().Get("label")
-		w.Header().Set("X-GC-Cache-Age-S", "0")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/waits"):
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.Path, "/beads"):
+			gotQuery = r.URL.Query().Get("label")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
@@ -2983,19 +2969,23 @@ func TestRouteWaitList_PassesWaitBeadLabelConstant(t *testing.T) {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if gotQuery != sessionpkg.WaitBeadLabel {
-		t.Errorf("API label query = %q, want %q", gotQuery, sessionpkg.WaitBeadLabel)
+		t.Errorf("legacy leg label query = %q, want %q", gotQuery, sessionpkg.WaitBeadLabel)
 	}
 }
 
-// TestRouteWaitList_StaleBannerOver30s confirms the >30 s cache-age banner
-// contract (parity with gc beads list API path).
+// TestRouteWaitList_StaleBannerOver30s confirms the >30 s cache-age banner on
+// the typed rung.
 func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeWaitTestCity(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/waits") {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("X-GC-Cache-Age-S", "45")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"waits": []map[string]any{}, "capped": false})
 	}))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
@@ -3006,89 +2996,5 @@ func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "cache age: 45s") {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
-}
-
-// TestRenderWaitListFromAPI_FiltersNonWaitBeads guards the architect's §5.4
-// guardrail: a non-wait bead labeled gc:wait must not leak through to the
-// rendered output. IsWaitBead is the type guard that enforces it.
-func TestRenderWaitListFromAPI_FiltersNonWaitBeads(t *testing.T) {
-	cr := api.CachedRead[[]beads.Bead]{
-		Body: []beads.Bead{
-			{
-				ID:       "ga-wait-keep",
-				Type:     sessionpkg.WaitBeadType,
-				Status:   "open",
-				Labels:   []string{sessionpkg.WaitBeadLabel},
-				Metadata: map[string]string{"state": waitStatePending},
-			},
-			{
-				ID:       "ga-task-drop",
-				Type:     "task",
-				Status:   "open",
-				Labels:   []string{sessionpkg.WaitBeadLabel},
-				Metadata: map[string]string{},
-			},
-			{
-				ID:       "ga-closed-drop",
-				Type:     sessionpkg.WaitBeadType,
-				Status:   "closed",
-				Labels:   []string{sessionpkg.WaitBeadLabel},
-				Metadata: map[string]string{},
-			},
-			{
-				ID:       "ga-legacy-keep",
-				Type:     sessionpkg.LegacyWaitBeadType,
-				Status:   "open",
-				Labels:   []string{sessionpkg.WaitBeadLabel},
-				Metadata: map[string]string{"state": waitStatePending},
-			},
-		},
-		AgeSeconds: 1,
-	}
-
-	var stdout, stderr bytes.Buffer
-	if code := renderWaitListFromAPI("test-city-path", cr, "", "", false, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit = %d", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "ga-wait-keep") {
-		t.Errorf("expected wait-typed bead to render:\n%s", out)
-	}
-	if !strings.Contains(out, "ga-legacy-keep") {
-		t.Errorf("expected legacy wait-typed bead to render:\n%s", out)
-	}
-	if strings.Contains(out, "ga-task-drop") {
-		t.Errorf("task-typed bead with gc:wait label leaked into output:\n%s", out)
-	}
-	if strings.Contains(out, "ga-closed-drop") {
-		t.Errorf("closed wait leaked into default (--all=false) output:\n%s", out)
-	}
-}
-
-// TestRenderWaitInspectFromAPI_RejectsNonWait verifies the §5.4 guardrail on
-// the inspect path: GET /bead/{id} can return any bead ID, so IsWaitBead must
-// still gate the API path.
-func TestRenderWaitInspectFromAPI_RejectsNonWait(t *testing.T) {
-	cr := api.CachedRead[beads.Bead]{
-		Body: beads.Bead{
-			ID:       "ga-task",
-			Type:     "task",
-			Status:   "open",
-			Labels:   []string{"something-else"},
-			Metadata: map[string]string{},
-		},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := renderWaitInspectFromAPI("test-city-path", cr, "ga-task", false, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr.String(), "is not a wait") {
-		t.Errorf("stderr missing 'is not a wait':\n%s", stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout should be empty on non-wait rejection, got:\n%s", stdout.String())
 	}
 }

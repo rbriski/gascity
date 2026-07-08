@@ -108,6 +108,12 @@ var typedClassCodecEdgeFiles = map[string]bool{
 	"cmd/gc/cli_session_store.go": true,
 	"cmd/gc/providers.go":         true,
 	"cmd/gc/nudge_beads.go":       true,
+	// internal/api/client_waits.go is the /v0/waits wire-serialization edge: its
+	// legacy rungs (ListWaitsViaBeads / GetWaitViaBead) project raw beads via
+	// WaitInfoFromBead during the rolling-deploy deprecation window. Excluded so
+	// that codec call keeps the interior at zero; removed with the legacy rungs
+	// when the window closes.
+	"internal/api/client_waits.go": true,
 }
 
 // typedClassCodecCensus is the checked-in baseline: needle -> slash-normalized
@@ -139,15 +145,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 	},
 	"SessionInfoFromBead(": {
 		"internal/worker/factory.go": 1,
-	},
-	// WI-4 A2 leaves three WaitInfoFromBead call sites in cmd_wait.go: the two
-	// generic-beads API render legs (renderWaitListFromAPI / renderWaitInspectFromAPI)
-	// and the local inspect fallback (doWaitInspectFallback). All three read raw
-	// beads.Bead off the generic /beads + /bead endpoints; WI-4 commit B (the
-	// /v0/waits wire + client_waits.go) converts them to typed session.WaitInfo at
-	// the internal/api edge and ratchets this needle back to interior-zero.
-	"WaitInfoFromBead(": {
-		"cmd/gc/cmd_wait.go": 3,
 	},
 	"ListAllSessionBeads(": {
 		"cmd/gc/adoption_barrier.go":         2,

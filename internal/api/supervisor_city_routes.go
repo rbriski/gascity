@@ -328,6 +328,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList)
 	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet)
 
+	// Durable session waits (session coordination-class).
+	cityGet(sm, "/waits", (*Server).humaHandleWaitList)
+	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet)
+
 	// Session SSE stream.
 	registerSSE(sm.humaAPI, huma.Operation{
 		OperationID: "stream-session",

@@ -901,9 +901,16 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 }
 
 func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
-	// Single-store wrapper: fan the one work store into every class param so
-	// the ~22 existing test call sites stay untouched. Identity today.
-	return prepareWaitWakeStateForCityWithSnapshot(cityPath, sessionFrontDoor(store), store, beads.NudgesStore{Store: store}, now, nil)
+	// Single-store wrapper: fan the one work store into every class param so the
+	// ~22 existing test call sites stay untouched. Route the session arm through
+	// the session coordination-class store (via cliSessionFrontDoor) so a
+	// [beads.classes.sessions] relocation reaches it; identity to the work store
+	// today.
+	var cfg *config.City
+	if strings.TrimSpace(cityPath) != "" {
+		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	}
+	return prepareWaitWakeStateForCityWithSnapshot(cityPath, cliSessionFrontDoor(store, cfg, cityPath), store, beads.NudgesStore{Store: store}, now, nil)
 }
 
 func prepareWaitWakeStateForCityWithSnapshot(cityPath string, sessFront *sessionpkg.Store, workStore beads.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
@@ -1046,8 +1053,15 @@ func lookupSessionBeadByIDInfo(store beads.Store, id string) (sessionpkg.Info, b
 
 func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
 	// Single-store wrapper: fan the one work store into the session and nudges
-	// class params so existing test call sites stay untouched. Identity today.
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, sessionFrontDoor(store), beads.NudgesStore{Store: store}, now, nil)
+	// class params so existing test call sites stay untouched. Route the session
+	// arm through the session coordination-class store (via cliSessionFrontDoor)
+	// so a [beads.classes.sessions] relocation reaches it; identity to the work
+	// store today.
+	var cfg *config.City
+	if strings.TrimSpace(cityPath) != "" {
+		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	}
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), beads.NudgesStore{Store: store}, now, nil)
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {

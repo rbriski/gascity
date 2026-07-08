@@ -41,6 +41,9 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if logicalID == "" {
 		return ControlResult{}, fmt.Errorf("%s: could not resolve logical bead ID", bead.ID)
 	}
+	// rootID keys the per-root coarse settlement stream (P5.3). The ralph control
+	// bead carries gc.root_bead_id; an empty value makes the attempt emit a no-op.
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 
 	subjectID, err := resolveBlockingSubjectID(store, bead.ID)
 	if err != nil {
@@ -74,6 +77,13 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
+		// LOW-2 (P5.3): a crash after this check's gc.outcome column write but
+		// before the emit loses the settlement permanently — the redo skips the
+		// already-closed check bead (ProcessControl's not-open guard), never
+		// re-reaching the emit, unlike the finalize redo which re-reaches and
+		// dedupes. Acceptable for best-effort provenance; backfill via the
+		// outcome-scoped idem token is the remedy. See retry.go for the full note.
+		opts.emitAttemptSettled(rootID, logicalID, beadmeta.OutcomePass, attempt)
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
 
@@ -90,6 +100,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed logical bead: %w", logicalID, err)
 		}
+		opts.emitAttemptSettled(rootID, logicalID, beadmeta.OutcomeFail, attempt)
 		return ControlResult{Processed: true, Action: "fail"}, nil
 	}
 

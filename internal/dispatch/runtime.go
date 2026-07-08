@@ -71,6 +71,13 @@ type ProcessOptions struct {
 	// the primary store, exactly matching the pre-seam single-store behavior.
 	MemberStores []beads.Store
 	Tracef       func(format string, args ...any)
+	// Settlements, when non-nil, receives coarse v2 settlement/lifecycle
+	// provenance AFTER a root/attempt/workflow reaches its terminal gc.outcome
+	// column write (the projection of record). It is provenance only: an emit
+	// never alters bead state and an emit failure never fails the control action.
+	// nil (the default) is completely inert — a city without a graph journal
+	// behaves byte-identically to pre-P5.3. See settlement.go.
+	Settlements SettlementEmitter
 }
 
 var (
@@ -164,6 +171,9 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		return ControlResult{}, false, fmt.Errorf("%s: loading workflow root %s: %w", bead.ID, rootID, err)
 	}
 
+	// LOW-1 (P5.3): this orphaned/quarantine terminal close carries no coarse
+	// settlement provenance today — deferred to P5.4, whose v1 closer-class pass
+	// will anchor the failure-terminal closes (this and discardPartialRalphRetry).
 	opts.tracef("process-control bead=%s kind=%s close reason=missing_workflow_root root=%s store_ref=%s",
 		bead.ID, bead.Metadata[beadmeta.KindMetadataKey], rootID, rootStoreRef)
 	closeMetadata := map[string]string{
@@ -742,10 +752,18 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
 				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
 			}
+			// Provenance (P5.3): the finalizer's own outcome column write committed;
+			// emit the coarse missing_root fact. Best-effort — never alters bead state.
+			opts.emitWorkflowFinalized(rootID, bead.ID, beadmeta.OutcomeMissingRoot)
 			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
+	// Provenance (P5.3): the root's terminal gc.outcome column write (the
+	// projection of record) has committed above. Emit ONE coarse settlement.root
+	// fact into the shared journal — after the fact, never altering bead state,
+	// never failing the finalize (nil emitter ⇒ inert).
+	opts.emitRootSettled(rootID, outcome)
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
@@ -757,6 +775,10 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err))
 	}
+	// Provenance (P5.3): the finalize control bead completed; emit the workflow's
+	// coarse terminal outcome (the resolved workflow outcome, not the finalizer's
+	// own bookkeeping pass). Same best-effort discipline as the root above.
+	opts.emitWorkflowFinalized(rootID, bead.ID, outcome)
 
 	// Purge the molecule-scoped artifact tree now that the workflow has
 	// terminated. Artifact lifetime is anchored to the molecule, not the

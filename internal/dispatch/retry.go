@@ -32,6 +32,9 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	if logicalID == "" {
 		return ControlResult{}, fmt.Errorf("%s: could not resolve logical bead ID", bead.ID)
 	}
+	// rootID keys the per-root coarse settlement stream (P5.3). The eval control
+	// bead carries gc.root_bead_id; an empty value makes the attempt emit a no-op.
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 	logical, err := store.Get(logicalID)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
@@ -81,6 +84,16 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
+		// LOW-2 (P5.3, applies to every attempt emit in this function): a crash
+		// AFTER the gc.outcome column write but BEFORE this emit loses the
+		// settlement event permanently — the redo reloads a logical bead whose
+		// gc.closed_by_attempt already covers this attempt and takes the stale-eval
+		// noop arm above (Action "noop"), which never re-reaches the emit. This is
+		// unlike the finalize redo, which re-reaches its emit and dedupes via the
+		// idem token. Asymmetric but acceptable for best-effort provenance; the
+		// remedy is an idempotent backfill re-emit (the outcome-scoped idem tokens
+		// make it safe to replay).
+		opts.emitAttemptSettled(rootID, logicalID, beadmeta.OutcomePass, attempt)
 		return ControlResult{Processed: true, Action: "pass"}, nil
 
 	case "hard":
@@ -99,6 +112,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
 		}
+		opts.emitAttemptSettled(rootID, logicalID, beadmeta.OutcomeFail, attempt)
 		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 
 	case "transient":
@@ -119,6 +133,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 				if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
 					return ControlResult{}, fmt.Errorf("%s: closing soft-failed logical bead: %w", logicalID, err)
 				}
+				opts.emitAttemptSettled(rootID, logicalID, beadmeta.OutcomePass, attempt)
 				return ControlResult{Processed: true, Action: "soft-fail"}, nil
 			}
 			if err := store.SetMetadataBatch(logicalID, map[string]string{
@@ -136,6 +151,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 			if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: closing exhausted logical bead: %w", logicalID, err)
 			}
+			opts.emitAttemptSettled(rootID, logicalID, beadmeta.OutcomeFail, attempt)
 			return ControlResult{Processed: true, Action: "fail"}, nil
 		}
 	default:

@@ -186,6 +186,18 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
+	// Provenance (P5.3): a control kind that SETTLES a v2 root/attempt/workflow
+	// gets a coarse settlement emitter riding the city's shared graph journal.
+	// The set is dispatch.SettlementEmittingKinds — the SAME source of truth the
+	// handlers' anchors are keyed to — read via EmitsSettlement so the wiring can
+	// never drift from the emitting handlers (the HIGH-1 bug, where the switch
+	// listed ralph but not check, wired the emitter for the wrong kinds). A
+	// non-opted city (no .gc/graph scope) yields a nil journal ⇒ nil emitter ⇒
+	// byte-identical to pre-P5.3 (no journal open, no append). Ride the existing
+	// cachedCityGraphJournal memo; do not add a new opener.
+	if dispatch.EmitsSettlement(bead.Metadata[beadmeta.KindMetadataKey]) {
+		opts.Settlements = dispatch.NewJournalSettlementEmitter(cachedCityGraphJournal(cityPath))
+	}
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
 	// config loaded to resolve store-refs/formulas/sessions?), not a

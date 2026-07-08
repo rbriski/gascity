@@ -31,6 +31,12 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	if onExhausted == "" {
 		onExhausted = beadmeta.DispositionHardFail
 	}
+	// rootID keys the per-root coarse settlement stream (P5.3). In the
+	// self-evaluating retry topology the retry control bead IS the logical step
+	// bead — it is the one closed with the terminal gc.outcome below — so the
+	// attempt settlements record bead.ID as the settled logical bead. An empty
+	// gc.root_bead_id makes the emit a no-op (best-effort provenance).
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 
 	// Find the most recent attempt.
 	attempt, err := findLatestAttempt(store, bead)
@@ -92,6 +98,10 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
+		// Provenance (P5.3): the logical retry step's terminal gc.outcome column
+		// write committed above; emit the coarse attempt settlement before the
+		// downstream scope reconcile (best-effort — never alters bead state).
+		opts.emitAttemptSettled(rootID, bead.ID, beadmeta.OutcomePass, attemptNum)
 		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -111,6 +121,9 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
+		// Provenance (P5.3): terminal hard-fail column write committed; emit the
+		// coarse attempt settlement (best-effort, same discipline as pass above).
+		opts.emitAttemptSettled(rootID, bead.ID, beadmeta.OutcomeFail, attemptNum)
 		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -119,7 +132,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 
 	case "transient":
 		if attemptNum >= maxAttempts {
-			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted, attemptLog)
+			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted, attemptLog, rootID, opts)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -161,6 +174,13 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	if err != nil || maxAttempts < 1 {
 		return ControlResult{}, fmt.Errorf("%s: invalid gc.max_attempts %q", bead.ID, bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	}
+	// rootID keys the per-root coarse settlement stream (P5.3). In the
+	// self-evaluating ralph topology the ralph control bead IS the logical step
+	// bead — the one closed with the terminal gc.outcome below — so the attempt
+	// settlements record bead.ID as the settled logical bead. gc.root_bead_id is
+	// stable across the mid-function reload; an empty value makes the emit a
+	// no-op (best-effort provenance).
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 
 	// Find the most recent iteration.
 	iteration, err := findLatestAttempt(store, bead)
@@ -238,6 +258,10 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
+		// Provenance (P5.3): the logical ralph step's terminal gc.outcome column
+		// write committed above; emit the coarse attempt settlement before the
+		// downstream scope reconcile (best-effort — never alters bead state).
+		opts.emitAttemptSettled(rootID, bead.ID, beadmeta.OutcomePass, iterationNum)
 		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -255,6 +279,10 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", bead.ID, err)
 		}
+		// Provenance (P5.3): the ralph loop exhausted its attempts and resolved to
+		// gc.outcome=fail; emit the coarse attempt settlement after the column
+		// write (best-effort, same discipline as the pass arm above).
+		opts.emitAttemptSettled(rootID, bead.ID, beadmeta.OutcomeFail, iterationNum)
 		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -474,7 +502,7 @@ func isTransientWorkQueryFailure(msg string) bool {
 	return false
 }
 
-func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
+func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog, rootID string, opts ProcessOptions) (ControlResult, error) {
 	if onExhausted == beadmeta.DispositionSoftFail {
 		closeMetadata := map[string]string{
 			beadmeta.AttemptLogMetadataKey:       attemptLog,
@@ -488,6 +516,10 @@ func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, rea
 		if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing soft-failed: %w", beadID, err)
 		}
+		// Provenance (P5.3): a soft-fail exhaustion resolves the logical step to
+		// gc.outcome=pass; emit the coarse attempt settlement after that column
+		// write (best-effort — never alters bead state, mirrors the outcome above).
+		opts.emitAttemptSettled(rootID, beadID, beadmeta.OutcomePass, attemptNum)
 		return ControlResult{Processed: true, Action: "soft-fail"}, nil
 	}
 
@@ -503,6 +535,9 @@ func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, rea
 	if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", beadID, err)
 	}
+	// Provenance (P5.3): a hard exhaustion resolves the logical step to
+	// gc.outcome=fail; emit the coarse attempt settlement after the column write.
+	opts.emitAttemptSettled(rootID, beadID, beadmeta.OutcomeFail, attemptNum)
 	return ControlResult{Processed: true, Action: "fail"}, nil
 }
 

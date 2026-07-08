@@ -85,6 +85,9 @@ func NewJournalStore(gs *graphstore.Store) *JournalStore {
 	// The control-epoch fence appends into this engine; register its event type
 	// at construction so a fence CAS is never rejected as an unknown type (I-5).
 	registerControlFenceVocab(gs)
+	// The dispatcher emits coarse v2/v1 settlement events into this engine (P5.3);
+	// register their vocabulary here so an emit is never rejected as unknown (I-5).
+	registerSettlementVocab(gs)
 	return &JournalStore{gs: gs, db: gs.DB(), rdb: gs.ReadDB()}
 }
 

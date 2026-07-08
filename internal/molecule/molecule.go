@@ -217,10 +217,15 @@ func runFenced(ctx context.Context, fence ControlWriteFence, store beads.Store, 
 // runFenced), its read-compare-write executes after every prior fenced writer
 // has committed, so a writer that lost the race to a fresher epoch observes the
 // advanced value and no-ops rather than regressing it (the staggered
-// lost-update/regression kill). On the legacy path (nil fence) it is a plain
-// fresh-read check-then-act, unchanged in effect from the direct SetMetadata it
-// replaces.
-func bumpEpochIfCurrent(store beads.Store, beadID string, expectedEpoch int) error {
+// lost-update/regression kill). The advance goes through
+// beads.SetMetadataConditionally: on a capable store it is a store-level CAS
+// conditioned on the observed epoch, so a cross-process writer that already
+// bumped turns this into a loud ErrMetadataCASConflict the fence retries (re-read
+// → no-op), never a silent regression; a capability-absent store falls back to
+// today's exact unconditional SetMetadata. On the legacy path (nil fence) with a
+// single writer the CAS precondition holds, so the outcome is byte-identical to
+// the direct SetMetadata it replaces.
+func bumpEpochIfCurrent(ctx context.Context, store beads.Store, beadID string, expectedEpoch int) error {
 	b, err := store.Get(beadID)
 	if err != nil {
 		return err
@@ -229,7 +234,15 @@ func bumpEpochIfCurrent(store beads.Store, beadID string, expectedEpoch int) err
 	if current != expectedEpoch {
 		return nil
 	}
-	return store.SetMetadata(beadID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(expectedEpoch+1))
+	// Condition the CAS on the RAW observed value (b.Metadata[key]), NOT the
+	// re-canonicalized strconv.Itoa(expectedEpoch): SetMetadataIf compares expected
+	// against the stored string byte-for-byte, so a non-canonical stored epoch
+	// ("01", " 1") must be matched verbatim. Round-tripping it through the parsed int
+	// would make the CAS miss on every retry and livelock; the swap normalizes the
+	// value to the canonical next. The DECISION above (current == expectedEpoch)
+	// still uses the parsed int.
+	return beads.SetMetadataConditionally(ctx, store, beadID,
+		beadmeta.ControlEpochMetadataKey, b.Metadata[beadmeta.ControlEpochMetadataKey], strconv.Itoa(expectedEpoch+1))
 }
 
 // ErrEpochConflict is returned when AttachOptions.ExpectedEpoch does not match
@@ -357,20 +370,25 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 
 	// Increment epoch after successful attach. The decision (re-read the epoch,
 	// advance only if it still equals ExpectedEpoch) runs INSIDE the fence's
-	// serialized region for journal-resident beads, so a concurrent processor
-	// that already advanced the bump is observed and this writer no-ops instead
-	// of regressing it (S0.4 / staggered-regression kill); legacy beads take the
-	// same fresh-read check-then-act unserialized.
+	// serialized region, so a concurrent processor that already advanced the bump
+	// is observed and this writer no-ops instead of regressing it (S0.4 /
+	// staggered-regression kill). Since P5.2 the fence is TOTAL: journal-resident
+	// beads serialize via the append CAS, and legacy beads via the store-level
+	// SetMetadataIf CAS inside bumpEpochIfCurrent — a lost race is loud on both, no
+	// longer a silent unserialized check-then-act (that fallback survives only for
+	// a store supporting neither CAS, not seen in production).
 	//
-	// Scope (P5): the fence guards this epoch bump, not the sub-DAG instantiation
-	// above. Under a lost race a duplicate sub-DAG can still be created (both
-	// writers passed the pre-instantiate epoch pre-check); the epoch ends
-	// correct, but full duplicate-DAG prevention needs an Attach-level fence over
-	// the instantiate region, deferred to P5. The loser still no-ops the bump
-	// safely and never closes the workflow.
+	// Scope: the fence guards this epoch bump, not the sub-DAG instantiation above.
+	// Under a lost cross-process race a duplicate sub-DAG can still be created (both
+	// writers passed the pre-instantiate epoch pre-check); the epoch ends correct
+	// and the loser's bump no-ops loudly, but full duplicate-DAG prevention needs
+	// an Attach-level fence over the instantiate region. That residual stands (the
+	// in-process keyed mutex serializes same-process attaches; findExistingAttach's
+	// idempotency key remains the cross-process duplicate rescue). The loser never
+	// closes the workflow.
 	if opts.ExpectedEpoch > 0 {
-		if err := runFenced(ctx, opts.Fence, store, attachBeadID, func(context.Context) error {
-			return bumpEpochIfCurrent(store, attachBeadID, opts.ExpectedEpoch)
+		if err := runFenced(ctx, opts.Fence, store, attachBeadID, func(ctx context.Context) error {
+			return bumpEpochIfCurrent(ctx, store, attachBeadID, opts.ExpectedEpoch)
 		}); err != nil {
 			return nil, fmt.Errorf("incrementing epoch on %s: %w", attachBeadID, err)
 		}
@@ -449,8 +467,8 @@ func advanceAttachEpochIfNeeded(ctx context.Context, store beads.Store, attachBe
 	// runs against post-serialization state: the former pre-fence Get here saw a
 	// stale epoch and could regress it under a lost race. A no-op when the epoch
 	// already advanced is the correct duplicate-path behavior.
-	return runFenced(ctx, fence, store, attachBeadID, func(context.Context) error {
-		return bumpEpochIfCurrent(store, attachBeadID, expectedEpoch)
+	return runFenced(ctx, fence, store, attachBeadID, func(ctx context.Context) error {
+		return bumpEpochIfCurrent(ctx, store, attachBeadID, expectedEpoch)
 	})
 }
 

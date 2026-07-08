@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ErrConditionalMetadataUnsupported reports that a store cannot atomically
@@ -10,6 +11,17 @@ import (
 // a wrapper that must route SetMetadataIf but whose target leg lacks the
 // capability returns this loudly rather than silently dropping the write.
 var ErrConditionalMetadataUnsupported = errors.New("conditional metadata update unsupported")
+
+// ErrMetadataCASConflict is the typed, LOUD conflict signal a conditional
+// metadata write raises when the store-level compare-and-set lost the race: the
+// bead's observed value for the key no longer equals the value the caller just
+// read (a concurrent writer advanced it), so NOTHING was written. It is never a
+// silent lost update. The control-epoch fence (dispatch/control_fence.go)
+// consumes it as its retry trigger — re-read, re-decide, converge — exactly as
+// the journal branch consumes graphstore.ErrWrongExpectedVersion. Callers that
+// might surface it outside a retry loop classify it transient so a loser
+// re-dispatches rather than closing a workflow.
+var ErrMetadataCASConflict = errors.New("conditional metadata update lost the race")
 
 // ConditionalMetadataStore is implemented by stores that can update a single
 // metadata key only when its current value still matches an expected snapshot,
@@ -68,6 +80,43 @@ func ConditionalMetadataStoreFor(store Store) (ConditionalMetadataStore, bool) {
 		return p.ConditionalMetadataHandle()
 	}
 	return nil, false
+}
+
+// SetMetadataConditionally writes metadata[key]=next on bead id, conditioned on
+// the value the caller just observed (expected). It is the shared write half of
+// the control-epoch fence, used by both the dispatch epoch site
+// (syncControlEpochToAttempt) and the molecule epoch site (bumpEpochIfCurrent),
+// so the decide-then-write is identical on the journal-resident and legacy paths.
+//
+//   - Capable store (ConditionalMetadataStoreFor ok), CAS holds → the value is
+//     written; nil. A precondition-holding no-op (next == expected) is a nil
+//     success too (SetMetadataIf reports swapped=true without writing).
+//   - Capable store, CAS lost (a concurrent writer changed the value first) →
+//     ErrMetadataCASConflict, the LOUD typed signal the fence retries on. Never a
+//     silent lost update, never a silent regression.
+//   - Store WITHOUT the capability → today's exact unconditional SetMetadata. This
+//     is the only remaining non-loud path in the now-total fence: a store that can
+//     neither append-CAS (journal) nor metadata-CAS (this) cannot detect a
+//     cross-process lost update, so it degrades to the byte-identical pre-P5
+//     baseline. Neither Dolt-backed production store reaches here (BdStore and
+//     NativeDoltStore both implement ConditionalMetadataStore); the honest degrade
+//     class is the exec provider (internal/beads/exec), which has no CAS verb, so an
+//     exec:-provider city takes this fallback for its legacy control writes. This is
+//     a genuine capability gap, not a lost CAS. Extending an exec-contract CAS verb
+//     — so exec cities also get the S0.4 kill for legacy control writes — is a
+//     documented follow-up, not implemented in P5.2.
+func SetMetadataConditionally(ctx context.Context, store Store, id, key, expected, next string) error {
+	if cas, ok := ConditionalMetadataStoreFor(store); ok {
+		swapped, err := cas.SetMetadataIf(ctx, id, key, expected, next)
+		if err != nil {
+			return err
+		}
+		if !swapped {
+			return fmt.Errorf("conditional metadata write on %s (%s: %q→%q): %w", id, key, expected, next, ErrMetadataCASConflict)
+		}
+		return nil
+	}
+	return store.SetMetadata(id, key, next)
 }
 
 // Compile-time assertions that every in-package store surfaces the capability.

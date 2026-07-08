@@ -1141,7 +1141,9 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 
 // SetMetadataIf atomically sets metadata[key]=next only when the bead's current
 // observed value for key equals expected, via a single guarded conditional
-// UPDATE through `bd sql` (embedded-dolt fallback mirrors ReleaseIfCurrent). The
+// UPDATE through `bd sql` (embedded-dolt fallback mirrors ReleaseIfCurrent). Like
+// ReleaseIfCurrent, this raw guarded UPDATE bypasses bd-update hooks/attribution;
+// the metadata value and updated_at land identically to that sibling pipeline. The
 // metadata column is JSON with string-typed values, so the compare goes through
 // JSON_UNQUOTE(JSON_EXTRACT(...)) and folds an absent key (JSON null) to "" via
 // COALESCE — honoring the empty-string clear contract. rows_affected > 0 means

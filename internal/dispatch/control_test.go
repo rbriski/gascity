@@ -1470,6 +1470,8 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "fence uncapped", err: fmt.Errorf("wrap: %w", errControlFenceUncapped), want: true},
 		{name: "graphstore busy", err: fmt.Errorf("append: %w", graphstore.ErrBusy), want: true},
 		{name: "molecule epoch conflict", err: fmt.Errorf("spawning attempt: %w", molecule.ErrEpochConflict), want: true},
+		{name: "metadata cas conflict", err: fmt.Errorf("incrementing epoch: %w", beads.ErrMetadataCASConflict), want: true},
+		{name: "conditional metadata unsupported", err: fmt.Errorf("wrap: %w", beads.ErrConditionalMetadataUnsupported), want: true},
 	}
 
 	for _, tt := range tests {

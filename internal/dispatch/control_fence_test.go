@@ -81,17 +81,24 @@ func stealHeadOnce(t *testing.T, store *beads.JournalStore, beadID string) (seam
 	return seam, func() { fenceAfterHead = nil }
 }
 
-// TestFenceControlWriteInertOnLegacyStore proves that on a legacy store (no
-// journal CAS capability) fenceControlWrite is a pure pass-through for a legacy
-// bead id: decideAndWrite runs exactly once, its effect is byte-identical to a
-// direct SetMetadata, and no fence machinery is engaged.
+// TestFenceControlWriteInertOnLegacyStore proves that on a legacy store with
+// NEITHER CAS capability (no journal append AND no ConditionalMetadataStore)
+// fenceControlWrite is a pure pass-through for a legacy bead id: decideAndWrite
+// runs exactly once, its effect is byte-identical to a direct SetMetadata, and no
+// fence machinery is engaged. This is the only remaining non-loud path in the
+// now-total fence (P5.2). A bare MemStore is now ConditionalMetadataStore-capable,
+// so it takes the loud CAS-loop path — the caps-absent fallback is exercised by
+// hiding the capability behind noCASStore (see control_fence_legacy_test.go).
 func TestFenceControlWriteInertOnLegacyStore(t *testing.T) {
-	mem := beads.NewMemStore()
-	if _, ok := beads.AppendLogStoreFor(mem); ok {
-		t.Fatalf("MemStore unexpectedly exposes AppendLogStore; the inert test would be meaningless")
+	store := noCASStore{Store: beads.NewMemStore()}
+	if _, ok := beads.AppendLogStoreFor(store); ok {
+		t.Fatalf("store unexpectedly exposes AppendLogStore; the inert test would be meaningless")
+	}
+	if _, ok := beads.ConditionalMetadataStoreFor(store); ok {
+		t.Fatalf("store unexpectedly exposes ConditionalMetadataStore; the caps-absent inert test would be meaningless")
 	}
 
-	b, err := mem.Create(beads.Bead{
+	b, err := store.Create(beads.Bead{
 		Title: "legacy control", Type: "task",
 		Metadata: map[string]string{beadmeta.ControlEpochMetadataKey: "1"},
 	})
@@ -99,21 +106,21 @@ func TestFenceControlWriteInertOnLegacyStore(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	if beads.IsJournalResidentID(b.ID) {
-		t.Fatalf("MemStore minted a journal-resident id %q; the legacy inert test would be meaningless", b.ID)
+		t.Fatalf("store minted a journal-resident id %q; the legacy inert test would be meaningless", b.ID)
 	}
 
 	calls := 0
-	err = fenceControlWrite(context.Background(), mem, b.ID, func(context.Context) error {
+	err = fenceControlWrite(context.Background(), store, b.ID, func(context.Context) error {
 		calls++
-		return mem.SetMetadata(b.ID, beadmeta.ControlEpochMetadataKey, "2")
+		return store.SetMetadata(b.ID, beadmeta.ControlEpochMetadataKey, "2")
 	})
 	if err != nil {
-		t.Fatalf("fenceControlWrite on legacy store: %v", err)
+		t.Fatalf("fenceControlWrite on caps-absent legacy store: %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("decideAndWrite ran %d times, want exactly 1 (pass-through)", calls)
 	}
-	got, err := mem.Get(b.ID)
+	got, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -123,10 +130,12 @@ func TestFenceControlWriteInertOnLegacyStore(t *testing.T) {
 	}
 }
 
-// TestFenceControlWriteInertOnLegacyBeadIDOverJournalStore proves the fallback
-// trigger for a non-journal id: even on a journal-capable store, a bead that is
-// not journal-resident (id lacks the gcg-j marker) takes the unchanged write
-// path and no fence event is appended (the fence stream head stays 0).
+// TestFenceControlWriteInertOnLegacyBeadIDOverJournalStore proves the branch
+// discriminator is the bead id, not the store: even on a journal-capable store, a
+// bead that is not journal-resident (id lacks the gcg-j marker) takes the LEGACY
+// branch and NO journal fence event is appended (the fence stream head stays 0).
+// The legacy branch may still serialize + metadata-CAS on a capable store, but it
+// never touches the journal append stream.
 func TestFenceControlWriteInertOnLegacyBeadIDOverJournalStore(t *testing.T) {
 	ctx := context.Background()
 	store := openJournalStoreForFence(t)

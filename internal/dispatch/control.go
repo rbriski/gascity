@@ -312,7 +312,7 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	// a writer that lost the race to a higher attempt observes the advanced epoch
 	// and no-ops instead of regressing it. attemptNum comes from the recovered
 	// attempt and is stable, so it stays captured outside.
-	return fenceControlWrite(context.Background(), store, control.ID, func(context.Context) error {
+	return fenceControlWrite(context.Background(), store, control.ID, func(ctx context.Context) error {
 		fresh, err := store.Get(control.ID)
 		if err != nil {
 			return err
@@ -326,7 +326,21 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 			// Already advanced to at least this attempt — no-op (regression kill).
 			return nil
 		}
-		return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+		// Condition on the RAW value we just observed (fresh.Metadata[key]), NOT the
+		// re-canonicalized strconv.Itoa(current): SetMetadataIf compares expected
+		// against the stored string byte-for-byte, so a non-canonical stored epoch
+		// ("02", " 2") written by an external/hand writer must be matched verbatim.
+		// Round-tripping it through the parsed int would make the CAS miss on every
+		// retry (stored "02" != "2"), exhaust the budget, and livelock forever (the
+		// pre-P5.2 unconditional SetMetadata self-healed this). A successful swap
+		// normalizes the value to the canonical next; the DECISION above still uses
+		// the parsed int (attemptNum vs current). On a capable store a cross-process
+		// writer that advanced the epoch first turns this into a loud
+		// ErrMetadataCASConflict the fence retries (re-read → re-decide → converge),
+		// never a silent overwrite; a capability-absent store falls back to today's
+		// exact unconditional SetMetadata.
+		return beads.SetMetadataConditionally(ctx, store, control.ID,
+			beadmeta.ControlEpochMetadataKey, fresh.Metadata[beadmeta.ControlEpochMetadataKey], strconv.Itoa(attemptNum))
 	})
 }
 
@@ -394,10 +408,23 @@ func IsTransientControllerError(err error) bool {
 	// error. molecule.ErrEpochConflict means another processor already advanced
 	// the attach bead — the correct response is to back off and re-dispatch, so a
 	// concurrent duplicate-spawn attempt never closes the workflow.
+	// beads.ErrMetadataCASConflict is defense-in-depth: the fence consumes it via
+	// its retry loop, but if a store-level epoch CAS ever loses outside a loop (a
+	// nil-fence legacy write under contention) it must re-dispatch, never close.
+	// beads.ErrConditionalMetadataUnsupported is the sibling latent case: a wrapper
+	// that advertises ConditionalMetadataStore but whose backing leg lacks the cap
+	// (a CachingStore over a non-CAS store, a residence router) returns it from
+	// inside the legacy fence, escaping the fence's caps probe. Classify it
+	// transient so a loser re-dispatches on a wiring gap rather than the workflow
+	// being closed. Unreachable in production today (control-dispatch stores are raw
+	// BdStore / policy-wrapped / journal, never a wrapper over a non-CAS leg) but
+	// one wiring change from a workflow-kill.
 	if errors.Is(err, errControlFenceContended) ||
 		errors.Is(err, errControlFenceUncapped) ||
 		errors.Is(err, graphstore.ErrBusy) ||
-		errors.Is(err, molecule.ErrEpochConflict) {
+		errors.Is(err, molecule.ErrEpochConflict) ||
+		errors.Is(err, beads.ErrMetadataCASConflict) ||
+		errors.Is(err, beads.ErrConditionalMetadataUnsupported) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

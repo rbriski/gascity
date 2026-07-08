@@ -41,7 +41,7 @@ func (s *Store) ResidenceOf(ctx context.Context, rootID string) (state string, f
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", 0, false, nil
 		}
-		return "", 0, false, fmt.Errorf("graphstore: reading residence of %q: %w", rootID, mapSQLiteBusy(err))
+		return "", 0, false, fmt.Errorf("graphstore: reading residence of %q: %w", rootID, s.dialect.mapError(err))
 	}
 	return state, fenceEpoch, true, nil
 }
@@ -59,7 +59,7 @@ func (s *Store) BeginResidenceMigration(ctx context.Context, rootID string, fenc
 		 ON CONFLICT(root_id) DO NOTHING`,
 		rootID, fenceEpoch, now)
 	if err != nil {
-		return false, fmt.Errorf("graphstore: begin residence migration %q: %w", rootID, mapSQLiteBusy(err))
+		return false, fmt.Errorf("graphstore: begin residence migration %q: %w", rootID, s.dialect.mapError(err))
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -79,7 +79,7 @@ func (s *Store) FlipResidenceToJournal(ctx context.Context, rootID string, fence
 		 WHERE root_id = ? AND state = 'migrating' AND fence_epoch = ?`,
 		now, rootID, fenceEpoch)
 	if err != nil {
-		return false, fmt.Errorf("graphstore: flip residence %q: %w", rootID, mapSQLiteBusy(err))
+		return false, fmt.Errorf("graphstore: flip residence %q: %w", rootID, s.dialect.mapError(err))
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -102,7 +102,7 @@ func (s *Store) RevertResidence(ctx context.Context, rootID string, fenceEpoch i
 		`DELETE FROM graph_residence WHERE root_id = ? AND state = 'migrating' AND fence_epoch = ?`,
 		rootID, fenceEpoch)
 	if err != nil {
-		return false, fmt.Errorf("graphstore: revert residence %q: %w", rootID, mapSQLiteBusy(err))
+		return false, fmt.Errorf("graphstore: revert residence %q: %w", rootID, s.dialect.mapError(err))
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -119,7 +119,7 @@ func (s *Store) MigratingRoots(ctx context.Context) ([]string, error) {
 	rows, err := s.readDB.QueryContext(ctx,
 		`SELECT root_id FROM graph_residence WHERE state = 'migrating' ORDER BY root_id`)
 	if err != nil {
-		return nil, fmt.Errorf("graphstore: listing migrating roots: %w", mapSQLiteBusy(err))
+		return nil, fmt.Errorf("graphstore: listing migrating roots: %w", s.dialect.mapError(err))
 	}
 	defer func() { _ = rows.Close() }()
 	var roots []string

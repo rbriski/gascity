@@ -1139,45 +1139,96 @@ func (s *JournalStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return released, err
 }
 
-// SetMetadataIf atomically sets metadata[key]=next only when the bead's current
-// observed value for key equals expected, in one WAL transaction on the single
-// serialized write connection (so a concurrent CAS on the same bead serializes:
-// the loser reads the winner's committed value and reports a non-match). A
-// fold-owned Tier-A row is write-closed (I-14): SetMetadataIf on one returns
-// ErrFoldOwnedWriteClosed. A missing bead is a non-match (false, nil). See
+// SetMetadataIf atomically compare-and-sets metadata[key] to next only when the
+// bead's currently observed value for key equals expected. The swap is conditioned
+// in SQL, so exactly one writer wins on BOTH backends (SQLite and Postgres) — never
+// a Go-side read-then-write that a concurrent cross-process committer could slip
+// past (the S0.4 silent lost update). A changing swap (expected != next) takes the
+// conditional-write path; expected == next is a pure precondition check that writes
+// nothing. This mirrors the BdStore/ReleaseIfCurrent conditional-write shape:
+//
+//   - present-key leg: UPDATE ... WHERE value = expected. On Postgres a concurrent
+//     loser blocks on the row lock, then re-evaluates its WHERE against the winner's
+//     committed value under READ COMMITTED, matches zero rows, and reports a
+//     non-match; on SQLite the single serialized write connection has the same
+//     effect. RowsAffected==1 ⇒ swapped; ==0 ⇒ the value moved (or the key is
+//     absent) ⇒ non-match.
+//   - absent-key leg (expected == "" only — the P5.1 empty-or-absent contract):
+//     when the present-key UPDATE matched nothing and expected is "", the key may be
+//     genuinely absent, so INSERT ... ON CONFLICT DO NOTHING fires ONLY when the row
+//     is truly absent. A present row — empty or not — leaves it a 0-row no-op, so a
+//     present non-empty value stays a correct non-match and two racing inserts
+//     resolve to exactly one winner (the loser's ON CONFLICT is a 0-row no-op).
+//
+// A fold-owned Tier-A row is write-closed (I-14): SetMetadataIf on one returns
+// ErrFoldOwnedWriteClosed. A missing bead is a non-match (false, nil), mirroring
+// ReleaseIfCurrent. next == "" clears the key to its observably-empty state. See
 // ConditionalMetadataStore for the full contract.
 func (s *JournalStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
 	swapped := false
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		// I-14 guard: the bead must exist and be façade-owned (fold_owned=0). A
+		// missing bead is a non-match; a fold-owned Tier-A row is write-closed.
 		var foldOwned int
-		err := tx.QueryRowContext(ctx, `SELECT fold_owned FROM nodes WHERE id = ?`, id).Scan(&foldOwned)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil // missing bead → non-match (mirrors ReleaseIfCurrent)
-		}
-		if err != nil {
+		switch err := tx.QueryRowContext(ctx, `SELECT fold_owned FROM nodes WHERE id = ?`, id).Scan(&foldOwned); {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil // missing bead → non-match (swapped stays false)
+		case err != nil:
 			return fmt.Errorf("journal store: checking bead %q: %w", id, err)
-		}
-		if foldOwned == 1 {
+		case foldOwned == 1:
 			return fmt.Errorf("bead %q: %w", id, ErrFoldOwnedWriteClosed)
 		}
-		var current string
-		err = tx.QueryRowContext(ctx, `SELECT value FROM node_metadata WHERE node_id = ? AND key = ?`, id, key).Scan(&current)
-		if errors.Is(err, sql.ErrNoRows) {
-			current = "" // absent key observes as ""
-		} else if err != nil {
-			return fmt.Errorf("journal store: reading metadata %q on %q: %w", key, id, err)
-		}
-		if current != expected {
-			return nil // value mismatch → non-match
-		}
-		if next != current {
-			if err := journalMergeMetadata(ctx, tx, id, map[string]string{key: next}); err != nil {
-				return err
+
+		if expected == next {
+			// Precondition-holding no-op: the swap writes nothing, so there is no lost
+			// update to guard against. Report whether the observed value (absent key
+			// observes as "") equals expected, writing nothing — this keeps a
+			// set-to-same a genuine no-op (updated_at untouched, no phantom empty row
+			// minted), byte-identical to the pre-P6 result.
+			var current string
+			err := tx.QueryRowContext(ctx, `SELECT value FROM node_metadata WHERE node_id = ? AND key = ?`, id, key).Scan(&current)
+			if errors.Is(err, sql.ErrNoRows) {
+				current = ""
+			} else if err != nil {
+				return fmt.Errorf("journal store: reading metadata %q on %q: %w", key, id, err)
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE nodes SET updated_at = ? WHERE id = ? AND fold_owned = 0`,
-				journalFormatTime(journalNow()), id); err != nil {
-				return fmt.Errorf("journal store: touching bead %q: %w", id, err)
+			swapped = current == expected
+			return nil
+		}
+
+		// expected != next: the swap changes the value, so the compare-and-set MUST be
+		// conditioned in SQL. Present-key leg first; the absent-key INSERT leg fires
+		// only when expected == "" (the empty-or-absent contract).
+		res, err := tx.ExecContext(ctx,
+			`UPDATE node_metadata SET value = ? WHERE node_id = ? AND key = ? AND value = ?`,
+			next, id, key, expected)
+		if err != nil {
+			return fmt.Errorf("journal store: conditional metadata update %q on %q: %w", key, id, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("journal store: conditional metadata rows for %q: %w", id, err)
+		}
+		if n == 0 && expected == "" {
+			ins, err := tx.ExecContext(ctx,
+				`INSERT INTO node_metadata (node_id, key, value) VALUES (?, ?, ?)
+				 ON CONFLICT(node_id, key) DO NOTHING`,
+				id, key, next)
+			if err != nil {
+				return fmt.Errorf("journal store: conditional metadata insert %q on %q: %w", key, id, err)
 			}
+			n, err = ins.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("journal store: conditional metadata insert rows for %q: %w", id, err)
+			}
+		}
+		if n == 0 {
+			return nil // value moved (or a non-empty expected against an absent key) → non-match
+		}
+		// Won the swap: touch updated_at exactly as the unconditional metadata path does.
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET updated_at = ? WHERE id = ? AND fold_owned = 0`,
+			journalFormatTime(journalNow()), id); err != nil {
+			return fmt.Errorf("journal store: touching bead %q: %w", id, err)
 		}
 		swapped = true
 		return nil

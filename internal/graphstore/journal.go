@@ -47,9 +47,22 @@ func (s *Store) Append(ctx context.Context, streamID, engine string, expectedVer
 
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
-		return AppendResult{}, fmt.Errorf("graphstore: append: begin: %w", mapSQLiteBusy(err))
+		return AppendResult{}, fmt.Errorf("graphstore: append: begin: %w", s.dialect.mapError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	// Serialize writers of this stream as the FIRST statement of the txn — the
+	// isomorphism of SQLite's BEGIN IMMEDIATE, narrowed per-stream. On SQLite a
+	// no-op (the single write connection already serializes every writer). On
+	// Postgres a pg_advisory_xact_lock held to commit/rollback: a concurrent
+	// appender BLOCKS here, then — under READ COMMITTED — its post-lock head read
+	// observes THIS txn's committed head and its expectedVersion CAS fails LOUD
+	// (ErrWrongExpectedVersion), never a silent lost update (the S0.4 killer). The
+	// lock key derives from the same streamID the CAS conditions on. A lock_timeout
+	// while blocked maps to the retryable ErrBusy.
+	if err := s.dialect.lockStream(ctx, tx, streamID); err != nil {
+		return AppendResult{}, fmt.Errorf("graphstore: append: lock stream %q: %w", streamID, s.dialect.mapError(err))
+	}
 
 	result := AppendResult{Duplicates: map[int]uint64{}}
 	fresh := make([]int, 0, len(events))
@@ -85,7 +98,7 @@ func (s *Store) Append(ctx context.Context, streamID, engine string, expectedVer
 	// input event's existing seq and do not enforce expectedVersion.
 	if len(fresh) == 0 {
 		if err := tx.Commit(); err != nil {
-			return AppendResult{}, fmt.Errorf("graphstore: append: commit (replay): %w", mapSQLiteBusy(err))
+			return AppendResult{}, fmt.Errorf("graphstore: append: commit (replay): %w", s.dialect.mapError(err))
 		}
 		result.FirstSeq = result.Duplicates[0]
 		return result, nil
@@ -121,7 +134,7 @@ func (s *Store) Append(ctx context.Context, streamID, engine string, expectedVer
 			streamID, seq, e.Substream, engine, e.Type, e.IRContractVersion,
 			nullableToken(e.IdemToken), e.Payload, payloadHash[:], chain[:], leaseEpoch, appendedAt,
 		); err != nil {
-			return AppendResult{}, fmt.Errorf("graphstore: append: insert seq %d: %w", seq, mapSQLiteBusy(err))
+			return AppendResult{}, fmt.Errorf("graphstore: append: insert seq %d: %w", seq, s.dialect.mapError(err))
 		}
 		if idx == fresh[0] {
 			result.FirstSeq = seq
@@ -130,7 +143,7 @@ func (s *Store) Append(ctx context.Context, streamID, engine string, expectedVer
 	}
 
 	if err := tx.Commit(); err != nil {
-		return AppendResult{}, fmt.Errorf("graphstore: append: commit: %w", mapSQLiteBusy(err))
+		return AppendResult{}, fmt.Errorf("graphstore: append: commit: %w", s.dialect.mapError(err))
 	}
 	return result, nil
 }

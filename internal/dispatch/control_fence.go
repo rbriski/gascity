@@ -50,8 +50,12 @@ var errControlFenceUncapped = errors.New("control-epoch fence: journal-resident 
 // regression. Cross-process, the durable conflict detector makes a loser retry
 // rather than clobber: on the journal branch the append CAS, and on both branches
 // (P5.2) the epoch write's own store-level SetMetadataIf CAS via
-// beads.SetMetadataConditionally. The former "cross-process metadata race remains
-// a P2 limitation" is now closed — a cross-process metadata CAS miss surfaces as
+// beads.SetMetadataConditionally. That store-level CAS is SQL-conditioned in every
+// production store (BdStore/NativeDoltStore's guarded UPDATE, and the JournalStore's
+// conditional UPDATE/INSERT — never a Go-side read-then-write), so the guarantee
+// holds on the hosted Postgres backend, not just on SQLite's single-writer
+// serialization. The former "cross-process metadata race remains a P2 limitation"
+// is now closed — a cross-process metadata CAS miss surfaces as
 // ErrMetadataCASConflict and both branches re-decide behind the winner.
 var fenceLocks keyedMutex
 

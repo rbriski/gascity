@@ -16,43 +16,50 @@ import (
 // to the retryable ErrBusy.
 const pgLockTimeoutMS = defaultBusyTimeoutMS
 
-// openPostgres opens the journal store against a PostgreSQL DSN, mirroring Open
-// but for the hosted backend. It:
+// OpenPostgres opens the journal store against a PostgreSQL DSN, mirroring Open
+// but for the hosted backend. It is write-ready and concurrency-correct
+// cross-process: P6.2 wired the dialect seam into every read-decide-write engine
+// path (per-stream advisory-lock serialization), and the beads façade's own
+// compare-and-set (JournalStore.SetMetadataIf) is SQL-conditioned rather than a
+// Go-side read-then-write — so no writer, engine or façade, can silently lose an
+// update across processes.
 //
-//   - connects through the pgqmark shim driver over lib/pq, so every `?`
+//   - It connects through the pgqmark shim driver over lib/pq, so every `?`
 //     placeholder in the shared SQL is rewritten to `$N` and no query string
-//     changes between backends;
-//   - opens a single-connection write pool (SetMaxOpenConns(1)) and a pooled read
-//     pool — the same single-serialized-writer model as SQLite; PG's multi-conn
-//     pools are ready for the P6.2 per-stream advisory-lock serialization;
-//   - sets lock_timeout on every connection (the busy_timeout analog);
-//   - runs the Postgres migration ladder 0→schemaV4 and seeds/guards city_id
-//     (ErrCityMismatch), exactly as Open;
-//   - requires READ COMMITTED (see requireReadCommitted); and
-//   - never lets the DSN's password reach an error or log — every path routes the
-//     DSN through redactDSN.
+//     changes between backends.
+//   - It opens a single-connection write pool (SetMaxOpenConns(1)) and a pooled
+//     read pool — the same single-serialized-writer model as SQLite. Cross-process
+//     write serialization rests on the per-stream pg_advisory_xact_lock taken as
+//     the first statement of every read-decide-write transaction (Append,
+//     AcquireWriterLease, WriteSnapshot, TruncateBelowAnchor, RebuildTierA), via
+//     dialect.lockStream.
+//   - It sets lock_timeout on every connection (the busy_timeout analog); a
+//     blocked writer that times out surfaces the retryable ErrBusy through
+//     dialect.mapError, which also maps the 23505 unique-violation backstops to
+//     the loud typed sentinels (ErrWrongExpectedVersion / ErrIdemTokenReuse).
+//   - It runs the Postgres migration ladder 0→schemaV4 and seeds/guards city_id
+//     (ErrCityMismatch), exactly as Open.
+//   - It requires READ COMMITTED (see requireReadCommitted) — load-bearing for the
+//     per-stream CAS, not an inherited default.
+//   - It never lets the DSN's password reach an error or log — every path routes
+//     the DSN through redactDSN.
 //
 // dsn is either a postgres:// URL or a keyword=value string (lib/pq parses both).
 // The returned *Store is the same type Open returns, so the beads façade, the
 // router, and the engines are untouched.
 //
-// It is deliberately UNEXPORTED in P6.1: the dialect seam it installs
-// (Store.dialect = postgresDialect{}) has no readers yet. The engine paths —
-// Append, the writer-lease CAS, retention truncation, snapshot writes, and the
-// Tier-A projection — still call mapSQLiteBusy directly and never call
-// lockStream, so a store opened here would surface a 55P03 lock_timeout as an
-// untyped error instead of the retryable ErrBusy and would take no per-stream
-// advisory lock, i.e. no cross-process write serialization. P6.2 wires the
-// dialect into those paths (typed busy mapping via dialect.mapError + per-stream
-// advisory-lock serialization via dialect.lockStream) and only then is a
-// write-ready Postgres opener re-exported. Until then this is reachable only
-// from package tests.
-//
-// extraOnConnect carries additional per-connection setup statements: production
-// passes nil; tests pass a `SET search_path …` to pin a private schema for
-// isolation. The setup runs on every freshly established connection (lib/pq's
-// ResetSession does not clear session state, so a SET persists for the pooled
-// connection's life).
+// Database-per-city is the hosted tenancy shape: the DSN is the tenant boundary
+// and city_id + ErrCityMismatch is the belt inside it.
+func OpenPostgres(ctx context.Context, dsn string, opts Options) (*Store, error) {
+	return openPostgres(ctx, dsn, opts, nil)
+}
+
+// openPostgres is OpenPostgres with an extraOnConnect hook, mirroring the
+// Open/openStore split. extraOnConnect carries additional per-connection setup
+// statements: production (OpenPostgres) passes nil; tests pass a `SET search_path
+// …` to pin a private schema for isolation. The setup runs on every freshly
+// established connection (lib/pq's ResetSession does not clear session state, so a
+// SET persists for the pooled connection's life).
 func openPostgres(ctx context.Context, dsn string, opts Options, extraOnConnect []string) (*Store, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, fmt.Errorf("graphstore: open postgres: empty dsn")

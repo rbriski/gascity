@@ -34,17 +34,21 @@ var ErrProjectionIDCollision = errors.New("fold node id collides with a façade-
 // caller that commits after an ApplyDelta error still lands with the closure
 // re-armed rather than permanently disabled. On the happy path a caller rollback
 // also restores the closed gate, since the whole toggle is part of tx.
-func ApplyDelta(ctx context.Context, tx *sql.Tx, d fold.Delta) error {
-	if err := openTierAGate(ctx, tx); err != nil {
+//
+// It is a method on *Store (not a free function) so it can route the gate toggles'
+// errors through the store's dialect: the Tier-A gate is a cross-stream singleton
+// whose Postgres row-lock contention must surface as the retryable ErrBusy.
+func (s *Store) ApplyDelta(ctx context.Context, tx *sql.Tx, d fold.Delta) error {
+	if err := openTierAGate(ctx, tx, s.dialect); err != nil {
 		return err
 	}
 	if err := applyDeltaLocked(ctx, tx, d); err != nil {
 		// Re-close the gate even though the delta failed: an exported caller may
 		// still commit tx, and a committed-open gate would permanently disable the
 		// write-closure. Join so neither error is swallowed.
-		return errors.Join(err, closeTierAGate(ctx, tx))
+		return errors.Join(err, closeTierAGate(ctx, tx, s.dialect))
 	}
-	return closeTierAGate(ctx, tx)
+	return closeTierAGate(ctx, tx, s.dialect)
 }
 
 // RebuildTierA is the Tier-A repair story (I-14): it DROPs streamID's Tier-A rows
@@ -77,27 +81,46 @@ func (s *Store) RebuildTierA(ctx context.Context, r fold.Reducer, streamID strin
 
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("graphstore: rebuild tier A %q: begin: %w", streamID, mapSQLiteBusy(err))
+		return fmt.Errorf("graphstore: rebuild tier A %q: begin: %w", streamID, s.dialect.mapError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
+	// Serialize writers of this stream as the FIRST statement of the txn — this is
+	// the subtle cross-process TOCTOU close (blueprint §3.3). The fold above read
+	// the stream from readDB OUTSIDE this txn; the recheck below re-reads the head
+	// inside it. On SQLite, BEGIN IMMEDIATE on the single write connection already
+	// prevents any Append from committing between the recheck and this rebuild's
+	// COMMIT, so a stale projection can never become durable. On Postgres, journal
+	// INSERTs and Tier-A writes touch different rows and do NOT conflict at the row
+	// level: without this lock a concurrent Append could commit AFTER the recheck
+	// and BEFORE this COMMIT, and the rebuild would durably commit a SILENTLY STALE
+	// projection — the exact torn view the recheck exists to kill. The per-stream
+	// pg_advisory_xact_lock makes concurrent appends BLOCK until this rebuild
+	// commits; an append that committed before this lock was granted is caught by
+	// the recheck. Same serialization SQLite gets, restored cross-process. A
+	// lock_timeout maps to ErrBusy.
+	if err := s.dialect.lockStream(ctx, tx, streamID); err != nil {
+		return fmt.Errorf("graphstore: rebuild tier A %q: lock stream: %w", streamID, s.dialect.mapError(err))
+	}
+
 	// TOCTOU guard: the stream was read before this write transaction opened, so
 	// an Append could have committed in that window and made the folded prefix
-	// stale. BEGIN IMMEDIATE now holds the write lock, so re-reading the head
-	// inside tx is authoritative — any drift means we folded an old prefix and
-	// must abort rather than project a torn view (deltas cover seq <= foldedHead
-	// only). seq is dense and monotonic, so a changed MAX(seq) catches any append.
+	// stale. The write lock above (BEGIN IMMEDIATE on SQLite, the per-stream
+	// advisory lock on Postgres) now holds, so re-reading the head inside tx is
+	// authoritative — any drift means we folded an old prefix and must abort rather
+	// than project a torn view (deltas cover seq <= foldedHead only). seq is dense
+	// and monotonic, so a changed MAX(seq) catches any append.
 	var head uint64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(seq), 0) FROM journal WHERE stream_id = ?`, streamID,
 	).Scan(&head); err != nil {
-		return fmt.Errorf("graphstore: rebuild tier A %q: rechecking head: %w", streamID, mapSQLiteBusy(err))
+		return fmt.Errorf("graphstore: rebuild tier A %q: rechecking head: %w", streamID, s.dialect.mapError(err))
 	}
 	if head != foldedHead {
 		return fmt.Errorf("graphstore: rebuild tier A %q: folded head %d but journal head %d: %w", streamID, foldedHead, head, ErrRebuildRaced)
 	}
 
-	if err := openTierAGate(ctx, tx); err != nil {
+	if err := openTierAGate(ctx, tx, s.dialect); err != nil {
 		return err
 	}
 	if err := dropStreamTierA(ctx, tx, streamID); err != nil {
@@ -108,11 +131,11 @@ func (s *Store) RebuildTierA(ctx context.Context, r fold.Reducer, streamID strin
 			return fmt.Errorf("graphstore: rebuild tier A %q: apply delta %d: %w", streamID, i, err)
 		}
 	}
-	if err := closeTierAGate(ctx, tx); err != nil {
+	if err := closeTierAGate(ctx, tx, s.dialect); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("graphstore: rebuild tier A %q: commit: %w", streamID, mapSQLiteBusy(err))
+		return fmt.Errorf("graphstore: rebuild tier A %q: commit: %w", streamID, s.dialect.mapError(err))
 	}
 	return nil
 }
@@ -218,16 +241,24 @@ func toFoldEvent(e StoredEvent) fold.Event {
 	}
 }
 
-func openTierAGate(ctx context.Context, tx *sql.Tx) error {
+// openTierAGate and closeTierAGate toggle the Tier-A write-closure gate. The gate
+// is a SINGLETON row (WHERE singleton = 0) shared across every stream, so on
+// Postgres two different streams' projection/rebuild transactions contend on this
+// one row lock even though they hold different per-stream advisory locks — a
+// cross-stream blocking path that partially serializes snapshot/truncate/projection.
+// A lock_timeout on that contention is routed through d.mapError so it surfaces as
+// the retryable ErrBusy, not a raw 55P03 the transient classifier would treat as
+// hard. SQLite is unaffected: its mapError is the identical SQLITE_BUSY mapping.
+func openTierAGate(ctx context.Context, tx *sql.Tx, d dialect) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE tier_a_write_gate SET open = 1 WHERE singleton = 0`); err != nil {
-		return fmt.Errorf("graphstore: opening tier-A write gate: %w", err)
+		return fmt.Errorf("graphstore: opening tier-A write gate: %w", d.mapError(err))
 	}
 	return nil
 }
 
-func closeTierAGate(ctx context.Context, tx *sql.Tx) error {
+func closeTierAGate(ctx context.Context, tx *sql.Tx, d dialect) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE tier_a_write_gate SET open = 0 WHERE singleton = 0`); err != nil {
-		return fmt.Errorf("graphstore: closing tier-A write gate: %w", err)
+		return fmt.Errorf("graphstore: closing tier-A write gate: %w", d.mapError(err))
 	}
 	return nil
 }
@@ -330,10 +361,22 @@ func applyDeltaLocked(ctx context.Context, tx *sql.Tx, d fold.Delta) error {
 // metadata child sets. An empty metadata value clears the key (it is simply not
 // re-inserted), matching the node_metadata empty-clear contract.
 func upsertNode(ctx context.Context, tx *sql.Tx, n fold.NodeRow) error {
-	// A fold delta must never adopt a façade-minted (fold_owned=0) row. The
-	// ON CONFLICT(id) upsert below would otherwise rewrite it fold_owned=1 and
-	// write-close it, silently corrupting the beads.Store's own bead. Refuse
-	// loudly; an existing fold_owned=1 row upserts normally (idempotent refold).
+	// A fold delta must never adopt a façade-minted (fold_owned=0) row: the upsert
+	// would rewrite it fold_owned=1 and write-close it, silently corrupting the
+	// beads.Store's own bead. Two layers enforce I-14 so the guard is loud on BOTH
+	// backends:
+	//   1. This pre-read catches the common case early and loudly when the colliding
+	//      row is already visible.
+	//   2. The ON CONFLICT(id) DO UPDATE below is guarded `WHERE nodes.fold_owned = 1`,
+	//      so it can ONLY rewrite a row that is already fold-owned. On Postgres a
+	//      façade Create of the same id committing between this read and the upsert
+	//      would otherwise be silently adopted (a read-then-write TOCTOU); the guard
+	//      turns that adoption into a 0-row no-op, which the RowsAffected check below
+	//      promotes to the same loud ErrProjectionIDCollision instead of a silent
+	//      corruption (or a silently dropped fold node). On SQLite the single
+	//      serialized writer makes the window unreachable, so the pre-read always
+	//      fires first and behavior is byte-identical (an idempotent fold_owned=1
+	//      refold passes the guard and reports one affected row).
 	var existingFoldOwned int
 	switch err := tx.QueryRowContext(ctx, `SELECT fold_owned FROM nodes WHERE id = ?`, n.ID).Scan(&existingFoldOwned); {
 	case errors.Is(err, sql.ErrNoRows):
@@ -347,7 +390,7 @@ func upsertNode(ctx context.Context, tx *sql.Tx, n fold.NodeRow) error {
 	if tier == "" {
 		tier = "history"
 	}
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO nodes
 		   (id, title, status, bead_type, priority, description, assignee, from_actor,
 		    parent_id, ref, created_at, updated_at, defer_until, storage_tier,
@@ -360,12 +403,23 @@ func upsertNode(ctx context.Context, tx *sql.Tx, n fold.NodeRow) error {
 		   parent_id = excluded.parent_id, ref = excluded.ref,
 		   created_at = excluded.created_at, updated_at = excluded.updated_at,
 		   defer_until = excluded.defer_until, storage_tier = excluded.storage_tier,
-		   is_blocked = excluded.is_blocked, fold_owned = 1, stream_id = excluded.stream_id`,
+		   is_blocked = excluded.is_blocked, fold_owned = 1, stream_id = excluded.stream_id
+		 WHERE nodes.fold_owned = 1`,
 		n.ID, n.Title, n.Status, n.BeadType, nullableInt(n.Priority), n.Description,
 		n.Assignee, n.FromActor, n.ParentID, n.Ref, n.CreatedAt, n.UpdatedAt,
 		nullableString(n.DeferUntil), tier, boolToInt(n.IsBlocked), n.StreamID,
-	); err != nil {
+	)
+	if err != nil {
 		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("upsert rows for node %q: %w", n.ID, err)
+	} else if affected == 0 {
+		// A conflict fired but the fold_owned=1 guard blocked the DO UPDATE: the
+		// existing row is façade-owned. A façade Create raced in after the pre-read
+		// (Postgres cross-process TOCTOU). Refuse loudly rather than silently drop the
+		// fold node or corrupt the façade row.
+		return fmt.Errorf("node %q: %w", n.ID, ErrProjectionIDCollision)
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM node_labels WHERE node_id = ?`, n.ID); err != nil {

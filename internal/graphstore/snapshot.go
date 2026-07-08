@@ -52,9 +52,19 @@ func (s *Store) WriteSnapshot(ctx context.Context, engine string, leaseEpoch uin
 
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("graphstore: write snapshot: begin: %w", mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: write snapshot: begin: %w", s.dialect.mapError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	// Serialize writers of this stream as the FIRST statement of the txn. No-op on
+	// SQLite; a per-stream pg_advisory_xact_lock on Postgres so the covered_seq ==
+	// head gate and the head+1 anchor append can't rot between the check and the
+	// commit — a concurrent Append blocks until this snapshot commits (or this
+	// blocks until it does), then the gate decision is authoritative. A lock_timeout
+	// maps to ErrBusy.
+	if err := s.dialect.lockStream(ctx, tx, snap.StreamID); err != nil {
+		return 0, fmt.Errorf("graphstore: write snapshot %q: lock stream: %w", snap.StreamID, s.dialect.mapError(err))
+	}
 
 	head, prevChain, err := headAndChain(ctx, tx, snap.StreamID)
 	if err != nil {
@@ -68,7 +78,7 @@ func (s *Store) WriteSnapshot(ctx context.Context, engine string, leaseEpoch uin
 	}
 
 	// Insert the snapshots row through the write gate.
-	if err := openSnapshotGate(ctx, tx); err != nil {
+	if err := openSnapshotGate(ctx, tx, s.dialect); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -81,10 +91,10 @@ func (s *Store) WriteSnapshot(ctx context.Context, engine string, leaseEpoch uin
 		time.Now().UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		return 0, errors.Join(
-			fmt.Errorf("graphstore: write snapshot %q@%d: insert: %w", snap.StreamID, snap.CoveredSeq, mapSQLiteBusy(err)),
-			closeSnapshotGate(ctx, tx))
+			fmt.Errorf("graphstore: write snapshot %q@%d: insert: %w", snap.StreamID, snap.CoveredSeq, s.dialect.mapError(err)),
+			closeSnapshotGate(ctx, tx, s.dialect))
 	}
-	if err := closeSnapshotGate(ctx, tx); err != nil {
+	if err := closeSnapshotGate(ctx, tx, s.dialect); err != nil {
 		return 0, err
 	}
 
@@ -102,10 +112,10 @@ func (s *Store) WriteSnapshot(ctx context.Context, engine string, leaseEpoch uin
 		nullableToken(anchor.IdemToken), anchor.Payload, payloadHash[:], chain[:], leaseEpoch,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	); err != nil {
-		return 0, fmt.Errorf("graphstore: write snapshot %q: anchor append seq %d: %w", snap.StreamID, seq, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: write snapshot %q: anchor append seq %d: %w", snap.StreamID, seq, s.dialect.mapError(err))
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("graphstore: write snapshot %q: commit: %w", snap.StreamID, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: write snapshot %q: commit: %w", snap.StreamID, s.dialect.mapError(err))
 	}
 	return seq, nil
 }
@@ -134,16 +144,24 @@ func (s *Store) LatestSnapshot(ctx context.Context, streamID string) (fold.Snaps
 	return snap, true, nil
 }
 
-func openSnapshotGate(ctx context.Context, tx *sql.Tx) error {
+// openSnapshotGate and closeSnapshotGate toggle the snapshot write-closure gate.
+// The gate is a SINGLETON row (WHERE singleton = 0) shared across every stream, so
+// on Postgres two different streams' snapshot/truncate transactions contend on this
+// one row lock even though they hold different per-stream advisory locks — a
+// cross-stream blocking path that partially serializes snapshot/truncate/projection.
+// A lock_timeout on that contention is routed through d.mapError so it surfaces as
+// the retryable ErrBusy, not a raw 55P03 the transient classifier would treat as
+// hard. SQLite is unaffected: its mapError is the identical SQLITE_BUSY mapping.
+func openSnapshotGate(ctx context.Context, tx *sql.Tx, d dialect) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE snapshot_write_gate SET open = 1 WHERE singleton = 0`); err != nil {
-		return fmt.Errorf("graphstore: opening snapshot write gate: %w", err)
+		return fmt.Errorf("graphstore: opening snapshot write gate: %w", d.mapError(err))
 	}
 	return nil
 }
 
-func closeSnapshotGate(ctx context.Context, tx *sql.Tx) error {
+func closeSnapshotGate(ctx context.Context, tx *sql.Tx, d dialect) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE snapshot_write_gate SET open = 0 WHERE singleton = 0`); err != nil {
-		return fmt.Errorf("graphstore: closing snapshot write gate: %w", err)
+		return fmt.Errorf("graphstore: closing snapshot write gate: %w", d.mapError(err))
 	}
 	return nil
 }

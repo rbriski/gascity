@@ -105,7 +105,7 @@ func (d *driver) maybeSnapshot(force bool) error {
 	if err != nil {
 		return fmt.Errorf("lumen: begin snapshot projection tx: %w", err)
 	}
-	if err := graphstore.ApplyDelta(d.ctx, tx, delta); err != nil {
+	if err := d.store.ApplyDelta(d.ctx, tx, delta); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("lumen: project snapshot anchor: %w", err)
 	}
@@ -350,7 +350,7 @@ func (d *driver) reapplyDeltas(deltas []fold.Delta) error {
 		return fmt.Errorf("lumen: resume: begin reprojection tx: %w", err)
 	}
 	for i := range deltas {
-		if err := graphstore.ApplyDelta(d.ctx, tx, deltas[i]); err != nil {
+		if err := d.store.ApplyDelta(d.ctx, tx, deltas[i]); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("lumen: resume: reproject delta %d: %w", i, err)
 		}

@@ -61,7 +61,7 @@ func TestTierAProjectionAndRebuildByteIdentity_DETT17(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin %d: %v", i, err)
 		}
-		if err := ApplyDelta(ctx, tx, delta); err != nil {
+		if err := s.ApplyDelta(ctx, tx, delta); err != nil {
 			_ = tx.Rollback()
 			t.Fatalf("apply delta %d: %v", i, err)
 		}
@@ -130,7 +130,7 @@ func TestTierAWriteClosureGuard_DETT18(t *testing.T) {
 		ID: "n1", Status: "open", BeadType: "task",
 		CreatedAt: "2020-01-01T00:00:00Z", StorageTier: "history", StreamID: stream,
 	}}}
-	if err := ApplyDelta(ctx, tx, delta); err != nil {
+	if err := s.ApplyDelta(ctx, tx, delta); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("apply delta: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestApplyDeltaErrorLeavesGateClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := ApplyDelta(ctx, tx, badDelta); err == nil {
+	if err := s.ApplyDelta(ctx, tx, badDelta); err == nil {
 		_ = tx.Rollback()
 		t.Fatal("ApplyDelta of an FK-violating delta = nil, want error")
 	}
@@ -318,7 +318,7 @@ func TestUpsertNodeRefusesFacadeOwnedCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	applyErr := ApplyDelta(ctx, tx, delta)
+	applyErr := s.ApplyDelta(ctx, tx, delta)
 	if !errors.Is(applyErr, ErrProjectionIDCollision) {
 		_ = tx.Rollback()
 		t.Fatalf("ApplyDelta over a façade-owned row = %v, want ErrProjectionIDCollision", applyErr)

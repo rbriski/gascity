@@ -36,9 +36,18 @@ func (s *Store) TruncateBelowAnchor(ctx context.Context, streamID string, anchor
 
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("graphstore: truncate: begin: %w", mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate: begin: %w", s.dialect.mapError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	// Serialize writers of this stream as the FIRST statement of the txn. No-op on
+	// SQLite; a per-stream pg_advisory_xact_lock on Postgres so the covering-snapshot
+	// read, the cut-anchor record, and the retention-gated DELETE serialize against a
+	// concurrent Append on the same stream (it shares the snapshot-row surface with
+	// WriteSnapshot). A lock_timeout maps to ErrBusy.
+	if err := s.dialect.lockStream(ctx, tx, streamID); err != nil {
+		return 0, fmt.Errorf("graphstore: truncate %q: lock stream: %w", streamID, s.dialect.mapError(err))
+	}
 
 	// A snapshot must cover exactly anchorSeq. This is also the "never past the
 	// latest durable snapshot" guard: anchorSeq is required to BE a covered_seq,
@@ -61,7 +70,7 @@ func (s *Store) TruncateBelowAnchor(ctx context.Context, streamID string, anchor
 		return 0, fmt.Errorf("graphstore: truncate %q at %d: %w", streamID, anchorSeq, ErrNoCoveringSnapshot)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("graphstore: truncate %q: reading covering snapshot: %w", streamID, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate %q: reading covering snapshot: %w", streamID, s.dialect.mapError(err))
 	}
 	var have [32]byte
 	copy(have[:], snapHash)
@@ -79,16 +88,16 @@ func (s *Store) TruncateBelowAnchor(ctx context.Context, streamID string, anchor
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already truncated at/above anchorSeq: nothing to delete. Idempotent.
 		if err := tx.Commit(); err != nil {
-			return 0, fmt.Errorf("graphstore: truncate %q: commit (no-op): %w", streamID, mapSQLiteBusy(err))
+			return 0, fmt.Errorf("graphstore: truncate %q: commit (no-op): %w", streamID, s.dialect.mapError(err))
 		}
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("graphstore: truncate %q: reading cut anchor at %d: %w", streamID, anchorSeq, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate %q: reading cut anchor at %d: %w", streamID, anchorSeq, s.dialect.mapError(err))
 	}
 
 	// Record the cut anchor on the covering snapshot row (write-gated).
-	if err := openSnapshotGate(ctx, tx); err != nil {
+	if err := openSnapshotGate(ctx, tx, s.dialect); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -96,10 +105,10 @@ func (s *Store) TruncateBelowAnchor(ctx context.Context, streamID string, anchor
 		cut, streamID, anchorSeq,
 	); err != nil {
 		return 0, errors.Join(
-			fmt.Errorf("graphstore: truncate %q: recording cut anchor: %w", streamID, mapSQLiteBusy(err)),
-			closeSnapshotGate(ctx, tx))
+			fmt.Errorf("graphstore: truncate %q: recording cut anchor: %w", streamID, s.dialect.mapError(err)),
+			closeSnapshotGate(ctx, tx, s.dialect))
 	}
-	if err := closeSnapshotGate(ctx, tx); err != nil {
+	if err := closeSnapshotGate(ctx, tx, s.dialect); err != nil {
 		return 0, err
 	}
 
@@ -109,25 +118,25 @@ func (s *Store) TruncateBelowAnchor(ctx context.Context, streamID string, anchor
 		 ON CONFLICT(stream_id) DO UPDATE SET max_seq = excluded.max_seq`,
 		streamID, anchorSeq,
 	); err != nil {
-		return 0, fmt.Errorf("graphstore: truncate %q: opening retention gate: %w", streamID, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate %q: opening retention gate: %w", streamID, s.dialect.mapError(err))
 	}
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM journal WHERE stream_id = ? AND seq <= ?`, streamID, anchorSeq,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("graphstore: truncate %q: deleting seq <= %d: %w", streamID, anchorSeq, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate %q: deleting seq <= %d: %w", streamID, anchorSeq, s.dialect.mapError(err))
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retention_gate WHERE stream_id = ?`, streamID,
 	); err != nil {
-		return 0, fmt.Errorf("graphstore: truncate %q: closing retention gate: %w", streamID, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate %q: closing retention gate: %w", streamID, s.dialect.mapError(err))
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("graphstore: truncate %q: rows affected: %w", streamID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("graphstore: truncate %q: commit: %w", streamID, mapSQLiteBusy(err))
+		return 0, fmt.Errorf("graphstore: truncate %q: commit: %w", streamID, s.dialect.mapError(err))
 	}
 	return n, nil
 }

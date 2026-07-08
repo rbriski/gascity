@@ -662,7 +662,7 @@ func (d *driver) append(eventType, idemToken string, payload any) error {
 	if err != nil {
 		return fmt.Errorf("lumen: begin projection tx: %w", err)
 	}
-	if err := graphstore.ApplyDelta(d.ctx, tx, delta); err != nil {
+	if err := d.store.ApplyDelta(d.ctx, tx, delta); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("lumen: apply delta for %s: %w", eventType, err)
 	}

@@ -16,8 +16,8 @@ import (
 // engine and the beads façade can run byte-for-byte the same query strings
 // against either SQLite (the default, embedded) or PostgreSQL (hosted). The
 // SQLite dialect is the default and reproduces the pre-P6 behavior exactly; the
-// Postgres dialect is reached only through openPostgres (unexported until P6.2
-// wires the seam into the engine paths).
+// Postgres dialect is reached through OpenPostgres, which P6.2 made write-ready by
+// wiring this seam into every read-decide-write engine path.
 //
 // The seam is deliberately narrow. Everything backend-varying lives behind these
 // methods: the DDL ladder (migrations), the schema-version probe, the
@@ -46,9 +46,10 @@ type dialect interface {
 	//             serializes every writer against every other.
 	//   postgres: pg_advisory_xact_lock over a hash of the stream id, held until
 	//             the transaction commits/rolls back.
-	// P6.1 defines the hook and both implementations; the read-decide-write
-	// entry points (Append, AcquireWriterLease, WriteSnapshot,
-	// TruncateBelowAnchor, RebuildTierA) call it in P6.2.
+	// It is called as the FIRST statement of every read-decide-write transaction
+	// (Append, AcquireWriterLease, WriteSnapshot, TruncateBelowAnchor,
+	// RebuildTierA), before any read, so the post-lock head/gate/lease read
+	// observes the previous holder's committed state and the CAS decides loudly.
 	lockStream(ctx context.Context, tx *sql.Tx, streamID string) error
 }
 

@@ -21,9 +21,20 @@ func (s *Store) AcquireWriterLease(ctx context.Context, streamID, holder string,
 	}
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
-		return WriterLease{}, fmt.Errorf("graphstore: acquire lease: begin: %w", mapSQLiteBusy(err))
+		return WriterLease{}, fmt.Errorf("graphstore: acquire lease: begin: %w", s.dialect.mapError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	// Serialize lease writers of this stream as the FIRST statement of the txn
+	// (blueprint §3.1). No-op on SQLite; a per-stream pg_advisory_xact_lock on
+	// Postgres so two acquirers can't both read an empty/expired lease row and each
+	// bump the epoch — the loser blocks, then reads the winner's committed epoch and
+	// re-decides steal/held under READ COMMITTED. The key is the same streamID the
+	// lease row is keyed on, so an Append and an AcquireWriterLease on the same
+	// stream serialize against each other. A lock_timeout maps to ErrBusy.
+	if err := s.dialect.lockStream(ctx, tx, streamID); err != nil {
+		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: lock stream: %w", streamID, s.dialect.mapError(err))
+	}
 
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
@@ -45,14 +56,14 @@ func (s *Store) AcquireWriterLease(ctx context.Context, streamID, holder string,
 			 VALUES (?, ?, 1, ?)`,
 			streamID, holder, expiresStr,
 		); err != nil {
-			return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: insert: %w", streamID, err)
+			return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: insert: %w", streamID, s.dialect.mapError(err))
 		}
 		if err := tx.Commit(); err != nil {
-			return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: commit: %w", streamID, err)
+			return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: commit: %w", streamID, s.dialect.mapError(err))
 		}
 		return WriterLease{StreamID: streamID, Holder: holder, Epoch: 1, ExpiresAt: expiresAt}, nil
 	case err != nil:
-		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: read: %w", streamID, err)
+		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: read: %w", streamID, s.dialect.mapError(err))
 	}
 
 	if curHolder != holder && !expired(curExpires, now) {
@@ -63,10 +74,10 @@ func (s *Store) AcquireWriterLease(ctx context.Context, streamID, holder string,
 		`UPDATE writer_lease SET holder = ?, epoch = ?, expires_at = ? WHERE stream_id = ?`,
 		holder, newEpoch, expiresStr, streamID,
 	); err != nil {
-		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: update: %w", streamID, err)
+		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: update: %w", streamID, s.dialect.mapError(err))
 	}
 	if err := tx.Commit(); err != nil {
-		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: commit: %w", streamID, err)
+		return WriterLease{}, fmt.Errorf("graphstore: acquire lease %q: commit: %w", streamID, s.dialect.mapError(err))
 	}
 	return WriterLease{StreamID: streamID, Holder: holder, Epoch: newEpoch, ExpiresAt: expiresAt}, nil
 }
@@ -82,7 +93,7 @@ func (s *Store) RenewWriterLease(ctx context.Context, lease WriterLease, ttl tim
 		expiresAt.Format(time.RFC3339Nano), lease.StreamID, lease.Holder, lease.Epoch,
 	)
 	if err != nil {
-		return WriterLease{}, fmt.Errorf("graphstore: renew lease %q: %w", lease.StreamID, err)
+		return WriterLease{}, fmt.Errorf("graphstore: renew lease %q: %w", lease.StreamID, s.dialect.mapError(err))
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -105,7 +116,7 @@ func (s *Store) ReleaseWriterLease(ctx context.Context, lease WriterLease) error
 		  WHERE stream_id = ? AND holder = ? AND epoch = ?`,
 		time.Unix(0, 0).UTC().Format(time.RFC3339Nano), lease.StreamID, lease.Holder, lease.Epoch,
 	); err != nil {
-		return fmt.Errorf("graphstore: release lease %q: %w", lease.StreamID, err)
+		return fmt.Errorf("graphstore: release lease %q: %w", lease.StreamID, s.dialect.mapError(err))
 	}
 	return nil
 }

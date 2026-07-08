@@ -169,3 +169,52 @@ func TestCmdSlingRemote_JSONOutput(t *testing.T) {
 		t.Errorf("json missing schema_version/success: %v", got)
 	}
 }
+
+// TestCmdSlingRemote_ForwardsMetadataFlags proves --merge/--no-convoy/--no-formula
+// forward to the server instead of being refused (C7).
+func TestCmdSlingRemote_ForwardsMetadataFlags(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"routed","target":"mayor","bead":"BL-9"}`))
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), []string{"mayor", "BL-9"},
+		false, false, false, "", nil, "direct" /*merge*/, true /*noConvoy*/, false /*owned*/, false, "", true /*noFormula*/, false, false, "", "", false, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	for _, want := range []string{`"merge":"direct"`, `"no_convoy":true`, `"no_formula":true`} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("body %q missing %q", gotBody, want)
+		}
+	}
+}
+
+// TestCmdSlingRemote_OnMapsToAttach proves `--on F` maps onto the server's
+// attach mode (formula + attached_bead_id), not a refusal (C7).
+// TestCmdSlingRemote_RefusesOn proves --on stays refused for a remote city: its
+// per-child convoy expansion is local-only, so the server would attach the wisp
+// to a convoy container instead of each child (a silent divergence a red-team
+// caught). A clear refusal is safer until the server expands containers.
+func TestCmdSlingRemote_RefusesOn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("server must not be contacted for a refused --on")
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), []string{"mayor", "BL-3"},
+		false, false, false, "", nil, "", false, false, false, "review" /*onFormula*/, false, false, false, "", "", false, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (--on refused); stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "--on") {
+		t.Fatalf("stderr = %q, want --on refusal", errb.String())
+	}
+}

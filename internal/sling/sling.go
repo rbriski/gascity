@@ -269,6 +269,12 @@ type FormulaOpts struct {
 	Merge string
 	Nudge bool
 	Force bool
+	// NoConvoy and Owned mirror RouteOpts. Meaningful on AttachFormula (attached
+	// routes are !IsFormula so auto-convoy applies); a no-op on a fresh
+	// LaunchFormula, matching the Reassign precedent below. Kept here so the API
+	// formula paths honor the wire no_convoy/owned fields.
+	NoConvoy bool
+	Owned    bool
 	// Reassign clears any existing human assignee before routing. Meaningful
 	// on AttachFormula (an existing bead may be claimed); a no-op on a fresh
 	// LaunchFormula (a minted root bead has no assignee). Kept here so the API
@@ -294,6 +300,7 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
+		NoFormula:     opts.NoFormula,
 	}, s.deps, s.deps.Store)
 }
 
@@ -306,6 +313,8 @@ func (s *Sling) LaunchFormula(_ context.Context, formulaName string, target conf
 		Title:         opts.Title,
 		Vars:          opts.Vars,
 		Merge:         opts.Merge,
+		NoConvoy:      opts.NoConvoy,
+		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		Reassign:      opts.Reassign,
@@ -325,6 +334,8 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		Title:         opts.Title,
 		Vars:          opts.Vars,
 		Merge:         opts.Merge,
+		NoConvoy:      opts.NoConvoy,
+		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		Reassign:      opts.Reassign,

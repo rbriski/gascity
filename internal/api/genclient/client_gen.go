@@ -3122,6 +3122,18 @@ type SlingInputBody struct {
 	// Formula Formula name for workflow launch.
 	Formula *string `json:"formula,omitempty"`
 
+	// Merge Merge strategy: direct, mr, or local.
+	Merge *string `json:"merge,omitempty"`
+
+	// NoConvoy Do not create an auto-convoy for the routed bead.
+	NoConvoy *bool `json:"no_convoy,omitempty"`
+
+	// NoFormula Suppress the target's default_sling_formula even when configured.
+	NoFormula *bool `json:"no_formula,omitempty"`
+
+	// Owned Mark the routed bead as owned by the target.
+	Owned *bool `json:"owned,omitempty"`
+
 	// Reassign Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.
 	Reassign *bool `json:"reassign,omitempty"`
 

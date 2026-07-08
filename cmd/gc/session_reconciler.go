@@ -40,21 +40,9 @@ type wakeTarget struct {
 	alive   bool
 }
 
-func lifecycleTimerBlocker(metadata map[string]string, now time.Time) string {
-	switch {
-	case metadataTimeInFuture(metadata["held_until"], now):
-		return "user_hold"
-	case metadataTimeInFuture(metadata["quarantined_until"], now):
-		return "quarantine"
-	default:
-		return ""
-	}
-}
-
-// lifecycleTimerBlockerInfo is the session.Info sibling of lifecycleTimerBlocker:
-// it reports the active lifecycle timer blocker (user hold / quarantine) from the
-// typed Info.HeldUntil / Info.QuarantinedUntil mirrors, using the same
-// metadataTimeInFuture rule. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+// lifecycleTimerBlockerInfo reports the active lifecycle timer blocker (user hold /
+// quarantine) from the typed Info.HeldUntil / Info.QuarantinedUntil mirrors, using
+// the metadataTimeInFuture rule.
 func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	switch {
 	case metadataTimeInFuture(info.HeldUntil, now):
@@ -66,15 +54,9 @@ func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	}
 }
 
-func isDrainAckStopPending(session beads.Bead) bool {
-	return strings.TrimSpace(session.Metadata["state"]) == string(sessionpkg.StateDraining) &&
-		strings.TrimSpace(session.Metadata["state_reason"]) == sessionpkg.DrainAckStopPendingReason
-}
-
-// isDrainAckStopPendingInfo is the session.Info sibling of isDrainAckStopPending:
-// it reports whether a session is parked in the drain-ack stop-pending state from
-// the typed Info.MetadataState (raw "state") / Info.StateReason mirrors, with the
-// same TrimSpace compares. Equivalence-proven (TestSessionClassifierInfoEquivalence).
+// isDrainAckStopPendingInfo reports whether a session is parked in the drain-ack
+// stop-pending state from the typed Info.MetadataState (raw "state") /
+// Info.StateReason mirrors, with TrimSpace compares.
 func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 	return strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateDraining) &&
 		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
@@ -146,25 +128,9 @@ func assignedWorkDrainCancelReasonInfo(info sessionpkg.Info, sp runtime.Provider
 	return "orphaned"
 }
 
-func resetPendingCommittedAt(session beads.Bead) (string, time.Time, bool) {
-	if strings.TrimSpace(session.Metadata["continuation_reset_pending"]) != "true" {
-		return "", time.Time{}, false
-	}
-	raw := strings.TrimSpace(session.Metadata[sessionpkg.ResetCommittedAtKey])
-	if raw == "" {
-		return "", time.Time{}, false
-	}
-	committedAt, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return "", time.Time{}, false
-	}
-	return raw, committedAt, true
-}
-
-// resetPendingCommittedAtInfo is the session.Info mirror of
-// resetPendingCommittedAt: it reads the raw continuation_reset_pending and
+// resetPendingCommittedAtInfo reads the raw continuation_reset_pending and
 // reset_committed_at markers (Info.ContinuationResetPending / Info.ResetCommittedAt)
-// with the same trim + RFC3339 parse rules.
+// with trim + RFC3339 parse rules.
 func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool) {
 	if strings.TrimSpace(info.ContinuationResetPending) != "true" {
 		return "", time.Time{}, false
@@ -369,7 +335,7 @@ type drainAckFinalizeResult struct {
 // (already ApplyPatchInfo-folded inside the call) wins next; otherwise the Path-A
 // ClosePatch folds via ApplyPatch and its in-memory close folds via MarkClosed.
 // The caller must pass the session's coherent snapshot entry — infoByID[id] equal
-// to the pre-call InfoFromPersistedBead(*session) — which holds at every finalize
+// to the pre-call Info projection of *session — which holds at every finalize
 // call site (top-of-loop / post-heal / post-zombie refresh, no un-refreshed
 // *session mutation reaches the call).
 func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
@@ -410,8 +376,8 @@ func finalizeDrainAckStoppedSession(
 	// 5b); the raw *session is retained only for the whole-bead raw-by-design
 	// helpers below (sessionHasOpenAssignedWorkForReachableStore,
 	// closeSessionBeadIfReachableStoreUnassigned, recordDrainAckAssignedWorkEvent,
-	// sessionAgentMetricIdentity) and the store.Get witness reprojection. Callers
-	// pass the coherent infoByID[session.ID] (== InfoFromPersistedBead(*session)).
+	// sessionAgentMetricIdentity) and the front-door Get witness refresh. Callers
+	// pass the coherent infoByID[session.ID] (== the Info projection of *session).
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if template == "" {
 		template = normalizedSessionTemplateInfo(info, cfg)
@@ -466,9 +432,25 @@ func finalizeDrainAckStoppedSession(
 			// not a Metadata bracket write, and asserted by the telemetry close-path test).
 			return drainAckFinalizeResult{batch: closePatch, closed: true}
 		}
-		if latest, err := store.Get(session.ID); err == nil && latest.Status == "closed" {
-			session.Status = latest.Status
-			session.Metadata = latest.Metadata
+		if witnessInfo, err := sessionFrontDoor(store).Get(session.ID); err == nil && witnessInfo.Closed {
+			// NDI witness close: another observer already closed the bead. The
+			// session-front-door Get returns the authoritative closed Info directly —
+			// the one documented status-close Store.Get refresh (a metadata patch
+			// cannot express a status close, so no local fold reproduces it). It is a
+			// rare non-fast-path branch, so it does not affect the tick Get budget.
+			// The raw session.Status="closed" struct-field set stays (asserted by the
+			// telemetry close-path test); the raw metadata adoption
+			// (session.Metadata = latest.Metadata) is gone with the lockstep (W5) —
+			// no later this-tick reader consumes the raw bead metadata here (the
+			// session `continue`s and the post-loop scans read only orderedBeads[i].ID).
+			// This is behaviorally equivalent to the old raw store.Get + reproject on
+			// well-formed session beads, with two intentional front-door deltas: Get
+			// applies the IsSessionBeadOrRepairable class gate (a corrupt non-session
+			// bead admitted only by a stale session label now errs → falls through to
+			// the assigned-work close gate instead of witnessing) and projects the
+			// fully-latest bead fields rather than *session's carried-forward ones —
+			// both confined to corrupt-class / concurrent-mutation edges.
+			session.Status = "closed"
 			if dops != nil {
 				_ = dops.clearDrain(name)
 			}
@@ -477,12 +459,6 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(session.ID)
 			}
 			recordStopped(false)
-			// NDI witness close: another observer already closed the bead and this
-			// call adopted its authoritative metadata wholesale, so the post-Info is
-			// a full reprojection, not a patch fold. This is the one finalize path
-			// still reading the raw bead; it is byte-identical to the old
-			// refreshSessionInfo and is reworked when the lockstep drops.
-			witnessInfo := sessionpkg.InfoFromPersistedBead(*session)
 			return drainAckFinalizeResult{witnessInfo: &witnessInfo}
 		}
 		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
@@ -796,6 +772,9 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	return false
 }
 
+// WI-6: raw form retained — the reconciler forward pass and lifecycle-parallel
+// still call it on raw beads; the pendingCreateStartInFlightInfo twin is
+// oracle-pinned and already used where the caller holds an Info.
 func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" &&
 		sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) != sessionpkg.StateCreating {

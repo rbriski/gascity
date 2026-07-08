@@ -239,10 +239,10 @@ type Info struct {
 	CreationCompleteAt string // creation_complete_at (raw)
 	// ContinuationResetPending is the RAW continuation_reset_pending metadata.
 	// The reconciler's restart-handoff path branches on it (trimmed) == "true"
-	// via resetPendingCommittedAt; the Info mirror keeps the raw value.
+	// via resetPendingCommittedAtInfo; the Info mirror keeps the raw value.
 	ContinuationResetPending string // continuation_reset_pending (raw)
 	// ResetCommittedAt is the RAW reset_committed_at metadata (RFC3339 or empty),
-	// the durable marker for when a restart handoff committed. resetPendingCommittedAt
+	// the durable marker for when a restart handoff committed. resetPendingCommittedAtInfo
 	// parses it; the Info mirror keeps the raw value.
 	ResetCommittedAt string // reset_committed_at (raw)
 	// Generation is the RAW generation metadata, verbatim. The drain/wake

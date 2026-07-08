@@ -12,6 +12,11 @@ import (
 // template_overrides participate in the same fingerprint everywhere. Start
 // paths may keep their pre-start assembly inline when they need setup-specific
 // diagnostics before storing first-start metadata.
+//
+// WI-6: this raw-bead form survives WI-5 only because its sole remaining caller
+// is the WI-6-owned session_beads.go rebaseline lane (sessionHashRebaselineMetadata).
+// Every other consumer already uses sessionCoreConfigForHashInfo; the raw form
+// dies when that caller takes a session.Info.
 func sessionCoreConfigForHash(tp TemplateParams, session beads.Bead) runtime.Config {
 	return sessionCoreConfigForHashInfo(tp, sessionpkg.InfoFromPersistedBead(session))
 }

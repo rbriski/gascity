@@ -74,10 +74,41 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 // (cityPath, client, nilReason). Together with routeRead this is the
 // resolver + routing unification the CityClient design calls for.
 func routeReadCmd(cmdName string, stderr io.Writer, localSeam func(cityPath string) (*api.Client, string), route func(cityPath string, c *api.Client, nilReason string) int) int {
+	return routeReadCmdWithHooks(cmdName, stderr, readCmdHooks{}, localSeam, route)
+}
+
+// readCmdHooks are optional overrides for routeReadCmdWithHooks. A zero value
+// reproduces routeReadCmd exactly, so all plain callers are unaffected.
+type readCmdHooks struct {
+	// guard runs AFTER resolveReadTarget (so a resolve error still takes
+	// precedence) and BEFORE both the remote dispatch and the local seam — a
+	// short-circuit therefore never touches the seam's side effects (the
+	// classifyGCNoAPI stderr warning, the controller-liveness probe, config.Load;
+	// the exact b4592cb79/6f09f2172 ordering break). It returns (code, stop):
+	// stop=true short-circuits the command with code.
+	guard func() (code int, stop bool)
+	// onResolveErr replaces the default "gc <cmd>: <err>" + exit 1 on a
+	// resolveReadTarget error — e.g. mail peek falls back to a local read instead
+	// of failing. When nil the default print+exit-1 applies.
+	onResolveErr func(err error) int
+}
+
+// routeReadCmdWithHooks is routeReadCmd with optional hooks. Ordering contract:
+// resolveReadTarget → onResolveErr (or default print+exit-1) on error → guard
+// (post-resolve, pre-dispatch) → remote route | local seam+route.
+func routeReadCmdWithHooks(cmdName string, stderr io.Writer, hooks readCmdHooks, localSeam func(cityPath string) (*api.Client, string), route func(cityPath string, c *api.Client, nilReason string) int) int {
 	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
+		if hooks.onResolveErr != nil {
+			return hooks.onResolveErr(err)
+		}
 		fmt.Fprintf(stderr, "gc %s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if hooks.guard != nil {
+		if code, stop := hooks.guard(); stop {
+			return code
+		}
 	}
 	if isRemote {
 		return route("", remoteC, "")

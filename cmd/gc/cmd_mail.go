@@ -2010,19 +2010,21 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 }
 
 func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	// The missing-ID guard stays PRE-resolve: in the hand-written form it ran
+	// before resolveReadTarget, so on the no-args path resolution/provider side
+	// effects never happen. Keeping it here preserves that exactly.
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail peek: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		return doMailPeekFallback(args, jsonOut, stdout, stderr)
-	}
-	if isRemote {
-		return routeMailPeek("", args, remoteC, "", jsonOut, stdout, stderr)
-	}
-	c, reason := mailPeekAPIClient(cityPath)
-	return routeMailPeek(cityPath, args, c, reason, jsonOut, stdout, stderr)
+	// onResolveErr preserves mail peek's distinctive behavior: a resolve error
+	// (including a remote-client build error) falls back to the local read with
+	// no error line and no route= log — exactly the old `if err != nil` branch.
+	return routeReadCmdWithHooks("mail peek", stderr, readCmdHooks{
+		onResolveErr: func(error) int { return doMailPeekFallback(args, jsonOut, stdout, stderr) },
+	}, mailPeekAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeMailPeek(cityPath, args, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // mailPeekAPIClient returns (client, "") when the API path is available,

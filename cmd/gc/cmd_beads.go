@@ -179,30 +179,26 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 // cmdBeadsShow is the CLI entry point for "gc beads show". Routes through
 // the supervisor API and falls back to a direct store lookup.
 //
-// This one stays hand-written rather than using routeReadCmd: the missing-id
-// guard must fire AFTER resolveReadTarget (so a resolve error still takes
-// precedence) but BEFORE the local beadsShowAPIClient seam (whose apiClient()
-// call has observable side effects — the classifyGCNoAPI stderr warning on a
-// malformed GC_NO_API, plus a controller-liveness probe and config.Load).
-// routeReadCmd bundles resolve+seam with no hook between them, so folding this
-// guard in either direction changes byte-for-byte stderr on an edge path.
+// It uses routeReadCmdWithHooks with a guard hook because the missing-id guard
+// must fire AFTER resolveReadTarget (so a resolve error still takes precedence)
+// but BEFORE the local beadsShowAPIClient seam (whose apiClient() call has
+// observable side effects — the classifyGCNoAPI stderr warning on a malformed
+// GC_NO_API, plus a controller-liveness probe and config.Load). The hook runs in
+// exactly that slot. parseBeadFormat is pure, so hoisting it above the call is
+// side-effect-free.
 func cmdBeadsShow(args []string, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	format, rest := parseBeadFormat(args)
-	if len(rest) == 0 {
-		fmt.Fprintln(stderr, "gc beads show: missing bead id") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	beadID := rest[0]
-	if isRemote {
-		return routeBeadsShow("", remoteC, "", beadID, format, stdout, stderr)
-	}
-	c, reason := beadsShowAPIClient(cityPath)
-	return routeBeadsShow(cityPath, c, reason, beadID, format, stdout, stderr)
+	return routeReadCmdWithHooks("beads show", stderr, readCmdHooks{
+		guard: func() (int, bool) {
+			if len(rest) == 0 {
+				fmt.Fprintln(stderr, "gc beads show: missing bead id") //nolint:errcheck // best-effort stderr
+				return 1, true
+			}
+			return 0, false
+		},
+	}, beadsShowAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeBeadsShow(cityPath, c, nilReason, rest[0], format, stdout, stderr)
+	})
 }
 
 var beadsShowAPIClient = func(cityPath string) (*api.Client, string) {

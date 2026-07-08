@@ -306,16 +306,9 @@ child issues.`,
 
 // cmdConvoyList is the CLI entry point for listing convoys.
 func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeConvoyList("", remoteC, "", jsonOut, stdout, stderr)
-	}
-	c, reason := convoyListAPIClient(cityPath)
-	return routeConvoyList(cityPath, c, reason, jsonOut, stdout, stderr)
+	return routeReadCmd("convoy list", stderr, convoyListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeConvoyList(cityPath, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // convoyListAPIClient returns (client, "") when the API path is available,

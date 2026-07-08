@@ -64,3 +64,24 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 	logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	return localRender()
 }
+
+// routeReadCmd collapses the resolve boilerplate shared by every routed read
+// command's CLI entry point: resolveReadTarget then dispatch — remote → route
+// with the remote client and no fallback (gate G1); local → resolve the
+// per-command loopback seam and route with fallback. localSeam is the command's
+// overridable *APIClient seam (kept per-command so the six-row matrix tests can
+// inject fakes); route invokes the command's routeX with the resolved
+// (cityPath, client, nilReason). Together with routeRead this is the
+// resolver + routing unification the CityClient design calls for.
+func routeReadCmd(cmdName string, stderr io.Writer, localSeam func(cityPath string) (*api.Client, string), route func(cityPath string, c *api.Client, nilReason string) int) int {
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc %s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if isRemote {
+		return route("", remoteC, "")
+	}
+	c, reason := localSeam(cityPath)
+	return route(cityPath, c, reason)
+}

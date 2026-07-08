@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -170,6 +171,61 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 		c.dirty[id] = struct{}{}
 	}
 	c.clearDependentReadyProjectionsLocked(id)
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	if notify {
+		c.notifyChange("bead.updated", updated)
+	}
+	return true, nil
+}
+
+// SetMetadataIf forwards the conditional compare-and-set to the backing store
+// and refreshes the cached row only when the swap succeeds, so a CAS that changes
+// a cached value never leaves a stale cache (read-after-CAS sees the new value).
+// A backing store without the capability is a loud ErrConditionalMetadataUnsupported,
+// mirroring ReleaseIfCurrent — never a silent no-op.
+func (c *CachingStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
+	cas, ok := ConditionalMetadataStoreFor(c.backing)
+	if !ok {
+		return false, ErrConditionalMetadataUnsupported
+	}
+	swapped, err := cas.SetMetadataIf(ctx, id, key, expected, next)
+	if err != nil || !swapped {
+		return swapped, err
+	}
+
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after set-metadata-if")
+	var updated Bead
+	notify := false
+	c.mu.Lock()
+	c.noteLocalMutationLocked(id)
+	if refreshed {
+		c.beads[id] = cloneBead(fresh)
+		c.deps[id] = depsFromBeadFields(fresh)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		updated = cloneBead(fresh)
+		notify = true
+	} else if b, ok := c.beads[id]; ok {
+		// Refresh failed but the row is cached: hand-patch the swapped value, but
+		// mark the row DIRTY and bump UpdatedAt — mirroring ReleaseIfCurrent's
+		// fallback. The backing bumped updated_at, and a hand-patched row is not
+		// authoritative, so a cache-only read must refuse it (ErrCacheUnavailable)
+		// and re-fetch rather than serve a laundered-clean guess.
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string)
+		}
+		b.Metadata[key] = next
+		b.UpdatedAt = time.Now()
+		c.beads[id] = b
+		c.dirty[id] = struct{}{}
+		delete(c.deletedSeq, id)
+		updated = cloneBead(b)
+		notify = true
+	} else {
+		c.dirty[id] = struct{}{}
+	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()

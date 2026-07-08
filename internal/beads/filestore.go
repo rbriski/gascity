@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -243,6 +244,32 @@ func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 	released, err := fs.MemStore.ReleaseIfCurrent(id, expectedAssignee)
 	if err != nil || !released {
 		return released, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return false, err
+	}
+	return true, nil
+}
+
+// SetMetadataIf atomically compare-and-sets a single metadata key while holding
+// the file-store write lock, then flushes to disk. A non-match (missing bead or
+// value mismatch) writes nothing and leaves the file untouched. See
+// ConditionalMetadataStore for the full contract.
+func (fs *FileStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return false, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return false, err
+	}
+	snap := fs.snapshotLocked()
+	swapped, err := fs.MemStore.SetMetadataIf(ctx, id, key, expected, next)
+	if err != nil || !swapped {
+		return swapped, err
 	}
 	if err := fs.save(); err != nil {
 		fs.restoreFrom(snap.seq, snap.beads, snap.deps)

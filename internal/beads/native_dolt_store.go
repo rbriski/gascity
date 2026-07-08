@@ -634,8 +634,16 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	released := false
+	var released bool
 	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: release bead %s if current", id), func(tx beadslib.Transaction) error {
+		// Reset at the top of every (re)entry so a withRetry replay re-decides
+		// from the freshly-read state. Dolt server-mode RunInTransaction wraps
+		// withRetry, which REPLAYS this whole closure on a retryable connection
+		// error (including a commit-phase failure). A released flag captured
+		// outside would survive a doomed attempt and report a phantom release
+		// after a concurrent writer changed the row — the same latent flaw as
+		// SetMetadataIf. P2.3's fence path can drive this replay.
+		released = false
 		issue, err := tx.GetIssue(ctx, id)
 		if err != nil {
 			err = nativeStoreError(id, err)
@@ -660,6 +668,72 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, err
 	}
 	return released, nil
+}
+
+// SetMetadataIf atomically sets metadata[key]=next only when the bead's current
+// observed value for key equals expected, inside one native Dolt transaction
+// (read-compare-write, mirroring ReleaseIfCurrent). This tx-scoped CAS also
+// closes the whole-map merge race that plain SetMetadata's Get→merge→Update pair
+// carries for this key. See ConditionalMetadataStore for the full contract.
+func (s *NativeDoltStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	opCtx, cancel := nativeDoltOperationContext(ctx)
+	defer cancel()
+	var swapped bool
+	err = storage.RunInTransaction(opCtx, fmt.Sprintf("gc: cas metadata %q on %s if current", key, id), func(tx beadslib.Transaction) error {
+		// Reset the decision at the top of every (re)entry. Dolt server-mode
+		// RunInTransaction wraps withRetry, which REPLAYS this whole closure on a
+		// retryable connection error — including a commit-phase failure where the
+		// write never lands. If swapped were captured outside and left set from a
+		// doomed attempt, a replay whose fresh read no longer matches expected (a
+		// concurrent writer moved the value out from under us) would return early
+		// and still report a phantom win: a silent lost update. Re-deciding from
+		// the freshly-read value on each replay degrades the ambiguous-commit case
+		// to a fail-safe false-negative instead. See ConditionalMetadataStore.
+		swapped = false
+		issue, err := tx.GetIssue(opCtx, id)
+		if err != nil {
+			err = nativeStoreError(id, err)
+			if errors.Is(err, ErrNotFound) {
+				return nil // missing bead → non-match
+			}
+			return err
+		}
+		if issue == nil {
+			return nil // missing bead → non-match
+		}
+		metadata, err := metadataMapFromNative(issue.Metadata)
+		if err != nil {
+			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+		}
+		current := metadata[key] // absent key observes as ""
+		if current != expected {
+			return nil // value mismatch → non-match
+		}
+		if next != current {
+			if metadata == nil {
+				metadata = make(map[string]string, 1)
+			}
+			metadata[key] = next
+			raw, err := metadataRawFromMap(metadata)
+			if err != nil {
+				return err
+			}
+			if err := tx.UpdateIssue(opCtx, id, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
+				return nativeStoreError(id, err)
+			}
+		}
+		swapped = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return swapped, nil
 }
 
 // Close sets a bead's status to closed through the upstream beads storage layer.

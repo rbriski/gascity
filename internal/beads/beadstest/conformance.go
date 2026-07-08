@@ -4,8 +4,10 @@
 package beadstest
 
 import (
+	"context"
 	"errors"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -839,6 +841,214 @@ func RunMetadataTests(t *testing.T, newStore func() beads.Store) {
 		_, ok = got.Metadata["nonexistent"]
 		if ok {
 			t.Error("Metadata[\"nonexistent\"] present, want absent")
+		}
+	})
+}
+
+// RunConditionalMetadataTests runs the shared conformance suite for the
+// ConditionalMetadataStore.SetMetadataIf compare-and-set capability. Call it for
+// every Store whose backend maintains real, mutable metadata state (MemStore,
+// FileStore, NativeDoltStore, JournalStore, and their caching-wrapped variants).
+// The BdStore exercises its raw `bd sql` path via dedicated fake-runner unit
+// tests plus a real-bd integration pin, so it is intentionally not enrolled here.
+//
+// The concurrent compare-and-set subtest (ConcurrentSingleWinner) is enrolled
+// only for backends whose SetMetadataIf serializes cleanly in-process (MemStore,
+// FileStore, and JournalStore), gated by concurrentSafe — it proves the S0.4
+// loud-CAS property (exactly one winner) under -race.
+func RunConditionalMetadataTests(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+	runConditionalMetadataTests(t, newStore, false)
+}
+
+// RunConditionalMetadataTestsConcurrent is RunConditionalMetadataTests plus the
+// concurrent single-winner subtest, for backends that serialize SetMetadataIf
+// cleanly in-process.
+func RunConditionalMetadataTestsConcurrent(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+	runConditionalMetadataTests(t, newStore, true)
+}
+
+func runConditionalMetadataTests(t *testing.T, newStore func() beads.Store, concurrentSafe bool) {
+	t.Helper()
+	const key = "gc.control_epoch" // a dotted key: pins that stores treat it as one key
+
+	casFor := func(t *testing.T, s beads.Store) beads.ConditionalMetadataStore {
+		t.Helper()
+		cas, ok := beads.ConditionalMetadataStoreFor(s)
+		if !ok {
+			t.Fatalf("ConditionalMetadataStoreFor = false, want the store to expose SetMetadataIf")
+		}
+		return cas
+	}
+
+	create := func(t *testing.T, s beads.Store, meta map[string]string) beads.Bead {
+		t.Helper()
+		b, err := s.Create(beads.Bead{Title: "cas", Metadata: meta})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return b
+	}
+
+	getValue := func(t *testing.T, s beads.Store, id string) string {
+		t.Helper()
+		got, err := s.Get(id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return got.Metadata[key]
+	}
+
+	t.Run("SwapsOnMatch", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, map[string]string{key: "1"})
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), b.ID, key, "1", "2")
+		if err != nil {
+			t.Fatalf("SetMetadataIf: %v", err)
+		}
+		if !swapped {
+			t.Fatal("swapped = false, want true on a matching precondition")
+		}
+		if got := getValue(t, s, b.ID); got != "2" {
+			t.Errorf("value = %q, want %q", got, "2")
+		}
+	})
+
+	t.Run("NoOpOnMismatchLeavesValueUnchanged", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, map[string]string{key: "1"})
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), b.ID, key, "9", "2")
+		if err != nil {
+			t.Fatalf("SetMetadataIf returned error on a value mismatch, want (false, nil): %v", err)
+		}
+		if swapped {
+			t.Fatal("swapped = true, want false on a value mismatch")
+		}
+		if got := getValue(t, s, b.ID); got != "1" {
+			t.Errorf("value = %q, want unchanged %q", got, "1")
+		}
+	})
+
+	t.Run("SetToSameValueWhenPreconditionHolds", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, map[string]string{key: "7"})
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), b.ID, key, "7", "7")
+		if err != nil {
+			t.Fatalf("SetMetadataIf: %v", err)
+		}
+		if !swapped {
+			t.Fatal("swapped = false, want true: a precondition-holding no-op still reports success")
+		}
+		if got := getValue(t, s, b.ID); got != "7" {
+			t.Errorf("value = %q, want %q", got, "7")
+		}
+	})
+
+	t.Run("ExpectedEmptyMatchesAbsentKey", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, map[string]string{"other": "x"}) // key is absent
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), b.ID, key, "", "first")
+		if err != nil {
+			t.Fatalf("SetMetadataIf: %v", err)
+		}
+		if !swapped {
+			t.Fatal("swapped = false, want true: expected=\"\" matches an absent key (observed as \"\")")
+		}
+		if got := getValue(t, s, b.ID); got != "first" {
+			t.Errorf("value = %q, want %q", got, "first")
+		}
+	})
+
+	t.Run("ExpectedNonEmptyDoesNotMatchAbsentKey", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, nil) // no metadata at all
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), b.ID, key, "1", "2")
+		if err != nil {
+			t.Fatalf("SetMetadataIf returned error, want (false, nil): %v", err)
+		}
+		if swapped {
+			t.Fatal("swapped = true, want false: a non-empty expected must not match an absent key")
+		}
+		if got := getValue(t, s, b.ID); got != "" {
+			t.Errorf("value = %q, want absent/empty", got)
+		}
+	})
+
+	t.Run("NextEmptyClearsKeyObservably", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, map[string]string{key: "active"})
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), b.ID, key, "active", "")
+		if err != nil {
+			t.Fatalf("SetMetadataIf: %v", err)
+		}
+		if !swapped {
+			t.Fatal("swapped = false, want true when clearing a matching key to empty")
+		}
+		if got := getValue(t, s, b.ID); got != "" {
+			t.Errorf("value = %q, want observable empty after a next=\"\" clear", got)
+		}
+	})
+
+	t.Run("MissingBeadIsNonMatch", func(t *testing.T) {
+		s := newStore()
+		// Seed one bead so the store isn't empty, then CAS a different id.
+		create(t, s, map[string]string{key: "1"})
+		swapped, err := casFor(t, s).SetMetadataIf(context.Background(), "cas-missing-999", key, "1", "2")
+		if err != nil {
+			t.Fatalf("SetMetadataIf on a missing bead returned error, want (false, nil): %v", err)
+		}
+		if swapped {
+			t.Fatal("swapped = true, want false: a missing bead is a non-match")
+		}
+	})
+
+	if !concurrentSafe {
+		return
+	}
+
+	t.Run("ConcurrentSingleWinner", func(t *testing.T) {
+		s := newStore()
+		b := create(t, s, map[string]string{key: "0"})
+		cas := casFor(t, s)
+
+		type outcome struct {
+			next    string
+			swapped bool
+			err     error
+		}
+		nexts := []string{"A", "B"}
+		results := make([]outcome, len(nexts))
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i, next := range nexts {
+			wg.Add(1)
+			go func(i int, next string) {
+				defer wg.Done()
+				<-start
+				swapped, err := cas.SetMetadataIf(context.Background(), b.ID, key, "0", next)
+				results[i] = outcome{next: next, swapped: swapped, err: err}
+			}(i, next)
+		}
+		close(start)
+		wg.Wait()
+
+		winners := 0
+		winningNext := ""
+		for _, r := range results {
+			if r.err != nil {
+				t.Fatalf("concurrent SetMetadataIf(next=%q) errored, want at most one winner and never an error: %v", r.next, r.err)
+			}
+			if r.swapped {
+				winners++
+				winningNext = r.next
+			}
+		}
+		if winners != 1 {
+			t.Fatalf("winners = %d, want exactly 1 (the loud-CAS property)", winners)
+		}
+		if got := getValue(t, s, b.ID); got != winningNext {
+			t.Errorf("final value = %q, want the winner's %q", got, winningNext)
 		}
 	})
 }

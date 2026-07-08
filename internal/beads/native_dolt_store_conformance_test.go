@@ -9,4 +9,5 @@ import (
 
 func TestNativeDoltStoreConformance(t *testing.T) {
 	beadstest.RunStoreTests(t, beads.NewNativeDoltStoreForConformance)
+	beadstest.RunConditionalMetadataTests(t, beads.NewNativeDoltStoreForConformance)
 }

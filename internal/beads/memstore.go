@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -189,6 +190,33 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		m.beads[i].Status = "open"
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
+		return true, nil
+	}
+	return false, nil
+}
+
+// SetMetadataIf atomically sets metadata[key]=next only when the bead's current
+// observed value for key equals expected. See ConditionalMetadataStore for the
+// full contract: a missing bead or a value mismatch is a non-match (false, nil);
+// a precondition-holding no-op (next == expected) still reports true.
+func (m *MemStore) SetMetadataIf(_ context.Context, id, key, expected, next string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID != id {
+			continue
+		}
+		current := m.beads[i].Metadata[key] // absent key observes as ""
+		if current != expected {
+			return false, nil
+		}
+		if next != current {
+			if m.beads[i].Metadata == nil {
+				m.beads[i].Metadata = make(map[string]string)
+			}
+			m.beads[i].Metadata[key] = next
+			m.beads[i].UpdatedAt = time.Now()
+		}
 		return true, nil
 	}
 	return false, nil

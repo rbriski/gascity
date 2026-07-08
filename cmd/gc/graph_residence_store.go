@@ -74,6 +74,7 @@ var (
 	_ beads.ControlFrontierHandleProvider    = (*residenceRoutingGraphStore)(nil)
 	_ beads.AppendLogHandleProvider          = (*residenceRoutingGraphStore)(nil)
 	_ beads.ConditionalVersionHandleProvider = (*residenceRoutingGraphStore)(nil)
+	_ beads.ConditionalMetadataStore         = (*residenceRoutingGraphStore)(nil)
 	_ beads.CachedReader                     = residenceRoutingReader{}
 	_ beads.LiveReader                       = residenceRoutingReader{}
 )
@@ -307,6 +308,28 @@ func (s *residenceRoutingGraphStore) SetMetadataBatch(id string, kvs map[string]
 		return err
 	}
 	return leg.SetMetadataBatch(id, kvs)
+}
+
+// SetMetadataIf routes the metadata compare-and-set by the bead's residence to
+// the owning leg's ConditionalMetadataStore — the same per-id routing as every
+// other write, not a journal-only forward, because a legacy control bead lives on
+// the legacy leg. A migrating root is blocked and a hard probe error fails the
+// write. When the routed leg does not expose the capability the router returns a
+// loud ErrConditionalMetadataUnsupported (hard-error, never a silent no-op),
+// mirroring how CachingStore reports an unsupported CAS.
+func (s *residenceRoutingGraphStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
+	if err := s.guardNotMigrating(id); err != nil {
+		return false, err
+	}
+	leg, err := s.legFor(id)
+	if err != nil {
+		return false, err
+	}
+	cas, ok := beads.ConditionalMetadataStoreFor(leg)
+	if !ok {
+		return false, fmt.Errorf("residence routing: set-metadata-if on %q: %w", id, beads.ErrConditionalMetadataUnsupported)
+	}
+	return cas.SetMetadataIf(ctx, id, key, expected, next)
 }
 
 // Delete routes by residence; a migrating root is blocked, a hard probe error

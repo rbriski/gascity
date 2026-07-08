@@ -1126,6 +1126,52 @@ func (s *JournalStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return released, err
 }
 
+// SetMetadataIf atomically sets metadata[key]=next only when the bead's current
+// observed value for key equals expected, in one WAL transaction on the single
+// serialized write connection (so a concurrent CAS on the same bead serializes:
+// the loser reads the winner's committed value and reports a non-match). A
+// fold-owned Tier-A row is write-closed (I-14): SetMetadataIf on one returns
+// ErrFoldOwnedWriteClosed. A missing bead is a non-match (false, nil). See
+// ConditionalMetadataStore for the full contract.
+func (s *JournalStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
+	swapped := false
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var foldOwned int
+		err := tx.QueryRowContext(ctx, `SELECT fold_owned FROM nodes WHERE id = ?`, id).Scan(&foldOwned)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // missing bead → non-match (mirrors ReleaseIfCurrent)
+		}
+		if err != nil {
+			return fmt.Errorf("journal store: checking bead %q: %w", id, err)
+		}
+		if foldOwned == 1 {
+			return fmt.Errorf("bead %q: %w", id, ErrFoldOwnedWriteClosed)
+		}
+		var current string
+		err = tx.QueryRowContext(ctx, `SELECT value FROM node_metadata WHERE node_id = ? AND key = ?`, id, key).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			current = "" // absent key observes as ""
+		} else if err != nil {
+			return fmt.Errorf("journal store: reading metadata %q on %q: %w", key, id, err)
+		}
+		if current != expected {
+			return nil // value mismatch → non-match
+		}
+		if next != current {
+			if err := journalMergeMetadata(ctx, tx, id, map[string]string{key: next}); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE nodes SET updated_at = ? WHERE id = ? AND fold_owned = 0`,
+				journalFormatTime(journalNow()), id); err != nil {
+				return fmt.Errorf("journal store: touching bead %q: %w", id, err)
+			}
+		}
+		swapped = true
+		return nil
+	})
+	return swapped, err
+}
+
 // Tx runs fn inside one SQLite transaction; every write coalesces into a single
 // commit and rolls back atomically on error.
 func (s *JournalStore) Tx(_ string, fn func(tx Tx) error) error {

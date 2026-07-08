@@ -91,6 +91,7 @@ func TestFileStore(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunConditionalMetadataTestsConcurrent(t, factory)
 }
 
 func TestFileStorePersistence(t *testing.T) {

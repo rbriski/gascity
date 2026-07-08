@@ -54,6 +54,7 @@ func TestJournalStoreConformance(t *testing.T) {
 	factory := newJournalConformanceFactory(t)
 	beadstest.RunStoreTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunConditionalMetadataTestsConcurrent(t, factory)
 }
 
 // TestJournalStoreConformanceCachingWrapped runs the same conformance suite
@@ -67,4 +68,5 @@ func TestJournalStoreConformanceCachingWrapped(t *testing.T) {
 	}
 	beadstest.RunStoreTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunConditionalMetadataTests(t, factory)
 }

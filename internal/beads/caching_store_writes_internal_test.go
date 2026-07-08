@@ -85,6 +85,34 @@ func (s *releaseRefreshFailOnceStore) ReleaseIfCurrent(id, expectedAssignee stri
 	return released, err
 }
 
+// casRefreshFailOnceStore mirrors releaseRefreshFailOnceStore for the CAS path:
+// a successful SetMetadataIf arms a single injected Get failure, so the caching
+// wrapper's post-swap refresh fails and falls back to the hand-patch branch.
+type casRefreshFailOnceStore struct {
+	Store
+	failNextGet bool
+}
+
+func (s *casRefreshFailOnceStore) Get(id string) (Bead, error) {
+	if s.failNextGet {
+		s.failNextGet = false
+		return Bead{}, errors.New("injected refresh failure")
+	}
+	return s.Store.Get(id)
+}
+
+func (s *casRefreshFailOnceStore) SetMetadataIf(ctx context.Context, id, key, expected, next string) (bool, error) {
+	cas, ok := ConditionalMetadataStoreFor(s.Store)
+	if !ok {
+		return false, ErrConditionalMetadataUnsupported
+	}
+	swapped, err := cas.SetMetadataIf(ctx, id, key, expected, next)
+	if swapped && err == nil {
+		s.failNextGet = true
+	}
+	return swapped, err
+}
+
 func (s *txPreservingBackingStore) Update(id string, opts UpdateOpts) error {
 	s.updateCalls++
 	if err := s.Store.Update(id, opts); err != nil {
@@ -350,6 +378,57 @@ func TestCachingStoreReleaseIfCurrentKeepsDirtyWhenRefreshFails(t *testing.T) {
 	}
 	if got.Status != "open" || got.Assignee != "" {
 		t.Fatalf("cached bead after dirty refresh = %+v, want open and unassigned", got)
+	}
+}
+
+// TestCachingStoreSetMetadataIfKeepsDirtyWhenRefreshFails is the MEDIUM-1 pin: a
+// swap whose post-swap refresh fails must leave the hand-patched row DIRTY (so a
+// cache-only read refuses it and re-fetches), mirroring ReleaseIfCurrent's
+// fallback — never laundered clean.
+func TestCachingStoreSetMetadataIfKeepsDirtyWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	const key = "gc.control_epoch"
+	backing := &casRefreshFailOnceStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "cas", Metadata: map[string]string{key: "1"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	swapped, err := cache.SetMetadataIf(context.Background(), bead.ID, key, "1", "2")
+	if err != nil {
+		t.Fatalf("SetMetadataIf: %v", err)
+	}
+	if !swapped {
+		t.Fatal("SetMetadataIf swapped = false, want true")
+	}
+
+	cache.mu.Lock()
+	_, dirty := cache.dirty[bead.ID]
+	cache.mu.Unlock()
+	if !dirty {
+		t.Fatal("swapped bead was not kept dirty after a refresh failure (row laundered clean)")
+	}
+
+	// A cache-only read must refuse the suspect hand-patched row rather than
+	// serve it as authoritative.
+	if _, err := cache.cachedGetOnly(bead.ID); !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("cachedGetOnly err = %v, want ErrCacheUnavailable for a dirty row", err)
+	}
+
+	// A full Get re-fetches through the (now-recovered) backing and sees the
+	// swapped value.
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get after dirty refresh: %v", err)
+	}
+	if got.Metadata[key] != "2" {
+		t.Fatalf("value after dirty refresh = %q, want 2", got.Metadata[key])
 	}
 }
 

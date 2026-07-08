@@ -35,7 +35,10 @@ type beadPolicyGraphStore struct {
 	applier beads.GraphApplyStore
 }
 
-var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
+var (
+	_ beads.ConditionalAssignmentReleaser     = (*beadPolicyStore)(nil)
+	_ beads.ConditionalMetadataHandleProvider = (*beadPolicyStore)(nil)
+)
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	if store == nil {
@@ -114,6 +117,19 @@ func (s *beadPolicyStore) AppendLogHandle() (beads.AppendLogStore, bool) {
 
 func (s *beadPolicyStore) ConditionalVersionHandle() (beads.ConditionalVersionStore, bool) {
 	return beads.ConditionalVersionStoreFor(s.Store)
+}
+
+// ConditionalMetadataHandle forwards the metadata compare-and-set capability the
+// legacy control-epoch write is hardened onto in P5.2. The policy wrapper embeds
+// beads.Store as an interface, so this optional capability is not promoted
+// automatically; the explicit forward lets ConditionalMetadataStoreFor reach the
+// wrapped store (the CachingStore, which keeps the CAS cache-coherent) through
+// the policy wrapper. beadPolicyGraphStore embeds *beadPolicyStore, so it
+// inherits this forward. A CAS on metadata is not a policy-classified write
+// (policy customizes only Create tiering and read-tier expansion), so forwarding
+// straight through is byte-identical to SetMetadata's own passthrough.
+func (s *beadPolicyStore) ConditionalMetadataHandle() (beads.ConditionalMetadataStore, bool) {
+	return beads.ConditionalMetadataStoreFor(s.Store)
 }
 
 // ResidenceMigrationHandle forwards the residence-migration capability the

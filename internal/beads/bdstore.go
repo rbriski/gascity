@@ -1139,6 +1139,89 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 	return rowsAffected > 0, nil
 }
 
+// SetMetadataIf atomically sets metadata[key]=next only when the bead's current
+// observed value for key equals expected, via a single guarded conditional
+// UPDATE through `bd sql` (embedded-dolt fallback mirrors ReleaseIfCurrent). The
+// metadata column is JSON with string-typed values, so the compare goes through
+// JSON_UNQUOTE(JSON_EXTRACT(...)) and folds an absent key (JSON null) to "" via
+// COALESCE — honoring the empty-string clear contract. rows_affected > 0 means
+// the precondition held and the value changed. See ConditionalMetadataStore.
+//
+// The set-to-same case (next == expected) is handled in Go before touching SQL:
+// a conditional UPDATE reports *changed* rows, so a same-value write would report
+// 0 rows and masquerade as a conflict. Because next == expected asks for no value
+// change, the CAS succeeds iff the precondition currently holds, which a plain
+// read decides (there is no write to make atomic).
+func (s *BdStore) SetMetadataIf(_ context.Context, id, key, expected, next string) (bool, error) {
+	if expected == next {
+		// Freshness caveat: this read-only precondition check can observe a stale
+		// value if a caller reads through a daemon/cache layer. It is unreachable
+		// for P5.2's control-epoch bumps, which always advance the value
+		// (expected != next) and so take the atomic guarded-UPDATE path below.
+		b, err := s.Get(id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return false, nil // missing bead → non-match
+			}
+			return false, fmt.Errorf("bd set-metadata-if: %w", err)
+		}
+		return b.Metadata[key] == expected, nil
+	}
+	path := bdJSONMetadataPath(key)
+	query := "UPDATE issues SET metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), " + bdSQLStringLiteral(path) + ", " + bdSQLStringLiteral(next) + "), updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, " + bdSQLStringLiteral(path) + ")), '') = " + bdSQLStringLiteral(expected)
+	out, err := s.runBDTransientWriteOutput("sql", "--json", query)
+	if err != nil {
+		if isBdSQLUnsupportedInEmbeddedMode(err) {
+			return s.setMetadataIfViaEmbeddedDoltSQL(id, key, expected, next)
+		}
+		return false, fmt.Errorf("bd set-metadata-if: %w", err)
+	}
+	var result struct {
+		RowsAffected int `json:"rows_affected"`
+	}
+	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
+		return false, fmt.Errorf("bd set-metadata-if: parsing SQL result: %w", err)
+	}
+	return result.RowsAffected > 0, nil
+}
+
+func (s *BdStore) setMetadataIfViaEmbeddedDoltSQL(id, key, expected, next string) (bool, error) {
+	doltDir, ok, err := s.embeddedDoltDir()
+	if err != nil {
+		return false, fmt.Errorf("bd set-metadata-if embedded fallback: %w", err)
+	}
+	if !ok {
+		return false, fmt.Errorf("bd set-metadata-if embedded fallback: %w", ErrConditionalMetadataUnsupported)
+	}
+	path := bdJSONMetadataPath(key)
+	query := "UPDATE issues SET metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), " + bdSQLStringLiteral(path) + ", " + bdSQLStringLiteral(next) + "), updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, " + bdSQLStringLiteral(path) + ")), '') = " + bdSQLStringLiteral(expected) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
+	if err != nil {
+		return false, fmt.Errorf("bd set-metadata-if embedded fallback: dolt sql: %w", err)
+	}
+	rowsAffected, err := parseDoltRowsAffected(out)
+	if err != nil {
+		return false, fmt.Errorf("bd set-metadata-if embedded fallback: parsing SQL result: %w", err)
+	}
+	return rowsAffected > 0, nil
+}
+
+// bdJSONMetadataPath builds the JSON path member for a metadata key with the key
+// double-quoted, so a dotted key (e.g. "gc.control_epoch") is one member rather
+// than a nested path, and backslash/double-quote inside the key are escaped per
+// JSON-path string rules. The result is then wrapped by bdSQLStringLiteral for
+// the surrounding SQL string literal (two escaping layers, both required).
+func bdJSONMetadataPath(key string) string {
+	escaped := strings.ReplaceAll(key, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+	return `$."` + escaped + `"`
+}
+
 func (s *BdStore) embeddedDoltDir() (string, bool, error) {
 	metaPath := filepath.Join(s.dir, ".beads", "metadata.json")
 	data, err := os.ReadFile(metaPath)

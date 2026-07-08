@@ -2314,3 +2314,136 @@ func filterNativeIssuesForTest(issues []*beadslib.Issue, filter beadslib.IssueFi
 	}
 	return filtered
 }
+
+// replayOnceStorage models dolt server-mode withRetry: it runs the transaction
+// closure twice. The first attempt's writes are discarded (a retryable
+// commit-phase failure that never lands), a concurrent writer lands its own
+// value in between, then the closure is REPLAYED against the mutated store and
+// its committed result kept. This is the exact seam HIGH-1 rides — a
+// swapped/released flag captured outside the closure survives a doomed attempt
+// into the replay and reports a phantom win/release.
+type replayOnceStorage struct {
+	*nativeDoltMemStorage
+	interfere func()
+	attempts  int
+}
+
+func (s *replayOnceStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+	tx := nativeDoltTransactionForTest{storage: s.nativeDoltMemStorage}
+
+	// Attempt 1 (doomed): apply the closure, then discard its writes as if the
+	// commit failed retryably — nothing lands.
+	s.attempts++
+	s.store.mu.Lock()
+	seq, snap, deps := s.store.snapshot()
+	s.store.mu.Unlock()
+	if err := fn(tx); err != nil {
+		s.store.restoreFrom(seq, snap, deps)
+		return err
+	}
+	s.store.restoreFrom(seq, snap, deps)
+
+	// A concurrent writer commits between A's attempts.
+	if s.interfere != nil {
+		s.interfere()
+	}
+
+	// Attempt 2 (the withRetry replay): re-run and keep the committed result.
+	s.attempts++
+	return runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
+		return fn(tx)
+	})
+}
+
+// TestNativeDoltStoreSetMetadataIfReplayDoesNotPhantomWin is the HIGH-1 pin: a
+// swapped flag must be reset at the top of the RunInTransaction closure so a
+// withRetry replay re-decides from the freshly-read value. Attempt 1 sees the
+// epoch at the expected value and writes, but the commit is discarded; a
+// concurrent writer then advances the epoch; the replay's fresh read no longer
+// matches expected and must report swapped=false (a fail-safe false-negative),
+// never a phantom win over the concurrent writer's value.
+func TestNativeDoltStoreSetMetadataIfReplayDoesNotPhantomWin(t *testing.T) {
+	const key = "gc.control_epoch"
+	mem := newNativeDoltMemStorage()
+	created, err := mem.store.Create(Bead{Title: "cas replay", Metadata: map[string]string{key: "1"}})
+	if err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+	id := created.ID
+
+	replay := &replayOnceStorage{
+		nativeDoltMemStorage: mem,
+		interfere: func() {
+			if err := mem.store.SetMetadata(id, key, "B"); err != nil {
+				t.Errorf("interfere SetMetadata: %v", err)
+			}
+		},
+	}
+	store := newNativeDoltStoreForTest(replay)
+
+	swapped, err := store.SetMetadataIf(context.Background(), id, key, "1", "A")
+	if err != nil {
+		t.Fatalf("SetMetadataIf: %v", err)
+	}
+	if replay.attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (the closure must replay)", replay.attempts)
+	}
+	if swapped {
+		t.Fatal("swapped = true after a replay whose fresh read no longer matched expected: phantom win / silent lost update (HIGH-1)")
+	}
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[key] != "B" {
+		t.Fatalf("final epoch = %q, want B (the concurrent writer's value stands, not A's)", got.Metadata[key])
+	}
+}
+
+// TestNativeDoltStoreReleaseIfCurrentReplayDoesNotPhantomRelease is the HIGH-1
+// pin for the sibling ReleaseIfCurrent flaw: the released flag must reset on
+// every replay. Attempt 1 sees the expected assignee and releases, but the
+// commit is discarded; a concurrent writer reassigns the bead; the replay's
+// fresh read no longer matches the expected assignee and must report
+// released=false, never a phantom release over the reassignment.
+func TestNativeDoltStoreReleaseIfCurrentReplayDoesNotPhantomRelease(t *testing.T) {
+	mem := newNativeDoltMemStorage()
+	created, err := mem.store.Create(Bead{Title: "release replay", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+	id := created.ID
+	inProgress := "in_progress"
+	if err := mem.store.Update(id, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+
+	replay := &replayOnceStorage{
+		nativeDoltMemStorage: mem,
+		interfere: func() {
+			reassign := "worker-2"
+			if err := mem.store.Update(id, UpdateOpts{Assignee: &reassign}); err != nil {
+				t.Errorf("interfere reassign: %v", err)
+			}
+		},
+	}
+	store := newNativeDoltStoreForTest(replay)
+
+	released, err := store.ReleaseIfCurrent(id, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if replay.attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (the closure must replay)", replay.attempts)
+	}
+	if released {
+		t.Fatal("released = true after a replay whose fresh read no longer matched the expected assignee: phantom release (HIGH-1)")
+	}
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Assignee != "worker-2" || got.Status != "in_progress" {
+		t.Fatalf("bead = {assignee:%q status:%q}, want worker-2/in_progress (the concurrent reassignment stands, not the release)", got.Assignee, got.Status)
+	}
+}

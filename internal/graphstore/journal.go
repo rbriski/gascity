@@ -193,16 +193,38 @@ func (s *Store) Head(ctx context.Context, streamID string) (uint64, error) {
 	return head, nil
 }
 
-// Verify walks streamID from seq 1 and recomputes every payload_hash and
-// chain_hash, returning ErrChainBroken (wrapped with the offending seq) on the
-// first mismatch. This backs `gc journal verify`.
+// Verify walks streamID from its first surviving seq and recomputes every
+// payload_hash and chain_hash, returning ErrChainBroken (wrapped with the
+// offending seq) on the first mismatch. This backs `gc journal verify`.
+//
+// An untruncated stream starts at seq 1 anchored on the genesis hash. A
+// retention-truncated stream starts at anchorSeq+1: its chain resumes from the
+// cut_chain_hash the covering snapshot recorded at TruncateBelowAnchor, so the
+// hash chain stays verifiable across the cut with the snapshot as the new anchor
+// (SEC-T-6). A truncated head with no such cut anchor is journal tampering.
 func (s *Store) Verify(ctx context.Context, streamID string) error {
 	events, err := s.ReadStream(ctx, streamID, 1, 0)
 	if err != nil {
 		return err
 	}
-	prev := genesisHash(streamID, s.cityID)
-	var wantSeq uint64 = 1
+	if len(events) == 0 {
+		return nil
+	}
+	firstSeq := events[0].Seq
+	var prev [32]byte
+	if firstSeq == 1 {
+		prev = genesisHash(streamID, s.cityID)
+	} else {
+		cut, ok, err := s.cutChainHashAt(ctx, streamID, firstSeq-1)
+		if err != nil {
+			return fmt.Errorf("graphstore: verify %q: reading cut anchor at %d: %w", streamID, firstSeq-1, err)
+		}
+		if !ok {
+			return fmt.Errorf("graphstore: verify %q: stream truncated below seq %d with no snapshot cut anchor: %w", streamID, firstSeq, ErrChainBroken)
+		}
+		prev = cut
+	}
+	wantSeq := firstSeq
 	for _, e := range events {
 		if e.Seq != wantSeq {
 			return fmt.Errorf("graphstore: verify %q: gap or reorder at seq %d (expected %d): %w", streamID, e.Seq, wantSeq, ErrChainBroken)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/gastownhall/gascity/internal/graphstore/canon"
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
@@ -47,11 +48,17 @@ func ApplyDelta(ctx context.Context, tx *sql.Tx, d fold.Delta) error {
 }
 
 // RebuildTierA is the Tier-A repair story (I-14): it DROPs streamID's Tier-A rows
-// and re-derives them by folding the stream's journal from genesis, re-applying
-// every Delta. A drop+refold reproduces the tables byte-identically (DET-T-17);
-// repair is always re-fold, never hand-edit. Snapshot-anchored rebuild (fold from
-// a snapshot tail rather than genesis) plugs in here when snapshot.go lands; this
-// slice folds from genesis, which is byte-equivalent by the R-RESUME law.
+// and re-derives them by folding the stream's journal, re-applying every Delta. A
+// drop+refold reproduces the tables byte-identically (DET-T-17); repair is always
+// re-fold, never hand-edit.
+//
+// An untruncated stream folds from genesis. A retention-truncated stream (its
+// surviving journal starts above seq 1, so its genesis prefix is gone) anchors on
+// the covering snapshot exactly as Resume does: it projects the snapshot's
+// covered-prefix state (via fold.SnapshotProjector) and folds the surviving tail
+// on top, so the drop+refold repair story survives truncation (H1). The snapshot
+// path is taken ONLY when genesis is gone, so an untruncated rebuild stays
+// byte-identical to the pre-snapshot path.
 //
 // The whole operation — drop, fold-apply — commits in one transaction so a rebuild
 // is never partially observable.
@@ -59,21 +66,9 @@ func (s *Store) RebuildTierA(ctx context.Context, r fold.Reducer, streamID strin
 	if streamID == "" {
 		return fmt.Errorf("graphstore: rebuild tier A: empty stream id")
 	}
-	stored, err := s.ReadStream(ctx, streamID, 1, 0)
+	deltas, foldedHead, err := s.rebuildDeltas(ctx, r, streamID)
 	if err != nil {
 		return err
-	}
-	var foldedHead uint64
-	if n := len(stored); n > 0 {
-		foldedHead = stored[n-1].Seq
-	}
-	events := make([]fold.Event, len(stored))
-	for i, e := range stored {
-		events[i] = toFoldEvent(e)
-	}
-	_, deltas, err := fold.Fold(r, nil, events)
-	if err != nil {
-		return fmt.Errorf("graphstore: rebuild tier A %q: fold: %w", streamID, err)
 	}
 
 	if s.rebuildAfterRead != nil {
@@ -120,6 +115,91 @@ func (s *Store) RebuildTierA(ctx context.Context, r fold.Reducer, streamID strin
 		return fmt.Errorf("graphstore: rebuild tier A %q: commit: %w", streamID, mapSQLiteBusy(err))
 	}
 	return nil
+}
+
+// rebuildDeltas computes the fold deltas that reconstruct streamID's full Tier-A
+// projection, plus the journal head they cover (the TOCTOU recheck's witness). An
+// untruncated stream (or an empty one) folds from genesis, byte-identical to the
+// pre-snapshot rebuild. A retention-truncated stream — its surviving journal
+// starts above seq 1, so the genesis prefix is gone — anchors on the covering
+// snapshot: it projects the snapshot's covered-prefix state and folds the surviving
+// tail on top (H1). The snapshot is consulted ONLY when genesis is gone, so the
+// clean-store (untruncated) rebuild path is unchanged.
+func (s *Store) rebuildDeltas(ctx context.Context, r fold.Reducer, streamID string) ([]fold.Delta, uint64, error) {
+	stored, err := s.ReadStream(ctx, streamID, 1, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Untruncated (genesis intact) or empty: fold from genesis as before.
+	if len(stored) == 0 || stored[0].Seq == 1 {
+		var foldedHead uint64
+		if n := len(stored); n > 0 {
+			foldedHead = stored[n-1].Seq
+		}
+		events := make([]fold.Event, len(stored))
+		for i, e := range stored {
+			events[i] = toFoldEvent(e)
+		}
+		_, deltas, err := fold.Fold(r, nil, events)
+		if err != nil {
+			return nil, 0, fmt.Errorf("graphstore: rebuild tier A %q: fold: %w", streamID, err)
+		}
+		return deltas, foldedHead, nil
+	}
+
+	// Truncated: the genesis prefix is gone, so the covering snapshot is the only
+	// source for the covered-prefix projection.
+	firstSeq := stored[0].Seq
+	snap, ok, err := s.LatestSnapshot(ctx, streamID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !ok {
+		return nil, 0, fmt.Errorf("graphstore: rebuild tier A %q: stream truncated below seq %d with no covering snapshot: %w", streamID, firstSeq, ErrNoCoveringSnapshot)
+	}
+	if canon.Hash(snap.State) != snap.StateHash {
+		return nil, 0, fmt.Errorf("graphstore: rebuild tier A %q: snapshot@%d: %w", streamID, snap.CoveredSeq, ErrSnapshotHashMismatch)
+	}
+	snapState, err := r.UnmarshalSnapshot(snap.SnapshotFormatVersion, snap.State)
+	if err != nil {
+		return nil, 0, fmt.Errorf("graphstore: rebuild tier A %q: unmarshal snapshot@%d: %w", streamID, snap.CoveredSeq, err)
+	}
+	projector, ok := snapState.(fold.SnapshotProjector)
+	if !ok {
+		return nil, 0, fmt.Errorf("graphstore: rebuild tier A %q: reducer state %T cannot project a snapshot anchor", streamID, snapState)
+	}
+
+	// The tail begins at covered_seq+1. The latest snapshot may cover more than the
+	// first surviving seq (a newer snapshot survived the cut), so read the tail from
+	// covered_seq+1 rather than assuming it equals firstSeq.
+	tail := stored
+	if snap.CoveredSeq+1 != firstSeq {
+		tail, err = s.ReadStream(ctx, streamID, snap.CoveredSeq+1, 0)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	foldedHead := snap.CoveredSeq
+	if n := len(tail); n > 0 {
+		foldedHead = tail[n-1].Seq
+	}
+	tailEvents := make([]fold.Event, len(tail))
+	for i, e := range tail {
+		tailEvents[i] = toFoldEvent(e)
+	}
+	_, tailDeltas, err := fold.Fold(r, &snap, tailEvents)
+	if err != nil {
+		return nil, 0, fmt.Errorf("graphstore: rebuild tier A %q: fold tail: %w", streamID, err)
+	}
+
+	// Project the covered prefix from the snapshot state, then apply the folded tail
+	// on top: prefix(covered_seq) ++ tail(covered_seq+1..H) == the genesis projection
+	// (R-RESUME), and the real tail deltas correct anything the tail touches.
+	deltas := make([]fold.Delta, 0, len(tailDeltas)+1)
+	deltas = append(deltas, projector.ProjectDelta(streamID))
+	deltas = append(deltas, tailDeltas...)
+	return deltas, foldedHead, nil
 }
 
 // toFoldEvent projects a committed journal row onto the I/O-free fold.Event view.

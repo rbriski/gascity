@@ -46,7 +46,10 @@ type RunResult struct {
 	Outcome string
 	// NodeOutputs maps each executed node id to its captured output value.
 	NodeOutputs map[string]string
-	// Events is the full committed journal for the run, in seq order.
+	// Events is the committed journal for the run in seq order: the full journal
+	// for an untruncated stream, or the surviving tail after the latest retention
+	// cut for a truncated one (a Resume of a retention-truncated stream returns the
+	// surviving events, from seq 1, not just the post-snapshot tail).
 	Events []graphstore.StoredEvent
 }
 
@@ -58,11 +61,29 @@ func RegisterVocabulary(store *graphstore.Store) {
 	}
 }
 
-// Options tune a run. The zero value (nil Host) refuses a do node with
-// ErrUnsupportedNode — no agent host, no do steps.
+// DefaultSnapshotEvery is the recommended fold-snapshot cadence for a
+// long-running or resumable stream: anchor a snapshot roughly every this many
+// committed events. It is a documented default, NOT the library default —
+// Options.SnapshotEvery is 0 (disabled) unless a caller opts in.
+const DefaultSnapshotEvery = 256
+
+// Options tune a run. The zero value (nil Host, SnapshotEvery 0) refuses a do
+// node with ErrUnsupportedNode and writes no snapshots.
 type Options struct {
 	// Host runs agent `do` steps. Nil refuses do nodes.
 	Host enginehost.AgentHost
+	// SnapshotEvery anchors a fold snapshot at the next unit boundary once this
+	// many events have accumulated since the last snapshot, and once more at the
+	// run seal (before run.closed). 0 disables snapshotting entirely (opt-in): the
+	// disabled path is behaviorally INERT and fold-compatible — it writes no
+	// snapshot.anchored events, no snapshots rows, and triggers no truncation, so
+	// the event-TYPE sequence matches a P4.2 run. It is NOT chain-byte-identical to
+	// a P4.2 binary for input-bearing or do runs, whose run.started (input_hash) and
+	// effect.settled (node_outcome) payloads carry P4.3 fields; an input-less
+	// exec-only run is byte-identical. Snapshots are additive — a snapshot.anchored
+	// event folds to a no-op — so enabling them never changes the Tier-A projection,
+	// only bounds the journal and enables Resume.
+	SnapshotEvery int
 }
 
 // Run executes doc with no agent host — the exec-only path.
@@ -100,14 +121,15 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 
 	reducer := lumenReducer{}
 	d := &driver{
-		ctx:      ctx,
-		store:    store,
-		streamID: streamID,
-		irVer:    doc.Contract.Version,
-		epoch:    lease.Epoch,
-		reducer:  reducer,
-		state:    reducer.Zero(streamID),
-		host:     opts.Host,
+		ctx:           ctx,
+		store:         store,
+		streamID:      streamID,
+		irVer:         doc.Contract.Version,
+		epoch:         lease.Epoch,
+		reducer:       reducer,
+		state:         reducer.Zero(streamID),
+		host:          opts.Host,
+		snapshotEvery: opts.SnapshotEvery,
 	}
 
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -115,6 +137,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		RootID:    streamID,
 		Name:      doc.Name,
 		IRHash:    irHash(doc),
+		InputHash: inputHash(input),
 		CreatedAt: createdAt,
 	}); err != nil {
 		return RunResult{}, err
@@ -127,9 +150,17 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		if err := d.runUnit(units[i], scope, nodeOutputs); err != nil {
 			return RunResult{}, err
 		}
+		if err := d.maybeSnapshot(false); err != nil {
+			return RunResult{}, err
+		}
 	}
 
 	runOutcome := d.st().runOutcome()
+	// Seal snapshot: anchor the final state before run.closed so a resume of a
+	// sealed stream loads the whole run from one snapshot plus the closed marker.
+	if err := d.maybeSnapshot(true); err != nil {
+		return RunResult{}, err
+	}
 	if err := d.append(EventRunClosed, streamID+":run:closed", runClosedPayload{Outcome: runOutcome}); err != nil {
 		return RunResult{}, err
 	}
@@ -152,6 +183,23 @@ type driver struct {
 	state    fold.State
 	head     uint64
 	host     enginehost.AgentHost
+
+	// snapshotEvery is the fold-snapshot cadence (0 = disabled); sinceSnapshot
+	// counts committed events since the last anchored snapshot.
+	snapshotEvery int
+	sinceSnapshot int
+
+	// Resume-only memoization, keyed by activation. On a fresh run both are nil
+	// and the memoization is skipped. crashInterrupted holds effects that were
+	// scheduled but never settled (a crash mid-effect): they settle FAILED under
+	// at-most-once without re-acting. settledEffects holds effects that settled
+	// but whose outcome.settled never committed (a crash in the
+	// effect.settled -> outcome.settled window): the node settles from the
+	// recorded effect result, again without re-invoking the host (B1). Consulting
+	// them inside runUnit makes reload/settle idempotent at ANY nesting level, so
+	// a settled combine member nested in a gather is never re-executed (B2).
+	crashInterrupted map[string]string               // activation -> idem token
+	settledEffects   map[string]effectSettledPayload // activation -> recorded settlement
 }
 
 // st returns the driver's live fold state as the concrete lumenState so the
@@ -172,6 +220,16 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		scope[u.nodeID] = val
 		nodeOutputs[u.nodeID] = val
 		return nil
+	}
+
+	// Resume memoization (B1/B2): before touching the journal, reload an
+	// already-settled unit, settle a do node from its recorded effect, or settle a
+	// crash-interrupted effect — all from the journal, never by re-acting. Because
+	// this lives in runUnit (not only the top-level resume loop), it applies at any
+	// nesting level, so a settled combine member inside a gather is reloaded, not
+	// re-run. On a fresh run the maps are nil and this is a no-op.
+	if handled, err := d.resumeMemoized(u, scope, nodeOutputs); err != nil || handled {
+		return err
 	}
 
 	if err := d.appendActivated(u); err != nil {
@@ -338,12 +396,13 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 	nodeOutcome, effResult, detail, out, session := foldDoResult(result, runErr)
 
 	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
-		Activation: u.activation,
-		IdemToken:  effectIdem,
-		Result:     effResult,
-		Output:     out,
-		Session:    session,
-		Detail:     detail,
+		Activation:  u.activation,
+		IdemToken:   effectIdem,
+		Result:      effResult,
+		NodeOutcome: nodeOutcome,
+		Output:      out,
+		Session:     session,
+		Detail:      detail,
 	}); err != nil {
 		return err
 	}
@@ -512,6 +571,23 @@ func (d *driver) append(eventType, idemToken string, payload any) error {
 	if err != nil {
 		return fmt.Errorf("lumen: append %s: %w", eventType, err)
 	}
+	// Idempotent replay short-circuit (resume re-emission). A crashed run that
+	// resumes re-drives units whose events already committed (e.g. a gather's
+	// head-of-line node.decision checkpoints emitted before the crash). The store
+	// dedups an identical idem token and returns its existing seq without writing
+	// a row. That event is ALREADY folded into d.state (resume rebuilt state from
+	// the journal) and sits BELOW the live head, so we must neither re-fold it
+	// (double-apply) nor move d.head back to the older seq (which would break the
+	// next append's expectedVersion CAS).
+	//
+	// ORDER-DEPENDENCE (L3): this only stays sound because resume re-emits events
+	// in their original journal order. A fresh event always lands at head+1; a
+	// replayed one is a byte-identical duplicate at its original seq. Re-emitting
+	// out of order would either present a stale expectedVersion (ErrWrongExpected-
+	// Version) or bind an idem token to a divergent payload (ErrIdemTokenReuse).
+	if _, dup := res.Duplicates[0]; dup {
+		return nil
+	}
 	seq := res.FirstSeq
 
 	next, delta, err := d.reducer.Apply(d.state, fold.Event{
@@ -540,6 +616,7 @@ func (d *driver) append(eventType, idemToken string, payload any) error {
 		return fmt.Errorf("lumen: commit projection for %s: %w", eventType, err)
 	}
 	d.head = seq
+	d.sinceSnapshot++
 	return nil
 }
 
@@ -643,6 +720,27 @@ func canonPayload(v any) ([]byte, error) {
 		return nil, err
 	}
 	return canon.Canonicalize(raw)
+}
+
+// inputHash is the provenance pin stamped on run.started for the run input: the
+// SHA-256 of the canonicalized input map. It pins interpolation scope so Resume
+// can refuse a different input (M2). An empty input is left unpinned (""), so a
+// run that takes no input writes a run.started byte-identical to the pre-P4.3
+// executor and Resume imposes no input constraint.
+func inputHash(input map[string]any) string {
+	if len(input) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return ""
+	}
+	canonical, err := canon.Canonicalize(raw)
+	if err != nil {
+		return ""
+	}
+	h := canon.Hash(canonical)
+	return hex.EncodeToString(h[:])
 }
 
 // irHash is the provenance pin stamped on run.started: the SHA-256 of the

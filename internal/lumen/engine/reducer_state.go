@@ -18,6 +18,7 @@ type lumenState struct {
 	Name      string                `json:"name"`
 	CreatedAt string                `json:"created_at"`
 	IRHash    string                `json:"ir_hash,omitempty"`
+	InputHash string                `json:"input_hash,omitempty"`
 	Closed    bool                  `json:"closed"`
 	Outcome   string                `json:"outcome,omitempty"`
 	Nodes     map[string]*nodeState `json:"nodes,omitempty"`
@@ -101,6 +102,21 @@ func isBlocking(outcome string) bool {
 // (pass/degraded/failed) makes the aggregate DRAIN.
 func didNotRun(outcome string) bool {
 	return outcome == OutcomeSkipped || outcome == OutcomeCanceled
+}
+
+// ranOutcome reports whether a settled outcome means the unit actually RAN
+// (pass / degraded / failed), as opposed to skip-cascading (skipped / canceled).
+// It is the genesis record() predicate: runLeaf/runScatter/runGather record a
+// unit's output into scope/nodeOutputs, but a unit intercepted by blocked() or
+// aggregateAllSkipped() settles WITHOUT recording. Resume reproduces this rule
+// exactly so a resumed run's interpolation scope matches genesis (B1).
+func ranOutcome(outcome string) bool {
+	switch outcome {
+	case OutcomePass, OutcomeDegraded, OutcomeFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // ready reports whether an activation is frontier-ready: activated, not

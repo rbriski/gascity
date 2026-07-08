@@ -101,6 +101,7 @@ func applyRunStarted(next *lumenState, e fold.Event) (fold.State, fold.Delta, er
 	next.Name = p.Name
 	next.CreatedAt = p.CreatedAt
 	next.IRHash = p.IRHash
+	next.InputHash = p.InputHash
 	delta := fold.Delta{
 		NodeUpserts: []fold.NodeRow{{
 			ID:          p.RootID,
@@ -282,6 +283,87 @@ func applyRunClosed(next *lumenState, e fold.Event) (fold.State, fold.Delta, err
 	// journal (no leaf frontier rows) clears exactly the root — identical to v1.
 	delta.FrontierDelete = append([]string{next.RootID}, next.activationKeys()...)
 	return next, delta, nil
+}
+
+// ProjectDelta renders the FULL Tier-A projection of the carried state as a
+// single fold delta: the root node, every activation's node/edge rows, and the
+// live frontier. It is the fold.SnapshotProjector capability RebuildTierA uses to
+// reconstruct a retention-truncated stream's covered prefix from its snapshot
+// state — the journal prefix is gone, but the snapshot captures its cumulative
+// projection. It mirrors, over the carried state, exactly what applyRunStarted /
+// applyNodeActivated / applyOutcomeSettled emit incrementally (and what
+// applyRunClosed clears), so a projected-from-state prefix plus the folded
+// surviving tail reproduces the pre-truncation projection byte-for-byte (H1). A
+// snapshot is always anchored at a unit boundary before run.closed, so the state
+// it renders is never mid-effect.
+func (s *lumenState) ProjectDelta(streamID string) fold.Delta {
+	var delta fold.Delta
+
+	// Root (applyRunStarted, upgraded to closed by applyRunClosed). It carries no
+	// metadata and no parent; it sits in the frontier only while the run is open.
+	rootStatus := "open"
+	if s.Closed {
+		rootStatus = statusForOutcome(s.Outcome)
+	}
+	delta.NodeUpserts = append(delta.NodeUpserts, fold.NodeRow{
+		ID:          s.RootID,
+		Title:       s.Name,
+		Status:      rootStatus,
+		BeadType:    "run",
+		CreatedAt:   s.CreatedAt,
+		StorageTier: "history",
+		StreamID:    streamID,
+	})
+	if !s.Closed {
+		delta.FrontierInsert = append(delta.FrontierInsert, frontierRowFor(s, s.RootID))
+	}
+
+	for _, act := range s.activationKeys() {
+		n := s.Nodes[act]
+		parentID := s.RootID
+		if n.ParentActivation != "" {
+			parentID = activationNodeID(n.ParentActivation)
+		}
+		// A settled node carries its outcome/output metadata (the applyOutcomeSettled
+		// upsert replaces the activated {kind, activation} set); an activated-only
+		// node carries {kind, activation}. Empty metadata values clear their key at
+		// the applier, matching the incremental fold exactly.
+		status := "open"
+		var meta map[string]string
+		if n.Settled {
+			status = statusForOutcome(n.Outcome)
+			meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
+		} else {
+			meta = map[string]string{"kind": n.Kind, "activation": act}
+		}
+		delta.NodeUpserts = append(delta.NodeUpserts, fold.NodeRow{
+			ID:          n.NodeID,
+			Title:       n.NodeID,
+			Status:      status,
+			BeadType:    "step",
+			ParentID:    parentID,
+			CreatedAt:   s.CreatedAt,
+			StorageTier: "history",
+			StreamID:    streamID,
+			Metadata:    meta,
+		})
+		for _, dep := range n.After {
+			delta.EdgeUpserts = append(delta.EdgeUpserts, fold.EdgeRow{
+				FromID: activationNodeID(dep), ToID: n.NodeID, DepType: "after",
+			})
+		}
+		for _, m := range n.Members {
+			delta.EdgeUpserts = append(delta.EdgeUpserts, fold.EdgeRow{
+				FromID: activationNodeID(m), ToID: n.NodeID, DepType: "member",
+			})
+		}
+		// A closed run clears the whole frontier (applyRunClosed), so no frontier row
+		// survives regardless of a node's stale in-state InFrontier flag.
+		if n.InFrontier && !s.Closed {
+			delta.FrontierInsert = append(delta.FrontierInsert, frontierRowFor(s, act))
+		}
+	}
+	return delta
 }
 
 // frontierRowFor builds the Tier-A frontier row for an activation. The row id

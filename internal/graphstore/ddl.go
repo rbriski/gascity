@@ -242,6 +242,40 @@ WHEN NOT EXISTS (SELECT 1 FROM tier_a_write_gate WHERE singleton = 0 AND open = 
 BEGIN SELECT RAISE(ABORT, 'frontier is write-closed (I-14)'); END;
 `
 
+// schemaV4 arms the snapshots table's write-closure (P4.3 — 13-p4 §4). The
+// snapshots table shipped in schemaV1 with no gate; this migration adds the
+// snapshot_write_gate — the exact analog of tier_a_write_gate — plus the three
+// tripwire triggers. Store.WriteSnapshot (and the cut-anchor UPDATE in
+// Store.TruncateBelowAnchor) open the gate inside their own transaction, write,
+// and close it; any writer that does NOT open the gate hits a loud ABORT
+// (R-SNAP-WRITE / DET-T-18). A snapshot is the resume anchor — a forged or
+// mutated snapshots row would make Resume trust a lie — so the row is as
+// write-closed as a fold-owned node.
+//
+// The journal's own append-only + retention-gate triggers (schemaV1) already
+// write-close the truncation path: a DELETE from journal aborts unless a
+// retention_gate row covers the seq, so truncation is gated symmetrically
+// without a second gate table.
+const schemaV4 = `
+CREATE TABLE snapshot_write_gate (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+  open      INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO snapshot_write_gate(singleton, open) VALUES (0, 0);
+
+CREATE TRIGGER snapshots_write_closed_no_insert BEFORE INSERT ON snapshots
+WHEN NOT EXISTS (SELECT 1 FROM snapshot_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'snapshots is write-closed (R-SNAP-WRITE)'); END;
+
+CREATE TRIGGER snapshots_write_closed_no_update BEFORE UPDATE ON snapshots
+WHEN NOT EXISTS (SELECT 1 FROM snapshot_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'snapshots is write-closed (R-SNAP-WRITE)'); END;
+
+CREATE TRIGGER snapshots_write_closed_no_delete BEFORE DELETE ON snapshots
+WHEN NOT EXISTS (SELECT 1 FROM snapshot_write_gate WHERE singleton = 0 AND open = 1)
+BEGIN SELECT RAISE(ABORT, 'snapshots is write-closed (R-SNAP-WRITE)'); END;
+`
+
 // migrations is the forward-only schema ladder. Index i applies to move the
 // database from schema_version i to i+1. Never edit an existing entry once it
 // has shipped; append a new one.
@@ -249,6 +283,7 @@ var migrations = []string{
 	schemaV1,
 	schemaV2,
 	schemaV3,
+	schemaV4,
 }
 
 // schemaVersionLatest is the target schema_version after all migrations apply.

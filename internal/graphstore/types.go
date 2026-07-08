@@ -65,6 +65,20 @@ var (
 	// retries against the new head.
 	ErrRebuildRaced = errors.New("graphstore: tier-A rebuild raced a concurrent append")
 
+	// ErrSnapshotHashMismatch is returned when a snapshot's stored state_hash is
+	// not the canonical hash of its state blob (R-SNAP-WRITE). WriteSnapshot
+	// refuses to persist such a snapshot; Resume refuses to fold one. A snapshot
+	// is the resume anchor, so a hash that does not match its bytes means the
+	// blob was corrupted before it was ever trusted — never a silent best-effort
+	// fold.
+	ErrSnapshotHashMismatch = errors.New("graphstore: snapshot state hash does not match its state blob")
+
+	// ErrNoCoveringSnapshot is returned by TruncateBelowAnchor when no durable
+	// snapshot covers the requested anchor seq. Truncation without a covering
+	// snapshot would orphan events no resume could rebuild, so it is refused —
+	// the journal is never truncated past its latest durable anchor.
+	ErrNoCoveringSnapshot = errors.New("graphstore: no snapshot covers the truncation anchor")
+
 	// ErrBusy is a retryable sentinel wrapping SQLite SQLITE_BUSY / "database is
 	// locked": another writer holds the single write lock. Callers may retry;
 	// it does not mean the store is broken. The store is single-writer per

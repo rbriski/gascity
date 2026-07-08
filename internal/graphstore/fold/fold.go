@@ -157,6 +157,21 @@ type Delta struct {
 	WakeupDeletes  []string // node_ids
 }
 
+// SnapshotProjector is an OPTIONAL capability of a fold.State: it renders the
+// FULL Tier-A projection of the state as a single Delta. RebuildTierA uses it to
+// reconstruct the covered-prefix rows of a retention-truncated stream — whose
+// journal prefix is gone but whose cumulative projection is captured by the
+// snapshot state — before applying the folded surviving tail on top. A State that
+// does not implement it can only be rebuilt from a genesis fold (an untruncated
+// journal); a truncated stream whose reducer state is not projectable cannot be
+// rebuilt.
+type SnapshotProjector interface {
+	// ProjectDelta renders the state as one full Tier-A delta scoped to streamID
+	// (NodeRow.StreamID / FrontierRow.RootID), so a per-stream rebuild reclaims
+	// exactly its own rows (the Delta scoping obligation above).
+	ProjectDelta(streamID string) Delta
+}
+
 // Snapshot is a persisted fold-state anchor covering seq <= CoveredSeq
 // (01-architecture §2.3). Resume folds only the tail after CoveredSeq (R-RESUME).
 type Snapshot struct {

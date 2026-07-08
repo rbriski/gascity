@@ -38,9 +38,12 @@ const (
 	// the P4.2 rename of P1's node.settled (upcast transparently); the root's
 	// outcome.settled is the run's outcome-freeze fact (V-1).
 	EventOutcomeSettled = "lumen.outcome.settled"
-	// EventEffectScheduled (5) records that a side-effecting step (agent `do`,
-	// exec, sub-run, Tier-B attach) is about to run: appended BEFORE the effect
-	// acts, carrying the idem token, the policy, and the effect spec hash.
+	// EventEffectScheduled (5) records that a side-effecting step is about to run:
+	// appended BEFORE the effect acts, carrying the idem token, the policy, and the
+	// effect spec hash. In P4.3 ONLY agent `do` emits this pair, which is what makes
+	// do at-most-once across a crash. `exec` (and, later, sub-run / Tier-B attach)
+	// run WITHOUT an effect record today, so they are at-least-once across resume;
+	// extending the effect discipline to them is a deferred follow-up (M1).
 	EventEffectScheduled = "lumen.effect.scheduled"
 	// EventEffectSettled (6) pairs with EventEffectScheduled: the effect's
 	// observed result (ok/failed/interrupted), captured output, and session ref.
@@ -142,6 +145,13 @@ const (
 const (
 	// reducerVersion is bumped on any semantic change to the fold or upcasters.
 	// v2 replaces the P1 minimal fold with the DAG fold (blueprint §2).
+	//
+	// P4.3 stays at v2 despite applyRunStarted now folding a new run.started field
+	// (input_hash): no snapshot predates P4.3 (snapshots are new in this slice), so
+	// no persisted snapshot carries a stale reducer_version to gate, and an old
+	// journal without input_hash folds identically (the omitempty field decodes to
+	// "", the pre-P4.3 value). A bump would only strand snapshots that do not exist,
+	// so it is unnecessary.
 	reducerVersion = 2
 	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped with the
 	// v2 state shape; no v1 snapshot ever persisted (blueprint §2), so there is
@@ -213,14 +223,20 @@ type effectScheduledPayload struct {
 	Spec       effectSpec `json:"spec"`
 }
 
-// effectSettledPayload is the body of EventEffectSettled.
+// effectSettledPayload is the body of EventEffectSettled. NodeOutcome memoizes
+// the resolved node outcome (pass/degraded/failed) the effect produced, so a
+// resume that finds effect.settled committed but outcome.settled missing can
+// settle the node from this record WITHOUT re-invoking the host (B1). Result
+// (ok/failed/interrupted) alone is lossy — ok maps to both pass and degraded —
+// so the node outcome is recorded explicitly rather than re-derived.
 type effectSettledPayload struct {
-	Activation string `json:"activation"`
-	IdemToken  string `json:"idem_token"`
-	Result     string `json:"result"`
-	Output     string `json:"output,omitempty"`
-	Session    string `json:"session,omitempty"`
-	Detail     string `json:"detail,omitempty"`
+	Activation  string `json:"activation"`
+	IdemToken   string `json:"idem_token"`
+	Result      string `json:"result"`
+	NodeOutcome string `json:"node_outcome,omitempty"`
+	Output      string `json:"output,omitempty"`
+	Session     string `json:"session,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // attemptMintedPayload is the body of EventAttemptMinted.

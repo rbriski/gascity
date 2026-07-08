@@ -870,30 +870,23 @@ var convoyStatusAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local store resolver.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "convoy status"
-	if c != nil {
-		cr, err := c.GetConvoy(convoyID)
-		if err == nil {
-			// Graph/workflow convoys return an empty Convoy.ID — treat as
-			// "not a simple convoy" and fall back so the workflow-aware
-			// local path can render it.
-			if cr.Body.Convoy.ID == "" {
-				logRoute(stderr, cmdName, "fallback", "workflow-convoy")
-				return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr)
+	var cr api.CachedRead[api.ConvoyStatusView]
+	return routeRead(c, "convoy status", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.GetConvoy(convoyID); err != nil {
+				return err
 			}
-			logRoute(stderr, cmdName, "api", "")
-			return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr)
+			// Graph/workflow convoys return an empty Convoy.ID — force a fallback
+			// so the workflow-aware local path can render it.
+			if cr.Body.Convoy.ID == "" {
+				return fallbackAfterFetch{Reason: "workflow-convoy"}
+			}
+			return nil
+		},
+		func() int { return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr) },
+		func() int { return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr) },
+	)
 }
 
 // renderConvoyStatusFromAPI formats the API-sourced convoy detail to match

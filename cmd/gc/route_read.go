@@ -1,11 +1,21 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/gastownhall/gascity/internal/api"
 )
+
+// fallbackAfterFetch is a sentinel an apiFetch closure may return to force a
+// fallback to the local path AFTER a successful API round-trip — for a command
+// whose response can indicate "the API can't serve this, use the richer local
+// path" (e.g. convoy status on a graph/workflow convoy). routeRead renders it as
+// route=fallback reason=<Reason>, bypassing error classification.
+type fallbackAfterFetch struct{ Reason string }
+
+func (f fallbackAfterFetch) Error() string { return "fallback-after-fetch: " + f.Reason }
 
 // routeRead runs the canonical read-path routing ladder shared by every routed
 // read command, so the "try the API, classify the error, fall back to the local
@@ -31,6 +41,11 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 	if err == nil {
 		logRoute(stderr, cmdName, "api", "")
 		return apiRender()
+	}
+	var faf fallbackAfterFetch
+	if errors.As(err, &faf) {
+		logRoute(stderr, cmdName, "fallback", faf.Reason)
+		return localRender()
 	}
 	if !api.ShouldFallbackForRead(c, err) {
 		logRoute(stderr, cmdName, "api", "error")

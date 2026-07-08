@@ -485,7 +485,10 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// Clear in-memory crash tracker so the reconciler doesn't immediately
-	// re-quarantine the session based on stale crash history.
+	// re-quarantine the session based on stale crash history. Read the RAW
+	// SessionNameMetadata (not Info.SessionName, which falls back to
+	// sessionNameFor(ID)) to preserve the skip-when-unset behavior. res.Info is
+	// the typed WakeResult projection (WI-4), so no raw bead is cracked here.
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
@@ -751,7 +754,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
 			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
 			return
 		}

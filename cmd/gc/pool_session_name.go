@@ -292,8 +292,12 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		if sb.Status == "closed" {
 			continue
 		}
-		storeRef := openSessionReachableStoreRef(cityPath, cfg, sb)
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		// WI-5 W3: project once at this boundary and read the session through Info
+		// for both the store-ref resolution and the assignee identities. W4 removes
+		// the projection when the caller iterates OpenInfos() instead of raw beads.
+		info := session.InfoFromPersistedBead(sb)
+		storeRef := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
 			addOpenSessionStoreRef(index, id, storeRef)
 		}
 	}

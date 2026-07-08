@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // closeSessionBeadIfUnassigned closes a session bead only when the live store
@@ -51,12 +52,17 @@ func closeSessionBeadIfUnassigned(
 // the live store scope its configured agent can query has no open or
 // in-progress work assigned to the session. It returns whether the close
 // succeeded, matching closeSessionBeadIfUnassigned's contract.
+// The session parameter is a session.Info: the reachable-store gate reads the
+// session through the typed front door, while the close routes through closeBead
+// (which already funnels its writes through sessionFrontDoor AND runs the
+// extmsg/orphaned-work release cascade Store.Close does not — so the close stays
+// on closeBead, not Store.Close, to preserve that behavior).
 func closeSessionBeadIfReachableStoreUnassigned(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	rigStores map[string]beads.Store,
-	session beads.Bead,
+	info sessionpkg.Info,
 	reason string,
 	now time.Time,
 	stderr io.Writer,
@@ -64,16 +70,16 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
 	if err != nil {
-		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
 	}
 	if hasAssignedWork {
 		return false
 	}
-	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionFrontDoor(store), session.ID, now, stderr)
+	if isFailedCreateSessionInfo(info) {
+		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
 	}
-	return closeBead(store, session.ID, reason, now, stderr)
+	return closeBead(store, info.ID, reason, now, stderr)
 }

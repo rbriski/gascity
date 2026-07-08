@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterval
@@ -20,7 +22,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterva
 	session := env.createSessionBead("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
-	if err := recordSessionAttachedConfigDriftDeferral(session, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
 	first, err := env.store.Get(session.ID)
@@ -38,7 +40,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterva
 	// Advance the clock well within the refresh interval (2m; advance 5s).
 	env.clk.Time = env.clk.Time.Add(5 * time.Second)
 
-	if err := recordSessionAttachedConfigDriftDeferral(first, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(first), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
 	second, err := env.store.Get(session.ID)
@@ -60,7 +62,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RewritesWhenKeyChanges(t *test
 	env := newReconcilerTestEnv()
 	session := env.createSessionBead("worker", "worker")
 
-	if err := recordSessionAttachedConfigDriftDeferral(session, sessionFrontDoor(env.store), env.clk, "key-A"); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, "key-A"); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
 	first, err := env.store.Get(session.ID)
@@ -71,7 +73,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RewritesWhenKeyChanges(t *test
 
 	env.clk.Time = env.clk.Time.Add(5 * time.Second)
 
-	if err := recordSessionAttachedConfigDriftDeferral(first, sessionFrontDoor(env.store), env.clk, "key-B"); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(first), sessionFrontDoor(env.store), env.clk, "key-B"); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
 	second, err := env.store.Get(session.ID)
@@ -103,7 +105,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *t
 	session := env.createSessionBead("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
-	if err := recordSessionAttachedConfigDriftDeferral(session, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
 	first, err := env.store.Get(session.ID)
@@ -118,7 +120,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *t
 	cur := first
 	for elapsed := patrol; elapsed < sessionAttachedConfigDriftRefreshInterval; elapsed += patrol {
 		env.clk.Time = env.clk.Time.Add(patrol)
-		if err := recordSessionAttachedConfigDriftDeferral(cur, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+		if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(cur), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("record at +%s: %v", elapsed, err)
 		}
 		cur, err = env.store.Get(session.ID)
@@ -134,7 +136,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *t
 	// Once the existing stamp is older than the refresh interval, the next call
 	// refreshes it so the deferral cannot age out of the false-negative window.
 	env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftRefreshInterval + time.Second)
-	if err := recordSessionAttachedConfigDriftDeferral(cur, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(cur), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("refresh record: %v", err)
 	}
 	refreshed, err := env.store.Get(session.ID)
@@ -165,7 +167,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 	session := env.createSessionBead("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
-	if err := recordSessionAttachedConfigDriftDeferral(session, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	stamped, err := env.store.Get(session.ID)
@@ -177,14 +179,14 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 	// must still consider the deferral valid (this is the whole point of the
 	// decoupling — a skipped refresh cannot create a false-negative gap).
 	env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftRefreshInterval - time.Second)
-	if err := recordSessionAttachedConfigDriftDeferral(stamped, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(stamped), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("record near refresh boundary: %v", err)
 	}
 	afterSkip, err := env.store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("get after skip: %v", err)
 	}
-	if !recentlyDeferredSessionAttachedConfigDrift(afterSkip, env.clk, driftKey) {
+	if !recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(afterSkip), env.clk, driftKey) {
 		t.Fatal("deferral must read as valid just below the refresh interval (un-refreshed stamp)")
 	}
 
@@ -196,7 +198,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 	if err != nil {
 		t.Fatalf("get near validity boundary: %v", err)
 	}
-	if !recentlyDeferredSessionAttachedConfigDrift(stillValid, env.clk, driftKey) {
+	if !recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(stillValid), env.clk, driftKey) {
 		t.Fatal("deferral must read as valid just below the false-negative limit")
 	}
 
@@ -207,7 +209,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 	if err != nil {
 		t.Fatalf("get past validity: %v", err)
 	}
-	if recentlyDeferredSessionAttachedConfigDrift(lapsed, env.clk, driftKey) {
+	if recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(lapsed), env.clk, driftKey) {
 		t.Fatal("deferral must read as lapsed past the false-negative limit")
 	}
 }
@@ -247,7 +249,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 		// Behavioral guard: drive the real reader at exactly the worst-case age.
 		env := newReconcilerTestEnv()
 		session := env.createSessionBead("worker", "worker")
-		if err := recordSessionAttachedConfigDriftDeferral(session, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+		if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("patrol=%s: record: %v", patrol, err)
 		}
 		stamped, err := env.store.Get(session.ID)
@@ -258,7 +260,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 
 		// Tick at age just under the refresh interval: record() must SKIP (stamp unchanged).
 		env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftRefreshInterval - time.Second)
-		if err := recordSessionAttachedConfigDriftDeferral(stamped, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+		if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(stamped), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("patrol=%s: record near refresh boundary: %v", patrol, err)
 		}
 		afterSkip, err := env.store.Get(session.ID)
@@ -272,7 +274,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 		// One patrol tick later attachment flickers detached: total age is now
 		// (refreshInterval - 1s) + patrol < worst. The reader must still hold.
 		env.clk.Time = env.clk.Time.Add(patrol)
-		if !recentlyDeferredSessionAttachedConfigDrift(afterSkip, env.clk, driftKey) {
+		if !recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(afterSkip), env.clk, driftKey) {
 			t.Fatalf("patrol=%s: deferral must read as valid at age refreshInterval+patrol "+
 				"(skipped refresh then flicker) or a still-attached session is drained", patrol)
 		}

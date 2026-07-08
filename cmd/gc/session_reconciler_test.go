@@ -7986,7 +7986,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferral(t *
 		"started_config_hash":        oldHash,
 		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
 	})
-	driftKey := sessionConfigDriftKey(session, env.cfg, env.desiredState[sessionName])
+	driftKey := sessionConfigDriftKey(sessionpkg.InfoFromPersistedBead(session), env.cfg, env.desiredState[sessionName])
 	if driftKey == "" {
 		t.Fatal("expected config drift key")
 	}
@@ -8071,7 +8071,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferralForP
 	if err != nil {
 		t.Fatalf("Get after attached deferral: %v", err)
 	}
-	driftKey := sessionConfigDriftKey(got, env.cfg, env.desiredState["worker"])
+	driftKey := sessionConfigDriftKey(sessionpkg.InfoFromPersistedBead(got), env.cfg, env.desiredState["worker"])
 	if driftKey == "" {
 		t.Fatal("expected config drift key")
 	}

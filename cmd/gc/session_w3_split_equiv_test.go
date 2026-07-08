@@ -7,8 +7,39 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+// rawOpenSessionReachableStoreRefRef reimplements the pre-migration
+// openSessionReachableStoreRef against the raw bead (via the still-live raw
+// sessionAgentConfig), as ground truth for the Info form. Only the
+// sessionAgentConfig -> sessionAgentConfigInfo swap differs between the two; the
+// cross-store / store-ref resolution is identical, so byte-identity here is the
+// per-parameter split's proof.
+func rawOpenSessionReachableStoreRefRef(cityPath string, cfg *config.City, sb beads.Bead) string {
+	agentCfg := sessionAgentConfig(cfg, sb)
+	if agentCfg == nil {
+		return unresolvedOpenSessionStoreRef
+	}
+	if agentIsCrossStoreEligible(agentCfg) {
+		return crossStoreOpenSessionStoreRef
+	}
+	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+}
+
+// TestOpenSessionReachableStoreRefInfoMatchesRaw pins the §4 split site the
+// red-team flagged: openSessionReachableStoreRefInfo must equal the raw
+// resolution across every session-bead shape (resolved-scoped + unresolved arms).
+func TestOpenSessionReachableStoreRefInfoMatchesRaw(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "mayor"}}}
+	for _, sb := range oracleSessionBeadShapes() {
+		info := session.InfoFromPersistedBead(sb)
+		if got, want := openSessionReachableStoreRefInfo("", cfg, info), rawOpenSessionReachableStoreRefRef("", cfg, sb); got != want {
+			t.Errorf("openSessionReachableStoreRef(%s): info=%q raw=%q", sb.ID, got, want)
+		}
+	}
+}
 
 // WI-5 W3 per-parameter-split oracles. These pin the Info forms of the
 // mixed work/session helpers (spec §7): the SESSION parameter reads typed

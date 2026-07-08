@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // forkClaude is a resolved provider with full fork support, mirroring the
@@ -354,11 +355,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: ""})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: ""})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "" {
+		if got := boundInfo.BrainParentSID; got != "" {
 			t.Errorf("%s = %q, want cleared", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})
@@ -368,11 +369,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: "wb-B"})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: "wb-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "" {
+		if got := boundInfo.BrainParentSID; got != "" {
 			t.Errorf("%s = %q, want cleared on reassign to non-warm work", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})
@@ -382,11 +383,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "brain-B" {
+		if got := boundInfo.BrainParentSID; got != "brain-B" {
 			t.Errorf("%s = %q, want brain-B", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})
@@ -396,11 +397,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "brain-A" {
+		if got := boundInfo.BrainParentSID; got != "brain-A" {
 			t.Errorf("%s = %q, want brain-A preserved", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})

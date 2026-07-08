@@ -138,10 +138,9 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/session_lifecycle_parallel.go": 3,
 		"cmd/gc/session_logs_resolve.go":       3,
 		"cmd/gc/session_reconcile.go":          3,
-		"cmd/gc/session_reconciler.go":         8,
+		"cmd/gc/session_reconciler.go":         7,
 		"cmd/gc/session_resolve.go":            3,
 		"cmd/gc/session_template_start.go":     1,
-		"cmd/gc/session_wake.go":               3,
 		"cmd/gc/skill_visibility.go":           1,
 	},
 	"SessionInfoFromBead(": {

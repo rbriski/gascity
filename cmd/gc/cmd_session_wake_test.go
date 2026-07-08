@@ -403,6 +403,11 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionWake() = %d, want rejection; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
+	// Pin the CLI wake-conflict artifact: the fused WakeSession returns a
+	// WakeConflictError the CLI renders as "session <id> is <state>".
+	if want := "gc session wake: session " + sessionID + " is archived"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+	}
 }
 
 func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *testing.T) {

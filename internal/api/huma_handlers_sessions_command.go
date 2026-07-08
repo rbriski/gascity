@@ -874,10 +874,13 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		if state, conflict := session.WakeConflictState(err); conflict {
 			return nil, huma.Error409Conflict("session " + id + " is " + state)
 		}
-		if errors.Is(err, beads.ErrNotFound) {
-			return nil, humaStoreError(err)
-		}
-		return nil, huma.Error500InternalServerError(err.Error())
+		// Route every remaining store error through humaStoreError: the fused
+		// Get error keeps its original 404 "not_found: "/500 "internal: " mapping,
+		// and a mid-wake write error keeps the "internal: " prefix. (Delta vs the
+		// pre-fusion handler: a mid-wake write ErrNotFound now maps 404 instead of
+		// 500 — a safe-direction, near-unreachable shift, mirrored in the REST
+		// handler's writeStoreError.)
+		return nil, humaStoreError(err)
 	}
 	// Nudge withdrawal reads the nudges class, so it sources the typed
 	// NudgesBeadStore (identity to the work store until that class relocates).

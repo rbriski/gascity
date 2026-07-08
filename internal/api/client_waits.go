@@ -50,6 +50,7 @@ func IsRouteMissing(err error) bool {
 // rejection). The CLI renders "gc wait inspect: %s is not a wait" from it.
 type NotAWaitError struct{ ID string }
 
+// Error reports the referenced bead ID that is not a durable wait.
 func (e *NotAWaitError) Error() string { return fmt.Sprintf("%s is not a wait", e.ID) }
 
 // routeMissingFromResponse returns a routeMissingError when a 404 carried no

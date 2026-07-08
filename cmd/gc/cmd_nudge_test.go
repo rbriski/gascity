@@ -4937,3 +4937,63 @@ func TestDeliverSessionNudgeWaitIdleIdleTargetNotShortCircuited(t *testing.T) {
 		t.Fatalf("idle target should consult WaitForIdle (not short-circuited); calls = %#v", fake.Calls)
 	}
 }
+
+// TestBlockedQueuedNudgeReason_GetWaitErrorMapping is the design-promised A2
+// oracle for the WI-1 nudge residual closure: blockedQueuedNudgeReason gates
+// wait-sourced nudges by reading the referenced wait through the session front
+// door's GetWait, mapping a missing bead to "wait-missing", a non-wait bead to
+// "wait-reference-invalid", and each wait state to its block reason.
+func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
+	store := beads.NewMemStore()
+	sessFront := sessionFrontDoor(store)
+
+	newWait := func(state string) string {
+		b, err := store.Create(beads.Bead{
+			Type:     waitBeadType,
+			Status:   "open",
+			Labels:   []string{waitBeadLabel, "session:s-1"},
+			Metadata: map[string]string{"session_id": "s-1", "state": state},
+		})
+		if err != nil {
+			t.Fatalf("create wait: %v", err)
+		}
+		return b.ID
+	}
+	nonWait, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create non-wait: %v", err)
+	}
+
+	waitItem := func(refID string) queuedNudge {
+		return queuedNudge{Source: "wait", Reference: &nudgeReference{Kind: "bead", ID: refID}}
+	}
+
+	cases := []struct {
+		name       string
+		item       queuedNudge
+		wantReason string
+		wantBlock  bool
+	}{
+		{"ready-passes", waitItem(newWait(waitStateReady)), "", false},
+		{"canceled", waitItem(newWait(waitStateCanceled)), "wait-canceled", true},
+		{"closed", waitItem(newWait(waitStateClosed)), "wait-closed", true},
+		{"expired", waitItem(newWait(waitStateExpired)), "wait-expired", true},
+		{"failed", waitItem(newWait(waitStateFailed)), "wait-failed", true},
+		{"pending-not-ready", waitItem(newWait(waitStatePending)), "wait-not-ready", true},
+		{"missing-bead", waitItem("gc-nope"), "wait-missing", true},
+		{"non-wait-bead", waitItem(nonWait.ID), "wait-reference-invalid", true},
+		{"non-wait-source", queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false},
+		{"nil-reference", queuedNudge{Source: "wait"}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, block, err := blockedQueuedNudgeReason(sessFront, tc.item)
+			if err != nil {
+				t.Fatalf("blockedQueuedNudgeReason: %v", err)
+			}
+			if reason != tc.wantReason || block != tc.wantBlock {
+				t.Fatalf("got (%q, %v), want (%q, %v)", reason, block, tc.wantReason, tc.wantBlock)
+			}
+		})
+	}
+}

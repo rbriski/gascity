@@ -69,12 +69,18 @@ func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*Wai
 }
 
 // waitViewFromInfo projects a session.WaitInfo onto its wire view. CreatedAt is
-// rendered exactly like the CLI's formatOptionalTime (zero -> "", else RFC3339
-// UTC) so the typed rung and the local fallback rung are byte-identical.
+// carried at RFC3339Nano (full precision, UTC), not RFC3339: the CLI still
+// renders it at second precision via formatOptionalTime, so the emitted
+// created_at string is unchanged, but the sort key the CLI parses back
+// (sort.SliceStable on CreatedAt) keeps sub-second precision. Otherwise two
+// waits created within the same second on a nanosecond backend (mem/file store)
+// would render in a different row order on this typed rung than on the legacy
+// (/beads, RFC3339Nano) and local (raw time.Time) rungs, breaking the
+// byte-identical-across-rungs contract. A zero time still maps to "".
 func waitViewFromInfo(w session.WaitInfo) WaitView {
 	created := ""
 	if !w.CreatedAt.IsZero() {
-		created = w.CreatedAt.UTC().Format(time.RFC3339)
+		created = w.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return WaitView{
 		ID:              w.ID,

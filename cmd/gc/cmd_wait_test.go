@@ -2998,3 +2998,126 @@ func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
 }
+
+// TestRouteWaitList_ThreeRungByteIdentical is the cross-rung byte-identity pin
+// for the CreatedAt-precision blocker: two waits created sub-second apart in the
+// SAME second must render in the same --json row order on all three rungs. The
+// typed and legacy mocks carry created_at at RFC3339Nano (as the real server and
+// the bead encoder do), the local rung reads the persisted store; the CLI's
+// ascending created-time sort must resolve the tie identically on every rung.
+func TestRouteWaitList_ThreeRungByteIdentical(t *testing.T) {
+	cityDir, store := setupWaitJSONTestCity(t)
+
+	// The store assigns CreatedAt=now on Create, so two back-to-back creates land
+	// sub-second apart in (almost always) the same second — the tie the
+	// truncation bug broke. The skip guard below covers the rare second-straddle.
+	seed := func() {
+		if _, err := store.Create(beads.Bead{
+			Title:       "wait:demo",
+			Type:        waitBeadType,
+			Status:      "open",
+			Description: "wait for deps",
+			Labels:      []string{waitBeadLabel, "session:s-1"},
+			Metadata:    map[string]string{"session_id": "s-1", "session_name": "demo", "kind": "deps", "state": waitStateReady},
+		}); err != nil {
+			t.Fatalf("seed wait: %v", err)
+		}
+	}
+	seed()
+	seed()
+
+	// Read the persisted waits back the way the local rung will (reopened store),
+	// so the mock wire values match the local rung's CreatedAt exactly.
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	persisted, err := reopened.List(beads.ListQuery{Label: waitBeadLabel, Sort: beads.SortCreatedDesc})
+	if err != nil {
+		t.Fatalf("list persisted waits: %v", err)
+	}
+	if len(persisted) != 2 {
+		t.Fatalf("persisted wait count = %d, want 2", len(persisted))
+	}
+	// The file store must preserve sub-second precision for the tie to be
+	// resolvable on every rung (the coordinator's nanosecond-backend premise).
+	if persisted[0].CreatedAt.Truncate(time.Second) != persisted[1].CreatedAt.Truncate(time.Second) {
+		t.Skipf("seeded waits landed in different seconds (%v vs %v); tie scenario not exercised", persisted[0].CreatedAt, persisted[1].CreatedAt)
+	}
+	if persisted[0].CreatedAt.Equal(persisted[1].CreatedAt) {
+		t.Fatalf("file store truncated sub-second CreatedAt; both waits at %v — tie unresolvable on any rung", persisted[0].CreatedAt)
+	}
+
+	beadItem := func(b beads.Bead) map[string]any {
+		return map[string]any{
+			"id":          b.ID,
+			"title":       b.Title,
+			"issue_type":  b.Type,
+			"status":      b.Status,
+			"labels":      b.Labels,
+			"metadata":    b.Metadata,
+			"description": b.Description,
+			"created_at":  b.CreatedAt.UTC().Format(time.RFC3339Nano),
+		}
+	}
+	waitView := func(b beads.Bead) map[string]any {
+		return map[string]any{
+			"id":           b.ID,
+			"session_id":   b.Metadata["session_id"],
+			"session_name": b.Metadata["session_name"],
+			"kind":         b.Metadata["kind"],
+			"state":        b.Metadata["state"],
+			"status":       b.Status,
+			"note":         b.Description,
+			"created_at":   b.CreatedAt.UTC().Format(time.RFC3339Nano),
+		}
+	}
+
+	// Typed /v0/waits mock returns created-DESC (as the real server does).
+	typedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/waits") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"waits":  []map[string]any{waitView(persisted[0]), waitView(persisted[1])},
+			"capped": false,
+		})
+	}))
+	defer typedSrv.Close()
+
+	// Legacy mock: /waits plain-404 (route-missing) -> generic /beads.
+	legacySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/waits"):
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.Path, "/beads"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{beadItem(persisted[0]), beadItem(persisted[1])}, "total": 2})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer legacySrv.Close()
+
+	run := func(c *api.Client, nilReason string) string {
+		var stdout, stderr bytes.Buffer
+		if code := routeWaitList(cityDir, c, nilReason, "", "", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("routeWaitList exit=%d stderr=%q", code, stderr.String())
+		}
+		return stdout.String()
+	}
+
+	typed := run(api.NewCityScopedClient(typedSrv.URL, "wait-json"), "")
+	legacy := run(api.NewCityScopedClient(legacySrv.URL, "wait-json"), "")
+	local := run(nil, "controller-down")
+
+	if typed != legacy || typed != local {
+		t.Fatalf("--json differs across rungs:\n typed=%s\n legacy=%s\n local=%s", typed, legacy, local)
+	}
+	// Sanity: the tie resolved chronologically (oldest wait first in the array).
+	if !strings.Contains(typed, persisted[1].ID) || !strings.Contains(typed, persisted[0].ID) {
+		t.Fatalf("both waits should render: %s", typed)
+	}
+}

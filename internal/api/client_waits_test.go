@@ -3,11 +3,14 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -78,6 +81,16 @@ func TestWaitInfoWireRoundTrip(t *testing.T) {
 			Status:    "open",
 			// DepIDs nil, CreatedAt zero
 		},
+		// Sub-second CreatedAt must survive the wire so the CLI's created-time
+		// sort key stays precise across rungs (RFC3339Nano out, RFC3339 parse in).
+		"sub-second-created": {
+			ID:        "gc-wait-3",
+			SessionID: "gc-sess-3",
+			Kind:      "deps",
+			State:     "ready",
+			Status:    "open",
+			CreatedAt: time.Date(2026, 3, 2, 4, 5, 6, 123456789, time.UTC),
+		},
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -103,5 +116,61 @@ func TestNotAWaitErrorMessage(t *testing.T) {
 	e := &NotAWaitError{ID: "gc-9"}
 	if e.Error() != "gc-9 is not a wait" {
 		t.Fatalf("NotAWaitError = %q", e.Error())
+	}
+}
+
+// subSecondWaitBead builds an IsWaitBead-satisfying gate bead with an explicit
+// CreatedAt so the created-time ordering is deterministic and sub-second.
+func subSecondWaitBead(id string, created time.Time) beads.Bead {
+	return beads.Bead{
+		ID:        id,
+		Type:      session.WaitBeadType,
+		Status:    "open",
+		Labels:    []string{session.WaitBeadLabel, "session:s-1"},
+		Metadata:  map[string]string{"session_id": "s-1", "state": "ready", "kind": "deps"},
+		CreatedAt: created,
+	}
+}
+
+// TestWaitList_TypedRungPreservesSubSecondOrder is the source-side guard for the
+// cross-rung byte-identity contract: the real /v0/waits handler (waitViewFromInfo)
+// must carry sub-second CreatedAt so the CLI's ascending created-time sort orders
+// two same-second waits identically to the legacy/local rungs (which see full
+// time.Time precision). If waitViewFromInfo truncated to whole seconds, the two
+// waits would compare equal and the stable sort would keep the server's DESC
+// order (newest first) instead of chronological.
+func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
+	base := time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+	early := subSecondWaitBead("w-early", base.Add(100*time.Millisecond))
+	late := subSecondWaitBead("w-late", base.Add(900*time.Millisecond))
+
+	state := newFakeState(t)
+	// Seed both waits verbatim (NewMemStoreFrom preserves the explicit CreatedAt
+	// that Create would otherwise overwrite). SessionsBeadStore falls back to
+	// cityBeadStore, which the /v0/waits handler reads.
+	state.cityBeadStore = beads.NewMemStoreFrom(2, []beads.Bead{late, early}, nil)
+
+	ts := httptest.NewServer(newTestCityHandler(t, state))
+	t.Cleanup(ts.Close)
+	c := NewCityScopedClient(ts.URL, state.CityName())
+
+	cr, err := c.ListWaits("", "")
+	if err != nil {
+		t.Fatalf("ListWaits: %v", err)
+	}
+	got := cr.Body.Waits
+	if len(got) != 2 {
+		t.Fatalf("wait count = %d, want 2", len(got))
+	}
+	for _, w := range got {
+		if w.CreatedAt.Nanosecond() == 0 {
+			t.Fatalf("wait %s lost sub-second precision on the typed rung: %v", w.ID, w.CreatedAt)
+		}
+	}
+	// Apply the CLI's ascending stable created-time sort and assert chronological
+	// order (oldest first) — the same ordering the legacy/local rungs produce.
+	sort.SliceStable(got, func(i, j int) bool { return got[i].CreatedAt.Before(got[j].CreatedAt) })
+	if got[0].ID != "w-early" || got[1].ID != "w-late" {
+		t.Fatalf("post-sort order = [%s %s], want [w-early w-late]", got[0].ID, got[1].ID)
 	}
 }

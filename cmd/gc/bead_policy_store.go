@@ -120,6 +120,18 @@ func (s *beadPolicyStore) createTarget(b beads.Bead) beads.Store {
 	return s.Store
 }
 
+// Get resolves a bead by id across the work and graph stores, giving read/write
+// symmetry with the routing Create (createTarget): a graph-class bead (gcg-) created
+// through this store's chokepoint lands on graphStore, so Get must read it back from
+// graphStore too. Without this override Get promoted from the embedded work store, so
+// graph beads were write-only through the policy wrapper — anything resolving a
+// graph-resident bead by id through the store handle alone (e.g. a cross-store
+// convoy's ref-by-id, sling's live-tracking-convoy lookup) silently missed. Byte-
+// identical default: when graph is not relocated the set is just Store.
+func (s *beadPolicyStore) Get(id string) (beads.Bead, error) {
+	return s.getForPolicy(id)
+}
+
 // getForPolicy resolves a bead by id across the work and graph stores so a
 // graph-resident root (e.g. a wisp root, used to derive a child's storage tier) is
 // found even after the Router is gone. Byte-identical default: when graph is not

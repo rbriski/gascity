@@ -6783,18 +6783,13 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	if bead.ParentID != "" {
 		t.Fatalf("ParentID = %q, want empty because auto-convoy membership uses tracks deps", bead.ParentID)
 	}
-	trackDeps, err := deps.Store.DepList(bead.ID, "up")
-	if err != nil {
-		t.Fatalf("DepList(%s, up): %v", bead.ID, err)
-	}
-	var recoveredConvoyID string
-	for _, dep := range trackDeps {
-		if dep.Type == "tracks" && dep.DependsOnID == bead.ID {
-			recoveredConvoyID = dep.IssueID
-		}
-	}
+	// Auto-convoy membership is a ref-by-id: gc.tracking_convoy_id on the bead points
+	// at the recovered convoy. (The legacy tracks dep is a same-store-only optimization
+	// and is intentionally absent here — the MemStore mints the convoy with a "gc-"
+	// prefix while the bead is "BL-42", so they are not co-resident by prefix.)
+	recoveredConvoyID := bead.Metadata["gc.tracking_convoy_id"]
 	if recoveredConvoyID == "" {
-		t.Fatalf("expected recovered bead to have a tracks dependency, got deps=%v", trackDeps)
+		t.Fatalf("expected recovered bead to have gc.tracking_convoy_id, got metadata=%v", bead.Metadata)
 	}
 	if recoveredConvoyID == existingConvoy.ID {
 		t.Fatalf("recovered convoy = pre-existing convoy %s, want a fresh convoy", existingConvoy.ID)

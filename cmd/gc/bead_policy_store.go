@@ -143,6 +143,80 @@ func (s *beadPolicyStore) getForPolicy(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// writeOwner returns the store that owns id for a by-id mutation, federating across the
+// work and graph stores — the write-side symmetry with getForPolicy's read federation.
+// createTarget routes a graph-class bead (gcg-) to graphStore, and Get reads it back
+// from there; without this, every by-id WRITE (Update/Close/SetMetadata/DepAdd/…)
+// promoted from the embedded work store and silently missed the graph-resident bead
+// (stamping outcomes, closing steps, wiring deps on graph workflow beads all failed on
+// a graph-relocated city). Prefer the static id-prefix route (fork-free); fall back to a
+// graph probe. Byte-identical default: when graph is not relocated it returns Store, so
+// every default-bd city is untouched.
+func (s *beadPolicyStore) writeOwner(id string) beads.Store {
+	if s.graphStore == nil || s.graphStore == s.Store {
+		return s.Store
+	}
+	if o := storeref.PrefixOwner(id, []beads.Store{s.Store, s.graphStore}); o != nil {
+		return o
+	}
+	if _, err := s.graphStore.Get(id); err == nil {
+		return s.graphStore
+	}
+	return s.Store
+}
+
+func (s *beadPolicyStore) Update(id string, opts beads.UpdateOpts) error {
+	return s.writeOwner(id).Update(id, opts)
+}
+
+func (s *beadPolicyStore) Close(id string) error { return s.writeOwner(id).Close(id) }
+
+func (s *beadPolicyStore) Reopen(id string) error { return s.writeOwner(id).Reopen(id) }
+
+func (s *beadPolicyStore) Delete(id string) error { return s.writeOwner(id).Delete(id) }
+
+func (s *beadPolicyStore) SetMetadata(id, key, value string) error {
+	return s.writeOwner(id).SetMetadata(id, key, value)
+}
+
+func (s *beadPolicyStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	return s.writeOwner(id).SetMetadataBatch(id, kvs)
+}
+
+func (s *beadPolicyStore) DepList(id, direction string) ([]beads.Dep, error) {
+	return s.writeOwner(id).DepList(id, direction)
+}
+
+func (s *beadPolicyStore) DepAdd(issueID, dependsOnID, depType string) error {
+	return s.writeOwner(issueID).DepAdd(issueID, dependsOnID, depType)
+}
+
+func (s *beadPolicyStore) DepRemove(issueID, dependsOnID string) error {
+	return s.writeOwner(issueID).DepRemove(issueID, dependsOnID)
+}
+
+// CloseAll groups ids by owning store so a mixed graph/work batch closes each bead on
+// its own store instead of promoting the whole batch to the work store.
+func (s *beadPolicyStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if s.graphStore == nil || s.graphStore == s.Store {
+		return s.Store.CloseAll(ids, metadata)
+	}
+	byOwner := make(map[beads.Store][]string, 2)
+	for _, id := range ids {
+		o := s.writeOwner(id)
+		byOwner[o] = append(byOwner[o], id)
+	}
+	total := 0
+	for owner, group := range byOwner {
+		n, err := owner.CloseAll(group, metadata)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	query = expandPolicyReadTier(query)
 	return s.Store.List(query)

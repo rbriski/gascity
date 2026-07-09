@@ -2768,12 +2768,26 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workspace := packWorkspaceSlug(request); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackWorkspaceMetadataKey]) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+	switch workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); {
+	case workDir != "":
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
 			metadata[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
 			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		}
+	case strings.TrimSpace(request.WorkStoreRef) == tierBHookStoreName:
+		// Re-pointing this pooled session onto a Lumen graph-journal row: a tier-B
+		// do node has no per-bead work dir (poolTriggerWorkDir returned "" above),
+		// so any dir stamped from a prior rig trigger bead is now stale. Clear both
+		// keys so the launch re-resolves the agent's city dir (tp.WorkDir, restamped
+		// via session_beads.go) instead of new-session -c against a now-absent
+		// <city>/<bead-slug> — the "wedged in creating" failure Fix 2 exists to kill.
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != "" {
+			metadata[beadmeta.WorkDirMetadataKey] = ""
+		}
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != "" {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = ""
 		}
 	}
 	if len(metadata) == 0 {
@@ -2796,6 +2810,17 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
+		return ""
+	}
+	// A Lumen graph-journal work bead (a pool-mode do node) runs in place in the
+	// agent's configured work dir, not a per-bead trigger workspace. An L3 do node
+	// carries no isolation, so nothing materializes a `<city>/<bead-slug>` dir; a
+	// per-bead work dir here only destabilizes the pooled session — its resolved
+	// dir flips between un-created bead slugs, churning the session (a tmux pane
+	// wedges in "creating" on new-session -c against the absent dir). The claiming
+	// worker resolves the city from its env, so a per-bead trigger dir buys nothing.
+	// (Per-bead isolation for pool-mode work is an L4+ concern with real worktrees.)
+	if strings.TrimSpace(request.WorkStoreRef) == tierBHookStoreName {
 		return ""
 	}
 	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)

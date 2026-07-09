@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -99,6 +100,115 @@ func TestCityGraphScopeTransientStatErrorNotMemoizedAsAbsence(t *testing.T) {
 	}
 	if _, ok := cityGraphJournalCache.Load(filepath.Clean(cityPath)); ok {
 		t.Fatal("cachedCityGraphJournal memoized a transient stat error as absence — a later probe can never opt in")
+	}
+}
+
+// TestGraphJournalCacheStaleNegativeTransientRevalidationSurfaces pins L3fix: a
+// stale MEMOIZED negative that is re-validated with a transient stat error
+// (EACCES/EMFILE — here ENOTDIR) must NOT be reported as authoritative "not
+// opted" (nil, false, nil). It must surface as opted-unknown (nil, true, err),
+// matching the fresh openCityGraphJournalResultAt path, so the caller retries
+// instead of pinning bare-legacy routing for a city that may in fact be opted.
+func TestGraphJournalCacheStaleNegativeTransientRevalidationSurfaces(t *testing.T) {
+	cityPath := t.TempDir()
+	key := filepath.Clean(cityPath)
+	cityGraphJournalCache.Store(key, &graphJournalCacheEntry{store: nil})
+	t.Cleanup(func() { cityGraphJournalCache.Delete(key) })
+
+	// Make the scope re-stat fail transiently: a regular file where the scope's
+	// .beads directory is expected, so the stat fails ENOTDIR (not ENOENT).
+	scopeBeads := filepath.Join(graphScopeRoot(cityPath), ".beads")
+	if err := os.MkdirAll(filepath.Dir(scopeBeads), 0o755); err != nil {
+		t.Fatalf("mkdir graph scope root: %v", err)
+	}
+	if err := os.WriteFile(scopeBeads, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	store, opted, err := cachedCityGraphJournalResult(cityPath)
+	if store != nil {
+		t.Fatalf("store = %v, want nil on a transient revalidation error", store)
+	}
+	if err == nil {
+		t.Fatal("cachedCityGraphJournalResult swallowed a transient revalidation stat error as authoritative absence")
+	}
+	if !opted {
+		t.Fatal("opted = false on a transient revalidation error; want opted-unknown (true) so the caller retries, matching the fresh path")
+	}
+	// The transient miss must NOT overwrite/evict the memoized entry.
+	if _, ok := cityGraphJournalCache.Load(key); !ok {
+		t.Fatal("transient revalidation error evicted the memoized entry; a later probe must still re-validate")
+	}
+}
+
+// TestGraphJournalCacheStaleNegativeConcurrentReopenDedups pins L2fix: after a
+// city opts in mid-flight, concurrent callers that all observe a stale memoized
+// negative must converge on exactly ONE opened store (LoadOrStore dedup, losers
+// scheduled-closed) — never evict a freshly-stored positive. The re-validation
+// now evicts ONLY the observed stale entry via CompareAndDelete, so a racing
+// opener's live handle is never dropped from the map (which would leak it and
+// force the next caller to open a second).
+func TestGraphJournalCacheStaleNegativeConcurrentReopenDedups(t *testing.T) {
+	// Close the losing handles synchronously so the test leaves nothing pending.
+	prevDelay := controllerStateStoreCloseDelay
+	controllerStateStoreCloseDelay = 0
+	t.Cleanup(func() { controllerStateStoreCloseDelay = prevDelay })
+
+	cityPath := t.TempDir()
+	if err := migrateGraphJournalInit(cityPath); err != nil {
+		t.Fatalf("migrate graph-journal init: %v", err)
+	}
+	key := filepath.Clean(cityPath)
+	// Seed the exact race precondition: a stale negative from before the opt-in.
+	cityGraphJournalCache.Store(key, &graphJournalCacheEntry{store: nil})
+	t.Cleanup(func() {
+		if v, ok := cityGraphJournalCache.Load(key); ok {
+			if s := v.(*graphJournalCacheEntry).store; s != nil {
+				_ = closeBeadStoreHandle(s)
+			}
+			cityGraphJournalCache.Delete(key)
+		}
+	})
+
+	const goroutines = 32
+	var wg sync.WaitGroup
+	stores := make([]beads.Store, goroutines)
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			stores[idx], _, errs[idx] = cachedCityGraphJournalResult(cityPath)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var winner beads.Store
+	for i := 0; i < goroutines; i++ {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d: cachedCityGraphJournalResult error = %v", i, errs[i])
+		}
+		if stores[i] == nil {
+			t.Fatalf("goroutine %d: got a nil store for an opted city", i)
+		}
+		if winner == nil {
+			winner = stores[i]
+			continue
+		}
+		if !sameStorePtr(stores[i], winner) {
+			t.Fatalf("concurrent callers got two different memoized stores (a live handle was evicted, not deduped): %p vs %p", stores[i], winner)
+		}
+	}
+	// The cache must hold exactly that single positive.
+	v, ok := cityGraphJournalCache.Load(key)
+	if !ok {
+		t.Fatal("cache holds no entry after the reopen storm")
+	}
+	if got := v.(*graphJournalCacheEntry).store; !sameStorePtr(got, winner) {
+		t.Fatalf("memoized store %p != the store returned to callers %p", got, winner)
 	}
 }
 

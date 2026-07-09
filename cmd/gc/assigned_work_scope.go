@@ -86,8 +86,9 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	// resolves agentCfg from the row's own gc.routed_to via findAgentByTemplate,
 	// and the namedWorkReady caller (build_desired_state.go) gates on
 	// Assignee == identity before calling in. Its journal store ref
-	// (tierBHookStoreName) never equals any configured rig name, so the
-	// store-ref compare below would always drop it and DRAIN a mid-do Lumen
+	// (tierBHookStoreName) never equals any configured rig name — config.
+	// ValidateRigs reserves that value (config.ReservedGraphJournalRigName), so
+	// the store-ref compare below can never match it and DRAIN a mid-do Lumen
 	// worker (the exact failure S11 exists to prevent). The route/assignment
 	// match the caller already performed IS its reachability.
 	if storeRefs[index] == tierBHookStoreName {

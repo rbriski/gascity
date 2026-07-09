@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
@@ -49,8 +50,10 @@ func isTierBFenceRetryable(err error) bool {
 }
 
 // tierBHookStoreName identifies the Tier-B journal leg among the federated hook
-// stores. It is a fixed marker, not a role name.
-const tierBHookStoreName = "graph-journal"
+// stores. It is a fixed marker, not a role name. It is sourced from the single
+// canonical constant so config.ValidateRigs can reserve the same value as a
+// forbidden rig name (a rig with this name would collide with Tier-B routing).
+const tierBHookStoreName = config.ReservedGraphJournalRigName
 
 // claimTierBWork is the engine claim seam claimTierBWorkBead calls. It is a
 // package var so a test can inject the error-mapping branches — ErrTierBNotClaimable

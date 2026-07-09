@@ -144,7 +144,36 @@ func cachedCityGraphJournalResult(cityPath string) (beads.Store, bool, error) {
 	key := filepath.Clean(cityPath)
 	if v, ok := cityGraphJournalCache.Load(key); ok {
 		store := v.(*graphJournalCacheEntry).store
-		return store, store != nil, nil
+		if store != nil {
+			return store, true, nil
+		}
+		// A memoized ABSENCE is not permanent: `gc migrate graph-journal init`
+		// opts a running city in mid-flight, and post-start opt-in must be safe
+		// for every consumer, not just the tick (which already re-stats the scope
+		// each pass, cityHasGraphScope). Re-stat the scope with the same cheap
+		// probe: a still-absent scope stays the cached negative, while a now-present
+		// scope invalidates the stale entry and falls through to a fresh open. Only
+		// the nil-store negative is re-validated; a real opened handle stays memoized,
+		// so the opted-city hot path is unchanged.
+		present, statErr := cityGraphScopePresence(cityPath)
+		switch {
+		case statErr != nil:
+			// A transient re-validation stat error (EACCES/EMFILE/…) is unknowable,
+			// not authoritative absence. Surface it as opted-unknown (present=true
+			// tags "not real absence"), matching the fresh openCityGraphJournalResultAt
+			// path, so the caller retries rather than pinning bare-legacy routing. The
+			// memoized negative is left intact for the next pass (L3fix).
+			return nil, true, fmt.Errorf("re-validating city graph scope %q: %w", cityPath, statErr)
+		case !present:
+			// Still absent: the cached negative stands (byte-identical legacy routing).
+			return nil, false, nil
+		}
+		// Now present. Evict ONLY the observed stale negative — never a positive a
+		// racing opener stored in the gap. An unconditional Delete could drop a
+		// freshly-memoized live handle out of the map (leaking it; callers hold it
+		// but nothing closes it, and the next caller opens a second). CompareAndDelete
+		// spares any value other than the stale v we loaded (L2fix).
+		cityGraphJournalCache.CompareAndDelete(key, v)
 	}
 	opened, present, err := openCityGraphJournalResultAt(cityPath)
 	if err != nil {

@@ -405,3 +405,37 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 		}
 	})
 }
+
+// TestBindPoolSessionTriggerBead_ClearsStaleWorkDirOnTierBRepoint pins the M1
+// fix: a pooled session previously stamped with a per-bead trigger work_dir
+// (from a regular rig trigger bead) that is RE-POINTED onto a Lumen tier-B row
+// must have both work-dir metadata keys CLEARED. poolTriggerWorkDir returns ""
+// for a tier-B do node (it runs in the agent's city dir, not a per-bead dir);
+// leaving the stale <city>/<slug> in metadata makes a later respawn launch
+// new-session -c against a now-absent dir — the "wedged in creating" failure Fix
+// 2 exists to kill. Clearing lets session_beads.go re-stamp tp.WorkDir (city dir).
+func TestBindPoolSessionTriggerBead_ClearsStaleWorkDirOnTierBRepoint(t *testing.T) {
+	staleDir := "/city/wb-a-some-old-bead"
+	session := beads.Bead{ID: "sess-1", Metadata: map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey: "wb-A",
+		beadmeta.WorkDirMetadataKey:       staleDir,
+		beadmeta.LegacyWorkDirMetadataKey: staleDir,
+	}}
+	bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{
+		WorkBeadID:   "gcg-lumen-do-1",
+		WorkStoreRef: tierBHookStoreName,
+	})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if got := strings.TrimSpace(bound.Metadata[beadmeta.WorkDirMetadataKey]); got != "" {
+		t.Errorf("%s = %q, want cleared on tier-B re-point (stale per-bead dir wedges the respawn)", beadmeta.WorkDirMetadataKey, got)
+	}
+	if got := strings.TrimSpace(bound.Metadata[beadmeta.LegacyWorkDirMetadataKey]); got != "" {
+		t.Errorf("%s = %q, want cleared on tier-B re-point", beadmeta.LegacyWorkDirMetadataKey, got)
+	}
+	// The re-point itself is still recorded: the trigger flips to the Lumen row.
+	if got := bound.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gcg-lumen-do-1" {
+		t.Errorf("%s = %q, want the re-pointed Lumen work bead", beadmeta.TriggerBeadIDMetadataKey, got)
+	}
+}

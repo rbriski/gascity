@@ -157,3 +157,60 @@ func TestTrackItem_PolicyStoreTopologySkipsCrossStoreDep(t *testing.T) {
 		t.Fatalf("Members = %v, want [%s] via metadata", members, member.ID)
 	}
 }
+
+// federatingReadStore models the POST-ccebee78b beadPolicyStore: Create routes a
+// convoy to the graph store, and Get FEDERATES across [work, graph]. The original
+// TrackItem guard probed store.Get(convoyID) to decide "same-store, safe to dep-add";
+// the federating Get resolves the graph convoy through this work handle, so that guard
+// passed and re-fired the cross-store dep-add ("resolving gcg-2"). The prefix guard
+// must skip the dep regardless of what Get can resolve.
+type federatingReadStore struct {
+	beads.Store             // work store
+	graph       beads.Store // graph store (gcg-)
+}
+
+func (s *federatingReadStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.Type == "convoy" {
+		return s.graph.Create(b)
+	}
+	return s.Store.Create(b)
+}
+
+func (s *federatingReadStore) Get(id string) (beads.Bead, error) {
+	if b, err := s.Store.Get(id); err == nil {
+		return b, nil
+	}
+	return s.graph.Get(id) // federate — the ccebee78b behavior
+}
+
+func TestTrackItem_FederatingGetStillSkipsCrossStoreDep(t *testing.T) {
+	work := beads.NewMemStore()
+	graph, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if c, ok := graph.(interface{ CloseStore() error }); ok {
+			_ = c.CloseStore()
+		}
+	})
+	store := &federatingReadStore{Store: work, graph: graph}
+
+	member, _ := store.Create(beads.Bead{Type: "task", Title: "work member"})    // gc- in work
+	convoy, _ := store.Create(beads.Bead{Type: "convoy", Title: "graph convoy"}) // gcg- in graph
+
+	// Guard: store.Get(convoy) FEDERATES and would resolve it — the old guard's trap.
+	if _, err := store.Get(convoy.ID); err != nil {
+		t.Fatalf("precondition: federating Get must resolve the graph convoy: %v", err)
+	}
+	if err := TrackItem(store, convoy.ID, member.ID); err != nil {
+		t.Fatalf("TrackItem must not hard-fail on the cross-store pair: %v", err)
+	}
+	// The metadata ref is stamped (authoritative), but NO cross-store dep is written.
+	if got, _ := work.Get(member.ID); got.Metadata[beadmeta.TrackingConvoyIDMetadataKey] != convoy.ID {
+		t.Fatalf("member missing gc.tracking_convoy_id=%s; got %v", convoy.ID, got.Metadata)
+	}
+	if ok, _ := HasTrack(store, convoy.ID, member.ID); ok {
+		t.Fatal("cross-store dep must be skipped even when Get federates (prefix guard), else the gcg-2 regression is back")
+	}
+}

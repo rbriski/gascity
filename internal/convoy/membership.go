@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -44,14 +45,35 @@ func TrackItem(store beads.Store, convoyID, itemID string, memberStores ...beads
 	if err := owner.SetMetadata(itemID, beadmeta.TrackingConvoyIDMetadataKey, convoyID); err != nil {
 		return fmt.Errorf("stamping tracking convoy %s on item %s: %w", convoyID, itemID, err)
 	}
-	if owner == store {
-		if _, err := store.Get(convoyID); err == nil {
-			if err := store.DepAdd(convoyID, itemID, TrackingDepType); err != nil {
-				return fmt.Errorf("adding %s dependency %s -> %s: %w", TrackingDepType, convoyID, itemID, err)
-			}
+	// Add the legacy tracks dep only when convoy and item physically co-reside, so a
+	// cross-store dep-add (a dep row cannot span two stores) never fires. Compare id
+	// prefixes — bd's own cross-prefix classifier routes a differing-prefix target to
+	// depends_on_external — which is the exact, federation-proof predicate for "will a
+	// same-store dep-add succeed". A store.Get residency probe is NOT safe: a federating
+	// handle (beadPolicyStore.Get) resolves a graph convoy through a work store, which
+	// reintroduced the exact "resolving gcg-2: no issue found" failure this guards.
+	if owner == store && sameStoreByPrefix(convoyID, itemID) {
+		if err := store.DepAdd(convoyID, itemID, TrackingDepType); err != nil {
+			return fmt.Errorf("adding %s dependency %s -> %s: %w", TrackingDepType, convoyID, itemID, err)
 		}
 	}
 	return nil
+}
+
+// sameStoreByPrefix reports whether two bead ids route to the same physical store,
+// by comparing their id prefixes (the segment before the first '-'). It mirrors bd's
+// cross-prefix dependency classifier, so it is the precise predicate for whether a
+// same-store dep-add will succeed — and, unlike a store.Get residency probe, it is
+// immune to a federating read handle.
+func sameStoreByPrefix(a, b string) bool {
+	return idPrefix(a) == idPrefix(b)
+}
+
+func idPrefix(id string) string {
+	if i := strings.IndexByte(id, '-'); i >= 0 {
+		return id[:i]
+	}
+	return id
 }
 
 // ownerStore returns the first store in stores that holds id, or nil if none do.

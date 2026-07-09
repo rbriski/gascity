@@ -449,6 +449,59 @@ func TestTierBCrashRecoveryTierAdoptsOwnInProgress(t *testing.T) {
 	}
 }
 
+// TestTierBHookQueryRefusesForeignClaimantAdoption (HIGH B-1) proves the Tier-B hook
+// query refuses to surface a fold-owned in_progress row for ADOPTION when its recorded
+// claimant_id names a DIFFERENT instance than the adopter: a same-name respawn B cannot
+// adopt A's claimed row and re-run its side effects. A same-instance resume (matching
+// claimant_id) still adopts, and a legacy adopter (no claimant_id) keeps name-based
+// adoption. The "respawn B" case FAILS before the filter (name-only match surfaces A's
+// row to B).
+func TestTierBHookQueryRefusesForeignClaimantAdoption(t *testing.T) {
+	ctx := context.Background()
+	cityPath := tbHookGraphCity(t)
+	tbHookSeedParked(t, cityPath)
+
+	// A claims hello:0 recording its instance-unique claimant id "A-id".
+	gs := tbHookOpenStore(t, cityPath)
+	if err := engine.ClaimTierBWorkAs(ctx, gs, tbHookStream, "hello:0", "worker-a", "A-id"); err != nil {
+		t.Fatalf("claim by A: %v", err)
+	}
+	_ = gs.Close()
+
+	// adoptable reports whether the Tier-B hook query surfaces A's in_progress "hello" row
+	// as an adoption candidate for an adopter recording adopterID (sharing the NAME).
+	adoptable := func(adopterID string) bool {
+		st, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a", adopterID)
+		if !ok {
+			t.Fatal("tier-b hook store not present")
+		}
+		out, err := st.query()
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		var cands []beads.Bead
+		if err := json.Unmarshal([]byte(out), &cands); err != nil {
+			t.Fatalf("decode candidates: %v; raw=%s", err, out)
+		}
+		for _, c := range cands {
+			if c.ID == "hello" && strings.EqualFold(strings.TrimSpace(c.Status), "in_progress") {
+				return true
+			}
+		}
+		return false
+	}
+
+	if adoptable("B-id") {
+		t.Fatal("respawn B (different claimant id) could adopt A's in_progress row — repeated side effects")
+	}
+	if !adoptable("A-id") {
+		t.Fatal("same-instance resume (matching claimant id) could NOT adopt its own row")
+	}
+	if !adoptable("") {
+		t.Fatal("legacy adopter (no claimant id) lost name-based adoption")
+	}
+}
+
 // TestClaimLeaseFencedRetriesThenConflictShape (T-F1) pins the S17 claim fence
 // mapping: a single lease fence is retried and the re-claim succeeds; a persistent
 // fence maps to the conflict shape (winner, false, nil) — never claims_errored for a

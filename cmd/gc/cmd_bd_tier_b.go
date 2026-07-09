@@ -23,6 +23,15 @@ import (
 // silently adopt a firewall strand as a worker pass.
 var errTierBDivergentReclose = errors.New("divergent Tier-B re-close")
 
+// errTierBAttemptSuperseded is the loud, no-launder result when the settle retry loop's
+// bare-id re-resolve returns a DIFFERENT activation than the one this close pinned — the
+// firewall stranded the pinned attempt :N and the same-tick re-Advance minted a fresh
+// attempt :N+1 while this stale closer was retrying. Re-settling :N+1 with the stale
+// outcome (an empty-closer bypass would slip past both guard axes) would falsely settle
+// the fresh attempt; instead the loop refuses loudly and the fresh attempt is left for a
+// new worker to claim and complete (M-1).
+var errTierBAttemptSuperseded = errors.New("Tier-B attempt superseded by a fresh re-attempt")
+
 // settleTierBWorkAs is the engine settle seam interceptTierBClose routes through, a
 // package var so a test can inject a lease fence to exercise the bounded retry. It
 // carries the closer identity so the engine's closer-identity guard can reject a
@@ -156,12 +165,15 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 		if ref.Settled {
 			// Idempotent re-close dedup at the projection level: the settled row
 			// dropped its activation, so SettleTierBWork is unreachable and must not be
-			// needed. Same mapped outcome ⇒ idempotent success; a divergent one is a
-			// loud refusal (no new event either way).
-			if ref.Outcome == mapped {
+			// needed. Success only when the mapped outcome matches AND the recorded settle
+			// was NOT a firewall retryable strand (L-1): a worker's fail close over a
+			// firewall failed{retryable:true} strand shares the outcome STRING but is a
+			// divergent settle, so it must lose loudly rather than be laundered. An honest
+			// worker self-replay (retryable=false) still dedupes.
+			if ref.Outcome == mapped && !ref.Retryable {
 				continue
 			}
-			fmt.Fprintf(stderr, "gc bd: bead %q already settled %q; refusing a divergent re-close to %q\n", id, ref.Outcome, mapped) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc bd: bead %q already settled %q (retryable=%v); refusing a divergent re-close to %q\n", id, ref.Outcome, ref.Retryable, mapped) //nolint:errcheck
 			return 1, true
 		}
 		if err := settleTierBWithFenceRetry(ctx, gs, ref, id, mapped, closer, closerID); err != nil {
@@ -191,8 +203,8 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 // errTierBDivergentReclose, never laundered into a success.
 func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, beadID, outcome, closer, closerID string) error {
 	err := settleTierBWorkAs(ctx, gs, ref.StreamID, ref.Activation, outcome, "", closer, closerID, false)
-	for attempt := 0; attempt < tierBFenceRetries && isTierBSettleRetryable(err); attempt++ {
-		time.Sleep(tierBFenceBackoff)
+	for attempt := 0; attempt < tierBSettleRetries && isTierBSettleRetryable(err); attempt++ {
+		time.Sleep(tierBSettleBackoff(attempt))
 		r2, ok, rerr := engine.ResolveTierBWorkRef(ctx, gs, beadID)
 		if rerr != nil {
 			return rerr
@@ -203,17 +215,29 @@ func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref en
 			// treat as done.
 			return nil
 		}
+		// Activation pin (M-1): the firewall may have stranded the pinned attempt and, in
+		// the SAME tick, re-Advanced the stream to mint a FRESH attempt (:N+1). The bare-id
+		// re-resolve then returns that fresh, unsettled attempt. Never re-settle a DIFFERENT
+		// activation with this stale outcome — the empty-closer bypass would slip past both
+		// guard axes and falsely settle the fresh attempt. Refuse loudly; a new worker
+		// claims and completes :N+1. (A settled r2 drops its activation to "", so this pin
+		// is a no-op there and the settled arm below handles the dedup.)
+		if r2.Activation != "" && r2.Activation != ref.Activation {
+			return fmt.Errorf("bead %q pinned attempt %q was superseded by a fresh re-attempt %q; refusing to settle it with the stale outcome %q: %w",
+				beadID, ref.Activation, r2.Activation, outcome, errTierBAttemptSuperseded)
+		}
 		if r2.Settled || r2.Activation == "" {
 			// A concurrent settle (another worker's identical close, or the firewall) won
-			// the head CAS and dropped the activation. Compare outcomes rather than blanket-
-			// laundering, exactly like interceptTierBClose's first resolve: a same-outcome
-			// settle is idempotent success; a DIVERGENT one (a firewall strand under this
-			// worker's pass close) loses loudly and is never adopted as a success.
-			if r2.Outcome == outcome {
+			// the head CAS and dropped the activation. Compare (outcome, retryable) rather
+			// than blanket-laundering, exactly like interceptTierBClose's first resolve: a
+			// same-outcome NON-retryable settle is idempotent success; a DIVERGENT one — a
+			// firewall failed{retryable:true} strand under this worker's close, matching
+			// outcome string or not — loses loudly and is never adopted as a success (L-1).
+			if r2.Outcome == outcome && !r2.Retryable {
 				return nil
 			}
-			return fmt.Errorf("bead %q already settled %q under a concurrent close; refusing a divergent re-close to %q: %w",
-				beadID, r2.Outcome, outcome, errTierBDivergentReclose)
+			return fmt.Errorf("bead %q already settled %q (retryable=%v) under a concurrent close; refusing a divergent re-close to %q: %w",
+				beadID, r2.Outcome, r2.Retryable, outcome, errTierBDivergentReclose)
 		}
 		err = settleTierBWorkAs(ctx, gs, r2.StreamID, r2.Activation, outcome, "", closer, closerID, false)
 	}

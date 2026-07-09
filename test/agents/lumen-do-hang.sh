@@ -20,6 +20,10 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     id="$(printf '%s' "$claim" | jq -r '.bead_id')"
     prompt="$(printf '%s' "$claim" | jq -r '.description // empty')"
     printf '%s\n' "$prompt" > ".gc/lumen-e2e-prompt-${id}.txt"
+    # The "side effect": append ONE line per claim-and-execute. A same-name respawn that
+    # ADOPTS this claimed row (the firewall-wedge hazard) would re-run the work and append
+    # a second line, so a >1 line count is the adoption regression tripwire.
+    printf 'exec\n' >> ".gc/lumen-e2e-exec-count-${id}.txt"
     # Never close. Re-exec into a tagged sleep so the test can find + kill this PID.
     exec -a "${GC_LUMEN_E2E_NONCE:-lumen-do-hang}" sleep 2147483647
   fi

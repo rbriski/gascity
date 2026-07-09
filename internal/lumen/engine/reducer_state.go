@@ -304,6 +304,15 @@ func nodeProjectedMeta(act string, n *nodeState) map[string]string {
 	var meta map[string]string
 	if n.Settled {
 		meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
+		// Retryable is folded from the settle (applyOwnedSettled/applyOutcomeSettled)
+		// but otherwise unprojected. Emit it ONLY when true so every worker-settled row
+		// (retryable=false) projects byte-identically to pre-L-1 (DET-T-17), while a
+		// firewall infrastructure strand (retryable=true) surfaces on ResolveTierBWorkRef
+		// so a divergent-reclose compare cannot launder it under a worker's fail close
+		// (§4.3 L-1). Additive-omit-when-false through this shared helper ⇒ no version bump.
+		if n.Retryable {
+			meta["retryable"] = "true"
+		}
 	} else {
 		meta = map[string]string{"kind": n.Kind, "activation": act}
 		// The claimant id is the closer-identity guard's read (readTierBNode) while

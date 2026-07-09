@@ -49,6 +49,13 @@ type TierBWorkRef struct {
 	Assignee string
 	// Outcome is the projected outcome metadata, set iff the node has settled.
 	Outcome string
+	// Retryable is the projected L5 attempt-loop classification: true iff the settle
+	// was a firewall infrastructure strand (SettleTierBWorkAs retryable=true), projected
+	// onto node metadata only when true (omit-when-false, L-1). A divergent-reclose
+	// compare reads (Outcome, Retryable) so a firewall failed{retryable:true} strand is
+	// never laundered into success under a worker's fail close (§4.3). A worker settle
+	// (retryable=false) and every pre-L-1 settled row surface Retryable=false.
+	Retryable bool
 	// Settled reports whether the node has reached a terminal status.
 	Settled bool
 }
@@ -98,6 +105,10 @@ func ResolveTierBWorkRef(ctx context.Context, store *graphstore.Store, beadID st
 			ref.DispatchMode = value
 		case "outcome":
 			ref.Outcome = value
+		case "retryable":
+			// Projected only when true (nodeProjectedMeta omit-when-false), so any
+			// present value is the firewall-strand marker.
+			ref.Retryable = value == "true"
 		}
 	}
 	if err := rows.Err(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/lumen/engine"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -633,6 +634,59 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 
 	if got := resolveTaskWorkDir("", store, "worker-session"); got != workDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
+	}
+}
+
+// TestFilterAssignedWorkBeadsForPoolDemandExcludesDeadClaimantFoldRow (HIGH B-2) proves
+// pool demand EXCLUDES a fold-owned journal row whose recorded claimant instance is gone
+// (its session bead id is absent from the open set) — so no respawn is minted for a row
+// the firewall is about to strand (churn elimination). A live claimant (open bead id)
+// keeps its demand (the L1 preserve tier), a legacy fold row with no claimant_id keeps
+// today's name path, and a NON-fold row carrying the same metadata is unaffected. The
+// dead-claimant subcase FAILS before the exclusion (the dead row still feeds demand →
+// respawn churn).
+func TestFilterAssignedWorkBeadsForPoolDemandExcludesDeadClaimantFoldRow(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)}}
+	// tbPreserveWorkerSessionBead is the OPEN pool session bead sess-1 / worker-a.
+	sessions := sessionInfosFromBeads([]beads.Bead{tbPreserveWorkerSessionBead()})
+	foldRow := func(claimantID string) beads.Bead {
+		b := beads.Bead{ID: "hello", Status: "in_progress", Assignee: "worker-a", Metadata: map[string]string{}}
+		if claimantID != "" {
+			b.Metadata[engine.ClaimantIDMetaKey] = claimantID
+		}
+		return b
+	}
+	refs := []string{tierBHookStoreName}
+
+	if got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessions, []beads.Bead{foldRow("ghost-dead")}, refs); len(got) != 0 {
+		t.Fatalf("dead-claimant fold row kept in demand: %#v (want dropped — no respawn minted for a row the firewall will strand)", got)
+	}
+	if got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessions, []beads.Bead{foldRow("sess-1")}, refs); len(got) != 1 || got[0].ID != "hello" {
+		t.Fatalf("live-claimant fold row dropped: %#v (want kept — L1 preserve tier)", got)
+	}
+	if got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessions, []beads.Bead{foldRow("")}, refs); len(got) != 1 || got[0].ID != "hello" {
+		t.Fatalf("legacy fold row (no claimant_id) dropped: %#v (want kept — name path unchanged)", got)
+	}
+
+	// A NON-fold row with the same claimant_id metadata is unaffected — only fold rows
+	// (tierBHookStoreName ref) carry the B-2 discriminant.
+	plainCfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	plainSessions := sessionInfosFromBeads([]beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-session",
+		},
+	}})
+	plainWork := []beads.Bead{{
+		ID: "direct", Status: "in_progress", Assignee: "session-1",
+		Metadata: map[string]string{engine.ClaimantIDMetaKey: "ghost-dead"},
+	}}
+	if got := filterAssignedWorkBeadsForPoolDemand(plainCfg, "", plainSessions, plainWork, []string{""}); len(got) != 1 || got[0].ID != "direct" {
+		t.Fatalf("non-fold row with claimant_id metadata excluded by the fold-only rule: %#v", got)
 	}
 }
 

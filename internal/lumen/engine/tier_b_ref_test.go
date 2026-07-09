@@ -128,6 +128,54 @@ func TestResolveTierBWorkRefBijection(t *testing.T) {
 	})
 }
 
+// TestResolveTierBWorkRefSurfacesRetryable (L-1) pins the Retryable axis of the
+// decode: a firewall infrastructure strand (settled retryable=true) surfaces
+// ref.Retryable=true, while an ordinary worker settle (retryable=false) surfaces
+// false — so a divergent-reclose compare of (outcome, retryable) can refuse to
+// launder a firewall failed{retryable:true} strand under a worker's fail close.
+func TestResolveTierBWorkRefSurfacesRetryable(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("firewall_strand_surfaces_retryable", func(t *testing.T) {
+		store := newStore(t)
+		act := materializeTierB(t, store)
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act, "worker-a"); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := engine.SettleTierBWorkAs(ctx, store, tierBStream, act, engine.OutcomeFailed, "stranded: worker-a", "", "", true); err != nil {
+			t.Fatalf("firewall strand: %v", err)
+		}
+		ref, ok, err := engine.ResolveTierBWorkRef(ctx, store, tierBNodeID)
+		if err != nil || !ok {
+			t.Fatalf("resolve strand: ok=%v err=%v", ok, err)
+		}
+		if !ref.Retryable {
+			t.Fatal("stranded ref.Retryable = false, want true")
+		}
+		if ref.Outcome != engine.OutcomeFailed || !ref.Settled {
+			t.Fatalf("stranded ref = {outcome:%q settled:%v}, want {failed, true}", ref.Outcome, ref.Settled)
+		}
+	})
+
+	t.Run("worker_settle_absent_retryable", func(t *testing.T) {
+		store := newStore(t)
+		act := materializeTierB(t, store)
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act, "worker-a"); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := engine.SettleTierBWork(ctx, store, tierBStream, act, engine.OutcomePass, "done"); err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		ref, ok, err := engine.ResolveTierBWorkRef(ctx, store, tierBNodeID)
+		if err != nil || !ok {
+			t.Fatalf("resolve settled: ok=%v err=%v", ok, err)
+		}
+		if ref.Retryable {
+			t.Fatal("worker-settled ref.Retryable = true, want false (retryable omitted)")
+		}
+	})
+}
+
 // TestLumenOutcomeForGCOutcomeFirewall pins the S7 dispatch firewall: the raw
 // gc.outcome value a worker closes with maps to a Lumen outcome, with everything
 // unknown (bare/empty/case-variant/control-plane skipped) fail-closed to failed,

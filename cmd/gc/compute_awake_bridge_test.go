@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/lumen/engine"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -25,6 +26,7 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 				"template":     "worker",
 			},
 		})},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -66,7 +68,7 @@ func TestBuildAwakeInputFromReconcilerReadsInfoSnapshot(t *testing.T) {
 
 	input := buildAwakeInputFromReconciler(
 		&config.City{}, "", []session.Info{info},
-		nil, nil, nil, nil, nil, nil, nil, nil, now,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
 	)
 
 	if len(input.SessionBeads) != 1 {
@@ -104,6 +106,7 @@ func TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate(t *testin
 				"wake_request": "explicit",
 			},
 		})},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -159,6 +162,7 @@ func TestBuildAwakeInputFromReconcilerKeepsUnresolvableTemplateRaw(t *testing.T)
 		nil,
 		nil,
 		nil,
+		nil,
 		now,
 	)
 
@@ -188,6 +192,7 @@ func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) 
 				session.ResetCommittedAtKey:  now.Format(time.RFC3339),
 			},
 		})},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -234,6 +239,7 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 		&config.City{Agents: []config.Agent{{Name: "worker"}}},
 		"", // cityPath: empty exercises zero suspension state
 		[]session.Info{session.InfoFromPersistedBead(sessionBead)},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -292,6 +298,7 @@ func TestBuildAwakeInputFromReconciler_BlockedAssignedOpenBeadDoesNotKeepSession
 		[]beads.Bead{blockedWork},
 		[]bool{false}, // readyAssignedFlags: blocked bead is NOT ready
 		nil,
+		nil,
 		runtime.NewFake(),
 		now,
 	)
@@ -344,6 +351,7 @@ func TestBuildAwakeInputFromReconciler_ReadyAssignedOpenBeadWakesSession(t *test
 		[]beads.Bead{readyWork},
 		[]bool{true}, // readyAssignedFlags: bead IS ready
 		nil,
+		nil,
 		runtime.NewFake(),
 		now,
 	)
@@ -392,6 +400,7 @@ func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testi
 		nil,
 		[]beads.Bead{inProgressWork},
 		nil, // readyAssignedFlags omitted entirely: in_progress must still wake
+		nil,
 		nil,
 		runtime.NewFake(),
 		now,
@@ -472,6 +481,7 @@ func TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped(t 
 		nil,
 		work,
 		flags,
+		nil,
 		nil,
 		runtime.NewFake(),
 		now,
@@ -569,6 +579,7 @@ func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 		runtime.NewFake(),
 		now,
 	)
@@ -617,6 +628,7 @@ func TestBuildAwakeInputFromReconciler_RigNamedWorkQueryDemandWakesCanonicalSess
 		nil,
 		nil,
 		map[string]bool{"rig-a/worker": true},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -675,7 +687,7 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 		cfg,
 		"", // cityPath: empty exercises zero suspension state
 		[]session.Info{session.InfoFromPersistedBead(postChurnBead)},
-		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
 		runtime.NewFake(),
 		now,
 	)
@@ -701,5 +713,192 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 	}
 	if got.Reason != "named-always" {
 		t.Errorf("wake reason = %q, want named-always", got.Reason)
+	}
+}
+
+// TestBuildAwakeInputFoldRowWakeGate (HIGH-1, HIGH-2, MEDIUM) pins the corrected
+// fold-row wake-anchor gate. A Lumen fold-owned claim (tierBHookStoreName store ref,
+// recorded claimant_id) holds its claimant's pool bead awake — the assigned-work wake
+// anchor. The gate drops that anchor ONLY when the claimant is dead by the firewall's
+// instance-death definition (ABSENT from the open set, open+stranded, or crashed-active:
+// open with state=active and a dead runtime), so the killed bead reaches the poolFreeable
+// close and the firewall strands it. An ASLEEP-recoverable claimant (gc stop/city-stop,
+// max-session-age, idle-timeout — state=asleep, runtime down) is KEPT so its wake anchor
+// survives and it re-wakes to resume/adopt: dropping it lost the anchor and caused the
+// stop/start strand (HIGH-1) and the max-age permanent wedge (HIGH-2). A LIVE mid-do
+// claimant still anchors (L1 preserve). The store-ref discriminant means an ordinary bd
+// bead carrying a stray, user-set claimant_id is never gated (MEDIUM).
+func TestBuildAwakeInputFoldRowWakeGate(t *testing.T) {
+	now := time.Now().UTC()
+	const foldID = "hello"
+	const claimantID = "sess-A"
+
+	// build renders a one-fold-row awake input. claimantState/sleepReason describe the
+	// claimant session bead; alive is its runtime liveness; stranded stamps the reconciler
+	// marker; claimantPresent controls open-set membership; storeRef is the row's store.
+	build := func(claimantState, sleepReason string, alive, claimantPresent, stranded bool, storeRef string) AwakeInput {
+		workBead := beads.Bead{
+			ID: foldID, Status: "in_progress", Assignee: "worker-a",
+			Metadata: map[string]string{engine.ClaimantIDMetaKey: claimantID},
+		}
+		var sessionInfos []session.Info
+		if claimantPresent {
+			meta := map[string]string{"state": claimantState, "session_name": "worker-a", "template": "worker"}
+			if sleepReason != "" {
+				meta["sleep_reason"] = sleepReason
+			}
+			if stranded {
+				meta["stranded_event_emitted_at"] = now.Format(time.RFC3339)
+			}
+			sessionInfos = []session.Info{session.InfoFromPersistedBead(beads.Bead{
+				ID: claimantID, Status: "open", Type: "session", Metadata: meta,
+			})}
+		}
+		return buildAwakeInputFromReconciler(
+			&config.City{}, "",
+			sessionInfos,
+			nil, nil, nil, nil,
+			[]beads.Bead{workBead},
+			[]bool{false},
+			[]string{storeRef},
+			[]wakeTarget{{session: &beads.Bead{ID: claimantID}, alive: alive}},
+			nil, now,
+		)
+	}
+	kept := func(in AwakeInput) bool {
+		for _, wb := range in.WorkBeads {
+			if wb.ID == foldID {
+				return true
+			}
+		}
+		return false
+	}
+
+	// HIGH-1/HIGH-2: an asleep-recoverable claimant is KEPT under every real sleep_reason.
+	// This FAILS against the old runtime-liveness gate (alive=false → dropped). Raw "asleep"
+	// (SleepPatch: max-session-age, idle) and raw "stopped" (city-stop) both normalize to
+	// asleep-recoverable via CompatState, so both must be kept.
+	t.Run("asleep_recoverable_kept", func(t *testing.T) {
+		cases := []struct{ rawState, reason string }{
+			{"asleep", "city-stop"},
+			{"asleep", "max-session-age"},
+			{"asleep", "idle"},
+			{"stopped", "city-stop"},
+		}
+		for _, c := range cases {
+			if !kept(build(c.rawState, c.reason, false, true, false, tierBHookStoreName)) {
+				t.Fatalf("asleep-recoverable claimant (state=%q reason=%q) DROPPED — wake anchor lost, re-wake never fires", c.rawState, c.reason)
+			}
+		}
+	})
+
+	// Crashed-active: open, state=active, runtime dead → a real kill → DROPPED so the
+	// pool bead closes and the firewall strands it (the SIGKILL e2e path).
+	t.Run("crashed_active_dropped", func(t *testing.T) {
+		if kept(build("active", "", false, true, false, tierBHookStoreName)) {
+			t.Fatal("crashed-active claimant (state=active,!alive) KEPT — holds pool bead open → firewall wedge")
+		}
+	})
+
+	// Crashed session slept with a DEATH reason (runtime-missing, provider-terminal-error,
+	// failed-create) or an unknown reason is asleep but must still be DROPPED — keeping its
+	// anchor holds shouldWake=true so the reconciler's poolFreeable close/strand path
+	// (which requires !shouldWake) never fires (the observed wedge). Only the intentional-
+	// stop reasons above resume.
+	t.Run("crashed_asleep_death_reason_dropped", func(t *testing.T) {
+		for _, reason := range []string{"runtime-missing", "provider-terminal-error", "failed-create", "" /*unknown*/} {
+			if kept(build("asleep", reason, false, true, false, tierBHookStoreName)) {
+				t.Fatalf("crashed asleep claimant (sleep_reason=%q) KEPT — poolFreeable never strands it → wedge", reason)
+			}
+		}
+	})
+
+	// Absent from the open set (recycled / fresh-id respawn) → DROPPED.
+	t.Run("absent_dropped", func(t *testing.T) {
+		if kept(build("active", "", false, false, false, tierBHookStoreName)) {
+			t.Fatal("absent claimant KEPT — a recycled claimant must not anchor its pool bead")
+		}
+	})
+
+	// Open + stranded marker → dead by the firewall's own verdict, even when asleep.
+	t.Run("stranded_marked_dropped", func(t *testing.T) {
+		if kept(build("asleep", "idle", false, true, true, tierBHookStoreName)) {
+			t.Fatal("stranded-marked claimant KEPT — the firewall already ruled it dead")
+		}
+	})
+
+	// Live mid-do claimant → KEPT (L1 preserve).
+	t.Run("live_mid_do_kept", func(t *testing.T) {
+		if !kept(build("active", "", true, true, false, tierBHookStoreName)) {
+			t.Fatal("live claimant DROPPED — would drain a mid-do worker (L1 preserve broken)")
+		}
+	})
+
+	// MEDIUM: the same dead signal on a NON-Tier-B bead — an ordinary bd bead carrying a
+	// stray, user-set claimant_id — must NOT be gated (byte-identical to pre-gate behavior).
+	t.Run("store_ref_discriminant_ordinary_bead_kept", func(t *testing.T) {
+		if !kept(build("active", "", false, true, false, "some-rig")) {
+			t.Fatal("ordinary bd bead (non-Tier-B store ref) with a stray claimant_id was gated")
+		}
+		if !kept(build("active", "", false, false, false, "")) {
+			t.Fatal("ordinary bd bead (empty store ref) with a stray claimant_id was gated")
+		}
+	})
+
+	// A legacy Tier-B fold row with NO recorded claimant_id keeps the name path — never
+	// gated by the id rule (matches the firewall's legacy fallback).
+	t.Run("tier_b_legacy_no_claimant_id_kept", func(t *testing.T) {
+		workBead := beads.Bead{ID: foldID, Status: "in_progress", Assignee: "worker-a"}
+		in := buildAwakeInputFromReconciler(
+			&config.City{}, "", nil,
+			nil, nil, nil, nil,
+			[]beads.Bead{workBead}, []bool{false}, []string{tierBHookStoreName},
+			[]wakeTarget{{session: &beads.Bead{ID: claimantID}, alive: false}},
+			nil, now,
+		)
+		if !kept(in) {
+			t.Fatal("legacy Tier-B fold row with empty claimant_id was gated by the id rule")
+		}
+	})
+}
+
+// TestFoldRowAsleepClaimantRewakesToResume is the HIGH-1/HIGH-2 wake-DECISION pin: an
+// asleep claimant (here a max-session-age restart) whose Tier-B fold row is still
+// in_progress must not merely keep its anchor — ComputeAwakeSet must WAKE it so it
+// resumes/adopts. The old runtime-liveness gate dropped the anchor, so with the default
+// min_active_sessions=0 the session had no wake reason and stayed asleep: the pool bead
+// was freed → the run stranded (HIGH-1 stop/start), or under a max-age sleep the freeable
+// allowlist excludes, the bead stayed open+asleep forever → permanent wedge (HIGH-2).
+func TestFoldRowAsleepClaimantRewakesToResume(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	claimant := beads.Bead{
+		ID: "sess-A", Status: "open", Type: "session",
+		Metadata: map[string]string{
+			"state": "asleep", "sleep_reason": "max-session-age",
+			"session_name": "gc__worker-mc-1", "template": "worker",
+		},
+	}
+	foldRow := beads.Bead{
+		ID: "n1", Status: "in_progress", Assignee: "gc__worker-mc-1",
+		Metadata: map[string]string{engine.ClaimantIDMetaKey: "sess-A"},
+	}
+	input := buildAwakeInputFromReconciler(
+		cfg, "",
+		[]session.Info{session.InfoFromPersistedBead(claimant)},
+		nil, nil, nil, nil,
+		[]beads.Bead{foldRow},
+		[]bool{false},
+		[]string{tierBHookStoreName},
+		[]wakeTarget{{session: &beads.Bead{ID: "sess-A"}, alive: false}},
+		nil, now,
+	)
+	if len(input.WorkBeads) != 1 {
+		t.Fatalf("asleep claimant's in_progress fold row missing from WorkBeads: %+v", input.WorkBeads)
+	}
+	decisions := ComputeAwakeSet(input)
+	got := decisions["gc__worker-mc-1"]
+	if !got.ShouldWake || got.Reason != "assigned-work" {
+		t.Fatalf("asleep claimant did not re-wake for its in_progress fold row; decision = %+v", got)
 	}
 }

@@ -85,7 +85,12 @@ func (cr *CityRuntime) lumenClaimOrphanFirewall(ctx context.Context, gs *graphst
 		}
 		stillClaimed[ref.Activation] = true
 
-		if !firewallClaimantDeadOrStranded(snapshot, ref.Assignee) {
+		// The claimant's instance-unique id is on the hydrated bead's metadata (the
+		// firewall iterates TierBAssigned beads, which hydrate full metadata); it is the
+		// verdict's identity of record so a same-name respawn cannot revive a dead claim.
+		// ResolveTierBWorkRef does NOT carry it, so read it from the bead.
+		claimantID := strings.TrimSpace(b.Metadata[engine.ClaimantIDMetaKey])
+		if !firewallClaimantDeadOrStranded(snapshot, ref.Assignee, claimantID) {
 			delete(lr.deadSince, ref.Activation) // claimant recovered — reset the clock
 			continue
 		}
@@ -123,12 +128,27 @@ func (cr *CityRuntime) lumenClaimOrphanFirewall(ctx context.Context, gs *graphst
 }
 
 // firewallClaimantDeadOrStranded consumes the reconciler's liveness verdict for a
-// claimed row's assignee: dead when NO open session bead matches the assignee
-// (recycled/deleted claimant), stranded when the matched session carries the
-// reconciler's durable stranded marker (session_reconciler.go stamps it when its
-// pool-managed ∧ freeable ∧ not-alive ∧ holds-assigned-work gate fires). It never
-// probes runtime liveness itself.
-func firewallClaimantDeadOrStranded(snapshot *sessionBeadSnapshot, assignee string) bool {
+// claimed row. It keys on the recorded claimant_id (the claiming session's instance-
+// unique GC_SESSION_ID = its session bead id) whenever one was recorded, so a same-NAME
+// respawn — which has a DIFFERENT bead id under a singleton pool identity — does NOT
+// revive the verdict and reset the grace clock (the firewall-wedge), while a same-BEAD
+// crash-resume (the restart re-receives the same GC_SESSION_ID) legitimately keeps its
+// claim alive. The verdict: dead when the claimant's bead id is ABSENT from the OPEN
+// session-bead set (FindByID is open-only — recycled, deleted, or replaced by a fresh-id
+// respawn), stranded when its bead is open but carries the reconciler's durable stranded
+// marker. When the recorded claimant_id is empty (a legacy/driver/no-session claim, the
+// same tier the L5 closer-identity guard documents), it falls back to the NAME loop —
+// byte-identical to pre-hardening behavior. It never probes runtime liveness itself.
+func firewallClaimantDeadOrStranded(snapshot *sessionBeadSnapshot, assignee, claimantID string) bool {
+	if claimantID = strings.TrimSpace(claimantID); claimantID != "" {
+		sb, ok := snapshot.FindByID(claimantID)
+		if !ok {
+			return true // the claimant instance's bead is gone (recycled or a fresh-id respawn) → dead
+		}
+		// The claimant instance is still open: stranded iff the reconciler stamped its marker.
+		return strings.TrimSpace(sb.Metadata[strandedEventEmittedKey]) != ""
+	}
+	// Legacy/no-id claim: consume the name-keyed verdict, unchanged.
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
 		return false

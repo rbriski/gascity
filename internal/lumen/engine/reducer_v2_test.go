@@ -914,3 +914,51 @@ func canonJSON(t *testing.T, v any) ([]byte, error) {
 	}
 	return canon.Canonicalize(raw)
 }
+
+// TestSettledRetryableProjectsMetadata (L-1) pins the additive-omit-when-false
+// `retryable` node-metadata projection the divergent-reclose compare reads: a
+// settle folded retryable=true (a firewall infrastructure strand) projects
+// retryable=true, a retryable=false worker settle omits the key entirely (so every
+// pre-L-1 settled row projects byte-identically), and either way the live
+// incremental fold equals a drop+refold from genesis (DET-T-17, via the shared
+// nodeProjectedMeta helper — reducerVersion stays 2).
+func TestSettledRetryableProjectsMetadata(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("retryable_true_projects_key", func(t *testing.T) {
+		store := newStore(t)
+		act := materializeTierB(t, store)
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act, "worker-a"); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		// The firewall's authoritative strand: retryable=true, empty closer override.
+		if err := engine.SettleTierBWorkAs(ctx, store, tierBStream, act, engine.OutcomeFailed, "stranded: worker-a", "", "", true); err != nil {
+			t.Fatalf("firewall strand: %v", err)
+		}
+		if got := nodeMeta(t, store, tierBNodeID, "retryable"); got != "true" {
+			t.Fatalf("retryable meta = %q, want \"true\" (a firewall strand projects it)", got)
+		}
+		// The pre-L-1 keys are unchanged alongside the additive one.
+		if got := nodeMeta(t, store, tierBNodeID, "outcome"); got != engine.OutcomeFailed {
+			t.Fatalf("outcome meta = %q, want failed", got)
+		}
+		assertProjectionEqualsRefold(t, store, tierBStream) // incremental == drop+refold
+	})
+
+	t.Run("retryable_false_omits_key", func(t *testing.T) {
+		store := newStore(t)
+		act := materializeTierB(t, store)
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act, "worker-a"); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		// An ordinary worker close: retryable=false ⇒ the key is omitted, byte-identical
+		// to every pre-L-1 settled row.
+		if err := engine.SettleTierBWork(ctx, store, tierBStream, act, engine.OutcomePass, "done"); err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		if got := nodeMeta(t, store, tierBNodeID, "retryable"); got != "" {
+			t.Fatalf("retryable meta = %q, want \"\" (omitted when false)", got)
+		}
+		assertProjectionEqualsRefold(t, store, tierBStream)
+	})
+}

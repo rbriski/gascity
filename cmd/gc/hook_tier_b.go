@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -25,6 +26,30 @@ const tierBFenceRetries = 2
 
 // tierBFenceBackoff is the pause between fence retries (a package var for tests).
 var tierBFenceBackoff = 5 * time.Millisecond
+
+// tierBSettleRetries bounds the SETTLE loop's retries (settleTierBWithFenceRetry). A
+// close has NO outer retry — an unchased conflict exits `gc bd` 1 and the row wedges
+// until the 60s firewall grace strands it (§4.2, M-2) — so N sibling do's closing on
+// ONE run stream, each needing up to N−1 head-CAS rounds, must not exhaust the budget.
+// 8 absorbs a synchronized herd of ~9 with margin; larger fan-outs are throttled by
+// max_active_sessions. The CLAIM loop keeps the narrower tierBFenceRetries (it has an
+// outer retry). A package var so a test can pin the budget.
+var tierBSettleRetries = 8
+
+// tierBSettleBackoff is the capped full-jitter exponential backoff between settle
+// retries: a uniform draw from [0, min(250ms, 5ms<<attempt)]. Full jitter breaks the
+// jitterless 5ms lockstep that re-collides a synchronized close herd every round
+// (§4.2). It is a package var so a test can pin it; the window is bounded and the
+// attempts finite, so the enlarged retry budget never livelocks (exhaustion exits loud).
+var tierBSettleBackoff = func(attempt int) time.Duration {
+	const base = 5 * time.Millisecond
+	const maxWindow = 250 * time.Millisecond
+	window := base << attempt
+	if window <= 0 || window > maxWindow { // guard the shift overflow at large attempts
+		window = maxWindow
+	}
+	return time.Duration(rand.Int63n(int64(window) + 1))
+}
 
 // isTierBFenceRetryable reports whether a claim/settle append error is a cooperative
 // multi-writer race the bounded re-resolve+retry should chase rather than surface as
@@ -94,7 +119,7 @@ func tierBHookStore(cityPath string, routeTargets, identityCandidates []string, 
 		name: tierBHookStoreName,
 		dir:  cityPath,
 		query: func() (string, error) {
-			return tierBHookQuery(cityPath, routeTargets, identityCandidates)
+			return tierBHookQuery(cityPath, routeTargets, identityCandidates, claimantID)
 		},
 		claim: func(ctx context.Context, _ string, _ []string, beadID, claimant string) (beads.Bead, bool, error) {
 			// The claimant is the per-call assignee the federation passes
@@ -116,7 +141,7 @@ func tierBHookStore(cityPath string, routeTargets, identityCandidates []string, 
 // degrades to no candidates with a stderr note (a best-effort federated leg — the
 // hard-fail discipline belongs to the L2 controller/demand side), so routed pool
 // work simply waits for the journal rather than wedging the hook.
-func tierBHookQuery(cityPath string, routeTargets, identityCandidates []string) (string, error) {
+func tierBHookQuery(cityPath string, routeTargets, identityCandidates []string, claimantID string) (string, error) {
 	store := cachedCityGraphJournal(cityPath)
 	if store == nil {
 		fmt.Fprintf(os.Stderr, "gc hook --claim: tier-b journal unavailable for %q (routed pool work will wait)\n", cityPath) //nolint:errcheck
@@ -139,6 +164,13 @@ func tierBHookQuery(cityPath string, routeTargets, identityCandidates []string) 
 	if err != nil {
 		return "", fmt.Errorf("tier-b assigned query: %w", err)
 	}
+	// B-1 adoption refusal: the assigned query matches by NAME, but under a singleton pool
+	// identity a false-killed A and its respawn B share that name. Drop an in_progress row
+	// whose recorded claimant_id names a DIFFERENT instance than this adopter, so a respawn
+	// B never adopts A's claimed row (which it can neither re-claim nor close) and re-runs
+	// its side effects. A same-instance crash-resume (matching id) still adopts; a legacy
+	// row (no recorded id) and a legacy adopter (no id) keep today's name-based adoption.
+	assigned = filterTierBAdoptableByClaimant(assigned, claimantID)
 	routed, err := surface.TierBRoutedFrontier(ctx, routeTargets, 0)
 	if err != nil {
 		return "", fmt.Errorf("tier-b routed frontier query: %w", err)
@@ -151,6 +183,27 @@ func tierBHookQuery(cityPath string, routeTargets, identityCandidates []string) 
 		return "", fmt.Errorf("tier-b query marshal: %w", err)
 	}
 	return string(out), nil
+}
+
+// filterTierBAdoptableByClaimant drops an assigned fold-owned row whose recorded
+// claimant_id names a DIFFERENT instance than the adopter (B-1). An empty adopter id (a
+// claim outside a runtime session) or an empty recorded claimant_id (a legacy/driver
+// claim) both fall back to name-based adoption — byte-identical to pre-hardening. It is
+// applied only to the ASSIGNED (already-claimed) arm; routed frontier rows are open and
+// unassigned, so they carry no claimant to compare.
+func filterTierBAdoptableByClaimant(rows []beads.Bead, claimantID string) []beads.Bead {
+	claimantID = strings.TrimSpace(claimantID)
+	if claimantID == "" {
+		return rows // adopter has no instance id: legacy name adoption, unchanged
+	}
+	kept := make([]beads.Bead, 0, len(rows))
+	for _, b := range rows {
+		if recorded := strings.TrimSpace(b.Metadata[engine.ClaimantIDMetaKey]); recorded != "" && recorded != claimantID {
+			continue // fold-owned by a DIFFERENT instance — a respawn must not adopt A's row
+		}
+		kept = append(kept, b)
+	}
+	return kept
 }
 
 // claimTierBWorkBead translates a worker's claim of a projected Tier-B work bead

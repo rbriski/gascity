@@ -1359,14 +1359,20 @@ func TestLumenScatterOfDosE2E(t *testing.T) {
 	t.Logf("PROOF graphstore.Verify(%s) clean; sequence: %v", streamID, lumenStreamTypes(events))
 }
 
-// --- T-E4: a killed claimant is firewall-stranded, the run seals failed ------
+// --- Single-kill firewall e2e: strand-seal (Variant A) and recovery (Variant B) ---
 
-// TestLumenStrandedClaimantSealsFailedE2E (T-E4, scenario 4) proves a killed claimant
-// session is firewall-settled failed{stranded} so the run seals FAILED-stranded rather
-// than wedging. A hang agent claims the do and never closes; the test SIGKILLs its
-// session process (a per-city nonce pgrep, no PID files); after the 60s grace floor the
-// firewall strands the claim and the run seals failed. ~90s wall clock.
-func TestLumenStrandedClaimantSealsFailedE2E(t *testing.T) {
+// TestLumenSingleKillStrandsAndSealsE2E (Variant A) is the HONEST firewall-wedge proof:
+// a claimant is SIGKILLed exactly ONCE (no re-kill), and the run must still seal
+// failed-stranded. It replaces the re-kill T-E4, which masked the wedge by killing every
+// respawn each tick. Three independent tripwires for the firewall-wedge HIGH:
+//   - the run SEALS at all (a wedge — a respawn adopting the row and resetting the
+//     name-keyed grace clock — never seals and times out here);
+//   - the adopted work's side effect executed EXACTLY ONCE (a script-side exec counter);
+//   - respawn churn is bounded (≤ 1 non-original session for the route).
+//
+// A hang agent claims the do and never closes; after the 60s grace floor the firewall's
+// instance-keyed dead-claimant verdict strands it and the bare do seals failed. ~90s.
+func TestLumenSingleKillStrandsAndSealsE2E(t *testing.T) {
 	cityDir, _ := setupLumenDoCityWithOptions(t, "subprocess", "lumen-do-hang.sh", 1, "")
 	ctx := context.Background()
 	nonce := lumenKillNonce(filepath.Base(cityDir))
@@ -1394,29 +1400,26 @@ func TestLumenStrandedClaimantSealsFailedE2E(t *testing.T) {
 	}
 	t.Logf("PROOF claim observed: assignee %q (session bead %s)", admitted.Assignee, claimantBeadID)
 
-	// (2) SIGKILL the hang claimant by the per-city nonce (a process-table query, no PID
-	// files). The resume tier may transiently respawn a mid-do worker, so killNonce is
-	// re-invoked throughout the wait to keep the (permanently dead) claimant dead — the
-	// firewall's dead-claimant path then strands it after the grace floor.
-	killNonce := func() int {
-		pids := pgrepNonce(t, nonce)
-		for _, pid := range pids {
-			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-				t.Fatalf("SIGKILL %d: %v", pid, err)
-			}
+	// (2) SINGLE SIGKILL of the hang claimant, by the per-city nonce (a process-table
+	// query, no PID files). The nonce process exists only after the agent re-execs into
+	// the tagged sleep, so waiting for it guarantees the claim has already committed.
+	// It is killed EXACTLY ONCE — never re-killed — so a wedge is not masked.
+	pids := waitForNoncePID(t, nonce, 30*time.Second)
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			t.Fatalf("SIGKILL %d: %v", pid, err)
 		}
-		return len(pids)
 	}
-	if killNonce() == 0 {
-		t.Fatalf("pgrep -f %q found no hang session process to kill", nonce)
-	}
-	t.Logf("PROOF SIGKILLed the hang claimant %q", admitted.Assignee)
+	t.Logf("PROOF single SIGKILL of the hang claimant %q (%d pid)", admitted.Assignee, len(pids))
 
-	// (3) No wedge: the run seals failed-stranded within the 60s grace floor + slack,
-	// while the claimant is kept dead. A wedge here is the §1 scenario-4 adoption hazard.
-	events := waitForLumenStrandedSeal(t, gs, streamID, cityDir, lumenDoRoute, claimantBeadID, 4*time.Minute, killNonce)
+	// (3) No wedge, no re-kill: the run seals failed-stranded within the grace floor +
+	// slack. A timeout here is the firewall-wedge HIGH (a respawn adopted the row / reset
+	// the grace clock). respawns tracks non-original sessions for the churn bound.
+	events, respawns := waitForLumenSealTrackingRespawns(t, gs, streamID, cityDir, lumenDoRoute, claimantBeadID, 4*time.Minute)
 
-	// (4) Exactly the 5-event stranded sequence; the settle is the firewall's.
+	// (4) Exactly the 5-event stranded sequence — in particular EXACTLY ONE owned.admitted
+	// (an adopted re-execution appends no event, so the exec counter below is the adoption
+	// tripwire); the settle is the firewall's.
 	wantSeq := []string{
 		engine.EventRunStarted,
 		engine.EventNodeActivated,
@@ -1446,11 +1449,129 @@ func TestLumenStrandedClaimantSealsFailedE2E(t *testing.T) {
 	}
 	t.Logf("PROOF stranded seal: owned.settled failed %q retryable=%v; run.closed failed", settled.Output, settled.Retryable)
 
+	// (5) The adopted work executed EXACTLY ONCE — no respawn adopted the claimed row and
+	// re-ran its side effect (the firewall-wedge adoption hazard).
+	assertExecCountLines(t, cityDir, "greet", 1)
+	t.Logf("PROOF side effect executed exactly once (no adopted re-execution)")
+
+	// (6) Bounded churn: at most one pre-verdict respawn beyond the original claimant.
+	if len(respawns) > 1 {
+		t.Fatalf("respawns = %d (%v), want ≤ 1 (no churn: original + at most one pre-verdict drain)", len(respawns), respawns)
+	}
+	t.Logf("PROOF bounded churn: %d respawn(s) beyond the original claimant", len(respawns))
+
 	assertZeroControlBeads(t, cityDir, journalPath, streamID)
 	if err := gs.Verify(ctx, streamID); err != nil {
 		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
 	}
 	t.Logf("PROOF graphstore.Verify(%s) clean; sequence: %v", streamID, lumenStreamTypes(events))
+}
+
+// TestLumenSingleKillRetryRecoversE2E (Variant B) is the correct-behavior end-to-end:
+// a SINGLE kill of a repeat-loop's first attempt drives A dies → firewall strands
+// lane:0 at the floor (retryable) → the loop mints lane:1 (fresh tokens) → a FRESH
+// pooled worker claims lane:1 and completes it → the run seals PASS — with NO test-side
+// assistance after the one kill. The hang-once agent hangs on attempt :0 (killable) and
+// completes every later attempt. ~90-150s.
+func TestLumenSingleKillRetryRecoversE2E(t *testing.T) {
+	cityDir, _ := setupLumenDoCityWithOptions(t, "subprocess", "lumen-do-hang-once.sh", 1, "")
+	ctx := context.Background()
+	nonce := lumenKillNonce(filepath.Base(cityDir))
+
+	slingOut, err := gc(cityDir, "lumen", "sling", lumenDoRoute, lumenRepeatDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	// (1) lane:0 claim observed, then a SINGLE SIGKILL of its claimant. The repeat
+	// loop materializes lane:0 through an extra layer (loop node → attempt → lane:0),
+	// so the first spawn+claim is a touch slower than a bare do — allow generous headroom.
+	admitted := waitForOwnedAdmitted(t, gs, streamID, 90*time.Second)
+	if admitted.Handle != "lane:0" || admitted.Assignee == "" {
+		t.Fatalf("first owned.admitted = {handle:%q assignee:%q}, want {lane:0, <a worker>}", admitted.Handle, admitted.Assignee)
+	}
+	pids := waitForNoncePID(t, nonce, 60*time.Second)
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			t.Fatalf("SIGKILL %d: %v", pid, err)
+		}
+	}
+	t.Logf("PROOF single SIGKILL of lane:0's claimant %q", admitted.Assignee)
+
+	// (2) The run recovers and seals PASS with no further kills.
+	events := waitForLumenSeal(t, gs, streamID, 4*time.Minute)
+
+	// The firewall stranded lane:0 (retryable), then the loop re-attempted lane:1.
+	settles := lumenEventsOfType(events, engine.EventOwnedSettled)
+	if len(settles) != 2 {
+		t.Fatalf("owned.settled count = %d, want 2 (lane:0 strand, lane:1 pass)\nsequence: %v", len(settles), lumenStreamTypes(events))
+	}
+	s0 := decodeOwnedSettled(t, settles[0].Payload)
+	if s0.Handle != "lane:0" || s0.Outcome != engine.OutcomeFailed || !s0.Retryable || !strings.HasPrefix(s0.Output, "stranded: ") {
+		t.Fatalf("lane:0 settle = {%q %q retryable=%v %q}, want {lane:0, failed, true, stranded:...}", s0.Handle, s0.Outcome, s0.Retryable, s0.Output)
+	}
+	s1 := decodeOwnedSettled(t, settles[1].Payload)
+	if s1.Handle != "lane:1" || s1.Outcome != engine.OutcomePass {
+		t.Fatalf("lane:1 settle = {%q, %q}, want {lane:1, pass}", s1.Handle, s1.Outcome)
+	}
+
+	// A fresh claim minted the re-attempt: two attempt.minted, a SECOND owned.admitted for
+	// lane:1 by a real worker (fresh claim, not adoption — adoption appends no event).
+	if n := len(lumenEventsOfType(events, engine.EventAttemptMinted)); n != 2 {
+		t.Fatalf("attempt.minted count = %d, want 2 (lane:0 then the re-attempt lane:1)", n)
+	}
+	admits := lumenEventsOfType(events, engine.EventOwnedAdmitted)
+	if len(admits) != 2 {
+		t.Fatalf("owned.admitted count = %d, want 2 (one fresh claim per attempt)", len(admits))
+	}
+	a1 := decodeOwnedAdmitted(t, admits[1].Payload)
+	if a1.Handle != "lane:1" || a1.Assignee == "" {
+		t.Fatalf("second owned.admitted = {handle:%q assignee:%q}, want {lane:1, <a fresh worker>}", a1.Handle, a1.Assignee)
+	}
+	t.Logf("PROOF recovery: lane:0 stranded → lane:1 claimed fresh by %q → pass", a1.Assignee)
+
+	// The loop settled pass and the run sealed pass.
+	loopPass := false
+	for _, e := range lumenEventsOfType(events, engine.EventOutcomeSettled) {
+		var p struct {
+			Activation string `json:"activation"`
+			Outcome    string `json:"outcome"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode outcome.settled: %v", err)
+		}
+		if p.Activation == "repeat_1:0" && p.Outcome == engine.OutcomePass {
+			loopPass = true
+		}
+	}
+	if !loopPass {
+		t.Fatalf("loop node repeat_1:0 did not settle pass\nsequence: %v", lumenStreamTypes(events))
+	}
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass (recovery)", closed.Outcome)
+	}
+
+	// Each attempt's side effect ran exactly ONCE — both attempts claim the bare id "lane",
+	// so two legit attempts append two lines; an adopted re-execution of lane:0 would add a
+	// third.
+	assertExecCountLines(t, cityDir, "lane", 2)
+	t.Logf("PROOF two legit attempts, no adopted duplicate execution of lane:0")
+
+	assertZeroControlBeads(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF run sealed PASS after a single kill; Verify(%s) clean", streamID)
 }
 
 // --- T-E3/T-E4 support helpers ----------------------------------------------
@@ -1502,39 +1623,82 @@ func pgrepNonce(t *testing.T, nonce string) []int {
 	return pids
 }
 
-// waitForLumenStrandedSeal drives a killed-claimant run to seal, re-killing (via
-// reKill) any respawned nonce process each tick so the permanently-dead claimant stays
-// dead and the firewall's dead-path strands it. A transient resume-tier respawn is
-// logged, not failed on; a genuine wedge is caught by the timeout and diagnosed as the
-// §1 scenario-4 adoption hazard (a revived assignee that keeps resetting the grace clock).
-func waitForLumenStrandedSeal(t *testing.T, gs *graphstore.Store, streamID, cityDir, template, claimantBeadID string, timeout time.Duration, reKill func() int) []graphstore.StoredEvent {
+// waitForNoncePID polls the process table until at least one hang session process
+// carrying nonce exists (it appears only after the agent re-execs into the tagged
+// sleep, i.e. after its claim has committed), then returns those PIDs so the caller can
+// SIGKILL exactly once.
+func waitForNoncePID(t *testing.T, nonce string, timeout time.Duration) []int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pids := pgrepNonce(t, nonce); len(pids) > 0 {
+			return pids
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no hang session process (nonce %q) appeared within %s", nonce, timeout)
+	return nil
+}
+
+// waitForLumenSealTrackingRespawns drives a SINGLE-KILL run to seal WITHOUT re-killing
+// anything — the honest firewall discipline. It returns the sealed event stream plus the
+// distinct non-original session beads observed for the route (the churn bound). A timeout
+// is the firewall-wedge HIGH: a respawn adopted the claimed row or reset the name-keyed
+// grace clock, so the run never seals.
+func waitForLumenSealTrackingRespawns(t *testing.T, gs *graphstore.Store, streamID, cityDir, template, claimantBeadID string, timeout time.Duration) ([]graphstore.StoredEvent, []string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	respawns := map[string]bool{}
 	for time.Now().Before(deadline) {
 		last := lumenStreamEvents(t, gs, streamID)
 		if n := len(last); n > 0 && last[n-1].Type == engine.EventRunClosed {
-			return last
-		}
-		if killed := reKill(); killed > 0 {
-			t.Logf("DIAG re-killed %d respawned hang process(es) to keep the claimant dead", killed)
+			return last, keysOf(respawns)
 		}
 		if rows, err := listSessionsForTemplate(t, cityDir, template); err == nil {
 			for _, r := range rows {
-				if r.Closed || strings.TrimSpace(r.Template) != template {
+				if strings.TrimSpace(r.Template) != template {
 					continue
 				}
 				if id := strings.TrimSpace(r.ID); id != "" && id != claimantBeadID && !respawns[id] {
 					respawns[id] = true
-					t.Logf("DIAG resume-tier respawned session bead %q (name %q) — re-killing to keep the killed claimant dead", id, r.SessionName)
+					t.Logf("DIAG session bead %q (name %q) appeared for the route", id, r.SessionName)
 				}
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("stranded run %s did NOT seal within %s — WEDGE. Suspect the §1 scenario-4 adoption hazard: a resume-tier respawn revived the assignee and kept resetting the firewall grace clock. Respawned session beads seen: %v\nlast sequence: %v",
-		streamID, timeout, keysOf(respawns), lumenStreamTypes(lumenStreamEvents(t, gs, streamID)))
-	return nil
+	execFiles, _ := filepath.Glob(filepath.Join(cityDir, ".gc", "lumen-e2e-exec-count-*.txt"))
+	execDump := map[string]string{}
+	for _, f := range execFiles {
+		if b, rerr := os.ReadFile(f); rerr == nil {
+			execDump[filepath.Base(f)] = strings.TrimSpace(string(b))
+		}
+	}
+	openSessions, _ := listSessionsForTemplate(t, cityDir, template)
+	t.Fatalf("single-kill run %s did NOT seal within %s — WEDGE. Non-original session beads seen: %v; open sessions now: %v; exec markers: %v\nlast sequence: %v",
+		streamID, timeout, keysOf(respawns), openSessions, execDump, lumenStreamTypes(lumenStreamEvents(t, gs, streamID)))
+	return nil, nil
+}
+
+// assertExecCountLines asserts the per-bead exec-count marker file has exactly `want`
+// non-empty lines — the "side effect ran exactly N times" proof. An adopted re-execution
+// of a claimed row appends an extra line, so a mismatch is the wedge-adoption tripwire.
+func assertExecCountLines(t *testing.T, cityDir, beadID string, want int) {
+	t.Helper()
+	path := filepath.Join(cityDir, ".gc", "lumen-e2e-exec-count-"+beadID+".txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading exec-count %q: %v", path, err)
+	}
+	got := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("exec-count for %q = %d lines, want %d (an adopted re-execution appends an extra line)", beadID, got, want)
+	}
 }
 
 // assertTmuxSessionCountOnCitySocket proves >= n real tmux panes on the city's

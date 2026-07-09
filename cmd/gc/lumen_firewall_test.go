@@ -163,9 +163,12 @@ func TestFirewallStrandBecomesFreshAttempt(t *testing.T) {
 	assertLumenRunSealedOutcome(t, cityPath, streamID, engine.OutcomePass)
 }
 
-// lumenWorkerSessionBead builds an open pool session bead owning sessionName, with
-// the reconciler's stranded marker optionally stamped.
-func lumenWorkerSessionBead(id, sessionName string, stranded bool) beads.Bead {
+// lumenWorkerSessionBead builds an open pool session bead owning the canonical
+// singleton worker name (the same reused name across a false-kill/respawn, which is
+// exactly why the firewall must key liveness on the instance-unique bead id, not the
+// name), with the reconciler's stranded marker optionally stamped.
+func lumenWorkerSessionBead(id string, stranded bool) beads.Bead {
+	const sessionName = "worker-a"
 	meta := map[string]string{
 		"session_name":         sessionName,
 		"template":             tbHookRoute,
@@ -320,7 +323,7 @@ func TestFirewallStrandedMarkerTrigger(t *testing.T) {
 		_ = claimGS.Close()
 
 		gs := cr.lumenGraphStore(ctx)
-		snap := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-1", "worker-a", stranded)})
+		snap := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-1", stranded)})
 
 		cr.lumenClaimOrphanFirewall(ctx, gs, snap) // t0: start clock
 		// Well past grace.
@@ -410,7 +413,7 @@ func TestFirewallSparesUnclaimedAndRecovered(t *testing.T) {
 	cr.lumenClaimOrphanFirewall(ctx, gs, empty) // records first-seen dead
 
 	// ...then the session REAPPEARS (live) before grace elapses: the entry is cleared.
-	recovered := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-1", "worker-a", false)})
+	recovered := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-1", false)})
 	fake.Time = fake.Time.Add(lumenStrandedGrace(cr.patrolInterval()) + time.Second)
 	cr.lumenClaimOrphanFirewall(ctx, gs, recovered)
 	if st := lumenNodeStatus(t, cityPath, streamID, "hello"); st != engine.StatusClaimed {
@@ -419,6 +422,83 @@ func TestFirewallSparesUnclaimedAndRecovered(t *testing.T) {
 	if _, seen := cr.lumen.deadSince["hello:0"]; seen {
 		t.Fatal("grace clock entry survived a recovery (should be cleared)")
 	}
+}
+
+// TestFirewallInstanceLivenessKeysOnClaimantID (HIGH) is the firewall-wedge fix's
+// core pin: the dead-claimant verdict keys on the recorded claimant_id (the claiming
+// session's instance-unique GC_SESSION_ID = its session bead id), not the reused NAME.
+// A same-NAME respawn has a DIFFERENT bead id, so it must NOT revive the verdict and
+// reset the grace clock (the wedge) — it strands at the floor; a same-BEAD crash-resume
+// (matching id) is alive and its clock resets (no false kill). A legacy no-id claim
+// falls back to the NAME loop unchanged. The respawn subtest FAILS on the pre-fix
+// name-keyed verdict (the respawn matches by name → alive → never strands).
+func TestFirewallInstanceLivenessKeysOnClaimantID(t *testing.T) {
+	ctx := context.Background()
+
+	// claimWithID seeds a parked do run, claims hello:0 as worker-a recording claimantID,
+	// and returns the runtime handles for the firewall sweep.
+	claimWithID := func(t *testing.T, claimantID string) (*CityRuntime, string, *graphstore.Store, *clock.Fake, string) {
+		t.Helper()
+		cr, cityPath, _ := lumenTestRuntime(t)
+		fake := &clock.Fake{Time: time.Now()}
+		cr.ensureLumenRuntime().clk = fake
+		streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
+		cr.lumenRunsTick(ctx) // materialize hello:0 (parked)
+		claimGS := tbHookOpenStore(t, cityPath)
+		if err := engine.ClaimTierBWorkAs(ctx, claimGS, streamID, "hello:0", "worker-a", claimantID); err != nil {
+			_ = claimGS.Close()
+			t.Fatalf("claim: %v", err)
+		}
+		_ = claimGS.Close()
+		return cr, cityPath, cr.lumenGraphStore(ctx), fake, streamID
+	}
+
+	// strandedAfterGrace runs the firewall twice (start the clock, then past grace) and
+	// reports whether hello was settled (left StatusClaimed).
+	strandedAfterGrace := func(t *testing.T, cr *CityRuntime, cityPath string, gs *graphstore.Store, fake *clock.Fake, streamID string, snap *sessionBeadSnapshot) bool {
+		t.Helper()
+		cr.lumenClaimOrphanFirewall(ctx, gs, snap) // t0: start the grace clock (if dead)
+		fake.Time = fake.Time.Add(lumenStrandedGrace(cr.patrolInterval()) + time.Second)
+		cr.lumenClaimOrphanFirewall(ctx, gs, snap)
+		return lumenNodeStatus(t, cityPath, streamID, "hello") != engine.StatusClaimed
+	}
+
+	t.Run("respawn_new_bead_id_is_dead", func(t *testing.T) {
+		cr, cityPath, gs, fake, streamID := claimWithID(t, "sess-A")
+		// A same-NAME respawn B with a DIFFERENT bead id — must NOT reset the grace clock.
+		snap := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-B", false)})
+		if !strandedAfterGrace(t, cr, cityPath, gs, fake, streamID, snap) {
+			t.Fatal("a same-name respawn (new bead id) kept the claim alive (the wedge); want a strand at the floor")
+		}
+	})
+
+	t.Run("crash_resume_same_bead_id_is_alive", func(t *testing.T) {
+		cr, cityPath, gs, fake, streamID := claimWithID(t, "sess-A")
+		// The SAME instance (same bead id) crash-resumed — a live claimant, never stranded.
+		snap := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-A", false)})
+		if strandedAfterGrace(t, cr, cityPath, gs, fake, streamID, snap) {
+			t.Fatal("a same-bead crash-resume was firewall-stranded (false kill of a live claimant)")
+		}
+	})
+
+	t.Run("open_bead_with_marker_is_stranded", func(t *testing.T) {
+		cr, cityPath, gs, fake, streamID := claimWithID(t, "sess-A")
+		// The claimant's bead is open but carries the reconciler's stranded marker.
+		snap := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-A", true)})
+		if !strandedAfterGrace(t, cr, cityPath, gs, fake, streamID, snap) {
+			t.Fatal("a stranded-marked open claimant was not firewall-settled after grace")
+		}
+	})
+
+	t.Run("empty_claimant_id_falls_back_to_name", func(t *testing.T) {
+		// A legacy (no-id) claim consults the NAME loop: a matching-NAME live session is
+		// alive (byte-identical to pre-hardening), regardless of its bead id.
+		cr, cityPath, gs, fake, streamID := claimWithID(t, "")
+		alive := newSessionBeadSnapshot([]beads.Bead{lumenWorkerSessionBead("sess-any", false)})
+		if strandedAfterGrace(t, cr, cityPath, gs, fake, streamID, alive) {
+			t.Fatal("a legacy no-id claim with a matching-NAME live session was stranded (name fallback broke)")
+		}
+	})
 }
 
 // TestFirewallVsWorkerSettleRace (T-E5) is the multi-writer settle race: a worker

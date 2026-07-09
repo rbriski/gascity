@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -45,7 +45,7 @@ func (s *Server) agentPatchByName(name string) (*IndexOutput[config.AgentPatch],
 			}, nil
 		}
 	}
-	return nil, huma.Error404NotFound("agent patch " + name + " not found")
+	return nil, apierr.PatchNotFound.Msg("agent patch " + name + " not found")
 }
 
 // humaHandleAgentPatchSet is the Huma-typed handler for PUT /v0/patches/agents.
@@ -67,11 +67,11 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 	}
 
 	if patch.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
+		return nil, apierr.InvalidRequest.Msg("name is required")
 	}
 
 	if err := sm.SetAgentPatch(patch); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.PatchNotFound)
 	}
 
 	qn := patch.Name
@@ -102,7 +102,7 @@ func (s *Server) deleteAgentPatchByName(name string) (*PatchDeletedResponse, err
 		return nil, errMutationsNotSupported
 	}
 	if err := sm.DeleteAgentPatch(name); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.PatchNotFound)
 	}
 	resp := &PatchDeletedResponse{}
 	resp.Body.Status = "deleted"
@@ -137,7 +137,7 @@ func (s *Server) humaHandleRigPatchGet(_ context.Context, input *RigPatchGetInpu
 			}, nil
 		}
 	}
-	return nil, huma.Error404NotFound("rig patch " + name + " not found")
+	return nil, apierr.PatchNotFound.Msg("rig patch " + name + " not found")
 }
 
 // humaHandleRigPatchSet is the Huma-typed handler for PUT /v0/patches/rigs.
@@ -156,11 +156,11 @@ func (s *Server) humaHandleRigPatchSet(_ context.Context, input *RigPatchSetInpu
 	}
 
 	if patch.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
+		return nil, apierr.InvalidRequest.Msg("name is required")
 	}
 
 	if err := sm.SetRigPatch(patch); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.PatchNotFound)
 	}
 
 	resp := &PatchOKResponse{}
@@ -177,7 +177,7 @@ func (s *Server) humaHandleRigPatchDelete(_ context.Context, input *RigPatchDele
 	}
 
 	if err := sm.DeleteRigPatch(input.Name); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.PatchNotFound)
 	}
 	resp := &PatchDeletedResponse{}
 	resp.Body.Status = "deleted"
@@ -212,7 +212,7 @@ func (s *Server) humaHandleProviderPatchGet(_ context.Context, input *ProviderPa
 			}, nil
 		}
 	}
-	return nil, huma.Error404NotFound("provider patch " + name + " not found")
+	return nil, apierr.PatchNotFound.Msg("provider patch " + name + " not found")
 }
 
 // humaHandleProviderPatchSet is the Huma-typed handler for PUT /v0/patches/providers.
@@ -236,11 +236,11 @@ func (s *Server) humaHandleProviderPatchSet(_ context.Context, input *ProviderPa
 	}
 
 	if patch.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
+		return nil, apierr.InvalidRequest.Msg("name is required")
 	}
 
 	if err := sm.SetProviderPatch(patch); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.PatchNotFound)
 	}
 
 	resp := &PatchOKResponse{}
@@ -257,7 +257,7 @@ func (s *Server) humaHandleProviderPatchDelete(_ context.Context, input *Provide
 	}
 
 	if err := sm.DeleteProviderPatch(input.Name); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.PatchNotFound)
 	}
 	resp := &PatchDeletedResponse{}
 	resp.Body.Status = "deleted"

@@ -2,11 +2,44 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
+
+// TestEnqueueRefusesUnlowerableIR pins the §6 L6 enqueue-wedge fix: an IR that will
+// not lower (here a retry loop nested under a scatter — loops are top-level only) is
+// refused LOUD at EnqueueRun, BEFORE run.started is appended, so no wedged, unsealable
+// run is ever discoverable. Head stays 0.
+func TestEnqueueRefusesUnlowerableIR(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	// A retry nested under a scatter is un-lowerable (loops are top-level only).
+	doc := decodeIR(t, blockDoc("bad",
+		scatterNode("s", nil, "continue", retryNode(`{"kind":"literal","value":2}`, doNode("draft", "do it", nil))),
+	))
+
+	streamID, err := engine.EnqueueRun(ctx, store, doc, nil, "packs/x@v1", "workers")
+	if err == nil {
+		t.Fatalf("enqueue accepted an un-lowerable IR (stream %q); want a loud refusal", streamID)
+	}
+	if !errors.Is(err, engine.ErrUnsupportedNode) {
+		t.Fatalf("enqueue error = %v, want wrapped ErrUnsupportedNode", err)
+	}
+	if !strings.Contains(err.Error(), "does not lower") {
+		t.Errorf("enqueue error = %q, want it to name the lowering failure", err.Error())
+	}
+	// No run was seeded (the check precedes every side effect): nothing discoverable.
+	runs, lerr := engine.ListOpenRuns(ctx, store)
+	if lerr != nil {
+		t.Fatalf("list open runs: %v", lerr)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("open runs = %d, want 0 (the refusal left no run behind)", len(runs))
+	}
+}
 
 // containsRun reports whether the discovered open-run set includes streamID.
 func containsRun(runs []engine.OpenRun, streamID string) bool {
@@ -199,7 +232,7 @@ func TestDefaultRouteFieldDropRefoldIdentity(t *testing.T) {
 	// Drop+refold byte-identity: the additive field carries no hidden state.
 	assertProjectionEqualsRefold(t, store, streamID)
 
-	if v := engine.Reducer().ReducerVersion(); v != 2 {
-		t.Fatalf("reducerVersion = %d, want 2 (default_route added additively, no bump)", v)
+	if v := engine.Reducer().ReducerVersion(); v != 3 {
+		t.Fatalf("reducerVersion = %d, want 3 (real-bead do-node redesign took the honest bump)", v)
 	}
 }

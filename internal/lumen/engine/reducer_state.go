@@ -69,6 +69,14 @@ type nodeState struct {
 	// omitempty, so an engine-driven node re-marshals exactly as pre-L0.
 	Route  string `json:"route,omitempty"`
 	Prompt string `json:"prompt,omitempty"`
+	// BeadID is the real-bead do path's store-minted work-bead id (REDESIGN §1.3),
+	// folded ONCE from the owned.admitted{kind:work_bead} dispatch fact. Its presence
+	// flips the pool node's projection from a claimable Tier-B task row to a plain
+	// step (the actionable work is the real bead in the city work store, not this
+	// fold row), and the observer settles the fold from that bead's terminal close.
+	// omitempty, so every pre-redesign node (and every Tier-B claim path) serializes
+	// exactly as before.
+	BeadID string `json:"bead_id,omitempty"`
 }
 
 // clone deep-copies the state so Apply never mutates its input (R-PURE).
@@ -301,6 +309,19 @@ func nodeProjectedStatus(n *nodeState) string {
 // (MED-1). An empty value clears its key at the applier, matching the incremental
 // fold.
 func nodeProjectedMeta(act string, n *nodeState) map[string]string {
+	// Real-bead do path (REDESIGN §1.3): once the ordinary work bead is dispatched
+	// (BeadID set), this fold row is observability only — the claimable markers
+	// (dispatch_mode, gc.routed_to, claimant_id, retryable) belong to the real bead
+	// in the work store, not here. Carry only bead_id (the two-way join key) while
+	// unsettled; a settled row keeps {outcome, output} like any node. This branch is
+	// unreachable for a pre-redesign / Tier-B node (BeadID is always ""), so their
+	// projection is byte-identical.
+	if n.BeadID != "" {
+		if n.Settled {
+			return map[string]string{"outcome": n.Outcome, "output": n.Output}
+		}
+		return map[string]string{"kind": n.Kind, "activation": act, "bead_id": n.BeadID}
+	}
 	var meta map[string]string
 	if n.Settled {
 		meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
@@ -343,14 +364,17 @@ func nodeRowFor(s *lumenState, act string, n *nodeState, streamID string) fold.N
 	if n.ParentActivation != "" {
 		parentID = activationNodeID(n.ParentActivation)
 	}
-	// A pool-mode node projects as `task`, not `step`: `step` is in the worker
-	// claim surface's ready-exclude set (internal/beads.readyExcludeTypes), so a
-	// step-typed row is never claimable — "bead-compatible on the surface" made
-	// literal. Its rendered prompt lands in nodes.description. An engine-driven
-	// node stays `step` with no description.
+	// A pool-mode node awaiting its real work bead (BeadID == "") projects as
+	// `task`, not `step`: `step` is in the worker claim surface's ready-exclude set
+	// (internal/beads.readyExcludeTypes), so a step-typed row is never claimable —
+	// "bead-compatible on the surface" made literal. Its rendered prompt lands in
+	// nodes.description. Once the real bead is dispatched (BeadID set, REDESIGN §1.3)
+	// the pool node projects a PLAIN `step` — the actionable work is the ordinary bead
+	// in the work store, and a second task-typed fold row would be a bd-ready
+	// doppelganger. An engine-driven node stays `step` with no description.
 	beadType := "step"
 	description := ""
-	if n.DispatchMode == DispatchModePool {
+	if n.DispatchMode == DispatchModePool && n.BeadID == "" {
 		beadType = "task"
 		description = n.Prompt
 	}

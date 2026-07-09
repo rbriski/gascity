@@ -30,8 +30,13 @@ var lumenRunsTickFn = (*CityRuntime).lumenRunsTick
 // drops it entirely: the first tick re-Advances every open run once (idempotent),
 // which is exactly the crash-resume path.
 type lumenRuntime struct {
-	gs        *graphstore.Store
-	heads     map[string]uint64    // streamID -> journal head at last Advance (level trigger)
+	gs    *graphstore.Store
+	heads map[string]uint64 // streamID -> journal head at last Advance (level trigger)
+	// inflight tracks each run's dispatched-but-unsettled real work beads (REDESIGN
+	// §2.5). A real bead's close lands in the WORK store and does NOT move the journal
+	// head, so the pure head-compare level trigger would never observe it; a run with
+	// in-flight work therefore always re-Advances so the observe arm can Get its beads.
+	inflight  map[string][]engine.PoolWork
 	deadSince map[string]time.Time // activation -> first-seen-dead time (firewall grace, L2e)
 	clk       clock.Clock          // injectable for firewall grace tests (L2e)
 }
@@ -41,6 +46,7 @@ func (cr *CityRuntime) ensureLumenRuntime() *lumenRuntime {
 	if cr.lumen == nil {
 		cr.lumen = &lumenRuntime{
 			heads:     map[string]uint64{},
+			inflight:  map[string][]engine.PoolWork{},
 			deadSince: map[string]time.Time{},
 			clk:       clock.Real{},
 		}
@@ -127,8 +133,9 @@ func (cr *CityRuntime) advanceLumenRun(ctx context.Context, gs *graphstore.Store
 		fmt.Fprintf(cr.stderr, "%s: lumen runs: reading head %q: %v\n", cr.logPrefix, r.StreamID, err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	if last, seen := lr.heads[r.StreamID]; seen && head == last {
-		return // level trigger: nothing new since the last Advance
+	last, seen := lr.heads[r.StreamID]
+	if seen && head == last && len(lr.inflight[r.StreamID]) == 0 {
+		return // level trigger: nothing new since the last Advance, and no bead to observe
 	}
 	m, err := engine.ReadRunManifest(ctx, gs, r.StreamID)
 	if err != nil {
@@ -140,23 +147,34 @@ func (cr *CityRuntime) advanceLumenRun(ctx context.Context, gs *graphstore.Store
 		fmt.Fprintf(cr.stderr, "%s: lumen runs: loading inputs for %q: %v\n", cr.logPrefix, r.StreamID, err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	res, err := lumenAdvance(ctx, gs, doc, r.StreamID, input, engine.Options{PoolRouter: lumenPoolRouter(m.DefaultRoute)})
+	// Real-bead path (REDESIGN §2.5): the do's work is an ordinary work bead in the
+	// city work store, created by DispatchWork and observed for closure by ObserveWork.
+	workStore := cr.cityBeadStore()
+	res, err := lumenAdvance(ctx, gs, doc, r.StreamID, input, engine.Options{
+		PoolRouter:   lumenPoolRouter(m.DefaultRoute),
+		DispatchWork: lumenDispatchWork(workStore, cr.cfg),
+		ObserveWork:  lumenObserveWork(workStore),
+	})
 	switch {
 	case isRetryableAdvanceErr(err):
 		// Transient multi-writer race: the next tick (poke or patrol) re-Advances.
-		// Leave the cursor untouched so the retry is not level-trigger-suppressed.
+		// Leave head + inflight untouched so the retry is not level-trigger-suppressed.
 		return
 	case err != nil:
-		// A loud typed refusal (ErrIRHashMismatch, ErrAdvanceStalled, ErrNoPoolRoute,
-		// …): log and leave the run untouched for diagnosis; do not auto-settle.
+		// A loud typed refusal (ErrIRHashMismatch, ErrAdvanceStalled, ErrNoPoolRoute)
+		// OR a transient observer error (§9.7): log and leave the run untouched for
+		// diagnosis; do NOT auto-settle. inflight is left in place so a parked run
+		// whose observe failed re-Advances next tick.
 		fmt.Fprintf(cr.stderr, "%s: lumen runs: advancing %q: %v\n", cr.logPrefix, r.StreamID, err) //nolint:errcheck // best-effort stderr
 		return
 	case res.Sealed:
 		delete(lr.heads, r.StreamID)
+		delete(lr.inflight, r.StreamID)
 	case res.Parked:
 		lr.heads[r.StreamID] = res.Head
-		// Wake the demand/reconcile tick so freshly-materialized claimable work is
-		// picked up promptly (a nil pokeCh is never ready, so this is safe in tests).
+		lr.inflight[r.StreamID] = res.InFlight
+		// Wake the demand/reconcile tick so the freshly-created work bead is picked up
+		// promptly (a nil pokeCh is never ready, so this is safe in tests).
 		select {
 		case cr.pokeCh <- struct{}{}:
 		default:

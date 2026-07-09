@@ -32,6 +32,12 @@ const (
 	// effect.scheduled for do) but before the side effect runs — the (b) boundary.
 	// The effect has NOT run; the host is NOT called.
 	crashBeforeAct crashBoundary = "before-act"
+	// crashAfterDispatch fires on the real-bead do path (REDESIGN §9.1) after the
+	// DispatchWork side effect created the (durable, findable-by-metadata) work bead
+	// but BEFORE the write-once owned.admitted{work_bead} dispatch fact commits. On
+	// re-Advance the lookup-before-create seam re-finds the same bead id and lands
+	// the missing dispatch fact — exactly one bead, exactly one owned.admitted.
+	crashAfterDispatch crashBoundary = "after-dispatch"
 	// crashAfterAct fires after the side effect runs (exec shell / agent RunDo)
 	// but before its settlement append — the (c) boundary. The effect DID run
 	// exactly once; its outcome has not been recorded.

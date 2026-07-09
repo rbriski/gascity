@@ -156,6 +156,14 @@ const (
 	// Tier-B work handle, distinguishing it from the deferred async/detached-run
 	// handle kinds that share the type.
 	OwnedKindTierB = "tier_b"
+	// OwnedKindWorkBead is the owned.admitted kind for the real-bead do path
+	// (REDESIGN §1.2): a ready pool-mode do's work is an ordinary fold_owned=0 work
+	// bead in the city work store, and the driver records its store-minted id in a
+	// write-once owned.admitted{kind:work_bead, bead_id} dispatch fact. It shares the
+	// discriminant lane with OwnedKindTierB so a work_bead admit can never fold as a
+	// Tier-B claim (and vice versa); the two paths coexist while the Tier-B adapter
+	// is proven-then-deleted.
+	OwnedKindWorkBead = "work_bead"
 	// DispatchModeMetaKey is the projected node-metadata key carrying a claimable
 	// node's dispatch mode, so a serve/claim surface can select Tier-B work.
 	DispatchModeMetaKey = "dispatch_mode"
@@ -217,11 +225,26 @@ const (
 	// do not exist. ANY pre-L0 stream that somehow survives MUST be given a one-time
 	// RebuildTierA (which rewrites the frontier from state, dropping the stale
 	// activation-keyed rows) before its L0 frontier is trusted.
-	reducerVersion = 2
-	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped with the
-	// v2 state shape; no v1 snapshot ever persisted (blueprint §2), so there is
-	// no v1 fixture debt.
-	snapshotFormatVersion = 2
+	//
+	// REDESIGN (real-bead do node) — bumped 2 → 3. This slice lands the real-bead
+	// dispatch path alongside the Tier-B adapter: a new owned.admitted{kind:work_bead}
+	// arm folds nodeState.BeadID, and a work-bead-dispatched pool node projects a
+	// PLAIN step with no claimable frontier row / dispatch_mode marker (the real work
+	// bead lives in the city work store). Those two changes are additive-omitempty over
+	// the fields any pre-redesign stream carries (BeadID is always "" there, so every
+	// existing journal and snapshot folds and re-marshals byte-identically — DET-T-17).
+	// Strictly, an additive-omitempty change does not FORCE a bump (the L0/P4.5
+	// precedents above declined it). It is taken here, up front, because this is the
+	// first slice of a multi-slice transport whose later slices DO change how a
+	// persisted tier_b claim folds (that arm reverts to no-op bookkeeping) — taking the
+	// honest bump once, on an unpushed branch with zero persisted Lumen streams, avoids
+	// a mid-transport version churn. fold.Fold's version gate strands any (nonexistent)
+	// v2 snapshot LOUDLY (ErrReducerVersionSkew, resume.go), so the bump costs nothing.
+	reducerVersion = 3
+	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped 2 → 3 with
+	// reducerVersion for the additive nodeState.BeadID field; no v2 snapshot ever
+	// persisted (unpushed branch), so there is no fixture debt.
+	snapshotFormatVersion = 3
 )
 
 // ---- Typed event payloads (R-CANON) ----
@@ -405,12 +428,21 @@ type cancelSweptPayload struct {
 // its respawn B. ClaimantID pins the per-instance session bead id so the closer-
 // identity guard (§4.3) catches a same-name straggler. Additive and omitempty: a
 // legacy/no-session claim omits it and folds byte-identically.
+//
+// BeadID is the real-bead do path's additive field (REDESIGN §1.2): the
+// store-minted id of the ordinary work bead the driver created for a pool-mode do
+// (kind=OwnedKindWorkBead). It is env-specific but recorded ONCE at dispatch and
+// replayed on every refold, never re-minted — the same determinism class as the
+// lease epoch and effectSettledPayload.Session (DET holds, §1.5). Additive and
+// omitempty, so a Tier-B / async / detached admit that never set it folds
+// byte-identically.
 type ownedAdmittedPayload struct {
 	Handle     string `json:"handle"`
 	Activation string `json:"activation"`
 	Kind       string `json:"kind"`
 	Assignee   string `json:"assignee,omitempty"`
 	ClaimantID string `json:"claimant_id,omitempty"`
+	BeadID     string `json:"bead_id,omitempty"`
 }
 
 // ownedSettledPayload is the body of EventOwnedSettled. For P4.5 Tier-B it is

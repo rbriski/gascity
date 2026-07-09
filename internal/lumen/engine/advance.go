@@ -62,6 +62,10 @@ type PoolWork struct {
 	Route string
 	// Prompt is the rendered agent prompt (projected into nodes.description).
 	Prompt string
+	// BeadID is the dispatched real work bead's store-minted id on the real-bead
+	// path (REDESIGN §1.4), empty on the legacy Tier-A path. The controller carries
+	// it back into ObserveWork to settle the fold from the bead's ordinary close.
+	BeadID string
 }
 
 // AdvanceResult reports one Advance pass. Exactly one of Sealed / Parked is true
@@ -307,6 +311,15 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
 	// so a doomed activation never becomes claimable.
 	if poolMode(u, opts) && !d.blocked(u) {
+		// Real-bead path (REDESIGN §1.4): an already-dispatched, unsettled pool node
+		// is OBSERVED — a terminal close settles it in THIS pass so dependents later
+		// in the topo walk go ready immediately; a still-open bead parks; an observer
+		// error is transient (the run stays parked, the loop retries next tick).
+		if opts.ObserveWork != nil {
+			if n := d.st().Nodes[u.activation]; n != nil && !n.Settled && n.BeadID != "" {
+				return d.observePoolWork(u.activation, u.nodeID, n.BeadID, opts)
+			}
+		}
 		return d.materializePoolWork(u, scope, opts)
 	}
 
@@ -339,7 +352,16 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 // intercepted earlier by resumeMemoized, so it never reaches here.)
 func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts Options) error {
 	if n := d.st().Nodes[u.activation]; n != nil && !n.Settled {
-		return nil
+		// LEGACY path (nil DispatchWork): an activated, unsettled pool node is a
+		// claimable Tier-A row already — a TRUE no-op (HIGH-1). REAL-BEAD path: a node
+		// already carrying its dispatched bead id is likewise a no-op; a node activated
+		// but not yet dispatched (a crash between the two appends, §9.1) falls through
+		// to dispatch using the FOLD-recorded route/prompt (byte-stable, so no divergent
+		// re-render).
+		if opts.DispatchWork == nil || n.BeadID != "" {
+			return nil
+		}
+		return d.dispatchPoolWork(u.activation, u.nodeID, n.Route, n.Prompt, opts)
 	}
 	route, ok := opts.PoolRouter(u.leaf.agentRef)
 	if !ok {
@@ -357,7 +379,66 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 	if err := d.crashAt(crashBeforeActivate, u.activation); err != nil {
 		return err
 	}
-	return d.appendPoolActivated(u, route, prompt)
+	if err := d.appendPoolActivated(u, route, prompt); err != nil {
+		return err
+	}
+	// LEGACY path stops at the claimable fold row. REAL-BEAD path continues: create
+	// the ordinary work bead and journal the dispatch fact.
+	if opts.DispatchWork == nil {
+		return nil
+	}
+	return d.dispatchPoolWork(u.activation, u.nodeID, route, prompt, opts)
+}
+
+// dispatchPoolWork is the real-bead path's create+journal step (REDESIGN §1.4/§2.3):
+// it calls the DispatchWork seam (lookup-then-create — a durable, metadata-findable
+// side effect FIRST, the CAS-blob-before-append discipline), then appends the
+// write-once owned.admitted{kind:work_bead, bead_id} dispatch fact. It passes the
+// FOLD-recorded route/prompt so a re-Advance re-dispatches byte-identically. A crash
+// between the create and the fact (crashAfterDispatch) leaves a findable bead the
+// next Advance re-adopts (§9.1) — never an orphan, never a duplicate.
+func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, opts Options) error {
+	beadID, err := opts.DispatchWork(d.ctx, WorkDispatch{
+		StreamID:   d.streamID,
+		Activation: activation,
+		NodeID:     nodeID,
+		Route:      route,
+		Prompt:     prompt,
+		Attempt:    activationAttempt(activation),
+	})
+	if err != nil {
+		return fmt.Errorf("lumen: advance: dispatch do %q work bead: %w", nodeID, err)
+	}
+	if beadID == "" {
+		return fmt.Errorf("lumen: advance: dispatch do %q returned an empty bead id", nodeID)
+	}
+	if err := d.crashAt(crashAfterDispatch, activation); err != nil {
+		return err
+	}
+	return d.append(EventOwnedAdmitted, "bead-dispatch:"+activation, ownedAdmittedPayload{
+		Handle:     activation,
+		Activation: activation,
+		Kind:       OwnedKindWorkBead,
+		BeadID:     beadID,
+	})
+}
+
+// observePoolWork consults the ObserveWork seam for a dispatched-but-unsettled pool
+// node and, when its real bead has reached a terminal close, copies the outcome into
+// the journal as the EXISTING outcome.settled (REDESIGN §1.4) — zero new settle arm.
+// Retryable is stamped true iff the outcome is failed, so the formula's retry arm
+// re-attempts a genuine worker failure with a FRESH bead (§5). A still-open bead
+// parks (nil, no append); an observer error is returned so the controller loop logs
+// it and leaves the run parked to retry next tick (§9.7).
+func (d *driver) observePoolWork(activation, nodeID, beadID string, opts Options) error {
+	obs, err := opts.ObserveWork(d.ctx, beadID)
+	if err != nil {
+		return fmt.Errorf("lumen: advance: observe do %q bead %q: %w", nodeID, beadID, err)
+	}
+	if !obs.Terminal {
+		return nil
+	}
+	return d.appendSettledRetryable(activation, obs.Outcome, obs.Output, "", obs.Outcome == OutcomeFailed)
 }
 
 // appendPoolActivated emits a pool-mode node.activated: the plain engine
@@ -443,9 +524,22 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 		maxAttempts = n
 	}
 
-	// A live (materialized, unsettled) attempt is in flight — park on it.
-	if _, hasLive := d.liveAttempt(spec.bodyNodeID); hasLive {
-		return nil
+	// A live (materialized, unsettled) attempt is in flight — park on it. On the
+	// real-bead path, OBSERVE it first: if its work bead has closed, settle the
+	// attempt in-pass so the decide logic below runs THIS pass; otherwise park.
+	if liveAtt, hasLive := d.liveAttempt(spec.bodyNodeID); hasLive {
+		bodyAct := activationForAttempt(spec.bodyNodeID, liveAtt)
+		bn := d.st().Nodes[bodyAct]
+		if opts.ObserveWork == nil || bn == nil || bn.BeadID == "" {
+			return nil
+		}
+		if err := d.observePoolWork(bodyAct, spec.bodyNodeID, bn.BeadID, opts); err != nil {
+			return err
+		}
+		if bn := d.st().Nodes[bodyAct]; bn == nil || !bn.Settled {
+			return nil // still in flight — park
+		}
+		// Settled this pass: fall through to the decide logic below.
 	}
 
 	settledAttempt, hasSettled := d.lastSettledAttempt(spec.bodyNodeID)
@@ -554,7 +648,7 @@ func (d *driver) inFlightPoolWork() []PoolWork {
 	for _, act := range st.activationKeys() {
 		n := st.Nodes[act]
 		if n.DispatchMode == DispatchModePool && !n.Settled {
-			out = append(out, PoolWork{Activation: act, NodeID: n.NodeID, Route: n.Route, Prompt: n.Prompt})
+			out = append(out, PoolWork{Activation: act, NodeID: n.NodeID, Route: n.Route, Prompt: n.Prompt, BeadID: n.BeadID})
 		}
 	}
 	return out

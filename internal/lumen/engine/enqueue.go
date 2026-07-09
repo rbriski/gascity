@@ -38,6 +38,19 @@ func EnqueueRun(ctx context.Context, store *graphstore.Store, doc *ir.IR, input 
 	if doc == nil {
 		return "", fmt.Errorf("lumen: enqueue: nil IR document")
 	}
+	// Pre-validate lowering BEFORE any side effect (REDESIGN §6, the L6 enqueue-wedge
+	// HIGH). EnqueueRun otherwise seeds run.started without ever lowering the IR;
+	// buildUnits runs first inside the controller's Advance, so an un-lowerable IR
+	// (unsupported node kind, malformed loop body, dangling after, a loop nested under
+	// a scatter) would error there and the run root would stay open forever, re-logged
+	// every tick — a silently wedged, unsealable run. The flags mirror EXACTLY what the
+	// controller loop drives with (Advance computes buildUnits(nodes, PoolRouter!=nil,
+	// Host!=nil); the loop passes Options{PoolRouter:…} with nil Host ⇒ (true, false)),
+	// so an IR that lowers here is one Advance can drive. Failing here fails the enqueue
+	// LOUD at the CLI with no discoverable run.
+	if _, err := buildUnits(doc.Nodes, true, false); err != nil {
+		return "", fmt.Errorf("lumen: enqueue: IR does not lower: %w", err)
+	}
 
 	streamID := streamIDForRun(doc.Name, true)
 	if strings.ContainsRune(streamID, ':') {

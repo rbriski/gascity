@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -30,13 +31,19 @@ func lumenTestRuntime(t *testing.T) (*CityRuntime, string, *bytes.Buffer) {
 	cityPath := tbHookGraphCity(t)
 	var stderr bytes.Buffer
 	cr := &CityRuntime{
-		cityPath:            cityPath,
-		cityName:            "test",
-		logPrefix:           "test",
-		stdout:              io.Discard,
-		stderr:              &stderr,
-		pokeCh:              make(chan struct{}, 1),
-		cfg:                 &config.City{},
+		cityPath:  cityPath,
+		cityName:  "test",
+		logPrefix: "test",
+		stdout:    io.Discard,
+		stderr:    &stderr,
+		pokeCh:    make(chan struct{}, 1),
+		// Pool agents matching the routes these tests use ("rig/claude" and "workers")
+		// so the real-bead dispatch seam's route validation resolves them (REDESIGN
+		// §2.3): the do's work becomes an ordinary bead in standaloneCityStore.
+		cfg: &config.City{Agents: []config.Agent{
+			{Dir: "rig", Name: "claude"},
+			{Name: "workers"},
+		}},
 		standaloneCityStore: beads.NewMemStore(),
 		rec:                 events.Discard,
 	}
@@ -86,80 +93,129 @@ func lumenStreamEventTypes(t *testing.T, cityPath, streamID string) []string {
 	return out
 }
 
-// TestLumenRunsTickMaterializesReadyDo (T-B1) is the L2 exit half A: an enqueued
-// do-only run + one controller tick materializes the ready do as a claimable
-// Tier-B work bead surfaced by the routed frontier SELECT with its prompt/route.
-func TestLumenRunsTickMaterializesReadyDo(t *testing.T) {
+// TestLumenRunsTickDispatchesRealWorkBead (real-bead redesign, replaces T-B1) proves
+// one controller tick over an enqueued do-only run creates an ORDINARY fold_owned=0
+// work bead in the CITY WORK store — task-typed, routed, prompt in Description, run
+// linkage metadata — and journals owned.admitted{work_bead}. NO claimable Tier-B fold
+// row is minted (the real bead is the only claim surface).
+func TestLumenRunsTickDispatchesRealWorkBead(t *testing.T) {
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
 	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
 
 	cr.lumenRunsTick(ctx)
 
-	store := cachedCityGraphJournal(cityPath)
-	if store == nil {
-		t.Fatal("graph journal unavailable")
-	}
-	surface, ok := beads.TierBClaimSurfaceStoreFor(store)
-	if !ok {
-		t.Fatal("tier-b claim surface unavailable")
-	}
-	rows, err := surface.TierBRoutedFrontier(ctx, []string{tbHookRoute}, 0)
+	// The real work bead lives in the city WORK store, not the graph journal.
+	work := cr.cityBeadStore()
+	rows, err := work.List(beads.ListQuery{
+		Metadata:      map[string]string{beadmeta.LumenRunMetadataKey: streamID},
+		IncludeClosed: true,
+		AllowScan:     true,
+	})
 	if err != nil {
-		t.Fatalf("routed frontier: %v", err)
+		t.Fatalf("list work beads: %v", err)
 	}
 	if len(rows) != 1 {
-		t.Fatalf("routed frontier rows = %d, want 1 (the materialized do)", len(rows))
+		t.Fatalf("work beads for run = %d, want 1 (the dispatched do)", len(rows))
 	}
-	if rows[0].ID != "hello" || rows[0].Description != "Say hello." {
-		t.Fatalf("frontier row = {id:%q desc:%q}, want {hello, Say hello.}", rows[0].ID, rows[0].Description)
+	b := rows[0]
+	if b.Type != "task" {
+		t.Errorf("bead type = %q, want task", b.Type)
 	}
-	if types := lumenStreamEventTypes(t, cityPath, streamID); len(types) != 2 ||
-		types[0] != engine.EventRunStarted || types[1] != engine.EventNodeActivated {
-		t.Fatalf("journal = %v, want [run.started node.activated]", types)
+	if b.Description != "Say hello." {
+		t.Errorf("description = %q, want the rendered prompt", b.Description)
+	}
+	if b.Status != "open" {
+		t.Errorf("status = %q, want open (born claimable)", b.Status)
+	}
+	if b.Metadata[beadmeta.RoutedToMetadataKey] != tbHookRoute {
+		t.Errorf("gc.routed_to = %q, want %q", b.Metadata[beadmeta.RoutedToMetadataKey], tbHookRoute)
+	}
+	if b.Metadata[beadmeta.LumenActivationMetadataKey] != "hello:0" {
+		t.Errorf("gc.lumen_activation = %q, want hello:0", b.Metadata[beadmeta.LumenActivationMetadataKey])
+	}
+	if b.Metadata[beadmeta.LumenAttemptMetadataKey] != "0" {
+		t.Errorf("gc.lumen_attempt = %q, want 0", b.Metadata[beadmeta.LumenAttemptMetadataKey])
+	}
+
+	// Journal: run.started, node.activated, owned.admitted(work_bead) — no owned.settled.
+	if types := lumenStreamEventTypes(t, cityPath, streamID); len(types) != 3 ||
+		types[0] != engine.EventRunStarted || types[1] != engine.EventNodeActivated || types[2] != engine.EventOwnedAdmitted {
+		t.Fatalf("journal = %v, want [run.started node.activated owned.admitted]", types)
+	}
+
+	// No claimable Tier-B fold row (the coexistence proof: the Tier-B surface is idle).
+	if store := cachedCityGraphJournal(cityPath); store != nil {
+		if surface, ok := beads.TierBClaimSurfaceStoreFor(store); ok {
+			frontier, ferr := surface.TierBRoutedFrontier(ctx, []string{tbHookRoute}, 0)
+			if ferr != nil {
+				t.Fatalf("routed frontier: %v", ferr)
+			}
+			if len(frontier) != 0 {
+				t.Fatalf("Tier-B routed frontier rows = %d, want 0 (real bead is the only claim surface)", len(frontier))
+			}
+		}
 	}
 }
 
-// TestLumenRunsTickScriptedClaimCloseSeals (T-B2) is THE L2 exit, happy path:
-// enqueue → tick materializes the do → scripted claim + interceptTierBClose(pass)
-// → tick seals. The journal sequence is
-// run.started → node.activated → owned.admitted → owned.settled → run.closed.
-func TestLumenRunsTickScriptedClaimCloseSeals(t *testing.T) {
+// lumenCloseDoBead simulates an ordinary pooled worker closing the latest open real
+// work bead for a do node: it stamps gc.outcome and closes the bead through the plain
+// work store (NO Tier-B leg). Returns the closed bead id.
+func lumenCloseDoBead(t *testing.T, store beads.Store, streamID, nodeID, outcome string) string {
+	t.Helper()
+	hist, err := lumenAttemptHistory(store, streamID, nodeID)
+	if err != nil {
+		t.Fatalf("attempt history: %v", err)
+	}
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Status != "closed" {
+			id := hist[i].BeadID
+			if uerr := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.OutcomeMetadataKey: outcome}}); uerr != nil {
+				t.Fatalf("stamp outcome on %q: %v", id, uerr)
+			}
+			if cerr := store.Close(id); cerr != nil {
+				t.Fatalf("close %q: %v", id, cerr)
+			}
+			return id
+		}
+	}
+	t.Fatalf("no open work bead for %s/%s to close", streamID, nodeID)
+	return ""
+}
+
+// TestLumenRunsTickDispatchObserveSeals (real-bead redesign, replaces T-B2) is THE
+// controller happy path: enqueue → tick dispatches the real bead → an ORDINARY close
+// of that bead (gc.outcome=pass, no Tier-B leg) → tick observes the close → seals. The
+// journal sequence is run.started → node.activated → owned.admitted(work_bead) →
+// outcome.settled → run.closed (NOT owned.settled — the settle is outcome.settled).
+func TestLumenRunsTickDispatchObserveSeals(t *testing.T) {
 	ctx := context.Background()
-	cr, cityPath, stderr := lumenTestRuntime(t)
+	cr, cityPath, _ := lumenTestRuntime(t)
 	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
 
-	// Tick 1: materialize the do (park).
+	// Tick 1: dispatch the real bead (park, in flight).
 	cr.lumenRunsTick(ctx)
 
-	// Scripted claim (a pool worker claiming its hook work).
-	claimGS := tbHookOpenStore(t, cityPath)
-	if err := engine.ClaimTierBWork(ctx, claimGS, streamID, "hello:0", "worker-a"); err != nil {
-		_ = claimGS.Close()
-		t.Fatalf("scripted claim: %v", err)
-	}
-	_ = claimGS.Close()
+	// An ordinary pooled worker closes the real bead pass (no Tier-B leg).
+	closedID := lumenCloseDoBead(t, cr.cityBeadStore(), streamID, "hello", beadmeta.OutcomePass)
 
-	// Scripted close through the L1 close adapter (gc bd update --status closed).
-	code, handled := interceptTierBClose(cityPath,
-		[]string{"update", "hello", "--set-metadata", "gc.outcome=pass", "--status", "closed"},
-		io.Discard, stderr)
-	if !handled || code != 0 {
-		t.Fatalf("interceptTierBClose = (code=%d handled=%v); want (0,true); stderr=%s", code, handled, stderr.String())
-	}
-
-	// Tick 2: the settle moved the head → re-Advance seals.
+	// Tick 2: the observe arm sees the close → outcome.settled → seal.
 	cr.lumenRunsTick(ctx)
 
 	want := []string{
 		engine.EventRunStarted, engine.EventNodeActivated,
-		engine.EventOwnedAdmitted, engine.EventOwnedSettled, engine.EventRunClosed,
+		engine.EventOwnedAdmitted, engine.EventOutcomeSettled, engine.EventRunClosed,
 	}
 	if got := lumenStreamEventTypes(t, cityPath, streamID); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal sequence = %v, want %v", got, want)
 	}
-	// The run left the open set (sealed).
 	assertLumenRunSealed(t, cityPath, streamID)
+
+	// The settled work bead is an ordinary fold_owned=0 bead in the work store.
+	b, err := cr.cityBeadStore().Get(closedID)
+	if err != nil || b.Status != "closed" {
+		t.Fatalf("closed real bead %q = (%+v, %v), want a closed work-store bead", closedID, b, err)
+	}
 }
 
 // TestLumenRunsTickCrashResume (T-B3) is the L2 exit's crash-resume proof: after a
@@ -176,31 +232,28 @@ func TestLumenRunsTickCrashResume(t *testing.T) {
 		t.Fatalf("node.activated after first tick = %d, want 1", n)
 	}
 
-	// Simulate a controller restart: drop the store handle and all cursors.
+	// Simulate a controller restart: drop the store handle and all cursors. The city
+	// WORK store is DURABLE across a restart, so cr2 re-opens the SAME work store
+	// (the dispatched bead survives) — modeled by sharing the memstore handle.
 	if cr.lumen != nil && cr.lumen.gs != nil {
 		_ = cr.lumen.gs.Close()
 	}
 	cr2, _, _ := lumenTestRuntime(t)
-	cr2.cityPath = cityPath // same city, fresh runtime (empty cursors, nil store handle)
+	cr2.cityPath = cityPath                          // same city, fresh runtime (empty cursors, nil store handle)
+	cr2.standaloneCityStore = cr.standaloneCityStore // durable work store survives the restart
 
 	// Fresh tick rebuilds from the journal + CAS dir; the run re-parks and is NOT
-	// re-materialized (the write-once activation dedupes).
+	// re-dispatched (the write-once dispatch fact + the metadata lookup dedupe).
 	cr2.lumenRunsTick(ctx)
 	if n := lumenCountJournalType(t, cityPath, streamID, engine.EventNodeActivated); n != 1 {
 		t.Fatalf("node.activated after crash-resume tick = %d, want 1 (idempotent, no re-materialize)", n)
 	}
+	if n := lumenCountJournalType(t, cityPath, streamID, engine.EventOwnedAdmitted); n != 1 {
+		t.Fatalf("owned.admitted after crash-resume tick = %d, want 1 (idempotent dispatch)", n)
+	}
 
-	// Scripted close + tick seals across the restart.
-	claimGS := tbHookOpenStore(t, cityPath)
-	if err := engine.ClaimTierBWork(ctx, claimGS, streamID, "hello:0", "worker-a"); err != nil {
-		_ = claimGS.Close()
-		t.Fatalf("claim: %v", err)
-	}
-	if err := engine.SettleTierBWork(ctx, claimGS, streamID, "hello:0", engine.OutcomePass, "done"); err != nil {
-		_ = claimGS.Close()
-		t.Fatalf("settle: %v", err)
-	}
-	_ = claimGS.Close()
+	// An ordinary close of the surviving real bead + a tick seals across the restart.
+	lumenCloseDoBead(t, cr2.cityBeadStore(), streamID, "hello", beadmeta.OutcomePass)
 
 	cr2.lumenRunsTick(ctx)
 	assertLumenRunSealed(t, cityPath, streamID)
@@ -209,10 +262,12 @@ func TestLumenRunsTickCrashResume(t *testing.T) {
 	}
 }
 
-// TestLumenRunsTickLevelTrigger (T-B4) proves the head-cursor level trigger: after
-// a park, a tick with an unmoved head performs NO Advance (seam-counted); a settle
-// that moves the head makes the next tick Advance.
-func TestLumenRunsTickLevelTrigger(t *testing.T) {
+// TestLumenRunsTickAdvancesWhileInflight (real-bead redesign, replaces T-B4) proves
+// the level trigger under the new transport: a run with in-flight real work ALWAYS
+// re-Advances even though a bead close never moves the journal head (that is how the
+// observe arm ever sees the close); a run with an unmoved head AND no in-flight work
+// is skipped. The observed close then seals.
+func TestLumenRunsTickAdvancesWhileInflight(t *testing.T) {
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
 	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
@@ -225,28 +280,30 @@ func TestLumenRunsTickLevelTrigger(t *testing.T) {
 	}
 	defer func() { lumenAdvance = orig }()
 
-	cr.lumenRunsTick(ctx) // park: Advance #1
+	cr.lumenRunsTick(ctx) // dispatch + park: Advance #1, one bead in flight
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("advance calls after first tick = %d, want 1", got)
 	}
-	cr.lumenRunsTick(ctx) // head unmoved: level trigger skips Advance
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("advance calls after unmoved-head tick = %d, want 1 (level trigger must skip)", got)
-	}
-
-	// A settle moves the head.
-	gs := tbHookOpenStore(t, cityPath)
-	if err := engine.SettleTierBWork(ctx, gs, streamID, "hello:0", engine.OutcomePass, "ok"); err != nil {
-		_ = gs.Close()
-		t.Fatalf("settle: %v", err)
-	}
-	_ = gs.Close()
-
-	cr.lumenRunsTick(ctx) // head moved: Advance #2
+	// Head is unmoved (a bead close lands in the WORK store), but inflight>0 → the
+	// tick MUST re-Advance so the observe arm can Get the (still-open) bead.
+	cr.lumenRunsTick(ctx)
 	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("advance calls after head-moved tick = %d, want 2", got)
+		t.Fatalf("advance calls with in-flight work = %d, want 2 (inflight forces re-Advance)", got)
+	}
+
+	// The ordinary worker closes the bead; the next tick observes → seals.
+	lumenCloseDoBead(t, cr.cityBeadStore(), streamID, "hello", beadmeta.OutcomePass)
+	cr.lumenRunsTick(ctx)
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("advance calls after close = %d, want 3", got)
 	}
 	assertLumenRunSealed(t, cityPath, streamID)
+
+	// Sealed: inflight cleared → a further tick is level-trigger-skipped.
+	cr.lumenRunsTick(ctx)
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("advance calls after seal = %d, want 3 (sealed run, no inflight, head unmoved → skip)", got)
+	}
 }
 
 // TestLumenRunsTickRetriesRebuildRaced pins that ErrRebuildRaced from Advance (a
@@ -551,17 +608,16 @@ func TestLumenRunLoadsInputFromCAS(t *testing.T) {
 	if strings.Contains(stderr.String(), "input hash mismatch") {
 		t.Fatalf("input CAS blob did not round-trip (input_hash mismatch): %s", stderr.String())
 	}
-	store := cachedCityGraphJournal(cityPath)
-	surface, ok := beads.TierBClaimSurfaceStoreFor(store)
-	if !ok {
-		t.Fatal("tier-b claim surface unavailable")
-	}
-	rows, err := surface.TierBRoutedFrontier(ctx, []string{"workers"}, 0)
+	// The do dispatched a real work bead routed to "workers".
+	rows, err := cr.cityBeadStore().List(beads.ListQuery{
+		Metadata:  map[string]string{beadmeta.RoutedToMetadataKey: "workers"},
+		AllowScan: true,
+	})
 	if err != nil {
-		t.Fatalf("routed frontier: %v", err)
+		t.Fatalf("list work beads: %v", err)
 	}
-	if len(rows) != 1 || rows[0].ID != "hello" {
-		t.Fatalf("routed(workers) frontier = %+v, want the materialized hello do", rows)
+	if len(rows) != 1 || rows[0].Title != "hello" {
+		t.Fatalf("work beads routed(workers) = %+v, want the dispatched hello do", rows)
 	}
 	// The input blob is durable on disk, content-addressed by its input_hash.
 	if _, err := os.Stat(lumenInputBlobPath(cityPath, engine.InputHash(input))); err != nil {

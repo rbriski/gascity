@@ -100,6 +100,47 @@ type Options struct {
 	// and run every do inline through Host. ZERO role names: a route is a
 	// config-resolved pool target, exactly like gc.routed_to.
 	PoolRouter func(agentRef string) (route string, ok bool)
+
+	// DispatchWork is the real-bead do-path seam (REDESIGN §1.4): it creates
+	// (idempotently) the ordinary fold_owned=0 work bead for one ready pool-mode do
+	// activation in the city work store and returns its store-minted id. It is a
+	// Layer-0 side effect injected by the composition root (the engine stays free of
+	// internal/beads). When nil, Advance runs the LEGACY Tier-A path (a claimable
+	// fold row a Tier-B hook claims); when non-nil, Advance dispatches a real bead
+	// and journals an owned.admitted{kind:work_bead} fact instead. Setting it without
+	// ObserveWork is a configuration error (the dispatched bead would never settle).
+	DispatchWork func(ctx context.Context, w WorkDispatch) (beadID string, err error)
+
+	// ObserveWork reports an already-dispatched bead's terminal state (REDESIGN
+	// §1.4) so Advance can copy an ordinary close into the journal as the existing
+	// outcome.settled and advance the fold. Consulted only for a pool node that
+	// carries a recorded BeadID (the real-bead path). nil = the legacy path (a
+	// worker appends owned.settled directly).
+	ObserveWork func(ctx context.Context, beadID string) (WorkObservation, error)
+}
+
+// WorkDispatch describes one ready pool-mode do activation the DispatchWork seam
+// materializes as an ordinary work bead (REDESIGN §1.4/§2.2). Attempt is the
+// activation's 0-based attempt index (fresh-bead-per-attempt visibility, §5): a
+// retry/repeat re-attempt is a NEW activation, so the seam stamps a distinct
+// (run, activation, attempt) triple and a prior failed attempt's bead survives.
+type WorkDispatch struct {
+	StreamID   string
+	Activation string
+	NodeID     string
+	Route      string
+	Prompt     string
+	Attempt    int
+}
+
+// WorkObservation is a dispatched work bead's terminal state as ObserveWork reports
+// it (REDESIGN §1.4/§2.4). Outcome is a pre-mapped Lumen outcome
+// (pass/failed/degraded — the seam applies LumenOutcomeForGCOutcome, fail-closed),
+// so the driver copies it verbatim into outcome.settled with no further judgment.
+type WorkObservation struct {
+	Terminal bool
+	Outcome  string
+	Output   string
 }
 
 // Run executes doc with no agent host — the exec-only path.

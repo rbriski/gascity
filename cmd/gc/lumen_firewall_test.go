@@ -19,6 +19,18 @@ import (
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
 
+// firewallDormantOnRealBeadPath is the skip reason for the controller-fed Lumen
+// claim-orphan firewall tests. The real-bead do redesign flipped the controller to
+// dispatch ORDINARY work beads (lumen_runs.go), so a `cr.lumenRunsTick` no longer
+// materializes a claimable Tier-B fold row for the firewall to sweep — these tests
+// drive that now-DORMANT path (materialize → ClaimTierBWork → firewall settle →
+// re-attempt). The firewall CODE remains present (nothing deleted this phase) and its
+// mechanism is still exercised directly by the engine-level tier_b tests; the
+// REPLACEMENT recovery (gascity's ordinary orphan-release, no firewall) is proven by
+// the real-bead e2e-B. Per REDESIGN §8, the firewall + these tests are removed in a
+// later proven-then-delete slice (S5). Skipped, not silently broken.
+const firewallDormantOnRealBeadPath = "real-bead redesign: controller dispatches real work beads; the Tier-B claim-orphan firewall is dormant (kept, exercised directly by engine tier_b tests; recovery proven by e2e-B) — removed in a later slice"
+
 // lumenDepDoc is a two-do DAG: A (pool) then B (after A). A stranded A must
 // skip-cascade B.
 func lumenDepDoc(t *testing.T) *ir.IR {
@@ -88,6 +100,7 @@ func lumenRetryDoDoc(t *testing.T) *ir.IR {
 // (fresh-tokened, claimable), and a scripted claim + pass close on :1 seals the run
 // pass. The stranded worker's later close of :0 loses at the write-once token.
 func TestFirewallStrandBecomesFreshAttempt(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
 	fake := &clock.Fake{Time: time.Now()}
@@ -260,6 +273,7 @@ func assertLumenRunSealedOutcome(t *testing.T, cityPath, streamID, outcome strin
 // assignee matches no session bead is settled failed only AFTER the grace window,
 // and the re-Advance skip-cascades the dependent and seals the run failed.
 func TestFirewallSettlesDeadClaimantAfterGrace(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
 	fake := &clock.Fake{Time: time.Now()}
@@ -306,6 +320,7 @@ func TestFirewallSettlesDeadClaimantAfterGrace(t *testing.T) {
 // matched session WITH the reconciler's stranded marker fires after grace; the same
 // session WITHOUT the marker never fires.
 func TestFirewallStrandedMarkerTrigger(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 
 	run := func(t *testing.T, stranded bool) (settled bool) {
@@ -345,6 +360,7 @@ func TestFirewallStrandedMarkerTrigger(t *testing.T) {
 // of a firewall-settled row is a loud divergent-reclose refusal, with exactly one
 // owned.settled in the journal.
 func TestFirewallZombieLateCloseLosesLoud(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
 	fake := &clock.Fake{Time: time.Now()}
@@ -385,6 +401,7 @@ func TestFirewallZombieLateCloseLosesLoud(t *testing.T) {
 // frontier row is never firewalled, and a candidate whose session reappears before
 // grace elapses is dropped from the grace clock (never settled).
 func TestFirewallSparesUnclaimedAndRecovered(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
 	fake := &clock.Fake{Time: time.Now()}
@@ -433,6 +450,7 @@ func TestFirewallSparesUnclaimedAndRecovered(t *testing.T) {
 // falls back to the NAME loop unchanged. The respawn subtest FAILS on the pre-fix
 // name-keyed verdict (the respawn matches by name → alive → never strands).
 func TestFirewallInstanceLivenessKeysOnClaimantID(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 
 	// claimWithID seeds a parked do run, claims hello:0 as worker-a recording claimantID,
@@ -506,6 +524,7 @@ func TestFirewallInstanceLivenessKeysOnClaimantID(t *testing.T) {
 // activation — exactly one owned.settled lands, the loser surfaces
 // ErrTierBClaimConflict, and the journal converges (Verify clean).
 func TestFirewallVsWorkerSettleRace(t *testing.T) {
+	t.Skip(firewallDormantOnRealBeadPath)
 	ctx := context.Background()
 	cityPath := tbHookGraphCity(t)
 	tbSeedClaimedPoolRow(t, cityPath) // "hello" claimed by worker-a on tbHookStream

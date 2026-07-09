@@ -120,46 +120,60 @@ const (
 	LastFinalizeErrorMetadataKey         = "gc.last_finalize_error"
 	LastHeartbeatAtMetadataKey           = "gc.last_heartbeat_at"
 	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
-	MaxAttemptsMetadataKey               = "gc.max_attempts"
-	MigratedMetadataKey                  = "gc.migrated"
-	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
-	ModelMetadataKey                     = "gc.model"
-	NextAttemptMetadataKey               = "gc.next_attempt"
-	OnExhaustedMetadataKey               = "gc.on_exhausted"
-	OnFailMetadataKey                    = "gc.on_fail"
-	OriginalKindMetadataKey              = "gc.original_kind"
-	OutcomeBeadIDMetadataKey             = "gc.outcome_bead_id"
-	OutcomeMetadataKey                   = "gc.outcome"
-	OutputJSONMetadataKey                = "gc.output_json"
-	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
-	ParentBeadIDMetadataKey              = "gc.parent_bead_id"
-	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
-	PartialFragmentMetadataKey           = "gc.partial_fragment"
-	PartialRetryMetadataKey              = "gc.partial_retry"
-	PackMetadataKey                      = "gc.pack"
-	PackRootMetadataKey                  = "gc.pack_root"
-	PackWorkspaceMetadataKey             = "gc.pack_workspace"
-	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey               = "gc.ralph_step_id"
-	ReasoningMetadataKey                 = "gc.reasoning"
-	RequiredArtifactMetadataKey          = "gc.required_artifact"
-	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
-	RetryCountMetadataKey                = "gc.retry_count"
-	RetryFromMetadataKey                 = "gc.retry_from"
-	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
-	RetryStateMetadataKey                = "gc.retry_state"
-	RigRootMetadataKey                   = "gc.rig_root"
-	RootBeadIDMetadataKey                = "gc.root_bead_id"
-	RootStoreRefMetadataKey              = "gc.root_store_ref"
-	RoutedToMetadataKey                  = "gc.routed_to"
-	RunTargetMetadataKey                 = "gc.run_target"
-	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                 = "gc.scope_kind"
-	ScopeNameMetadataKey                 = "gc.scope_name"
-	ScopeRefMetadataKey                  = "gc.scope_ref"
-	ScopeRoleMetadataKey                 = "gc.scope_role"
-	SessionAffinityMetadataKey           = "gc.session_affinity"
-	SessionIDMetadataKey                 = "gc.session_id"
+	// LumenActivationMetadataKey correlates a real work bead back to the exact
+	// Lumen do activation it implements (nodeID:attempt — unique per attempt and
+	// scatter member). Paired with LumenRunMetadataKey it is the (run, activation)
+	// lookup key the dispatch seam reads before creating a bead (idempotency), and
+	// the join back from a closed bead to its journal settle.
+	LumenActivationMetadataKey = "gc.lumen_activation"
+	// LumenAttemptMetadataKey records the do's attempt index (0-based) on each
+	// attempt's real work bead. Fresh-bead-per-attempt means a failed attempt's
+	// bead survives closed alongside the next attempt's fresh bead; this key is
+	// how the attempt-history query orders and distinguishes them for visibility.
+	LumenAttemptMetadataKey = "gc.lumen_attempt"
+	// LumenRunMetadataKey correlates a real work bead to the Lumen run (journal
+	// stream id) that dispatched it, so all of a run's do beads are enumerable.
+	LumenRunMetadataKey             = "gc.lumen_run"
+	MaxAttemptsMetadataKey          = "gc.max_attempts"
+	MigratedMetadataKey             = "gc.migrated"
+	MissingRootBeadIDMetadataKey    = "gc.missing_root_bead_id"
+	ModelMetadataKey                = "gc.model"
+	NextAttemptMetadataKey          = "gc.next_attempt"
+	OnExhaustedMetadataKey          = "gc.on_exhausted"
+	OnFailMetadataKey               = "gc.on_fail"
+	OriginalKindMetadataKey         = "gc.original_kind"
+	OutcomeBeadIDMetadataKey        = "gc.outcome_bead_id"
+	OutcomeMetadataKey              = "gc.outcome"
+	OutputJSONMetadataKey           = "gc.output_json"
+	OutputJSONRequiredMetadataKey   = "gc.output_json_required"
+	ParentBeadIDMetadataKey         = "gc.parent_bead_id"
+	ParentConvoyIDMetadataKey       = "gc.parent_convoy_id"
+	PartialFragmentMetadataKey      = "gc.partial_fragment"
+	PartialRetryMetadataKey         = "gc.partial_retry"
+	PackMetadataKey                 = "gc.pack"
+	PackRootMetadataKey             = "gc.pack_root"
+	PackWorkspaceMetadataKey        = "gc.pack_workspace"
+	PerDispatchModelMetadataKey     = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey          = "gc.ralph_step_id"
+	ReasoningMetadataKey            = "gc.reasoning"
+	RequiredArtifactMetadataKey     = "gc.required_artifact"
+	RequiredArtifactsMetadataKey    = "gc.required_artifacts"
+	RetryCountMetadataKey           = "gc.retry_count"
+	RetryFromMetadataKey            = "gc.retry_from"
+	RetrySessionRecycledMetadataKey = "gc.retry_session_recycled"
+	RetryStateMetadataKey           = "gc.retry_state"
+	RigRootMetadataKey              = "gc.rig_root"
+	RootBeadIDMetadataKey           = "gc.root_bead_id"
+	RootStoreRefMetadataKey         = "gc.root_store_ref"
+	RoutedToMetadataKey             = "gc.routed_to"
+	RunTargetMetadataKey            = "gc.run_target"
+	RuntimeVarsMetadataKey          = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey            = "gc.scope_kind"
+	ScopeNameMetadataKey            = "gc.scope_name"
+	ScopeRefMetadataKey             = "gc.scope_ref"
+	ScopeRoleMetadataKey            = "gc.scope_role"
+	SessionAffinityMetadataKey      = "gc.session_affinity"
+	SessionIDMetadataKey            = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -330,6 +344,9 @@ var KnownMetadataKeys = []string{
 	LastFinalizeErrorMetadataKey,
 	LastHeartbeatAtMetadataKey,
 	LogicalBeadIDMetadataKey,
+	LumenActivationMetadataKey,
+	LumenAttemptMetadataKey,
+	LumenRunMetadataKey,
 	MaxAttemptsMetadataKey,
 	MigratedMetadataKey,
 	MissingRootBeadIDMetadataKey,

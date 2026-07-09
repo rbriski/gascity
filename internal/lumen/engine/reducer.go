@@ -264,6 +264,11 @@ func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 	if err := json.Unmarshal(e.Payload, &p); err != nil {
 		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.admitted payload at seq %d: %w", e.Seq, err)
 	}
+	if p.Kind == OwnedKindWorkBead {
+		// Real-bead do path (REDESIGN §1.3): the dispatch fact. It coexists with the
+		// Tier-B claim arm below on the shared discriminant lane.
+		return applyWorkBeadDispatched(next, e, p)
+	}
 	if p.Kind != OwnedKindTierB {
 		// A non-Tier-B owned handle (async / detached_run) is deferred no-op
 		// bookkeeping. kind is the Tier-B discriminant, symmetric with the settle
@@ -289,6 +294,36 @@ func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 	}
 	n.Assignee = p.Assignee
 	n.ClaimantID = p.ClaimantID
+	n.InFrontier = false
+	return next, fold.Delta{
+		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
+		FrontierDelete: []string{activationNodeID(p.Handle)},
+	}, nil
+}
+
+// applyWorkBeadDispatched folds the real-bead do path's dispatch fact (REDESIGN
+// §1.3): the driver created an ordinary fold_owned=0 work bead in the city work
+// store for a ready pool-mode do and recorded its store-minted id. The fold records
+// n.BeadID, drops the node out of the claimable frontier, and re-projects it as a
+// PLAIN step (nodeRowFor keys the task→step flip on BeadID) so the fold row stops
+// being a bd-ready doppelganger of the real bead. NO assignee, NO fold-side claim —
+// the worker claims the ordinary bead through the native pool path, invisible to the
+// fold.
+//
+// The fold is TOTAL (R-TOTAL): a dispatch naming an unactivated / non-pool /
+// already-settled handle, or an empty bead id, folds to a DEFINED no-op — never an
+// error that would poison RebuildTierA/Resume. Recording is write-once: a handle
+// that already carries a BeadID folds idempotently (the dispatch idem token is
+// write-once at the append, and a refold replays the single recorded fact).
+func applyWorkBeadDispatched(next *lumenState, e fold.Event, p ownedAdmittedPayload) (fold.State, fold.Delta, error) {
+	if p.Handle == "" || p.BeadID == "" {
+		return next, fold.Delta{}, nil
+	}
+	n := next.Nodes[p.Handle]
+	if n == nil || n.DispatchMode != DispatchModePool || n.Settled || n.BeadID != "" {
+		return next, fold.Delta{}, nil
+	}
+	n.BeadID = p.BeadID
 	n.InFrontier = false
 	return next, fold.Delta{
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},

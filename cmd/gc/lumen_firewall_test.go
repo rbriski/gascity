@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +49,118 @@ func lumenDepDoc(t *testing.T) *ir.IR {
 		t.Fatalf("decode dep IR: %v", err)
 	}
 	return d
+}
+
+// lumenRetryDoDoc wraps a pool do "hello" in a `retry 3 { … }` — the recovery
+// arm: an infrastructure strand (firewall-settled retryable) is re-attempted as a
+// fresh activation, while an honest worker verdict returns immediately.
+func lumenRetryDoDoc(t *testing.T) *ir.IR {
+	t.Helper()
+	const doc = `{
+      "contract": {"name": "lumen.ir", "version": "0.2.5", "producer": "test"},
+      "name": "retrydo",
+      "input": {"name": "main.input", "fields": [], "origin": {"uri": "t", "line": 0, "col": 0}},
+      "origin": {"uri": "t", "line": 0, "col": 0},
+      "nodes": [
+        {"kind": "block", "id": "block_1", "after": [], "origin": {"uri": "t", "line": 1, "col": 0},
+         "members": [
+           {"kind": "retry", "id": "attempt", "name": "attempt", "after": [],
+            "origin": {"uri": "t", "line": 1, "col": 0},
+            "attempts": {"kind": "literal", "value": 3},
+            "body": {"kind": "do", "id": "hello", "name": "hello", "after": [],
+              "origin": {"uri": "t", "line": 1, "col": 0},
+              "source": {"kind": "prompt"},
+              "interpreter": {"kind": "agent", "mode": {"kind": "do"}, "origin": {"uri": "t", "line": 1, "col": 0}},
+              "body": {"raw": "Say hello.", "language": "markdown", "source": {"kind": "inline"}, "origin": {"uri": "t", "line": 1, "col": 0}}}}
+         ]}
+      ]
+    }`
+	d, err := ir.Decode([]byte(doc))
+	if err != nil {
+		t.Fatalf("decode retry-do IR: %v", err)
+	}
+	return d
+}
+
+// TestFirewallStrandBecomesFreshAttempt (T-F1) is the §2.4 recovery story in
+// process: a stranded claimant on a retry-wrapped do's attempt :0 is firewall-
+// settled as a RETRYABLE strand, the same-tick re-Advance mints a fresh attempt :1
+// (fresh-tokened, claimable), and a scripted claim + pass close on :1 seals the run
+// pass. The stranded worker's later close of :0 loses at the write-once token.
+func TestFirewallStrandBecomesFreshAttempt(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	fake := &clock.Fake{Time: time.Now()}
+	cr.ensureLumenRuntime().clk = fake
+
+	streamID := lumenSeedRun(t, cityPath, lumenRetryDoDoc(t), nil, tbHookRoute)
+	cr.lumenRunsTick(ctx) // materialize attempt hello:0
+
+	claimGS := tbHookOpenStore(t, cityPath)
+	if err := engine.ClaimTierBWork(ctx, claimGS, streamID, "hello:0", "worker-a"); err != nil {
+		_ = claimGS.Close()
+		t.Fatalf("claim hello:0: %v", err)
+	}
+	_ = claimGS.Close()
+
+	gs := cr.lumenGraphStore(ctx)
+	empty := newSessionBeadSnapshot(nil) // the claimant is dead (no session bead)
+	cr.lumenClaimOrphanFirewall(ctx, gs, empty)
+	fake.Time = fake.Time.Add(lumenStrandedGrace(cr.patrolInterval()) + time.Second)
+	cr.lumenClaimOrphanFirewall(ctx, gs, empty) // settles hello:0 retryable + re-Advance mints hello:1
+
+	// hello:0 settled failed with the stranded marker; a fresh attempt hello:1 exists.
+	if o, out := lumenOwnedSettledOutput(t, cityPath, streamID, "hello:0"); o != engine.OutcomeFailed || !strings.HasPrefix(out, "stranded:") {
+		t.Fatalf("hello:0 settle = {%q, %q}, want {failed, stranded:...}", o, out)
+	}
+	if n := lumenCountJournalType(t, cityPath, streamID, engine.EventAttemptMinted); n != 2 {
+		t.Fatalf("attempt.minted count = %d, want 2 (hello:0 then the re-attempt hello:1)", n)
+	}
+	if st := lumenNodeStatus(t, cityPath, streamID, "hello"); st != "open" {
+		t.Fatalf("hello status after re-attempt = %q, want open (fresh attempt claimable)", st)
+	}
+
+	// A fresh worker (worker-b) claims the re-attempt hello:1.
+	claimGS2 := tbHookOpenStore(t, cityPath)
+	if err := engine.ClaimTierBWork(ctx, claimGS2, streamID, "hello:1", "worker-b"); err != nil {
+		_ = claimGS2.Close()
+		t.Fatalf("claim hello:1: %v", err)
+	}
+	_ = claimGS2.Close()
+
+	// The stranded worker-a (revived) closes hello while attempt :1 is LIVE (claimed by
+	// worker-b): the bare-id close resolves to the live attempt :1, and the closer-
+	// identity guard refuses worker-a loudly. NOTE: worker-a and worker-b have DISTINCT
+	// names, so this exercises only the guard's NAME axis (sharp edge 8 / T-Z1 shape).
+	// It does NOT cover the true singleton-pool false-kill, where a false-killed
+	// instance and its RESPAWN share one stable session name — that same-name case is
+	// caught by the instance-unique claimant-id axis and pinned by
+	// TestSameNameZombieCloseCannotSettleFreshAttempt (H1) in the engine suite.
+	t.Setenv("GC_SESSION_NAME", "worker-a")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_ALIAS", "")
+	var stderr bytes.Buffer
+	code, handled := interceptTierBClose(cityPath,
+		[]string{"update", "hello", "--set-metadata", "gc.outcome=pass", "--status", "closed"},
+		io.Discard, &stderr)
+	if !handled || code == 0 {
+		t.Fatalf("stranded worker-a's close of live hello:1 = (code=%d handled=%v); want a loud non-claimant refusal", code, handled)
+	}
+	// Only hello:0's strand settle exists — the zombie appended nothing.
+	if n := lumenCountJournalType(t, cityPath, streamID, engine.EventOwnedSettled); n != 1 {
+		t.Fatalf("owned.settled count = %d, want 1 (the zombie's close appended nothing)", n)
+	}
+
+	// worker-b, the real claimant, closes hello:1 pass → the run seals pass.
+	t.Setenv("GC_SESSION_NAME", "worker-b")
+	settleGS := tbHookOpenStore(t, cityPath)
+	if err := engine.SettleTierBWorkAs(ctx, settleGS, streamID, "hello:1", engine.OutcomePass, "done", "worker-b", "", false); err != nil {
+		_ = settleGS.Close()
+		t.Fatalf("settle hello:1: %v", err)
+	}
+	_ = settleGS.Close()
+	cr.lumenRunsTick(ctx) // re-Advance → retry arm settles the loop pass → seal
+	assertLumenRunSealedOutcome(t, cityPath, streamID, engine.OutcomePass)
 }
 
 // lumenWorkerSessionBead builds an open pool session bead owning sessionName, with

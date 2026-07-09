@@ -54,7 +54,7 @@ func TestWorkerClaimsLumenWorkBeadViaGcHookAndGcBd(t *testing.T) {
 
 	// 2. Claim through the gc hook --claim federation (in-process). The worker reads
 	// the prompt FROM THE CLAIM JSON — no store read (no `bd show`) is needed.
-	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a")
+	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a", "")
 	if !ok {
 		t.Fatal("tier-b hook store not present for a graph-scoped city")
 	}

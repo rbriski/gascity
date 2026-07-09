@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -13,9 +14,11 @@ import (
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
 
-// settleTierBWork is the engine settle seam interceptTierBClose routes through, a
-// package var so a test can inject a lease fence to exercise the bounded retry.
-var settleTierBWork = engine.SettleTierBWork
+// settleTierBWorkAs is the engine settle seam interceptTierBClose routes through, a
+// package var so a test can inject a lease fence to exercise the bounded retry. It
+// carries the closer identity so the engine's closer-identity guard can reject a
+// zombie (non-claimant) close.
+var settleTierBWorkAs = engine.SettleTierBWorkAs
 
 // openTierBWriteStore opens the write-capable journal graph store a Tier-B settle
 // needs (SettleTierBWork takes a *graphstore.Store, which the read-only beads
@@ -110,6 +113,24 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 	}
 	mapped := engine.LumenOutcomeForGCOutcome(rawOutcome)
 
+	// The closer identity is the settling worker's session, derived from the same
+	// vocabulary the claim used (GC_SESSION_NAME/ID/ALIAS, cf. cmd_hook.go). A worker
+	// that claimed the current attempt matches its assignee and settles cleanly; a
+	// straggler from a prior attempt is a non-claimant and loses loudly (S16). An
+	// EMPTY identity (a human operator's `gc bd close` outside any session) leaves the
+	// guard unengaged — attribution is best-effort transport integrity, not authz.
+	closer := firstNonEmptyHookValue(
+		strings.TrimSpace(os.Getenv("GC_SESSION_NAME")),
+		strings.TrimSpace(os.Getenv("GC_SESSION_ID")),
+		strings.TrimSpace(os.Getenv("GC_ALIAS")),
+	)
+	// The instance-unique guard field is the session bead id (GC_SESSION_ID) — the
+	// closer's per-instance identity the claim recorded as claimant_id. It distinguishes
+	// a false-killed A's straggler close from its same-named respawn B's live claim
+	// (§4.3), which the NAME (shared under a singleton pool identity) cannot. Empty
+	// outside a session, exactly like closer.
+	closerID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+
 	for _, id := range poolIDs {
 		ref, found, rerr := engine.ResolveTierBWorkRef(ctx, gs, id)
 		if rerr != nil {
@@ -134,7 +155,7 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 			fmt.Fprintf(stderr, "gc bd: bead %q already settled %q; refusing a divergent re-close to %q\n", id, ref.Outcome, mapped) //nolint:errcheck
 			return 1, true
 		}
-		if err := settleTierBWithFenceRetry(ctx, gs, ref, id, mapped); err != nil {
+		if err := settleTierBWithFenceRetry(ctx, gs, ref, id, mapped, closer, closerID); err != nil {
 			fmt.Fprintf(stderr, "gc bd: settling Tier-B bead %q: %v\n", id, err) //nolint:errcheck
 			return 1, true
 		}
@@ -151,8 +172,8 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 // see isTierBFenceRetryable). The write-once settle token makes each retry idempotent
 // — a settle that committed but whose projection rebuild raced dedupes to success. A
 // persistent race surfaces as a loud, re-runnable close error.
-func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, beadID, outcome string) error {
-	err := settleTierBWork(ctx, gs, ref.StreamID, ref.Activation, outcome, "")
+func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, beadID, outcome, closer, closerID string) error {
+	err := settleTierBWorkAs(ctx, gs, ref.StreamID, ref.Activation, outcome, "", closer, closerID, false)
 	for attempt := 0; attempt < tierBFenceRetries && isTierBFenceRetryable(err); attempt++ {
 		time.Sleep(tierBFenceBackoff)
 		r2, ok, rerr := engine.ResolveTierBWorkRef(ctx, gs, beadID)
@@ -164,7 +185,7 @@ func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref en
 			// dedup in interceptTierBClose already covers a re-close, so treat as done.
 			return nil
 		}
-		err = settleTierBWork(ctx, gs, r2.StreamID, r2.Activation, outcome, "")
+		err = settleTierBWorkAs(ctx, gs, r2.StreamID, r2.Activation, outcome, "", closer, closerID, false)
 	}
 	return err
 }

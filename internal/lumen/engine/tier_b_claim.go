@@ -54,6 +54,13 @@ var (
 	// conflict (ErrWrongExpectedVersion / ErrIdemTokenReuse) so callers can retry
 	// (re-read, re-claim) without ever silently clobbering the winner.
 	ErrTierBClaimConflict = errors.New("lumen tier-b: claim lost the append CAS race")
+
+	// ErrTierBNotClaimant reports that a settle carried a closer identity that is
+	// NOT the bead's current claimant — a straggler attempt-N worker trying to close
+	// the live attempt N+1 (the zombie firewall, §4.3). It is loud and appends
+	// nothing, so a fresh attempt's settlement is never overwritten by a zombie's
+	// late close. A "" closer is the driver/firewall override and is never guarded.
+	ErrTierBNotClaimant = errors.New("lumen tier-b: settle by a non-claimant")
 )
 
 // TierBWorkSpec describes a claimable Tier-B work bead to materialize on a run
@@ -65,6 +72,11 @@ type TierBWorkSpec struct {
 	CreatedAt string // RFC3339Nano payload timestamp threaded onto the projected rows
 	NodeID    string // the do-node id (becomes the work bead id in the projection)
 	Kind      string // ir kind (e.g. "do"); free-form, never a role name
+	// Attempt is the 0-based attempt index the activation key carries (nodeID:N).
+	// The zero value 0 is the single-attempt form (byte-identical to pre-L5); a
+	// retry/repeat re-attempt supplies N>0 so the claim/settle idem tokens are
+	// fresh per attempt (tier-b-claim:nodeID:N).
+	Attempt int
 }
 
 // tierBClaimToken is the write-once idempotency token for a handle's claim. It
@@ -116,7 +128,7 @@ func MaterializeTierBWork(ctx context.Context, store *graphstore.Store, streamID
 		head = res.FirstSeq
 	}
 
-	activation := spec.NodeID + ":0"
+	activation := activationForAttempt(spec.NodeID, spec.Attempt)
 	activated, err := canonPayload(nodeActivatedPayload{
 		NodeID:       spec.NodeID,
 		Activation:   activation,
@@ -138,13 +150,28 @@ func MaterializeTierBWork(ctx context.Context, store *graphstore.Store, streamID
 }
 
 // ClaimTierBWork translates a worker's claim of a Tier-B work bead into a CAS
+// owned.admitted append + fold, recording NO instance-unique claimant id — the
+// byte-identical pre-L5 signature and the driver/legacy path. Prefer
+// ClaimTierBWorkAs from a real worker's claim so the closer-identity guard has an
+// instance id to key on (§4.3).
+func ClaimTierBWork(ctx context.Context, store *graphstore.Store, streamID, activation, assignee string) error {
+	return ClaimTierBWorkAs(ctx, store, streamID, activation, assignee, "")
+}
+
+// ClaimTierBWorkAs translates a worker's claim of a Tier-B work bead into a CAS
 // owned.admitted append + fold. The projection's assignee/status is a PURE FOLD
 // of the appended event, never a direct column write. The CAS is loud: a
 // concurrent claimant that loses the append gets ErrTierBClaimConflict (never a
 // silent overwrite); a late claimant whose target is already owned by another
 // worker gets ErrTierBAlreadyClaimed; an honest same-worker re-claim is
 // idempotent success.
-func ClaimTierBWork(ctx context.Context, store *graphstore.Store, streamID, activation, assignee string) error {
+//
+// assignee is the claiming session's NAME (load-bearing for the reconciler's
+// session correlation). claimantID is its instance-unique id (GC_SESSION_ID),
+// recorded so the closer-identity guard can reject a same-named straggler's close
+// of a live attempt a respawn claimed (§4.3). An empty claimantID records no id
+// (the guard then keys on the name alone) — the legacy/driver path.
+func ClaimTierBWorkAs(ctx context.Context, store *graphstore.Store, streamID, activation, assignee, claimantID string) error {
 	if store == nil {
 		return fmt.Errorf("lumen tier-b: nil store")
 	}
@@ -179,6 +206,7 @@ func ClaimTierBWork(ctx context.Context, store *graphstore.Store, streamID, acti
 		Activation: activation,
 		Kind:       OwnedKindTierB,
 		Assignee:   assignee,
+		ClaimantID: claimantID,
 	})
 	if err != nil {
 		return err
@@ -204,14 +232,32 @@ func ClaimTierBWork(ctx context.Context, store *graphstore.Store, streamID, acti
 	return nil
 }
 
-// SettleTierBWork translates a worker's close of a Tier-B work bead into an
-// owned.settled append + fold: the projection folds the bead to its terminal
-// outcome status (assignee retained for provenance) and drives the rest of the
-// run's DAG. outcome is a Lumen outcome (pass / failed / degraded / skipped /
-// canceled); the dispatch-firewall mapping of a raw gc.outcome onto it is the
-// caller's (the settlement-observer's) job. A byte-identical re-settle is
-// idempotent; a divergent one is rejected loudly at the append.
+// SettleTierBWork translates a settle of a Tier-B work bead into an owned.settled
+// append + fold with NO closer identity — the driver/firewall override path, and
+// the byte-identical pre-L5 signature. Prefer SettleTierBWorkAs from a worker's
+// close path so the closer-identity guard applies.
 func SettleTierBWork(ctx context.Context, store *graphstore.Store, streamID, activation, outcome, output string) error {
+	return SettleTierBWorkAs(ctx, store, streamID, activation, outcome, output, "", "", false)
+}
+
+// SettleTierBWorkAs translates a close of a Tier-B work bead into an owned.settled
+// append + fold: the projection folds the bead to its terminal outcome status
+// (assignee retained for provenance) and drives the rest of the run's DAG.
+// outcome is a Lumen outcome; the dispatch-firewall mapping of a raw gc.outcome
+// onto it is the caller's job.
+//
+// closer is the settling worker's session NAME and closerID its instance-unique id
+// (GC_SESSION_ID). A settle whose closer is not the bead's current claimant loses
+// LOUDLY with ErrTierBNotClaimant and appends nothing — a straggler attempt-N
+// worker can never settle the live attempt N+1 (the zombie firewall, §4.3).
+// Non-claimant is checked on BOTH axes: a differently-NAMED closer, OR a same-named
+// closer whose instance id differs from the claimant's (the singleton-pool false-
+// kill, where A and its respawn B share a stable name — the name matches but the
+// id catches it). A "" closer/closerID is the driver/firewall override and is never
+// guarded. retryable stamps the settle as an infrastructure-retryable strand
+// (firewall) so the retry arm re-attempts it. A byte-identical re-settle is
+// idempotent; a divergent one is rejected loudly at the append.
+func SettleTierBWorkAs(ctx context.Context, store *graphstore.Store, streamID, activation, outcome, output, closer, closerID string, retryable bool) error {
 	if store == nil {
 		return fmt.Errorf("lumen tier-b: nil store")
 	}
@@ -230,12 +276,34 @@ func SettleTierBWork(ctx context.Context, store *graphstore.Store, streamID, act
 	if !ok || node.dispatchMode != DispatchModePool {
 		return fmt.Errorf("lumen tier-b: %q: %w", activationNodeID(activation), ErrTierBNotClaimable)
 	}
+	// Closer-identity guard: a worker's close names itself; if it is not the current
+	// claimant, it is a zombie from a prior attempt and loses loudly. The fresh
+	// tokens alone do NOT stop this — the resolve path hands a bare-id close back the
+	// LIVE activation — so the guard is the load-bearing protection (§4.3). The NAME
+	// axis rejects a differently-named closer; the instance-id axis rejects a same-
+	// named straggler (its GC_SESSION_ID differs from the live claimant's). The id
+	// axis fires only when the claim recorded an id (a legacy/no-id claim is guarded
+	// by the name alone). This mirrors the fold twin in applyOwnedSettled.
+	nameMismatch := closer != "" && node.assignee != closer
+	idMismatch := closerID != "" && node.claimantID != "" && node.claimantID != closerID
+	if nameMismatch || idMismatch {
+		return fmt.Errorf("lumen tier-b: %q closer %q/%q is not the claimant %q/%q: %w",
+			node.id, closer, closerID, node.assignee, node.claimantID, ErrTierBNotClaimant)
+	}
 
 	head, err := store.Head(ctx, streamID)
 	if err != nil {
 		return fmt.Errorf("lumen tier-b: reading stream head: %w", err)
 	}
-	payload, err := canonPayload(ownedSettledPayload{Handle: activation, Kind: OwnedKindTierB, Outcome: outcome, Output: output})
+	payload, err := canonPayload(ownedSettledPayload{
+		Handle:     activation,
+		Kind:       OwnedKindTierB,
+		Outcome:    outcome,
+		Output:     output,
+		Retryable:  retryable,
+		Assignee:   closer,
+		ClaimantID: closerID,
+	})
 	if err != nil {
 		return err
 	}
@@ -301,6 +369,7 @@ type tierBNodeView struct {
 	id           string
 	status       string
 	assignee     string
+	claimantID   string
 	dispatchMode string
 	settled      bool
 }
@@ -334,6 +403,21 @@ func readTierBNode(ctx context.Context, store *graphstore.Store, streamID, activ
 		return tierBNodeView{}, false, fmt.Errorf("lumen tier-b: reading dispatch mode of %q: %w", id, err)
 	default:
 		v.dispatchMode = dm.String
+	}
+	// The claimant id (present only while claimed-and-unsettled) is the closer-
+	// identity guard's instance-unique key; an absent marker leaves it "" (a legacy
+	// / no-session claim, guarded by the name alone).
+	var claimant sql.NullString
+	err = store.ReadDB().QueryRowContext(ctx,
+		`SELECT value FROM node_metadata WHERE node_id = ? AND key = ?`, id, ClaimantIDMetaKey,
+	).Scan(&claimant)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// no claimant_id marker: unclaimed, settled, or a legacy claim
+	case err != nil:
+		return tierBNodeView{}, false, fmt.Errorf("lumen tier-b: reading claimant id of %q: %w", id, err)
+	default:
+		v.claimantID = claimant.String
 	}
 	switch v.status {
 	case "open", StatusClaimed:

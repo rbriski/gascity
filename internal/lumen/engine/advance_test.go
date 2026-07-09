@@ -509,6 +509,219 @@ func TestAdvanceEqualsRunForEngineFormula(t *testing.T) {
 	}
 }
 
+// TestAdvancePoolRepeatFailThenPass (T-A1) is the pool loop spine: Advance
+// materializes attempt draft:0 (open, routed, fresh tokens) and parks; a scripted
+// failed settle plus a re-Advance mints draft:1 (attempt.minted, node.activated,
+// the bare-id frontier row back, fresh claim/settle tokens); a scripted pass settle
+// plus a re-Advance settles the loop pass and seals.
+func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-run-adv-repeat"
+	body := doNode("draft", "Do the work.", nil)
+	loop := repeatNode(body, condOutcomePassOrIter())
+	doc := decodeIR(t, blockDoc("adv-repeat", loop))
+	opts := engine.Options{PoolRouter: advRouter}
+
+	// Pass 1: materialize attempt draft:0 (claimable pool work), park.
+	r1, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+	if err != nil || !r1.Parked || len(r1.InFlight) != 1 || r1.InFlight[0].Activation != "draft:0" {
+		t.Fatalf("advance 1 = %+v, err %v; want Parked with draft:0 in flight", r1, err)
+	}
+	if r1.InFlight[0].Route != advPool {
+		t.Fatalf("draft:0 route = %q, want %q", r1.InFlight[0].Route, advPool)
+	}
+	if st := nodeStatus(t, store, "draft"); st != "open" {
+		t.Fatalf("draft status after mint = %q, want open (claimable)", st)
+	}
+
+	// Attempt 0 fails; a re-Advance re-attempts.
+	if err := engine.SettleTierBWork(ctx, store, streamID, "draft:0", engine.OutcomeFailed, "nope"); err != nil {
+		t.Fatalf("settle draft:0: %v", err)
+	}
+	r2, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+	if err != nil || !r2.Parked || len(r2.InFlight) != 1 || r2.InFlight[0].Activation != "draft:1" {
+		t.Fatalf("advance 2 = %+v, err %v; want Parked with draft:1 in flight (re-attempt)", r2, err)
+	}
+	events := streamStored(t, store, streamID)
+	if n := countAttemptMinted(events); n != 2 {
+		t.Fatalf("attempt.minted count = %d, want 2 (draft:0 then draft:1)", n)
+	}
+	// The bare-id frontier row is back and the bead is claimable again.
+	if !inFrontier(t, store, streamID, "draft:1") {
+		t.Fatal("draft re-attempt not in the frontier — the bead did not re-open claimable")
+	}
+	if st := nodeStatus(t, store, "draft"); st != "open" {
+		t.Fatalf("draft status after re-attempt = %q, want open (re-opened)", st)
+	}
+	// Per-attempt activations: draft:0 and draft:1 have distinct node.activated
+	// idem tokens (so fresh claim/settle tokens follow automatically).
+	tokens := journalIdemTokensAdv(t, store, streamID)
+	for _, want := range []string{streamID + ":draft:0:act", streamID + ":draft:1:act"} {
+		if !advContains(tokens, want) {
+			t.Fatalf("journal tokens %v missing %q (per-attempt activation token)", tokens, want)
+		}
+	}
+
+	// Attempt 1 passes; a re-Advance settles the loop pass and seals.
+	if err := engine.SettleTierBWork(ctx, store, streamID, "draft:1", engine.OutcomePass, "done"); err != nil {
+		t.Fatalf("settle draft:1: %v", err)
+	}
+	r3, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+	if err != nil || !r3.Sealed {
+		t.Fatalf("advance 3 = %+v, err %v; want Sealed", r3, err)
+	}
+	if r3.Run.Outcome != engine.OutcomePass {
+		t.Fatalf("run outcome = %q, want pass", r3.Run.Outcome)
+	}
+	if outcome, _, _, _ := loopSettle(t, r3.Run.Events, "repeat_1:0"); outcome != "pass" {
+		t.Fatalf("loop settle = %q, want pass", outcome)
+	}
+	// Both attempts settled under DISTINCT per-attempt settle tokens.
+	final := journalIdemTokensAdv(t, store, streamID)
+	for _, want := range []string{"tier-b-settle:draft:0", "tier-b-settle:draft:1"} {
+		if !advContains(final, want) {
+			t.Fatalf("journal tokens %v missing %q (per-attempt settle token)", final, want)
+		}
+	}
+	if err := store.Verify(ctx, streamID); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// TestAdvanceIdempotentMidLoopNoDoubleMint (T-A2) proves re-entrancy: after draft:0
+// settles failed, three Advances with NO new settlement mint EXACTLY ONE draft:1
+// (one node.activated, one attempt.minted) and leave the head stable.
+func TestAdvanceIdempotentMidLoopNoDoubleMint(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-run-adv-idem"
+	body := doNode("draft", "Do it.", nil)
+	loop := repeatNode(body, condOutcomePassOrIter())
+	doc := decodeIR(t, blockDoc("adv-idem", loop))
+	opts := engine.Options{PoolRouter: advRouter}
+
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
+		t.Fatalf("advance 1: %v", err)
+	}
+	if err := engine.SettleTierBWork(ctx, store, streamID, "draft:0", engine.OutcomeFailed, "nope"); err != nil {
+		t.Fatalf("settle draft:0: %v", err)
+	}
+	var lastHead uint64
+	for i := 0; i < 3; i++ {
+		r, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		if err != nil {
+			t.Fatalf("advance %d: %v", i+2, err)
+		}
+		if i > 0 && r.Head != lastHead {
+			t.Fatalf("head moved on a no-settlement re-Advance: %d -> %d", lastHead, r.Head)
+		}
+		lastHead = r.Head
+	}
+	events := streamStored(t, store, streamID)
+	if n := countActivationActivated(t, events, "draft:1"); n != 1 {
+		t.Fatalf("draft:1 node.activated count = %d, want exactly 1 (no double-mint)", n)
+	}
+	if n := countAttemptMinted(events); n != 2 {
+		t.Fatalf("attempt.minted count = %d, want 2 (draft:0, draft:1 — no extra)", n)
+	}
+}
+
+// TestAdvanceEqualsRunForEngineLoopFormula (T-A3) is the loop oracle-parity pin: an
+// EXEC-bodied repeat driven through Run and through repeated Advance yields the same
+// journal type sequence and settled (node, outcome) — Advance runs an exec-bodied
+// loop inline in one pass, exactly like Run.
+func TestAdvanceEqualsRunForEngineLoopFormula(t *testing.T) {
+	ctx := context.Background()
+	mkDoc := func(t *testing.T) string {
+		return blockDoc("loop-parity",
+			repeatNode(execNodeExit("draft", flakyExec(t), []int{0}, nil), condOutcomePassOrIter()),
+		)
+	}
+	runStore := newStore(t)
+	runRes, err := engine.Run(ctx, runStore, decodeIR(t, mkDoc(t)), nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	advStore := newStore(t)
+	advRes, err := engine.Advance(ctx, advStore, decodeIR(t, mkDoc(t)), "gcg-run-adv-loopparity", nil, engine.Options{})
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if !advRes.Sealed || advRes.Parked {
+		t.Fatalf("engine-only loop advance = %+v, want Sealed in one pass", advRes)
+	}
+	if a, b := eventTypes(runRes.Events), eventTypes(advRes.Run.Events); !reflect.DeepEqual(a, b) {
+		t.Fatalf("event-type sequence differs:\n run     = %v\n advance = %v", a, b)
+	}
+	if a, b := settledIDs(t, runRes.Events), settledIDs(t, advRes.Run.Events); !reflect.DeepEqual(a, b) {
+		t.Fatalf("settled (node, outcome) differs:\n run     = %v\n advance = %v", a, b)
+	}
+	if runRes.Outcome != advRes.Run.Outcome {
+		t.Fatalf("outcome: run %q != advance %q", runRes.Outcome, advRes.Run.Outcome)
+	}
+}
+
+// countActivationActivated counts node.activated events for a specific activation.
+func countActivationActivated(t *testing.T, events []graphstore.StoredEvent, activation string) int {
+	t.Helper()
+	n := 0
+	for _, e := range events {
+		if e.Type != engine.EventNodeActivated {
+			continue
+		}
+		var p struct {
+			Activation string `json:"activation"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode node.activated: %v", err)
+		}
+		if p.Activation == activation {
+			n++
+		}
+	}
+	return n
+}
+
+// journalIdemTokensAdv reads a stream's idem tokens in seq order.
+func journalIdemTokensAdv(t *testing.T, store *graphstore.Store, streamID string) []string {
+	t.Helper()
+	rows, err := store.DB().QueryContext(context.Background(),
+		`SELECT idem_token FROM journal WHERE stream_id = ? ORDER BY seq`, streamID)
+	if err != nil {
+		t.Fatalf("query idem tokens: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var tok string
+		if err := rows.Scan(&tok); err != nil {
+			t.Fatalf("scan idem token: %v", err)
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+func advContains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// streamStored reads a stream's committed events (StoredEvent view) from seq 1.
+func streamStored(t *testing.T, store *graphstore.Store, streamID string) []graphstore.StoredEvent {
+	t.Helper()
+	events, err := store.ReadStream(context.Background(), streamID, 1, 0)
+	if err != nil {
+		t.Fatalf("read stream %s: %v", streamID, err)
+	}
+	return events
+}
+
 // TestAdvanceEmitsOnlyLumenVocabZeroControlBeads is the §1.2 pin: an Advanced
 // pool run's journal is ENTIRELY Lumen vocabulary, and no projected node carries a
 // gc.kind control-bead marker — the v2 control dispatcher cannot see any of it.

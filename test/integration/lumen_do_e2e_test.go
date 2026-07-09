@@ -48,6 +48,13 @@ func lumenDoIRPath(t *testing.T) string {
 // variant on the city's isolated -L socket). It returns the city dir and the
 // isolated command env (whose supervisor is the controller running the lumen tick).
 func setupLumenDoCity(t *testing.T, provider string) (string, []string) {
+	return setupLumenDoCityWithAgent(t, provider, "lumen-do.sh")
+}
+
+// setupLumenDoCityWithAgent is setupLumenDoCity parameterized by the pool agent
+// script — "lumen-do.sh" (the L3 always-pass worker) or "lumen-do-flaky.sh" (the
+// L5 fail-then-pass worker for the retry demo).
+func setupLumenDoCityWithAgent(t *testing.T, provider, agentScriptName string) (string, []string) {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, false)
 
@@ -65,7 +72,7 @@ func setupLumenDoCity(t *testing.T, provider string) (string, []string) {
 	// across ~30 patrol passes (100ms patrol) — the no-mid-do-drain observation
 	// window (plan §3.4) — while staying ≪ the firewall grace floor (60s), so step
 	// (5)'s pass settle proves the worker settled it, not the firewall.
-	startCommand := "GC_LUMEN_E2E_WORK_SECONDS=3 bash " + agentScript("lumen-do.sh")
+	startCommand := "GC_LUMEN_E2E_WORK_SECONDS=3 bash " + agentScript(agentScriptName)
 
 	// A plain pool agent: max_active_sessions=1 (the ONE-session cap + pool shape),
 	// no scale_check (else it leaves the native default-scale probe the Lumen demand
@@ -300,6 +307,133 @@ func runLumenDoE2E(t *testing.T, cityDir, provider string) {
 	// session respawns.
 	assertSessionReapedNoRespawn(t, cityDir, lumenDoRoute)
 	t.Logf("PROOF session reaped post-seal, no respawn")
+}
+
+// lumenRepeatDoIRPath is the committed repeat-wrapped do IR (compiled 0.2.5).
+func lumenRepeatDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "hello-do-repeat.lumen.json")
+}
+
+// TestLumenRepeatDoE2E_FailThenPassOneRetry (L5e / T-E2E) is the retry demo: a
+// `repeat lane: prompt … until lane.outcome == pass || iteration >= 3` run whose
+// pooled worker closes gc.outcome=fail on the FIRST attempt and pass on the SECOND.
+// The fold re-attempts on a FRESH activation with fresh claim tokens (lane:0 → lane:1;
+// the pooled session may be reused under the singleton identity) and seals the run
+// pass with ZERO control beads — attempts lane:0 (failed) → lane:1 (pass) → loop pass.
+func TestLumenRepeatDoE2E_FailThenPassOneRetry(t *testing.T) {
+	cityDir, _ := setupLumenDoCityWithAgent(t, "subprocess", "lumen-do-flaky.sh")
+	ctx := context.Background()
+
+	slingOut, err := gc(cityDir, "lumen", "sling", lumenDoRoute, lumenRepeatDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	// Drive to seal: two attempts take ≥ two claim cycles, so allow a generous window.
+	events := waitForLumenSeal(t, gs, streamID, 120*time.Second)
+
+	// Exactly two claims (owned.admitted) — one per attempt.
+	admits := lumenEventsOfType(events, engine.EventOwnedAdmitted)
+	if len(admits) != 2 {
+		t.Fatalf("owned.admitted count = %d, want 2 (one pooled session per attempt)\nsequence: %v", len(admits), lumenStreamTypes(events))
+	}
+	a0 := decodeOwnedAdmitted(t, admits[0].Payload)
+	a1 := decodeOwnedAdmitted(t, admits[1].Payload)
+	// A real pooled session claimed each attempt. The session IDENTITY is incidental:
+	// the recovery contract is a fresh ACTIVATION (lane:0 → lane:1) with fresh claim
+	// tokens, not a fresh session. Under max_active_sessions=1 + canonical singleton
+	// identity, the pooled session is legitimately reused (or respawned under the same
+	// name) for attempt 2 — that is still correct recovery (no zombie: the live claimant
+	// settles each attempt). Distinct-session recovery is the firewall STRAND path
+	// (a dead claimant replaced), proven in-process by the closer-identity guard tests.
+	if a0.Assignee == "" || a1.Assignee == "" {
+		t.Fatalf("attempt assignees = {%q, %q}, want a real pooled session claiming each attempt", a0.Assignee, a1.Assignee)
+	}
+	t.Logf("PROOF a pooled session claimed each attempt: %q then %q", a0.Assignee, a1.Assignee)
+
+	// The two settlements: lane:0 failed → lane:1 pass.
+	settles := lumenEventsOfType(events, engine.EventOwnedSettled)
+	if len(settles) != 2 {
+		t.Fatalf("owned.settled count = %d, want 2", len(settles))
+	}
+	s0 := decodeOwnedSettled(t, settles[0].Payload)
+	s1 := decodeOwnedSettled(t, settles[1].Payload)
+	if s0.Handle != "lane:0" || s0.Outcome != engine.OutcomeFailed {
+		t.Fatalf("attempt 0 settle = {%q, %q}, want {lane:0, failed}", s0.Handle, s0.Outcome)
+	}
+	if s1.Handle != "lane:1" || s1.Outcome != engine.OutcomePass {
+		t.Fatalf("attempt 1 settle = {%q, %q}, want {lane:1, pass}", s1.Handle, s1.Outcome)
+	}
+	t.Logf("PROOF attempts: lane:0 %s -> lane:1 %s", s0.Outcome, s1.Outcome)
+
+	// Two attempt.minted (bookkeeping), the loop settled pass, and the run sealed pass.
+	if n := len(lumenEventsOfType(events, engine.EventAttemptMinted)); n != 2 {
+		t.Fatalf("attempt.minted count = %d, want 2", n)
+	}
+	loopPass := false
+	for _, e := range lumenEventsOfType(events, engine.EventOutcomeSettled) {
+		var p struct {
+			Activation string `json:"activation"`
+			Outcome    string `json:"outcome"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode outcome.settled: %v", err)
+		}
+		if p.Activation == "repeat_1:0" && p.Outcome == engine.OutcomePass {
+			loopPass = true
+		}
+	}
+	if !loopPass {
+		t.Fatalf("loop node repeat_1:0 did not settle pass\nsequence: %v", lumenStreamTypes(events))
+	}
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	t.Logf("PROOF run sealed pass after 2 attempts")
+
+	// Per-attempt prompt readback: the worker read its prompt off each attempt's claim
+	// JSON (two distinct per-attempt files).
+	for _, attempt := range []string{"1", "2"} {
+		promptFile := filepath.Join(cityDir, ".gc", "lumen-e2e-prompt-lane-attempt-"+attempt+".txt")
+		data, rerr := os.ReadFile(promptFile)
+		if rerr != nil {
+			t.Fatalf("reading per-attempt prompt readback %q: %v", promptFile, rerr)
+		}
+		if got := strings.TrimSpace(string(data)); got != lumenDoPrompt {
+			t.Fatalf("attempt %s prompt readback = %q, want %q", attempt, got, lumenDoPrompt)
+		}
+	}
+	t.Logf("PROOF per-attempt prompt readback written for both attempts")
+
+	// ZERO control beads (the L3 invariant holds across the retry).
+	assertZeroControlBeads(t, cityDir, journalPath, streamID)
+
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF graphstore.Verify(%s) clean; full sequence: %v", streamID, lumenStreamTypes(events))
+}
+
+// lumenEventsOfType returns all events of a given type, in seq order.
+func lumenEventsOfType(events []graphstore.StoredEvent, typ string) []graphstore.StoredEvent {
+	var out []graphstore.StoredEvent
+	for _, e := range events {
+		if e.Type == typ {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // --- assertions --------------------------------------------------------------

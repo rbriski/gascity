@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,12 @@ import (
 
 // leaseHolder identifies the executor as the writer-lease holder.
 const leaseHolder = "lumen-engine"
+
+// lumenRepeatLoopCap is the mandatory hard bound on a repeat loop's iterations
+// (mirroring the reference runner). A cond that never turns truthy terminates
+// after this many attempts, settling the loop failed{reason:"loop_cap"} — no
+// unbounded loop is expressible.
+const lumenRepeatLoopCap = 32
 
 // leaseTTL bounds how long a run holds the writer lease without renewal.
 const leaseTTL = 30 * time.Second
@@ -143,6 +150,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		reducer:       reducer,
 		state:         reducer.Zero(streamID),
 		host:          opts.Host,
+		input:         input,
 		snapshotEvery: opts.SnapshotEvery,
 	}
 
@@ -206,6 +214,11 @@ type driver struct {
 	state    fold.State
 	head     uint64
 	host     enginehost.AgentHost
+	// input is the run input (typed), threaded into the closed-expression scope a
+	// retry/repeat loop evaluates its attempts/cond against (typed comparisons —
+	// `iteration >= max_check_attempts`). It is the same map baseScope seeds the
+	// string interpolation scope from.
+	input map[string]any
 
 	// snapshotEvery is the fold-snapshot cadence (0 = disabled); sinceSnapshot
 	// counts committed events since the last anchored snapshot.
@@ -297,6 +310,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runScatter(u, nodeOutputs)
 	case unitGather:
 		runErr = d.runGather(u, scope, nodeOutputs)
+	case unitLoop:
+		runErr = d.runLoop(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -361,7 +376,13 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 			return err
 		}
 		output := strings.TrimRight(stdout, "\n")
-		if err := d.appendSettled(u.activation, outcomeForExit(exitCode, u.leaf.passCodes), output, ""); err != nil {
+		outcome := outcomeForExit(exitCode, u.leaf.passCodes)
+		// Stamp the retry classification DATA: a failed exec whose exit code is in
+		// exitMap.retryable is infrastructure-retryable (the retry arm reads this from
+		// the fold, never from a driver-side inference). A non-loop exec (empty
+		// retryable set) never sets it, so the settle is byte-identical to pre-L5.
+		retryable := outcome == OutcomeFailed && intInSlice(exitCode, u.leaf.retryableCodes)
+		if err := d.appendSettledRetryable(u.activation, outcome, output, "", retryable); err != nil {
 			return err
 		}
 		d.record(u.nodeID, output, scope, nodeOutputs)
@@ -407,11 +428,12 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("lumen: do %q prompt: %w", u.nodeID, err)
 	}
-	// NOTE (N2): the attempt suffix is pinned to 1 — one activation per node in
-	// P4.2 (retry/repeat re-activation is deferred). When retry lands (P4.3), the
-	// idem token must key on the live attempt number so at_least_once re-acts under
-	// the same token and at_most_once mints a fresh one.
-	effectIdem := d.streamID + ":" + u.nodeID + ":do:1"
+	// The effect suffix is the live attempt number (1-based): attempt 0 derives
+	// `:do:1` — byte-identical to the single-attempt path — and a retry/repeat
+	// re-attempt N mints a FRESH token `:do:<N+1>`, so each attempt gets its own
+	// at-most-once effect record (L5). The attempt is read from the activation key,
+	// not a driver-side counter, so a re-Advance re-derives the same token.
+	effectIdem := d.streamID + ":" + u.nodeID + ":do:" + strconv.Itoa(activationAttempt(u.activation)+1)
 	spec := effectSpec{Prompt: prompt, AgentRef: u.leaf.agentRef}
 	specBytes, err := canonPayload(spec)
 	if err != nil {
@@ -555,6 +577,232 @@ func (d *driver) runGather(u planUnit, scope, nodeOutputs map[string]string) err
 	return nil
 }
 
+// runLoop drives a retry/repeat attempt loop inline (Run/Resume). It re-attempts
+// the leaf body until the authored exit predicate says stop, then settles the loop
+// node. Each attempt runs through the SAME runUnit path a fresh unit does, so
+// per-attempt effect tokens (S4), crash boundaries, and resume memoization apply
+// for free. Keep-judgment-out-of-Go: the re-run decision is the closed expression
+// evaluated over folded attempt outcomes (loopDecide), never a Go branch on an
+// outcome value.
+func (d *driver) runLoop(u planUnit, scope, nodeOutputs map[string]string) error {
+	spec := u.loop
+	if spec == nil {
+		return fmt.Errorf("lumen: loop %q missing spec", u.nodeID)
+	}
+
+	// retry: evaluate the attempts budget ONCE. An invalid budget (non-integer or
+	// < 1) settles the loop failed{invalid_input} with ZERO attempts (reference
+	// parity). repeat has no budget expression (it is capped at lumenRepeatLoopCap).
+	maxAttempts := 0
+	if spec.irKind == ir.NodeRetry {
+		n, ok := evalAttempts(spec.attemptsExpr, d.loopScope(spec, 0, nil, nodeOutputs))
+		if !ok {
+			return d.settleLoop(u, OutcomeFailed, "", "invalid_input", nil, scope, nodeOutputs)
+		}
+		maxAttempts = n
+	}
+
+	for attempt := 0; ; attempt++ {
+		bodyAct := activationForAttempt(spec.bodyNodeID, attempt)
+		bn := d.st().Nodes[bodyAct]
+		if bn == nil || !bn.Settled {
+			if err := d.runAttempt(u, attempt, maxAttempts, scope, nodeOutputs); err != nil {
+				return err
+			}
+			bn = d.st().Nodes[bodyAct]
+			if bn == nil || !bn.Settled {
+				// An engine-inline attempt always settles in-pass; if it did not, the
+				// body lowering or host is broken — surface it loudly.
+				return fmt.Errorf("lumen: loop %q attempt %d did not settle in-pass", u.nodeID, attempt)
+			}
+		}
+		cont, err := d.loopDecide(u, attempt, maxAttempts, bn, scope, nodeOutputs)
+		if err != nil {
+			return err
+		}
+		if !cont {
+			return nil
+		}
+	}
+}
+
+// runAttempt mints one loop attempt: it emits attempt.minted (bookkeeping), binds
+// the 1-based iteration for a repeat body's prompt scope (loop-local), and drives
+// the synthesized per-attempt leaf unit through runUnit. The attempt's activation
+// is bodyID:N — a NEW activation ⇒ a fresh claim/settle/effect token per attempt.
+func (d *driver) runAttempt(u planUnit, attempt, maxAttempts int, scope, nodeOutputs map[string]string) error {
+	spec := u.loop
+	budget := lumenRepeatLoopCap
+	if spec.irKind == ir.NodeRetry {
+		budget = maxAttempts
+	}
+	remaining := budget - (attempt + 1)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if err := d.appendAttemptMinted(u.activation, attempt, remaining); err != nil {
+		return err
+	}
+
+	au := d.attemptUnit(u, attempt)
+	// A repeat body's prompt/interp may reference {{iteration}} (1-based). Bind it
+	// for THIS attempt only, then restore — the binding is loop-local (reference
+	// parity). retry has no iteration binding.
+	restore, had := "", false
+	if spec.irKind == ir.NodeRepeat {
+		restore, had = scope[spec.iterationName]
+		scope[spec.iterationName] = strconv.Itoa(attempt + 1)
+	}
+	err := d.runUnit(au, scope, nodeOutputs)
+	if spec.irKind == ir.NodeRepeat {
+		if had {
+			scope[spec.iterationName] = restore
+		} else {
+			delete(scope, spec.iterationName)
+		}
+	}
+	return err
+}
+
+// attemptUnit synthesizes the per-attempt leaf unit for a loop. It carries the
+// SAME `after` gates as the loop (the attempt-edge rule) and NO edge to the prior
+// attempt — the driver's sequential minting is the sequencer, not a fold edge (an
+// edge to attempt N would skip-cascade every re-attempt off the prior failure and
+// project a bare-id self-loop). It is parented under the loop activation, so it
+// stays out of the run's top-level outcome aggregation.
+func (d *driver) attemptUnit(u planUnit, attempt int) planUnit {
+	spec := u.loop
+	return planUnit{
+		kind:       unitLeaf,
+		activation: activationForAttempt(spec.bodyNodeID, attempt),
+		nodeID:     spec.bodyNodeID,
+		irKind:     spec.bodyIRKind,
+		parent:     u.activation, // loopID:0
+		afterDeps:  u.afterDeps,
+		rawAfter:   u.rawAfter,
+		leaf:       spec.body,
+	}
+}
+
+// loopDecide evaluates the exit predicate after attempt N settled: it either
+// settles the loop (returns continueLoop=false) or decides to re-attempt (returns
+// continueLoop=true, so the next runAttempt mints attempt N+1). The whole decision
+// is the closed expression over folded outcomes plus the folded retryable flag —
+// no Go branch on an outcome value drives a re-run.
+func (d *driver) loopDecide(u planUnit, attempt, maxAttempts int, bn *nodeState, scope, nodeOutputs map[string]string) (bool, error) {
+	spec := u.loop
+	switch spec.irKind {
+	case ir.NodeRepeat:
+		iteration := attempt + 1
+		truthy, err := evalCondTruthy(spec.condExpr, d.loopScope(spec, iteration, bn, nodeOutputs))
+		if err != nil {
+			return false, err
+		}
+		if truthy {
+			// Exit returning the last body result (reference: returns lastResult).
+			return false, d.settleLoop(u, bn.Outcome, bn.Output, "", nil, scope, nodeOutputs)
+		}
+		if iteration >= lumenRepeatLoopCap {
+			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "loop_cap", nil, scope, nodeOutputs)
+		}
+		return true, nil
+
+	case ir.NodeRetry:
+		n := attempt + 1 // 1-based attempt number
+		if bn.Outcome != OutcomeFailed {
+			// Success (or a non-failed outcome) returns immediately.
+			return false, d.settleLoop(u, bn.Outcome, bn.Output, "", nil, scope, nodeOutputs)
+		}
+		if !bn.Retryable {
+			// A non-retryable failure stops early, stamping the unused budget.
+			rem := maxAttempts - n
+			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "", &rem, scope, nodeOutputs)
+		}
+		if n >= maxAttempts {
+			// The budget is exhausted by retryable failures.
+			rem := 0
+			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "exhausted", &rem, scope, nodeOutputs)
+		}
+		return true, nil
+
+	default:
+		return false, fmt.Errorf("lumen: loop %q unknown kind %q", u.nodeID, spec.irKind)
+	}
+}
+
+// settleLoop settles the loop node and records its output into scope + nodeOutputs
+// so a downstream {{loopID}} ref and RunResult.NodeOutputs see the satisfying
+// attempt's output (the body binding scope[bodyID] was set by that attempt's own
+// record).
+func (d *driver) settleLoop(u planUnit, outcome, output, reason string, retriesRemaining *int, scope, nodeOutputs map[string]string) error {
+	if err := d.appendLoopSettled(u.activation, outcome, output, reason, retriesRemaining); err != nil {
+		return err
+	}
+	d.record(u.nodeID, output, scope, nodeOutputs)
+	return nil
+}
+
+// loopScope builds the closed-expression evaluation scope for a loop's cond /
+// attempts: the iteration counter, the just-settled attempt binding (bn), the run
+// input (typed), and the run's other settled node outputs/outcomes (max attempt
+// per node id). bn is nil when evaluating a retry's attempts expression (before any
+// attempt).
+func (d *driver) loopScope(spec *loopSpec, iteration int, bn *nodeState, nodeOutputs map[string]string) loopScope {
+	outcomes := map[string]string{}
+	best := map[string]int{}
+	for act, n := range d.st().Nodes {
+		if !n.Settled || !ranOutcome(n.Outcome) {
+			continue
+		}
+		id := activationNodeID(act)
+		att := activationAttempt(act)
+		if prev, ok := best[id]; ok && att <= prev {
+			continue
+		}
+		best[id] = att
+		outcomes[id] = n.Outcome
+	}
+	sc := loopScope{
+		iterationName: spec.iterationName,
+		iteration:     iteration,
+		input:         d.input,
+		nodeOutputs:   nodeOutputs,
+		nodeOutcomes:  outcomes,
+	}
+	if bn != nil {
+		sc.bodyName = spec.bodyNodeID
+		sc.bodyOutcome = bn.Outcome
+		sc.bodyOutput = bn.Output
+	}
+	return sc
+}
+
+// evalAttempts evaluates a retry's attempts expression and reports the integer
+// budget, or ok=false for a non-integer / < 1 value (reference invalid_input).
+func evalAttempts(expr json.RawMessage, scope loopScope) (int, bool) {
+	v, err := evalClosedExpr(expr, scope)
+	if err != nil {
+		return 0, false
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return 0, false
+	}
+	if f < 1 || f != float64(int64(f)) {
+		return 0, false
+	}
+	return int(f), true
+}
+
+// evalCondTruthy evaluates a repeat's `until` condition and reports its truthiness.
+func evalCondTruthy(expr json.RawMessage, scope loopScope) (bool, error) {
+	v, err := evalClosedExpr(expr, scope)
+	if err != nil {
+		return false, err
+	}
+	return isExprTruthy(v), nil
+}
+
 // combineOutcome aggregates the settled outcomes of a gather's combine members:
 // a blocking outcome (failed/canceled/skipped) dominates to failed, then
 // degraded, else pass. Silent members contribute nothing (they never settle).
@@ -606,14 +854,59 @@ func (d *driver) appendActivated(u planUnit) error {
 	})
 }
 
-// appendSettled emits an outcome.settled event for an activation.
+// appendSettled emits an outcome.settled event for an activation (no retry
+// classification — the byte-identical pre-L5 shape used by every non-exec settle).
 func (d *driver) appendSettled(activation, outcome, output, detail string) error {
+	return d.appendSettledRetryable(activation, outcome, output, detail, false)
+}
+
+// appendSettledRetryable emits an outcome.settled carrying the retry
+// classification (exec bodies): retryable=false omits the field, so it is
+// byte-identical to appendSettled.
+func (d *driver) appendSettledRetryable(activation, outcome, output, detail string, retryable bool) error {
 	return d.append(EventOutcomeSettled, d.streamID+":"+activation+":settled", outcomeSettledPayload{
 		Activation: activation,
 		Outcome:    outcome,
 		Output:     output,
 		Detail:     detail,
+		Retryable:  retryable,
 	})
+}
+
+// appendLoopSettled emits a loop node's own outcome.settled, carrying the
+// reason (loop_cap / exhausted / invalid_input) and retries_remaining the retry
+// arm stamps (§3.3).
+func (d *driver) appendLoopSettled(activation, outcome, output, reason string, retriesRemaining *int) error {
+	return d.append(EventOutcomeSettled, d.streamID+":"+activation+":settled", outcomeSettledPayload{
+		Activation:       activation,
+		Outcome:          outcome,
+		Output:           output,
+		Reason:           reason,
+		RetriesRemaining: retriesRemaining,
+	})
+}
+
+// appendAttemptMinted emits the bookkeeping attempt.minted for a loop attempt
+// (1-based attempt number, remaining budget). It is idem-keyed on the loop
+// activation and attempt so a re-Advance/resume dedupes; the reducer folds it to
+// a no-op (state is re-derivable from the attempt activation itself).
+func (d *driver) appendAttemptMinted(loopAct string, attempt, remaining int) error {
+	bodyAttempt := attempt // 0-based body attempt index
+	return d.append(EventAttemptMinted, d.streamID+":"+loopAct+":attempt:"+strconv.Itoa(bodyAttempt), attemptMintedPayload{
+		Activation: loopAct,
+		Attempt:    attempt + 1, // 1-based, mirroring the reference node.attempt counter
+		Remaining:  remaining,
+	})
+}
+
+// intInSlice reports whether xs contains x.
+func intInSlice(x int, xs []int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 // append canonicalizes payload, commits it to the journal at head+1, folds the

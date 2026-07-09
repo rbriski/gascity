@@ -328,6 +328,7 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 		state:            state,
 		head:             head,
 		host:             opts.Host,
+		input:            input,
 		snapshotEvery:    opts.SnapshotEvery,
 		crashInterrupted: crashInterrupted,
 		settledEffects:   recordedEffects,
@@ -571,11 +572,24 @@ func interruptedEffects(stored []graphstore.StoredEvent) (map[string]string, err
 func reconstructOutputs(s *lumenState) (nodeOutputs, scope map[string]string) {
 	nodeOutputs = map[string]string{}
 	scope = map[string]string{}
+	// A retry/repeat loop re-attempts one bare node id across activations b:0…b:N,
+	// so a node id can carry MULTIPLE settled activations; its authoritative output
+	// is the highest-numbered attempt's. activationKeys() is LEXICOGRAPHIC
+	// ("b:10" < "b:2"), so a plain last-write-wins walk would seed the wrong attempt
+	// once a node exceeds ten attempts (the loop cap is 32). Order by the numeric
+	// attempt suffix (activationAttempt) and let the max attempt win — deterministic,
+	// and byte-identical to the single-attempt path (one activation ⇒ one write).
+	best := map[string]int{} // node id -> highest ran-attempt index seeded so far
 	for _, k := range s.activationKeys() {
 		n := s.Nodes[k]
 		if !n.Settled || !ranOutcome(n.Outcome) {
 			continue // skip-cascaded / canceled: genesis recorded nothing
 		}
+		att := activationAttempt(k)
+		if prev, seen := best[n.NodeID]; seen && att <= prev {
+			continue // a higher attempt already seeded this node id
+		}
+		best[n.NodeID] = att
 		nodeOutputs[n.NodeID] = n.Output
 		if !isAggregateKind(n.Kind) {
 			scope[n.NodeID] = n.Output

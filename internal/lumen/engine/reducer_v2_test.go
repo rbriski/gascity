@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -571,7 +572,8 @@ func TestDeferredKindsRefusedCleanly(t *testing.T) {
 		node string
 	}{
 		{"dispatch", `{"kind":"dispatch","id":"d","after":[],"origin":{"uri":"t","line":1,"col":0},"subject":{"kind":"ref","name":"x"},"discriminant":"kind","exhaustive":true,"arms":[]}`},
-		{"retry", `{"kind":"retry","id":"r","after":[],"origin":{"uri":"t","line":1,"col":0},"attempts":{"kind":"literal","value":3}}`},
+		// retry/repeat are NO LONGER deferred — they land as the L5 attempt-loop arm
+		// (see loop_test.go). timeout/run/channel/async stay refused.
 		{"timeout", `{"kind":"timeout","id":"to","after":[],"origin":{"uri":"t","line":1,"col":0},"duration":{"kind":"literal","value":"30s"}}`},
 		{"channel", `{"kind":"channel","id":"ch","after":[],"origin":{"uri":"t","line":1,"col":0}}`},
 		{"async", `{"kind":"async","id":"as","after":[],"origin":{"uri":"t","line":1,"col":0}}`},
@@ -592,6 +594,151 @@ func TestDeferredKindsRefusedCleanly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSingleAttemptStreamUnchanged (T-K3) is the L5a byte-shape spot-check: the
+// activation-key generalization (:0 → :N) and the attempt-derived effect token
+// must leave the single-attempt (attempt-0) path bit-for-bit identical to pre-L5.
+// It pins BOTH (1) the exact idem-token strings a do run and a Tier-B claim/settle
+// produce — the do effect token stays `…:greet:do:1` (attempt 0 ⇒ suffix 1) and the
+// claim/settle tokens key on `…:0` — AND (2) the PAYLOAD SHAPE of the attempt-0
+// owned.admitted/owned.settled plus the absence of an attempt-loop field on the
+// attempt-0 outcome.settled, so a newly-populated attempt-0 field (a non-omitempty
+// `claimant_id`, a `retryable`, an `attempt`, …) genuinely FAILS here rather than
+// silently diverging every persisted stream. (The full engine suite + the DET
+// drop+refold tests are the broader byte-identity gate; this pins the shapes the L5
+// seams touch.)
+func TestSingleAttemptStreamUnchanged(t *testing.T) {
+	ctx := context.Background()
+
+	// (a) A single do run: the engine-inline effect token is attempt-derived and
+	// must render the historical `:do:1` for attempt 0, and the attempt-0
+	// outcome.settled must carry NO `retryable` field (the L5 attempt-loop field).
+	store := newStore(t)
+	doc := decodeIR(t, blockDoc("greeter", doNode("greet", "Say hi.", nil)))
+	host := &enginehost.StubHost{Results: map[string]enginehost.DoResult{
+		"greet": {Outcome: enginehost.OutcomePass, Output: "hi"},
+	}}
+	res, err := engine.RunWithOptions(ctx, store, doc, nil, engine.Options{Host: host})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	sched := findEventOf(t, res.Events, engine.EventEffectScheduled)
+	var sp struct {
+		IdemToken string `json:"idem_token"`
+	}
+	if err := json.Unmarshal(sched.Payload, &sp); err != nil {
+		t.Fatalf("decode effect.scheduled: %v", err)
+	}
+	if want := res.StreamID + ":greet:do:1"; sp.IdemToken != want {
+		t.Fatalf("effect idem token = %q, want %q (attempt-0 must derive :do:1)", sp.IdemToken, want)
+	}
+	settled := findEventOf(t, res.Events, engine.EventOutcomeSettled)
+	if got := payloadKeys(t, settled.Payload); got["retryable"] {
+		t.Fatalf("attempt-0 outcome.settled carries a `retryable` field; want it omitted (pre-L5 shape)")
+	}
+
+	// (b) A Tier-B claim/settle: the write-once tokens key on the attempt-0
+	// activation `summarize:0`, byte-identical to the pre-L5 form, and the
+	// owned.admitted/owned.settled payloads carry EXACTLY the pre-L5 fields — the
+	// plain claim/settle records NO instance-unique `claimant_id`.
+	tstore := newStore(t)
+	act := materializeTierB(t, tstore)
+	if act != "summarize:0" {
+		t.Fatalf("materialize activation = %q, want summarize:0 (attempt 0)", act)
+	}
+	if err := engine.ClaimTierBWork(ctx, tstore, tierBStream, act, "worker-a"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := engine.SettleTierBWork(ctx, tstore, tierBStream, act, engine.OutcomePass, "done"); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	tokens := journalIdemTokens(t, tstore, tierBStream)
+	for _, want := range []string{"tier-b-claim:summarize:0", "tier-b-settle:summarize:0"} {
+		if !containsString(tokens, want) {
+			t.Fatalf("journal idem tokens %v missing %q (attempt-0 Tier-B token shape changed)", tokens, want)
+		}
+	}
+	for _, e := range readFoldEvents(t, tstore, tierBStream) {
+		switch e.Type {
+		case engine.EventOwnedAdmitted:
+			assertPayloadShape(t, "attempt-0 owned.admitted", e.Payload, map[string]any{
+				"handle": "summarize:0", "activation": "summarize:0", "kind": "tier_b", "assignee": "worker-a",
+			})
+		case engine.EventOwnedSettled:
+			assertPayloadShape(t, "attempt-0 owned.settled", e.Payload, map[string]any{
+				"handle": "summarize:0", "kind": "tier_b", "outcome": "pass", "output": "done",
+			})
+		}
+	}
+}
+
+// payloadKeys decodes a canonical event payload to the set of keys it carries.
+func payloadKeys(t *testing.T, payload []byte) map[string]bool {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	keys := make(map[string]bool, len(m))
+	for k := range m {
+		keys[k] = true
+	}
+	return keys
+}
+
+// assertPayloadShape decodes a canonical event payload and asserts it carries
+// EXACTLY the expected key/value set — a populated attempt-0-only field fails here.
+func assertPayloadShape(t *testing.T, label string, payload []byte, want map[string]any) {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("%s: decode payload: %v", label, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s payload shape = %v, want %v (a populated attempt-0 field, or a missing field)", label, got, want)
+	}
+}
+
+// findEventOf returns the first event of the given type.
+func findEventOf(t *testing.T, events []graphstore.StoredEvent, typ string) graphstore.StoredEvent {
+	t.Helper()
+	for _, e := range events {
+		if e.Type == typ {
+			return e
+		}
+	}
+	t.Fatalf("no %s event in stream", typ)
+	return graphstore.StoredEvent{}
+}
+
+// journalIdemTokens reads a stream's idem tokens in seq order.
+func journalIdemTokens(t *testing.T, store *graphstore.Store, streamID string) []string {
+	t.Helper()
+	rows, err := store.DB().QueryContext(context.Background(),
+		`SELECT idem_token FROM journal WHERE stream_id = ? ORDER BY seq`, streamID)
+	if err != nil {
+		t.Fatalf("query idem tokens: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var tok string
+		if err := rows.Scan(&tok); err != nil {
+			t.Fatalf("scan idem token: %v", err)
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+func containsString(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 // --- helpers ----------------------------------------------------------------

@@ -392,8 +392,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		// A graph-scoped city federates a Tier-B journal leg LAST: it surfaces
 		// fold-owned pool work (assigned first, then routed) and claims via a journal
 		// append. Appending last preserves existing bd-store precedence exactly; a
-		// non-Lumen city reports no scope and this is a no-op.
-		if tbStore, ok := tierBHookStore(cityPath, claimOpts.RouteTargets, claimOpts.IdentityCandidates, assignee); ok {
+		// non-Lumen city reports no scope and this is a no-op. The claim records the
+		// session's instance-unique id (GC_SESSION_ID) as claimant_id so a same-named
+		// respawn cannot be impersonated by a false-killed straggler's close (§4.3);
+		// sessionID is "" outside a runtime session, leaving the guard on the name alone.
+		if tbStore, ok := tierBHookStore(cityPath, claimOpts.RouteTargets, claimOpts.IdentityCandidates, assignee, sessionID); ok {
 			stores = append(stores, tbStore)
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/lumen/exechost"
@@ -25,11 +26,12 @@ type step struct {
 	id   string
 
 	// exec fields.
-	program   string
-	script    string
-	passCodes []int
-	cwd       string
-	env       []string
+	program        string
+	script         string
+	passCodes      []int
+	retryableCodes []int // exec exitMap.retryable: exit codes a retry re-attempts
+	cwd            string
+	env            []string
 
 	// settle fields.
 	outcome string
@@ -48,6 +50,7 @@ const (
 	unitLeaf       unitKind = iota // exec / settle / lit / interp / do
 	unitScatterAgg                 // scatter aggregate: settles after its members
 	unitGather                     // gather: head-of-line drain + authored combine
+	unitLoop                       // retry / repeat: the attempt-loop over a leaf body
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -80,6 +83,24 @@ type planUnit struct {
 
 	gatherMembers []string   // unitGather: drained member activations, member order
 	combine       []planUnit // unitGather: authored combine leaf units
+
+	loop *loopSpec // unitLoop: the attempt-loop spec (retry / repeat)
+}
+
+// loopSpec carries a retry/repeat loop node's decoded shape: the leaf body it
+// re-attempts, and the closed exit expression that decides re-runs (retry:
+// attempts count; repeat: the `until` condition + iteration binding). The body is
+// a SINGLE leaf (exec / do); block / run / nested-loop / scatter bodies are
+// refused at lowering (§3.2). No IR is read at run time — the driver evaluates
+// these expressions over folded attempt outcomes (D-P4-1).
+type loopSpec struct {
+	irKind        ir.NodeKind     // NodeRetry | NodeRepeat
+	bodyNodeID    string          // the leaf body's node id (the re-attempted bare id)
+	bodyIRKind    ir.NodeKind     // NodeExec | NodeDo
+	body          step            // the decoded leaf body
+	attemptsExpr  json.RawMessage // retry: the attempts count expression (closed subset)
+	condExpr      json.RawMessage // repeat: the `until` exit condition (closed subset)
+	iterationName string          // repeat: the 1-based iteration binding name
 }
 
 // allDeps returns the union of a unit's blocking and drain dependencies, for
@@ -94,9 +115,18 @@ func (u *planUnit) allDeps() []string {
 	return deps
 }
 
-// activationFor returns the single activation key for a node id in this slice
-// (one activation per node; retry/repeat re-activation is deferred).
-func activationFor(nodeID string) string { return nodeID + ":0" }
+// activationFor returns the attempt-0 activation key for a node id — the form
+// every non-loop node uses (exactly one attempt). It is byte-identical to the
+// historical single-attempt key, so all pre-L5 lowering sites stay unchanged.
+func activationFor(nodeID string) string { return activationForAttempt(nodeID, 0) }
+
+// activationForAttempt returns the activation key for a node id's Nth attempt
+// (0-based): nodeID + ":" + N. Attempt 0 is the historical single-attempt key,
+// so activationFor(n) == activationForAttempt(n, 0). Only a retry/repeat loop
+// body mints attempt > 0; every other node has exactly one attempt (0).
+func activationForAttempt(nodeID string, attempt int) string {
+	return nodeID + ":" + strconv.Itoa(attempt)
+}
 
 // buildUnits lowers a formula body to a topologically ordered plan. block nodes
 // are transparent; exec/settle/lit/interp/do become leaf units; scatter(members)
@@ -181,12 +211,15 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 	case ir.NodeGather:
 		return l.lowerGather(n, parent)
 
+	case ir.NodeRetry, ir.NodeRepeat:
+		return l.lowerLoop(n, parent)
+
 	default:
 		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
 		// fail-channel, for-each(scatter form:each), guard, map, quote, raise,
-		// recover, repeat, retry, run, timeout. Vocabulary + reducer transitions
-		// exist (total fold); executor arms land in later slices. Filed follow-up:
-		// blueprint §7 P4.2 corpus TODO.
+		// recover, run, timeout. Vocabulary + reducer transitions exist (total
+		// fold); executor arms land in later slices. Filed follow-up: blueprint §7
+		// P4.2 corpus TODO. (retry/repeat land as the L5 attempt-loop arm above.)
 		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
 	}
 }
@@ -281,6 +314,104 @@ func (l *lowerer) lowerGather(n ir.Node, parent string) error {
 		overScatter:   activationFor(overName),
 		gatherMembers: memberActs,
 		combine:       combine,
+	})
+	return nil
+}
+
+// lowerLoop lowers a retry/repeat node to a unitLoop planUnit over a single leaf
+// body (§3.2). It is the ONLY place a retry/repeat's shape is validated: the body
+// must be exec/do (block / run / nested loop / scatter bodies are refused HERE,
+// before any append); the closed exit expression (retry: `attempts`; repeat:
+// `cond`) is validated by walking its tree, so a bad expression refuses at LOAD,
+// never at attempt N. A loop nested under an aggregate (scatter member / gather
+// combine) is refused this slice — it is a non-top-level, non-leaf placement.
+//
+// The label names the BODY (compiled evidence: repeat/retry give the loop node a
+// synthetic id and the body keeps its own id), and dependents gate on the LOOP
+// node id (the compiler rewrites body-binding `after` refs onto the loop node), so
+// resolveDeps registers only the loop unit. A raw `after: [bodyID]` in hand-crafted
+// IR is a dangling ref, refused loudly (the compiler never emits it).
+func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
+	if parent != "" {
+		// A loop nested under a scatter/gather aggregate is a non-leaf member; refuse
+		// it this slice (scatter/combine-nested loops are a follow-up, §7.7). Top-level
+		// loops (possibly inside transparent blocks) carry parent "".
+		return fmt.Errorf("%w: %q %q nested under an aggregate; loops are top-level only in this slice", ErrUnsupportedNode, n.Kind, n.ID)
+	}
+	spec := &loopSpec{irKind: n.Kind}
+
+	bodyRaw, ok := n.Raw["body"]
+	if !ok {
+		return fmt.Errorf("%w: %q %q missing body", ErrUnsupportedNode, n.Kind, n.ID)
+	}
+	var body ir.Node
+	if err := json.Unmarshal(bodyRaw, &body); err != nil {
+		return fmt.Errorf("lumen: %s %q body: %w", n.Kind, n.ID, err)
+	}
+	switch body.Kind {
+	case ir.NodeExec:
+		s, err := decodeExec(body)
+		if err != nil {
+			return err
+		}
+		spec.body = s
+	case ir.NodeDo:
+		if !l.allowDo {
+			// A do body obeys the same gate as a top-level do: it needs a Host
+			// (Run/Resume) or a PoolRouter (Advance). Refuse it before any append.
+			return fmt.Errorf("%w: %q body %q (node %q)", ErrUnsupportedNode, n.Kind, body.Kind, body.ID)
+		}
+		s, err := decodeDo(body)
+		if err != nil {
+			return err
+		}
+		spec.body = s
+	default:
+		return fmt.Errorf("%w: %q %q body kind %q (only exec/do leaf bodies)", ErrUnsupportedNode, n.Kind, n.ID, body.Kind)
+	}
+	if body.ID == "" {
+		return fmt.Errorf("%w: %q %q body missing id", ErrUnsupportedNode, n.Kind, n.ID)
+	}
+	spec.bodyNodeID = body.ID
+	spec.bodyIRKind = body.Kind
+
+	switch n.Kind {
+	case ir.NodeRetry:
+		att, ok := n.Raw["attempts"]
+		if !ok {
+			return fmt.Errorf("%w: retry %q missing attempts", ErrUnsupportedNode, n.ID)
+		}
+		if err := validateClosedExpr(att); err != nil {
+			return err
+		}
+		spec.attemptsExpr = att
+	case ir.NodeRepeat:
+		cond, ok := n.Raw["cond"]
+		if !ok {
+			return fmt.Errorf("%w: repeat %q missing cond", ErrUnsupportedNode, n.ID)
+		}
+		if err := validateClosedExpr(cond); err != nil {
+			return err
+		}
+		spec.condExpr = cond
+		iterName := "iteration"
+		if raw, ok := n.Raw["iterationName"]; ok {
+			_ = json.Unmarshal(raw, &iterName)
+		}
+		if iterName == "" {
+			iterName = "iteration"
+		}
+		spec.iterationName = iterName
+	}
+
+	l.units = append(l.units, planUnit{
+		kind:       unitLoop,
+		activation: activationFor(n.ID),
+		nodeID:     n.ID,
+		irKind:     n.Kind,
+		parent:     parent,
+		rawAfter:   n.After,
+		loop:       spec,
 	})
 	return nil
 }
@@ -590,12 +721,18 @@ func decodeExec(n ir.Node) (step, error) {
 
 	if raw, ok := n.Raw["exitMap"]; ok {
 		var em struct {
-			Pass []int `json:"pass"`
+			Pass      []int `json:"pass"`
+			Retryable []int `json:"retryable"`
 		}
 		if err := json.Unmarshal(raw, &em); err != nil {
 			return step{}, fmt.Errorf("lumen: exec %q exitMap: %w", n.ID, err)
 		}
 		s.passCodes = em.Pass
+		// The retryable exit-code set is the retry arm's classification DATA (a
+		// timeout wraps to retryable elsewhere): an exit in this set marks a failed
+		// attempt infrastructure-retryable, carried per-settle so the fold — not a
+		// driver-side memory — is the source on re-Advance (§3.3).
+		s.retryableCodes = em.Retryable
 	}
 
 	if raw, ok := n.Raw["cwd"]; ok {

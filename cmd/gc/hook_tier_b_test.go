@@ -214,7 +214,7 @@ func TestFoldProjectedPoolRowPassesClaimSurfaceParity(t *testing.T) {
 func TestTierBHookStoreClaimEndToEndInProcess(t *testing.T) {
 	cityPath := tbHookGraphCity(t)
 	tbHookSeedParked(t, cityPath)
-	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a")
+	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a", "")
 	if !ok {
 		t.Fatal("tier-b hook store not present for a graph-scoped city")
 	}
@@ -256,7 +256,7 @@ func TestTierBClaimLostRaceEmitsClaimRejected(t *testing.T) {
 	ctx := context.Background()
 	cityPath := tbHookGraphCity(t)
 	tbHookSeedParked(t, cityPath)
-	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a")
+	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a", "")
 	if !ok {
 		t.Fatal("tier-b hook store not present")
 	}
@@ -310,7 +310,7 @@ func TestTierBConcurrentClaimExactlyOneWins(t *testing.T) {
 	ctx := context.Background()
 	cityPath := tbHookGraphCity(t)
 	tbHookSeedParked(t, cityPath)
-	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, nil, "")
+	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, nil, "", "")
 	if !ok {
 		t.Fatal("tier-b hook store not present")
 	}
@@ -383,12 +383,12 @@ func TestTierBClaimBeadErrorMapping(t *testing.T) {
 			tbHookSeedParked(t, cityPath) // a real fold row so ResolveTierBWorkRef succeeds
 
 			orig := claimTierBWork
-			claimTierBWork = func(context.Context, *graphstore.Store, string, string, string) error {
+			claimTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
 				return tc.injected
 			}
 			defer func() { claimTierBWork = orig }()
 
-			bead, ok, err := claimTierBWorkBead(context.Background(), cityPath, "hello", "worker-a")
+			bead, ok, err := claimTierBWorkBead(context.Background(), cityPath, "hello", "worker-a", "")
 			if ok {
 				t.Fatalf("claim reported success for injected %v; want ok=false", tc.injected)
 			}
@@ -426,7 +426,7 @@ func TestTierBCrashRecoveryTierAdoptsOwnInProgress(t *testing.T) {
 	}
 	_ = gs.Close()
 
-	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a")
+	tbStore, ok := tierBHookStore(cityPath, []string{tbHookRoute}, []string{"worker-a"}, "worker-a", "")
 	if !ok {
 		t.Fatal("tier-b hook store not present")
 	}
@@ -461,16 +461,16 @@ func TestClaimLeaseFencedRetriesThenConflictShape(t *testing.T) {
 		tbHookSeedParked(t, cityPath)
 		calls := 0
 		orig := claimTierBWork
-		claimTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, assignee string) error {
+		claimTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, assignee, claimantID string) error {
 			calls++
 			if calls == 1 {
 				return graphstore.ErrLeaseFenced
 			}
-			return engine.ClaimTierBWork(ctx, gs, streamID, activation, assignee) // the retry lands
+			return engine.ClaimTierBWorkAs(ctx, gs, streamID, activation, assignee, claimantID) // the retry lands
 		}
 		defer func() { claimTierBWork = orig }()
 
-		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a", "")
 		if err != nil || !ok {
 			t.Fatalf("fence-once claim = (bead=%q ok=%v err=%v), want a successful retry", bead.ID, ok, err)
 		}
@@ -486,12 +486,12 @@ func TestClaimLeaseFencedRetriesThenConflictShape(t *testing.T) {
 		cityPath := tbHookGraphCity(t)
 		tbHookSeedParked(t, cityPath)
 		orig := claimTierBWork
-		claimTierBWork = func(context.Context, *graphstore.Store, string, string, string) error {
+		claimTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
 			return graphstore.ErrLeaseFenced
 		}
 		defer func() { claimTierBWork = orig }()
 
-		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a", "")
 		if err != nil {
 			t.Fatalf("persistent fence surfaced an error (would drain claims_errored): %v", err)
 		}
@@ -518,16 +518,16 @@ func TestClaimRebuildRacedRetriesThenConflictShape(t *testing.T) {
 		tbHookSeedParked(t, cityPath)
 		calls := 0
 		orig := claimTierBWork
-		claimTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, assignee string) error {
+		claimTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, assignee, claimantID string) error {
 			calls++
 			if calls == 1 {
 				return graphstore.ErrRebuildRaced
 			}
-			return engine.ClaimTierBWork(ctx, gs, streamID, activation, assignee) // the retry lands
+			return engine.ClaimTierBWorkAs(ctx, gs, streamID, activation, assignee, claimantID) // the retry lands
 		}
 		defer func() { claimTierBWork = orig }()
 
-		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a", "")
 		if err != nil || !ok {
 			t.Fatalf("race-once claim = (bead=%q ok=%v err=%v), want a successful retry", bead.ID, ok, err)
 		}
@@ -543,12 +543,12 @@ func TestClaimRebuildRacedRetriesThenConflictShape(t *testing.T) {
 		cityPath := tbHookGraphCity(t)
 		tbHookSeedParked(t, cityPath)
 		orig := claimTierBWork
-		claimTierBWork = func(context.Context, *graphstore.Store, string, string, string) error {
+		claimTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
 			return graphstore.ErrRebuildRaced
 		}
 		defer func() { claimTierBWork = orig }()
 
-		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a", "")
 		if err != nil {
 			t.Fatalf("persistent rebuild race surfaced an error (would drain claims_errored): %v", err)
 		}

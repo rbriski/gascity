@@ -211,6 +211,7 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 	n.Settled = true
 	n.Outcome = p.Outcome
 	n.Output = p.Output
+	n.Retryable = p.Retryable
 	n.InFrontier = false
 
 	delta := fold.Delta{
@@ -287,6 +288,7 @@ func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 		return next, fold.Delta{}, nil
 	}
 	n.Assignee = p.Assignee
+	n.ClaimantID = p.ClaimantID
 	n.InFrontier = false
 	return next, fold.Delta{
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
@@ -324,9 +326,26 @@ func applyOwnedSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta, 
 	if n == nil || n.DispatchMode != DispatchModePool || n.Settled || p.Outcome == "" {
 		return next, fold.Delta{}, nil
 	}
+	// A settle by a non-claimant LOSES (§4.3, the symmetric twin of "late claim
+	// loses"): a straggler attempt-N worker whose close carries its own identity can
+	// never settle a live attempt N+1 claimed by another worker. A crafted/replayed
+	// event that reaches the fold folds to a DEFINED no-op — the prior claim stands
+	// and RebuildTierA is never poisoned. Identity is checked on BOTH axes: the
+	// session NAME (a differently-named closer) AND the instance-unique claimant id
+	// (a same-named straggler A vs its respawn B under a singleton pool identity —
+	// the name matches but the id differs). Each axis fires only when both sides
+	// carry that identity, so the driver/firewall override ("" for both) is unguarded
+	// and an unclaimed node accepts an override. This is the fold twin of the append-
+	// time guard in SettleTierBWorkAs.
+	nameMismatch := p.Assignee != "" && n.Assignee != "" && p.Assignee != n.Assignee
+	idMismatch := p.ClaimantID != "" && n.ClaimantID != "" && p.ClaimantID != n.ClaimantID
+	if nameMismatch || idMismatch {
+		return next, fold.Delta{}, nil
+	}
 	n.Settled = true
 	n.Outcome = p.Outcome
 	n.Output = p.Output
+	n.Retryable = p.Retryable
 	n.InFrontier = false
 	delta := fold.Delta{
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
@@ -412,12 +431,29 @@ func (s *lumenState) ProjectDelta(streamID string) fold.Delta {
 		delta.FrontierInsert = append(delta.FrontierInsert, frontierRowFor(s, s.RootID))
 	}
 
+	// A retry/repeat loop re-attempts one bare node id across activations b:0…b:N,
+	// so several activations share a projected node id. Only the HIGHEST-numbered
+	// attempt owns the bare-id row: attempts are sequential, so the incremental
+	// fold's last temporal upsert of the id is the max attempt, and this full-state
+	// projection must agree. Selecting by the NUMERIC attempt (not the lexical
+	// activationKeys order, where "b:10" < "b:2") keeps ProjectDelta byte-identical
+	// to the incremental deltas (DET-T-17) even past ten attempts. Single-attempt
+	// nodes have max 0 and are unaffected.
+	maxAttempt := map[string]int{}
+	for act, n := range s.Nodes {
+		if a := activationAttempt(act); a > maxAttempt[n.NodeID] {
+			maxAttempt[n.NodeID] = a
+		}
+	}
 	for _, act := range s.activationKeys() {
 		n := s.Nodes[act]
 		// nodeRowFor is the single source of truth for a step node's projected row
 		// (status/assignee/metadata across activated → claimed → settled), so this
-		// full-state projection matches the incremental fold byte-for-byte (H1).
-		delta.NodeUpserts = append(delta.NodeUpserts, nodeRowFor(s, act, n, streamID))
+		// full-state projection matches the incremental fold byte-for-byte (H1). Only
+		// the max-attempt activation projects the shared bare-id row.
+		if activationAttempt(act) == maxAttempt[n.NodeID] {
+			delta.NodeUpserts = append(delta.NodeUpserts, nodeRowFor(s, act, n, streamID))
+		}
 		for _, dep := range n.After {
 			delta.EdgeUpserts = append(delta.EdgeUpserts, fold.EdgeRow{
 				FromID: activationNodeID(dep), ToID: n.NodeID, DepType: "after",

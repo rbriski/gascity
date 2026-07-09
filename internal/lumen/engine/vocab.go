@@ -159,6 +159,16 @@ const (
 	// DispatchModeMetaKey is the projected node-metadata key carrying a claimable
 	// node's dispatch mode, so a serve/claim surface can select Tier-B work.
 	DispatchModeMetaKey = "dispatch_mode"
+	// ClaimantIDMetaKey is the projected node-metadata key carrying a claimed
+	// node's instance-unique claimant id (the claiming session's GC_SESSION_ID).
+	// It is the zombie firewall's identity of record (§4.3): the assignee is the
+	// session NAME (stable across a false-kill/respawn under a singleton pool
+	// identity, so it cannot distinguish A from its respawn B), while the claimant
+	// id is the per-instance session bead id, so a straggler A's close of the live
+	// attempt B claimed is caught by an id mismatch even when the names match. It is
+	// projected only while a node is claimed-and-unsettled (a settled row drops it,
+	// like `activation`), and omitted for a legacy/no-session claim that carried none.
+	ClaimantIDMetaKey = "claimant_id"
 	// StatusClaimed is the projected status of a claimed-but-unsettled Tier-B
 	// work bead — bead-compatible with the worker view (in_progress + assignee).
 	StatusClaimed = "in_progress"
@@ -182,6 +192,14 @@ const (
 	// existing journal and snapshot folds and re-marshals byte-identically. The
 	// arms are additive live behavior over never-before-seen events, not a change
 	// to how any persisted state folds.
+	//
+	// L5-HARDENING stays at v2 too: owned.admitted/owned.settled gain a claimant_id
+	// (the closer-identity guard's instance-unique field, §4.3) and nodeState gains
+	// ClaimantID, all additive-omitempty. A pre-hardening claim/settle carried no
+	// claimant_id, so it decodes to "" and folds byte-identically (the id check is
+	// gated on a non-empty recorded id), and the projected claimant_id metadata key
+	// is emitted only when a claim carried one — drop+refold stays byte-identical
+	// (DET-T-17). No persisted stream predates this, so no snapshot is stranded.
 	//
 	// L0 DECISION — stays at v2 despite a frontier RE-KEYING (MED-1). L0 changed the
 	// leaf frontier row's node_id/id from the activation key to the BARE node id
@@ -276,6 +294,12 @@ type nodeDecisionPayload struct {
 }
 
 // outcomeSettledPayload is the body of EventOutcomeSettled.
+//
+// Retryable is the L5 attempt-loop classification DATA for an engine-inline exec
+// settle: it is true iff the exec's exit code is in exitMap.retryable, so the
+// retry arm's re-attempt decision is a fold of journaled fact (nodeState.Retryable),
+// never a Go inference. It is additive and omitempty — a non-retryable settle (every
+// pre-L5 settle, and every non-exec settle) omits it and folds byte-identically.
 type outcomeSettledPayload struct {
 	Activation       string `json:"activation"`
 	Outcome          string `json:"outcome"`
@@ -283,6 +307,7 @@ type outcomeSettledPayload struct {
 	Reason           string `json:"reason,omitempty"`
 	Detail           string `json:"detail,omitempty"`
 	RetriesRemaining *int   `json:"retries_remaining,omitempty"`
+	Retryable        bool   `json:"retryable,omitempty"`
 }
 
 // effectSpec captures the effect's inputs for provenance and hashing.
@@ -372,11 +397,20 @@ type cancelSweptPayload struct {
 // claimed the handle (the activation of a pool-mode node). Assignee is additive
 // and omitempty, so the async/detached-run uses of this type (kind=async|
 // detached_run, deferred) fold byte-identically without it.
+//
+// ClaimantID is the L5-hardening instance-unique claimant identity (the claiming
+// session's GC_SESSION_ID). Assignee is the session NAME (load-bearing for the
+// reconciler's session correlation), but a singleton pool identity reuses one
+// stable name across a false-kill/respawn, so the name alone cannot tell A from
+// its respawn B. ClaimantID pins the per-instance session bead id so the closer-
+// identity guard (§4.3) catches a same-name straggler. Additive and omitempty: a
+// legacy/no-session claim omits it and folds byte-identically.
 type ownedAdmittedPayload struct {
 	Handle     string `json:"handle"`
 	Activation string `json:"activation"`
 	Kind       string `json:"kind"`
 	Assignee   string `json:"assignee,omitempty"`
+	ClaimantID string `json:"claimant_id,omitempty"`
 }
 
 // ownedSettledPayload is the body of EventOwnedSettled. For P4.5 Tier-B it is
@@ -385,11 +419,24 @@ type ownedAdmittedPayload struct {
 // so an async/detached settle can never fold as one — MED-3), Outcome carries the
 // mapped gc.outcome and Output the captured result. Output is additive and
 // omitempty for the deferred async/detached-run uses.
+// Retryable and Assignee are the L5 attempt-loop fields. Retryable marks a pool
+// settle as an infrastructure-retryable strand (the firewall stamps it true, S17)
+// so the retry arm re-attempts it — DATA in the journal, not a Go inference.
+// Assignee carries the CLOSER's session NAME and ClaimantID the CLOSER's instance-
+// unique id (GC_SESSION_ID) so the fold can drop a settle by a non-claimant — by a
+// different name OR a different instance id — the symmetric twin of "late claim
+// loses" (§4.3). The name check alone is porous under a singleton pool identity
+// (A and its respawn B share a name); the id check closes that hole. The driver /
+// firewall override carries "" for both (unguarded). All additive and omitempty —
+// a pre-L5 settle (and an async/detached use) folds byte-identically.
 type ownedSettledPayload struct {
-	Handle  string `json:"handle"`
-	Kind    string `json:"kind"`
-	Outcome string `json:"outcome"`
-	Output  string `json:"output,omitempty"`
+	Handle     string `json:"handle"`
+	Kind       string `json:"kind"`
+	Outcome    string `json:"outcome"`
+	Output     string `json:"output,omitempty"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	Assignee   string `json:"assignee,omitempty"`
+	ClaimantID string `json:"claimant_id,omitempty"`
 }
 
 // snapshotAnchoredPayload is the body of EventSnapshotAnchored.

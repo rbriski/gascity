@@ -1,0 +1,3 @@
+formula main {
+  repeat lane: prompt Say hello to Gas City, then settle this step. until lane.outcome == pass || iteration >= 3
+}

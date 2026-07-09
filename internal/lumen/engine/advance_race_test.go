@@ -107,6 +107,123 @@ func TestAdvanceVsClaimSettleRace(t *testing.T) {
 	}
 }
 
+// TestAdvanceLoopRaceConcurrentSettles is the L5 loop analog of the multi-writer
+// race suite: a re-entrant Advance loop over a repeat/do formula (three sequential
+// attempts) racing a concurrent settle racer. The driver ⟷ claimant surface across
+// ATTEMPTS must stay loud, never silent — every Advance error is retryable-typed,
+// each attempt settles exactly once (write-once per-attempt token), the journal
+// verifies, and the run seals. Run with -race -count=100.
+func TestAdvanceLoopRaceConcurrentSettles(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-run-race-loop"
+	// repeat until iteration >= 3 — three sequential do attempts.
+	cond := `{"kind":"operator","op":">=","operands":[{"kind":"ref","name":"iteration"},{"kind":"literal","value":3}]}`
+	doc := decodeIR(t, blockDoc("race-loop",
+		repeatNode(doNode("draft", "do {{iteration}}", nil), cond)))
+	opts := engine.Options{PoolRouter: advRouter}
+
+	// Prime: materialize attempt 0.
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
+		t.Fatalf("prime advance: %v", err)
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var raceErr error
+
+	// Settle racer: resolve the live draft attempt and settle it; a settle of an
+	// already-settled / re-opened attempt races and is tolerated.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			ref, ok, err := engine.ResolveTierBWorkRef(ctx, store, "draft")
+			if err != nil || !ok || ref.Settled || ref.Activation == "" {
+				runtime.Gosched()
+				continue
+			}
+			if err := engine.SettleTierBWork(ctx, store, streamID, ref.Activation, engine.OutcomePass, "ok"); err != nil && !isRetryableRaceErr(err) {
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Driver racers: concurrent re-Advance passes. A concurrent-mint transient
+	// (ErrAdvanceStalled — one Advance minted the next attempt while another observed
+	// the between-attempts window with nothing yet in its local view) is a benign
+	// race the controller loop simply re-runs, so it is tolerated here alongside the
+	// CAS/fence/conflict transients.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				res, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+				if err != nil {
+					if isRetryableRaceErr(err) || errors.Is(err, engine.ErrAdvanceStalled) {
+						runtime.Gosched()
+						continue
+					}
+					mu.Lock()
+					if raceErr == nil {
+						raceErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				if res.Sealed {
+					return
+				}
+				runtime.Gosched()
+			}
+		}()
+	}
+
+	// Drain to a seal.
+	sealed := false
+	for attempt := 0; attempt < 400; attempt++ {
+		res, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		if err != nil {
+			if isRetryableRaceErr(err) || errors.Is(err, engine.ErrAdvanceStalled) {
+				continue
+			}
+			t.Fatalf("drain advance: %v", err)
+		}
+		if res.Sealed {
+			sealed = true
+			break
+		}
+		runtime.Gosched()
+	}
+	close(done)
+	wg.Wait()
+	if raceErr != nil {
+		t.Fatalf("advance raced non-retryably: %v", raceErr)
+	}
+	if !sealed {
+		t.Fatal("loop run did not seal under the race")
+	}
+	if err := store.Verify(ctx, streamID); err != nil {
+		t.Fatalf("Verify after the loop race: %v", err)
+	}
+	// Three attempts, each settled exactly once (write-once per-attempt settle token).
+	if n := countJournalType(t, store, streamID, engine.EventOwnedSettled); n != 3 {
+		t.Fatalf("owned.settled count = %d, want 3 (one per attempt, write-once)", n)
+	}
+}
+
 // isRetryableRaceErr reports whether err is a transient multi-writer race the
 // controller loop retries rather than surfaces (an expected-version CAS loss, a
 // lease fence, a busy store, or a Tier-B claim/settle conflict wrapping them).

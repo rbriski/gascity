@@ -36,6 +36,68 @@ func tbSeedClaimedPoolRow(t *testing.T, cityPath string) {
 	}
 }
 
+// TestGcBdCloseCarriesCloserIdentity (T-F2) proves the close shim derives the
+// closer from the session env and refuses a non-claimant close of a live attempt
+// (loud stderr, exit 1, no settle), while the real claimant settles cleanly and a
+// human operator (no session env) keeps the pre-L5 behavior.
+func TestGcBdCloseCarriesCloserIdentity(t *testing.T) {
+	closeArgs := []string{"update", "hello", "--set-metadata", "gc.outcome=pass", "--status", "closed"}
+
+	t.Run("non_claimant_refused", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath) // claimed by worker-a
+		t.Setenv("GC_SESSION_NAME", "zombie-worker")
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code == 0 {
+			t.Fatalf("non-claimant close = (code %d, handled %v); want a loud non-zero refusal; stderr=%s", code, handled, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "hello") {
+			t.Fatalf("stderr not loud about the refused close: %q", stderr.String())
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 0 {
+			t.Fatalf("owned.settled = %d, want 0 (a non-claimant close appends nothing)", n)
+		}
+		if st := tbHookNodeStatus(t, cityPath); st != engine.StatusClaimed {
+			t.Fatalf("status after refused close = %q, want in_progress (unchanged)", st)
+		}
+	})
+
+	t.Run("claimant_settles", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath) // claimed by worker-a
+		t.Setenv("GC_SESSION_NAME", "worker-a")
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code != 0 {
+			t.Fatalf("claimant close = (code %d, handled %v); want (0,true); stderr=%s", code, handled, stderr.String())
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1", n)
+		}
+	})
+
+	t.Run("operator_no_env_unchanged", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		t.Setenv("GC_SESSION_NAME", "")
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code != 0 {
+			t.Fatalf("operator close = (code %d, handled %v); want (0,true) pre-L5; stderr=%s", code, handled, stderr.String())
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1 (operator path unchanged)", n)
+		}
+	})
+}
+
 func TestGcBdCloseSettlesFoldOwnedPass(t *testing.T) {
 	cityPath := tbHookGraphCity(t)
 	tbSeedClaimedPoolRow(t, cityPath)
@@ -327,15 +389,15 @@ func TestSettleLeaseFencedRetries(t *testing.T) {
 		cityPath := tbHookGraphCity(t)
 		tbSeedClaimedPoolRow(t, cityPath)
 		calls := 0
-		orig := settleTierBWork
-		settleTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output string) error {
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output, closer, closerID string, retryable bool) error {
 			calls++
 			if calls == 1 {
 				return graphstore.ErrLeaseFenced
 			}
-			return engine.SettleTierBWork(ctx, gs, streamID, activation, outcome, output)
+			return engine.SettleTierBWorkAs(ctx, gs, streamID, activation, outcome, output, closer, closerID, retryable)
 		}
-		defer func() { settleTierBWork = orig }()
+		defer func() { settleTierBWorkAs = orig }()
 
 		var stdout, stderr bytes.Buffer
 		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
@@ -353,11 +415,11 @@ func TestSettleLeaseFencedRetries(t *testing.T) {
 	t.Run("fence_persistent_loud", func(t *testing.T) {
 		cityPath := tbHookGraphCity(t)
 		tbSeedClaimedPoolRow(t, cityPath)
-		orig := settleTierBWork
-		settleTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(context.Context, *graphstore.Store, string, string, string, string, string, string, bool) error {
 			return graphstore.ErrLeaseFenced
 		}
-		defer func() { settleTierBWork = orig }()
+		defer func() { settleTierBWorkAs = orig }()
 
 		var stdout, stderr bytes.Buffer
 		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
@@ -380,15 +442,15 @@ func TestSettleRebuildRacedRetries(t *testing.T) {
 		cityPath := tbHookGraphCity(t)
 		tbSeedClaimedPoolRow(t, cityPath)
 		calls := 0
-		orig := settleTierBWork
-		settleTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output string) error {
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output, closer, closerID string, retryable bool) error {
 			calls++
 			if calls == 1 {
 				return graphstore.ErrRebuildRaced
 			}
-			return engine.SettleTierBWork(ctx, gs, streamID, activation, outcome, output)
+			return engine.SettleTierBWorkAs(ctx, gs, streamID, activation, outcome, output, closer, closerID, retryable)
 		}
-		defer func() { settleTierBWork = orig }()
+		defer func() { settleTierBWorkAs = orig }()
 
 		var stdout, stderr bytes.Buffer
 		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
@@ -406,11 +468,11 @@ func TestSettleRebuildRacedRetries(t *testing.T) {
 	t.Run("race_persistent_loud", func(t *testing.T) {
 		cityPath := tbHookGraphCity(t)
 		tbSeedClaimedPoolRow(t, cityPath)
-		orig := settleTierBWork
-		settleTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(context.Context, *graphstore.Store, string, string, string, string, string, string, bool) error {
 			return graphstore.ErrRebuildRaced
 		}
-		defer func() { settleTierBWork = orig }()
+		defer func() { settleTierBWorkAs = orig }()
 
 		var stdout, stderr bytes.Buffer
 		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)

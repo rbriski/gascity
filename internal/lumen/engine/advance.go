@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,6 +166,7 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 			reducer:       reducer,
 			state:         reducer.Zero(streamID),
 			host:          opts.Host,
+			input:         input,
 			snapshotEvery: opts.SnapshotEvery,
 		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -290,6 +292,16 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return nil
 	}
 
+	// A pool-mode retry/repeat loop (a do body under a PoolRouter): drive its
+	// park-aware attempt arm, which materializes ONE attempt at a time as claimable
+	// pool work and parks between attempts. A blocked loop skip-cascades through
+	// runUnit below (its attempts never materialize). An exec-bodied loop (no pool
+	// materialization) falls through to runUnit → runLoop, which runs its attempts
+	// inline in-pass exactly as Run does (Advance/Run parity).
+	if u.kind == unitLoop && loopPoolMode(u, opts) && !d.blocked(u) {
+		return d.advanceLoop(u, scope, nodeOutputs, opts)
+	}
+
 	// Materialize a READY pool-mode do as claimable work. A pool node whose
 	// blocking dep failed is NOT offered to the pool — it skip-cascades through
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
@@ -395,6 +407,143 @@ func (d *driver) depsSettled(u planUnit) bool {
 // ZERO role names: the decision is a do-kind + config-seam test, not a role check.
 func poolMode(u planUnit, opts Options) bool {
 	return opts.PoolRouter != nil && u.kind == unitLeaf && u.leaf.kind == ir.NodeDo
+}
+
+// loopPoolMode reports whether u is a retry/repeat loop whose body is a pool-mode
+// do — the case Advance drives through the park-aware advanceLoop arm. An
+// exec-bodied loop (or a do-bodied loop with a Host and no PoolRouter) runs its
+// attempts inline through runLoop instead.
+func loopPoolMode(u planUnit, opts Options) bool {
+	return opts.PoolRouter != nil && u.kind == unitLoop && u.loop != nil && u.loop.bodyIRKind == ir.NodeDo
+}
+
+// advanceLoop is Advance's park-aware attempt-loop arm (§4.1) for a pool-mode
+// retry/repeat: it materializes ONE body attempt at a time as claimable pool work
+// and PARKS on it, minting the next attempt only after the current one settles.
+// Each pass either settles the loop, mints exactly one attempt, or leaves a live
+// attempt in flight, so it is re-entrant and idempotent — a re-Advance with no new
+// settlement re-derives the same decision and the write-once appends dedupe.
+func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	spec := u.loop
+
+	// Ensure the loop node.activated (write-once): dependents gate on the loop node,
+	// and the seal condition keys on its settle.
+	if err := d.ensureLoopActivated(u); err != nil {
+		return err
+	}
+
+	// retry: evaluate the attempts budget ONCE. An invalid budget settles the loop
+	// failed{invalid_input} with zero attempts (reference parity).
+	maxAttempts := 0
+	if spec.irKind == ir.NodeRetry {
+		n, ok := evalAttempts(spec.attemptsExpr, d.loopScope(spec, 0, nil, nodeOutputs))
+		if !ok {
+			return d.settleLoop(u, OutcomeFailed, "", "invalid_input", nil, scope, nodeOutputs)
+		}
+		maxAttempts = n
+	}
+
+	// A live (materialized, unsettled) attempt is in flight — park on it.
+	if _, hasLive := d.liveAttempt(spec.bodyNodeID); hasLive {
+		return nil
+	}
+
+	settledAttempt, hasSettled := d.lastSettledAttempt(spec.bodyNodeID)
+	if !hasSettled {
+		// No attempt yet: mint attempt 0.
+		return d.materializeLoopAttempt(u, 0, maxAttempts, scope, opts)
+	}
+
+	// The highest attempt has settled: decide (settle the loop OR re-attempt). The
+	// decision is the shared closed-expression evaluation (loopDecide); it settles
+	// the loop itself on a stop, and on a continue we mint the next pool attempt.
+	bn := d.st().Nodes[activationForAttempt(spec.bodyNodeID, settledAttempt)]
+	cont, err := d.loopDecide(u, settledAttempt, maxAttempts, bn, scope, nodeOutputs)
+	if err != nil {
+		return err
+	}
+	if !cont {
+		return nil // loop settled inside loopDecide
+	}
+	return d.materializeLoopAttempt(u, settledAttempt+1, maxAttempts, scope, opts)
+}
+
+// ensureLoopActivated emits a loop node's node.activated once (write-once via the
+// idem token; a fold-state check avoids a redundant append attempt).
+func (d *driver) ensureLoopActivated(u planUnit) error {
+	if n := d.st().Nodes[u.activation]; n != nil {
+		return nil
+	}
+	if err := d.crashAt(crashBeforeActivate, u.activation); err != nil {
+		return err
+	}
+	return d.appendActivated(u)
+}
+
+// materializeLoopAttempt mints one pool attempt: it emits attempt.minted, binds
+// the 1-based iteration for a repeat body's prompt render (loop-local), and
+// materializes the synthesized per-attempt do as claimable Tier-B pool work. The
+// attempt is a NEW activation (bodyID:N) ⇒ fresh claim/settle tokens, so a fresh
+// worker claims each attempt.
+func (d *driver) materializeLoopAttempt(u planUnit, attempt, maxAttempts int, scope map[string]string, opts Options) error {
+	spec := u.loop
+	budget := lumenRepeatLoopCap
+	if spec.irKind == ir.NodeRetry {
+		budget = maxAttempts
+	}
+	remaining := budget - (attempt + 1)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if err := d.appendAttemptMinted(u.activation, attempt, remaining); err != nil {
+		return err
+	}
+
+	au := d.attemptUnit(u, attempt)
+	restore, had := "", false
+	if spec.irKind == ir.NodeRepeat {
+		restore, had = scope[spec.iterationName]
+		scope[spec.iterationName] = strconv.Itoa(attempt + 1)
+	}
+	err := d.materializePoolWork(au, scope, opts)
+	if spec.irKind == ir.NodeRepeat {
+		if had {
+			scope[spec.iterationName] = restore
+		} else {
+			delete(scope, spec.iterationName)
+		}
+	}
+	return err
+}
+
+// liveAttempt returns the highest-numbered activated-but-unsettled attempt of a
+// loop body node id, and whether one exists — the park signal.
+func (d *driver) liveAttempt(bodyNodeID string) (int, bool) {
+	best, found := -1, false
+	for act, n := range d.st().Nodes {
+		if activationNodeID(act) != bodyNodeID || n.Settled {
+			continue
+		}
+		if att := activationAttempt(act); att > best {
+			best, found = att, true
+		}
+	}
+	return best, found
+}
+
+// lastSettledAttempt returns the highest-numbered SETTLED attempt of a loop body
+// node id (numeric, not lexical), and whether one exists — the decision anchor.
+func (d *driver) lastSettledAttempt(bodyNodeID string) (int, bool) {
+	best, found := -1, false
+	for act, n := range d.st().Nodes {
+		if activationNodeID(act) != bodyNodeID || !n.Settled {
+			continue
+		}
+		if att := activationAttempt(act); att > best {
+			best, found = att, true
+		}
+	}
+	return best, found
 }
 
 // inFlightPoolWork returns, in canonical activation order, every pool-mode node

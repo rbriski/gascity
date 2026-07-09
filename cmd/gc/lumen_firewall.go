@@ -98,9 +98,13 @@ func (cr *CityRuntime) lumenClaimOrphanFirewall(ctx context.Context, gs *graphst
 			continue // grace not yet elapsed (a restart resets the clock — conservative)
 		}
 
-		// The DRIVER settles the stranded claim failed. The write-once token means a
-		// zombie's later close loses loud (ErrIdemTokenReuse → claim-conflict).
-		if err := engine.SettleTierBWork(ctx, gs, ref.StreamID, ref.Activation, engine.OutcomeFailed, "stranded: "+ref.Assignee); err != nil {
+		// The DRIVER settles the stranded claim failed as a RETRYABLE infrastructure
+		// strand (closer + closerID both "" = the controller-only authoritative override,
+		// retryable = true): under a retry-wrapped do the loop re-attempts it as a fresh
+		// activation; under repeat the outcome-agnostic cond re-attempts regardless. The
+		// write-once token + the closer-identity guard (name AND instance-id axes) mean a
+		// zombie's later close loses loud (ErrTierBNotClaimant / claim-conflict).
+		if err := engine.SettleTierBWorkAs(ctx, gs, ref.StreamID, ref.Activation, engine.OutcomeFailed, "stranded: "+ref.Assignee, "", "", true); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: lumen firewall: settling stranded %q: %v\n", cr.logPrefix, ref.Activation, err) //nolint:errcheck // best-effort stderr
 			continue
 		}

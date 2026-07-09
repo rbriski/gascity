@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -41,12 +42,26 @@ type nodeState struct {
 	Outcome          string   `json:"outcome,omitempty"`
 	Output           string   `json:"output,omitempty"`
 	InFrontier       bool     `json:"in_frontier,omitempty"`
+	// Retryable is the L5 attempt-loop classification folded from a settle: an
+	// engine-inline exec settle carrying exit ∈ exitMap.retryable, or a pool settle
+	// the firewall marked a retryable infrastructure strand. The retry arm reads it
+	// from the fold (not driver memory) to decide a re-attempt, so a re-Advance /
+	// resume re-derives the same decision. omitempty + a bool ⇒ clone() copies it by
+	// value and a non-retryable node serializes exactly as pre-L5 (DET-T-17).
+	Retryable bool `json:"retryable,omitempty"`
 	// DispatchMode is the Tier-B claimability marker (DispatchModePool for a
 	// worker-claimable node). Assignee is the worker that claimed it, folded from
 	// a Tier-B owned.admitted (P4.5). Both omitempty, so a non-Tier-B node
 	// serializes exactly as it did pre-P4.5.
 	DispatchMode string `json:"dispatch_mode,omitempty"`
 	Assignee     string `json:"assignee,omitempty"`
+	// ClaimantID is the claimant's instance-unique id (its GC_SESSION_ID), folded
+	// from the same owned.admitted as Assignee. Assignee is the session NAME (kept
+	// for the reconciler's session correlation); ClaimantID is the per-instance id
+	// the closer-identity guard keys on so a false-killed A's straggler close cannot
+	// settle the live attempt its same-named respawn B claimed (§4.3). omitempty, so
+	// a legacy/no-session claim (and every non-Tier-B node) serializes as pre-L5.
+	ClaimantID string `json:"claimant_id,omitempty"`
 	// Route and Prompt are the L0 pool-claim-contract fields (dispatch_mode=pool
 	// only): Route projects onto gc.routed_to metadata + the frontier row's route
 	// column, Prompt onto nodes.description. Carried in state so a drop+refold
@@ -291,6 +306,12 @@ func nodeProjectedMeta(act string, n *nodeState) map[string]string {
 		meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
 	} else {
 		meta = map[string]string{"kind": n.Kind, "activation": act}
+		// The claimant id is the closer-identity guard's read (readTierBNode) while
+		// the node is claimed-and-unsettled. Like `activation`, a settled row drops
+		// it (the settled branch above), and an unclaimed / legacy claim carries none.
+		if n.ClaimantID != "" {
+			meta[ClaimantIDMetaKey] = n.ClaimantID
+		}
 	}
 	if n.DispatchMode != "" {
 		meta[DispatchModeMetaKey] = n.DispatchMode
@@ -353,6 +374,25 @@ func activationNodeID(activation string) string {
 		return activation[:i]
 	}
 	return activation
+}
+
+// activationAttempt parses the trailing attempt index from an activation key
+// (nodeID + ":" + attempt). It is the numeric-ordering companion to
+// activationNodeID: the retry/repeat arm and reconstructOutputs use it to pick
+// the highest-numbered attempt of a node id, where a lexicographic sort would
+// wrongly rank "b:10" below "b:2". An absent (a bare stream-id run root) or
+// non-numeric trailing segment is attempt 0 — the single-attempt and legacy
+// shapes.
+func activationAttempt(activation string) int {
+	i := strings.LastIndex(activation, ":")
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(activation[i+1:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // ActivationNodeID is the exported bare-node-id derivation for projection

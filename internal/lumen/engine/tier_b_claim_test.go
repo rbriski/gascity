@@ -302,6 +302,210 @@ func TestTierBDoubleClaimIsWriteOnceLoudAtSubstrate(t *testing.T) {
 	}
 }
 
+// TestZombieAttempt0CloseCannotSettleAttempt1 (T-Z1) is the loud-loss proof: a
+// straggler worker that claimed attempt :0 (firewall-settled) cannot settle the
+// live attempt :1 — whether :1 is unclaimed or claimed by another worker — because
+// the resolve path hands a bare-id close back the LIVE activation and the
+// closer-identity guard refuses it. It also proves the FOLD is total: a crafted
+// owned.settled by a non-claimant folds to a defined no-op.
+func TestZombieAttempt0CloseCannotSettleAttempt1(t *testing.T) {
+	ctx := context.Background()
+
+	// Sub-case A: attempt :1 is UNCLAIMED. A zombie close (closer W0) still loses.
+	t.Run("unclaimed", func(t *testing.T) {
+		store := newStore(t)
+		act0 := materializeTierB(t, store) // summarize:0
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act0, "W0"); err != nil {
+			t.Fatalf("claim :0: %v", err)
+		}
+		// The firewall (driver override, closer "") settles :0 failed.
+		if err := engine.SettleTierBWork(ctx, store, tierBStream, act0, engine.OutcomeFailed, "stranded: W0"); err != nil {
+			t.Fatalf("firewall settle :0: %v", err)
+		}
+		// Mint attempt :1 (re-opens the bare id claimable).
+		act1, err := engine.MaterializeTierBWork(ctx, store, tierBStream, engine.TierBWorkSpec{
+			CreatedAt: tierBCreatedAt, NodeID: tierBNodeID, Kind: "do", Attempt: 1,
+		})
+		if err != nil || act1 != "summarize:1" {
+			t.Fatalf("mint :1 = %q, err %v; want summarize:1", act1, err)
+		}
+		before := countJournalType(t, store, tierBStream, engine.EventOwnedSettled)
+		err = engine.SettleTierBWorkAs(ctx, store, tierBStream, act1, engine.OutcomePass, "zombie-done", "W0", "", false)
+		if !errors.Is(err, engine.ErrTierBNotClaimant) {
+			t.Fatalf("zombie settle of unclaimed :1 = %v, want ErrTierBNotClaimant", err)
+		}
+		if after := countJournalType(t, store, tierBStream, engine.EventOwnedSettled); after != before {
+			t.Fatalf("zombie settle appended an event (%d -> %d); want none", before, after)
+		}
+	})
+
+	// Sub-case B: attempt :1 is CLAIMED BY W1. The zombie W0 close loses loudly, and
+	// a crafted owned.settled{assignee:W0} folds to a no-op (fold totality).
+	t.Run("claimed-by-another", func(t *testing.T) {
+		store := newStore(t)
+		act0 := materializeTierB(t, store)
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act0, "W0"); err != nil {
+			t.Fatalf("claim :0: %v", err)
+		}
+		if err := engine.SettleTierBWork(ctx, store, tierBStream, act0, engine.OutcomeFailed, "stranded: W0"); err != nil {
+			t.Fatalf("firewall settle :0: %v", err)
+		}
+		act1, err := engine.MaterializeTierBWork(ctx, store, tierBStream, engine.TierBWorkSpec{
+			CreatedAt: tierBCreatedAt, NodeID: tierBNodeID, Kind: "do", Attempt: 1,
+		})
+		if err != nil {
+			t.Fatalf("mint :1: %v", err)
+		}
+		if err := engine.ClaimTierBWork(ctx, store, tierBStream, act1, "W1"); err != nil {
+			t.Fatalf("W1 claim :1: %v", err)
+		}
+		// API guard: the zombie W0 close of the W1-claimed live attempt loses.
+		if err := engine.SettleTierBWorkAs(ctx, store, tierBStream, act1, engine.OutcomePass, "zombie", "W0", "", false); !errors.Is(err, engine.ErrTierBNotClaimant) {
+			t.Fatalf("zombie settle of W1-claimed :1 = %v, want ErrTierBNotClaimant", err)
+		}
+		// Fold totality: a crafted owned.settled{assignee:W0} on the W1-claimed handle
+		// folds to a no-op — the projection is not poisoned and the node stays claimed.
+		appendRaw(t, store, tierBStream, engine.EventOwnedSettled, "tier-b-settle:"+act1+":zombie", map[string]any{
+			"handle": act1, "kind": engine.OwnedKindTierB, "outcome": engine.OutcomePass, "output": "zombie", "assignee": "W0",
+		})
+		if err := store.RebuildTierA(ctx, engine.Reducer(), tierBStream); err != nil {
+			t.Fatalf("RebuildTierA poisoned by a crafted non-claimant settle: %v", err)
+		}
+		status, assignee, _, _ := projectedNode(t, store)
+		if status != engine.StatusClaimed || assignee != "W1" {
+			t.Fatalf("after crafted zombie settle {status:%q assignee:%q}, want {in_progress, W1} (settle by non-claimant folds to no-op)", status, assignee)
+		}
+		// The legit claimant W1 CAN still settle it.
+		if err := engine.SettleTierBWorkAs(ctx, store, tierBStream, act1, engine.OutcomePass, "real-done", "W1", "", false); err != nil {
+			t.Fatalf("legit W1 settle of :1: %v", err)
+		}
+	})
+}
+
+// TestSameNameZombieCloseCannotSettleFreshAttempt (H1) is the singleton-pool
+// false-kill pin, the hole T-Z1's DIFFERENT-name shape did not cover. Under a
+// canonical singleton pool identity (max_active_sessions=1, no namepool) a false-
+// killed instance A and its respawn B share ONE stable session NAME, so the closer-
+// identity guard's NAME axis cannot tell them apart. The instance-unique claimant id
+// (each session's GC_SESSION_ID) does: A's straggler close of the live attempt B
+// claimed carries A's id, which mismatches B's recorded claimant id, so the guard
+// REJECTS it loudly (ErrTierBNotClaimant, no append) and the run stays sealed by the
+// real claimant B. Same shape as T-Z1 but same-NAME / different-ID. Before the id
+// axis existed this settle would PASS the name check and double-settle the fresh
+// attempt (H1) — this test is that regression's pin.
+func TestSameNameZombieCloseCannotSettleFreshAttempt(t *testing.T) {
+	ctx := context.Background()
+	const sharedName = "pool-worker" // A and its respawn B share one stable name
+
+	// Attempt :0 claimed by A (name=pool-worker, id=A-id), then firewall-settled.
+	store := newStore(t)
+	act0 := materializeTierB(t, store) // summarize:0
+	if err := engine.ClaimTierBWorkAs(ctx, store, tierBStream, act0, sharedName, "A-id"); err != nil {
+		t.Fatalf("A claim :0: %v", err)
+	}
+	if err := engine.SettleTierBWork(ctx, store, tierBStream, act0, engine.OutcomeFailed, "stranded: "+sharedName); err != nil {
+		t.Fatalf("firewall settle :0: %v", err)
+	}
+	// Mint attempt :1; B (SAME name, DIFFERENT id) claims it.
+	act1, err := engine.MaterializeTierBWork(ctx, store, tierBStream, engine.TierBWorkSpec{
+		CreatedAt: tierBCreatedAt, NodeID: tierBNodeID, Kind: "do", Attempt: 1,
+	})
+	if err != nil || act1 != "summarize:1" {
+		t.Fatalf("mint :1 = %q, err %v; want summarize:1", act1, err)
+	}
+	if err := engine.ClaimTierBWorkAs(ctx, store, tierBStream, act1, sharedName, "B-id"); err != nil {
+		t.Fatalf("B claim :1: %v", err)
+	}
+	// DET-T-17 with the new meta present: a claimed node projects a claimant_id
+	// node-metadata key, and a drop+refold must reproduce it byte-identically.
+	assertProjectionEqualsRefold(t, store, tierBStream)
+
+	// The zombie A closes the LIVE attempt :1 with the SHARED name but A's OWN id: the
+	// name axis passes (names match), but the id axis catches the instance mismatch.
+	before := countJournalType(t, store, tierBStream, engine.EventOwnedSettled)
+	err = engine.SettleTierBWorkAs(ctx, store, tierBStream, act1, engine.OutcomePass, "zombie", sharedName, "A-id", false)
+	if !errors.Is(err, engine.ErrTierBNotClaimant) {
+		t.Fatalf("same-name zombie settle of B-claimed :1 = %v, want ErrTierBNotClaimant (id-axis guard)", err)
+	}
+	if after := countJournalType(t, store, tierBStream, engine.EventOwnedSettled); after != before {
+		t.Fatalf("same-name zombie settle appended an event (%d -> %d); want none", before, after)
+	}
+	if status, assignee, _, _ := projectedNode(t, store); status != engine.StatusClaimed || assignee != sharedName {
+		t.Fatalf("after zombie settle {status:%q assignee:%q}, want {in_progress, %q} (B's claim stands)", status, assignee, sharedName)
+	}
+
+	// Fold totality: a crafted owned.settled{assignee:shared, claimant_id:A-id} on the
+	// B-claimed handle folds to a DEFINED no-op — RebuildTierA is not poisoned.
+	appendRaw(t, store, tierBStream, engine.EventOwnedSettled, "tier-b-settle:"+act1+":zombie", map[string]any{
+		"handle": act1, "kind": engine.OwnedKindTierB, "outcome": engine.OutcomePass, "output": "zombie",
+		"assignee": sharedName, "claimant_id": "A-id",
+	})
+	if err := store.RebuildTierA(ctx, engine.Reducer(), tierBStream); err != nil {
+		t.Fatalf("RebuildTierA poisoned by a crafted same-name/different-id settle: %v", err)
+	}
+	if status, assignee, _, _ := projectedNode(t, store); status != engine.StatusClaimed || assignee != sharedName {
+		t.Fatalf("after crafted same-name zombie settle {status:%q assignee:%q}, want {in_progress, %q}", status, assignee, sharedName)
+	}
+
+	// The real claimant B (same name, MATCHING id) settles cleanly — the run is B's.
+	if err := engine.SettleTierBWorkAs(ctx, store, tierBStream, act1, engine.OutcomePass, "real-done", sharedName, "B-id", false); err != nil {
+		t.Fatalf("legit B settle of :1 (same name, matching id): %v", err)
+	}
+	if status, _, _, _ := projectedNode(t, store); status != "done" {
+		t.Fatalf("after B settle status=%q, want done", status)
+	}
+}
+
+// TestFreshTokensPerAttempt (T-Z2) proves per-attempt claim/settle tokens: attempt
+// :0 and :1 carry DISTINCT idem tokens, so W1's claim of :1 after :0 settled never
+// collides with attempt 0's tokens (no spurious ErrIdemTokenReuse).
+func TestFreshTokensPerAttempt(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	act0 := materializeTierB(t, store)
+	if err := engine.ClaimTierBWork(ctx, store, tierBStream, act0, "W0"); err != nil {
+		t.Fatalf("claim :0: %v", err)
+	}
+	if err := engine.SettleTierBWork(ctx, store, tierBStream, act0, engine.OutcomeFailed, "no"); err != nil {
+		t.Fatalf("settle :0: %v", err)
+	}
+	act1, err := engine.MaterializeTierBWork(ctx, store, tierBStream, engine.TierBWorkSpec{
+		CreatedAt: tierBCreatedAt, NodeID: tierBNodeID, Kind: "do", Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("mint :1: %v", err)
+	}
+	// W1 claims :1 — must succeed (attempt 0's tokens never collide).
+	if err := engine.ClaimTierBWork(ctx, store, tierBStream, act1, "W1"); err != nil {
+		t.Fatalf("W1 claim :1 (spurious idem reuse from :0?): %v", err)
+	}
+	if err := engine.SettleTierBWork(ctx, store, tierBStream, act1, engine.OutcomePass, "ok"); err != nil {
+		t.Fatalf("settle :1: %v", err)
+	}
+	// Distinct per-attempt tokens in the journal.
+	toks := map[string]bool{}
+	rows, err := store.DB().QueryContext(ctx, `SELECT idem_token FROM journal WHERE stream_id = ? ORDER BY seq`, tierBStream)
+	if err != nil {
+		t.Fatalf("query idem tokens: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var tok string
+		if err := rows.Scan(&tok); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		toks[tok] = true
+	}
+	for _, want := range []string{
+		"tier-b-claim:summarize:0", "tier-b-settle:summarize:0",
+		"tier-b-claim:summarize:1", "tier-b-settle:summarize:1",
+	} {
+		if !toks[want] {
+			t.Fatalf("journal missing per-attempt token %q", want)
+		}
+	}
+}
+
 // TestTierBDropRefoldIdentity is the DROP+refold proof for the claim/settle arms:
 // the incremental fold and the full-state ProjectDelta produce identical Tier-A
 // rows (DET-T-17), so the projection is a pure fold with no hidden state.

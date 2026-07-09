@@ -59,8 +59,10 @@ const tierBHookStoreName = config.ReservedGraphJournalRigName
 // package var so a test can inject the error-mapping branches — ErrTierBNotClaimable
 // (skip, no event), a raw ErrLeaseFenced and a generic error (both drain as
 // claims_errored, never laundered to no_work) — that a real single-writer engine
-// reaches only under contention, without racing a live claim.
-var claimTierBWork = engine.ClaimTierBWork
+// reaches only under contention, without racing a live claim. It routes through the
+// As variant so the claim records the claimant's instance-unique id (GC_SESSION_ID),
+// the closer-identity guard's key against a same-named straggler's later close (§4.3).
+var claimTierBWork = engine.ClaimTierBWorkAs
 
 // tierBHookStore builds the federated Tier-B hook store for a graph-scoped city,
 // or reports present=false for a city with no graph scope (leaving a non-Lumen
@@ -69,7 +71,7 @@ var claimTierBWork = engine.ClaimTierBWork
 // crash-recovery-before-routed tier order — and its claim translates a worker's
 // claim into an engine owned.admitted append. It is appended LAST in the store
 // slice so existing bd-store precedence is preserved exactly.
-func tierBHookStore(cityPath string, routeTargets, identityCandidates []string, assignee string) (hookStore, bool) {
+func tierBHookStore(cityPath string, routeTargets, identityCandidates []string, assignee, claimantID string) (hookStore, bool) {
 	if !cityHasGraphScope(cityPath) {
 		return hookStore{}, false
 	}
@@ -82,11 +84,13 @@ func tierBHookStore(cityPath string, routeTargets, identityCandidates []string, 
 		claim: func(ctx context.Context, _ string, _ []string, beadID, claimant string) (beads.Bead, bool, error) {
 			// The claimant is the per-call assignee the federation passes
 			// (opts.Assignee); the store-construction assignee is a defensive fallback
-			// for the (never-hit in production) empty-arg case.
+			// for the (never-hit in production) empty-arg case. claimantID is the
+			// claiming session's instance-unique id (GC_SESSION_ID), captured here
+			// because the federation's claim contract only carries the NAME.
 			if strings.TrimSpace(claimant) == "" {
 				claimant = assignee
 			}
-			return claimTierBWorkBead(ctx, cityPath, beadID, claimant)
+			return claimTierBWorkBead(ctx, cityPath, beadID, claimant, claimantID)
 		},
 	}
 	return st, true
@@ -149,7 +153,7 @@ func tierBHookQuery(cityPath string, routeTargets, identityCandidates []string) 
 // takes a *graphstore.Store, which the beads claim surface deliberately does not
 // expose) and re-reads through that same handle so the returned bead reflects the
 // just-committed claim.
-func claimTierBWorkBead(ctx context.Context, cityPath, beadID, assignee string) (beads.Bead, bool, error) {
+func claimTierBWorkBead(ctx context.Context, cityPath, beadID, assignee, claimantID string) (beads.Bead, bool, error) {
 	backend, err := loadGraphJournalBackendConfig(cityPath)
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("tier-b claim: loading graph backend: %w", err)
@@ -168,7 +172,7 @@ func claimTierBWorkBead(ctx context.Context, cityPath, beadID, assignee string) 
 		return beads.Bead{}, false, nil
 	}
 
-	claimErr := claimTierBWithFenceRetry(ctx, gs, ref, assignee, beadID)
+	claimErr := claimTierBWithFenceRetry(ctx, gs, ref, assignee, beadID, claimantID)
 	switch {
 	case claimErr == nil:
 		return tierBReadClaimed(ctx, gs, beadID)
@@ -195,8 +199,8 @@ func claimTierBWorkBead(ctx context.Context, cityPath, beadID, assignee string) 
 // advanced the head/epoch) and re-claims cooperatively. A persistent race is returned
 // unwrapped for the caller's conflict-shaped mapping; a row that settled or vanished
 // under us surfaces the race for the same mapping rather than looping.
-func claimTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, assignee, beadID string) error {
-	err := claimTierBWork(ctx, gs, ref.StreamID, ref.Activation, assignee)
+func claimTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, assignee, beadID, claimantID string) error {
+	err := claimTierBWork(ctx, gs, ref.StreamID, ref.Activation, assignee, claimantID)
 	for attempt := 0; attempt < tierBFenceRetries && isTierBFenceRetryable(err); attempt++ {
 		time.Sleep(tierBFenceBackoff)
 		r2, ok, rerr := engine.ResolveTierBWorkRef(ctx, gs, beadID)
@@ -206,7 +210,7 @@ func claimTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref eng
 		if !ok || r2.DispatchMode != engine.DispatchModePool || r2.Settled || r2.Activation == "" {
 			return err // the row moved out from under us — surface the race for mapping
 		}
-		err = claimTierBWork(ctx, gs, r2.StreamID, r2.Activation, assignee)
+		err = claimTierBWork(ctx, gs, r2.StreamID, r2.Activation, assignee, claimantID)
 	}
 	return err
 }

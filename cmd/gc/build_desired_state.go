@@ -830,6 +830,37 @@ func buildDesiredStateWithSessionBeads(
 				}
 			}
 		}
+		// Lumen journal-frontier demand: the shell/native `bd ready` probe cannot see
+		// the graph journal, so the ready pool-mode Tier-B rows are counted here and
+		// merged with the same clamp + mergeScaleCheckDemand treatment as the default
+		// probe. StoreRefs point at the graph-journal store so the launch path resolves
+		// each work bead through it. An unopenable journal marks its templates partial
+		// (drain suppression) rather than asserting an authoritative 0.
+		if lumenTemplates := templateNamesFromScaleTargets(defaultScaleTargets); len(lumenTemplates) > 0 {
+			lumenCounts, lumenDemand, lumenPartials, lumenErr := lumenScaleCheckDemand(cityPath, lumenTemplates)
+			if lumenErr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", lumenErr) //nolint:errcheck
+			}
+			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, lumenPartials)
+			if scaleCheckCounts == nil {
+				scaleCheckCounts = make(map[string]int)
+			}
+			if scaleCheckDemandByTemplate == nil {
+				scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
+			}
+			for template, count := range lumenCounts {
+				if coldWakeTemplates[template] && count > 1 {
+					count = 1
+				}
+				if namedOnDemandTemplates[template] && count > 1 {
+					count = 1
+				}
+				if count > scaleCheckCounts[template] {
+					scaleCheckCounts[template] = count
+				}
+				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], lumenDemand[template], count)
+			}
+		}
 		if len(defaultNamedScaleTargets) > 0 {
 			var namedErrs []error
 			var partialTemplates map[string]bool

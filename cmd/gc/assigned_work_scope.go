@@ -236,6 +236,18 @@ func filterAssignedWorkBeadsForSessionWake(
 		if assignee == "" {
 			continue
 		}
+		if assignedWorkStoreRefs[i] == tierBHookStoreName {
+			// A fold-owned journal row is route/assignment-addressed, not
+			// store-addressed (the same bypass as assignedWorkIndexReachableFromAgent):
+			// its journal store ref never equals a configured rig, so the per-ref match
+			// below would DROP it and an asleep-mid-claim pool session (a city
+			// stop/start — the L2 crash-resume scenario) would never re-wake, then be
+			// classified stranded and firewall-failed. The non-empty assignee match here
+			// IS its reachability.
+			filtered = append(filtered, wb)
+			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+			continue
+		}
 		if _, ok := crossStore[assignee]; ok {
 			// City-scoped assignee: reachable from any store (vp-kvp).
 			filtered = append(filtered, wb)

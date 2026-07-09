@@ -84,6 +84,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
 		make(chan struct{}, 1),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -186,6 +187,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
 		make(chan struct{}, 1),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -281,6 +283,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
 		make(chan struct{}, 1),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -363,6 +366,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
 		make(chan struct{}, 1),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)

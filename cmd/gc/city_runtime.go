@@ -118,6 +118,8 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
+	lumenRunsCh         chan struct{}                // non-blocking signal for the lumen-runs-only tick
+	lumen               *lumenRuntime                // controller-loop state for driving Lumen runs (lazy; run goroutine only)
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
@@ -183,6 +185,7 @@ type CityRuntimeParams struct {
 	ReloadReqCh         chan reloadRequest      // may be nil; receives structured reload commands
 	PokeCh              chan struct{}           // may be nil; triggers immediate tick
 	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
+	LumenRunsCh         chan struct{}           // may be nil; triggers the lumen-runs tick
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
 	ManagedDoltHealth   func(string) error
@@ -330,6 +333,12 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
+		lumenRunsCh: func() chan struct{} {
+			if p.LumenRunsCh != nil {
+				return p.LumenRunsCh
+			}
+			return make(chan struct{}, 1)
+		}(),
 		nudgeWakeCh:       make(chan struct{}, 1),
 		onStarted:         p.OnStarted,
 		onStatus:          p.OnStatus,
@@ -364,6 +373,14 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
+	// The Lumen-runs loop's graph store is opened lazily inside the select loop's
+	// lumen-runs ticks and touched ONLY on this (reconciler/run) goroutine. Close it
+	// here, on the goroutine that owns it, when the loop returns — never from
+	// shutdown(), which a forced stop runs on the supervisor goroutine (that would
+	// race / use-after-close a run goroutine still mid-tick). A truly-wedged run that
+	// never returns leaks the handle, which is strictly safer than closing a store the
+	// wedged goroutine still holds.
+	defer cr.closeLumenGraphStore()
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -722,8 +739,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// behaves identically to the pre-debounce implementation.
 	pokeDB := newTickDebouncer()
 	ctrlDB := newTickDebouncer()
+	lumenDB := newTickDebouncer()
 	defer pokeDB.cancelPending()
 	defer ctrlDB.cancelPending()
+	defer lumenDB.cancelPending()
 
 	for {
 		// Re-read on every iteration so a hot reload of city.toml takes
@@ -735,7 +754,14 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// pending event-driven fires are redundant — drop them.
 			pokeDB.cancelPending()
 			ctrlDB.cancelPending()
+			lumenDB.cancelPending()
 			runTick("patrol")
+			// runTick("patrol") -> cr.tick knows nothing about Lumen, so the
+			// lumen-runs backstop is an explicit patrol-branch call (the level-
+			// trigger head-compare that catches any missed lumen-runs poke).
+			cr.safeTick(func() {
+				lumenRunsTickFn(cr, ctx)
+			}, "lumen-runs-patrol")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Arm the debouncer; the deferred fire runs runTick("poke")
@@ -753,6 +779,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
 			}, "control-dispatcher")
+		case <-cr.lumenRunsCh:
+			lumenDB.arm(debounce)
+		case <-lumenDB.fired():
+			cr.safeTick(func() {
+				lumenRunsTickFn(cr, ctx)
+			}, "lumen-runs")
 		case req := <-cr.convergenceReqCh:
 			// Low-latency path: process convergence commands between ticks.
 			// processConvergenceRequests() in tick() drains any that arrived
@@ -3411,6 +3443,11 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		// NB: the Lumen-runs loop's graph store is NOT closed here. It is opened and
+		// used only on the run goroutine, and a forced stop runs shutdown() on the
+		// SUPERVISOR goroutine (cmd_supervisor.go) — closing it here would race /
+		// use-after-close a run goroutine still mid-tick. run() closes it in its own
+		// deferred cleanup, on the goroutine that owns it (see run()).
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

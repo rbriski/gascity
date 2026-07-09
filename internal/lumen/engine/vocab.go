@@ -211,13 +211,25 @@ const (
 // runStartedPayload is the body of EventRunStarted. ir_hash pins the IR
 // provenance (resume refuses a differing IR); formula_ref / input_hash are
 // provenance fields the P1 upcast leaves empty.
+//
+// DefaultRoute is the L2 controller-loop provenance field: the run's default pool
+// route for do nodes with no agentRef, stamped by EnqueueRun so a controller
+// restart can recover which pool the run's do work targets (the journal pins
+// ir_hash/input_hash/formula_ref but carried no route). It is additive and
+// omitempty, and — like formula_ref — it is folded by NO reducer arm
+// (applyRunStarted ignores it), so it changes no state or projection: an old
+// journal without it folds identically (the field decodes to ""), and drop+refold
+// stays byte-identical. That is why it needs no reducerVersion bump (the same
+// additive-omitempty precedent as input_hash in P4.3 and the Tier-B fields in
+// P4.5).
 type runStartedPayload struct {
-	RootID     string `json:"root_id"`
-	Name       string `json:"name"`
-	IRHash     string `json:"ir_hash,omitempty"`
-	FormulaRef string `json:"formula_ref,omitempty"`
-	InputHash  string `json:"input_hash,omitempty"`
-	CreatedAt  string `json:"created_at"`
+	RootID       string `json:"root_id"`
+	Name         string `json:"name"`
+	IRHash       string `json:"ir_hash,omitempty"`
+	FormulaRef   string `json:"formula_ref,omitempty"`
+	InputHash    string `json:"input_hash,omitempty"`
+	DefaultRoute string `json:"default_route,omitempty"`
+	CreatedAt    string `json:"created_at"`
 }
 
 // nodeActivatedPayload is the body of EventNodeActivated. After carries the

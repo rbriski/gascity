@@ -130,6 +130,7 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	lumenRunsCh chan struct{},
 ) (net.Listener, error) {
 	sockPath := controllerSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
@@ -147,7 +148,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, lumenRunsCh)
 		}
 	}()
 	return lis, nil
@@ -167,6 +168,7 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	lumenRunsCh chan struct{},
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -209,6 +211,14 @@ func handleControllerConn(
 		case line == "control-dispatcher":
 			select {
 			case controlDispatcherCh <- struct{}{}:
+			default:
+			}
+			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case line == "lumen-runs":
+			// Cross-process poke of the Lumen-runs loop (gc lumen sling / gc bd
+			// close). Non-blocking send: a pending fire collapses with this one.
+			select {
+			case lumenRunsCh <- struct{}{}:
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
@@ -1269,11 +1279,12 @@ func runController(
 	reloadReqCh := make(chan reloadRequest)
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
+	lumenRunsCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, lumenRunsCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1325,6 +1336,7 @@ func runController(
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,
+		LumenRunsCh:             lumenRunsCh,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})

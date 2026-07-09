@@ -359,12 +359,13 @@ func TestTierBConcurrentClaimExactlyOneWins(t *testing.T) {
 }
 
 // TestTierBClaimBeadErrorMapping pins claimTierBWorkBead's mapping of each engine
-// claim error onto the hookClaimFunc contract, injected through the claim seam
-// (a single-writer engine reaches ErrLeaseFenced / generic failures only under
-// contention): ErrTierBNotClaimable skips silently as (zero, false, nil) with no
-// event; a raw ErrLeaseFenced and a generic error both surface as an error (drained
-// by the federation as claims_errored, never laundered into no_work); none of the
-// three append an owned.admitted.
+// claim error onto the hookClaimFunc contract, injected through the claim seam:
+// ErrTierBNotClaimable skips silently as (zero, false, nil) with no event; a
+// generic error surfaces as an error (drained by the federation as claims_errored,
+// never laundered into no_work); neither appends an owned.admitted. A raw
+// ErrLeaseFenced is NO LONGER a claims_errored error post-L2 — it is a cooperative
+// re-acquire race that retries then maps to the conflict shape; that behavior is
+// pinned by TestClaimLeaseFencedRetriesThenConflictShape (S17).
 func TestTierBClaimBeadErrorMapping(t *testing.T) {
 	genericErr := errors.New("tier-b claim boom")
 	cases := []struct {
@@ -374,7 +375,6 @@ func TestTierBClaimBeadErrorMapping(t *testing.T) {
 		wantErrIs error
 	}{
 		{name: "not_claimable_skips_no_event", injected: engine.ErrTierBNotClaimable, wantErr: false},
-		{name: "lease_fenced_errors_no_launder", injected: graphstore.ErrLeaseFenced, wantErr: true, wantErrIs: graphstore.ErrLeaseFenced},
 		{name: "generic_error_errors", injected: genericErr, wantErr: true, wantErrIs: genericErr},
 	}
 	for _, tc := range cases {
@@ -447,4 +447,116 @@ func TestTierBCrashRecoveryTierAdoptsOwnInProgress(t *testing.T) {
 	if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedAdmitted); n != 1 {
 		t.Fatalf("owned.admitted count = %d, want 1 (adopted, not re-claimed)", n)
 	}
+}
+
+// TestClaimLeaseFencedRetriesThenConflictShape (T-F1) pins the S17 claim fence
+// mapping: a single lease fence is retried and the re-claim succeeds; a persistent
+// fence maps to the conflict shape (winner, false, nil) — never claims_errored for a
+// pure re-acquire race.
+func TestClaimLeaseFencedRetriesThenConflictShape(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fence_once_retries_success", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbHookSeedParked(t, cityPath)
+		calls := 0
+		orig := claimTierBWork
+		claimTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, assignee string) error {
+			calls++
+			if calls == 1 {
+				return graphstore.ErrLeaseFenced
+			}
+			return engine.ClaimTierBWork(ctx, gs, streamID, activation, assignee) // the retry lands
+		}
+		defer func() { claimTierBWork = orig }()
+
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		if err != nil || !ok {
+			t.Fatalf("fence-once claim = (bead=%q ok=%v err=%v), want a successful retry", bead.ID, ok, err)
+		}
+		if calls < 2 {
+			t.Fatalf("claim calls = %d, want >= 2 (a fence must retry)", calls)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedAdmitted); n != 1 {
+			t.Fatalf("owned.admitted = %d, want 1 (retry claimed exactly once)", n)
+		}
+	})
+
+	t.Run("fence_persistent_conflict_shape", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbHookSeedParked(t, cityPath)
+		orig := claimTierBWork
+		claimTierBWork = func(context.Context, *graphstore.Store, string, string, string) error {
+			return graphstore.ErrLeaseFenced
+		}
+		defer func() { claimTierBWork = orig }()
+
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		if err != nil {
+			t.Fatalf("persistent fence surfaced an error (would drain claims_errored): %v", err)
+		}
+		if ok {
+			t.Fatalf("persistent fence reported success (bead=%q); want a conflict-shaped rejection", bead.ID)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedAdmitted); n != 0 {
+			t.Fatalf("owned.admitted = %d, want 0 (no claim landed on a persistent fence)", n)
+		}
+	})
+}
+
+// TestClaimRebuildRacedRetriesThenConflictShape (F2) pins ErrRebuildRaced on the
+// claim path exactly like a lease fence: a concurrent driver append that raced the
+// claim's Tier-A projection rebuild is a transient multi-writer race (the engine's
+// own retry contract classifies it, advance_race_test.go), NOT a hard failure. A
+// single race retries and the re-claim succeeds; a persistent race maps to the
+// conflict shape (winner, false, nil) — never claims_errored.
+func TestClaimRebuildRacedRetriesThenConflictShape(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("race_once_retries_success", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbHookSeedParked(t, cityPath)
+		calls := 0
+		orig := claimTierBWork
+		claimTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, assignee string) error {
+			calls++
+			if calls == 1 {
+				return graphstore.ErrRebuildRaced
+			}
+			return engine.ClaimTierBWork(ctx, gs, streamID, activation, assignee) // the retry lands
+		}
+		defer func() { claimTierBWork = orig }()
+
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		if err != nil || !ok {
+			t.Fatalf("race-once claim = (bead=%q ok=%v err=%v), want a successful retry", bead.ID, ok, err)
+		}
+		if calls < 2 {
+			t.Fatalf("claim calls = %d, want >= 2 (a rebuild race must retry)", calls)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedAdmitted); n != 1 {
+			t.Fatalf("owned.admitted = %d, want 1 (retry claimed exactly once, idem token)", n)
+		}
+	})
+
+	t.Run("race_persistent_conflict_shape", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbHookSeedParked(t, cityPath)
+		orig := claimTierBWork
+		claimTierBWork = func(context.Context, *graphstore.Store, string, string, string) error {
+			return graphstore.ErrRebuildRaced
+		}
+		defer func() { claimTierBWork = orig }()
+
+		bead, ok, err := claimTierBWorkBead(ctx, cityPath, "hello", "worker-a")
+		if err != nil {
+			t.Fatalf("persistent rebuild race surfaced an error (would drain claims_errored): %v", err)
+		}
+		if ok {
+			t.Fatalf("persistent rebuild race reported success (bead=%q); want a conflict-shaped rejection", bead.ID)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedAdmitted); n != 0 {
+			t.Fatalf("owned.admitted = %d, want 0 (no claim landed on a persistent race)", n)
+		}
+	})
 }

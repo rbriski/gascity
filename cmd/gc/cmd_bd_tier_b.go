@@ -5,12 +5,17 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
+
+// settleTierBWork is the engine settle seam interceptTierBClose routes through, a
+// package var so a test can inject a lease fence to exercise the bounded retry.
+var settleTierBWork = engine.SettleTierBWork
 
 // openTierBWriteStore opens the write-capable journal graph store a Tier-B settle
 // needs (SettleTierBWork takes a *graphstore.Store, which the read-only beads
@@ -129,14 +134,39 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 			fmt.Fprintf(stderr, "gc bd: bead %q already settled %q; refusing a divergent re-close to %q\n", id, ref.Outcome, mapped) //nolint:errcheck
 			return 1, true
 		}
-		if err := engine.SettleTierBWork(ctx, gs, ref.StreamID, ref.Activation, mapped, ""); err != nil {
+		if err := settleTierBWithFenceRetry(ctx, gs, ref, id, mapped); err != nil {
 			fmt.Fprintf(stderr, "gc bd: settling Tier-B bead %q: %v\n", id, err) //nolint:errcheck
 			return 1, true
 		}
 	}
-	// Best-effort: nudge the controller so a parked run re-Advances promptly.
-	_ = pokeController(cityPath)
+	// Best-effort: nudge the controller's Lumen-runs loop so the parked run re-Advances
+	// promptly (the DRIVER must wake, not the general reconciler — S7). A missed poke
+	// costs one patrol interval, never correctness.
+	_ = pokeLumenRuns(cityPath)
 	return 0, true
+}
+
+// settleTierBWithFenceRetry settles a Tier-B row, retrying a bounded number of times
+// on a lease fence OR a Tier-A rebuild race (both cooperative driver⟷settle races,
+// see isTierBFenceRetryable). The write-once settle token makes each retry idempotent
+// — a settle that committed but whose projection rebuild raced dedupes to success. A
+// persistent race surfaces as a loud, re-runnable close error.
+func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, beadID, outcome string) error {
+	err := settleTierBWork(ctx, gs, ref.StreamID, ref.Activation, outcome, "")
+	for attempt := 0; attempt < tierBFenceRetries && isTierBFenceRetryable(err); attempt++ {
+		time.Sleep(tierBFenceBackoff)
+		r2, ok, rerr := engine.ResolveTierBWorkRef(ctx, gs, beadID)
+		if rerr != nil {
+			return rerr
+		}
+		if !ok || r2.Settled || r2.Activation == "" {
+			// The row settled (our partial landed, or a racer won): the projection-level
+			// dedup in interceptTierBClose already covers a re-close, so treat as done.
+			return nil
+		}
+		err = settleTierBWork(ctx, gs, r2.StreamID, r2.Activation, outcome, "")
+	}
+	return err
 }
 
 // interceptTierBShow serves a read-only `gc bd show <id>` of a fold-owned row from

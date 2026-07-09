@@ -635,3 +635,36 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
 	}
 }
+
+// TestSessionWakeKeepsJournalRefRows (T-F3) is the S18 regression pin: a
+// "graph-journal"-ref claimed row assigned to a slept pool session must SURVIVE
+// filterAssignedWorkBeadsForSessionWake — otherwise an asleep-mid-claim session
+// (a city stop/start) never re-wakes, is classified stranded, and firewall-failed.
+// Fails before the tierBHookStoreName bypass, passes after.
+func TestSessionWakeKeepsJournalRefRows(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "claude", Dir: "rig"}},
+	}
+	// A slept pool session owned by worker-a.
+	sessions := []beads.Bead{{
+		ID:     "sess-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "rig/claude",
+			"session_name": "worker-a",
+		},
+	}}
+	// A claimed fold-owned journal row assigned to worker-a, store ref graph-journal.
+	work := []beads.Bead{{ID: "hello", Status: "in_progress", Assignee: "worker-a"}}
+	storeRefs := []string{tierBHookStoreName}
+
+	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, sessionInfosFromBeads(sessions), work, storeRefs)
+	if len(got) != 1 || got[0].ID != "hello" {
+		t.Fatalf("journal-ref claimed row was DROPPED by the wake filter (drains the mid-claim session): got %#v", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != tierBHookStoreName {
+		t.Fatalf("filtered refs = %#v, want [graph-journal] aligned", gotRefs)
+	}
+}

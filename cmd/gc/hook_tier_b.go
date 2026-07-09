@@ -8,11 +8,45 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
+
+// tierBFenceRetries bounds cooperative re-claim/re-settle attempts after a lease
+// fence — a driver (engine.Advance) re-acquire bumped the epoch between the
+// claim/settle's epoch read and its append. The fence is a retry signal, not a
+// terminal failure: between Advances the stream is unheld, so a bounded re-read +
+// re-append lands cooperatively.
+const tierBFenceRetries = 2
+
+// tierBFenceBackoff is the pause between fence retries (a package var for tests).
+var tierBFenceBackoff = 5 * time.Millisecond
+
+// isTierBFenceRetryable reports whether a claim/settle append error is a cooperative
+// multi-writer race the bounded re-resolve+retry should chase rather than surface as
+// a hard failure. Two shapes qualify, both raised only under a concurrent driver
+// (engine.Advance):
+//
+//   - ErrLeaseFenced: a driver re-acquire bumped the writer-lease epoch between this
+//     append's CurrentLeaseEpoch read and its commit, fencing the cooperative append
+//     (which never committed).
+//   - ErrRebuildRaced: this append DID commit, but a concurrent driver append landed
+//     during the claim/settle's Tier-A projection rebuild (appendAndProject →
+//     RebuildTierA's TOCTOU recheck). The event is durable and the projection
+//     converges on the next fold; a re-resolve+retry re-appends idempotently under
+//     the write-once claim/settle token (byte-identical replay dedupes to success)
+//     and re-runs the rebuild.
+//
+// Treating both identically matches the engine's own retry contract (the
+// isRetryableRaceErr the driver⟷claimant race suite asserts, advance_race_test.go):
+// a committed-but-rebuild-raced claim/settle must NOT be reported as claims_errored /
+// a non-zero close.
+func isTierBFenceRetryable(err error) bool {
+	return errors.Is(err, graphstore.ErrLeaseFenced) || errors.Is(err, graphstore.ErrRebuildRaced)
+}
 
 // tierBHookStoreName identifies the Tier-B journal leg among the federated hook
 // stores. It is a fixed marker, not a role name.
@@ -131,11 +165,15 @@ func claimTierBWorkBead(ctx context.Context, cityPath, beadID, assignee string) 
 		return beads.Bead{}, false, nil
 	}
 
-	claimErr := claimTierBWork(ctx, gs, ref.StreamID, ref.Activation, assignee)
+	claimErr := claimTierBWithFenceRetry(ctx, gs, ref, assignee, beadID)
 	switch {
 	case claimErr == nil:
 		return tierBReadClaimed(ctx, gs, beadID)
-	case errors.Is(claimErr, engine.ErrTierBAlreadyClaimed), errors.Is(claimErr, engine.ErrTierBClaimConflict):
+	case errors.Is(claimErr, engine.ErrTierBAlreadyClaimed), errors.Is(claimErr, engine.ErrTierBClaimConflict), isTierBFenceRetryable(claimErr):
+		// A persistent lease fence / rebuild race that outlasted the bounded retry is a
+		// cooperative multi-writer race, not a terminal failure (L2, S17 + F2): re-read
+		// and surface the winner exactly like a lost CAS, so the candidate drains as a
+		// NORMAL rejection, never claims_errored.
 		current, found, rerr := tierBReadClaimed(ctx, gs, beadID)
 		if rerr != nil || !found {
 			return beads.Bead{}, false, nil
@@ -146,6 +184,28 @@ func claimTierBWorkBead(ctx context.Context, cityPath, beadID, assignee string) 
 	default:
 		return beads.Bead{}, false, fmt.Errorf("tier-b claim of %q: %w", beadID, claimErr)
 	}
+}
+
+// claimTierBWithFenceRetry claims a Tier-B row, retrying a bounded number of times
+// on a lease fence OR a Tier-A rebuild race (both cooperative multi-writer races, see
+// isTierBFenceRetryable): it re-resolves the ref (a driver re-acquire may have
+// advanced the head/epoch) and re-claims cooperatively. A persistent race is returned
+// unwrapped for the caller's conflict-shaped mapping; a row that settled or vanished
+// under us surfaces the race for the same mapping rather than looping.
+func claimTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, assignee, beadID string) error {
+	err := claimTierBWork(ctx, gs, ref.StreamID, ref.Activation, assignee)
+	for attempt := 0; attempt < tierBFenceRetries && isTierBFenceRetryable(err); attempt++ {
+		time.Sleep(tierBFenceBackoff)
+		r2, ok, rerr := engine.ResolveTierBWorkRef(ctx, gs, beadID)
+		if rerr != nil {
+			return rerr
+		}
+		if !ok || r2.DispatchMode != engine.DispatchModePool || r2.Settled || r2.Activation == "" {
+			return err // the row moved out from under us — surface the race for mapping
+		}
+		err = claimTierBWork(ctx, gs, r2.StreamID, r2.Activation, assignee)
+	}
+	return err
 }
 
 // appendTierBAssignedWork appends claimed (in_progress) fold-owned pool rows from

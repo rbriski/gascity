@@ -316,3 +316,106 @@ func tbHookOpenStoreExec(t *testing.T, cityPath, stmt string) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// TestSettleLeaseFencedRetries (T-F2) pins the S17 settle fence mapping: a single
+// lease fence is retried and the settle lands (close succeeds); a persistent fence
+// surfaces as a loud, re-runnable close error.
+func TestSettleLeaseFencedRetries(t *testing.T) {
+	closeArgs := []string{"update", "hello", "--set-metadata", "gc.outcome=pass", "--status", "closed"}
+
+	t.Run("fence_once_retries_success", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		calls := 0
+		orig := settleTierBWork
+		settleTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output string) error {
+			calls++
+			if calls == 1 {
+				return graphstore.ErrLeaseFenced
+			}
+			return engine.SettleTierBWork(ctx, gs, streamID, activation, outcome, output)
+		}
+		defer func() { settleTierBWork = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code != 0 {
+			t.Fatalf("fence-once close = (code=%d handled=%v); want (0,true); stderr=%s", code, handled, stderr.String())
+		}
+		if calls < 2 {
+			t.Fatalf("settle calls = %d, want >= 2 (a fence must retry)", calls)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1 (retry settled exactly once, idempotent token)", n)
+		}
+	})
+
+	t.Run("fence_persistent_loud", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		orig := settleTierBWork
+		settleTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
+			return graphstore.ErrLeaseFenced
+		}
+		defer func() { settleTierBWork = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code == 0 {
+			t.Fatalf("persistent fence close = (code=%d handled=%v); want a loud non-zero", code, handled)
+		}
+	})
+}
+
+// TestSettleRebuildRacedRetries (F2) pins ErrRebuildRaced on the settle path exactly
+// like a lease fence: a concurrent driver append that raced the settle's Tier-A
+// projection rebuild is a transient multi-writer race, retried under the write-once
+// settle token (idempotent), NOT a hard close failure. A single race retries and the
+// settle lands (close succeeds); a persistent race surfaces as a loud, re-runnable
+// close error — never a spurious non-zero close for a settle that raced.
+func TestSettleRebuildRacedRetries(t *testing.T) {
+	closeArgs := []string{"update", "hello", "--set-metadata", "gc.outcome=pass", "--status", "closed"}
+
+	t.Run("race_once_retries_success", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		calls := 0
+		orig := settleTierBWork
+		settleTierBWork = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output string) error {
+			calls++
+			if calls == 1 {
+				return graphstore.ErrRebuildRaced
+			}
+			return engine.SettleTierBWork(ctx, gs, streamID, activation, outcome, output)
+		}
+		defer func() { settleTierBWork = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code != 0 {
+			t.Fatalf("race-once close = (code=%d handled=%v); want (0,true); stderr=%s", code, handled, stderr.String())
+		}
+		if calls < 2 {
+			t.Fatalf("settle calls = %d, want >= 2 (a rebuild race must retry)", calls)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1 (retry settled exactly once, idem token)", n)
+		}
+	})
+
+	t.Run("race_persistent_loud", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		orig := settleTierBWork
+		settleTierBWork = func(context.Context, *graphstore.Store, string, string, string, string) error {
+			return graphstore.ErrRebuildRaced
+		}
+		defer func() { settleTierBWork = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code == 0 {
+			t.Fatalf("persistent rebuild-race close = (code=%d handled=%v); want a loud non-zero", code, handled)
+		}
+	})
+}

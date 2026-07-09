@@ -170,6 +170,7 @@ const (
 	TallyResultMetadataKey               = "gc.tally_result"
 	TemplateMetadataKey                  = "gc.template"
 	TerminalMetadataKey                  = "gc.terminal"
+	TrackingConvoyIDMetadataKey          = "gc.tracking_convoy_id"
 	TruncatedMetadataKey                 = "gc.truncated"
 	VoteFieldMetadataKey                 = "gc.vote_field"
 	WorkBranchMetadataKey                = "gc.work_branch"
@@ -358,6 +359,7 @@ var KnownMetadataKeys = []string{
 	TallyResultMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
+	TrackingConvoyIDMetadataKey,
 	TruncatedMetadataKey,
 	VoteFieldMetadataKey,
 	WorkBranchMetadataKey,

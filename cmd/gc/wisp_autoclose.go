@@ -163,7 +163,11 @@ func collectInputConvoyWorkflowRoots(graph beads.Store, store beads.Store, paren
 	if graph == nil {
 		graph = store
 	}
-	convoys, err := convoycore.TrackingConvoysForItem(graph, parent.ID)
+	// parent is the just-closed WORK bead; in a split store its gc.tracking_convoy_id
+	// ref-by-id lives on the parent in its own (work) store, while the synthetic
+	// convoy it points at is ClassGraph on `graph`. Pass both so the ref resolves
+	// end to end (at graph == store this is byte-identical to the single-store read).
+	convoys, err := convoycore.TrackingConvoysForItem(graph, parent.ID, store)
 	if err != nil {
 		return nil
 	}

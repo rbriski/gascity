@@ -3,6 +3,7 @@ package convoy
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -34,15 +35,21 @@ func TestMembershipResolvesCrossStoreMemberViaTail(t *testing.T) {
 		t.Fatalf("create member: %v", err)
 	}
 
-	// TrackItem resolves the cross-store member via the tail (existence pre-check) and
-	// records the tracks edge on the convoy's store. Without the tail it would error.
+	// Cross-store TrackItem is ref-by-id: it stamps gc.tracking_convoy_id on the member
+	// (in the member's own store) and does NOT add a cross-store `tracks` dep — the
+	// dep-add would have to resolve both endpoints in one store's dep table, which is
+	// exactly the split-store failure this replaces. So HasTrack is false cross-store.
 	if err := TrackItem(convoyStore, convoy.ID, member.ID, memberStore); err != nil {
 		t.Fatalf("TrackItem cross-store: %v", err)
 	}
-	if ok, err := HasTrack(convoyStore, convoy.ID, member.ID); err != nil || !ok {
-		t.Fatalf("HasTrack = (%v, %v), want (true, nil)", ok, err)
+	if ok, err := HasTrack(convoyStore, convoy.ID, member.ID); err != nil || ok {
+		t.Fatalf("HasTrack = (%v, %v), want (false, nil) — cross-store uses a metadata ref, not a dep", ok, err)
+	}
+	if got, err := memberStore.Get(member.ID); err != nil || got.Metadata[beadmeta.TrackingConvoyIDMetadataKey] != convoy.ID {
+		t.Fatalf("member %s missing gc.tracking_convoy_id=%s (err=%v, meta=%v)", member.ID, convoy.ID, err, got.Metadata)
 	}
 
+	// Members resolves the cross-store member via the metadata ref + the tail.
 	members, err := Members(convoyStore, convoy.ID, false, memberStore)
 	if err != nil {
 		t.Fatalf("Members cross-store: %v", err)
@@ -54,14 +61,25 @@ func TestMembershipResolvesCrossStoreMemberViaTail(t *testing.T) {
 		t.Fatalf("member %s came back unresolved — the memberStores tail did not resolve it", member.ID)
 	}
 
-	// Without the tail, the member is invisible to the convoy store alone and comes
-	// back as the unresolved placeholder (never a wrong bead, never a hard error).
+	// Reverse: the member points up at its convoy via the metadata ref.
+	convoys, err := TrackingConvoysForItem(memberStore, member.ID, convoyStore)
+	if err != nil {
+		t.Fatalf("TrackingConvoysForItem cross-store: %v", err)
+	}
+	if len(convoys) != 1 || convoys[0].ID != convoy.ID {
+		t.Fatalf("TrackingConvoysForItem = %v, want [%s]", convoys, convoy.ID)
+	}
+
+	// Without the tail, a cross-store member is invisible: its gc.tracking_convoy_id
+	// ref lives with the item in the other store, so the convoy store alone has no
+	// record of it (never a wrong bead, never a hard error). Real readers (drain)
+	// always pass the member stores.
 	soloMembers, err := Members(convoyStore, convoy.ID, true)
 	if err != nil {
 		t.Fatalf("Members single-store: %v", err)
 	}
-	if len(soloMembers) != 1 || !IsUnresolvedTrackedItem(soloMembers[0]) {
-		t.Fatalf("single-store Members = %v, want one unresolved placeholder (member lives in the other store)", soloMembers)
+	if len(soloMembers) != 0 {
+		t.Fatalf("single-store Members = %v, want none (the member's ref lives in the other store)", soloMembers)
 	}
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
@@ -153,12 +154,7 @@ func (s *Server) humaHandleRigAction(_ context.Context, input *RigActionInput) (
 		return s.humaHandleRigRestart(name)
 
 	default:
-		// Unreachable in practice: RigActionInput.Action carries an
-		// enum:"suspend,resume,restart" schema, so Huma rejects unknown actions
-		// with the typed validation-failed contract before the handler runs.
-		// Kept as defense-in-depth and to mirror agentActionByName, emitting a
-		// typed apierr problem rather than a legacy bare-huma 404.
-		return nil, apierr.InvalidRequest.Msg("unknown rig action: " + action)
+		return nil, apierr.InvalidRequest.WithStatus(http.StatusNotFound, "unknown rig action: "+action)
 	}
 }
 

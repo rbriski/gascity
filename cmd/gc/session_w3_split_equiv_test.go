@@ -207,11 +207,19 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
 	if workDir != "" {
-		if strings.TrimSpace(sb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
-			metadata[beadmeta.WorkDirMetadataKey] = workDir
+		targetWorkDir := workDir
+		existingWorkDir := strings.TrimSpace(sb.Metadata[beadmeta.WorkDirMetadataKey])
+		if existingWorkDir == "" {
+			existingWorkDir = strings.TrimSpace(sb.Metadata[beadmeta.LegacyWorkDirMetadataKey])
 		}
-		if strings.TrimSpace(sb.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
-			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		if oldWorkBeadID == workBeadID && existingWorkDir != "" {
+			targetWorkDir = existingWorkDir
+		}
+		if strings.TrimSpace(sb.Metadata[beadmeta.WorkDirMetadataKey]) != targetWorkDir {
+			metadata[beadmeta.WorkDirMetadataKey] = targetWorkDir
+		}
+		if strings.TrimSpace(sb.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != targetWorkDir {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = targetWorkDir
 		}
 	}
 	return metadata

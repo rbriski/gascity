@@ -2932,12 +2932,25 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 	if workspace := packWorkspaceSlug(request); strings.TrimSpace(info.PackWorkspace) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
+	// Only use a newly derived work dir when the binding is new or re-pointed.
+	// Resume and wake requests for the same trigger may omit WorkBeadTitle; in
+	// that case re-derivation drops the title suffix from the path the launcher
+	// actually created. Preserve the recorded canonical path and keep the legacy
+	// twin synchronized with it.
 	if workDir != "" {
-		if strings.TrimSpace(info.WorkDirCanonical) != workDir {
-			metadata[beadmeta.WorkDirMetadataKey] = workDir
+		targetWorkDir := workDir
+		existingWorkDir := strings.TrimSpace(info.WorkDirCanonical)
+		if existingWorkDir == "" {
+			existingWorkDir = strings.TrimSpace(info.WorkDir)
 		}
-		if strings.TrimSpace(info.WorkDir) != workDir {
-			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		if oldWorkBeadID == workBeadID && existingWorkDir != "" {
+			targetWorkDir = existingWorkDir
+		}
+		if strings.TrimSpace(info.WorkDirCanonical) != targetWorkDir {
+			metadata[beadmeta.WorkDirMetadataKey] = targetWorkDir
+		}
+		if strings.TrimSpace(info.WorkDir) != targetWorkDir {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = targetWorkDir
 		}
 	}
 	return metadata

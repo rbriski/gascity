@@ -213,7 +213,15 @@ func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string
 // the work store (see the two-store split in cmd/gc/session_beads.go). Byte-
 // identical to the work store at the default backend.
 func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+	sessionStore := resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+	// A session-lifecycle bead can classify as ClassGraph (a wisp-marked pool-agent
+	// session) and land on the graph store while sessions stay on the work store, so the
+	// reconciler's by-id reads AND writes must find the bead wherever the class routing
+	// put it. Owner-route this handle across the session, graph, and work stores. This
+	// collapses to the bare session store at the default bd backend (all three identical),
+	// keeping the path byte-identical there.
+	graphStore := resolveGraphStore(workStore, cfg, cityPath, rec)
+	return newClassFederatedSessionStore(sessionStore, graphStore, workStore)
 }
 
 // openGraphSQLiteStore opens (or returns the cached) embedded SQLite graph store at

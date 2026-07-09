@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,8 +55,32 @@ func setupLumenDoCity(t *testing.T, provider string) (string, []string) {
 
 // setupLumenDoCityWithAgent is setupLumenDoCity parameterized by the pool agent
 // script — "lumen-do.sh" (the L3 always-pass worker) or "lumen-do-flaky.sh" (the
-// L5 fail-then-pass worker for the retry demo).
+// L5 fail-then-pass worker for the retry demo). It keeps the L3/L5 defaults:
+// max_active_sessions=1 and a 3s work window (the no-mid-do-drain window, ≪ the 60s
+// firewall grace). New L4 rows use setupLumenDoCityWithOptions directly.
 func setupLumenDoCityWithAgent(t *testing.T, provider, agentScriptName string) (string, []string) {
+	t.Helper()
+	return setupLumenDoCityWithOptions(t, provider, agentScriptName, 1, "GC_LUMEN_E2E_WORK_SECONDS=3")
+}
+
+// lumenKillNonce is the per-city process-table token the firewall e2e's hang agent
+// carries in its command line (an env assignment + its re-exec'd argv[0]) so a
+// `pgrep -f` can find and SIGKILL exactly that session process. The lumenhang- prefix
+// keeps the token off the controller/supervisor argv (which carries only the plain
+// city dir path), so the kill never touches the infrastructure processes.
+func lumenKillNonce(cityName string) string {
+	return "lumenhang-" + cityName
+}
+
+// setupLumenDoCityWithOptions is the general Lumen test-city builder: it adds the
+// pool cap (maxActive) and the per-agent env prefix the L4 concurrency / firewall
+// cities need (barrier size, work window). Every start command also carries
+// GC_LUMEN_E2E_NONCE=<lumenKillNonce> — inert for most agents, the SIGKILL target
+// token for the firewall e2e's hang agent. The scripted agent IS the start_command
+// (the subprocess provider drops startup prompts, plan correction #2). Otherwise it
+// mirrors the L3 shape exactly: [beads] file, subprocess session (default variant),
+// 100ms patrol, a plain pool agent, no scale_check / named_session / min_active.
+func setupLumenDoCityWithOptions(t *testing.T, provider, agentScriptName string, maxActive int, agentEnv string) (string, []string) {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, false)
 
@@ -66,13 +92,8 @@ func setupLumenDoCityWithAgent(t *testing.T, provider, agentScriptName string) (
 	}
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
-	// The scripted agent IS the start_command: the subprocess provider drops
-	// startup prompts (plan correction #2), so the claim→read→close loop must be
-	// the command, not a prompt asset. The 3s work window holds the in_progress claim
-	// across ~30 patrol passes (100ms patrol) — the no-mid-do-drain observation
-	// window (plan §3.4) — while staying ≪ the firewall grace floor (60s), so step
-	// (5)'s pass settle proves the worker settled it, not the firewall.
-	startCommand := "GC_LUMEN_E2E_WORK_SECONDS=3 bash " + agentScript(agentScriptName)
+	nonceEnv := "GC_LUMEN_E2E_NONCE=" + lumenKillNonce(cityName)
+	startCommand := nonceEnv + " " + agentEnv + " bash " + agentScript(agentScriptName)
 
 	// A plain pool agent: max_active_sessions=1 (the ONE-session cap + pool shape),
 	// no scale_check (else it leaves the native default-scale probe the Lumen demand
@@ -85,8 +106,8 @@ func setupLumenDoCityWithAgent(t *testing.T, provider, agentScriptName string) (
 		sessionBlock = "\n[session]\nprovider = \"subprocess\"\n"
 	}
 	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[beads]\nprovider = \"file\"\n%s\n[daemon]\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = %q\nmax_active_sessions = 1\nstart_command = %q\n",
-		cityName, sessionBlock, lumenDoRoute, startCommand,
+		"[workspace]\nname = %q\n\n[beads]\nprovider = \"file\"\n%s\n[daemon]\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = %q\nmax_active_sessions = %d\nstart_command = %q\n",
+		cityName, sessionBlock, lumenDoRoute, maxActive, startCommand,
 	)
 	configPath := filepath.Join(t.TempDir(), "lumen-do.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
@@ -583,10 +604,12 @@ type lumenOwnedAdmitted struct {
 }
 
 type lumenOwnedSettled struct {
-	Handle  string `json:"handle"`
-	Kind    string `json:"kind"`
-	Outcome string `json:"outcome"`
-	Output  string `json:"output"`
+	Handle    string `json:"handle"`
+	Kind      string `json:"kind"`
+	Outcome   string `json:"outcome"`
+	Output    string `json:"output"`
+	Retryable bool   `json:"retryable"`
+	Assignee  string `json:"assignee"`
 }
 
 type lumenRunClosed struct {
@@ -813,4 +836,732 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// ============================================================================
+// L4 — multi-do DAG concurrency e2e (S-H2 helpers + T-E1/T-E1t/T-E2/T-E3/T-E4)
+// ============================================================================
+
+// --- S-H2: count-parameterized wait helpers ---------------------------------
+
+// waitForPooledSessions polls until at least n DISTINCT non-closed pooled sessions
+// (by session bead id) for template have been observed, and returns those distinct
+// rows. Distinctness is ACCUMULATED across polls so a fire-and-forget subprocess
+// worker that briefly leaves the pool view still counts — the proof is "Lumen demand
+// spawned N distinct sessions" (the concurrency-cap pin), not "N are listed at one
+// instant". A transient list error while waiting is retried, never read as absence.
+func waitForPooledSessions(t *testing.T, cityDir, template string, n int, timeout time.Duration) []sessionListRow {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	seen := map[string]sessionListRow{}
+	for time.Now().Before(deadline) {
+		rows, err := listSessionsForTemplate(t, cityDir, template)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		for _, s := range rows {
+			if s.Closed || strings.TrimSpace(s.Template) != template {
+				continue
+			}
+			id := strings.TrimSpace(s.ID)
+			if id == "" || strings.TrimSpace(s.SessionName) == "" {
+				continue
+			}
+			if _, ok := seen[id]; !ok {
+				seen[id] = s
+			}
+		}
+		if len(seen) >= n {
+			out := make([]sessionListRow, 0, len(seen))
+			for _, s := range seen {
+				out = append(out, s)
+			}
+			return out
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("observed %d distinct pooled sessions for %q within %s, want >= %d (demand→spawn cap gap?)", len(seen), template, timeout, n)
+	return nil
+}
+
+// waitForOwnedAdmittedCount polls until at least n owned.admitted events exist in the
+// stream and returns them decoded, in seq order. Used to observe N concurrent claims.
+func waitForOwnedAdmittedCount(t *testing.T, gs *graphstore.Store, streamID string, n int, timeout time.Duration) []lumenOwnedAdmitted {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		admits := lumenEventsOfType(lumenStreamEvents(t, gs, streamID), engine.EventOwnedAdmitted)
+		if len(admits) >= n {
+			out := make([]lumenOwnedAdmitted, len(admits))
+			for i, e := range admits {
+				out[i] = decodeOwnedAdmitted(t, e.Payload)
+			}
+			return out
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	saw := lumenEventsOfType(lumenStreamEvents(t, gs, streamID), engine.EventOwnedAdmitted)
+	t.Fatalf("observed %d owned.admitted for %s within %s, want >= %d", len(saw), streamID, timeout, n)
+	return nil
+}
+
+// --- seq / decode helpers ----------------------------------------------------
+
+type lumenNodeActivated struct {
+	NodeID       string `json:"node_id"`
+	Activation   string `json:"activation"`
+	DispatchMode string `json:"dispatch_mode"`
+	Route        string `json:"route"`
+}
+
+type lumenNodeDecision struct {
+	NextMember string `json:"next_member"`
+}
+
+type lumenOutcomeSettled struct {
+	Activation string `json:"activation"`
+	Outcome    string `json:"outcome"`
+}
+
+func minSeqOf(events []graphstore.StoredEvent) uint64 {
+	var m uint64
+	for i, e := range events {
+		if i == 0 || e.Seq < m {
+			m = e.Seq
+		}
+	}
+	return m
+}
+
+func maxSeqOf(events []graphstore.StoredEvent) uint64 {
+	var m uint64
+	for _, e := range events {
+		if e.Seq > m {
+			m = e.Seq
+		}
+	}
+	return m
+}
+
+// nodeActivatedIDsBefore returns the set of node ids whose node.activated event
+// committed strictly before seqCutoff — the "materialized in the same pass" proof.
+func nodeActivatedIDsBefore(t *testing.T, events []graphstore.StoredEvent, seqCutoff uint64) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, e := range events {
+		if e.Type != engine.EventNodeActivated || e.Seq >= seqCutoff {
+			continue
+		}
+		var p lumenNodeActivated
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode node.activated: %v", err)
+		}
+		out[p.NodeID] = true
+	}
+	return out
+}
+
+// outcomeSettledFor returns the outcome of the outcome.settled event for activation,
+// or "" if none.
+func outcomeSettledFor(t *testing.T, events []graphstore.StoredEvent, activation string) string {
+	t.Helper()
+	for _, e := range events {
+		if e.Type != engine.EventOutcomeSettled {
+			continue
+		}
+		var p lumenOutcomeSettled
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode outcome.settled: %v", err)
+		}
+		if p.Activation == activation {
+			return p.Outcome
+		}
+	}
+	return ""
+}
+
+// gatherDecisionMembers returns, in seq order, the NextMember of each node.decision
+// checkpoint — the head-of-line gather drain order.
+func gatherDecisionMembers(t *testing.T, events []graphstore.StoredEvent) []string {
+	t.Helper()
+	var out []string
+	for _, e := range events {
+		if e.Type != engine.EventNodeDecision {
+			continue
+		}
+		var p lumenNodeDecision
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode node.decision: %v", err)
+		}
+		if p.NextMember != "" {
+			// next_member is the member ACTIVATION (e.g. "one:0"); the drain order is
+			// over the bare member node ids.
+			out = append(out, engine.ActivationNodeID(p.NextMember))
+		}
+	}
+	return out
+}
+
+// assertPromptReadback checks the per-bead prompt-readback file the barrier/scripted
+// agent wrote from the claim JSON.
+func assertPromptReadback(t *testing.T, cityDir, beadID, want string) {
+	t.Helper()
+	p := filepath.Join(cityDir, ".gc", "lumen-e2e-prompt-"+beadID+".txt")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("reading prompt readback %q: %v", p, err)
+	}
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("prompt readback %q = %q, want %q", beadID, got, want)
+	}
+}
+
+// --- T-E1 / T-E1t: two do's genuinely concurrent -----------------------------
+
+func lumenScatterPairIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "scatter-pair-do.lumen.json")
+}
+
+// TestLumenTwoDoConcurrentE2E (T-E1, scenario 1) proves TWO independent pool do's are
+// genuinely in flight at once: a 2-member scatter-of-do's (the language's honest
+// parallel form) slung into a max_active_sessions=2 city spawns two DISTINCT pooled
+// sessions that both claim before either settles (the barrier guarantees the overlap),
+// and the run seals pass with the §0.2 concurrent-close fix keeping both colliding
+// closes landing (neither strands). Subprocess provider, no LLM.
+func TestLumenTwoDoConcurrentE2E(t *testing.T) {
+	cityDir, _ := setupLumenDoCityWithOptions(t, "subprocess", "lumen-do-barrier.sh", 2, "GC_LUMEN_E2E_BARRIER=2")
+	runLumenTwoDoConcurrentE2E(t, cityDir, "subprocess")
+}
+
+// TestLumenTwoDoConcurrentE2E_RealTmux is T-E1's body on the default tmux provider,
+// with an extra pane-count assert on the city's isolated -L socket. It skips without
+// tmux or under GC_SESSION=subprocess. Guard-scoped cleanup only.
+func TestLumenTwoDoConcurrentE2E_RealTmux(t *testing.T) {
+	if usingSubprocess() {
+		t.Skip("real-tmux variant needs the default tmux provider; suite runs GC_SESSION=subprocess")
+	}
+	tmuxtest.RequireTmux(t)
+	cityDir, _ := setupLumenDoCityWithOptions(t, "tmux", "lumen-do-barrier.sh", 2, "GC_LUMEN_E2E_BARRIER=2")
+	runLumenTwoDoConcurrentE2E(t, cityDir, "tmux")
+}
+
+func runLumenTwoDoConcurrentE2E(t *testing.T, cityDir, provider string) {
+	t.Helper()
+	ctx := context.Background()
+
+	// (1) Sling the 2-member scatter-of-do's.
+	slingOut, err := gc(cityDir, "lumen", "sling", lumenDoRoute, lumenScatterPairIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	// (2) Two DISTINCT pooled sessions spawn (demand→spawn=N pin).
+	sessions := waitForPooledSessions(t, cityDir, lumenDoRoute, 2, 30*time.Second)
+	names := map[string]bool{}
+	ids := map[string]bool{}
+	for _, s := range sessions {
+		names[strings.TrimSpace(s.SessionName)] = true
+		ids[strings.TrimSpace(s.ID)] = true
+	}
+	if len(names) < 2 || len(ids) < 2 {
+		t.Fatalf("pooled sessions not distinct: names=%v ids=%v (want 2 distinct names + bead ids)", names, ids)
+	}
+	t.Logf("PROOF two distinct pooled sessions spawned: names=%v", keysOf(names))
+
+	// (2b, tmux only) Two real panes on the city's isolated -L socket during the window.
+	if provider == "tmux" {
+		assertTmuxSessionCountOnCitySocket(t, cityDir, 2)
+	}
+
+	// (3) Seal, then read the whole sealed stream once.
+	events := waitForLumenSeal(t, gs, streamID, 60*time.Second)
+
+	admits := lumenEventsOfType(events, engine.EventOwnedAdmitted)
+	settles := lumenEventsOfType(events, engine.EventOwnedSettled)
+	if len(admits) != 2 || len(settles) != 2 {
+		t.Fatalf("owned.admitted=%d owned.settled=%d, want 2 and 2 (write-once, two claims)\nsequence: %v", len(admits), len(settles), lumenStreamTypes(events))
+	}
+
+	// (4) Materialized-simultaneously pin: both member node.activated precede the first
+	// admit (one Advance pass fanned out both).
+	firstAdmitSeq := minSeqOf(admits)
+	before := nodeActivatedIDsBefore(t, events, firstAdmitSeq)
+	for _, m := range []string{"left", "right"} {
+		if !before[m] {
+			t.Fatalf("member %q was not node.activated before the first admit (seq %d) — not one-pass fan-out; activated-before=%v", m, firstAdmitSeq, keysOf(before))
+		}
+	}
+	t.Logf("PROOF both members activated in one pass before the first admit (seq %d)", firstAdmitSeq)
+
+	// (5) Real-overlap pin: max(admit seq) < min(settle seq) ⇒ both claims held
+	// concurrently in the total-ordered stream; the two admit assignees are distinct.
+	maxAdmit := maxSeqOf(admits)
+	minSettle := minSeqOf(settles)
+	if !(maxAdmit < minSettle) {
+		t.Fatalf("overlap pin failed: max(admit seq)=%d not < min(settle seq)=%d — the two do's were NOT concurrent\nsequence: %v", maxAdmit, minSettle, lumenStreamTypes(events))
+	}
+	a0 := decodeOwnedAdmitted(t, admits[0].Payload)
+	a1 := decodeOwnedAdmitted(t, admits[1].Payload)
+	if a0.Assignee == "" || a1.Assignee == "" || a0.Assignee == a1.Assignee {
+		t.Fatalf("admit assignees = {%q, %q}, want two distinct non-empty session names", a0.Assignee, a1.Assignee)
+	}
+	t.Logf("PROOF genuine overlap: admits(seq<=%d) before settles(seq>=%d); assignees %q, %q", maxAdmit, minSettle, a0.Assignee, a1.Assignee)
+
+	// (6) Both settles pass, NEITHER stranded (the §0.2 regression detector); the
+	// aggregate `pair` settles pass; the run seals pass.
+	for i, e := range settles {
+		s := decodeOwnedSettled(t, e.Payload)
+		if s.Outcome != engine.OutcomePass {
+			t.Fatalf("settle[%d] outcome = %q, want pass", i, s.Outcome)
+		}
+		if strings.HasPrefix(s.Output, "stranded:") {
+			t.Fatalf("settle[%d] output = %q starts with stranded: — the concurrent-close race stranded a healthy do (S-F1 regression)", i, s.Output)
+		}
+	}
+	if o := outcomeSettledFor(t, events, "pair:0"); o != engine.OutcomePass {
+		t.Fatalf("aggregate pair:0 settled %q, want pass", o)
+	}
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	t.Logf("PROOF both do's settled pass (no strand); aggregate pair pass; run.closed pass")
+
+	// (7) Prompt readback for both members.
+	assertPromptReadback(t, cityDir, "left", "Do the left task, then settle this step.")
+	assertPromptReadback(t, cityDir, "right", "Do the right task, then settle this step.")
+
+	// (8) Zero control beads + journal verify.
+	assertZeroControlBeads(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF graphstore.Verify(%s) clean; sequence: %v", streamID, lumenStreamTypes(events))
+}
+
+// --- T-E2: a failing do skip-cascades its dependents -------------------------
+
+func lumenSkipCascadeIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "skip-cascade-do.lumen.json")
+}
+
+// TestLumenFailingDoSkipCascadesE2E (T-E2, scenario 2) proves a failing pool do
+// skip-cascades its transitive dependents to a failed seal: do a (worker-closed
+// failed) → exec b (skipped, never runs) → do c (skipped, never claimable). One
+// worker settle then ONE Advance pass does the whole cascade — the deterministic
+// 9-event sequence.
+func TestLumenFailingDoSkipCascadesE2E(t *testing.T) {
+	cityDir, _ := setupLumenDoCityWithOptions(t, "subprocess", "lumen-do-fail.sh", 1, "GC_LUMEN_E2E_WORK_SECONDS=1")
+	ctx := context.Background()
+
+	slingOut, err := gc(cityDir, "lumen", "sling", lumenDoRoute, lumenSkipCascadeIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	events := waitForLumenSeal(t, gs, streamID, 60*time.Second)
+
+	// The exact deterministic 9-event sequence (§5.2).
+	wantSeq := []string{
+		engine.EventRunStarted,
+		engine.EventNodeActivated,  // a (pool)
+		engine.EventOwnedAdmitted,  // a claimed
+		engine.EventOwnedSettled,   // a failed (worker)
+		engine.EventNodeActivated,  // b
+		engine.EventOutcomeSettled, // b skipped
+		engine.EventNodeActivated,  // c
+		engine.EventOutcomeSettled, // c skipped
+		engine.EventRunClosed,      // failed
+	}
+	if got := lumenStreamTypes(events); !equalStrings(got, wantSeq) {
+		t.Fatalf("journal sequence = %v,\n want %v", got, wantSeq)
+	}
+	t.Logf("PROOF deterministic skip-cascade sequence = %v", lumenStreamTypes(events))
+
+	// a: worker verdict failed, NOT stranded (the firewall did not touch it).
+	sa := decodeOwnedSettled(t, findEvent(t, events, engine.EventOwnedSettled).Payload)
+	if sa.Outcome != engine.OutcomeFailed {
+		t.Fatalf("owned.settled(a) outcome = %q, want failed", sa.Outcome)
+	}
+	if strings.HasPrefix(sa.Output, "stranded:") {
+		t.Fatalf("owned.settled(a) output = %q starts with stranded: — want the worker's own fail close", sa.Output)
+	}
+	// b and c skip-cascaded.
+	if o := outcomeSettledFor(t, events, "b:0"); o != engine.OutcomeSkipped {
+		t.Fatalf("b:0 outcome.settled = %q, want skipped", o)
+	}
+	if o := outcomeSettledFor(t, events, "c:0"); o != engine.OutcomeSkipped {
+		t.Fatalf("c:0 outcome.settled = %q, want skipped", o)
+	}
+	// Exactly ONE admit in the whole stream (c was never claimable).
+	if n := len(lumenEventsOfType(events, engine.EventOwnedAdmitted)); n != 1 {
+		t.Fatalf("owned.admitted count = %d, want 1 (only a was ever claimable)", n)
+	}
+	// Projected c row: skipped, not task-typed, no route (the e2e twin of the engine pin).
+	db, err := sql.Open("sqlite", "file:"+journalPath+"?_pragma=busy_timeout(5000)&mode=ro")
+	if err != nil {
+		t.Fatalf("opening journal read-only: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var cType, cStatus string
+	if err := db.QueryRow(`SELECT bead_type, status FROM nodes WHERE id = 'c' AND fold_owned = 1`).Scan(&cType, &cStatus); err != nil {
+		t.Fatalf("reading projected c row: %v", err)
+	}
+	if cStatus != "skipped" {
+		t.Fatalf("c status = %q, want skipped", cStatus)
+	}
+	if cType == "task" {
+		t.Fatalf("c bead_type = task — a skip-cascaded do must never be offered as claimable work")
+	}
+	var cRoute int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM node_metadata WHERE node_id = 'c' AND key = 'gc.routed_to'`).Scan(&cRoute); err != nil {
+		t.Fatalf("counting c gc.routed_to: %v", err)
+	}
+	if cRoute != 0 {
+		t.Fatalf("c has %d gc.routed_to rows, want 0 (never offered to a pool)", cRoute)
+	}
+	t.Logf("PROOF c skip-cascaded (status=%s bead_type=%s, no route), never claimable", cStatus, cType)
+
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomeFailed {
+		t.Fatalf("run.closed outcome = %q, want failed", closed.Outcome)
+	}
+	assertZeroControlBeads(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF run.closed failed; zero control beads; Verify clean")
+}
+
+// --- T-E3: scatter-of-do's fan-out + gather ----------------------------------
+
+func lumenScatterGatherIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "scatter-gather-do.lumen.json")
+}
+
+// TestLumenScatterOfDosE2E (T-E3, scenario 3) proves a scatter(members)-of-do's fans
+// out through the pool and gathers: 3 do members materialize in one pass, are claimed
+// by pooled sessions (min(members, cap)=2 concurrent), settle pass, then the aggregate
+// + the attached gather (head-of-line member-order drain + an exec combine) settle pass
+// and the run seals pass.
+func TestLumenScatterOfDosE2E(t *testing.T) {
+	cityDir, _ := setupLumenDoCityWithOptions(t, "subprocess", "lumen-do-barrier.sh", 2, "GC_LUMEN_E2E_BARRIER=2")
+	ctx := context.Background()
+
+	slingOut, err := gc(cityDir, "lumen", "sling", lumenDoRoute, lumenScatterGatherIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	// At least 2 distinct pooled sessions serve the route (cap=2 concurrency).
+	sessions := waitForPooledSessions(t, cityDir, lumenDoRoute, 2, 45*time.Second)
+	if len(sessions) < 2 {
+		t.Fatalf("distinct pooled sessions = %d, want >= 2", len(sessions))
+	}
+	t.Logf("PROOF >= %d distinct pooled sessions served the route", len(sessions))
+
+	events := waitForLumenSeal(t, gs, streamID, 90*time.Second)
+
+	admits := lumenEventsOfType(events, engine.EventOwnedAdmitted)
+	settles := lumenEventsOfType(events, engine.EventOwnedSettled)
+	if len(admits) != 3 || len(settles) != 3 {
+		t.Fatalf("owned.admitted=%d owned.settled=%d, want 3 and 3\nsequence: %v", len(admits), len(settles), lumenStreamTypes(events))
+	}
+
+	// (1) One-pass fan-out: all 3 member node.activated precede the first admit.
+	firstAdmitSeq := minSeqOf(admits)
+	before := nodeActivatedIDsBefore(t, events, firstAdmitSeq)
+	for _, m := range []string{"one", "two", "three"} {
+		if !before[m] {
+			t.Fatalf("member %q not node.activated before the first admit (seq %d); activated-before=%v", m, firstAdmitSeq, keysOf(before))
+		}
+	}
+
+	// (2) All 3 settles pass.
+	for i, e := range settles {
+		s := decodeOwnedSettled(t, e.Payload)
+		if s.Outcome != engine.OutcomePass {
+			t.Fatalf("member settle[%d] = %q, want pass", i, s.Outcome)
+		}
+		if strings.HasPrefix(s.Output, "stranded:") {
+			t.Fatalf("member settle[%d] stranded (%q) — a concurrent-close strand", i, s.Output)
+		}
+	}
+
+	// (3) 2-concurrent pin: the two EARLIEST admits precede the earliest settle.
+	admitSeqs := seqsOf(admits)
+	minSettle := minSeqOf(settles)
+	if n := countBelow(admitSeqs, minSettle); n < 2 {
+		t.Fatalf("only %d admits precede the first settle, want >= 2 (min(members,cap)=2 concurrency)\nsequence: %v", n, lumenStreamTypes(events))
+	}
+	t.Logf("PROOF fan-out: 3 members activated in one pass; >=2 admits held before the first settle")
+
+	// (4) The drain: 3 node.decision checkpoints in member order, combine tally + the
+	// aggregate + the gather all pass, run seals pass.
+	if got := gatherDecisionMembers(t, events); !equalStrings(got, []string{"one", "two", "three"}) {
+		t.Fatalf("gather decision member order = %v, want [one two three]", got)
+	}
+	if o := outcomeSettledFor(t, events, "tally:0"); o != engine.OutcomePass {
+		t.Fatalf("combine tally:0 = %q, want pass", o)
+	}
+	if o := outcomeSettledFor(t, events, "lanes:0"); o != engine.OutcomePass {
+		t.Fatalf("aggregate lanes:0 = %q, want pass", o)
+	}
+	if o := outcomeSettledFor(t, events, "lanes_gather:0"); o != engine.OutcomePass {
+		t.Fatalf("gather lanes_gather:0 = %q, want pass", o)
+	}
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	t.Logf("PROOF gather drained [one two three]; tally/lanes/lanes_gather pass; run.closed pass")
+
+	// (5) Prompt readback for all three members.
+	assertPromptReadback(t, cityDir, "one", "Do lane one, then settle.")
+	assertPromptReadback(t, cityDir, "two", "Do lane two, then settle.")
+	assertPromptReadback(t, cityDir, "three", "Do lane three, then settle.")
+
+	assertZeroControlBeads(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF graphstore.Verify(%s) clean; sequence: %v", streamID, lumenStreamTypes(events))
+}
+
+// --- T-E4: a killed claimant is firewall-stranded, the run seals failed ------
+
+// TestLumenStrandedClaimantSealsFailedE2E (T-E4, scenario 4) proves a killed claimant
+// session is firewall-settled failed{stranded} so the run seals FAILED-stranded rather
+// than wedging. A hang agent claims the do and never closes; the test SIGKILLs its
+// session process (a per-city nonce pgrep, no PID files); after the 60s grace floor the
+// firewall strands the claim and the run seals failed. ~90s wall clock.
+func TestLumenStrandedClaimantSealsFailedE2E(t *testing.T) {
+	cityDir, _ := setupLumenDoCityWithOptions(t, "subprocess", "lumen-do-hang.sh", 1, "")
+	ctx := context.Background()
+	nonce := lumenKillNonce(filepath.Base(cityDir))
+
+	slingOut, err := gc(cityDir, "lumen", "sling", lumenDoRoute, lumenDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	// (1) Spawn + claim observed; record the claimant session + bead id.
+	claimant := waitForPooledSession(t, cityDir, lumenDoRoute, 30*time.Second)
+	claimantBeadID := strings.TrimSpace(claimant.ID)
+	admitted := waitForOwnedAdmitted(t, gs, streamID, 30*time.Second)
+	if admitted.Assignee == "" {
+		t.Fatalf("owned.admitted has no assignee; cannot pin the stranded closer")
+	}
+	t.Logf("PROOF claim observed: assignee %q (session bead %s)", admitted.Assignee, claimantBeadID)
+
+	// (2) SIGKILL the hang claimant by the per-city nonce (a process-table query, no PID
+	// files). The resume tier may transiently respawn a mid-do worker, so killNonce is
+	// re-invoked throughout the wait to keep the (permanently dead) claimant dead — the
+	// firewall's dead-claimant path then strands it after the grace floor.
+	killNonce := func() int {
+		pids := pgrepNonce(t, nonce)
+		for _, pid := range pids {
+			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+				t.Fatalf("SIGKILL %d: %v", pid, err)
+			}
+		}
+		return len(pids)
+	}
+	if killNonce() == 0 {
+		t.Fatalf("pgrep -f %q found no hang session process to kill", nonce)
+	}
+	t.Logf("PROOF SIGKILLed the hang claimant %q", admitted.Assignee)
+
+	// (3) No wedge: the run seals failed-stranded within the 60s grace floor + slack,
+	// while the claimant is kept dead. A wedge here is the §1 scenario-4 adoption hazard.
+	events := waitForLumenStrandedSeal(t, gs, streamID, cityDir, lumenDoRoute, claimantBeadID, 4*time.Minute, killNonce)
+
+	// (4) Exactly the 5-event stranded sequence; the settle is the firewall's.
+	wantSeq := []string{
+		engine.EventRunStarted,
+		engine.EventNodeActivated,
+		engine.EventOwnedAdmitted,
+		engine.EventOwnedSettled,
+		engine.EventRunClosed,
+	}
+	if got := lumenStreamTypes(events); !equalStrings(got, wantSeq) {
+		t.Fatalf("journal sequence = %v, want %v", got, wantSeq)
+	}
+	settled := decodeOwnedSettled(t, findEvent(t, events, engine.EventOwnedSettled).Payload)
+	if settled.Outcome != engine.OutcomeFailed {
+		t.Fatalf("owned.settled outcome = %q, want failed (firewall strand)", settled.Outcome)
+	}
+	if !strings.HasPrefix(settled.Output, "stranded: ") {
+		t.Fatalf("owned.settled output = %q, want a \"stranded: <assignee>\" prefix (the firewall settle)", settled.Output)
+	}
+	if !strings.Contains(settled.Output, admitted.Assignee) {
+		t.Fatalf("stranded output = %q does not name the killed assignee %q", settled.Output, admitted.Assignee)
+	}
+	if !settled.Retryable {
+		t.Fatalf("firewall strand retryable = false, want true (lumen_firewall settle stamps retryable)")
+	}
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomeFailed {
+		t.Fatalf("run.closed outcome = %q, want failed", closed.Outcome)
+	}
+	t.Logf("PROOF stranded seal: owned.settled failed %q retryable=%v; run.closed failed", settled.Output, settled.Retryable)
+
+	assertZeroControlBeads(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF graphstore.Verify(%s) clean; sequence: %v", streamID, lumenStreamTypes(events))
+}
+
+// --- T-E3/T-E4 support helpers ----------------------------------------------
+
+func seqsOf(events []graphstore.StoredEvent) []uint64 {
+	out := make([]uint64, len(events))
+	for i, e := range events {
+		out[i] = e.Seq
+	}
+	return out
+}
+
+func countBelow(seqs []uint64, cutoff uint64) int {
+	n := 0
+	for _, s := range seqs {
+		if s < cutoff {
+			n++
+		}
+	}
+	return n
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// pgrepNonce returns the PIDs whose command line matches nonce (a process-table
+// query — the house "query live state" rule). pgrep exits 1 with no matches, which is
+// not an error here.
+func pgrepNonce(t *testing.T, nonce string) []int {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", nonce).CombinedOutput()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return nil // no matches
+		}
+		t.Fatalf("pgrep -f %q: %v (out=%s)", nonce, err, out)
+	}
+	var pids []int
+	for _, line := range strings.Fields(strings.TrimSpace(string(out))) {
+		if pid, cerr := strconv.Atoi(line); cerr == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// waitForLumenStrandedSeal drives a killed-claimant run to seal, re-killing (via
+// reKill) any respawned nonce process each tick so the permanently-dead claimant stays
+// dead and the firewall's dead-path strands it. A transient resume-tier respawn is
+// logged, not failed on; a genuine wedge is caught by the timeout and diagnosed as the
+// §1 scenario-4 adoption hazard (a revived assignee that keeps resetting the grace clock).
+func waitForLumenStrandedSeal(t *testing.T, gs *graphstore.Store, streamID, cityDir, template, claimantBeadID string, timeout time.Duration, reKill func() int) []graphstore.StoredEvent {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	respawns := map[string]bool{}
+	for time.Now().Before(deadline) {
+		last := lumenStreamEvents(t, gs, streamID)
+		if n := len(last); n > 0 && last[n-1].Type == engine.EventRunClosed {
+			return last
+		}
+		if killed := reKill(); killed > 0 {
+			t.Logf("DIAG re-killed %d respawned hang process(es) to keep the claimant dead", killed)
+		}
+		if rows, err := listSessionsForTemplate(t, cityDir, template); err == nil {
+			for _, r := range rows {
+				if r.Closed || strings.TrimSpace(r.Template) != template {
+					continue
+				}
+				if id := strings.TrimSpace(r.ID); id != "" && id != claimantBeadID && !respawns[id] {
+					respawns[id] = true
+					t.Logf("DIAG resume-tier respawned session bead %q (name %q) — re-killing to keep the killed claimant dead", id, r.SessionName)
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("stranded run %s did NOT seal within %s — WEDGE. Suspect the §1 scenario-4 adoption hazard: a resume-tier respawn revived the assignee and kept resetting the firewall grace clock. Respawned session beads seen: %v\nlast sequence: %v",
+		streamID, timeout, keysOf(respawns), lumenStreamTypes(lumenStreamEvents(t, gs, streamID)))
+	return nil
+}
+
+// assertTmuxSessionCountOnCitySocket proves >= n real tmux panes on the city's
+// isolated -L socket (socket name == city name). Best-effort within a window so the
+// brief pooled-worker panes are caught. Guard-scoped socket only; never the default
+// server.
+func assertTmuxSessionCountOnCitySocket(t *testing.T, cityDir string, n int) {
+	t.Helper()
+	socket := filepath.Base(cityDir)
+	deadline := time.Now().Add(20 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		raw, err := exec.Command("tmux", "-L", socket, "list-sessions", "-F", "#{session_name}").CombinedOutput()
+		last = string(raw)
+		if err == nil {
+			count := 0
+			for _, line := range strings.Split(strings.TrimSpace(last), "\n") {
+				if strings.TrimSpace(line) != "" {
+					count++
+				}
+			}
+			if count >= n {
+				t.Logf("PROOF >= %d real tmux panes on isolated socket -L %s:\n%s", n, socket, strings.TrimRight(last, "\n"))
+				return
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("did not observe >= %d tmux panes on isolated socket -L %s within window\nlast list-sessions:\n%s", n, socket, last)
 }

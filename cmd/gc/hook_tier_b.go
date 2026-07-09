@@ -49,6 +49,21 @@ func isTierBFenceRetryable(err error) bool {
 	return errors.Is(err, graphstore.ErrLeaseFenced) || errors.Is(err, graphstore.ErrRebuildRaced)
 }
 
+// isTierBSettleRetryable is the SETTLE loop's retry predicate: the fence/rebuild races
+// isTierBFenceRetryable chases, PLUS engine.ErrTierBClaimConflict — the head-CAS loss a
+// settle suffers when a CONCURRENT close of a DIFFERENT bead on the same run stream wins
+// the append race first. A claim that loses this CAS self-heals (the candidate loop
+// falls through and the agent's outer claim loop retries), so the claim path keeps the
+// narrower isTierBFenceRetryable. A close has NO outer retry: an unchased conflict exits
+// `gc bd` 1, the scripted worker dies without settling, and the claimed row wedges until
+// the 60s firewall grace strands it — corrupting a healthy run's outcome. Chasing it
+// here (re-resolve the moved head + re-settle) matches the engine's own race contract
+// (isRetryableRaceErr in advance_race_test.go treats ErrTierBClaimConflict as retryable);
+// the write-once settle token keeps every retry idempotent.
+func isTierBSettleRetryable(err error) bool {
+	return isTierBFenceRetryable(err) || errors.Is(err, engine.ErrTierBClaimConflict)
+}
+
 // tierBHookStoreName identifies the Tier-B journal leg among the federated hook
 // stores. It is a fixed marker, not a role name. It is sourced from the single
 // canonical constant so config.ValidateRigs can reserve the same value as a

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,14 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
+
+// errTierBDivergentReclose is the loud, no-launder result when a settle loses the head
+// CAS to a CONCURRENT settle that committed a DIFFERENT outcome — e.g. the firewall
+// stranded the row `failed` while this worker's `pass` close was in flight. It mirrors
+// interceptTierBClose's first-resolve divergent-reclose refusal (a divergent re-close is
+// never laundered into success), so the retry loop that chases a lost settle CAS cannot
+// silently adopt a firewall strand as a worker pass.
+var errTierBDivergentReclose = errors.New("divergent Tier-B re-close")
 
 // settleTierBWorkAs is the engine settle seam interceptTierBClose routes through, a
 // package var so a test can inject a lease fence to exercise the bounded retry. It
@@ -167,23 +176,44 @@ func interceptTierBClose(cityPath string, bdArgs []string, _, stderr io.Writer) 
 	return 0, true
 }
 
-// settleTierBWithFenceRetry settles a Tier-B row, retrying a bounded number of times
-// on a lease fence OR a Tier-A rebuild race (both cooperative driver⟷settle races,
-// see isTierBFenceRetryable). The write-once settle token makes each retry idempotent
-// — a settle that committed but whose projection rebuild raced dedupes to success. A
-// persistent race surfaces as a loud, re-runnable close error.
+// settleTierBWithFenceRetry settles a Tier-B row, retrying a bounded number of times on
+// a cooperative multi-writer race (isTierBSettleRetryable): a lease fence, a Tier-A
+// rebuild race, OR a head-CAS conflict lost to a CONCURRENT close of a DIFFERENT bead on
+// the same run stream (§0.2 — the multi-do close race). The write-once settle token
+// makes each retry idempotent — a settle that committed but whose projection rebuild
+// raced dedupes to success. A persistent race surfaces as a loud, re-runnable close
+// error.
+//
+// The re-resolve's settled arm does NOT blanket-return nil: it dedups at the projection
+// level exactly like interceptTierBClose's first resolve. A concurrent settle that won
+// the CAS with the SAME outcome is idempotent success; a DIVERGENT one — the firewall
+// stranding the row `failed` under this worker's `pass` close — is a loud
+// errTierBDivergentReclose, never laundered into a success.
 func settleTierBWithFenceRetry(ctx context.Context, gs *graphstore.Store, ref engine.TierBWorkRef, beadID, outcome, closer, closerID string) error {
 	err := settleTierBWorkAs(ctx, gs, ref.StreamID, ref.Activation, outcome, "", closer, closerID, false)
-	for attempt := 0; attempt < tierBFenceRetries && isTierBFenceRetryable(err); attempt++ {
+	for attempt := 0; attempt < tierBFenceRetries && isTierBSettleRetryable(err); attempt++ {
 		time.Sleep(tierBFenceBackoff)
 		r2, ok, rerr := engine.ResolveTierBWorkRef(ctx, gs, beadID)
 		if rerr != nil {
 			return rerr
 		}
-		if !ok || r2.Settled || r2.Activation == "" {
-			// The row settled (our partial landed, or a racer won): the projection-level
-			// dedup in interceptTierBClose already covers a re-close, so treat as done.
+		if !ok {
+			// The row vanished under us (no concurrent driver deletes rows in L1); the
+			// projection-level dedup in interceptTierBClose already covers a re-close, so
+			// treat as done.
 			return nil
+		}
+		if r2.Settled || r2.Activation == "" {
+			// A concurrent settle (another worker's identical close, or the firewall) won
+			// the head CAS and dropped the activation. Compare outcomes rather than blanket-
+			// laundering, exactly like interceptTierBClose's first resolve: a same-outcome
+			// settle is idempotent success; a DIVERGENT one (a firewall strand under this
+			// worker's pass close) loses loudly and is never adopted as a success.
+			if r2.Outcome == outcome {
+				return nil
+			}
+			return fmt.Errorf("bead %q already settled %q under a concurrent close; refusing a divergent re-close to %q: %w",
+				beadID, r2.Outcome, outcome, errTierBDivergentReclose)
 		}
 		err = settleTierBWorkAs(ctx, gs, r2.StreamID, r2.Activation, outcome, "", closer, closerID, false)
 	}

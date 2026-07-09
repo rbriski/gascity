@@ -832,6 +832,126 @@ func TestAdvanceParallelUndeclaredRefNoWedge(t *testing.T) {
 	}
 }
 
+// TestAdvanceScatterPoolMembersFanOutAndAggregate (T-U2, L4 scenario 3) pins the
+// scatter-of-pool-do's fan-out no test drove before: a 3-do-member scatter
+// materializes ALL members as claimable pool work in ONE Advance pass (each a
+// task-typed row carrying the route + a frontier row), while the aggregate parks on
+// its member drain deps and is NOT activated. Once the members settle, one re-Advance
+// settles the aggregate from their outcomes and seals the run. The degraded subtest
+// pins the mixed-outcome aggregate under on_fail continue, and the drop+refold
+// identity proves the fan-out projection carries no state a refold misses.
+func TestAdvanceScatterPoolMembersFanOutAndAggregate(t *testing.T) {
+	scatterOfDos := func(onFail string) string {
+		return blockDoc("fan",
+			scatterNode("lanes", nil, onFail,
+				doNode("one", "Do lane one.", nil),
+				doNode("two", "Do lane two.", nil),
+				doNode("three", "Do lane three.", nil),
+			),
+		)
+	}
+	opts := engine.Options{PoolRouter: advRouter}
+
+	t.Run("all_members_pass_aggregate_passes", func(t *testing.T) {
+		ctx := context.Background()
+		store := newStore(t)
+		streamID := "gcg-run-adv-scatter-fanout"
+		doc := decodeIR(t, scatterOfDos("continue"))
+
+		// Pass 1: all three do members materialize as claimable pool work; the aggregate
+		// parks on its member drain deps and is NOT activated.
+		r1, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		if err != nil {
+			t.Fatalf("advance 1: %v", err)
+		}
+		if !r1.Parked || r1.Sealed {
+			t.Fatalf("advance 1 = %+v, want Parked (members await the pool)", r1)
+		}
+		if got := inFlightNodeIDs(r1.InFlight); !equalStringSet(got, []string{"one", "two", "three"}) {
+			t.Fatalf("in-flight members = %v, want {one,two,three} (all three fan out in one pass)", got)
+		}
+		if inFlightHas(r1.InFlight, "lanes") {
+			t.Fatalf("scatter aggregate 'lanes' was offered as pool work; want it parked on member drain")
+		}
+		if n := countJournalType(t, store, streamID, engine.EventNodeActivated); n != 3 {
+			t.Fatalf("node.activated count after pass 1 = %d, want 3 (members only; aggregate not yet activated)", n)
+		}
+		// Each member is a claimable task-typed row carrying the route + a frontier row.
+		for _, m := range []string{"one", "two", "three"} {
+			if got := nodeMeta(t, store, m, beadmeta.RoutedToMetadataKey); got != advPool {
+				t.Fatalf("member %q gc.routed_to = %q, want %q", m, got, advPool)
+			}
+			if bt := nodeBeadType(t, store, m); bt != "task" {
+				t.Fatalf("member %q bead_type = %q, want task (claimable)", m, bt)
+			}
+			if !inFrontier(t, store, streamID, m+":0") {
+				t.Fatalf("member %q has no frontier row (not claimable)", m)
+			}
+		}
+
+		// Members settle pass; one re-Advance settles the aggregate and seals.
+		for _, m := range []string{"one", "two", "three"} {
+			if err := engine.SettleTierBWork(ctx, store, streamID, m+":0", engine.OutcomePass, "done "+m); err != nil {
+				t.Fatalf("settle %q: %v", m, err)
+			}
+		}
+		r2, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		if err != nil {
+			t.Fatalf("advance 2: %v", err)
+		}
+		if !r2.Sealed {
+			t.Fatalf("advance 2 = %+v, want Sealed after members settled", r2)
+		}
+		if r2.Run.Outcome != engine.OutcomePass {
+			t.Fatalf("run outcome = %q, want pass (all members passed)", r2.Run.Outcome)
+		}
+		if o := settledOutcomeOf(t, store, streamID, "lanes:0"); o != engine.OutcomePass {
+			t.Fatalf("aggregate lanes:0 settled %q, want pass", o)
+		}
+		if err := store.Verify(ctx, streamID); err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		// Drop+refold byte-identity over the fanned-out member rows.
+		assertProjectionEqualsRefold(t, store, streamID)
+		assertIncrementalEqualsProjectDelta(t, store, streamID)
+	})
+
+	t.Run("one_member_fails_aggregate_degrades", func(t *testing.T) {
+		ctx := context.Background()
+		store := newStore(t)
+		streamID := "gcg-run-adv-scatter-degrade"
+		doc := decodeIR(t, scatterOfDos("continue"))
+
+		if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
+			t.Fatalf("advance 1: %v", err)
+		}
+		// One member fails; the other two pass. on_fail=continue ⇒ the aggregate degrades
+		// (a mix of pass and non-pass), NOT a total failure.
+		settles := map[string]string{"one": engine.OutcomeFailed, "two": engine.OutcomePass, "three": engine.OutcomePass}
+		for m, o := range settles {
+			if err := engine.SettleTierBWork(ctx, store, streamID, m+":0", o, "settle "+m); err != nil {
+				t.Fatalf("settle %q %q: %v", m, o, err)
+			}
+		}
+		r2, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		if err != nil {
+			t.Fatalf("advance 2: %v", err)
+		}
+		if !r2.Sealed {
+			t.Fatalf("advance 2 = %+v, want Sealed", r2)
+		}
+		if o := settledOutcomeOf(t, store, streamID, "lanes:0"); o != engine.OutcomeDegraded {
+			t.Fatalf("aggregate lanes:0 settled %q, want degraded (mixed member outcomes under on_fail continue)", o)
+		}
+		if r2.Run.Outcome != engine.OutcomeDegraded {
+			t.Fatalf("run outcome = %q, want degraded", r2.Run.Outcome)
+		}
+		if err := store.Verify(ctx, streamID); err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+	})
+}
+
 // TestAdvanceSilentDepDefersUntilRealInputSettles is the HIGH-2 repro:
 // do P (pool) -> interp S (after P, = {{P}}) -> exec U (after S, echo {{S}}).
 // A silent (interp) dep never settles, but the REAL node it derives its value from
@@ -1032,6 +1152,56 @@ func inFlightPrompt(inFlight []engine.PoolWork, nodeID string) string {
 		}
 	}
 	return ""
+}
+
+// inFlightNodeIDs returns the node ids of the in-flight pool work, order-free.
+func inFlightNodeIDs(inFlight []engine.PoolWork) []string {
+	out := make([]string, len(inFlight))
+	for i, pw := range inFlight {
+		out[i] = pw.NodeID
+	}
+	return out
+}
+
+// inFlightHas reports whether nodeID is among the in-flight pool work.
+func inFlightHas(inFlight []engine.PoolWork, nodeID string) bool {
+	for _, pw := range inFlight {
+		if pw.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// equalStringSet compares two string slices as sets (order- and duplicate-free).
+func equalStringSet(got, want []string) bool {
+	set := map[string]int{}
+	for _, s := range got {
+		set[s]++
+	}
+	for _, s := range want {
+		if set[s] == 0 {
+			return false
+		}
+		set[s]--
+	}
+	for _, n := range set {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// nodeBeadType reads a projected node's bead_type from the Tier-A projection.
+func nodeBeadType(t *testing.T, store *graphstore.Store, nodeID string) string {
+	t.Helper()
+	var bt string
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT bead_type FROM nodes WHERE id = ? AND fold_owned = 1`, nodeID).Scan(&bt); err != nil {
+		t.Fatalf("read bead_type of %q: %v", nodeID, err)
+	}
+	return bt
 }
 
 // settledOutcomeOf returns the outcome of the first outcome.settled event for

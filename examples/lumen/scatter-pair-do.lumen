@@ -1,0 +1,6 @@
+formula scatter-pair-do {
+  scatter pair {
+    left: prompt Do the left task, then settle this step.
+    right: prompt Do the right task, then settle this step.
+  }
+}

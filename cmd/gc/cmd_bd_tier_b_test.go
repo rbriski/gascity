@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -478,6 +479,156 @@ func TestSettleRebuildRacedRetries(t *testing.T) {
 		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
 		if !handled || code == 0 {
 			t.Fatalf("persistent rebuild-race close = (code=%d handled=%v); want a loud non-zero", code, handled)
+		}
+	})
+}
+
+// TestGcBdCloseRetriesSettleHeadCASLoss (T-U1, §0.2) pins the L4 fix: a worker close
+// whose settle loses the head CAS to a CONCURRENT close of a DIFFERENT bead (mapped to
+// engine.ErrTierBClaimConflict) is CHASED by the close shim's bounded retry, not surfaced
+// as a hard exit 1 that would strand the run for the 60s firewall grace. The re-resolve's
+// settled arm compares outcomes: a same-outcome concurrent settle is idempotent success;
+// a DIVERGENT one (a firewall strand under a worker pass) loses loudly and is never
+// laundered. Subtest (a) FAILS on HEAD (the pre-fix loop chased only fence/rebuild races).
+func TestGcBdCloseRetriesSettleHeadCASLoss(t *testing.T) {
+	closeArgs := []string{"update", "hello", "--set-metadata", "gc.outcome=pass", "--status", "closed"}
+
+	// wrapConflict models the engine's wrapping of a lost head-CAS: the underlying
+	// graphstore.ErrWrongExpectedVersion is dropped, ErrTierBClaimConflict is the chain.
+	wrapConflict := func() error {
+		return fmt.Errorf("lumen tier-b: settle of %q lost the race: %w", "hello", engine.ErrTierBClaimConflict)
+	}
+
+	t.Run("conflict_once_then_retry_succeeds", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		t.Setenv("GC_SESSION_NAME", "worker-a") // matches the seeded claimant
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		calls := 0
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output, closer, closerID string, retryable bool) error {
+			calls++
+			if calls == 1 {
+				return wrapConflict()
+			}
+			return engine.SettleTierBWorkAs(ctx, gs, streamID, activation, outcome, output, closer, closerID, retryable)
+		}
+		defer func() { settleTierBWorkAs = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code != 0 {
+			t.Fatalf("conflict-once close = (code=%d handled=%v); want (0,true) — the settle CAS loss must be retried; stderr=%s", code, handled, stderr.String())
+		}
+		if calls != 2 {
+			t.Fatalf("settle calls = %d, want exactly 2 (one conflict, one successful retry)", calls)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1 (retry settled exactly once)", n)
+		}
+		if o := tbTierBSettledOutcome(t, cityPath); o != engine.OutcomePass {
+			t.Fatalf("settled outcome = %q, want pass", o)
+		}
+	})
+
+	t.Run("conflict_then_settled_same_outcome_idempotent", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		t.Setenv("GC_SESSION_NAME", "worker-a")
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		calls := 0
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(ctx context.Context, gs *graphstore.Store, streamID, activation, outcome, output, closer, closerID string, retryable bool) error {
+			calls++
+			if calls == 1 {
+				// A concurrent identical close won the CAS: commit the SAME outcome, then
+				// report the loss so the retry loop re-resolves and finds it settled pass.
+				if err := engine.SettleTierBWorkAs(ctx, gs, streamID, activation, outcome, output, closer, closerID, retryable); err != nil {
+					t.Fatalf("seed concurrent-same settle: %v", err)
+				}
+				return wrapConflict()
+			}
+			t.Fatalf("settle called again (%d); want the re-resolve to dedup a same-outcome settle", calls)
+			return nil
+		}
+		defer func() { settleTierBWorkAs = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code != 0 {
+			t.Fatalf("same-outcome re-resolve = (code=%d handled=%v); want (0,true) idempotent; stderr=%s", code, handled, stderr.String())
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1 (no second settle appended)", n)
+		}
+		if o := tbTierBSettledOutcome(t, cityPath); o != engine.OutcomePass {
+			t.Fatalf("outcome = %q, want pass", o)
+		}
+	})
+
+	t.Run("conflict_then_settled_divergent_loud_no_launder", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		t.Setenv("GC_SESSION_NAME", "worker-a")
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(ctx context.Context, gs *graphstore.Store, streamID, activation, _, _, _, _ string, _ bool) error {
+			// The firewall stranded this row `failed` (controller override: empty closer,
+			// retryable) while this worker's `pass` close was in flight; then this settle
+			// loses the head CAS. The retry must NOT launder the strand into a pass.
+			if err := engine.SettleTierBWorkAs(ctx, gs, streamID, activation, engine.OutcomeFailed, "stranded: worker-a", "", "", true); err != nil {
+				t.Fatalf("seed firewall strand: %v", err)
+			}
+			return wrapConflict()
+		}
+		defer func() { settleTierBWorkAs = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code == 0 {
+			t.Fatalf("divergent re-resolve = (code=%d handled=%v); want a loud non-zero (no laundering)", code, handled)
+		}
+		if !strings.Contains(stderr.String(), "divergent") {
+			t.Fatalf("divergent re-close stderr = %q, want a divergent-reclose refusal", stderr.String())
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 1 {
+			t.Fatalf("owned.settled = %d, want 1 (the firewall strand stands; the pass was refused)", n)
+		}
+		if o := tbTierBSettledOutcome(t, cityPath); o != engine.OutcomeFailed {
+			t.Fatalf("outcome = %q, want failed (the firewall strand is not laundered to pass)", o)
+		}
+	})
+
+	t.Run("persistent_conflict_loud_after_bounded_retries", func(t *testing.T) {
+		cityPath := tbHookGraphCity(t)
+		tbSeedClaimedPoolRow(t, cityPath)
+		t.Setenv("GC_SESSION_NAME", "worker-a")
+		t.Setenv("GC_SESSION_ID", "")
+		t.Setenv("GC_ALIAS", "")
+		calls := 0
+		orig := settleTierBWorkAs
+		settleTierBWorkAs = func(context.Context, *graphstore.Store, string, string, string, string, string, string, bool) error {
+			calls++
+			return wrapConflict()
+		}
+		defer func() { settleTierBWorkAs = orig }()
+
+		var stdout, stderr bytes.Buffer
+		code, handled := interceptTierBClose(cityPath, closeArgs, &stdout, &stderr)
+		if !handled || code == 0 {
+			t.Fatalf("persistent conflict close = (code=%d handled=%v); want a loud non-zero after the bounded retries", code, handled)
+		}
+		if calls != tierBFenceRetries+1 {
+			t.Fatalf("settle calls = %d, want %d (initial + %d bounded retries)", calls, tierBFenceRetries+1, tierBFenceRetries)
+		}
+		if n := tbHookCountJournalType(t, cityPath, engine.EventOwnedSettled); n != 0 {
+			t.Fatalf("owned.settled = %d, want 0 (nothing settled; the row stays claimed for a re-run)", n)
+		}
+		if st := tbHookNodeStatus(t, cityPath); st != engine.StatusClaimed {
+			t.Fatalf("status after persistent conflict = %q, want in_progress (unchanged)", st)
 		}
 	})
 }

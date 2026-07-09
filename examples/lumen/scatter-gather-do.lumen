@@ -1,0 +1,12 @@
+formula scatter-gather-do {
+  scatter lanes {
+    one: prompt Do lane one, then settle.
+    two: prompt Do lane two, then settle.
+    three: prompt Do lane three, then settle.
+  }
+  gather {
+    collect {
+      tally: exec echo "members drained"
+    }
+  }
+}

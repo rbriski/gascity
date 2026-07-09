@@ -1,0 +1,267 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "scatter-gather-do",
+  "input": {
+    "name": "scatter-gather-do.input",
+    "fields": [],
+    "origin": {
+      "uri": "examples/lumen/scatter-gather-do.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "lanes",
+      "name": "lanes",
+      "after": [],
+      "origin": {
+        "uri": "examples/lumen/scatter-gather-do.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "form": "members",
+      "members": [
+        {
+          "kind": "do",
+          "id": "one",
+          "name": "one",
+          "after": [],
+          "origin": {
+            "uri": "examples/lumen/scatter-gather-do.lumen",
+            "line": 2,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "examples/lumen/scatter-gather-do.lumen",
+              "line": 2,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do lane one, then settle.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do lane one, then settle."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "examples/lumen/scatter-gather-do.lumen",
+              "line": 2,
+              "col": 0
+            }
+          }
+        },
+        {
+          "kind": "do",
+          "id": "two",
+          "name": "two",
+          "after": [],
+          "origin": {
+            "uri": "examples/lumen/scatter-gather-do.lumen",
+            "line": 3,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "examples/lumen/scatter-gather-do.lumen",
+              "line": 3,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do lane two, then settle.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do lane two, then settle."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "examples/lumen/scatter-gather-do.lumen",
+              "line": 3,
+              "col": 0
+            }
+          }
+        },
+        {
+          "kind": "do",
+          "id": "three",
+          "name": "three",
+          "after": [],
+          "origin": {
+            "uri": "examples/lumen/scatter-gather-do.lumen",
+            "line": 4,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "examples/lumen/scatter-gather-do.lumen",
+              "line": 4,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do lane three, then settle.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do lane three, then settle."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "examples/lumen/scatter-gather-do.lumen",
+              "line": 4,
+              "col": 0
+            }
+          }
+        }
+      ],
+      "on_fail": "continue"
+    },
+    {
+      "kind": "gather",
+      "id": "lanes_gather",
+      "name": "lanes_gather",
+      "after": [
+        "lanes"
+      ],
+      "origin": {
+        "uri": "examples/lumen/scatter-gather-do.lumen",
+        "line": 6,
+        "col": 0
+      },
+      "over": {
+        "kind": "ref",
+        "name": "lanes",
+        "origin": {
+          "uri": "examples/lumen/scatter-gather-do.lumen",
+          "line": 6,
+          "col": 0
+        }
+      },
+      "combine": {
+        "kind": "authored",
+        "block": {
+          "kind": "block",
+          "id": "lanes_gather.body",
+          "after": [],
+          "origin": {
+            "uri": "examples/lumen/scatter-gather-do.lumen",
+            "line": 6,
+            "col": 0
+          },
+          "members": [
+            {
+              "kind": "exec",
+              "id": "tally",
+              "name": "tally",
+              "after": [],
+              "origin": {
+                "uri": "examples/lumen/scatter-gather-do.lumen",
+                "line": 8,
+                "col": 0
+              },
+              "interpreter": {
+                "kind": "shell",
+                "program": {
+                  "kind": "exec"
+                },
+                "origin": {
+                  "uri": "examples/lumen/scatter-gather-do.lumen",
+                  "line": 8,
+                  "col": 0
+                }
+              },
+              "body": {
+                "raw": "echo \"members drained\"",
+                "template": {
+                  "parts": [
+                    {
+                      "kind": "text",
+                      "value": "echo \"members drained\""
+                    }
+                  ]
+                },
+                "source": {
+                  "kind": "inline"
+                },
+                "templated": true,
+                "language": "bash",
+                "syntax": "bare",
+                "origin": {
+                  "uri": "examples/lumen/scatter-gather-do.lumen",
+                  "line": 8,
+                  "col": 0
+                }
+              },
+              "exitMap": {
+                "pass": [
+                  0
+                ],
+                "retryable": []
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "examples/lumen/scatter-gather-do.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

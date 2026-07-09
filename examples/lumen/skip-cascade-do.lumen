@@ -1,0 +1,5 @@
+formula skip-cascade-do {
+  a: prompt Do task A, then settle this step.
+  b: exec echo "b ran"
+  c: prompt Do task C, then settle this step.
+}

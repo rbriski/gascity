@@ -1,0 +1,172 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "skip-cascade-do",
+  "input": {
+    "name": "skip-cascade-do.input",
+    "fields": [],
+    "origin": {
+      "uri": "examples/lumen/skip-cascade-do.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "do",
+      "id": "a",
+      "name": "a",
+      "after": [],
+      "origin": {
+        "uri": "examples/lumen/skip-cascade-do.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/skip-cascade-do.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Do task A, then settle this step.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Do task A, then settle this step."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "examples/lumen/skip-cascade-do.lumen",
+          "line": 1,
+          "col": 0
+        }
+      }
+    },
+    {
+      "kind": "exec",
+      "id": "b",
+      "name": "b",
+      "after": [
+        "a"
+      ],
+      "origin": {
+        "uri": "examples/lumen/skip-cascade-do.lumen",
+        "line": 2,
+        "col": 0
+      },
+      "interpreter": {
+        "kind": "shell",
+        "program": {
+          "kind": "exec"
+        },
+        "origin": {
+          "uri": "examples/lumen/skip-cascade-do.lumen",
+          "line": 2,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "echo \"b ran\"",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "echo \"b ran\""
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "bash",
+        "syntax": "bare",
+        "origin": {
+          "uri": "examples/lumen/skip-cascade-do.lumen",
+          "line": 2,
+          "col": 0
+        }
+      },
+      "exitMap": {
+        "pass": [
+          0
+        ],
+        "retryable": []
+      }
+    },
+    {
+      "kind": "do",
+      "id": "c",
+      "name": "c",
+      "after": [
+        "b"
+      ],
+      "origin": {
+        "uri": "examples/lumen/skip-cascade-do.lumen",
+        "line": 3,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/skip-cascade-do.lumen",
+          "line": 3,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Do task C, then settle this step.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Do task C, then settle this step."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "examples/lumen/skip-cascade-do.lumen",
+          "line": 3,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "examples/lumen/skip-cascade-do.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

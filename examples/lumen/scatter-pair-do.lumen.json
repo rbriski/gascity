@@ -1,0 +1,133 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "scatter-pair-do",
+  "input": {
+    "name": "scatter-pair-do.input",
+    "fields": [],
+    "origin": {
+      "uri": "examples/lumen/scatter-pair-do.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "pair",
+      "name": "pair",
+      "after": [],
+      "origin": {
+        "uri": "examples/lumen/scatter-pair-do.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "form": "members",
+      "members": [
+        {
+          "kind": "do",
+          "id": "left",
+          "name": "left",
+          "after": [],
+          "origin": {
+            "uri": "examples/lumen/scatter-pair-do.lumen",
+            "line": 2,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "examples/lumen/scatter-pair-do.lumen",
+              "line": 2,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do the left task, then settle this step.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do the left task, then settle this step."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "examples/lumen/scatter-pair-do.lumen",
+              "line": 2,
+              "col": 0
+            }
+          }
+        },
+        {
+          "kind": "do",
+          "id": "right",
+          "name": "right",
+          "after": [],
+          "origin": {
+            "uri": "examples/lumen/scatter-pair-do.lumen",
+            "line": 3,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "examples/lumen/scatter-pair-do.lumen",
+              "line": 3,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do the right task, then settle this step.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do the right task, then settle this step."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "examples/lumen/scatter-pair-do.lumen",
+              "line": 3,
+              "col": 0
+            }
+          }
+        }
+      ],
+      "on_fail": "continue"
+    }
+  ],
+  "origin": {
+    "uri": "examples/lumen/scatter-pair-do.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

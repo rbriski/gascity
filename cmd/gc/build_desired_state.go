@@ -706,6 +706,17 @@ func buildDesiredStateWithSessionBeads(
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
+			// defaultScaleCheckCounts scans the city/rig stores only. When the graph
+			// class is relocated, routed orchestration work (gcg- graph.v2 steps) is
+			// graph-resident, so its pool demand is uncounted and the pool never scales
+			// for it (Seam C, the demand side). Add the shared graph store's ready routed
+			// demand once — the collectOpenUnassignedRoutedWork graph-leg analog for the
+			// Ready-based pool probe. no-op when graphStore == store (the bd default).
+			if graphStore != nil && graphStore != store {
+				for template, n := range graphStoreRoutedDemand(graphStore, defaultScaleTargets, stderr) {
+					defaultCounts[template] += n
+				}
+			}
 			for _, err := range errs {
 				// defaultScaleCheckCounts wraps Ready() failures with
 				// enough context to keep this generic outer log honest
@@ -1520,6 +1531,40 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		}
 	}
 	return counts, partialTemplates, errs
+}
+
+// graphStoreRoutedDemand counts ready, unassigned, pool-routed work in the relocated
+// graph store, matched to the pool templates in targets — the graph analog of the
+// per-store Ready scan in defaultScaleCheckCounts. It reads the shared city-scope graph
+// store ONCE (not per group), so it never double-counts, and it stays graph-only (does
+// not federate the work store) so no rig-WORK bead leaks into pool demand. Callers gate
+// it on graphStore != store (the relocated case).
+func graphStoreRoutedDemand(graphStore beads.Store, targets []defaultScaleCheckTarget, stderr io.Writer) map[string]int {
+	counts := make(map[string]int)
+	templates := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		if tmpl := strings.TrimSpace(t.template); tmpl != "" {
+			templates[tmpl] = struct{}{}
+		}
+	}
+	if len(templates) == 0 {
+		return counts
+	}
+	ready, err := readyForControllerDemand(graphStore)
+	if err != nil && !beads.IsPartialResult(err) {
+		fmt.Fprintf(stderr, "graphStoreRoutedDemand: Ready(): %v\n", err) //nolint:errcheck
+		return counts
+	}
+	for _, b := range ready {
+		if strings.TrimSpace(b.Assignee) != "" {
+			continue
+		}
+		template := controllerDemandRouteTarget(b, templates)
+		if _, ok := templates[template]; ok {
+			counts[template]++
+		}
+	}
+	return counts
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City, _ string) (map[string]bool, map[string]bool, []error) {

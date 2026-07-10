@@ -4,6 +4,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -33,5 +34,29 @@ func TestCollectOpenUnassignedRoutedWork_IncludesGraphStore(t *testing.T) {
 	// Byte-identical no-op when graphStore == store (bd default): no panic, no dup.
 	if out, _ := collectOpenUnassignedRoutedWork(&config.City{}, work, work, nil, nil, io.Discard); len(out) != 0 {
 		t.Fatalf("bd-default (graphStore==store) must be a no-op leg; got %v", out)
+	}
+}
+
+// TestGraphStoreRoutedDemand counts graph-resident routed pool work (the demand-side
+// of Seam C): a ready, unassigned, routed gcg- bead in the graph store contributes to
+// the routed pool template's demand, and non-matching / assigned beads do not.
+func TestGraphStoreRoutedDemand(t *testing.T) {
+	graph := beads.NewMemStore()
+	// ready + unassigned + routed to the pool template -> counted.
+	if _, err := graph.Create(beads.Bead{Type: "task", Status: "open", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gc.run-operator"}}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// assigned -> NOT counted.
+	if _, err := graph.Create(beads.Bead{Type: "task", Status: "open", Assignee: "x", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gc.run-operator"}}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// routed to a different template -> NOT counted for run-operator.
+	if _, err := graph.Create(beads.Bead{Type: "task", Status: "open", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "other"}}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	targets := []defaultScaleCheckTarget{{template: "gc.run-operator", store: beads.NewMemStore(), storeKey: "city"}}
+	got := graphStoreRoutedDemand(graph, targets, io.Discard)
+	if got["gc.run-operator"] != 1 {
+		t.Fatalf("graph routed demand for gc.run-operator = %d, want 1; got %v", got["gc.run-operator"], got)
 	}
 }

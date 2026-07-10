@@ -19,7 +19,10 @@ type MemStore struct {
 	seq   int
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ Claimer                       = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
@@ -164,6 +167,37 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 		}
 	}
 	return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+}
+
+// Claim atomically claims a bead for assignee: it succeeds (status ->
+// in_progress, assignee -> caller) only when the bead is open/in_progress and
+// currently unassigned, is idempotent when the same assignee already holds it,
+// returns ok=false (a conflict, not an error) when another assignee holds it or
+// the bead is closed, and ErrNotFound when the bead is absent. It is the
+// acquire-dual of [MemStore.ReleaseIfCurrent]; the store mutex makes the
+// read-check-write single-winner under concurrency.
+func (m *MemStore) Claim(id, assignee string) (Bead, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID != id {
+			continue
+		}
+		cur := strings.TrimSpace(m.beads[i].Assignee)
+		if cur != "" && cur != assignee {
+			// Held by another worker — conflict, not an error.
+			return Bead{}, false, nil
+		}
+		if m.beads[i].Status == "closed" {
+			// Terminal work is not claimable.
+			return Bead{}, false, nil
+		}
+		m.beads[i].Assignee = assignee
+		m.beads[i].Status = "in_progress"
+		m.beads[i].UpdatedAt = time.Now()
+		return cloneBead(m.beads[i]), true, nil
+	}
+	return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still

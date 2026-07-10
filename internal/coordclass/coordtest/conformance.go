@@ -18,6 +18,7 @@ package coordtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -164,6 +165,70 @@ func RunClassedStoreTestsWithOptions(t *testing.T, class coordclass.Class, newSt
 		}
 		if !found {
 			t.Fatalf("List did not include the created %v bead %q", class, created.ID)
+		}
+	})
+
+	// ClaimIsAtomicCAS is the gap detector for the exact defect the two-store split
+	// hit live: a graph-class work step relocated onto a backend that implements
+	// neither Claimer nor EnvActorClaimer cannot be claimed — the API claim path
+	// falls through to ErrClaimUnsupported and drains the worker, so the molecule
+	// never advances past preflight. Every classed store must support atomic claim;
+	// this subtest fails loudly in CI instead of at runtime, and pins the CAS
+	// semantics (single-winner, idempotent-by-holder, conflict-loses-cleanly).
+	t.Run("ClaimIsAtomicCAS", func(t *testing.T) {
+		s := newStore()
+		created, err := s.Create(representativeBead(class))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		switch c := any(s).(type) {
+		case beads.Claimer:
+			// Explicit-assignee CAS (SQLite/Postgres/Mem).
+			claimed, ok, err := c.Claim(created.ID, "worker-a")
+			if err != nil {
+				t.Fatalf("Claim: %v", err)
+			}
+			if !ok {
+				t.Fatal("Claim of an unassigned open bead returned ok=false")
+			}
+			if claimed.Status != "in_progress" || claimed.Assignee != "worker-a" {
+				t.Fatalf("claimed = {status:%q assignee:%q}, want {in_progress worker-a}", claimed.Status, claimed.Assignee)
+			}
+			if got, err := s.Get(created.ID); err != nil {
+				t.Fatalf("Get after Claim: %v", err)
+			} else if got.Status != "in_progress" || got.Assignee != "worker-a" {
+				t.Fatalf("persisted claim = {status:%q assignee:%q}, want {in_progress worker-a}", got.Status, got.Assignee)
+			}
+			// Idempotent: the same holder re-claiming still succeeds.
+			if _, ok, err := c.Claim(created.ID, "worker-a"); err != nil || !ok {
+				t.Fatalf("idempotent re-claim by holder = (ok=%v, err=%v), want (true, nil)", ok, err)
+			}
+			// Conflict: a different actor loses cleanly (ok=false, not an error).
+			if _, ok, err := c.Claim(created.ID, "worker-b"); err != nil || ok {
+				t.Fatalf("conflicting claim = (ok=%v, err=%v), want (false, nil)", ok, err)
+			}
+			if got, _ := s.Get(created.ID); got.Assignee != "worker-a" {
+				t.Fatalf("after a losing claim the holder = %q, want worker-a (the winner must not be displaced)", got.Assignee)
+			}
+			// ErrNotFound for an absent id (a lost race is ok=false; a missing bead is an error).
+			if _, _, err := c.Claim("does-not-exist", "worker-a"); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("Claim(absent) err = %v, want ErrNotFound", err)
+			}
+		case beads.EnvActorClaimer:
+			// Store-baked actor (bd): single-winner + idempotent + not-found only,
+			// since the assignee is a store property, not a per-call argument.
+			if _, ok, err := c.Claim(created.ID); err != nil || !ok {
+				t.Fatalf("EnvActor Claim = (ok=%v, err=%v), want (true, nil)", ok, err)
+			}
+			if _, ok, err := c.Claim(created.ID); err != nil || !ok {
+				t.Fatalf("EnvActor idempotent re-claim = (ok=%v, err=%v), want (true, nil)", ok, err)
+			}
+			if _, _, err := c.Claim("does-not-exist"); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("EnvActor Claim(absent) err = %v, want ErrNotFound", err)
+			}
+		default:
+			t.Fatalf("store %T implements neither beads.Claimer nor beads.EnvActorClaimer; "+
+				"graph-resident work beads cannot be claimed on it — this is the ErrClaimUnsupported gap the two-store split hit live", s)
 		}
 	})
 }

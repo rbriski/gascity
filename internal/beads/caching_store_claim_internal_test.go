@@ -7,6 +7,14 @@ import (
 	"testing"
 )
 
+// nonClaimerStore embeds the Store interface so it satisfies Store but exposes
+// none of the embedded value's optional capabilities (Claim is not a Store
+// method, so it is not promoted). Used to drive the CachingStore's
+// ErrClaimUnsupported fallback now that every concrete classed store is a Claimer.
+type nonClaimerStore struct {
+	Store
+}
+
 // claimerBackingStore is a Store that also implements the 2-arg Claimer,
 // delegating the claim to the embedded store's Update so the CachingStore's
 // post-claim refresh observes the assignee + in_progress status. It models the
@@ -96,7 +104,12 @@ func TestCachingStoreClaimDelegatesToClaimerBackingAndRefreshesCache(t *testing.
 func TestCachingStoreClaimUnsupportedWhenBackingNotClaimer(t *testing.T) {
 	t.Parallel()
 
-	backing := NewMemStore() // implements neither Claimer nor EnvActorClaimer
+	// nonClaimerStore embeds the Store interface, so it satisfies Store but
+	// promotes none of MemStore's concrete optional capabilities — in particular
+	// NOT Claimer (Claim is not part of the Store interface). MemStore itself is a
+	// Claimer now (every classed backend must be), so we need an explicit
+	// non-claimer double to exercise the CachingStore's ErrClaimUnsupported path.
+	backing := nonClaimerStore{Store: NewMemStore()}
 	bead, err := backing.Create(Bead{Title: "step"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

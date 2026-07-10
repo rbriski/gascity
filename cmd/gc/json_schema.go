@@ -275,13 +275,21 @@ func isBDCommandPath(commandPath []string) bool {
 
 // isContractExemptBareJSONPath reports command paths exempt from the gc
 // JSON-schema contract because they self-serialize a bare JSON array: the bd
-// passthrough commands (emitted by the real bd binary) and `gc ready`, the
+// passthrough commands (emitted by the real bd binary), the `gc bd-shim`
+// passthrough (which parses --json itself for the routable `mol current|progress`
+// subcommands and otherwise falls back to real bd), and `gc ready`, the
 // graph-store-aware drop-in for `bd ready --json` that streams the same
 // []bead array. Exempting keeps `gc ready --json` (used by the routed
 // work_query under graph_store=sqlite) from being rejected for lacking a
 // declared schema, while still letting it stream its own array to the consumer.
+// Exempting bd-shim keeps `gc bd-shim mol current <id> --json` (the pr-review
+// router's molecule status read on a Postgres/SQLite-relocated graph store) from
+// being rejected with json_unsupported before bd-shim can render it.
 func isContractExemptBareJSONPath(commandPath []string) bool {
 	if isBDCommandPath(commandPath) {
+		return true
+	}
+	if len(commandPath) > 0 && commandPath[0] == "bd-shim" {
 		return true
 	}
 	return len(commandPath) == 1 && commandPath[0] == "ready"

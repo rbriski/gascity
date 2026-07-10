@@ -824,3 +824,29 @@ func TestJSONSchemaManifestForDiscoveredPackCommand(t *testing.T) {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 }
+
+// TestContractExemptBareJSONPath pins which command paths bypass the JSON-schema
+// contract because they self-serialize a bare JSON array. bd-shim is exempt so
+// `gc bd-shim mol current <id> --json` (the pr-review router's molecule status
+// read on a relocated graph store) is not rejected with json_unsupported before
+// bd-shim can render it — the Seam-D-adjacent fix.
+func TestContractExemptBareJSONPath(t *testing.T) {
+	cases := []struct {
+		path []string
+		want bool
+	}{
+		{[]string{"bd"}, true},
+		{[]string{"bd", "list"}, true},
+		{[]string{"bd-shim"}, true},
+		{[]string{"bd-shim", "mol", "current"}, true},
+		{[]string{"ready"}, true},
+		{[]string{"beads", "list"}, false},
+		{[]string{"status"}, false},
+		{[]string{}, false},
+	}
+	for _, tc := range cases {
+		if got := isContractExemptBareJSONPath(tc.path); got != tc.want {
+			t.Errorf("isContractExemptBareJSONPath(%v) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

@@ -678,7 +678,7 @@ community contributors. See the GitHub release page for the full narrative.
 - Long tail of session lifecycle, wake-budget, and pool identity fixes.
 
 [Unreleased]: https://github.com/gastownhall/gascity/compare/v1.3.4...HEAD
-[1.3.4]: https://github.com/gastownhall/gascity/compare/v1.3.3...v1.3.4
+[1.3.4]: https://github.com/gastownhall/gascity/releases/tag/v1.3.4
 [1.3.3]: https://github.com/gastownhall/gascity/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/gastownhall/gascity/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/gastownhall/gascity/compare/v1.3.0...v1.3.1

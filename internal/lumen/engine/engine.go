@@ -91,31 +91,30 @@ type Options struct {
 	// event folds to a no-op — so enabling them never changes the Tier-A projection,
 	// only bounds the journal and enables Resume.
 	SnapshotEvery int
-	// PoolRouter is the L0 pool seam consulted ONLY by Advance. When non-nil, every
-	// `do` node lowers pool-mode: Advance materializes it as a claimable Tier-B work
-	// bead a session POOL claims and settles asynchronously, and PARKS instead of
-	// blocking on a Host. agentRef selects the pool ("" = the run's default route);
-	// ok=false is a loud config error (a pool-mode do with no resolvable route),
-	// never a silent inline fallback. Run/RunWithOptions/Resume ignore this field
-	// and run every do inline through Host. ZERO role names: a route is a
-	// config-resolved pool target, exactly like gc.routed_to.
+	// PoolRouter is the pool seam consulted ONLY by Advance. When non-nil, every
+	// `do` node lowers pool-mode: Advance dispatches its work as an ordinary bead in
+	// the city work store (via DispatchWork), observes that bead for closure (via
+	// ObserveWork), and PARKS instead of blocking on a Host. agentRef selects the
+	// pool ("" = the run's default route); ok=false is a loud config error (a
+	// pool-mode do with no resolvable route), never a silent inline fallback.
+	// Run/RunWithOptions/Resume ignore this field and run every do inline through
+	// Host. ZERO role names: a route is a config-resolved pool target, exactly like
+	// gc.routed_to.
 	PoolRouter func(agentRef string) (route string, ok bool)
 
 	// DispatchWork is the real-bead do-path seam (REDESIGN §1.4): it creates
 	// (idempotently) the ordinary fold_owned=0 work bead for one ready pool-mode do
 	// activation in the city work store and returns its store-minted id. It is a
 	// Layer-0 side effect injected by the composition root (the engine stays free of
-	// internal/beads). When nil, Advance runs the LEGACY Tier-A path (a claimable
-	// fold row a Tier-B hook claims); when non-nil, Advance dispatches a real bead
-	// and journals an owned.admitted{kind:work_bead} fact instead. Setting it without
-	// ObserveWork is a configuration error (the dispatched bead would never settle).
+	// internal/beads). It is REQUIRED whenever PoolRouter is set — a pool-mode do
+	// with no DispatchWork seam is a loud configuration error (nowhere to create the
+	// bead), and set without ObserveWork the dispatched bead would never settle.
 	DispatchWork func(ctx context.Context, w WorkDispatch) (beadID string, err error)
 
 	// ObserveWork reports an already-dispatched bead's terminal state (REDESIGN
 	// §1.4) so Advance can copy an ordinary close into the journal as the existing
-	// outcome.settled and advance the fold. Consulted only for a pool node that
-	// carries a recorded BeadID (the real-bead path). nil = the legacy path (a
-	// worker appends owned.settled directly).
+	// outcome.settled and advance the fold. Consulted for every pool node that
+	// carries a recorded BeadID; REQUIRED alongside DispatchWork.
 	ObserveWork func(ctx context.Context, beadID string) (WorkObservation, error)
 }
 

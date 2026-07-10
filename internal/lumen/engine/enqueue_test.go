@@ -116,7 +116,7 @@ func TestEnqueueRunSeedsManifest(t *testing.T) {
 
 	// A follow-up Advance takes the REBUILD path (head != 0) and its ir/input hash
 	// guards pass — proving the stamped hashes match the doc + input.
-	res, err := engine.Advance(ctx, store, doc, streamID, input, engine.Options{PoolRouter: advRouter})
+	res, err := engine.Advance(ctx, store, doc, streamID, input, newFakeWorkStore().opts())
 	if err != nil {
 		t.Fatalf("advance rebuild: %v (ir/input hash guard regression?)", err)
 	}
@@ -206,9 +206,7 @@ func TestEnqueueRunNonceStreams(t *testing.T) {
 
 // TestDefaultRouteFieldDropRefoldIdentity (T-A5) is the DET-T-17 extension for the
 // additive default_route field: a stream whose run.started carries default_route
-// survives a drop+refold byte-identically (the reducer folds no new state from it),
-// and the reducer version is unchanged (still 2 — an omitempty field folded by no
-// reducer arm needs no bump).
+// survives a drop+refold byte-identically (the reducer folds no new state from it).
 func TestDefaultRouteFieldDropRefoldIdentity(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -219,9 +217,9 @@ func TestDefaultRouteFieldDropRefoldIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	// Advance once so the projection carries a materialized pool row too, not just
-	// the root — a richer surface for the byte-identity comparison.
-	if _, err := engine.Advance(ctx, store, doc, streamID, nil, engine.Options{PoolRouter: advRouter}); err != nil {
+	// Advance once so the projection carries a dispatched pool row too, not just the
+	// root — a richer surface for the byte-identity comparison.
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, newFakeWorkStore().opts()); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
 

@@ -41,7 +41,7 @@ const (
 	// EventEffectScheduled (5) records that a side-effecting step is about to run:
 	// appended BEFORE the effect acts, carrying the idem token, the policy, and the
 	// effect spec hash. In P4.3 ONLY agent `do` emits this pair, which is what makes
-	// do at-most-once across a crash. `exec` (and, later, sub-run / Tier-B attach)
+	// do at-most-once across a crash. `exec` (and, later, sub-run / detached-run attach)
 	// run WITHOUT an effect record today, so they are at-least-once across resume;
 	// extending the effect discipline to them is a deferred follow-up (M1).
 	EventEffectScheduled = "lumen.effect.scheduled"
@@ -142,44 +142,21 @@ const (
 	DecisionFoldCkpt = "fold_ckpt"
 )
 
-// Tier-B (P4.5) claim-as-append vocabulary. A pool-mode node materializes as a
-// worker-claimable Tier-B work bead; a claim is a CAS EventOwnedAdmitted with
-// kind=OwnedKindTierB (write-once per handle), a close is an EventOwnedSettled.
-// The projection (assignee/status) is a pure fold of those events — never a raw
-// column write (B1/08, blueprint §6). ZERO hardcoded roles: worker-class is
-// keyed by DispatchModePool, not a role name.
+// Pool-mode dispatch vocabulary. A pool-mode node's work is an ordinary
+// fold_owned=0 work bead in the city work store (REDESIGN); the driver records
+// its store-minted id in a write-once owned.admitted{kind:work_bead, bead_id}
+// dispatch fact and observes the bead's ordinary close for settlement. ZERO
+// hardcoded roles: worker-class is keyed by DispatchModePool, not a role name.
 const (
 	// DispatchModePool is the node.activated dispatch_mode marking a node
-	// worker-claimable (vs the default "" engine-driven path).
+	// pool-dispatched (vs the default "" engine-driven path).
 	DispatchModePool = "pool"
-	// OwnedKindTierB is the owned.admitted/owned.settled kind for a claimed
-	// Tier-B work handle, distinguishing it from the deferred async/detached-run
-	// handle kinds that share the type.
-	OwnedKindTierB = "tier_b"
 	// OwnedKindWorkBead is the owned.admitted kind for the real-bead do path
 	// (REDESIGN §1.2): a ready pool-mode do's work is an ordinary fold_owned=0 work
 	// bead in the city work store, and the driver records its store-minted id in a
-	// write-once owned.admitted{kind:work_bead, bead_id} dispatch fact. It shares the
-	// discriminant lane with OwnedKindTierB so a work_bead admit can never fold as a
-	// Tier-B claim (and vice versa); the two paths coexist while the Tier-B adapter
-	// is proven-then-deleted.
+	// write-once owned.admitted{kind:work_bead, bead_id} dispatch fact. Every other
+	// owned kind (async / detached_run) folds as deferred no-op bookkeeping.
 	OwnedKindWorkBead = "work_bead"
-	// DispatchModeMetaKey is the projected node-metadata key carrying a claimable
-	// node's dispatch mode, so a serve/claim surface can select Tier-B work.
-	DispatchModeMetaKey = "dispatch_mode"
-	// ClaimantIDMetaKey is the projected node-metadata key carrying a claimed
-	// node's instance-unique claimant id (the claiming session's GC_SESSION_ID).
-	// It is the zombie firewall's identity of record (§4.3): the assignee is the
-	// session NAME (stable across a false-kill/respawn under a singleton pool
-	// identity, so it cannot distinguish A from its respawn B), while the claimant
-	// id is the per-instance session bead id, so a straggler A's close of the live
-	// attempt B claimed is caught by an id mismatch even when the names match. It is
-	// projected only while a node is claimed-and-unsettled (a settled row drops it,
-	// like `activation`), and omitted for a legacy/no-session claim that carried none.
-	ClaimantIDMetaKey = "claimant_id"
-	// StatusClaimed is the projected status of a claimed-but-unsettled Tier-B
-	// work bead — bead-compatible with the worker view (in_progress + assignee).
-	StatusClaimed = "in_progress"
 )
 
 const (
@@ -192,22 +169,6 @@ const (
 	// journal without input_hash folds identically (the omitempty field decodes to
 	// "", the pre-P4.3 value). A bump would only strand snapshots that do not exist,
 	// so it is unnecessary.
-	//
-	// P4.5 also stays at v2: the Tier-B claim/settle arms (owned.admitted/
-	// owned.settled with kind=tier_b) only fold event patterns that NO pre-P4.5
-	// stream or snapshot contains (owned.* was inert no-op bookkeeping; nothing
-	// emitted it), and the new nodeState/payload fields are omitempty, so every
-	// existing journal and snapshot folds and re-marshals byte-identically. The
-	// arms are additive live behavior over never-before-seen events, not a change
-	// to how any persisted state folds.
-	//
-	// L5-HARDENING stays at v2 too: owned.admitted/owned.settled gain a claimant_id
-	// (the closer-identity guard's instance-unique field, §4.3) and nodeState gains
-	// ClaimantID, all additive-omitempty. A pre-hardening claim/settle carried no
-	// claimant_id, so it decodes to "" and folds byte-identically (the id check is
-	// gated on a non-empty recorded id), and the projected claimant_id metadata key
-	// is emitted only when a claim carried one — drop+refold stays byte-identical
-	// (DET-T-17). No persisted stream predates this, so no snapshot is stranded.
 	//
 	// L0 DECISION — stays at v2 despite a frontier RE-KEYING (MED-1). L0 changed the
 	// leaf frontier row's node_id/id from the activation key to the BARE node id
@@ -226,20 +187,20 @@ const (
 	// RebuildTierA (which rewrites the frontier from state, dropping the stale
 	// activation-keyed rows) before its L0 frontier is trusted.
 	//
-	// REDESIGN (real-bead do node) — bumped 2 → 3. This slice lands the real-bead
-	// dispatch path alongside the Tier-B adapter: a new owned.admitted{kind:work_bead}
-	// arm folds nodeState.BeadID, and a work-bead-dispatched pool node projects a
-	// PLAIN step with no claimable frontier row / dispatch_mode marker (the real work
-	// bead lives in the city work store). Those two changes are additive-omitempty over
-	// the fields any pre-redesign stream carries (BeadID is always "" there, so every
-	// existing journal and snapshot folds and re-marshals byte-identically — DET-T-17).
-	// Strictly, an additive-omitempty change does not FORCE a bump (the L0/P4.5
-	// precedents above declined it). It is taken here, up front, because this is the
-	// first slice of a multi-slice transport whose later slices DO change how a
-	// persisted tier_b claim folds (that arm reverts to no-op bookkeeping) — taking the
-	// honest bump once, on an unpushed branch with zero persisted Lumen streams, avoids
-	// a mid-transport version churn. fold.Fold's version gate strands any (nonexistent)
-	// v2 snapshot LOUDLY (ErrReducerVersionSkew, resume.go), so the bump costs nothing.
+	// REDESIGN (real-bead do node) — v3. A ready pool-mode do's work is an ordinary
+	// fold_owned=0 work bead in the city work store: the driver records its store-minted
+	// id in a write-once owned.admitted{kind:work_bead, bead_id} dispatch fact, folds
+	// nodeState.BeadID, projects the pool node as a PLAIN step (no claimable frontier
+	// row, no dispatch_mode marker — the real bead is the only claim surface), and
+	// settles the do from the bead's ordinary close through the existing outcome.settled.
+	// The former Tier-B claim-as-append arms (owned.admitted/owned.settled kind=tier_b)
+	// were REMOVED with the adapter: every owned kind other than work_bead now folds as
+	// deferred no-op bookkeeping. That removal changes the fold of NO real-bead stream —
+	// no real-bead stream ever carried a tier_b claim — so v3 is unchanged by it. The
+	// bump to 3 was taken up front (against the never-persisted v2) so no persisted Lumen
+	// stream or snapshot exists on any real deployment (this branch is unpushed local
+	// dev); fold.Fold's version gate strands any (nonexistent) v2 snapshot LOUDLY
+	// (ErrReducerVersionSkew, resume.go), so the bump costs nothing.
 	reducerVersion = 3
 	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped 2 → 3 with
 	// reducerVersion for the additive nodeState.BeadID field; no v2 snapshot ever
@@ -261,8 +222,7 @@ const (
 // (applyRunStarted ignores it), so it changes no state or projection: an old
 // journal without it folds identically (the field decodes to ""), and drop+refold
 // stays byte-identical. That is why it needs no reducerVersion bump (the same
-// additive-omitempty precedent as input_hash in P4.3 and the Tier-B fields in
-// P4.5).
+// additive-omitempty precedent as input_hash in P4.3).
 type runStartedPayload struct {
 	RootID       string `json:"root_id"`
 	Name         string `json:"name"`
@@ -278,21 +238,18 @@ type runStartedPayload struct {
 // Members carries drain dependencies (a scatter aggregate / gather waits for
 // them to settle with any outcome). Together they are THE DAG, in the journal.
 //
-// DispatchMode is the P4.5 Tier-B knob (default "" = engine-driven; "pool" =
-// worker-claimable). It is kind/label-keyed, never a role name: a pool node
-// materializes as a claimable Tier-B work bead whose claim/settle are journal
-// appends (tier_b_claim.go), and the fold projects it with a dispatch_mode
-// marker so a serve/claim surface can select it. It is additive and omitempty,
-// so a stream that never set it folds byte-identically to the pre-P4.5 reducer.
+// DispatchMode is the pool-dispatch knob (default "" = engine-driven; "pool" =
+// pool-dispatched). It is kind/label-keyed, never a role name: a ready pool node's
+// work is dispatched as an ordinary work bead in the city work store (REDESIGN),
+// not run inline. It is additive and omitempty, so a stream that never set it folds
+// byte-identically to the pre-pool reducer.
 //
-// Route and Prompt are the L0 pool-claim-contract fields the driver
-// (engine.Advance) stamps when it materializes a pool-mode do: Route is the pool
-// the work is routed to (projected onto both the node's gc.routed_to metadata and
-// the frontier row's route column, so the dormant frontier_route_order index
-// becomes the demand/claim SELECT); Prompt is the rendered agent prompt
-// (projected onto nodes.description so a claiming worker reads it without a
-// store-blind bd show). Both additive and omitempty, so an engine-driven node —
-// or a pre-L0 pool node minted by MaterializeTierBWork — folds byte-identically.
+// Route and Prompt are the pool-dispatch fields the driver (engine.Advance) stamps
+// when it materializes a pool-mode do: Route is the pool the work is routed to (the
+// dispatched bead's gc.routed_to), Prompt is the rendered agent prompt (the
+// dispatched bead's Description). Both are carried in the fold so a re-Advance
+// re-dispatches byte-identically. Both additive and omitempty, so an engine-driven
+// node folds byte-identically.
 type nodeActivatedPayload struct {
 	NodeID           string   `json:"node_id"`
 	Activation       string   `json:"activation"`
@@ -415,60 +372,32 @@ type cancelSweptPayload struct {
 	SessionsStopped int    `json:"sessions_stopped"`
 }
 
-// ownedAdmittedPayload is the body of EventOwnedAdmitted. For P4.5 Tier-B it is
-// the CAS `claimed` fact: kind=OwnedKindTierB and Assignee names the worker that
-// claimed the handle (the activation of a pool-mode node). Assignee is additive
-// and omitempty, so the async/detached-run uses of this type (kind=async|
-// detached_run, deferred) fold byte-identically without it.
-//
-// ClaimantID is the L5-hardening instance-unique claimant identity (the claiming
-// session's GC_SESSION_ID). Assignee is the session NAME (load-bearing for the
-// reconciler's session correlation), but a singleton pool identity reuses one
-// stable name across a false-kill/respawn, so the name alone cannot tell A from
-// its respawn B. ClaimantID pins the per-instance session bead id so the closer-
-// identity guard (§4.3) catches a same-name straggler. Additive and omitempty: a
-// legacy/no-session claim omits it and folds byte-identically.
-//
-// BeadID is the real-bead do path's additive field (REDESIGN §1.2): the
-// store-minted id of the ordinary work bead the driver created for a pool-mode do
-// (kind=OwnedKindWorkBead). It is env-specific but recorded ONCE at dispatch and
-// replayed on every refold, never re-minted — the same determinism class as the
-// lease epoch and effectSettledPayload.Session (DET holds, §1.5). Additive and
-// omitempty, so a Tier-B / async / detached admit that never set it folds
-// byte-identically.
+// ownedAdmittedPayload is the body of EventOwnedAdmitted. For the real-bead do
+// path (REDESIGN §1.2) it is the dispatch fact: kind=OwnedKindWorkBead and BeadID
+// carries the store-minted id of the ordinary work bead the driver created for a
+// pool-mode do. BeadID is env-specific but recorded ONCE at dispatch and replayed
+// on every refold, never re-minted — the same determinism class as the lease epoch
+// and effectSettledPayload.Session (DET holds, §1.5). Assignee/BeadID are additive
+// and omitempty, so the deferred async/detached-run uses of this type (kind=async|
+// detached_run) fold byte-identically without them.
 type ownedAdmittedPayload struct {
 	Handle     string `json:"handle"`
 	Activation string `json:"activation"`
 	Kind       string `json:"kind"`
 	Assignee   string `json:"assignee,omitempty"`
-	ClaimantID string `json:"claimant_id,omitempty"`
 	BeadID     string `json:"bead_id,omitempty"`
 }
 
-// ownedSettledPayload is the body of EventOwnedSettled. For P4.5 Tier-B it is
-// the `settled` fact translated from the worker's close: Kind=OwnedKindTierB
-// marks it a Tier-B settle (the discriminant, symmetric with ownedAdmittedPayload
-// so an async/detached settle can never fold as one — MED-3), Outcome carries the
-// mapped gc.outcome and Output the captured result. Output is additive and
-// omitempty for the deferred async/detached-run uses.
-// Retryable and Assignee are the L5 attempt-loop fields. Retryable marks a pool
-// settle as an infrastructure-retryable strand (the firewall stamps it true, S17)
-// so the retry arm re-attempts it — DATA in the journal, not a Go inference.
-// Assignee carries the CLOSER's session NAME and ClaimantID the CLOSER's instance-
-// unique id (GC_SESSION_ID) so the fold can drop a settle by a non-claimant — by a
-// different name OR a different instance id — the symmetric twin of "late claim
-// loses" (§4.3). The name check alone is porous under a singleton pool identity
-// (A and its respawn B share a name); the id check closes that hole. The driver /
-// firewall override carries "" for both (unguarded). All additive and omitempty —
-// a pre-L5 settle (and an async/detached use) folds byte-identically.
+// ownedSettledPayload is the body of EventOwnedSettled. It is registered day one
+// for the deferred async/detached-run await boundary (kind=async|detached_run,
+// Outcome/Output). It carries NO real-bead do settlement: a do settles through the
+// existing outcome.settled (applyOutcomeSettled), not here. Output is additive and
+// omitempty.
 type ownedSettledPayload struct {
-	Handle     string `json:"handle"`
-	Kind       string `json:"kind"`
-	Outcome    string `json:"outcome"`
-	Output     string `json:"output,omitempty"`
-	Retryable  bool   `json:"retryable,omitempty"`
-	Assignee   string `json:"assignee,omitempty"`
-	ClaimantID string `json:"claimant_id,omitempty"`
+	Handle  string `json:"handle"`
+	Kind    string `json:"kind"`
+	Outcome string `json:"outcome"`
+	Output  string `json:"output,omitempty"`
 }
 
 // snapshotAnchoredPayload is the body of EventSnapshotAnchored.

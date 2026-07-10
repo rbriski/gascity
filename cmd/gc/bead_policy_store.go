@@ -104,17 +104,6 @@ func (s *beadPolicyStore) ControlFrontierHandle() (beads.ControlFrontierStore, b
 	return beads.ControlFrontierStoreFor(s.Store)
 }
 
-// TierBClaimSurfaceHandle forwards the Tier-B claim-surface read capability
-// (routed frontier / assigned rows / fold-owned get) from the wrapped store. The
-// policy wrapper embeds beads.Store as an interface, so the optional capability is
-// not promoted automatically; this explicit forward lets TierBClaimSurfaceStoreFor
-// reach a JournalStore that sits behind the policy wrapper (the journal residence
-// leg is always policy-wrapped). beadPolicyGraphStore embeds *beadPolicyStore, so
-// it inherits this forward.
-func (s *beadPolicyStore) TierBClaimSurfaceHandle() (beads.TierBClaimSurfaceStore, bool) {
-	return beads.TierBClaimSurfaceStoreFor(s.Store)
-}
-
 // AppendLogHandle and ConditionalVersionHandle forward the journal CAS
 // capabilities the control-epoch fence probes. The policy wrapper embeds
 // beads.Store as an interface, so these optional capabilities are not promoted

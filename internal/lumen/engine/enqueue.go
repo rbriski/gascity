@@ -130,7 +130,8 @@ type RunManifest struct {
 // ReadRunManifest decodes the run.started at seq 1 of streamID into a RunManifest.
 // It is how the controller loop recovers a run's inputs and route across a restart:
 // the journal is the single source of truth, and run.started is always the first
-// event (EnqueueRun seeds a fresh stream, and MaterializeTierBWork seeds it too).
+// event (EnqueueRun seeds a fresh stream; Advance seeds one too when it drives a
+// run whose stream is still fresh).
 func ReadRunManifest(ctx context.Context, store *graphstore.Store, streamID string) (RunManifest, error) {
 	if store == nil {
 		return RunManifest{}, fmt.Errorf("lumen: run manifest: nil store")

@@ -83,7 +83,7 @@ func lumenDispatchWork(store beads.Store, cfg *config.City) func(context.Context
 
 // lumenObserveWork returns the engine.Options.ObserveWork seam (REDESIGN §2.4): read
 // the dispatched bead's terminal state through ordinary bead reads. A closed bead is
-// terminal; its outcome is the raw gc.outcome mapped through the fail-closed firewall
+// terminal; its outcome is the raw gc.outcome mapped through the fail-closed value map
 // (LumenOutcomeForGCOutcome) — a bare/unknown close maps to failed, never laundered
 // into success. An open/in_progress bead (including an orphan-released bead re-read
 // as open) is still in flight. A missing bead is an error (ambiguous store outage vs

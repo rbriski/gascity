@@ -18,19 +18,14 @@ import (
 // comparable), such a store's identity for sameHookStore/isZeroHookStore is its
 // name (+ dir/env), never a struct compare.
 type hookStore struct {
-	dir   string
-	env   []string
-	name  string
-	query func() (string, error)
-	claim hookClaimFunc
+	dir  string
+	env  []string
+	name string
 }
 
-// runHookStoreQuery runs st's work query: its in-process query func when set (the
-// Tier-B journal leg), else the shell bd runner against st's dir/env.
+// runHookStoreQuery runs st's work query via the shell bd runner against st's
+// dir/env.
 func runHookStoreQuery(st hookStore, command string, run hookStoreRunner) (string, error) {
-	if st.query != nil {
-		return st.query()
-	}
 	return run(command, st.dir, st.env)
 }
 
@@ -234,10 +229,10 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that firstStoreWithWork
-// returns when no store has ready work (no name, dir, env, or seams).
+// returns when no store has ready work (no name, dir, or env).
 func isZeroHookStore(s hookStore) bool {
 	return strings.TrimSpace(s.name) == "" && strings.TrimSpace(s.dir) == "" &&
-		len(s.env) == 0 && s.query == nil && s.claim == nil
+		len(s.env) == 0
 }
 
 // removeHookStore returns stores with the first entry equal to target removed.

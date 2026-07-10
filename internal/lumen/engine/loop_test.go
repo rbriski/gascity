@@ -462,19 +462,16 @@ func TestDETT17_MultiAttemptRebuildByteIdentity(t *testing.T) {
 		streamID := "gcg-run-det-pool"
 		loop := repeatNode(doNode("draft", "Do it.", nil), condOutcomePassOrIter())
 		doc := decodeIR(t, blockDoc("det-pool", loop))
-		opts := engine.Options{PoolRouter: advRouter}
+		fake := newFakeWorkStore()
+		opts := fake.opts()
 		if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
 			t.Fatalf("advance 1: %v", err)
 		}
-		if err := engine.SettleTierBWork(ctx, store, streamID, "draft:0", engine.OutcomeFailed, "no"); err != nil {
-			t.Fatalf("settle draft:0: %v", err)
-		}
+		fake.settleAct(t, "draft:0", engine.OutcomeFailed, "no")
 		if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
 			t.Fatalf("advance 2: %v", err)
 		}
-		if err := engine.SettleTierBWork(ctx, store, streamID, "draft:1", engine.OutcomePass, "ok"); err != nil {
-			t.Fatalf("settle draft:1: %v", err)
-		}
+		fake.settleAct(t, "draft:1", engine.OutcomePass, "ok")
 		if r, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil || !r.Sealed {
 			t.Fatalf("advance 3 = %+v, err %v; want Sealed", r, err)
 		}

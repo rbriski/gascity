@@ -755,13 +755,6 @@ func buildDesiredStateWithSessionBeads(
 		// awake/scale accounting wakes for it can actually surface and claim it
 		// (the agent-side work_query/claim path matches identities by raw string).
 		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
-		// Lumen preserve tier (S11): append claimed (in_progress) fold-owned pool
-		// rows AFTER the stamp/canonicalize writers above — a fold row is write-closed
-		// and those writers would hit ErrFoldOwnedWriteClosed on it — and BEFORE pool
-		// demand / drain-suppression consume the slices below, so the reconciler keeps
-		// a mid-do Lumen worker's session alive instead of draining it. No-op for a
-		// city with no graph scope.
-		appendTierBAssignedWork(cityPath, &assignedWorkBeads, &assignedWorkStores, &assignedWorkStoreRefs, stderr)
 		// Re-home open, unassigned work still routed to a legacy bound form of a
 		// now-unbound pool agent. This is the demand/claim half of the migration:
 		// empty-assignee open work never enters the assigned-work collection above,
@@ -830,37 +823,10 @@ func buildDesiredStateWithSessionBeads(
 				}
 			}
 		}
-		// Lumen journal-frontier demand: the shell/native `bd ready` probe cannot see
-		// the graph journal, so the ready pool-mode Tier-B rows are counted here and
-		// merged with the same clamp + mergeScaleCheckDemand treatment as the default
-		// probe. StoreRefs point at the graph-journal store so the launch path resolves
-		// each work bead through it. An unopenable journal marks its templates partial
-		// (drain suppression) rather than asserting an authoritative 0.
-		if lumenTemplates := templateNamesFromScaleTargets(defaultScaleTargets); len(lumenTemplates) > 0 {
-			lumenCounts, lumenDemand, lumenPartials, lumenErr := lumenScaleCheckDemand(cityPath, lumenTemplates)
-			if lumenErr != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", lumenErr) //nolint:errcheck
-			}
-			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, lumenPartials)
-			if scaleCheckCounts == nil {
-				scaleCheckCounts = make(map[string]int)
-			}
-			if scaleCheckDemandByTemplate == nil {
-				scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
-			}
-			for template, count := range lumenCounts {
-				if coldWakeTemplates[template] && count > 1 {
-					count = 1
-				}
-				if namedOnDemandTemplates[template] && count > 1 {
-					count = 1
-				}
-				if count > scaleCheckCounts[template] {
-					scaleCheckCounts[template] = count
-				}
-				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], lumenDemand[template], count)
-			}
-		}
+		// Lumen pool-mode do work is dispatched as ordinary open, unassigned,
+		// gc.routed_to-routed task beads in the city work store (REDESIGN), so the
+		// native defaultScaleCheckCountsAndDemand probe above already counts it — no
+		// Lumen-aware demand source is needed here.
 		if len(defaultNamedScaleTargets) > 0 {
 			var namedErrs []error
 			var partialTemplates map[string]bool
@@ -2768,26 +2734,12 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workspace := packWorkspaceSlug(request); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackWorkspaceMetadataKey]) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	switch workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); {
-	case workDir != "":
+	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
 			metadata[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
 			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
-		}
-	case strings.TrimSpace(request.WorkStoreRef) == tierBHookStoreName:
-		// Re-pointing this pooled session onto a Lumen graph-journal row: a tier-B
-		// do node has no per-bead work dir (poolTriggerWorkDir returned "" above),
-		// so any dir stamped from a prior rig trigger bead is now stale. Clear both
-		// keys so the launch re-resolves the agent's city dir (tp.WorkDir, restamped
-		// via session_beads.go) instead of new-session -c against a now-absent
-		// <city>/<bead-slug> — the "wedged in creating" failure Fix 2 exists to kill.
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != "" {
-			metadata[beadmeta.WorkDirMetadataKey] = ""
-		}
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != "" {
-			metadata[beadmeta.LegacyWorkDirMetadataKey] = ""
 		}
 	}
 	if len(metadata) == 0 {
@@ -2810,17 +2762,6 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
-		return ""
-	}
-	// A Lumen graph-journal work bead (a pool-mode do node) runs in place in the
-	// agent's configured work dir, not a per-bead trigger workspace. An L3 do node
-	// carries no isolation, so nothing materializes a `<city>/<bead-slug>` dir; a
-	// per-bead work dir here only destabilizes the pooled session — its resolved
-	// dir flips between un-created bead slugs, churning the session (a tmux pane
-	// wedges in "creating" on new-session -c against the absent dir). The claiming
-	// worker resolves the city from its env, so a per-bead trigger dir buys nothing.
-	// (Per-bead isolation for pool-mode work is an L4+ concern with real worktrees.)
-	if strings.TrimSpace(request.WorkStoreRef) == tierBHookStoreName {
 		return ""
 	}
 	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)

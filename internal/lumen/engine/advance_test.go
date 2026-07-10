@@ -10,124 +10,27 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 	"github.com/gastownhall/gascity/internal/lumen/enginehost"
 )
 
-// The L0 driver harness: a do-only (or multi-do) formula, a fixed pool route, and
-// a stream id. Advance materializes each ready pool-mode do as a claimable
-// Tier-B work bead and PARKS; a scripted owned.settled (standing in for a pool
-// worker's close) plus a re-Advance drives the DAG to run.closed — with NO real
-// pool, NO controller loop, NO claim adapter (those are L1/L2/L3).
+// The driver harness: a do-only (or multi-do) formula, a fixed pool route, and a
+// stream id. Advance dispatches each ready pool-mode do as an ordinary work bead
+// (via the fakeWorkStore seams) and PARKS; scripting the bead's terminal close
+// (fake.settleAct) plus a re-Advance drives the DAG to run.closed — with NO real
+// pool and NO controller loop.
 
 const advPool = "pool-reviewers"
 
-// advRouter routes every do to the L0 test pool. A non-nil PoolRouter is what
-// makes Advance treat do nodes as pool-mode.
+// advRouter routes every do to the test pool. A non-nil PoolRouter is what makes
+// Advance treat do nodes as pool-mode.
 func advRouter(string) (string, bool) { return advPool, true }
 
 // doOnlyDoc is a single pool-mode do node, no dependencies.
 func doOnlyDoc() (doc, streamID string) {
 	return blockDoc("greet", doNode("hello", "Say hello.", nil)), "gcg-run-adv-doonly"
-}
-
-// TestAdvancePoolProjectionIsClaimable proves the L0 pool-mode projection: a
-// ready pool-mode do materializes as a CLAIMABLE work bead — task-typed (NOT the
-// ready-excluded `step`), carrying gc.routed_to + a populated frontier route, with
-// the rendered prompt in nodes.description — and is surfaced by the real routed
-// frontier SELECT (beads.ControlFrontier) and passes the worker ready-candidate
-// contract.
-func TestAdvancePoolProjectionIsClaimable(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-	docJSON, streamID := doOnlyDoc()
-	doc := decodeIR(t, docJSON)
-
-	res, err := engine.Advance(ctx, store, doc, streamID, nil, engine.Options{PoolRouter: advRouter})
-	if err != nil {
-		t.Fatalf("advance: %v", err)
-	}
-	if !res.Parked || res.Sealed {
-		t.Fatalf("advance result = %+v, want Parked (do-only run awaits the pool)", res)
-	}
-
-	// The three additive projection fields.
-	var (
-		beadType, description, status string
-	)
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT bead_type, description, status FROM nodes WHERE id = 'hello' AND fold_owned = 1`,
-	).Scan(&beadType, &description, &status); err != nil {
-		t.Fatalf("read projected pool node: %v", err)
-	}
-	if beadType != "task" {
-		t.Fatalf("bead_type = %q, want task (NOT the ready-excluded step)", beadType)
-	}
-	if description != "Say hello." {
-		t.Fatalf("description = %q, want the rendered prompt", description)
-	}
-	if status != "open" {
-		t.Fatalf("status = %q, want open (claimable)", status)
-	}
-	if got := nodeMeta(t, store, "hello", beadmeta.RoutedToMetadataKey); got != advPool {
-		t.Fatalf("gc.routed_to = %q, want %q", got, advPool)
-	}
-	if got := nodeMeta(t, store, "hello", "dispatch_mode"); got != engine.DispatchModePool {
-		t.Fatalf("dispatch_mode = %q, want pool", got)
-	}
-
-	// The frontier row carries the route, keyed by the bare node id (nodes.id): the
-	// dormant frontier_route_order index is now the demand/claim SELECT for the pool.
-	var frontierRoute string
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT route FROM frontier WHERE root_id = ? AND node_id = 'hello'`, streamID,
-	).Scan(&frontierRoute); err != nil {
-		t.Fatalf("read frontier route: %v", err)
-	}
-	if frontierRoute != advPool {
-		t.Fatalf("frontier route = %q, want %q", frontierRoute, advPool)
-	}
-
-	// The fold-owned claim SELECT surfaces it. Passing only Routes (no metadata
-	// keys) exercises frontierProjectionTier alone — the frontier_route_order index
-	// walk over fold_owned=1 rows, the path a Lumen pool bead is claimed through
-	// (Arm A's routed tier is fold_owned=0-only and cannot see a fold-owned row).
-	js := beads.NewJournalStore(store)
-	cf, ok := beads.ControlFrontierStoreFor(js)
-	if !ok {
-		t.Fatal("journal store does not expose ControlFrontier")
-	}
-	frontier, err := cf.ControlFrontier(ctx, beads.ControlFrontierParams{
-		Routes: []string{advPool},
-	})
-	if err != nil {
-		t.Fatalf("control frontier: %v", err)
-	}
-	var claimable *beads.Bead
-	for i := range frontier {
-		if frontier[i].ID == "hello" {
-			claimable = &frontier[i]
-			break
-		}
-	}
-	if claimable == nil {
-		t.Fatalf("pool do not surfaced by the routed frontier SELECT; got %d beads", len(frontier))
-	}
-	if claimable.Type != "task" || claimable.Metadata[beadmeta.RoutedToMetadataKey] != advPool || claimable.Description != "Say hello." {
-		t.Fatalf("claimable bead = {type:%q routed_to:%q desc:%q}, want {task, %s, Say hello.}",
-			claimable.Type, claimable.Metadata[beadmeta.RoutedToMetadataKey], claimable.Description, advPool)
-	}
-	if !beads.IsReadyCandidateForTier(*claimable, time.Now(), beads.TierIssues) {
-		t.Fatalf("pool do bead fails the worker ready-candidate contract: %+v", claimable)
-	}
-
-	// The contract this projection relies on: step is ready-excluded, task is not.
-	if !beads.IsReadyExcludedType("step") || beads.IsReadyExcludedType("task") {
-		t.Fatal("ready-exclude contract drift: expected step excluded, task not excluded")
-	}
 }
 
 // TestAdvanceParksWithLiveLeaseAndInFlight proves the park mechanics: a do-only
@@ -139,8 +42,9 @@ func TestAdvanceParksWithLiveLeaseAndInFlight(t *testing.T) {
 	store := newStore(t)
 	docJSON, streamID := doOnlyDoc()
 	doc := decodeIR(t, docJSON)
+	fake := newFakeWorkStore()
 
-	res, err := engine.Advance(ctx, store, doc, streamID, nil, engine.Options{PoolRouter: advRouter})
+	res, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts())
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}
@@ -185,22 +89,18 @@ func TestAdvanceSettleThenAdvanceCloses(t *testing.T) {
 	store := newStore(t)
 	docJSON, streamID := doOnlyDoc()
 	doc := decodeIR(t, docJSON)
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	first, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
 	if err != nil || !first.Parked {
 		t.Fatalf("first advance = %+v, err %v; want Parked", first, err)
 	}
 
-	// The pool worker's close, translated to an owned.settled append. This carries
-	// the LIVE lease epoch (the parked driver's preserved epoch); a hardcoded 0
-	// would be fenced here and this call would fail.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "hello:0", engine.OutcomePass, "hi there"); err != nil {
-		t.Fatalf("scripted owned.settled: %v (epoch-0 fence regression?)", err)
-	}
-	if epoch := leaseEpochOfType(t, store, streamID, engine.EventOwnedSettled); epoch < 1 {
-		t.Fatalf("owned.settled lease_epoch = %d, want >= 1 (live epoch, not 0)", epoch)
-	}
+	// The pool worker's close: script the dispatched bead terminal. The next Advance
+	// observes it and appends the outcome.settled — which carries the LIVE lease
+	// epoch (the parked driver's preserved epoch); a hardcoded 0 would be fenced.
+	fake.settleAct(t, "hello:0", engine.OutcomePass, "hi there")
 
 	second, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
 	if err != nil {
@@ -208,6 +108,9 @@ func TestAdvanceSettleThenAdvanceCloses(t *testing.T) {
 	}
 	if !second.Sealed || second.Parked {
 		t.Fatalf("second advance = %+v, want Sealed", second)
+	}
+	if epoch := leaseEpochOfType(t, store, streamID, engine.EventOutcomeSettled); epoch < 1 {
+		t.Fatalf("outcome.settled lease_epoch = %d, want >= 1 (live epoch, not 0)", epoch)
 	}
 	if second.Run.Outcome != engine.OutcomePass {
 		t.Fatalf("run outcome = %q, want pass", second.Run.Outcome)
@@ -239,7 +142,8 @@ func TestAdvanceIsIdempotentWhenParked(t *testing.T) {
 	store := newStore(t)
 	docJSON, streamID := doOnlyDoc()
 	doc := decodeIR(t, docJSON)
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	first, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
 	if err != nil || !first.Parked {
@@ -280,7 +184,8 @@ func TestAdvanceMultiDoDAGConverges(t *testing.T) {
 		doNode("A", "Produce a value.", nil),
 		doNode("B", "Refine {{A}}.", []string{"A"}),
 	))
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	// Pass 1: A materialized, B deferred.
 	r1, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
@@ -295,7 +200,7 @@ func TestAdvanceMultiDoDAGConverges(t *testing.T) {
 	}
 
 	// A settles; B becomes ready and materializes with A's output interpolated.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "A:0", engine.OutcomePass, "raw-value"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "A:0", engine.OutcomePass, "raw-value"); err != nil {
 		t.Fatalf("settle A: %v", err)
 	}
 
@@ -311,7 +216,7 @@ func TestAdvanceMultiDoDAGConverges(t *testing.T) {
 	}
 
 	// B settles; the run seals.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "B:0", engine.OutcomePass, "refined"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "B:0", engine.OutcomePass, "refined"); err != nil {
 		t.Fatalf("settle B: %v", err)
 	}
 	r3, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
@@ -338,12 +243,13 @@ func TestAdvanceFailedPoolSettleSkipCascades(t *testing.T) {
 		doNode("A", "Do A.", nil),
 		doNode("B", "Do B after {{A}}.", []string{"A"}),
 	))
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
 		t.Fatalf("advance 1: %v", err)
 	}
-	if err := engine.SettleTierBWork(ctx, store, streamID, "A:0", engine.OutcomeFailed, "boom"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "A:0", engine.OutcomeFailed, "boom"); err != nil {
 		t.Fatalf("settle A failed: %v", err)
 	}
 	res, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
@@ -388,7 +294,8 @@ func TestAdvanceDropRefoldIdentityPoolRows(t *testing.T) {
 	store := newStore(t)
 	docJSON, streamID := doOnlyDoc()
 	doc := decodeIR(t, docJSON)
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
 		t.Fatalf("advance: %v", err)
@@ -396,7 +303,7 @@ func TestAdvanceDropRefoldIdentityPoolRows(t *testing.T) {
 	assertProjectionEqualsRefold(t, store, streamID)
 	assertIncrementalEqualsProjectDelta(t, store, streamID)
 
-	if err := engine.SettleTierBWork(ctx, store, streamID, "hello:0", engine.OutcomePass, "done"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "hello:0", engine.OutcomePass, "done"); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
@@ -415,7 +322,8 @@ func TestAdvanceCrashMidAdvanceConverges(t *testing.T) {
 	store := newStore(t)
 	docJSON, streamID := doOnlyDoc()
 	doc := decodeIR(t, docJSON)
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	// Crash 1: before materializing the pool do.
 	sentinel := errors.New("crash before materialize")
@@ -440,7 +348,7 @@ func TestAdvanceCrashMidAdvanceConverges(t *testing.T) {
 		t.Fatalf("re-advance = %+v, err %v; want Parked", r1, err)
 	}
 
-	if err := engine.SettleTierBWork(ctx, store, streamID, "hello:0", engine.OutcomePass, "ok"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "hello:0", engine.OutcomePass, "ok"); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 
@@ -510,10 +418,9 @@ func TestAdvanceEqualsRunForEngineFormula(t *testing.T) {
 }
 
 // TestAdvancePoolRepeatFailThenPass (T-A1) is the pool loop spine: Advance
-// materializes attempt draft:0 (open, routed, fresh tokens) and parks; a scripted
-// failed settle plus a re-Advance mints draft:1 (attempt.minted, node.activated,
-// the bare-id frontier row back, fresh claim/settle tokens); a scripted pass settle
-// plus a re-Advance settles the loop pass and seals.
+// dispatches attempt draft:0 (open, fresh bead) and parks; a scripted failed close
+// plus a re-Advance mints draft:1 (attempt.minted, node.activated, a fresh work
+// bead); a scripted pass close plus a re-Advance settles the loop pass and seals.
 func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -521,9 +428,10 @@ func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
 	body := doNode("draft", "Do the work.", nil)
 	loop := repeatNode(body, condOutcomePassOrIter())
 	doc := decodeIR(t, blockDoc("adv-repeat", loop))
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
-	// Pass 1: materialize attempt draft:0 (claimable pool work), park.
+	// Pass 1: dispatch attempt draft:0, park.
 	r1, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
 	if err != nil || !r1.Parked || len(r1.InFlight) != 1 || r1.InFlight[0].Activation != "draft:0" {
 		t.Fatalf("advance 1 = %+v, err %v; want Parked with draft:0 in flight", r1, err)
@@ -532,13 +440,11 @@ func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
 		t.Fatalf("draft:0 route = %q, want %q", r1.InFlight[0].Route, advPool)
 	}
 	if st := nodeStatus(t, store, "draft"); st != "open" {
-		t.Fatalf("draft status after mint = %q, want open (claimable)", st)
+		t.Fatalf("draft status after mint = %q, want open", st)
 	}
 
 	// Attempt 0 fails; a re-Advance re-attempts.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "draft:0", engine.OutcomeFailed, "nope"); err != nil {
-		t.Fatalf("settle draft:0: %v", err)
-	}
+	fake.settleAct(t, "draft:0", engine.OutcomeFailed, "nope")
 	r2, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
 	if err != nil || !r2.Parked || len(r2.InFlight) != 1 || r2.InFlight[0].Activation != "draft:1" {
 		t.Fatalf("advance 2 = %+v, err %v; want Parked with draft:1 in flight (re-attempt)", r2, err)
@@ -547,26 +453,24 @@ func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
 	if n := countAttemptMinted(events); n != 2 {
 		t.Fatalf("attempt.minted count = %d, want 2 (draft:0 then draft:1)", n)
 	}
-	// The bare-id frontier row is back and the bead is claimable again.
-	if !inFrontier(t, store, streamID, "draft:1") {
-		t.Fatal("draft re-attempt not in the frontier — the bead did not re-open claimable")
-	}
 	if st := nodeStatus(t, store, "draft"); st != "open" {
 		t.Fatalf("draft status after re-attempt = %q, want open (re-opened)", st)
 	}
-	// Per-attempt activations: draft:0 and draft:1 have distinct node.activated
-	// idem tokens (so fresh claim/settle tokens follow automatically).
+	// Per-attempt activations: draft:0 and draft:1 have distinct node.activated idem
+	// tokens (a fresh work bead is dispatched per attempt).
 	tokens := journalIdemTokensAdv(t, store, streamID)
 	for _, want := range []string{streamID + ":draft:0:act", streamID + ":draft:1:act"} {
 		if !advContains(tokens, want) {
 			t.Fatalf("journal tokens %v missing %q (per-attempt activation token)", tokens, want)
 		}
 	}
+	// A distinct work bead was dispatched per attempt.
+	if fake.dispatchCount() != 2 {
+		t.Fatalf("DispatchWork calls = %d, want 2 (one bead per attempt)", fake.dispatchCount())
+	}
 
 	// Attempt 1 passes; a re-Advance settles the loop pass and seals.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "draft:1", engine.OutcomePass, "done"); err != nil {
-		t.Fatalf("settle draft:1: %v", err)
-	}
+	fake.settleAct(t, "draft:1", engine.OutcomePass, "done")
 	r3, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
 	if err != nil || !r3.Sealed {
 		t.Fatalf("advance 3 = %+v, err %v; want Sealed", r3, err)
@@ -577,9 +481,9 @@ func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
 	if outcome, _, _, _ := loopSettle(t, r3.Run.Events, "repeat_1:0"); outcome != "pass" {
 		t.Fatalf("loop settle = %q, want pass", outcome)
 	}
-	// Both attempts settled under DISTINCT per-attempt settle tokens.
+	// Both attempts settled under DISTINCT per-attempt outcome.settled tokens.
 	final := journalIdemTokensAdv(t, store, streamID)
-	for _, want := range []string{"tier-b-settle:draft:0", "tier-b-settle:draft:1"} {
+	for _, want := range []string{streamID + ":draft:0:settled", streamID + ":draft:1:settled"} {
 		if !advContains(final, want) {
 			t.Fatalf("journal tokens %v missing %q (per-attempt settle token)", final, want)
 		}
@@ -599,12 +503,13 @@ func TestAdvanceIdempotentMidLoopNoDoubleMint(t *testing.T) {
 	body := doNode("draft", "Do it.", nil)
 	loop := repeatNode(body, condOutcomePassOrIter())
 	doc := decodeIR(t, blockDoc("adv-idem", loop))
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
 		t.Fatalf("advance 1: %v", err)
 	}
-	if err := engine.SettleTierBWork(ctx, store, streamID, "draft:0", engine.OutcomeFailed, "nope"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "draft:0", engine.OutcomeFailed, "nope"); err != nil {
 		t.Fatalf("settle draft:0: %v", err)
 	}
 	var lastHead uint64
@@ -730,12 +635,13 @@ func TestAdvanceEmitsOnlyLumenVocabZeroControlBeads(t *testing.T) {
 	store := newStore(t)
 	docJSON, streamID := doOnlyDoc()
 	doc := decodeIR(t, docJSON)
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if err := engine.SettleTierBWork(ctx, store, streamID, "hello:0", engine.OutcomePass, "ok"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "hello:0", engine.OutcomePass, "ok"); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	res, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
@@ -779,7 +685,8 @@ func TestAdvanceParallelUndeclaredRefNoWedge(t *testing.T) {
 		doNode("A", "Produce a value.", nil),
 		doNode("B", "Use {{A}}.", nil), // NO declared `after A` — an undeclared ref
 	))
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	// Pass 1: both materialize (both have empty afterDeps); B renders A unresolved.
 	r1, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
@@ -794,7 +701,7 @@ func TestAdvanceParallelUndeclaredRefNoWedge(t *testing.T) {
 	}
 
 	// A settles with an output that WOULD change B's prompt if re-rendered.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "A:0", engine.OutcomePass, "APPLE"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "A:0", engine.OutcomePass, "APPLE"); err != nil {
 		t.Fatalf("settle A: %v", err)
 	}
 
@@ -817,7 +724,7 @@ func TestAdvanceParallelUndeclaredRefNoWedge(t *testing.T) {
 	}
 
 	// B settles; the run seals.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "B:0", engine.OutcomePass, "used"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, store, streamID, "B:0", engine.OutcomePass, "used"); err != nil {
 		t.Fatalf("settle B: %v", err)
 	}
 	r3, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
@@ -850,17 +757,16 @@ func TestAdvanceScatterPoolMembersFanOutAndAggregate(t *testing.T) {
 			),
 		)
 	}
-	opts := engine.Options{PoolRouter: advRouter}
-
 	t.Run("all_members_pass_aggregate_passes", func(t *testing.T) {
 		ctx := context.Background()
 		store := newStore(t)
 		streamID := "gcg-run-adv-scatter-fanout"
 		doc := decodeIR(t, scatterOfDos("continue"))
+		fake := newFakeWorkStore()
 
-		// Pass 1: all three do members materialize as claimable pool work; the aggregate
+		// Pass 1: all three do members dispatch as ordinary work beads; the aggregate
 		// parks on its member drain deps and is NOT activated.
-		r1, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		r1, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts())
 		if err != nil {
 			t.Fatalf("advance 1: %v", err)
 		}
@@ -876,26 +782,28 @@ func TestAdvanceScatterPoolMembersFanOutAndAggregate(t *testing.T) {
 		if n := countJournalType(t, store, streamID, engine.EventNodeActivated); n != 3 {
 			t.Fatalf("node.activated count after pass 1 = %d, want 3 (members only; aggregate not yet activated)", n)
 		}
-		// Each member is a claimable task-typed row carrying the route + a frontier row.
+		// Each member dispatched exactly one ordinary work bead and projects a plain
+		// step (the real work bead is the claim surface, not this fold row).
+		if fake.dispatchCount() != 3 {
+			t.Fatalf("DispatchWork calls = %d, want 3 (one per member)", fake.dispatchCount())
+		}
 		for _, m := range []string{"one", "two", "three"} {
-			if got := nodeMeta(t, store, m, beadmeta.RoutedToMetadataKey); got != advPool {
-				t.Fatalf("member %q gc.routed_to = %q, want %q", m, got, advPool)
+			if got := nodeMeta(t, store, m, beadmeta.RoutedToMetadataKey); got != "" {
+				t.Fatalf("member %q gc.routed_to = %q, want empty (routing lives on the real bead)", m, got)
 			}
-			if bt := nodeBeadType(t, store, m); bt != "task" {
-				t.Fatalf("member %q bead_type = %q, want task (claimable)", m, bt)
+			if bt := nodeBeadType(t, store, m); bt != "step" {
+				t.Fatalf("member %q bead_type = %q, want step (real work bead lives in the work store)", m, bt)
 			}
-			if !inFrontier(t, store, streamID, m+":0") {
-				t.Fatalf("member %q has no frontier row (not claimable)", m)
+			if inFrontier(t, store, streamID, m+":0") {
+				t.Fatalf("member %q left a claimable frontier row; the real bead is the only claim surface", m)
 			}
 		}
 
 		// Members settle pass; one re-Advance settles the aggregate and seals.
 		for _, m := range []string{"one", "two", "three"} {
-			if err := engine.SettleTierBWork(ctx, store, streamID, m+":0", engine.OutcomePass, "done "+m); err != nil {
-				t.Fatalf("settle %q: %v", m, err)
-			}
+			fake.settleAct(t, m+":0", engine.OutcomePass, "done "+m)
 		}
-		r2, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		r2, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts())
 		if err != nil {
 			t.Fatalf("advance 2: %v", err)
 		}
@@ -921,19 +829,18 @@ func TestAdvanceScatterPoolMembersFanOutAndAggregate(t *testing.T) {
 		store := newStore(t)
 		streamID := "gcg-run-adv-scatter-degrade"
 		doc := decodeIR(t, scatterOfDos("continue"))
+		fake := newFakeWorkStore()
 
-		if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
+		if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
 			t.Fatalf("advance 1: %v", err)
 		}
 		// One member fails; the other two pass. on_fail=continue ⇒ the aggregate degrades
 		// (a mix of pass and non-pass), NOT a total failure.
 		settles := map[string]string{"one": engine.OutcomeFailed, "two": engine.OutcomePass, "three": engine.OutcomePass}
 		for m, o := range settles {
-			if err := engine.SettleTierBWork(ctx, store, streamID, m+":0", o, "settle "+m); err != nil {
-				t.Fatalf("settle %q %q: %v", m, o, err)
-			}
+			fake.settleAct(t, m+":0", o, "settle "+m)
 		}
-		r2, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
+		r2, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts())
 		if err != nil {
 			t.Fatalf("advance 2: %v", err)
 		}
@@ -983,7 +890,8 @@ func TestAdvanceSilentDepDefersUntilRealInputSettles(t *testing.T) {
 	// Advance: P pool, scripted settle "pval".
 	advStore := newStore(t)
 	streamID := "gcg-run-adv-silentchain"
-	opts := engine.Options{PoolRouter: advRouter}
+	fake := newFakeWorkStore()
+	opts := fake.opts()
 
 	r1, err := engine.Advance(ctx, advStore, decodeIR(t, docJSON), streamID, nil, opts)
 	if err != nil {
@@ -998,7 +906,7 @@ func TestAdvanceSilentDepDefersUntilRealInputSettles(t *testing.T) {
 	}
 
 	// P settles; re-Advance computes S then runs U with {{S}} resolved, and seals.
-	if err := engine.SettleTierBWork(ctx, advStore, streamID, "P:0", engine.OutcomePass, "pval"); err != nil {
+	if err := engine.SettleWorkForTest(ctx, advStore, streamID, "P:0", engine.OutcomePass, "pval"); err != nil {
 		t.Fatalf("settle P: %v", err)
 	}
 	r2, err := engine.Advance(ctx, advStore, decodeIR(t, docJSON), streamID, nil, opts)
@@ -1077,55 +985,6 @@ func TestAdvanceNoPoolRouteIsLoudError(t *testing.T) {
 	_, err := engine.Advance(ctx, store, doc, streamID, nil, engine.Options{PoolRouter: noRoute})
 	if !errors.Is(err, engine.ErrNoPoolRoute) {
 		t.Fatalf("advance with an unresolvable pool route = %v, want ErrNoPoolRoute", err)
-	}
-}
-
-// TestAdvanceClaimedNodeStaysParkedNoRematerialize exercises the claimed-but-
-// unsettled branch: a worker admits (owned.admitted) a pool node without settling
-// it. A re-Advance keeps parking, reports the claimed node (projected in_progress)
-// as still in flight, and does NOT re-materialize it (no duplicate node.activated).
-func TestAdvanceClaimedNodeStaysParkedNoRematerialize(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-	docJSON, streamID := doOnlyDoc()
-	doc := decodeIR(t, docJSON)
-	opts := engine.Options{PoolRouter: advRouter}
-
-	if _, err := engine.Advance(ctx, store, doc, streamID, nil, opts); err != nil {
-		t.Fatalf("advance 1: %v", err)
-	}
-	if err := engine.ClaimTierBWork(ctx, store, streamID, "hello:0", "worker-1"); err != nil {
-		t.Fatalf("claim: %v", err)
-	}
-	if st := nodeStatus(t, store, "hello"); st != engine.StatusClaimed {
-		t.Fatalf("claimed node status = %q, want %q (in_progress)", st, engine.StatusClaimed)
-	}
-
-	r, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
-	if err != nil {
-		t.Fatalf("re-advance over a claimed node: %v", err)
-	}
-	if !r.Parked {
-		t.Fatalf("re-advance = %+v, want Parked (claimed node still in flight)", r)
-	}
-	if len(r.InFlight) != 1 || r.InFlight[0].NodeID != "hello" {
-		t.Fatalf("InFlight = %+v, want the claimed hello still in flight", r.InFlight)
-	}
-	if n := countJournalType(t, store, streamID, engine.EventNodeActivated); n != 1 {
-		t.Fatalf("node.activated count = %d, want 1 (a claimed node is NOT re-materialized)", n)
-	}
-	// The projection still shows the claim (assignee retained, in_progress).
-	if st := nodeStatus(t, store, "hello"); st != engine.StatusClaimed {
-		t.Fatalf("node status after re-advance = %q, want %q", st, engine.StatusClaimed)
-	}
-
-	// The worker settles; a final Advance seals.
-	if err := engine.SettleTierBWork(ctx, store, streamID, "hello:0", engine.OutcomePass, "done"); err != nil {
-		t.Fatalf("settle: %v", err)
-	}
-	final, err := engine.Advance(ctx, store, doc, streamID, nil, opts)
-	if err != nil || !final.Sealed {
-		t.Fatalf("final advance = %+v, err %v; want Sealed", final, err)
 	}
 }
 

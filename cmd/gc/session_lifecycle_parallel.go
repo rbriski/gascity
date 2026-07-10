@@ -275,7 +275,6 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
-	assignedWorkStoreRefs    []string
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -345,19 +344,6 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
-	}
-}
-
-// withAssignedWorkStoreRefs installs the per-bead originating store ref slice,
-// index-aligned with the assignedWorkBeads passed to the same reconcile pass (the
-// refs returned alongside them by filterAssignedWorkBeadsForSessionWake). The awake
-// bridge uses it as the fold-row discriminant: only a bead whose store ref is the
-// Tier-B journal (tierBHookStoreName) is subject to the claimant-liveness wake gate,
-// so an ordinary bd bead carrying a stray claimant_id is never excluded. Nil leaves
-// the gate inert (no bead is treated as a fold row).
-func withAssignedWorkStoreRefs(assignedWorkStoreRefs []string) startExecutionOption {
-	return func(opts *startExecutionOptions) {
-		opts.assignedWorkStoreRefs = assignedWorkStoreRefs
 	}
 }
 

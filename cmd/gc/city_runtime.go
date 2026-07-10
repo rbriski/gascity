@@ -2317,7 +2317,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
-		withAssignedWorkStoreRefs(awakeAssignedStoreRefs),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on

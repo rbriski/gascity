@@ -4829,14 +4829,6 @@ func validateDependsOn(agents []Agent) error {
 	return nil
 }
 
-// ReservedGraphJournalRigName is the store ref of the Tier-B graph-journal leg
-// (cmd/gc binds tierBHookStoreName to this value). Rig refs are the bare rig
-// name, so a rig with this name would mint ordinary pool work beads whose store
-// ref equals the Lumen Tier-B gate — colliding with graph-journal routing (which
-// suppresses per-bead work dirs for that ref) and with the assigned-work Tier-B
-// bypass. ValidateRigs reserves it so the collision can never form.
-const ReservedGraphJournalRigName = "graph-journal"
-
 // ValidateRigs checks rig configurations for errors. It returns an error if
 // any rig is missing required fields, has duplicate names, or has colliding
 // prefixes. The hqPrefix is the city's HQ prefix for collision checks.
@@ -4866,11 +4858,6 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		// token; a real rig with that name would be silently shadowed.
 		if r.Name == orders.RigWildcard {
 			return fmt.Errorf("rig[%d]: name %q is reserved as the [[orders.overrides]] wildcard", i, r.Name)
-		}
-		// ReservedGraphJournalRigName is the Tier-B graph-journal store ref; a rig
-		// with this name would collide with Lumen graph-journal routing.
-		if r.Name == ReservedGraphJournalRigName {
-			return fmt.Errorf("rig[%d]: name %q is reserved as the Tier-B graph-journal store ref", i, r.Name)
 		}
 		if r.Path == "" {
 			return fmt.Errorf("rig %q: path is required", r.Name)

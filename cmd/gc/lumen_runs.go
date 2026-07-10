@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
@@ -23,12 +21,11 @@ var lumenAdvance = engine.Advance
 var lumenRunsTickFn = (*CityRuntime).lumenRunsTick
 
 // lumenRuntime is the controller loop's in-memory, single-goroutine state for
-// driving Lumen runs: the lazily-opened long-lived graph store, the per-run
-// level-trigger head cursors, and (L2e) the firewall's per-candidate grace clock.
-// It is touched only on the reconciler goroutine — the same single-threading
-// discipline as controlDispatcherTick — so it needs no mutex. A controller restart
-// drops it entirely: the first tick re-Advances every open run once (idempotent),
-// which is exactly the crash-resume path.
+// driving Lumen runs: the lazily-opened long-lived graph store and the per-run
+// level-trigger head cursors. It is touched only on the reconciler goroutine — the
+// same single-threading discipline as controlDispatcherTick — so it needs no mutex.
+// A controller restart drops it entirely: the first tick re-Advances every open run
+// once (idempotent), which is exactly the crash-resume path.
 type lumenRuntime struct {
 	gs    *graphstore.Store
 	heads map[string]uint64 // streamID -> journal head at last Advance (level trigger)
@@ -36,19 +33,15 @@ type lumenRuntime struct {
 	// §2.5). A real bead's close lands in the WORK store and does NOT move the journal
 	// head, so the pure head-compare level trigger would never observe it; a run with
 	// in-flight work therefore always re-Advances so the observe arm can Get its beads.
-	inflight  map[string][]engine.PoolWork
-	deadSince map[string]time.Time // activation -> first-seen-dead time (firewall grace, L2e)
-	clk       clock.Clock          // injectable for firewall grace tests (L2e)
+	inflight map[string][]engine.PoolWork
 }
 
 // ensureLumenRuntime lazily initializes the loop's in-memory state.
 func (cr *CityRuntime) ensureLumenRuntime() *lumenRuntime {
 	if cr.lumen == nil {
 		cr.lumen = &lumenRuntime{
-			heads:     map[string]uint64{},
-			inflight:  map[string][]engine.PoolWork{},
-			deadSince: map[string]time.Time{},
-			clk:       clock.Real{},
+			heads:    map[string]uint64{},
+			inflight: map[string][]engine.PoolWork{},
 		}
 	}
 	return cr.lumen
@@ -90,13 +83,13 @@ func (cr *CityRuntime) closeLumenGraphStore() {
 	}
 }
 
-// lumenRunsTick is the controller's Lumen-runs loop body: discover every open run,
-// re-Advance each whose journal head moved since the last pass (materializing ready
-// do work as claimable Tier-B beads, or sealing), and firewall stranded claimants
-// (L2e). It runs on the reconciler event goroutine, wrapped in safeTick for panic
-// isolation, fired by the lumen-runs poke fast-path and the patrol backstop. It is
-// a pure function of (journal, IR/input CAS, live session state): a missed poke
-// costs at most one patrol interval, never correctness.
+// lumenRunsTick is the controller's Lumen-runs loop body: discover every open run
+// and re-Advance each whose journal head moved since the last pass (dispatching
+// ready do work as ordinary city-store work beads, observing dispatched beads for
+// closure, or sealing). It runs on the reconciler event goroutine, wrapped in
+// safeTick for panic isolation, fired by the lumen-runs poke fast-path and the
+// patrol backstop. It is a pure function of (journal, IR/input CAS, work-store
+// bead state): a missed poke costs at most one patrol interval, never correctness.
 func (cr *CityRuntime) lumenRunsTick(ctx context.Context) {
 	if !cityHasGraphScope(cr.cityPath) {
 		return
@@ -111,13 +104,12 @@ func (cr *CityRuntime) lumenRunsTick(ctx context.Context) {
 		return
 	}
 	// Per-run failures are contained: one run's loud refusal (bad blob, stall) must
-	// not starve the others, so each run is advanced independently.
+	// not starve the others, so each run is advanced independently. A dispatched
+	// worker that dies is recovered by gascity's ordinary orphan-release (the real
+	// bead reopens and a fresh worker re-claims it) — no Lumen-side firewall.
 	for _, r := range runs {
 		cr.advanceLumenRun(ctx, gs, r)
 	}
-	// Sweep claimed-but-unsettled work whose claimant died/stranded (city-wide, not
-	// per-run) so a write-once claim never wedges a run forever.
-	cr.lumenClaimOrphanFirewall(ctx, gs, cr.loadSessionBeadSnapshot())
 }
 
 // advanceLumenRun drives one open run one parking pass, gated on the level-trigger
@@ -199,11 +191,10 @@ func lumenPoolRouter(defaultRoute string) func(agentRef string) (string, bool) {
 // isRetryableAdvanceErr reports whether an Advance error is a transient
 // multi-writer race the controller loop should retry on the next tick rather than
 // surface as a terminal refusal: an expected-version CAS loss to a concurrent
-// claim/settle, a lease fence from a driver re-acquire, a busy store, or a
-// Tier-A rebuild that raced a concurrent append (a driver materialize-append's
-// RebuildTierA losing to a worker settle). This mirrors engine isRetryableRaceErr
-// and the Tier-B claim/settle adapters so the same race is classified identically
-// at every layer. Retry is safe: Advance is a re-entrant parking driver.
+// append, a lease fence from a driver re-acquire, a busy store, or a Tier-A
+// rebuild that raced a concurrent append. This mirrors engine isRetryableRaceErr so
+// the same race is classified identically at every layer. Retry is safe: Advance is
+// a re-entrant parking driver.
 func isRetryableAdvanceErr(err error) bool {
 	return err != nil && (errors.Is(err, graphstore.ErrWrongExpectedVersion) ||
 		errors.Is(err, graphstore.ErrLeaseFenced) ||

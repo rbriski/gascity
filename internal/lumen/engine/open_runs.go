@@ -22,8 +22,8 @@ type OpenRun struct {
 // until run.closed folds it to its terminal status, so a sealed run drops out of
 // the result on its own. The fold_owned=1 filter excludes any v2-side façade
 // `run` row (which is fold_owned=0), so the loop can never pick up a control-bead
-// projection. It reads through ReadDB with placeholder-free static SQL, following
-// the readTierBNode idiom so the Postgres dialect shim covers it unchanged.
+// projection. It reads through ReadDB with placeholder-free static SQL so the
+// Postgres dialect shim covers it unchanged.
 func ListOpenRuns(ctx context.Context, store *graphstore.Store) ([]OpenRun, error) {
 	if store == nil {
 		return nil, fmt.Errorf("lumen: list open runs: nil store")

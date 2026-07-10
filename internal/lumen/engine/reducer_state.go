@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/graphstore/canon"
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
@@ -49,33 +48,21 @@ type nodeState struct {
 	// resume re-derives the same decision. omitempty + a bool ⇒ clone() copies it by
 	// value and a non-retryable node serializes exactly as pre-L5 (DET-T-17).
 	Retryable bool `json:"retryable,omitempty"`
-	// DispatchMode is the Tier-B claimability marker (DispatchModePool for a
-	// worker-claimable node). Assignee is the worker that claimed it, folded from
-	// a Tier-B owned.admitted (P4.5). Both omitempty, so a non-Tier-B node
-	// serializes exactly as it did pre-P4.5.
+	// DispatchMode is the pool-dispatch marker (DispatchModePool for a node whose
+	// work is dispatched as an ordinary bead in the city work store). omitempty, so
+	// an engine-driven node serializes exactly as it did pre-pool.
 	DispatchMode string `json:"dispatch_mode,omitempty"`
-	Assignee     string `json:"assignee,omitempty"`
-	// ClaimantID is the claimant's instance-unique id (its GC_SESSION_ID), folded
-	// from the same owned.admitted as Assignee. Assignee is the session NAME (kept
-	// for the reconciler's session correlation); ClaimantID is the per-instance id
-	// the closer-identity guard keys on so a false-killed A's straggler close cannot
-	// settle the live attempt its same-named respawn B claimed (§4.3). omitempty, so
-	// a legacy/no-session claim (and every non-Tier-B node) serializes as pre-L5.
-	ClaimantID string `json:"claimant_id,omitempty"`
-	// Route and Prompt are the L0 pool-claim-contract fields (dispatch_mode=pool
-	// only): Route projects onto gc.routed_to metadata + the frontier row's route
-	// column, Prompt onto nodes.description. Carried in state so a drop+refold
-	// reproduces the claimable projection byte-identically (DET-T-17). Both
-	// omitempty, so an engine-driven node re-marshals exactly as pre-L0.
+	// Route and Prompt are the pool-dispatch fields (dispatch_mode=pool only): the
+	// dispatched work bead's gc.routed_to and Description. Carried in state so a
+	// drop+refold re-dispatches byte-identically (DET-T-17). Both omitempty, so an
+	// engine-driven node re-marshals exactly as pre-pool.
 	Route  string `json:"route,omitempty"`
 	Prompt string `json:"prompt,omitempty"`
-	// BeadID is the real-bead do path's store-minted work-bead id (REDESIGN §1.3),
-	// folded ONCE from the owned.admitted{kind:work_bead} dispatch fact. Its presence
-	// flips the pool node's projection from a claimable Tier-B task row to a plain
-	// step (the actionable work is the real bead in the city work store, not this
-	// fold row), and the observer settles the fold from that bead's terminal close.
-	// omitempty, so every pre-redesign node (and every Tier-B claim path) serializes
-	// exactly as before.
+	// BeadID is the pool-dispatched do's store-minted work-bead id (REDESIGN §1.3),
+	// folded ONCE from the owned.admitted{kind:work_bead} dispatch fact. It is the
+	// two-way join to the real bead in the city work store — the actionable work
+	// lives there, not in this fold row — and the observer settles the fold from that
+	// bead's terminal close. omitempty, so an engine-driven node serializes as pre-pool.
 	BeadID string `json:"bead_id,omitempty"`
 }
 
@@ -286,71 +273,41 @@ func statusForOutcome(outcome string) string {
 // nodeProjectedStatus is the Tier-A `nodes.status` a fold projects for n. It is
 // shared by the incremental appliers and ProjectDelta so an incremental fold and
 // a drop+refold project byte-identical rows (DET-T-17). A settled node takes its
-// outcome status; an unsettled node a worker has claimed (Tier-B) reads
-// StatusClaimed (in_progress); everything else is open.
+// outcome status; everything else is open. There is no fold-side "claimed" status
+// anymore — a pool node's real work bead carries its own claim lifecycle in the
+// city work store, invisible to the fold (REDESIGN).
 func nodeProjectedStatus(n *nodeState) string {
-	switch {
-	case n.Settled:
+	if n.Settled {
 		return statusForOutcome(n.Outcome)
-	case n.Assignee != "":
-		return StatusClaimed
-	default:
-		return "open"
 	}
+	return "open"
+}
+
+// frontierEligible reports whether an activated, ready node projects a Tier-A
+// frontier row. A pool-dispatched node never does (REDESIGN): its work is an
+// ordinary bead in the city work store — the only claim surface — so a fold
+// frontier row would be a bd-ready doppelganger. Engine-driven nodes and the run
+// root populate the frontier exactly as before, so a non-pool node's projection is
+// byte-identical.
+func frontierEligible(n *nodeState) bool {
+	return n.DispatchMode != DispatchModePool
 }
 
 // nodeProjectedMeta is the Tier-A `node_metadata` a fold projects for the
 // activation act in state n, shared by the incremental appliers and ProjectDelta.
 // A settled node carries {outcome, output}; an unsettled node carries
-// {kind, activation}. Either way a Tier-B claimable node keeps its dispatch_mode
-// marker, so a SETTLED pool bead retains its provenance and readTierBNode still
-// recognizes it as pool-mode — that is what lets a byte-identical re-settle
-// dedupe to idempotent success rather than tripping the not-claimable guard
-// (MED-1). An empty value clears its key at the applier, matching the incremental
-// fold.
+// {kind, activation}. A pool-dispatched node additionally carries {bead_id} while
+// unsettled — the two-way join to its real work bead in the city work store
+// (REDESIGN observability only); the bead itself owns the claim-routing metadata
+// (gc.routed_to) and claim lifecycle, not this fold row. An empty value clears its
+// key at the applier, matching the incremental fold.
 func nodeProjectedMeta(act string, n *nodeState) map[string]string {
-	// Real-bead do path (REDESIGN §1.3): once the ordinary work bead is dispatched
-	// (BeadID set), this fold row is observability only — the claimable markers
-	// (dispatch_mode, gc.routed_to, claimant_id, retryable) belong to the real bead
-	// in the work store, not here. Carry only bead_id (the two-way join key) while
-	// unsettled; a settled row keeps {outcome, output} like any node. This branch is
-	// unreachable for a pre-redesign / Tier-B node (BeadID is always ""), so their
-	// projection is byte-identical.
-	if n.BeadID != "" {
-		if n.Settled {
-			return map[string]string{"outcome": n.Outcome, "output": n.Output}
-		}
-		return map[string]string{"kind": n.Kind, "activation": act, "bead_id": n.BeadID}
-	}
-	var meta map[string]string
 	if n.Settled {
-		meta = map[string]string{"outcome": n.Outcome, "output": n.Output}
-		// Retryable is folded from the settle (applyOwnedSettled/applyOutcomeSettled)
-		// but otherwise unprojected. Emit it ONLY when true so every worker-settled row
-		// (retryable=false) projects byte-identically to pre-L-1 (DET-T-17), while a
-		// firewall infrastructure strand (retryable=true) surfaces on ResolveTierBWorkRef
-		// so a divergent-reclose compare cannot launder it under a worker's fail close
-		// (§4.3 L-1). Additive-omit-when-false through this shared helper ⇒ no version bump.
-		if n.Retryable {
-			meta["retryable"] = "true"
-		}
-	} else {
-		meta = map[string]string{"kind": n.Kind, "activation": act}
-		// The claimant id is the closer-identity guard's read (readTierBNode) while
-		// the node is claimed-and-unsettled. Like `activation`, a settled row drops
-		// it (the settled branch above), and an unclaimed / legacy claim carries none.
-		if n.ClaimantID != "" {
-			meta[ClaimantIDMetaKey] = n.ClaimantID
-		}
+		return map[string]string{"outcome": n.Outcome, "output": n.Output}
 	}
-	if n.DispatchMode != "" {
-		meta[DispatchModeMetaKey] = n.DispatchMode
-	}
-	// A pool-mode node carries gc.routed_to (the canonical claim-routing key) so
-	// the worker claim surface's route match (hookCandidateClaimable) selects it.
-	// The frontier row's route column carries the same value for the demand SELECT.
-	if n.DispatchMode == DispatchModePool && n.Route != "" {
-		meta[beadmeta.RoutedToMetadataKey] = n.Route
+	meta := map[string]string{"kind": n.Kind, "activation": act}
+	if n.BeadID != "" {
+		meta["bead_id"] = n.BeadID
 	}
 	return meta
 }
@@ -364,28 +321,16 @@ func nodeRowFor(s *lumenState, act string, n *nodeState, streamID string) fold.N
 	if n.ParentActivation != "" {
 		parentID = activationNodeID(n.ParentActivation)
 	}
-	// A pool-mode node awaiting its real work bead (BeadID == "") projects as
-	// `task`, not `step`: `step` is in the worker claim surface's ready-exclude set
-	// (internal/beads.readyExcludeTypes), so a step-typed row is never claimable —
-	// "bead-compatible on the surface" made literal. Its rendered prompt lands in
-	// nodes.description. Once the real bead is dispatched (BeadID set, REDESIGN §1.3)
-	// the pool node projects a PLAIN `step` — the actionable work is the ordinary bead
-	// in the work store, and a second task-typed fold row would be a bd-ready
-	// doppelganger. An engine-driven node stays `step` with no description.
-	beadType := "step"
-	description := ""
-	if n.DispatchMode == DispatchModePool && n.BeadID == "" {
-		beadType = "task"
-		description = n.Prompt
-	}
+	// Every step node — engine-driven OR pool-dispatched — projects a plain `step`
+	// row with no description (REDESIGN). The actionable pool work is the ordinary
+	// bead in the city work store, which carries the prompt in its Description; a
+	// task-typed fold row here would be a bd-ready doppelganger of it.
 	return fold.NodeRow{
 		ID:          n.NodeID,
 		Title:       n.NodeID,
 		Status:      nodeProjectedStatus(n),
-		BeadType:    beadType,
-		Description: description,
+		BeadType:    "step",
 		ParentID:    parentID,
-		Assignee:    n.Assignee,
 		CreatedAt:   s.CreatedAt,
 		StorageTier: "history",
 		StreamID:    streamID,

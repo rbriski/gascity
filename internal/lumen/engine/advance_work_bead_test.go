@@ -63,8 +63,41 @@ func (f *fakeWorkStore) settle(beadID, outcome, output string) {
 	f.terminal[beadID] = engine.WorkObservation{Terminal: true, Outcome: outcome, Output: output}
 }
 
+// settleAct scripts the terminal observation of the work bead dispatched for an
+// activation. The settle lands on the next Advance (the observe arm), matching the
+// controller loop; a t.Fatalf fires if the activation has not been dispatched yet.
+func (f *fakeWorkStore) settleAct(t *testing.T, activation, outcome, output string) {
+	t.Helper()
+	f.mu.Lock()
+	id, ok := f.byAct[activation]
+	f.mu.Unlock()
+	if !ok {
+		t.Fatalf("settleAct: no dispatched work bead for activation %q", activation)
+	}
+	f.settle(id, outcome, output)
+}
+
+// settleAllDispatchedPass marks every dispatched-but-unsettled bead terminal(pass)
+// — a "worker" closing whatever work has been dispatched so far. It is the settle
+// racer for the concurrency tests.
+func (f *fakeWorkStore) settleAllDispatchedPass() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range f.byAct {
+		if _, done := f.terminal[id]; !done {
+			f.terminal[id] = engine.WorkObservation{Terminal: true, Outcome: engine.OutcomePass, Output: "done"}
+		}
+	}
+}
+
 func (f *fakeWorkStore) opts() engine.Options {
-	return engine.Options{PoolRouter: advRouter, DispatchWork: f.dispatch, ObserveWork: f.observe}
+	return f.optsWith(advRouter)
+}
+
+// optsWith builds the engine.Options with a caller-supplied PoolRouter and this
+// fake's dispatch/observe seams — for tests that route with a non-default router.
+func (f *fakeWorkStore) optsWith(router func(string) (string, bool)) engine.Options {
+	return engine.Options{PoolRouter: router, DispatchWork: f.dispatch, ObserveWork: f.observe}
 }
 
 func (f *fakeWorkStore) dispatchCount() int {

@@ -7,7 +7,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/lumen/engine"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -26,7 +25,6 @@ func buildAwakeInputFromReconciler(
 	readyWaitSet map[string]bool,
 	assignedWorkBeads []beads.Bead,
 	readyAssignedFlags []bool,
-	assignedWorkStoreRefs []string,
 	wakeTargets []wakeTarget,
 	sp runtime.Provider,
 	clk time.Time,
@@ -75,44 +73,6 @@ func buildAwakeInputFromReconciler(
 		})
 	}
 
-	// Per-instance runtime liveness, keyed by session BEAD ID (== GC_SESSION_ID == a
-	// Lumen fold row's recorded claimant_id). It is the same live probe the reconciler's
-	// close gate reads (wakeTarget.alive → RunningSessions). Keying by bead id (not name)
-	// means a same-name respawn cannot revive a dead claimant's demand. A claimant absent
-	// from this map (not a wake target this tick) reads not-alive, matching the pre-fix
-	// gate: only a recoverable-asleep claimant escapes the not-alive drop below.
-	aliveByBeadID := make(map[string]bool, len(wakeTargets))
-	for _, tgt := range wakeTargets {
-		if tgt.session != nil {
-			aliveByBeadID[tgt.session.ID] = tgt.alive
-		}
-	}
-
-	// Open-set membership + NORMALIZED lifecycle state + stranded marker, keyed by session
-	// BEAD ID, built from the reconciler's full open snapshot (sessionInfos, less closed
-	// beads). Membership is the same domain the firewall's FindByID reads (open-only), and
-	// the durable stranded marker is the same signal it consults — so the fold-row wake
-	// gate below mirrors the firewall's instance-death verdict (absent OR open+stranded),
-	// while EXEMPTING an asleep-recoverable claimant. The state is the projected CompatState
-	// (not the raw metadata) so every recoverable-sleep variant — asleep, and the "stopped"
-	// city-stop form — normalizes to asleep and is exempted uniformly.
-	openState := make(map[string]string, len(sessionInfos))
-	openStranded := make(map[string]bool, len(sessionInfos))
-	openSleepReason := make(map[string]string, len(sessionInfos))
-	for i := range sessionInfos {
-		si := sessionInfos[i]
-		if si.Closed {
-			continue
-		}
-		lcInput := session.LifecycleInputFromInfo(si)
-		lcInput.Now = clk
-		openState[si.ID] = string(session.ProjectLifecycle(lcInput).CompatState)
-		openSleepReason[si.ID] = strings.TrimSpace(si.SleepReason)
-		if strings.TrimSpace(si.StrandedEventEmittedAt) != "" {
-			openStranded[si.ID] = true
-		}
-	}
-
 	// Work beads. Readiness is the store's verdict (readyAssignedFlags), not a
 	// status-only guess: assignedWorkBeads mixes the open-routed orphan-release
 	// pass (which admits any open assigned+routed bead with no deps check) into
@@ -126,25 +86,6 @@ func buildAwakeInputFromReconciler(
 		wb := assignedWorkBeads[i]
 		a := strings.TrimSpace(wb.Assignee)
 		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
-			// Fold-row wake gate. A Lumen fold-owned journal row (tierBHookStoreName store
-			// ref — the same B-2 discriminant filterAssignedWorkBeadsForPoolDemand uses)
-			// carries a recorded claimant_id (the claiming session's instance-unique bead
-			// id). Such a row holds its claimant's pool bead awake — the assigned-work wake
-			// anchor — so a claim whose claimant is genuinely DEAD would wedge the run: the
-			// bead never reaches the poolFreeable close and the firewall (which reads only
-			// the open session set) never strands it. We drop the anchor ONLY for a dead
-			// claimant, by the SAME instance-death definition the firewall uses, EXEMPTING
-			// an asleep-recoverable claimant (gc stop/city-stop, max-session-age, idle) that
-			// MUST re-wake to resume/adopt. Recovery of a truly dead claimant is the
-			// firewall's job (strand → the L5 retry mints a fresh attempt), not a resume. A
-			// live mid-do claimant still anchors (the L1 preserve tier). The store-ref
-			// discriminant means an ordinary bd bead carrying a stray, user-set claimant_id
-			// is never gated (byte-identical).
-			if i < len(assignedWorkStoreRefs) && assignedWorkStoreRefs[i] == tierBHookStoreName {
-				if cid := strings.TrimSpace(wb.Metadata[engine.ClaimantIDMetaKey]); cid != "" && foldRowClaimantDead(cid, openState, openStranded, openSleepReason, aliveByBeadID) {
-					continue
-				}
-			}
 			ready := i < len(readyAssignedFlags) && readyAssignedFlags[i]
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready,
@@ -253,60 +194,6 @@ func buildAwakeInputFromReconciler(
 	}
 
 	return input
-}
-
-// foldRowClaimantDead reports whether a Lumen fold row's recorded claimant is dead — the
-// signal that decides whether the wake gate drops the fold row's session-wake anchor. It
-// mirrors the firewall's instance-death verdict (lumen_firewall.go's
-// firewallClaimantDeadOrStranded), with one recoverable-sleep exemption:
-//
-//   - ABSENT from the open set (recycled, closed, or replaced by a fresh-id respawn) — the
-//     firewall's FindByID miss → dead;
-//   - open and carrying the reconciler's durable stranded marker → dead;
-//   - open, ASLEEP (projected CompatState asleep), AND slept for a RECOVERABLE-resumable
-//     reason (gc stop/city-stop, max-session-age, idle, idle-timeout) → NOT dead: its
-//     anchor MUST survive so the next awake pass re-wakes it to resume or adopt its claim
-//     (the HIGH-1/HIGH-2 fix). This is deliberately NOT "any asleep": a crashed claimant
-//     slept with runtime-missing (or provider-terminal-error/failed-create) is asleep too,
-//     and keeping its anchor would hold shouldWake=true forever so the reconciler's
-//     poolFreeable close/strand path (which requires !shouldWake) never fires — the wedge.
-//     Only the intentional-stop reasons resume; the death reasons must strand;
-//   - otherwise (non-asleep, or asleep for a death/unknown reason) → dead iff its runtime is
-//     not alive. This is the reconciler's live close-gate signal (wakeTarget.alive), and a
-//     claimant absent from wakeTargets this tick reads not-alive — exactly as the pre-fix
-//     gate treated it, so a genuinely killed claimant still strands. A live mid-do claimant
-//     reads alive → kept (the L1 preserve tier).
-//
-// openState carries the projected CompatState (not raw metadata) so the "stopped" city-stop
-// form normalizes to asleep uniformly; openStranded/openSleepReason/aliveByBeadID are keyed
-// by session bead id.
-func foldRowClaimantDead(claimantID string, openState map[string]string, openStranded map[string]bool, openSleepReason map[string]string, aliveByBeadID map[string]bool) bool {
-	state, open := openState[claimantID]
-	if !open {
-		return true // absent from the open set → recycled/closed/fresh-id respawn → dead
-	}
-	if openStranded[claimantID] {
-		return true // the reconciler stamped its durable stranded marker → dead
-	}
-	if state == string(session.StateAsleep) && isResumableClaimantSleepReason(openSleepReason[claimantID]) {
-		return false // asleep for a recoverable reason → keep the anchor so it re-wakes to resume/adopt
-	}
-	return !aliveByBeadID[claimantID] // otherwise dead iff the runtime is not alive (crashed)
-}
-
-// isResumableClaimantSleepReason reports whether an asleep claimant's sleep_reason marks an
-// INTENTIONAL stop whose Tier-B claim must resume when the session re-wakes, versus a
-// terminal-death reason (runtime-missing, provider-terminal-error, failed-create) whose
-// claim must strand. The allowlist is intentional: an unknown or empty reason falls through
-// to the runtime-liveness verdict (drop when not alive), matching the deny-by-default stance
-// of isPoolSessionSlotFreeable and the pre-fix wake gate.
-func isResumableClaimantSleepReason(reason string) bool {
-	switch strings.TrimSpace(reason) {
-	case sleepReasonCityStop, "max-session-age", "idle", "idle-timeout":
-		return true
-	default:
-		return false
-	}
 }
 
 func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, poolDesired map[string]int) bool {

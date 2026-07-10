@@ -4696,23 +4696,6 @@ func TestValidateRigs_WildcardNameRejected(t *testing.T) {
 	}
 }
 
-// TestValidateRigs_GraphJournalNameReserved pins L4fix: a rig named
-// "graph-journal" is rejected. Its store ref would equal the Tier-B journal leg
-// (cmd/gc's tierBHookStoreName == ReservedGraphJournalRigName), so its ordinary
-// pool work beads would collide with the Lumen graph-journal gate (suppressed
-// per-bead dirs) and with the assigned-work Tier-B bypass. The reservation turns
-// that comment-only assumption into a real guard.
-func TestValidateRigs_GraphJournalNameReserved(t *testing.T) {
-	rigs := []Rig{{Name: ReservedGraphJournalRigName, Path: "/a"}}
-	err := ValidateRigs(rigs, "ci")
-	if err == nil {
-		t.Fatalf("expected error for rig name %q", ReservedGraphJournalRigName)
-	}
-	if !strings.Contains(err.Error(), "graph-journal") || !strings.Contains(err.Error(), "reserved") {
-		t.Errorf("error = %q, want it to name %q as reserved", err, ReservedGraphJournalRigName)
-	}
-}
-
 func TestValidateRigs_DuplicateName(t *testing.T) {
 	rigs := []Rig{
 		{Name: "frontend", Path: "/a"},

@@ -6,7 +6,6 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/lumen/engine"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -81,20 +80,6 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	if agentIsCrossStoreEligible(agentCfg) {
 		return true
 	}
-	// A fold-owned journal row (S11 preserve tier, appendTierBAssignedWork) is
-	// route-addressed, not store-addressed: it reaches this check only AFTER the
-	// caller matched it to this agent — filterAssignedWorkBeadsForPoolDemand
-	// resolves agentCfg from the row's own gc.routed_to via findAgentByTemplate,
-	// and the namedWorkReady caller (build_desired_state.go) gates on
-	// Assignee == identity before calling in. Its journal store ref
-	// (tierBHookStoreName) never equals any configured rig name — config.
-	// ValidateRigs reserves that value (config.ReservedGraphJournalRigName), so
-	// the store-ref compare below can never match it and DRAIN a mid-do Lumen
-	// worker (the exact failure S11 exists to prevent). The route/assignment
-	// match the caller already performed IS its reachability.
-	if storeRefs[index] == tierBHookStoreName {
-		return true
-	}
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
@@ -115,12 +100,10 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
-	openSessionBeadIDs := make(map[string]struct{}, len(sessionInfos))
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
 		}
-		openSessionBeadIDs[sb.ID] = struct{}{}
 		template := normalizedSessionTemplateInfo(sb, cfg)
 		if template == "" {
 			template = strings.TrimSpace(sb.Template)
@@ -134,21 +117,6 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
-		// B-2 demand exclusion: a fold-owned journal row whose recorded claimant instance
-		// is GONE (its session bead id is absent from the open set) must not feed pool
-		// demand — no respawn is minted for a row the firewall is about to strand. A
-		// same-name respawn has a NEW bead id, so it does not keep the dead row's demand
-		// alive; an open claimant (alive, asleep, or stranded-marked-but-open) keeps it
-		// (the L1 preserve tier). Only fold rows (tierBHookStoreName ref) carry this
-		// discriminant; a legacy fold row with no recorded id keeps the name path. This is
-		// the instance-death mirror of the firewall's FindByID(claimant_id) verdict.
-		if i < len(assignedWorkStoreRefs) && assignedWorkStoreRefs[i] == tierBHookStoreName {
-			if cid := strings.TrimSpace(wb.Metadata[engine.ClaimantIDMetaKey]); cid != "" {
-				if _, ok := openSessionBeadIDs[cid]; !ok {
-					continue // the claimant instance is gone → drop from pool demand
-				}
-			}
-		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
@@ -253,18 +221,6 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" {
-			continue
-		}
-		if assignedWorkStoreRefs[i] == tierBHookStoreName {
-			// A fold-owned journal row is route/assignment-addressed, not
-			// store-addressed (the same bypass as assignedWorkIndexReachableFromAgent):
-			// its journal store ref never equals a configured rig, so the per-ref match
-			// below would DROP it and an asleep-mid-claim pool session (a city
-			// stop/start — the L2 crash-resume scenario) would never re-wake, then be
-			// classified stranded and firewall-failed. The non-empty assignee match here
-			// IS its reachability.
-			filtered = append(filtered, wb)
-			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 			continue
 		}
 		if _, ok := crossStore[assignee]; ok {

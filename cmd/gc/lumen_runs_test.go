@@ -143,19 +143,6 @@ func TestLumenRunsTickDispatchesRealWorkBead(t *testing.T) {
 		types[0] != engine.EventRunStarted || types[1] != engine.EventNodeActivated || types[2] != engine.EventOwnedAdmitted {
 		t.Fatalf("journal = %v, want [run.started node.activated owned.admitted]", types)
 	}
-
-	// No claimable Tier-B fold row (the coexistence proof: the Tier-B surface is idle).
-	if store := cachedCityGraphJournal(cityPath); store != nil {
-		if surface, ok := beads.TierBClaimSurfaceStoreFor(store); ok {
-			frontier, ferr := surface.TierBRoutedFrontier(ctx, []string{tbHookRoute}, 0)
-			if ferr != nil {
-				t.Fatalf("routed frontier: %v", ferr)
-			}
-			if len(frontier) != 0 {
-				t.Fatalf("Tier-B routed frontier rows = %d, want 0 (real bead is the only claim surface)", len(frontier))
-			}
-		}
-	}
 }
 
 // lumenCloseDoBead simulates an ordinary pooled worker closing the latest open real
@@ -700,10 +687,10 @@ func TestForcedStopDoesNotCloseLumenGraphStore(t *testing.T) {
 // shutdown() never touches cr.lumen, so the store is single-goroutine-owned.
 //
 // Goroutine A deliberately exercises the store through lumenGraphStore()+Head() and
-// NOT the full lumenRunsTick: the firewall in a full tick locks the session-bead
-// MemStore mutex, which shutdown() also locks, and that shared lock would inject a
-// happens-before edge masking the cr.lumen.gs field race from the detector. Reading
-// the store field without the memstore lock keeps the race observable.
+// NOT the full lumenRunsTick: a full tick takes shared store locks that shutdown()
+// also takes, and that shared lock would inject a happens-before edge masking the
+// cr.lumen.gs field race from the detector. Reading the store field directly keeps
+// the race observable.
 func TestLumenRunGoroutineOwnsGraphStoreNoRace(t *testing.T) {
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)

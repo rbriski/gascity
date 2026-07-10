@@ -71,10 +71,10 @@ type hookClaimJSONResult struct {
 	Assignee      string `json:"assignee,omitempty"`
 	Route         string `json:"route,omitempty"`
 	// Description carries the claimed bead's rendered work text so a worker reads
-	// its prompt straight off the claim JSON. Load-bearing for Tier-B journal work,
-	// whose prompt lives in nodes.description and is invisible to a store-blind
-	// `bd show`; benignly populated for ordinary bd candidates too. CLI JSON only —
-	// not a Huma wire field, so adding it is a zero-contract, additive change.
+	// its prompt straight off the claim JSON. Load-bearing for a Lumen do work bead,
+	// whose prompt is dispatched onto the bead's Description; benignly populated for
+	// ordinary bd candidates too. CLI JSON only — not a Huma wire field, so adding it
+	// is a zero-contract, additive change.
 	Description          string   `json:"description,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`

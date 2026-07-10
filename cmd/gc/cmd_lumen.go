@@ -142,11 +142,12 @@ func newLumenSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inputJSON string
 	c := &cobra.Command{
 		Use:   "sling <route> <formula.lumen.json>",
-		Short: "Enqueue a Lumen run: the controller loop drives it, materializing do work as pool-claimable beads",
+		Short: "Enqueue a Lumen run: the controller loop drives it, dispatching do work as ordinary pool beads",
 		Long: "Enqueue a compiled Lumen formula as a run on the city's graph journal. " +
 			"The <route> is the default pool template for the formula's do nodes. The " +
-			"controller loop discovers the run, materializes each ready do as a claimable " +
-			"Tier-B work bead, and drives the DAG to run.closed as workers settle it.\n\n" +
+			"controller loop discovers the run, dispatches each ready do as an ordinary " +
+			"work bead in the city work store (claimed and closed through the normal pool " +
+			"path), and drives the DAG to run.closed as those beads settle.\n\n" +
 			"The compiled IR and input are copied into the content-addressed run dir " +
 			"(.gc/graph/ir, .gc/graph/runs) so the run survives a controller restart; " +
 			"deleting a blob afterward is a loud per-tick refusal until it is re-placed " +

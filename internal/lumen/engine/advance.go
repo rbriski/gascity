@@ -49,21 +49,20 @@ var (
 	ErrAdvanceStalled = errors.New("lumen: advance stalled with pending units and no pool work in flight")
 )
 
-// PoolWork is one pool-mode do activation the driver materialized as a claimable
-// Tier-B work bead and is now awaiting an owned.settled from the claiming worker.
-// The controller loop (L2) uses this to track and, if the claimant strands, to
-// firewall-settle (§2.4).
+// PoolWork is one pool-mode do activation the driver dispatched as an ordinary
+// work bead in the city work store and is now awaiting a terminal close. The
+// controller loop uses it to observe each dispatched bead (ObserveWork) and settle
+// the fold from its ordinary close (REDESIGN §2.5).
 type PoolWork struct {
-	// Activation is the activation key (the claim/settle handle).
+	// Activation is the activation key (the dispatch handle).
 	Activation string
-	// NodeID is the do-node id (the claimable work bead's projected id).
+	// NodeID is the do-node id.
 	NodeID string
-	// Route is the pool the work is routed to (the frontier route / gc.routed_to).
+	// Route is the pool the work is routed to (the dispatched bead's gc.routed_to).
 	Route string
-	// Prompt is the rendered agent prompt (projected into nodes.description).
+	// Prompt is the rendered agent prompt (the dispatched bead's Description).
 	Prompt string
-	// BeadID is the dispatched real work bead's store-minted id on the real-bead
-	// path (REDESIGN §1.4), empty on the legacy Tier-A path. The controller carries
+	// BeadID is the dispatched work bead's store-minted id. The controller carries
 	// it back into ObserveWork to settle the fold from the bead's ordinary close.
 	BeadID string
 }
@@ -98,8 +97,8 @@ type AdvanceResult struct {
 //     owned.settled a worker appended since the last Advance;
 //  3. walks the units in topo order, where — unlike Run/Resume — a unit whose
 //     dependencies have not all settled is DEFERRED (left for a later Advance)
-//     instead of blocking, and a ready pool-mode do is MATERIALIZED as a
-//     claimable Tier-B work bead and NOT waited on;
+//     instead of blocking, and a ready pool-mode do is DISPATCHED as an ordinary
+//     work bead in the city work store and NOT waited on;
 //  4. seals the run (run.closed) when every unit has settled, or PARKS (releasing
 //     the lease) when pending pool-mode work remains.
 //
@@ -334,13 +333,13 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 }
 
 // materializePoolWork emits the pool-mode node.activated for a ready pool-mode do
-// and does NOT wait: the fold projects a claimable Tier-B work bead the session
-// pool claims and settles asynchronously; a later Advance sees the owned.settled
-// and continues.
+// and dispatches its work bead, then does NOT wait: the session pool claims and
+// closes the ordinary bead asynchronously; a later Advance observes the close and
+// continues.
 //
 // A node already materialized in the fold state and not yet settled is a TRUE
-// NO-OP for this pass — it is already claimable (open) or claimed (in_progress),
-// and it must NOT be re-rendered or re-appended (HIGH-1). The write-once
+// NO-OP for this pass — it is already dispatched (its bead id is recorded), and it
+// must NOT be re-rendered or re-appended (HIGH-1). The write-once
 // activation idem token assumes a byte-identical re-render, but a prompt {{ref}}
 // to a node that is NOT a declared `after` dep renders DIFFERENTLY once that node
 // settles; re-offering the same token with a divergent payload trips
@@ -352,13 +351,11 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 // intercepted earlier by resumeMemoized, so it never reaches here.)
 func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts Options) error {
 	if n := d.st().Nodes[u.activation]; n != nil && !n.Settled {
-		// LEGACY path (nil DispatchWork): an activated, unsettled pool node is a
-		// claimable Tier-A row already — a TRUE no-op (HIGH-1). REAL-BEAD path: a node
-		// already carrying its dispatched bead id is likewise a no-op; a node activated
-		// but not yet dispatched (a crash between the two appends, §9.1) falls through
-		// to dispatch using the FOLD-recorded route/prompt (byte-stable, so no divergent
-		// re-render).
-		if opts.DispatchWork == nil || n.BeadID != "" {
+		// A node already carrying its dispatched bead id is a TRUE no-op (HIGH-1); a
+		// node activated but not yet dispatched (a crash between the two appends,
+		// §9.1) falls through to dispatch using the FOLD-recorded route/prompt
+		// (byte-stable, so no divergent re-render).
+		if n.BeadID != "" {
 			return nil
 		}
 		return d.dispatchPoolWork(u.activation, u.nodeID, n.Route, n.Prompt, opts)
@@ -382,11 +379,6 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 	if err := d.appendPoolActivated(u, route, prompt); err != nil {
 		return err
 	}
-	// LEGACY path stops at the claimable fold row. REAL-BEAD path continues: create
-	// the ordinary work bead and journal the dispatch fact.
-	if opts.DispatchWork == nil {
-		return nil
-	}
 	return d.dispatchPoolWork(u.activation, u.nodeID, route, prompt, opts)
 }
 
@@ -398,6 +390,11 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 // between the create and the fact (crashAfterDispatch) leaves a findable bead the
 // next Advance re-adopts (§9.1) — never an orphan, never a duplicate.
 func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, opts Options) error {
+	if opts.DispatchWork == nil {
+		// A pool-mode do (PoolRouter set) with no DispatchWork seam is a composition
+		// error — there is nowhere to create the work bead. Loud, never a silent park.
+		return fmt.Errorf("lumen: advance: pool-mode do %q has no DispatchWork seam (configuration error)", nodeID)
+	}
 	beadID, err := opts.DispatchWork(d.ctx, WorkDispatch{
 		StreamID:   d.streamID,
 		Activation: activation,
@@ -442,8 +439,8 @@ func (d *driver) observePoolWork(activation, nodeID, beadID string, opts Options
 }
 
 // appendPoolActivated emits a pool-mode node.activated: the plain engine
-// activation payload (node id, DAG edges, kind) plus the Tier-B claim-contract
-// fields (dispatch_mode=pool, route, prompt). Its idem token matches the
+// activation payload (node id, DAG edges, kind) plus the pool-dispatch fields
+// (dispatch_mode=pool, route, prompt). Its idem token matches the
 // engine-mode appendActivated (streamID:activation:act), and a given activation
 // is either pool OR engine — never both — so there is no collision. This is
 // reached only for the FIRST materialization of an activation: an already
@@ -576,9 +573,9 @@ func (d *driver) ensureLoopActivated(u planUnit) error {
 
 // materializeLoopAttempt mints one pool attempt: it emits attempt.minted, binds
 // the 1-based iteration for a repeat body's prompt render (loop-local), and
-// materializes the synthesized per-attempt do as claimable Tier-B pool work. The
-// attempt is a NEW activation (bodyID:N) ⇒ fresh claim/settle tokens, so a fresh
-// worker claims each attempt.
+// materializes the synthesized per-attempt do as ordinary pool work. The attempt
+// is a NEW activation (bodyID:N) ⇒ a fresh work bead per attempt, so a fresh worker
+// claims each attempt.
 func (d *driver) materializeLoopAttempt(u planUnit, attempt, maxAttempts int, scope map[string]string, opts Options) error {
 	spec := u.loop
 	budget := lumenRepeatLoopCap

@@ -65,9 +65,6 @@ func TestReducerWorkBeadDispatchArm(t *testing.T) {
 	if n.BeadID != "gc-42" {
 		t.Fatalf("BeadID = %q, want gc-42", n.BeadID)
 	}
-	if n.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty (real-bead path never fold-claims)", n.Assignee)
-	}
 	if n.InFrontier {
 		t.Errorf("InFrontier = true, want false (dispatch drops the claimable frontier row)")
 	}

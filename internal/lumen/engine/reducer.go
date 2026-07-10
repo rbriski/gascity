@@ -69,24 +69,22 @@ func (lumenReducer) Apply(s fold.State, e fold.Event) (fold.State, fold.Delta, e
 	case EventRunClosed:
 		return applyRunClosed(next, e)
 
-	// Tier-B claim-as-append (P4.5): a claim is a CAS owned.admitted, a close an
-	// owned.settled — both with kind=tier_b. The projection (assignee/status) is a
-	// pure fold of these events. A non-Tier-B owned handle (async / detached_run)
-	// stays deferred no-op bookkeeping inside these arms.
+	// owned.admitted carries the real-bead do path's dispatch fact
+	// (kind=work_bead); every other owned kind folds as deferred no-op bookkeeping.
 	case EventOwnedAdmitted:
 		return applyOwnedAdmitted(next, e)
-	case EventOwnedSettled:
-		return applyOwnedSettled(next, e)
 
 	// Bookkeeping and not-yet-emitting arms: total transitions with no Tier-A
 	// delta. They guard the run has started (corruption detection) and fold to a
 	// no-op projection, so the fold is total (R-TOTAL) over the frozen vocabulary
 	// and an emitting executor arm can be added without touching the reducer's
-	// version gate for these.
+	// version gate for these. owned.settled is here: it settles no real-bead do (a
+	// do settles through outcome.settled); it is registered for the deferred
+	// async/detached-run await boundary and folds as a no-op until that lands.
 	case EventNodeDecision, EventEffectScheduled, EventEffectSettled,
 		EventAttemptMinted, EventChannelOpened, EventChannelEmit,
 		EventChannelCursorPlanted, EventChannelCursorAdvanced, EventChannelSealed,
-		EventCancelRequested, EventCancelSwept, EventSnapshotAnchored:
+		EventCancelRequested, EventCancelSwept, EventSnapshotAnchored, EventOwnedSettled:
 		if next.RootID == "" {
 			return nil, fold.Delta{}, fmt.Errorf("lumen: %s at seq %d before run.started", e.Type, e.Seq)
 		}
@@ -179,7 +177,7 @@ func applyNodeActivated(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 			DepType: "member",
 		})
 	}
-	if next.ready(n) {
+	if next.ready(n) && frontierEligible(n) {
 		n.InFrontier = true
 		delta.FrontierInsert = []fold.FrontierRow{frontierRowFor(next, p.Activation)}
 	}
@@ -232,7 +230,7 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 		if d.InFrontier || d.Settled {
 			continue
 		}
-		if next.ready(d) {
+		if next.ready(d) && frontierEligible(d) {
 			d.InFrontier = true
 			delta.FrontierInsert = append(delta.FrontierInsert, frontierRowFor(next, depKey))
 		}
@@ -241,21 +239,15 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 	return next, delta, nil
 }
 
-// applyOwnedAdmitted folds a Tier-B claim (P4.5): a worker admitted an owned
-// work handle (kind=tier_b) — the claim-as-append the JournalStore's beads.Store
-// claim write translates into. The projection sets the node's assignee and moves
-// it to StatusClaimed (in_progress) and out of the frontier — a PURE FOLD of the
-// event, never a raw column write. A non-Tier-B handle (async / detached_run)
-// remains deferred no-op bookkeeping. Loud-CAS one-winner selection lives in the
-// append (tier_b_claim.go): the reducer only reflects the committed fact.
+// applyOwnedAdmitted folds an owned.admitted. The only live kind is
+// OwnedKindWorkBead (the real-bead do path's dispatch fact — see
+// applyWorkBeadDispatched); every other owned kind (async / detached_run) is
+// deferred no-op bookkeeping.
 //
 // The fold is TOTAL (R-TOTAL): every legal appended event folds to a DEFINED
-// state, so it can NEVER return an error that breaks RebuildTierA/Resume. A claim
-// that cannot take effect — an unactivated / non-pool / already-settled handle, or
-// an empty assignee — folds to a no-op ("late claim loses"): the prior fact stands
-// and the ineffective claim leaves the projection unchanged. Only genuinely
-// structural corruption (an event before run.started, or an unparseable payload)
-// is a typed error, consistent with the rest of the reducer.
+// state, so it can NEVER return an error that breaks RebuildTierA/Resume. Only
+// genuinely structural corruption (an event before run.started, or an unparseable
+// payload) is a typed error, consistent with the rest of the reducer.
 func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta, error) {
 	if next.RootID == "" {
 		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.admitted at seq %d before run.started", e.Seq)
@@ -265,40 +257,11 @@ func applyOwnedAdmitted(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.admitted payload at seq %d: %w", e.Seq, err)
 	}
 	if p.Kind == OwnedKindWorkBead {
-		// Real-bead do path (REDESIGN §1.3): the dispatch fact. It coexists with the
-		// Tier-B claim arm below on the shared discriminant lane.
 		return applyWorkBeadDispatched(next, e, p)
 	}
-	if p.Kind != OwnedKindTierB {
-		// A non-Tier-B owned handle (async / detached_run) is deferred no-op
-		// bookkeeping. kind is the Tier-B discriminant, symmetric with the settle
-		// arm (MED-3), so an async admit whose handle collides with a pool
-		// activation can never fold as a claim.
-		return next, fold.Delta{}, nil
-	}
-	if p.Handle == "" || p.Assignee == "" {
-		// A handle-less or assignee-less claim holds the bead for nobody: it cannot
-		// take effect, so it folds to a no-op — the node stays claimable, never
-		// orphaned (LOW-2).
-		return next, fold.Delta{}, nil
-	}
-	n := next.Nodes[p.Handle]
-	if n == nil || n.DispatchMode != DispatchModePool || n.Settled {
-		// Late claim loses (HIGH-1 totality): an unactivated / non-pool / terminal
-		// handle cannot be claimed. The prior fact (an unclaimed settle, an
-		// engine-driven node) stands and the claim is recorded as ineffective — a
-		// DEFINED no-op, never an error that would poison the stream forever. The
-		// losing worker still learns it lost: the API-level guard/CAS in
-		// ClaimTierBWork rejects it loudly.
-		return next, fold.Delta{}, nil
-	}
-	n.Assignee = p.Assignee
-	n.ClaimantID = p.ClaimantID
-	n.InFrontier = false
-	return next, fold.Delta{
-		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
-		FrontierDelete: []string{activationNodeID(p.Handle)},
-	}, nil
+	// A non-work-bead owned handle (async / detached_run) is deferred no-op
+	// bookkeeping.
+	return next, fold.Delta{}, nil
 }
 
 // applyWorkBeadDispatched folds the real-bead do path's dispatch fact (REDESIGN
@@ -329,75 +292,6 @@ func applyWorkBeadDispatched(next *lumenState, e fold.Event, p ownedAdmittedPayl
 		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
 		FrontierDelete: []string{activationNodeID(p.Handle)},
 	}, nil
-}
-
-// applyOwnedSettled folds a Tier-B close (P4.5): the worker settled a claimed
-// work handle. It mirrors applyOutcomeSettled — the node settles to its outcome
-// status (assignee retained for provenance), leaves the frontier, and propagates
-// readiness so the settle drives the rest of the run's DAG. A handle that is not
-// a claimable Tier-B node (a deferred async / detached_run handle) is no-op
-// bookkeeping.
-//
-// The fold is TOTAL (R-TOTAL), symmetric with applyOwnedAdmitted: kind is the
-// Tier-B discriminant (an async/detached settle whose handle collides with a pool
-// activation folds as deferred bookkeeping, never a Tier-B settle; MED-3), and a
-// settle that cannot take effect — an unactivated / non-pool / already-settled
-// handle, or a missing outcome — folds to a DEFINED idempotent no-op. The first
-// settle stands; a divergent re-settle is rejected loudly at the append (idem
-// token), and reaching the fold with a redundant settle (a re-sliced or crafted
-// stream) must never error and poison RebuildTierA/Resume.
-func applyOwnedSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta, error) {
-	if next.RootID == "" {
-		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.settled at seq %d before run.started", e.Seq)
-	}
-	var p ownedSettledPayload
-	if err := json.Unmarshal(e.Payload, &p); err != nil {
-		return nil, fold.Delta{}, fmt.Errorf("lumen: owned.settled payload at seq %d: %w", e.Seq, err)
-	}
-	if p.Kind != OwnedKindTierB {
-		return next, fold.Delta{}, nil
-	}
-	n := next.Nodes[p.Handle]
-	if n == nil || n.DispatchMode != DispatchModePool || n.Settled || p.Outcome == "" {
-		return next, fold.Delta{}, nil
-	}
-	// A settle by a non-claimant LOSES (§4.3, the symmetric twin of "late claim
-	// loses"): a straggler attempt-N worker whose close carries its own identity can
-	// never settle a live attempt N+1 claimed by another worker. A crafted/replayed
-	// event that reaches the fold folds to a DEFINED no-op — the prior claim stands
-	// and RebuildTierA is never poisoned. Identity is checked on BOTH axes: the
-	// session NAME (a differently-named closer) AND the instance-unique claimant id
-	// (a same-named straggler A vs its respawn B under a singleton pool identity —
-	// the name matches but the id differs). Each axis fires only when both sides
-	// carry that identity, so the driver/firewall override ("" for both) is unguarded
-	// and an unclaimed node accepts an override. This is the fold twin of the append-
-	// time guard in SettleTierBWorkAs.
-	nameMismatch := p.Assignee != "" && n.Assignee != "" && p.Assignee != n.Assignee
-	idMismatch := p.ClaimantID != "" && n.ClaimantID != "" && p.ClaimantID != n.ClaimantID
-	if nameMismatch || idMismatch {
-		return next, fold.Delta{}, nil
-	}
-	n.Settled = true
-	n.Outcome = p.Outcome
-	n.Output = p.Output
-	n.Retryable = p.Retryable
-	n.InFrontier = false
-	delta := fold.Delta{
-		NodeUpserts:    []fold.NodeRow{nodeRowFor(next, p.Handle, n, e.StreamID)},
-		FrontierDelete: []string{activationNodeID(p.Handle)},
-	}
-	for _, depKey := range next.dependentsOf(p.Handle) {
-		d := next.Nodes[depKey]
-		if d.InFrontier || d.Settled {
-			continue
-		}
-		if next.ready(d) {
-			d.InFrontier = true
-			delta.FrontierInsert = append(delta.FrontierInsert, frontierRowFor(next, depKey))
-		}
-	}
-	next.Outcome = next.runOutcome()
-	return next, delta, nil
 }
 
 func applyRunClosed(next *lumenState, e fold.Event) (fold.State, fold.Delta, error) {
@@ -516,22 +410,20 @@ func (s *lumenState) ProjectDelta(streamID string) fold.Delta {
 // row, one run's node upsert clobbering the other's. Single-run L3 is unaffected
 // (one run owns its node ids). Before multi-run pools land, the projected node id
 // must be run-namespaced (e.g. streamID-scoped) and FrontierDelete must be
-// root-scoped. readTierBNode already scopes its READ by stream_id (MED-2); the
-// write side (this row + the FrontierDelete sites in applyOutcomeSettled /
-// applyOwnedSettled / applyRunClosed) is the remaining half.
+// root-scoped (the write side: this row + the FrontierDelete sites in
+// applyOutcomeSettled / applyRunClosed). Nothing claims off the Tier-A projection
+// anymore (the real do work is an ordinary city-store bead — REDESIGN), so the
+// residual blast radius is a cosmetic observability clobber, not claim corruption.
 //
 // frontierRowFor builds the Tier-A frontier row for an activation. Its node_id is
-// the BARE node id (activationNodeID), NOT the activation key: the frontier is a
-// claim surface, and the claimable-pool-work SELECT (frontierProjectionTier,
-// internal/beads/journal_frontier.go) reads `frontier.node_id` and hydrates
-// `nodes WHERE id IN (...)` — so the frontier node_id must equal nodes.id or the
-// row hydrates to nothing. The root's activation is the stream id (no ':' suffix),
-// so it is already bare. A pool-mode node carries its route so the
-// frontier_route_order index (route, ready_priority, created_at, id) IS the
-// claim SELECT: rows with route=<pool> are exactly the open+ready+unassigned pool
-// set. The run root and engine-driven nodes carry route "" and never match a pool
-// SELECT. (One activation per node in P4.2, so the bare id is unique per run; a
-// per-attempt frontier key is a retry-slice concern, blueprint correction #3.)
+// the BARE node id (activationNodeID), NOT the activation key, so a downstream
+// hydrate (`nodes WHERE id IN (...)`) resolves. The frontier is now an
+// observer-only projection of open, ready, engine-driven work and the run root: a
+// pool-dispatched node never enters it (frontierEligible is false — its work bead
+// in the city work store is the only claim surface), so the Route column here is
+// always "" for the rows that do project. (One activation per node in P4.2, so the
+// bare id is unique per run; a per-attempt frontier key is a retry-slice concern,
+// blueprint correction #3.)
 func frontierRowFor(s *lumenState, activation string) fold.FrontierRow {
 	route := ""
 	if n := s.Nodes[activation]; n != nil {

@@ -412,6 +412,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runRun(u, scope, nodeOutputs)
 	case unitGuard:
 		runErr = d.runGuard(u, scope, nodeOutputs)
+	case unitDispatch:
+		runErr = d.runDispatch(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -691,32 +693,78 @@ func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) erro
 		return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
 	}
 	if !truthy {
-		return d.settleGuardCondFalse(u, scope, nodeOutputs)
+		return d.settleDecisionSkipped(u, scope, nodeOutputs)
 	}
 	tu := d.guardThenUnit(u)
 	if err := d.runUnit(tu, scope, nodeOutputs); err != nil {
 		return err
 	}
-	return d.settleGuardFromThen(u, tu, scope, nodeOutputs)
+	return d.settleDecisionFromBody(u, tu, scope, nodeOutputs)
 }
 
-// settleGuardCondFalse settles a guard whose condition was false: PASS with an empty
-// result (no side effect, no skip-cascade). It records the empty output so a
-// downstream {{guardID}} resolves to "" and genesis matches a resume.
-func (d *driver) settleGuardCondFalse(u planUnit, scope, nodeOutputs map[string]string) error {
-	if err := d.appendSettled(u.activation, OutcomePass, "", "condition false"); err != nil {
+// runDispatch drives a dispatch (multi-way branch) inline: it evaluates the subject
+// to a string and runs the FIRST arm whose match equals it, settling the dispatch
+// transparently from that arm's body; no matching arm settles the dispatch PASS with
+// an empty result (a no-op that does not skip-cascade). The subject is a pure function
+// of the fold, so a resume re-selects the same arm.
+func (d *driver) runDispatch(u planUnit, scope, nodeOutputs map[string]string) error {
+	arm, ok, err := d.matchingArm(u, scope)
+	if err != nil {
+		return fmt.Errorf("lumen: dispatch %q subject: %w", u.nodeID, err)
+	}
+	if !ok {
+		return d.settleDecisionSkipped(u, scope, nodeOutputs)
+	}
+	au := d.dispatchArmUnit(u, arm)
+	if err := d.runUnit(au, scope, nodeOutputs); err != nil {
+		return err
+	}
+	return d.settleDecisionFromBody(u, au, scope, nodeOutputs)
+}
+
+// matchingArm evaluates a dispatch's subject against the scope and returns the first
+// arm whose match value equals it.
+func (d *driver) matchingArm(u planUnit, scope map[string]string) (*dispatchArm, bool, error) {
+	subjectVal, err := evalValue(u.dispatch.subject, scope)
+	if err != nil {
+		return nil, false, err
+	}
+	for i := range u.dispatch.arms {
+		if u.dispatch.arms[i].matchValue == subjectVal {
+			return &u.dispatch.arms[i], true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// chosenArm returns the arm whose body has already been activated — the durable
+// record of which branch a prior Advance pass selected (write-once decision).
+func (d *driver) chosenArm(u planUnit) (*dispatchArm, bool) {
+	for i := range u.dispatch.arms {
+		if d.st().Nodes[activationFor(u.dispatch.arms[i].bodyNodeID)] != nil {
+			return &u.dispatch.arms[i], true
+		}
+	}
+	return nil, false
+}
+
+// settleDecisionSkipped settles a decision arm (guard/dispatch) that took no branch:
+// PASS with an empty result (no side effect, no skip-cascade). It records the empty
+// output so a downstream {{id}} resolves to "" and genesis matches a resume.
+func (d *driver) settleDecisionSkipped(u planUnit, scope, nodeOutputs map[string]string) error {
+	if err := d.appendSettled(u.activation, OutcomePass, "", "no branch taken"); err != nil {
 		return err
 	}
 	d.record(u.nodeID, "", scope, nodeOutputs)
 	return nil
 }
 
-// settleGuardFromThen settles a guard transparently from its (already-settled) then
-// leaf and records the then's output for a downstream {{guardID}}.
-func (d *driver) settleGuardFromThen(u, tu planUnit, scope, nodeOutputs map[string]string) error {
+// settleDecisionFromBody settles a decision arm transparently from its (already-
+// settled) chosen body leaf and records the body's output for a downstream {{id}}.
+func (d *driver) settleDecisionFromBody(u, bu planUnit, scope, nodeOutputs map[string]string) error {
 	outcome, output := OutcomePass, ""
-	if tn := d.st().Nodes[tu.activation]; tn != nil && tn.Settled {
-		outcome, output = tn.Outcome, tn.Output
+	if bn := d.st().Nodes[bu.activation]; bn != nil && bn.Settled {
+		outcome, output = bn.Outcome, bn.Output
 	}
 	if err := d.appendSettled(u.activation, outcome, output, ""); err != nil {
 		return err
@@ -725,23 +773,32 @@ func (d *driver) settleGuardFromThen(u, tu planUnit, scope, nodeOutputs map[stri
 	return nil
 }
 
-// guardThenUnit synthesizes the leaf unit for a guard's `then` step (activation
-// thenID:0, parented under the guard). It inherits the guard's `after` gates (the
-// guard already cleared them before the then runs) and renders against the guard's
-// namespace.
-func (d *driver) guardThenUnit(u planUnit) planUnit {
-	spec := u.guard
+// decisionBodyUnit synthesizes the leaf unit for a decision arm's body (a guard
+// `then` or a dispatch arm body): activation bodyID:0, parented under the decision
+// node, inheriting its `after` gates (already cleared) and namespace.
+func (d *driver) decisionBodyUnit(u planUnit, bodyNodeID string, bodyIRKind ir.NodeKind, body step) planUnit {
 	return planUnit{
 		kind:       unitLeaf,
-		activation: activationFor(spec.thenNodeID),
-		nodeID:     spec.thenNodeID,
-		irKind:     spec.thenIRKind,
+		activation: activationFor(bodyNodeID),
+		nodeID:     bodyNodeID,
+		irKind:     bodyIRKind,
 		parent:     u.activation,
 		ns:         u.ns,
 		afterDeps:  u.afterDeps,
 		rawAfter:   u.rawAfter,
-		leaf:       spec.then,
+		leaf:       body,
 	}
+}
+
+// guardThenUnit synthesizes the guard's `then` leaf unit.
+func (d *driver) guardThenUnit(u planUnit) planUnit {
+	s := u.guard
+	return d.decisionBodyUnit(u, s.thenNodeID, s.thenIRKind, s.then)
+}
+
+// dispatchArmUnit synthesizes a dispatch arm's body leaf unit.
+func (d *driver) dispatchArmUnit(u planUnit, arm *dispatchArm) planUnit {
+	return d.decisionBodyUnit(u, arm.bodyNodeID, arm.bodyIRKind, arm.body)
 }
 
 // condScope builds the closed-expression scope a guard cond (and any non-loop

@@ -53,6 +53,7 @@ const (
 	unitLoop                       // retry / repeat: the attempt-loop over a leaf body
 	unitRun                        // run: transparent sub-formula call over an inlined sub-graph
 	unitGuard                      // guard: a conditional single-step arm (cond ? then : pass)
+	unitDispatch                   // dispatch: a multi-way branch (subject -> matching arm's body)
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -92,6 +93,30 @@ type planUnit struct {
 	run *runSpec // unitRun: the transparent sub-formula-call spec
 
 	guard *guardSpec // unitGuard: the conditional single-step spec
+
+	dispatch *dispatchSpec // unitDispatch: the multi-way branch spec
+}
+
+// dispatchSpec carries a dispatch node's decoded shape: the subject value expression
+// to branch on, the node/input refs it reads (for the DET gate — the branch must be
+// decided over stable state), and the ordered arms. At run time the subject is
+// evaluated to a string and the FIRST arm whose match value equals it runs its body
+// (the dispatch settles transparently from it); no matching arm settles the dispatch
+// PASS with an empty result (a no-op that does not skip-cascade). Like guard, the
+// decision is a pure function of the fold.
+type dispatchSpec struct {
+	subject     json.RawMessage
+	subjectRefs []string
+	arms        []dispatchArm
+}
+
+// dispatchArm is one discriminated-variant arm: a match value and the single leaf
+// body to run when the subject equals it.
+type dispatchArm struct {
+	matchValue string
+	bodyNodeID string
+	bodyIRKind ir.NodeKind
+	body       step
 }
 
 // guardSpec carries a guard node's decoded shape: the closed condition and the
@@ -309,6 +334,9 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 
 	case ir.NodeGuard:
 		return l.lowerGuard(n, parent)
+
+	case ir.NodeDispatch:
+		return l.lowerDispatch(n, parent)
 
 	default:
 		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
@@ -708,6 +736,101 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 	return nil
 }
 
+// lowerDispatch lowers a dispatch node — a multi-way branch — to a unitDispatch. The
+// subject is a value expression; each arm has a match literal and a SINGLE leaf body
+// (exec/do). A non-leaf arm body (block/run/scatter) is refused this slice — a
+// dispatch-to-run composition is a follow-on. Like guard, a dispatch inside a run
+// sub-formula (prefix != "") is refused (namespace-unaware decision), and a subject
+// that reads the dispatch's own id or an arm body id is refused (self-referential).
+func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
+	if l.prefix != "" {
+		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
+	}
+	subject, ok := n.Raw["subject"]
+	if !ok {
+		return fmt.Errorf("%w: dispatch %q missing subject", ErrUnsupportedNode, n.ID)
+	}
+	var rawArms []struct {
+		Match json.RawMessage `json:"match"`
+		Body  json.RawMessage `json:"body"`
+	}
+	if raw, ok := n.Raw["arms"]; ok {
+		if err := json.Unmarshal(raw, &rawArms); err != nil {
+			return fmt.Errorf("lumen: dispatch %q arms: %w", n.ID, err)
+		}
+	}
+	if len(rawArms) == 0 {
+		return fmt.Errorf("%w: dispatch %q has no arms", ErrUnsupportedNode, n.ID)
+	}
+
+	spec := &dispatchSpec{subject: subject, subjectRefs: collectRefs(subject)}
+	seenMatch := map[string]bool{}
+	seenBody := map[string]bool{}
+	for i := range rawArms {
+		var match struct {
+			Value json.RawMessage `json:"value"`
+		}
+		_ = json.Unmarshal(rawArms[i].Match, &match)
+		matchVal := canonScalar(match.Value)
+		if seenMatch[matchVal] {
+			return fmt.Errorf("%w: dispatch %q has duplicate arm match %q", ErrUnsupportedNode, n.ID, matchVal)
+		}
+		seenMatch[matchVal] = true
+
+		var body ir.Node
+		if err := json.Unmarshal(rawArms[i].Body, &body); err != nil {
+			return fmt.Errorf("lumen: dispatch %q arm %d body: %w", n.ID, i, err)
+		}
+		if body.ID == "" {
+			return fmt.Errorf("%w: dispatch %q arm %q body missing id", ErrUnsupportedNode, n.ID, matchVal)
+		}
+		// Arm body ids must be distinct: their activations (bodyID:0) are the durable
+		// write-once decision records + Tier-A node ids, so a shared id would collide.
+		if seenBody[body.ID] {
+			return fmt.Errorf("%w: dispatch %q has duplicate arm body id %q", ErrUnsupportedNode, n.ID, body.ID)
+		}
+		seenBody[body.ID] = true
+		for _, r := range spec.subjectRefs {
+			if r == n.ID || r == body.ID {
+				return fmt.Errorf("%w: dispatch %q subject references its own %s (self-referential decision)", ErrUnsupportedNode, n.ID, r)
+			}
+		}
+		arm := dispatchArm{matchValue: matchVal, bodyNodeID: l.qid(body.ID), bodyIRKind: body.Kind}
+		switch body.Kind {
+		case ir.NodeExec:
+			s, err := decodeExec(body)
+			if err != nil {
+				return err
+			}
+			arm.body = s
+		case ir.NodeDo:
+			if !l.allowDo {
+				return fmt.Errorf("%w: dispatch %q arm %q do body (node %q)", ErrUnsupportedNode, n.ID, matchVal, body.ID)
+			}
+			s, err := decodeDo(body)
+			if err != nil {
+				return err
+			}
+			arm.body = s
+		default:
+			return fmt.Errorf("%w: dispatch %q arm %q body kind %q (only exec/do leaf arm bodies)", ErrUnsupportedNode, n.ID, matchVal, body.Kind)
+		}
+		spec.arms = append(spec.arms, arm)
+	}
+
+	l.units = append(l.units, planUnit{
+		kind:       unitDispatch,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeDispatch,
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		dispatch:   spec,
+	})
+	return nil
+}
+
 // runTargetName decodes a run node's target ref, refusing anything but the
 // by-name form this slice supports.
 func runTargetName(n ir.Node) (string, error) {
@@ -961,6 +1084,10 @@ func (l *lowerer) resolveDeps() error {
 			if u.guard != nil {
 				exprRefs = u.guard.condRefs
 			}
+		case unitDispatch:
+			if u.dispatch != nil {
+				exprRefs = u.dispatch.subjectRefs
+			}
 		default:
 			continue
 		}
@@ -990,6 +1117,42 @@ func (l *lowerer) resolveDeps() error {
 			s := &l.units[j]
 			if s.activation == u.activation || (u.kind == unitRun && strings.HasPrefix(s.nodeID, subPrefix)) {
 				s.afterDeps = appendMissing(s.afterDeps, gates)
+			}
+		}
+	}
+
+	// Synthesized decision-arm bodies (a guard `then`, dispatch arm bodies) are NOT
+	// plan units, so topoSortUnits' duplicate-activation guard cannot see them. A body
+	// id that collides with a real unit's node id or with another synthesized body id
+	// would collide on activationFor(bodyID) — corrupting the write-once decision
+	// record (dispatch chosenArm) and the Tier-A projection. Refuse it loudly.
+	synthBodies := map[string]string{}
+	addSynth := func(bodyID, owner string) error {
+		if prev, ok := synthBodies[bodyID]; ok {
+			return fmt.Errorf("lumen: decision body id %q used by both %q and %q", bodyID, prev, owner)
+		}
+		if _, ok := byNodeID[bodyID]; ok {
+			return fmt.Errorf("lumen: decision %q body id %q collides with node %q", owner, bodyID, bodyID)
+		}
+		synthBodies[bodyID] = owner
+		return nil
+	}
+	for i := range l.units {
+		u := &l.units[i]
+		switch u.kind {
+		case unitGuard:
+			if u.guard != nil {
+				if err := addSynth(u.guard.thenNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		case unitDispatch:
+			if u.dispatch != nil {
+				for _, arm := range u.dispatch.arms {
+					if err := addSynth(arm.bodyNodeID, u.nodeID); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -1345,6 +1508,26 @@ func evalInterp(raw map[string]json.RawMessage, scope map[string]string) (string
 	}
 
 	return "", fmt.Errorf("lumen: interp node: unrecognized shape")
+}
+
+// canonScalar stringifies a JSON scalar the SAME way baseScope seeds a run input
+// value: a string as-is, else canonical Go JSON (json.Marshal of the decoded value).
+// A dispatch subject that resolves through baseScope (a numeric input → float64 →
+// "5") must compare equal to a match literal spelled 5.0 or 5 — so the match side
+// canonicalizes here rather than keeping raw source bytes ("5.0"). Falls back to raw
+// bytes only for a value that will not decode.
+func canonScalar(raw json.RawMessage) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return scalarToString(raw)
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return scalarToString(raw)
 }
 
 // scalarToString renders a JSON scalar as a plain Go string.

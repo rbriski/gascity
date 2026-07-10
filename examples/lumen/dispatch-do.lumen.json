@@ -1,0 +1,56 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "dispatch-do",
+  "input": {
+    "name": "dispatch-do.input",
+    "fields": [
+      {
+        "name": "policy",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "dispatch",
+      "id": "d",
+      "name": "d",
+      "after": [],
+      "subject": { "kind": "ref", "name": "policy" },
+      "arms": [
+        {
+          "match": { "kind": "literal", "value": "separate" },
+          "body": {
+            "kind": "do",
+            "id": "sep",
+            "name": "sep",
+            "after": [],
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Run the separate-session drain, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        },
+        {
+          "match": { "kind": "literal", "value": "same-session" },
+          "body": {
+            "kind": "do",
+            "id": "shared",
+            "name": "shared",
+            "after": [],
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Run the shared-session drain, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        }
+      ]
+    }
+  ]
+}

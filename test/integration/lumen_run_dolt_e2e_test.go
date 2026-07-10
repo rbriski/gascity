@@ -105,6 +105,65 @@ func guardDoIRPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "examples", "lumen", "guard-do.lumen.json")
 }
 
+func dispatchDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "dispatch-do.lumen.json")
+}
+
+// TestLumenDispatchDoltE2E_PicksArmDispatchesDo (dispatch acceptance) proves a
+// dispatch's chosen arm drives on the pool: with policy=same-session the dispatch
+// selects the "shared" arm and dispatches ITS do (not the other arm's); a pooled
+// worker claims+closes it; the dispatch settles transparently and the run seals.
+func TestLumenDispatchDoltE2E_PicksArmDispatchesDo(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 1, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+	const wantPrompt = "Run the shared-session drain, then settle this step."
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, dispatchDoIRPath(t), "--input", `{"policy":"same-session"}`)
+	if err != nil {
+		t.Fatalf("gc lumen sling (dispatch-do) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF dispatch-do streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+	admitted := waitForOwnedAdmitted(t, gs, streamID, 60*time.Second)
+	realBeadID := admitted.BeadID
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 4*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	// The chosen arm's do (shared:0) settled pass; the dispatch settled transparently.
+	if got := outcomeSettledFor(t, events, "shared:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled shared:0 = %q, want pass (chosen arm's do)", got)
+	}
+	if got := outcomeSettledFor(t, events, "d:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled d:0 = %q, want pass (dispatch transparent)", got)
+	}
+	// Exactly one arm dispatched (the other arm's do must NOT have run).
+	if n := len(lumenEventsOfType(events, engine.EventOwnedAdmitted)); n != 1 {
+		t.Fatalf("owned.admitted count = %d, want 1 (only the chosen arm dispatches)", n)
+	}
+	assertLumenPromptReadback(t, cityDir, realBeadID, wantPrompt)
+	t.Logf("PROOF dispatch picked the same-session arm -> dispatched its do -> sealed pass")
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}
+
 // TestLumenGuardDoltE2E_CondTrueDispatchesThen (guard acceptance) proves a guard's
 // decision arm on the pool: with mode=go the cond is true, so the guard dispatches
 // its `then` do as ordinary work; a pooled worker claims+closes it; the guard settles

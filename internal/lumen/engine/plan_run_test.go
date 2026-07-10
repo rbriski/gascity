@@ -80,6 +80,27 @@ func TestGuardDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestDispatchDoFixtureLowers guards the dispatch dolt-e2e fixture.
+func TestDispatchDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "dispatch-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("lower dispatch-do: %v", err)
+	}
+	d := unitByNode(units, "d")
+	if d == nil || d.kind != unitDispatch || d.dispatch == nil || len(d.dispatch.arms) != 2 {
+		t.Fatalf("dispatch unit = %+v, want a unitDispatch with 2 arms", d)
+	}
+}
+
 // decodeBundle builds an *ir.IR from a JSON literal, failing the test on a
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {
@@ -172,6 +193,74 @@ func TestLowerGuardLowers(t *testing.T) {
 	done := unitByNode(units, "done")
 	if done == nil || !containsStr(done.afterDeps, "g:0") {
 		t.Errorf("done afterDeps = %v, want to include g:0", deref(done).afterDeps)
+	}
+}
+
+// dispatchNode renders a dispatch node over a subject ref with the given arms
+// (each `match:<lit> -> exec body`).
+func dispatchNode(id string, after []string, subjectRef string, arms ...[2]string) string {
+	a, _ := json.Marshal(after)
+	var armJSON []string
+	for i, arm := range arms {
+		bodyID := id + "_arm" + string(rune('0'+i))
+		armJSON = append(armJSON, `{"match":{"kind":"literal","value":`+jsonStr(arm[0])+`},"body":`+
+			execNode(bodyID, nil, arm[1])+`}`)
+	}
+	return `{"kind":"dispatch","id":"` + id + `","name":"` + id + `","after":` + string(a) +
+		`,"subject":{"kind":"ref","name":"` + subjectRef + `"},"arms":[` + strings.Join(armJSON, ",") + `]}`
+}
+
+// TestLowerDispatchLowers pins that a dispatch lowers to a unitDispatch carrying its
+// subject + arms, gated on the subject's node-refs (DET), with no separate arm units.
+func TestLowerDispatchLowers(t *testing.T) {
+	doc := decodeBundle(t, plainDoc(
+		execNode("pick", nil, "echo separate")+","+
+			dispatchNode("d", nil, "pick", [2]string{"separate", "echo a"}, [2]string{"shared", "echo b"}),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits: %v", err)
+	}
+	d := unitByNode(units, "d")
+	if d == nil || d.kind != unitDispatch || d.dispatch == nil {
+		t.Fatalf("d = %+v, want a unitDispatch", d)
+	}
+	if len(d.dispatch.arms) != 2 {
+		t.Errorf("arms = %d, want 2", len(d.dispatch.arms))
+	}
+	// The dispatch gates on subject-ref node `pick` (stable decision).
+	if !containsStr(d.afterDeps, "pick:0") {
+		t.Errorf("dispatch afterDeps = %v, want to include pick:0 (subject-ref gate)", d.afterDeps)
+	}
+	// Arm bodies are not separate units (synthesized at run time).
+	if unitByNode(units, "d_arm0") != nil {
+		t.Errorf("arm body should not be a separate unit; got %v", nodeIDs(units))
+	}
+}
+
+// TestLowerDispatchDuplicateBodyIdRefused pins that two arms sharing a body id are
+// refused (their activations would collide — the write-once decision record).
+func TestLowerDispatchDuplicateBodyIdRefused(t *testing.T) {
+	arms := `{"match":{"kind":"literal","value":"a"},"body":` + execNode("shared", nil, "echo a") + `},` +
+		`{"match":{"kind":"literal","value":"b"},"body":` + execNode("shared", nil, "echo b") + `}`
+	node := `{"kind":"dispatch","id":"d","name":"d","after":[],"subject":{"kind":"ref","name":"p"},"arms":[` + arms + `]}`
+	doc := decodeBundle(t, plainDoc(node))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "duplicate arm body id") {
+		t.Fatalf("want a duplicate-arm-body-id refusal, got %v", err)
+	}
+}
+
+// TestLowerDispatchArmBodyCollidesWithNodeRefused pins the red-team runner-up fix: a
+// dispatch arm body id that collides with a real sibling node is refused (their
+// activations would collide, forging the write-once decision record).
+func TestLowerDispatchArmBodyCollidesWithNodeRefused(t *testing.T) {
+	arms := `{"match":{"kind":"literal","value":"a"},"body":` + execNode("prep", nil, "echo arm") + `}`
+	node := `{"kind":"dispatch","id":"d","name":"d","after":[],"subject":{"kind":"ref","name":"p"},"arms":[` + arms + `]}`
+	doc := decodeBundle(t, plainDoc(execNode("prep", nil, "echo real")+","+node))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "collides with node") {
+		t.Fatalf("want an arm-body/node collision refusal, got %v", err)
 	}
 }
 

@@ -318,6 +318,11 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceGuard(u, scope, nodeOutputs, opts)
 	}
 
+	// A dispatch selects one arm and drives its body (the multi-way analog of guard).
+	if u.kind == unitDispatch && !d.blocked(u) {
+		return d.advanceDispatch(u, scope, nodeOutputs, opts)
+	}
+
 	// Materialize a READY pool-mode do as claimable work. A pool node whose
 	// blocking dep failed is NOT offered to the pool — it skip-cascades through
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
@@ -603,7 +608,7 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 // identically across passes), so re-Advance converges.
 func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
 	spec := u.guard
-	if err := d.ensureGuardActivated(u); err != nil {
+	if err := d.ensureDecisionActivated(u); err != nil {
 		return err
 	}
 	tu := d.guardThenUnit(u)
@@ -618,7 +623,7 @@ func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, 
 			return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
 		}
 		if !truthy {
-			return d.settleGuardCondFalse(u, scope, nodeOutputs)
+			return d.settleDecisionSkipped(u, scope, nodeOutputs)
 		}
 	}
 	if opts.PoolRouter != nil && spec.thenIRKind == ir.NodeDo {
@@ -646,12 +651,60 @@ func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, 
 			return err
 		}
 	}
-	return d.settleGuardFromThen(u, tu, scope, nodeOutputs)
+	return d.settleDecisionFromBody(u, tu, scope, nodeOutputs)
 }
 
-// ensureGuardActivated emits a guard node's node.activated once (write-once via the
+// advanceDispatch drives a dispatch's multi-way branch in the parking model: it
+// activates the dispatch once, then selects an arm. If a prior pass already activated
+// an arm body (the durable, write-once decision), it drives THAT arm without
+// re-evaluating the subject; otherwise it evaluates the subject and selects the
+// matching arm (no match settles the dispatch pass). The chosen arm's exec body runs
+// inline; a pool-do body materializes/observes/parks. The subject-ref gate keeps the
+// first selection stable.
+func (d *driver) advanceDispatch(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	if err := d.ensureDecisionActivated(u); err != nil {
+		return err
+	}
+	arm, chosen := d.chosenArm(u)
+	if !chosen {
+		var ok bool
+		var err error
+		arm, ok, err = d.matchingArm(u, scope)
+		if err != nil {
+			return fmt.Errorf("lumen: dispatch %q subject: %w", u.nodeID, err)
+		}
+		if !ok {
+			return d.settleDecisionSkipped(u, scope, nodeOutputs)
+		}
+	}
+	au := d.dispatchArmUnit(u, arm)
+	if opts.PoolRouter != nil && arm.bodyIRKind == ir.NodeDo {
+		bn := d.st().Nodes[au.activation]
+		switch {
+		case bn == nil || (!bn.Settled && bn.BeadID == ""):
+			return d.materializePoolWork(au, scope, opts)
+		case !bn.Settled:
+			if opts.ObserveWork == nil {
+				return nil
+			}
+			if err := d.observePoolWork(au.activation, au.nodeID, bn.BeadID, scope, nodeOutputs, opts); err != nil {
+				return err
+			}
+			if n := d.st().Nodes[au.activation]; n == nil || !n.Settled {
+				return nil
+			}
+		}
+	} else if bn := d.st().Nodes[au.activation]; bn == nil || !bn.Settled {
+		if err := d.runUnit(au, scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+	return d.settleDecisionFromBody(u, au, scope, nodeOutputs)
+}
+
+// ensureDecisionActivated emits a guard node's node.activated once (write-once via the
 // idem token; a fold-state check avoids a redundant append attempt).
-func (d *driver) ensureGuardActivated(u planUnit) error {
+func (d *driver) ensureDecisionActivated(u planUnit) error {
 	if n := d.st().Nodes[u.activation]; n != nil {
 		return nil
 	}

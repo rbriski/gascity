@@ -1271,6 +1271,46 @@ func collectAssignedWorkBeadsWithStores(
 			partial = true
 		}
 	}
+
+	// Graph-resident orphan-release capture. Under graph-class relocation
+	// (graph_store=sqlite/postgres) a molecule's step beads live in a dedicated
+	// graph store, physically separate from the work/rig stores the two
+	// assigned-work passes above scan (both read source.store, which is
+	// work-only). A step bead stranded in_progress or open-routed by a dead
+	// session is therefore never captured, so releaseOrphanedPoolAssignments
+	// never reopens it and the dead session's drain stays canceled — the
+	// assigned-work-scan analog of the Seam C collectOpenUnassignedRoutedWork
+	// graph leg. Scan the shared graph store EXACTLY ONCE (it is attached to
+	// every work leg, so a per-leg scan would N-duplicate) and record graphStore
+	// as the owner store so the release loop's owner-store lookup resolves.
+	// These beads are captured for release only — they carry no readiness verdict,
+	// so a nil readyIDs keeps them out of readyAssignedIDs (a stranded gcg- must
+	// not hold a session awake by status alone). At the bd default graphStore ==
+	// cityStore and relocatedGraph is false, so this is a byte-identical no-op.
+	if relocatedGraph {
+		seen := make(map[string]struct{}, len(result))
+		for _, b := range result {
+			seen[b.ID] = struct{}{}
+		}
+		if inProgress, err := listBothTiersForControllerDemand(graphStore, beads.ListQuery{Status: "in_progress"}); err == nil {
+			appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, nil, inProgress, seen, graphStore, "graph")
+		} else {
+			log.Printf("collectAssignedWorkBeads: graph List(in_progress): %v", err)
+			partial = true
+			if beads.IsPartialResult(err) && len(inProgress) > 0 {
+				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, nil, inProgress, seen, graphStore, "graph")
+			}
+		}
+		if openRouted, err := listBothTiersForControllerDemand(graphStore, beads.ListQuery{Status: "open"}); err == nil {
+			appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, graphStore, "graph")
+		} else {
+			log.Printf("collectAssignedWorkBeads: graph List(open): %v", err)
+			partial = true
+			if beads.IsPartialResult(err) && len(openRouted) > 0 {
+				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, graphStore, "graph")
+			}
+		}
+	}
 	return result, resultStores, resultStoreRefs, readyAssignedIDs, partial
 }
 

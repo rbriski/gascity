@@ -50,6 +50,11 @@ func (s *graphDemandGraphStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error)
 	return append([]beads.Bead(nil), s.ready...), nil
 }
 
+// List models a graph store holding no in_progress/open orphan step beads, so the
+// dedicated graph orphan-release pass in collectAssignedWorkBeadsWithStores finds
+// nothing here and these tests stay focused on the READY path.
+func (s *graphDemandGraphStore) List(beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
+
 func graphDemandContains(rows []beads.Bead, id string) bool {
 	for _, b := range rows {
 		if b.ID == id {
@@ -134,8 +139,7 @@ func TestCollectAssignedWorkReadyGraphOnlyExcludesRigWorkLegUnderSQLite(t *testi
 	}
 	rigStores := map[string]beads.Store{"rig1": rigStore}
 
-	result, _, _, readyAssignedIDs, partial :=
-		collectAssignedWorkBeadsWithStores(cfg, cityStore, graphStore, rigStores, nil, nil)
+	result, _, _, readyAssignedIDs, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, graphStore, rigStores, nil, nil)
 	if partial {
 		t.Fatalf("unexpected partial result")
 	}

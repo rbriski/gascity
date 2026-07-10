@@ -105,8 +105,26 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
+	if coordclass.Classify(b) == coordclass.ClassGraph && s.graphStoreUnavailable() {
+		return beads.Bead{}, errGraphStoreUnavailable
+	}
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.createTarget(b), b, storage)
+}
+
+// errGraphStoreUnavailable is returned instead of silently orphaning a ClassGraph bead
+// onto the work store. See graphStoreUnavailable.
+var errGraphStoreUnavailable = fmt.Errorf("graph class is relocated but its store is unavailable in this process; refusing to orphan a ClassGraph bead/plan onto the work store (check graph-store credentials)")
+
+// graphStoreUnavailable reports whether the graph class is relocated per config but this
+// process wired NO distinct graph store — resolveGraphStore silently fell back to the work
+// store because it could not open the relocated graph backend (typically missing graph-store
+// credentials, e.g. a session/sling process with the Postgres password scrubbed). Creating a
+// ClassGraph bead in that state orphans it onto the work store as an `ae-`/work-prefix id,
+// where the graph-only readiness scan (huma_handlers_beads.go) never sees it — the exact
+// silent misroute that froze a two-store graph.v2 sling at preflight. Fail loud instead.
+func (s *beadPolicyStore) graphStoreUnavailable() bool {
+	return graphRelocated(s.cfg) && (s.graphStore == nil || s.graphStore == s.Store)
 }
 
 // createTarget routes a graph-class bead to the dedicated graph store — the
@@ -487,6 +505,9 @@ func (s *beadPolicyGraphStore) applierForPlan(plan *beads.GraphApplyPlan) beads.
 }
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	if plan != nil && coordclass.ClassifyGraphPlan(plan) == coordclass.ClassGraph && s.graphStoreUnavailable() {
+		return nil, errGraphStoreUnavailable
+	}
 	applier := s.applierForPlan(plan)
 	if plan == nil {
 		return applier.ApplyGraphPlan(ctx, plan)

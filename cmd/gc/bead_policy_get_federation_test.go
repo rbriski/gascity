@@ -128,3 +128,24 @@ func TestBeadPolicyScansFederateGraph(t *testing.T) {
 		t.Fatalf("ListByLabel must union the graph store; graph root %s missing from %v", gb.ID, byLabel)
 	}
 }
+
+// TestBeadPolicyRefusesToOrphanGraphClassWhenUnwired is the loud guard for the two-store
+// graph.v2 stall: when config relocates the graph class but this process could not open
+// the graph store (resolveGraphStore silently fell back to the work store, so
+// graphStore == Store), creating/applying a ClassGraph bead/plan MUST fail loudly instead
+// of orphaning it onto the work store where the graph-only readiness scan never sees it.
+func TestBeadPolicyRefusesToOrphanGraphClassWhenUnwired(t *testing.T) {
+	work := beads.NewMemStore()
+	cfg := graphCfgFor(true) // graph class relocated in config
+	// Simulate the resolveGraphStore fallback: graphStore == Store (graph store failed to open).
+	ps := &beadPolicyStore{Store: work, cfg: cfg, graphStore: work}
+
+	// A ClassGraph bead (wisp) must be refused, not silently orphaned.
+	if _, err := ps.Create(beads.Bead{Type: "task", Labels: []string{"gc:wisp"}}); err == nil {
+		t.Fatal("Create of a ClassGraph bead must fail loudly when graph is relocated but unwired")
+	}
+	// A work-class bead is unaffected.
+	if _, err := ps.Create(beads.Bead{Type: "task", Title: "work"}); err != nil {
+		t.Fatalf("work-class Create must not be blocked by the guard: %v", err)
+	}
+}

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/testenv"
 )
 
 // TestResolveConsultsExactlyRegisteredEnvVars pins the env var NAMES Resolve
@@ -63,20 +62,9 @@ func TestConfigPathAddressesTheFieldResolveReads(t *testing.T) {
 	}
 }
 
-// TestEnvOverridesAreLeakVectors: every registered env override must be scrubbed
-// by testenv so a live shell export cannot leak into a test and flip a gate.
-func TestEnvOverridesAreLeakVectors(t *testing.T) {
-	t.Parallel()
-	leak := map[string]bool{}
-	for _, v := range testenv.LeakVectorVars {
-		leak[v] = true
-	}
-	for _, s := range Specs() {
-		if s.EnvOverride != "" && !leak[s.EnvOverride] {
-			t.Errorf("%s: EnvOverride %q is not in testenv.LeakVectorVars; a stray shell value could flip it during tests", s.Key, s.EnvOverride)
-		}
-	}
-}
+// TestEnvOverridesAreLeakVectors moved to internal/testenv (it owns
+// LeakVectorVars, and the stray-import lint forbids non-testenv test files from
+// importing internal/testenv). See internal/testenv/rollout_leak_vector_test.go.
 
 // TestBeadsVersionAnchorPending documents the CAS gate's "pending" anchor state:
 // VersionAnchor names a deps.env key that is currently ABSENT (untagged

@@ -95,6 +95,67 @@ func TestLumenRunDoltE2E_ProducedBundle(t *testing.T) {
 	}
 }
 
+func scatterRetryDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "scatter-retry-do.lumen.json")
+}
+
+// TestLumenRetryInScatterDoltE2E (RN acceptance) proves retry loops nested under a
+// scatter drive on the real pool: `scatter { r1: retry{do laneA}, r2: retry{do
+// laneB} }` slings, BOTH lane do's dispatch as ordinary work beads (a retry loop is
+// a legal scatter member now), two pooled workers claim+close them pass, each retry
+// settles pass, and the scatter aggregate seals pass — the mol-review-quorum lane
+// shape on a live city.
+func TestLumenRetryInScatterDoltE2E(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 2, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, scatterRetryDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling (scatter-retry-do) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF scatter-retry-do streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 5*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	// Both lane do bodies (attempt 0) settled pass on the pool.
+	if got := outcomeSettledFor(t, events, "laneA:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled laneA:0 = %q, want pass", got)
+	}
+	if got := outcomeSettledFor(t, events, "laneB:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled laneB:0 = %q, want pass", got)
+	}
+	// The scatter aggregated both retry-loop members → pass.
+	if got := outcomeSettledFor(t, events, "lanes:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled lanes:0 = %q, want pass (scatter over two retry-do lanes)", got)
+	}
+	// Both lane do's were dispatched as ordinary work beads (>= 2 admits).
+	if n := len(lumenEventsOfType(events, engine.EventOwnedAdmitted)); n < 2 {
+		t.Fatalf("owned.admitted count = %d, want >= 2 (both retry-do lanes dispatched)", n)
+	}
+	t.Logf("PROOF both retry-do lanes sealed pass under the scatter; run.closed pass")
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}
+
 // TestLumenRunDoltE2E_TransparentSubDo (the run crux) proves a top-level `run` of a
 // one-do sub-formula seals transparently through the real-bead path: `gc lumen sling`
 // of the bundle → the controller dispatches the REAL work bead for the NAMESPACED sub

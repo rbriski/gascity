@@ -418,13 +418,14 @@ func (l *lowerer) lowerGather(n ir.Node, parent string) error {
 // resolveDeps registers only the loop unit. A raw `after: [bodyID]` in hand-crafted
 // IR is a dangling ref, refused loudly (the compiler never emits it).
 func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
-	if l.inAggregate || l.prefix != "" {
-		// A loop nested under a scatter/gather aggregate is a non-leaf member; a loop
-		// inside a run sub-formula (prefix != "") uses the root loop scope this slice.
-		// Both are refused (scatter/combine-nested loops and loops-in-sub-formulas are a
-		// follow-up, §7.7). A top-level loop (possibly inside transparent blocks) carries
-		// inAggregate=false and prefix "".
-		return fmt.Errorf("%w: %q %q nested under an aggregate; loops are top-level only in this slice", ErrUnsupportedNode, n.Kind, n.ID)
+	// A loop may be a SCATTER MEMBER at top level (RN slice — the mol-review-quorum lane
+	// shape). Still refused: a loop INSIDE a run sub-formula (prefix != "") — its decision
+	// scope (loopScope) is namespace-unaware, so cond/attempts refs would resolve wrong;
+	// that needs a namespace-aware loopScope (a follow-on). Also refused: a loop as a
+	// gather-COMBINE member (lowerCombine's leaf-only check), and a loop whose BODY is not
+	// a leaf exec/do (the body switch below refuses run/block/nested-loop bodies).
+	if l.prefix != "" {
+		return fmt.Errorf("%w: %q %q inside a run sub-formula; loops are top-level (or a top-level scatter member) only this slice", ErrUnsupportedNode, n.Kind, n.ID)
 	}
 	spec := &loopSpec{irKind: n.Kind}
 

@@ -10,15 +10,16 @@ import (
 )
 
 // TestEnqueueRefusesUnlowerableIR pins the §6 L6 enqueue-wedge fix: an IR that will
-// not lower (here a retry loop nested under a scatter — loops are top-level only) is
-// refused LOUD at EnqueueRun, BEFORE run.started is appended, so no wedged, unsealable
-// run is ever discoverable. Head stays 0.
+// not lower (here a `run` nested under a scatter — run is top-level only this slice)
+// is refused LOUD at EnqueueRun, BEFORE run.started is appended, so no wedged,
+// unsealable run is ever discoverable. Head stays 0. (retry-in-scatter now lowers
+// after the RN slice, so it is no longer a valid un-lowerable example.)
 func TestEnqueueRefusesUnlowerableIR(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	// A retry nested under a scatter is un-lowerable (loops are top-level only).
+	// A run nested under a scatter is un-lowerable (run is top-level only this slice).
 	doc := decodeIR(t, blockDoc("bad",
-		scatterNode("s", nil, "continue", retryNode(`{"kind":"literal","value":2}`, doNode("draft", "do it", nil))),
+		scatterNode("s", nil, "continue", runNodeJSON("r", nil, "sometarget", "", "")),
 	))
 
 	streamID, err := engine.EnqueueRun(ctx, store, doc, nil, "packs/x@v1", "workers")

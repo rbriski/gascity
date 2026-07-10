@@ -1,0 +1,58 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "scatter-retry-do",
+  "input": {
+    "name": "scatter-retry-do.input",
+    "fields": []
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "lanes",
+      "name": "lanes",
+      "after": [],
+      "form": "members",
+      "on_fail": "continue",
+      "members": [
+        {
+          "kind": "retry",
+          "id": "r1",
+          "name": "r1",
+          "after": [],
+          "attempts": { "kind": "literal", "value": 2 },
+          "body": {
+            "kind": "do",
+            "id": "laneA",
+            "name": "laneA",
+            "after": [],
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Lane A: say hello, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        },
+        {
+          "kind": "retry",
+          "id": "r2",
+          "name": "r2",
+          "after": [],
+          "attempts": { "kind": "literal", "value": 2 },
+          "body": {
+            "kind": "do",
+            "id": "laneB",
+            "name": "laneB",
+            "after": [],
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Lane B: say hello, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -34,6 +34,31 @@ func TestRunDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestScatterRetryDoFixtureLowers guards the RN dolt-e2e fixture: a scatter of two
+// retry-do lanes lowers (two loop members under the scatter aggregate).
+func TestScatterRetryDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "scatter-retry-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("lower scatter-retry-do: %v", err)
+	}
+	agg := unitByNode(units, "lanes")
+	if agg == nil || agg.kind != unitScatterAgg {
+		t.Fatalf("no scatter aggregate; got %v", nodeIDs(units))
+	}
+	if !containsStr(agg.members, "r1:0") || !containsStr(agg.members, "r2:0") {
+		t.Errorf("scatter members = %v, want the two retry loops", agg.members)
+	}
+}
+
 // decodeBundle builds an *ir.IR from a JSON literal, failing the test on a
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {
@@ -84,6 +109,79 @@ func greeterFormula(name string, nodes string) string {
 	return `"` + name + `":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"` + name + `","input":{"name":"` + name + `.input","fields":[{"name":"name","type":{"kind":"atomic","name":"string"},"required":true,"body":false}]},` +
 		`"nodes":[` + nodes + `]}`
+}
+
+// plainDoc wraps a node list into a full IR doc (no formulas bundle).
+func plainDoc(nodes string) string {
+	return `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
+		`"name":"main","input":{"name":"main.input","fields":[]},"nodes":[` + nodes + `]}`
+}
+
+// retryMember renders a retry loop (distinct loop + body ids) with a literal attempts count.
+func retryMember(loopID, bodyID, script, attempts string) string {
+	return `{"kind":"retry","id":"` + loopID + `","name":"` + loopID + `","after":[],` +
+		`"attempts":{"kind":"literal","value":` + attempts + `},` +
+		`"body":{"kind":"exec","id":"` + bodyID + `","name":"` + bodyID + `","after":[],` +
+		`"interpreter":{"program":{"kind":"shell"}},"body":{"raw":` + jsonStr(script) + `},` +
+		`"exitMap":{"pass":[0],"retryable":[]}}}`
+}
+
+// scatterOf renders a members-form scatter over the given member node JSONs.
+func scatterOf(id string, after []string, members ...string) string {
+	a, _ := json.Marshal(after)
+	return `{"kind":"scatter","id":"` + id + `","name":"` + id + `","after":` + string(a) +
+		`,"form":"members","on_fail":"continue","members":[` + strings.Join(members, ",") + `]}`
+}
+
+// TestLowerRetryInScatterLowers (RN) pins that a retry loop is a legal scatter
+// member: the loop lowers (no ErrUnsupportedNode), parented to the scatter, and is
+// collected as a scatter member. Before the slice this refused (loops top-level only).
+func TestLowerRetryInScatterLowers(t *testing.T) {
+	doc := decodeBundle(t, plainDoc(
+		scatterOf("lanes", nil,
+			retryMember("r1", "b1", "echo a", "2"),
+			retryMember("r2", "b2", "echo b", "2")),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused retry-in-scatter: %v", err)
+	}
+	r1 := unitByNode(units, "r1")
+	r2 := unitByNode(units, "r2")
+	if r1 == nil || r1.kind != unitLoop {
+		t.Fatalf("r1 = %+v, want a unitLoop", r1)
+	}
+	if r1.parent != "lanes:0" {
+		t.Errorf("r1 parent = %q, want lanes:0 (a scatter member)", r1.parent)
+	}
+	agg := unitByNode(units, "lanes")
+	if agg == nil || agg.kind != unitScatterAgg {
+		t.Fatalf("lanes = %+v, want a scatter aggregate", agg)
+	}
+	if !containsStr(agg.members, "r1:0") || !containsStr(agg.members, "r2:0") {
+		t.Errorf("scatter members = %v, want the two retry loops r1:0, r2:0", agg.members)
+	}
+	if r2 == nil {
+		t.Fatal("no r2 loop unit")
+	}
+}
+
+// TestLowerLoopInSubFormulaRefused pins that a retry/repeat loop INSIDE a run
+// sub-formula is refused this slice: the loop's decision scope (loopScope) is
+// namespace-unaware, so a nested loop's cond/attempts refs would resolve wrong.
+// retry-in-scatter (top-level, ns="") is the supported shape; loop-in-sub-formula
+// is a follow-on that also needs a namespace-aware loopScope.
+func TestLowerLoopInSubFormulaRefused(t *testing.T) {
+	sub := `"greeter":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
+		`"name":"greeter","input":{"name":"greeter.input","fields":[]},"nodes":[` +
+		retryMember("r1", "b1", "echo hi", "2") + `]}`
+	runNoEnv := `{"kind":"run","id":"greeting","name":"greeting","after":[],` +
+		`"target":{"kind":"by-name","name":"greeter"},"environment":{"fields":[]},"outcome":"transparent"}`
+	doc := decodeBundle(t, runMainDoc(runNoEnv, sub))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "top-level") {
+		t.Fatalf("want a loop-in-sub-formula refusal, got %v", err)
+	}
 }
 
 // TestLowerRunInlinesNamespacedSubGraph pins the core lowering shape: a

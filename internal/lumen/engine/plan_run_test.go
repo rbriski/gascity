@@ -59,6 +59,27 @@ func TestScatterRetryDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestGuardDoFixtureLowers guards the guard dolt-e2e fixture.
+func TestGuardDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "guard-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("lower guard-do: %v", err)
+	}
+	g := unitByNode(units, "g")
+	if g == nil || g.kind != unitGuard || g.guard == nil || g.guard.thenNodeID != "gthen" {
+		t.Fatalf("guard unit = %+v (spec %+v), want a unitGuard over gthen", g, deref(g).guard)
+	}
+}
+
 // decodeBundle builds an *ir.IR from a JSON literal, failing the test on a
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {
@@ -109,6 +130,83 @@ func greeterFormula(name string, nodes string) string {
 	return `"` + name + `":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"` + name + `","input":{"name":"` + name + `.input","fields":[{"name":"name","type":{"kind":"atomic","name":"string"},"required":true,"body":false}]},` +
 		`"nodes":[` + nodes + `]}`
+}
+
+// guardNode renders a guard node: cond is a closed expr, then is a single leaf.
+func guardNode(id string, after []string, cond, then string) string {
+	a, _ := json.Marshal(after)
+	return `{"kind":"guard","id":"` + id + `","name":"` + id + `","after":` + string(a) +
+		`,"cond":` + cond + `,"then":` + then + `}`
+}
+
+// condRefEq builds a closed cond `<ref> == <literal>` over an input/node ref.
+func condRefEq(ref, lit string) string {
+	return `{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"` + ref + `"},` +
+		`{"kind":"literal","value":` + jsonStr(lit) + `}]}`
+}
+
+// TestLowerGuardLowers (guard) pins that a guard lowers to a unitGuard carrying its
+// cond + then, with NO separate then unit (the then is synthesized at run time).
+func TestLowerGuardLowers(t *testing.T) {
+	doc := decodeBundle(t, plainDoc(
+		execNode("prep", nil, "echo p")+","+
+			guardNode("g", []string{"prep"}, condRefEq("mode", "go"), execNode("gthen", nil, "echo ran"))+","+
+			execNode("done", []string{"g"}, "echo d"),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits: %v", err)
+	}
+	g := unitByNode(units, "g")
+	if g == nil || g.kind != unitGuard {
+		t.Fatalf("g = %+v, want a unitGuard", g)
+	}
+	if g.guard == nil || g.guard.thenNodeID != "gthen" {
+		t.Errorf("guard spec = %+v, want then node gthen", g.guard)
+	}
+	// The then is NOT a separate unit (synthesized at run time, like a loop body).
+	if unitByNode(units, "gthen") != nil {
+		t.Errorf("gthen should not be a separate unit; got %v", nodeIDs(units))
+	}
+	// done gates on the guard (bare id g).
+	done := unitByNode(units, "done")
+	if done == nil || !containsStr(done.afterDeps, "g:0") {
+		t.Errorf("done afterDeps = %v, want to include g:0", deref(done).afterDeps)
+	}
+}
+
+// TestLowerGuardCondRefGatesGuard pins the red-team DET fix: a guard whose cond
+// reads a NODE output must gate on that node, so the cond is evaluated over stable,
+// complete state (never flipping across Advance passes as the fold grows). Here the
+// cond `b == "x"` reads node b, so g must gate on b even without an authored `after`.
+func TestLowerGuardCondRefGatesGuard(t *testing.T) {
+	doc := decodeBundle(t, plainDoc(
+		execNode("b", nil, "echo bv")+","+
+			guardNode("g", nil, condRefEq("b", "x"), execNode("gthen", nil, "echo then")),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits: %v", err)
+	}
+	g := unitByNode(units, "g")
+	if g == nil {
+		t.Fatal("no guard unit")
+	}
+	if !containsStr(g.afterDeps, "b:0") {
+		t.Errorf("guard afterDeps = %v, want to include b:0 (cond-ref gate — stable decision)", g.afterDeps)
+	}
+}
+
+// TestLowerGuardSelfRefCondRefused pins the refusal of a self-referential guard
+// cond (one that reads its own then output — nonsensical + a resume-flip hazard).
+func TestLowerGuardSelfRefCondRefused(t *testing.T) {
+	doc := decodeBundle(t, plainDoc(
+		guardNode("g", nil, condRefEq("gthen", "x"), execNode("gthen", nil, "echo t")),
+	))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "self-referential") {
+		t.Fatalf("want a self-referential-cond refusal, got %v", err)
+	}
 }
 
 // plainDoc wraps a node list into a full IR doc (no formulas bundle).

@@ -1,0 +1,45 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "guard-do",
+  "input": {
+    "name": "guard-do.input",
+    "fields": [
+      {
+        "name": "mode",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "guard",
+      "id": "g",
+      "name": "g",
+      "after": [],
+      "cond": {
+        "kind": "operator",
+        "op": "==",
+        "operands": [
+          { "kind": "ref", "name": "mode" },
+          { "kind": "literal", "value": "go" }
+        ]
+      },
+      "then": {
+        "kind": "do",
+        "id": "gthen",
+        "name": "gthen",
+        "after": [],
+        "source": { "kind": "prompt" },
+        "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+        "body": { "raw": "Do the gated work, then settle this step." },
+        "exitMap": { "pass": [0], "retryable": [] }
+      }
+    }
+  ]
+}

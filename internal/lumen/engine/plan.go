@@ -52,6 +52,7 @@ const (
 	unitGather                     // gather: head-of-line drain + authored combine
 	unitLoop                       // retry / repeat: the attempt-loop over a leaf body
 	unitRun                        // run: transparent sub-formula call over an inlined sub-graph
+	unitGuard                      // guard: a conditional single-step arm (cond ? then : pass)
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -89,6 +90,24 @@ type planUnit struct {
 	loop *loopSpec // unitLoop: the attempt-loop spec (retry / repeat)
 
 	run *runSpec // unitRun: the transparent sub-formula-call spec
+
+	guard *guardSpec // unitGuard: the conditional single-step spec
+}
+
+// guardSpec carries a guard node's decoded shape: the closed condition and the
+// single leaf `then` step to run when the condition is truthy. It is the decision
+// arm — cond true runs `then` and the guard settles with `then`'s outcome
+// (transparent); cond false settles the guard `pass` WITHOUT running `then` (a
+// conditional step that legitimately did not run, so it does NOT skip-cascade its
+// dependents). The condition is a closed expression over the run's settled node
+// outcomes/outputs + input — the same subset a repeat `until` evaluates — so the
+// decision is a pure function of the fold and re-evaluates identically on resume.
+type guardSpec struct {
+	cond       json.RawMessage
+	condRefs   []string // node/input names the cond reads (for the DET gate — see resolveDeps)
+	thenNodeID string
+	thenIRKind ir.NodeKind
+	then       step
 }
 
 // runSpec carries a run node's decoded shape: the target formula name, the
@@ -287,6 +306,9 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 
 	case ir.NodeRun:
 		return l.lowerRun(n, parent)
+
+	case ir.NodeGuard:
+		return l.lowerGuard(n, parent)
 
 	default:
 		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
@@ -614,6 +636,78 @@ func (l *lowerer) lowerRun(n ir.Node, parent string) error {
 	return nil
 }
 
+// lowerGuard lowers a guard node — a conditional single-step arm — to a unitGuard.
+// The closed condition is validated at LOAD (a bad expr refuses here, never at run
+// time). The `then` is a SINGLE leaf (exec/do); a non-leaf then (block/scatter/loop)
+// is refused this slice. The then is NOT a separate unit — it is synthesized and run
+// (or skipped) by the driver, so a false condition runs no side effect. A guard is
+// top-level or a scatter member (like a leaf); a guard inside a run sub-formula
+// renders/decides against the root scope this slice — refuse it when prefix != "".
+func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
+	if l.prefix != "" {
+		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
+	}
+	cond, ok := n.Raw["cond"]
+	if !ok {
+		return fmt.Errorf("%w: guard %q missing cond", ErrUnsupportedNode, n.ID)
+	}
+	if err := validateClosedExpr(cond); err != nil {
+		return err
+	}
+	thenRaw, ok := n.Raw["then"]
+	if !ok {
+		return fmt.Errorf("%w: guard %q missing then", ErrUnsupportedNode, n.ID)
+	}
+	var then ir.Node
+	if err := json.Unmarshal(thenRaw, &then); err != nil {
+		return fmt.Errorf("lumen: guard %q then: %w", n.ID, err)
+	}
+	if then.ID == "" {
+		return fmt.Errorf("%w: guard %q then missing id", ErrUnsupportedNode, n.ID)
+	}
+	condRefs := collectRefs(cond)
+	// A cond that references the guard's own id or its `then` is self-referential — the
+	// guard/then have not settled when the decision is made, so the ref folds to null on
+	// genesis but could flip on a resume that reloaded the then. Refuse it at load.
+	for _, r := range condRefs {
+		if r == n.ID || r == then.ID {
+			return fmt.Errorf("%w: guard %q cond references its own %s (self-referential decision)", ErrUnsupportedNode, n.ID, r)
+		}
+	}
+	spec := &guardSpec{cond: cond, condRefs: condRefs, thenNodeID: l.qid(then.ID), thenIRKind: then.Kind}
+	switch then.Kind {
+	case ir.NodeExec:
+		s, err := decodeExec(then)
+		if err != nil {
+			return err
+		}
+		spec.then = s
+	case ir.NodeDo:
+		if !l.allowDo {
+			return fmt.Errorf("%w: guard %q then %q (node %q)", ErrUnsupportedNode, n.ID, then.Kind, then.ID)
+		}
+		s, err := decodeDo(then)
+		if err != nil {
+			return err
+		}
+		spec.then = s
+	default:
+		return fmt.Errorf("%w: guard %q then kind %q (only exec/do leaf then)", ErrUnsupportedNode, n.ID, then.Kind)
+	}
+
+	l.units = append(l.units, planUnit{
+		kind:       unitGuard,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeGuard,
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		guard:      spec,
+	})
+	return nil
+}
+
 // runTargetName decodes a run node's target ref, refusing anything but the
 // by-name form this slice supports.
 func runTargetName(n ir.Node) (string, error) {
@@ -851,22 +945,35 @@ func (l *lowerer) resolveDeps() error {
 	// namespace (u.ns). The gate is applied to the run aggregate AND every sub-unit
 	// so the whole sub-graph defers until the referenced parent node settles.
 	// byNodeID (built above) already maps every unit's node id to its activation.
+	// A run gates its whole sub-graph on the parent nodes its `environment` reads; a
+	// guard gates itself on the parent nodes its `cond` reads. Both keep the deciding
+	// expression's inputs frozen before the unit becomes ready, so the decision is a
+	// pure, stable function of the fold (never flipping across Advance passes).
 	for i := range l.units {
 		u := &l.units[i]
-		if u.kind != unitRun || u.run == nil {
+		var exprRefs []string
+		switch u.kind {
+		case unitRun:
+			if u.run != nil {
+				exprRefs = u.run.envRefs
+			}
+		case unitGuard:
+			if u.guard != nil {
+				exprRefs = u.guard.condRefs
+			}
+		default:
 			continue
 		}
 		var gates []string
-		for _, refName := range u.run.envRefs {
+		for _, refName := range exprRefs {
 			act, ok := byNodeID[u.ns+refName]
 			if !ok {
-				continue
+				continue // a ref to an input (not a node) is not a gate
 			}
-			// A silent (lit/interp) env-ref node never settles, so gating on it
-			// directly would defer the sub-graph forever on the Advance path
-			// (red-team HIGH). Substitute its transitive non-silent closure — the real
-			// nodes the silent value derives from — exactly like the H2 after-dep rule.
-			// A pure constant (empty closure) correctly contributes no gate.
+			// A silent (lit/interp) ref node never settles, so gating on it directly
+			// would defer forever on the Advance path. Substitute its transitive
+			// non-silent closure — the real nodes the silent value derives from — exactly
+			// like the H2 after-dep rule. A pure constant (empty closure) adds no gate.
 			for _, g := range nonSilentClosure(act, silent, rawDeps) {
 				if g != u.activation {
 					gates = append(gates, g)
@@ -876,10 +983,12 @@ func (l *lowerer) resolveDeps() error {
 		if len(gates) == 0 {
 			continue
 		}
+		// Apply to the unit itself; a run ALSO applies to its whole inlined sub-graph
+		// (so no sub-unit renders before an env-ref parent settles).
 		subPrefix := u.nodeID + "/"
 		for j := range l.units {
 			s := &l.units[j]
-			if s.activation == u.activation || strings.HasPrefix(s.nodeID, subPrefix) {
+			if s.activation == u.activation || (u.kind == unitRun && strings.HasPrefix(s.nodeID, subPrefix)) {
 				s.afterDeps = appendMissing(s.afterDeps, gates)
 			}
 		}

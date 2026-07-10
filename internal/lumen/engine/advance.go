@@ -312,6 +312,12 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceLoop(u, scope, nodeOutputs, opts)
 	}
 
+	// A guard decides in-pass; a false cond or an exec then settles inline, a pool-do
+	// then materializes and parks. A blocked guard skip-cascades through runUnit below.
+	if u.kind == unitGuard && !d.blocked(u) {
+		return d.advanceGuard(u, scope, nodeOutputs, opts)
+	}
+
 	// Materialize a READY pool-mode do as claimable work. A pool node whose
 	// blocking dep failed is NOT offered to the pool — it skip-cascades through
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
@@ -586,6 +592,73 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 		return nil // loop settled inside loopDecide
 	}
 	return d.materializeLoopAttempt(u, settledAttempt+1, maxAttempts, scope, opts)
+}
+
+// advanceGuard drives a guard's decision arm in the parking model: it activates the
+// guard once, evaluates the closed condition over the fold, and either settles the
+// guard PASS (false cond — a no-op that does not skip-cascade) or runs the `then`. An
+// exec then runs inline in this pass; a pool-do then materializes as ordinary work and
+// PARKS, is observed on a later pass when its bead closes, and then the guard settles
+// transparently from it. The decision is a pure function of the fold (re-evaluated
+// identically across passes), so re-Advance converges.
+func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	spec := u.guard
+	if err := d.ensureGuardActivated(u); err != nil {
+		return err
+	}
+	tu := d.guardThenUnit(u)
+	// Write-once decision (red-team): the then's node.activated IS the durable record
+	// that the TRUE branch was taken. Only evaluate the cond when the then has NOT been
+	// activated yet — otherwise a re-Advance over a grown fold could re-decide FALSE
+	// while the then's bead is already dispatched. The cond-ref gate (resolveDeps)
+	// makes the FIRST evaluation stable; this makes it permanent across passes.
+	if d.st().Nodes[tu.activation] == nil {
+		truthy, err := evalCondTruthy(spec.cond, d.condScope(nodeOutputs))
+		if err != nil {
+			return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
+		}
+		if !truthy {
+			return d.settleGuardCondFalse(u, scope, nodeOutputs)
+		}
+	}
+	if opts.PoolRouter != nil && spec.thenIRKind == ir.NodeDo {
+		tn := d.st().Nodes[tu.activation]
+		switch {
+		case tn == nil || (!tn.Settled && tn.BeadID == ""):
+			// Not yet materialized (or activated but not dispatched): dispatch it, park.
+			return d.materializePoolWork(tu, scope, opts)
+		case !tn.Settled:
+			// In flight: observe its bead; if still open, park.
+			if opts.ObserveWork == nil {
+				return nil
+			}
+			if err := d.observePoolWork(tu.activation, tu.nodeID, tn.BeadID, scope, nodeOutputs, opts); err != nil {
+				return err
+			}
+			if n := d.st().Nodes[tu.activation]; n == nil || !n.Settled {
+				return nil
+			}
+		}
+		// tn settled: fall through to settle the guard.
+	} else if tn := d.st().Nodes[tu.activation]; tn == nil || !tn.Settled {
+		// An exec then (or a do then with a Host) runs inline in this pass.
+		if err := d.runUnit(tu, scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+	return d.settleGuardFromThen(u, tu, scope, nodeOutputs)
+}
+
+// ensureGuardActivated emits a guard node's node.activated once (write-once via the
+// idem token; a fold-state check avoids a redundant append attempt).
+func (d *driver) ensureGuardActivated(u planUnit) error {
+	if n := d.st().Nodes[u.activation]; n != nil {
+		return nil
+	}
+	if err := d.crashAt(crashBeforeActivate, u.activation); err != nil {
+		return err
+	}
+	return d.appendActivated(u)
 }
 
 // ensureLoopActivated emits a loop node's node.activated once (write-once via the

@@ -100,6 +100,61 @@ func scatterRetryDoIRPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "examples", "lumen", "scatter-retry-do.lumen.json")
 }
 
+func guardDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "guard-do.lumen.json")
+}
+
+// TestLumenGuardDoltE2E_CondTrueDispatchesThen (guard acceptance) proves a guard's
+// decision arm on the pool: with mode=go the cond is true, so the guard dispatches
+// its `then` do as ordinary work; a pooled worker claims+closes it; the guard settles
+// transparently from it and the run seals pass. (mode!=go would settle the guard pass
+// with no dispatch — the no-op branch, covered by the Advance unit test.)
+func TestLumenGuardDoltE2E_CondTrueDispatchesThen(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 1, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+	const wantPrompt = "Do the gated work, then settle this step."
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, guardDoIRPath(t), "--input", `{"mode":"go"}`)
+	if err != nil {
+		t.Fatalf("gc lumen sling (guard-do) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF guard-do streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+	admitted := waitForOwnedAdmitted(t, gs, streamID, 60*time.Second)
+	realBeadID := admitted.BeadID
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 4*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	if got := outcomeSettledFor(t, events, "gthen:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled gthen:0 = %q, want pass (the gated do)", got)
+	}
+	if got := outcomeSettledFor(t, events, "g:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled g:0 = %q, want pass (guard transparent from then)", got)
+	}
+	assertLumenPromptReadback(t, cityDir, realBeadID, wantPrompt)
+	t.Logf("PROOF guard cond-true dispatched the then do -> sealed pass; prompt readback = %q", wantPrompt)
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}
+
 // TestLumenRetryInScatterDoltE2E (RN acceptance) proves retry loops nested under a
 // scatter drive on the real pool: `scatter { r1: retry{do laneA}, r2: retry{do
 // laneB} }` slings, BOTH lane do's dispatch as ordinary work beads (a retry loop is

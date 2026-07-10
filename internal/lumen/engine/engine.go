@@ -410,6 +410,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runLoop(u, scope, nodeOutputs)
 	case unitRun:
 		runErr = d.runRun(u, scope, nodeOutputs)
+	case unitGuard:
+		runErr = d.runGuard(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -673,6 +675,82 @@ func (d *driver) runRun(u planUnit, scope, nodeOutputs map[string]string) error 
 	}
 	d.record(u.nodeID, output, scope, nodeOutputs)
 	return nil
+}
+
+// runGuard drives a guard's decision arm inline (Run, and Advance for an exec then):
+// it evaluates the closed condition over the folded scope; a FALSE condition settles
+// the guard `pass` with no side effect (a conditional step that legitimately did not
+// run — it does NOT skip-cascade dependents); a TRUE condition runs the synthesized
+// `then` leaf and settles the guard transparently from it, recording its output for a
+// downstream {{guardID}}. The condition is a pure function of the fold, so a resume
+// re-evaluates it identically.
+func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) error {
+	spec := u.guard
+	truthy, err := evalCondTruthy(spec.cond, d.condScope(nodeOutputs))
+	if err != nil {
+		return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
+	}
+	if !truthy {
+		return d.settleGuardCondFalse(u, scope, nodeOutputs)
+	}
+	tu := d.guardThenUnit(u)
+	if err := d.runUnit(tu, scope, nodeOutputs); err != nil {
+		return err
+	}
+	return d.settleGuardFromThen(u, tu, scope, nodeOutputs)
+}
+
+// settleGuardCondFalse settles a guard whose condition was false: PASS with an empty
+// result (no side effect, no skip-cascade). It records the empty output so a
+// downstream {{guardID}} resolves to "" and genesis matches a resume.
+func (d *driver) settleGuardCondFalse(u planUnit, scope, nodeOutputs map[string]string) error {
+	if err := d.appendSettled(u.activation, OutcomePass, "", "condition false"); err != nil {
+		return err
+	}
+	d.record(u.nodeID, "", scope, nodeOutputs)
+	return nil
+}
+
+// settleGuardFromThen settles a guard transparently from its (already-settled) then
+// leaf and records the then's output for a downstream {{guardID}}.
+func (d *driver) settleGuardFromThen(u, tu planUnit, scope, nodeOutputs map[string]string) error {
+	outcome, output := OutcomePass, ""
+	if tn := d.st().Nodes[tu.activation]; tn != nil && tn.Settled {
+		outcome, output = tn.Outcome, tn.Output
+	}
+	if err := d.appendSettled(u.activation, outcome, output, ""); err != nil {
+		return err
+	}
+	d.record(u.nodeID, output, scope, nodeOutputs)
+	return nil
+}
+
+// guardThenUnit synthesizes the leaf unit for a guard's `then` step (activation
+// thenID:0, parented under the guard). It inherits the guard's `after` gates (the
+// guard already cleared them before the then runs) and renders against the guard's
+// namespace.
+func (d *driver) guardThenUnit(u planUnit) planUnit {
+	spec := u.guard
+	return planUnit{
+		kind:       unitLeaf,
+		activation: activationFor(spec.thenNodeID),
+		nodeID:     spec.thenNodeID,
+		irKind:     spec.thenIRKind,
+		parent:     u.activation,
+		ns:         u.ns,
+		afterDeps:  u.afterDeps,
+		rawAfter:   u.rawAfter,
+		leaf:       spec.then,
+	}
+}
+
+// condScope builds the closed-expression scope a guard cond (and any non-loop
+// decision) evaluates against: the run input plus every settled node's
+// output/outcome. It reuses the loop machinery's scope assembly with an empty loop
+// spec (no iteration / body binding — a guard cond references only inputs and node
+// results).
+func (d *driver) condScope(nodeOutputs map[string]string) loopScope {
+	return d.loopScope(&loopSpec{}, 0, nil, nodeOutputs)
 }
 
 // transparentOutcome aggregates a run's direct-member outcomes into the transparent

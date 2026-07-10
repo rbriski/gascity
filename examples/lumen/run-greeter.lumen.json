@@ -1,0 +1,198 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [
+      {
+        "name": "who",
+        "type": {
+          "kind": "atomic",
+          "name": "string",
+          "origin": {
+            "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+            "line": 4,
+            "col": 5
+          }
+        },
+        "required": true,
+        "body": false,
+        "origin": {
+          "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+          "line": 4,
+          "col": 0
+        }
+      }
+    ],
+    "origin": {
+      "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+      "line": 4,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "run",
+      "id": "greeting",
+      "name": "greeting",
+      "after": [],
+      "origin": {
+        "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+        "line": 5,
+        "col": 0
+      },
+      "target": {
+        "kind": "by-name",
+        "name": "greeter"
+      },
+      "environment": {
+        "fields": [
+          {
+            "name": "name",
+            "value": {
+              "kind": "expr",
+              "expr": {
+                "kind": "ref",
+                "name": "who",
+                "origin": {
+                  "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+                  "line": 5,
+                  "col": 55
+                }
+              }
+            },
+            "origin": {
+              "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+              "line": 5,
+              "col": 0
+            }
+          }
+        ]
+      },
+      "outcome": "transparent"
+    }
+  ],
+  "origin": {
+    "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+    "line": 4,
+    "col": 0
+  },
+  "formulas": {
+    "greeter": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "greeter",
+      "input": {
+        "name": "greeter.input",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "kind": "atomic",
+              "name": "string",
+              "origin": {
+                "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+                "line": 8,
+                "col": 6
+              }
+            },
+            "required": true,
+            "body": false,
+            "origin": {
+              "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+              "line": 8,
+              "col": 0
+            }
+          }
+        ],
+        "origin": {
+          "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+          "line": 8,
+          "col": 0
+        }
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "hello",
+          "name": "hello",
+          "after": [],
+          "origin": {
+            "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+            "line": 9,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+              "line": 9,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Say hello to {{ name }}, then settle this step.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Say hello to "
+                },
+                {
+                  "kind": "interp",
+                  "expr": {
+                    "kind": "ref",
+                    "name": "name",
+                    "origin": {
+                      "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+                      "line": 9,
+                      "col": 16
+                    }
+                  },
+                  "origin": {
+                    "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+                    "line": 9,
+                    "col": 16
+                  }
+                },
+                {
+                  "kind": "text",
+                  "value": ", then settle this step."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+              "line": 9,
+              "col": 0
+            }
+          }
+        }
+      ],
+      "origin": {
+        "uri": "scripts/fixtures/lumen-bundle/run-greeter.formula",
+        "line": 8,
+        "col": 0
+      }
+    }
+  }
+}

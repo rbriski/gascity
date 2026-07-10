@@ -14,7 +14,7 @@ import (
 // decodes and lowers (allowDo) so a fixture typo fails fast here, not 300s into
 // the integration e2e. The sub-do inlines as greeting/hello.
 func TestRunDoFixtureLowers(t *testing.T) {
-	for _, name := range []string{"run-do.lumen.json", "run-do-chain.lumen.json"} {
+	for _, name := range []string{"run-do.lumen.json", "run-do-chain.lumen.json", "run-greeter.lumen.json"} {
 		path := filepath.Join("..", "..", "..", "examples", "lumen", name)
 		data, err := os.ReadFile(path)
 		if err != nil {

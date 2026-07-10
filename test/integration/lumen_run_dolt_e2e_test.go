@@ -31,6 +31,70 @@ func runChainDoIRPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "examples", "lumen", "run-do-chain.lumen.json")
 }
 
+// runGreeterIRPath is the bundle PRODUCED by gascity-tools/scripts/bundle-lumen.mjs
+// from scripts/fixtures/lumen-bundle/run-greeter.formula (R2). It proves the
+// producer's output — not a hand-authored bundle — runs end-to-end.
+func runGreeterIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "run-greeter.lumen.json")
+}
+
+// TestLumenRunDoltE2E_ProducedBundle (R2 acceptance) proves the bundle producer's
+// output runs on a real city: the PRODUCED run-greeter bundle (main `run greeter`,
+// greeter a single do rendering `{{ name }}` <- who) slings, dispatches the
+// namespaced sub-do greeting/hello, a pooled worker claims+closes it, and the
+// transparent run seals pass — with the sub-do prompt rendered through the run
+// boundary exactly as the hand-authored fixtures, but from a compiler-produced
+// bundle.
+func TestLumenRunDoltE2E_ProducedBundle(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 1, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+
+	const subActivation = "greeting/hello:0"
+	const runActivation = "greeting:0"
+	const wantPrompt = "Say hello to Gas City, then settle this step."
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, runGreeterIRPath(t), "--input", `{"who":"Gas City"}`)
+	if err != nil {
+		t.Fatalf("gc lumen sling (produced bundle) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF produced-bundle streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForPooledSession(t, cityDir, lumenDoRoute, 90*time.Second)
+	admitted := waitForOwnedAdmitted(t, gs, streamID, 60*time.Second)
+	realBeadID := admitted.BeadID
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 4*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	if got := outcomeSettledFor(t, events, subActivation); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled %s = %q, want pass", subActivation, got)
+	}
+	if got := outcomeSettledFor(t, events, runActivation); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled %s = %q, want pass (transparent run)", runActivation, got)
+	}
+	assertLumenPromptReadback(t, cityDir, realBeadID, wantPrompt)
+	t.Logf("PROOF produced bundle sealed pass; sub-do prompt readback = %q (producer -> engine -> seal)", wantPrompt)
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}
+
 // TestLumenRunDoltE2E_TransparentSubDo (the run crux) proves a top-level `run` of a
 // one-do sub-formula seals transparently through the real-bead path: `gc lumen sling`
 // of the bundle → the controller dispatches the REAL work bead for the NAMESPACED sub

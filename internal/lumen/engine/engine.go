@@ -205,7 +205,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		return RunResult{}, fmt.Errorf("lumen: nil IR document")
 	}
 
-	units, err := buildUnits(doc.Nodes, opts.Host != nil, opts.Host != nil)
+	units, err := buildUnits(doc, opts.Host != nil, opts.Host != nil)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -236,6 +236,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		host:          opts.Host,
 		input:         input,
 		snapshotEvery: opts.SnapshotEvery,
+		runEnvs:       runEnvIndex(units),
 	}
 
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -320,6 +321,13 @@ type driver struct {
 	// a settled combine member nested in a gather is never re-executed (B2).
 	crashInterrupted map[string]string               // activation -> idem token
 	settledEffects   map[string]effectSettledPayload // activation -> recorded settlement
+
+	// runEnvs indexes a run sub-formula's environment spec by its sub-namespace
+	// (`<runID>/`), so scopeFor can build the per-namespace render view (env
+	// bindings evaluated against the parent view + declared defaults). It is
+	// derived purely from the lowered units (runEnvIndex), so it is identical on a
+	// fresh run and a rebuild — keeping the sub-scope deterministic across resume.
+	runEnvs map[string]*runSpec
 }
 
 // st returns the driver's live fold state as the concrete lumenState so the
@@ -333,7 +341,11 @@ func (d *driver) st() *lumenState { return d.state.(*lumenState) }
 // settles its real outcome.
 func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error {
 	if u.silent {
-		val, err := evalSilent(u.leaf, scope)
+		view, err := d.scopeFor(u.ns, scope)
+		if err != nil {
+			return err
+		}
+		val, err := evalSilent(u.leaf, view)
 		if err != nil {
 			return err
 		}
@@ -396,6 +408,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runGather(u, scope, nodeOutputs)
 	case unitLoop:
 		runErr = d.runLoop(u, scope, nodeOutputs)
+	case unitRun:
+		runErr = d.runRun(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -443,9 +457,16 @@ func (d *driver) aggregateAllSkipped(u planUnit) bool {
 
 // runLeaf executes an exec / settle / do leaf and settles its outcome.
 func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error {
+	// A unit inside a run sub-formula renders against its namespace view (env
+	// bindings + sub outputs), not the flat root scope; a root unit's view IS the
+	// flat scope, so run-free behavior is byte-identical.
+	view, err := d.scopeFor(u.ns, scope)
+	if err != nil {
+		return err
+	}
 	switch u.leaf.kind {
 	case ir.NodeExec:
-		script := interpolate(u.leaf.script, scope)
+		script := interpolate(u.leaf.script, view)
 		// Crash boundary (b): after node.activated, before the shell runs.
 		if err := d.crashAt(crashBeforeAct, u.activation); err != nil {
 			return err
@@ -475,7 +496,7 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 	case ir.NodeSettle:
 		value := ""
 		if raw, ok := u.leaf.raw["value"]; ok {
-			v, err := evalValue(raw, scope)
+			v, err := evalValue(raw, view)
 			if err != nil {
 				return fmt.Errorf("lumen: settle %q value: %w", u.nodeID, err)
 			}
@@ -508,7 +529,11 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 	if d.host == nil {
 		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, u.leaf.kind, u.nodeID)
 	}
-	prompt, err := renderPrompt(u.leaf.raw, scope)
+	view, err := d.scopeFor(u.ns, scope)
+	if err != nil {
+		return err
+	}
+	prompt, err := renderPrompt(u.leaf.raw, view)
 	if err != nil {
 		return fmt.Errorf("lumen: do %q prompt: %w", u.nodeID, err)
 	}
@@ -619,6 +644,67 @@ func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 	}
 	nodeOutputs[u.nodeID] = ""
 	return nil
+}
+
+// runRun settles a run's transparent aggregate from its (already-settled) members
+// and records the sub-formula's result into the PARENT scope for downstream value
+// plumbing. It is reached only after every member settled (the run's memberDeps
+// gate the aggregate in topo order); a gated-off run was intercepted earlier by
+// blocked()/aggregateAllSkipped() and settled skipped without running any member.
+//
+// The outcome is "transparent" — exactly what the sub-formula would seal with as a
+// standalone run (transparentOutcome mirrors runOutcome: failed|canceled dominates,
+// then degraded, else pass; a skipped member is IGNORED, unlike a scatter's degraded
+// mapping). The output is the LAST source-order member that actually RAN (the
+// sub-formula's final executed statement — the "returns lastResult" convention),
+// recorded under the run's (parent-namespace) node id so a downstream `{{runRef}}`
+// in the parent resolves.
+func (d *driver) runRun(u planUnit, scope, nodeOutputs map[string]string) error {
+	st := d.st()
+	outcome := transparentOutcome(st, u.members)
+	output := ""
+	for _, m := range u.members {
+		if n := st.Nodes[m]; n != nil && n.Settled && ranOutcome(n.Outcome) {
+			output = n.Output
+		}
+	}
+	if err := d.appendSettled(u.activation, outcome, output, ""); err != nil {
+		return err
+	}
+	d.record(u.nodeID, output, scope, nodeOutputs)
+	return nil
+}
+
+// transparentOutcome aggregates a run's direct-member outcomes into the transparent
+// run outcome, byte-for-byte mirroring runOutcome (reducer_state.go) over the member
+// set: failed|canceled dominates → failed; any degraded → degraded; else pass. A
+// skipped member contributes nothing (it did not run), so a sub-formula that
+// skip-cascaded a tail still reports the honest outcome of the steps that ran.
+func transparentOutcome(st *lumenState, members []string) string {
+	var anyFailed, anyDegraded, anySettled bool
+	for _, m := range members {
+		n := st.Nodes[m]
+		if n == nil || !n.Settled {
+			continue
+		}
+		anySettled = true
+		switch n.Outcome {
+		case OutcomeFailed, OutcomeCanceled:
+			anyFailed = true
+		case OutcomeDegraded:
+			anyDegraded = true
+		}
+	}
+	switch {
+	case anyFailed:
+		return OutcomeFailed
+	case anyDegraded:
+		return OutcomeDegraded
+	case anySettled:
+		return OutcomePass
+	default:
+		return OutcomePass
+	}
 }
 
 // runGather drains its scatter's members head-of-line (a node.decision fold
@@ -922,6 +1008,102 @@ func (d *driver) combineOutcome(combine []planUnit) string {
 func (d *driver) record(nodeID, output string, scope, nodeOutputs map[string]string) {
 	scope[nodeID] = output
 	nodeOutputs[nodeID] = output
+}
+
+// scopeFor derives the render view for a unit's namespace (§C). The root
+// namespace ("") IS the flat scope, so a run-free document renders byte-identically
+// to before. A run sub-formula's namespace ("greeting/") gets a fresh view built
+// purely from (a) the run's environment bindings, evaluated in IR field order
+// against the PARENT view, keyed by the sub-input field name; (b) declared sub-input
+// defaults for any unbound field; and (c) the settled outputs of the namespace's
+// DIRECT sub-nodes, which shadow same-named bindings exactly as record() shadows
+// baseScope. It reads no clock and no randomness — everything derives from
+// (bundle, input, fold state) — so genesis, re-Advance, and crash-resume build an
+// identical view (DET). It is recomputed per render (cheap at these sizes), so there
+// is no cache to invalidate across passes.
+func (d *driver) scopeFor(ns string, scope map[string]string) (map[string]string, error) {
+	if ns == "" {
+		return scope, nil
+	}
+	parent, err := d.scopeFor(parentNamespace(ns), scope)
+	if err != nil {
+		return nil, err
+	}
+	view := make(map[string]string)
+	if spec := d.runEnvs[ns]; spec != nil {
+		bound := make(map[string]bool, len(spec.env))
+		for _, f := range spec.env {
+			v, err := evalValue(f.value, parent)
+			if err != nil {
+				return nil, fmt.Errorf("lumen: run env %q: %w", f.name, err)
+			}
+			view[f.name] = v
+			bound[f.name] = true
+		}
+		for _, fld := range spec.inputFields {
+			if !bound[fld.Name] && fld.Default != nil {
+				view[fld.Name] = scalarDefaultToString(fld.Default)
+			}
+		}
+	}
+	for k, v := range scope {
+		if rest, ok := directChildKey(k, ns); ok {
+			view[rest] = v
+		}
+	}
+	return view, nil
+}
+
+// runEnvIndex maps each run sub-formula's sub-namespace ("<runID>/") to its env
+// spec, so scopeFor can resolve bindings by namespace. It is a pure function of the
+// lowered units, so a fresh run and a rebuild produce the same index.
+func runEnvIndex(units []planUnit) map[string]*runSpec {
+	idx := make(map[string]*runSpec)
+	for i := range units {
+		if units[i].kind == unitRun && units[i].run != nil {
+			idx[units[i].nodeID+"/"] = units[i].run
+		}
+	}
+	return idx
+}
+
+// parentNamespace returns the enclosing namespace of a run namespace: "greeting/"
+// -> "" (root), "outer/inner/" -> "outer/". A namespace always ends in "/".
+func parentNamespace(ns string) string {
+	trimmed := strings.TrimSuffix(ns, "/")
+	idx := strings.LastIndex(trimmed, "/")
+	if idx < 0 {
+		return ""
+	}
+	return trimmed[:idx+1]
+}
+
+// directChildKey reports whether a flat scope key is a DIRECT child of ns (exactly
+// one segment deeper, no further "/") and returns the child's bare name.
+// "greeting/hello" under "greeting/" -> ("hello", true); "outer/inner/leaf" under
+// "outer/" -> ("", false) — that key belongs to the inner namespace's view.
+func directChildKey(key, ns string) (string, bool) {
+	if !strings.HasPrefix(key, ns) {
+		return "", false
+	}
+	rest := key[len(ns):]
+	if rest == "" || strings.Contains(rest, "/") {
+		return "", false
+	}
+	return rest, true
+}
+
+// scalarDefaultToString stringifies an IR input default exactly as baseScope seeds
+// a run input value (string as-is, else canonical JSON), so a defaulted sub-input
+// renders identically to the same value passed explicitly.
+func scalarDefaultToString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return ""
 }
 
 // appendActivated emits a node.activated event for a unit, carrying its

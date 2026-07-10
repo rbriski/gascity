@@ -48,7 +48,7 @@ func EnqueueRun(ctx context.Context, store *graphstore.Store, doc *ir.IR, input 
 	// Host!=nil); the loop passes Options{PoolRouter:…} with nil Host ⇒ (true, false)),
 	// so an IR that lowers here is one Advance can drive. Failing here fails the enqueue
 	// LOUD at the CLI with no discoverable run.
-	if _, err := buildUnits(doc.Nodes, true, false); err != nil {
+	if _, err := buildUnits(doc, true, false); err != nil {
 		return "", fmt.Errorf("lumen: enqueue: IR does not lower: %w", err)
 	}
 

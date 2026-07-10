@@ -46,6 +46,14 @@ type IR struct {
 	Input    InputDecl
 	Nodes    []Node
 	Origin   Origin
+	// Formulas is the optional flat sub-formula bundle keyed by formula name:
+	// every formula reachable via a run target, at any nesting depth, is present
+	// here by name. It is absent for a run-free document, in which case decode,
+	// encode, and irHash are byte-identical to a pre-bundle document (the bundle
+	// rides in Raw, so MarshalJSON round-trips it without special handling). The
+	// bundle is flat — a sub-doc must NOT itself carry a Formulas map (enforced by
+	// Validate), so a nested run's target resolves against this one closure.
+	Formulas map[string]*IR
 	Raw      map[string]json.RawMessage
 }
 
@@ -62,8 +70,22 @@ func (ir *IR) UnmarshalJSON(b []byte) error {
 	if err := decodeFieldStrict(raw, "nodes", &ir.Nodes); err != nil {
 		return err
 	}
+	// The optional sub-formula bundle. Strict: a malformed bundle is a decode
+	// error, never a silent nil. Each value decodes recursively through this same
+	// UnmarshalJSON, so a sub-doc gets its own typed Nodes and Raw passthrough.
+	if err := decodeFieldStrict(raw, "formulas", &ir.Formulas); err != nil {
+		return err
+	}
+	// input is decoded STRICTLY (like contract/nodes/formulas): a type-mismatched
+	// input decl must be a load error, not a silently-zeroed struct. It is
+	// load-bearing — decodeRunEnv validates a run's environment against a sub-
+	// formula's Input.Fields (required-unbound is a loud refusal), so a lenient
+	// decode that dropped `required` would defeat that guard and run the sub-graph
+	// with an unbound {{ref}}.
+	if err := decodeFieldStrict(raw, "input", &ir.Input); err != nil {
+		return err
+	}
 	decodeField(raw, "name", &ir.Name)
-	decodeField(raw, "input", &ir.Input)
 	decodeField(raw, "origin", &ir.Origin)
 	return nil
 }

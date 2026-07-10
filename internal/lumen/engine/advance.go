@@ -128,7 +128,7 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 		return AdvanceResult{}, fmt.Errorf("lumen: advance: stream id %q must not contain ':' (it is the run root node id; ':' is the activation-key delimiter)", streamID)
 	}
 
-	units, err := buildUnits(doc.Nodes, opts.Host != nil || opts.PoolRouter != nil, opts.Host != nil)
+	units, err := buildUnits(doc, opts.Host != nil || opts.PoolRouter != nil, opts.Host != nil)
 	if err != nil {
 		return AdvanceResult{}, err
 	}
@@ -196,6 +196,9 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 			return AdvanceResult{}, err
 		}
 	}
+	// Index the run sub-formula env specs for scopeFor (identical on fresh + rebuild,
+	// since units is a pure function of the doc — keeps the sub-scope deterministic).
+	d.runEnvs = runEnvIndex(units)
 
 	// Already sealed (an Advance of a finished run): idempotent no-op read. The
 	// projection was reconciled inside rebuildDriver (H1), so this returns cleanly.
@@ -278,7 +281,11 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		if !d.depsSettled(u) {
 			return nil
 		}
-		val, err := evalSilent(u.leaf, scope)
+		view, err := d.scopeFor(u.ns, scope)
+		if err != nil {
+			return err
+		}
+		val, err := evalSilent(u.leaf, view)
 		if err != nil {
 			return err
 		}
@@ -364,7 +371,13 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 	if !ok {
 		return fmt.Errorf("%w: node %q (agent %q)", ErrNoPoolRoute, u.nodeID, u.leaf.agentRef)
 	}
-	prompt, err := renderPrompt(u.leaf.raw, scope)
+	// A pool-do inside a run sub-formula renders its prompt against the namespace
+	// view (env bindings + settled sub outputs), not the flat root scope.
+	view, err := d.scopeFor(u.ns, scope)
+	if err != nil {
+		return err
+	}
+	prompt, err := renderPrompt(u.leaf.raw, view)
 	if err != nil {
 		return fmt.Errorf("lumen: advance: do %q prompt: %w", u.nodeID, err)
 	}

@@ -153,7 +153,7 @@ func Resume(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 		return RunResult{}, fmt.Errorf("lumen: resume: empty stream id")
 	}
 
-	units, err := buildUnits(doc.Nodes, opts.Host != nil, opts.Host != nil)
+	units, err := buildUnits(doc, opts.Host != nil, opts.Host != nil)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -174,6 +174,7 @@ func Resume(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 	if err != nil {
 		return RunResult{}, err
 	}
+	d.runEnvs = runEnvIndex(units)
 	ls := d.st()
 
 	// Already sealed before the crash: resume is a no-op read of the finished run
@@ -402,7 +403,12 @@ func (d *driver) resumeMemoized(u planUnit, scope, nodeOutputs map[string]string
 		// aggregate that drained seeded nodeOutputs only, never the scope.
 		if ranOutcome(n.Outcome) {
 			nodeOutputs[u.nodeID] = n.Output
-			if u.kind == unitLeaf {
+			// A leaf and a unitRun both seed scope: a leaf's output is {{ref}}-consumable
+			// downstream, and a run's transparent output is the sub-formula's result the
+			// parent reads via {{runRef}} (genesis record()s it in runRun). A scatter/gather
+			// aggregate seeds nodeOutputs only (it never wrote scope). This reproduces the
+			// genesis scope exactly, so a resumed run's downstream render matches (B1).
+			if u.kind == unitLeaf || u.kind == unitRun {
 				scope[u.nodeID] = n.Output
 			}
 		}

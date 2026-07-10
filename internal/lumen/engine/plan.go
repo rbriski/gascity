@@ -51,6 +51,7 @@ const (
 	unitScatterAgg                 // scatter aggregate: settles after its members
 	unitGather                     // gather: head-of-line drain + authored combine
 	unitLoop                       // retry / repeat: the attempt-loop over a leaf body
+	unitRun                        // run: transparent sub-formula call over an inlined sub-graph
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -63,7 +64,8 @@ type planUnit struct {
 	irKind      ir.NodeKind
 	parent      string // parent activation ("" = top-level, folds under the root)
 	memberIndex *int
-	silent      bool // pure lit/interp: compute scope, emit no journal events
+	silent      bool   // pure lit/interp: compute scope, emit no journal events
+	ns          string // the namespace this unit renders in ("" = root, "greeting/" = a run sub-graph)
 
 	rawAfter []string // IR `after` node ids
 
@@ -85,6 +87,30 @@ type planUnit struct {
 	combine       []planUnit // unitGather: authored combine leaf units
 
 	loop *loopSpec // unitLoop: the attempt-loop spec (retry / repeat)
+
+	run *runSpec // unitRun: the transparent sub-formula-call spec
+}
+
+// runSpec carries a run node's decoded shape: the target formula name, the
+// ordered environment bindings (evaluated against the parent scope view to seed
+// the sub-formula's input scope), the sub-input schema (for default seeding),
+// and the parent-scope ref names the bindings read (so resolveDeps can gate the
+// sub-graph on those parent nodes — keeping the sub-scope stable before any
+// sub-unit renders, DET seed #3). The sub-formula's nodes are inlined as ordinary
+// units under a `<runID>/` namespace; this spec drives only the transparent
+// settle and the boundary scope translation.
+type runSpec struct {
+	target      string
+	env         []runEnvField // ordered env bindings (sub-input field name <- value expr)
+	envRefs     []string      // parent-scope ref names read by the bindings (for DET gating)
+	inputFields []ir.Field    // the sub-formula's declared input schema
+}
+
+// runEnvField is one environment binding: a sub-input field name and the value
+// expression evaluated against the parent scope view at render time.
+type runEnvField struct {
+	name  string
+	value json.RawMessage
 }
 
 // loopSpec carries a retry/repeat loop node's decoded shape: the leaf body it
@@ -142,9 +168,14 @@ func activationForAttempt(nodeID string, attempt int) string {
 // Host therefore sets allowDo=true but allowCombineDo=false, and a combine `do` is
 // refused HERE at lowering (before any append) rather than hard-failing late in
 // runGather after the scatter members already ran (M2).
-func buildUnits(nodes []ir.Node, allowDo, allowCombineDo bool) ([]planUnit, error) {
-	l := &lowerer{allowDo: allowDo, allowCombineDo: allowCombineDo, scatterMembers: map[string][]string{}}
-	if err := l.lowerNodes(nodes, ""); err != nil {
+func buildUnits(doc *ir.IR, allowDo, allowCombineDo bool) ([]planUnit, error) {
+	l := &lowerer{
+		allowDo:        allowDo,
+		allowCombineDo: allowCombineDo,
+		formulas:       doc.Formulas,
+		scatterMembers: map[string][]string{},
+	}
+	if err := l.lowerNodes(doc.Nodes, ""); err != nil {
 		return nil, err
 	}
 	if err := l.resolveDeps(); err != nil {
@@ -157,7 +188,40 @@ type lowerer struct {
 	allowDo        bool
 	allowCombineDo bool
 	units          []planUnit
-	scatterMembers map[string][]string // scatter node id -> member activation keys (in order)
+	scatterMembers map[string][]string // qualified scatter node id -> member activation keys (in order)
+
+	// formulas is the sub-formula bundle a `run` target resolves against; prefix is
+	// the current namespace ("" at the top level, "greeting/" inside a run); targetStack
+	// is the chain of formula names being inlined, so a recursive cycle is refused loudly.
+	// inAggregate is true while lowering a scatter member / gather combine — it (not the
+	// bare parent activation, which is also non-empty for an inlined sub-formula's own
+	// statements) is what refuses a `run`/`loop` placed under an aggregate, so a nested
+	// run (a run that is a sub-formula's own statement) stays allowed.
+	formulas    map[string]*ir.IR
+	prefix      string
+	targetStack []string
+	inAggregate bool
+}
+
+// qid qualifies an authored node id with the current namespace prefix. Authored
+// ids are '/'- and ':'-free (enforced at lowerNode entry), so the only '/' in a
+// qualified id comes from a run prefix and the only ':' comes from the activation
+// key — keeping activationNodeID/activationAttempt parsing unambiguous and the
+// namespaced scope keys unreachable from any `{{ref}}` (scope isolation, §C).
+func (l *lowerer) qid(id string) string { return l.prefix + id }
+
+// qAfter qualifies a node's `after` ids into the current namespace. A run's sub-
+// formula only references its own siblings, so each ref resolves within the
+// namespace; a dangling ref stays a loud resolveDeps error.
+func (l *lowerer) qAfter(after []string) []string {
+	if len(after) == 0 {
+		return nil
+	}
+	out := make([]string, len(after))
+	for i, a := range after {
+		out[i] = l.qid(a)
+	}
+	return out
 }
 
 func (l *lowerer) lowerNodes(nodes []ir.Node, parent string) error {
@@ -170,6 +234,13 @@ func (l *lowerer) lowerNodes(nodes []ir.Node, parent string) error {
 }
 
 func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
+	// Authored node ids must be '/'- and ':'-free: '/' is the run-namespace
+	// delimiter and ':' is the activation-attempt delimiter. Refusing them here
+	// (before any unit is emitted) keeps qualified ids unambiguous and stops a
+	// hand-authored id from forging a cross-namespace scope key (§B/§C).
+	if strings.ContainsAny(n.ID, "/:") {
+		return fmt.Errorf("lumen: node id %q must not contain '/' or ':' (reserved delimiters)", n.ID)
+	}
 	switch n.Kind {
 	case ir.NodeBlock:
 		members, err := childNodes(n.Raw["members"])
@@ -214,12 +285,16 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 	case ir.NodeRetry, ir.NodeRepeat:
 		return l.lowerLoop(n, parent)
 
+	case ir.NodeRun:
+		return l.lowerRun(n, parent)
+
 	default:
 		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
 		// fail-channel, for-each(scatter form:each), guard, map, quote, raise,
-		// recover, run, timeout. Vocabulary + reducer transitions exist (total
-		// fold); executor arms land in later slices. Filed follow-up: blueprint §7
-		// P4.2 corpus TODO. (retry/repeat land as the L5 attempt-loop arm above.)
+		// recover, timeout. Vocabulary + reducer transitions exist (total fold);
+		// executor arms land in later slices. Filed follow-up: blueprint §7 P4.2
+		// corpus TODO. (retry/repeat land as the L5 attempt-loop arm above; run as
+		// the R lowerRun arm.)
 		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
 	}
 }
@@ -240,15 +315,19 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 	if err != nil {
 		return fmt.Errorf("lumen: scatter %q members: %w", n.ID, err)
 	}
-	scatterAct := activationFor(n.ID)
+	scatterAct := activationFor(l.qid(n.ID))
 	firstUnit := len(l.units)
 	var memberActs []string
+	savedAgg := l.inAggregate
+	l.inAggregate = true // members are under an aggregate: a run/loop member is refused
 	for i := range members {
 		idx := i
 		if err := l.lowerNode(members[i], scatterAct, &idx); err != nil {
+			l.inAggregate = savedAgg
 			return err
 		}
 	}
+	l.inAggregate = savedAgg
 	// Direct members only (L1): a member unit is one lowered directly under this
 	// scatter (parent == scatterAct). A nested scatter/block contributes its own
 	// aggregate/children as inner units parented elsewhere — those must NOT inflate
@@ -260,15 +339,16 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 			memberActs = append(memberActs, u.activation)
 		}
 	}
-	l.scatterMembers[n.ID] = memberActs
+	l.scatterMembers[l.qid(n.ID)] = memberActs
 
 	// Propagate the scatter's own `after` gate onto every unit lowered beneath it
 	// (H1): a scatter gated on a failed dependency must not run any member. The
 	// aggregate itself is gated separately below (its afterDeps). Descendants
 	// inherit the gate so a nested scatter's leaves skip-cascade too.
 	if len(n.After) > 0 {
+		qAfter := l.qAfter(n.After)
 		for i := firstUnit; i < len(l.units); i++ {
-			l.units[i].rawAfter = append(l.units[i].rawAfter, n.After...)
+			l.units[i].rawAfter = append(l.units[i].rawAfter, qAfter...)
 		}
 	}
 
@@ -279,10 +359,11 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 	l.units = append(l.units, planUnit{
 		kind:       unitScatterAgg,
 		activation: scatterAct,
-		nodeID:     n.ID,
+		nodeID:     l.qid(n.ID),
 		irKind:     ir.NodeScatter,
 		parent:     parent,
-		rawAfter:   n.After,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
 		members:    memberActs,
 		onFail:     onFail,
 	})
@@ -296,7 +377,11 @@ func (l *lowerer) lowerGather(n ir.Node, parent string) error {
 	if err != nil {
 		return err
 	}
-	memberActs, ok := l.scatterMembers[overName]
+	// The `over` ref is a sibling scatter's node id in the SAME namespace; qualify
+	// it to look up the (qualified) scatter members, so a bare-name `over` never
+	// resolves across a run boundary.
+	qOver := l.qid(overName)
+	memberActs, ok := l.scatterMembers[qOver]
 	if !ok {
 		return fmt.Errorf("lumen: gather %q references unknown scatter %q", n.ID, overName)
 	}
@@ -306,12 +391,13 @@ func (l *lowerer) lowerGather(n ir.Node, parent string) error {
 	}
 	l.units = append(l.units, planUnit{
 		kind:          unitGather,
-		activation:    activationFor(n.ID),
-		nodeID:        n.ID,
+		activation:    activationFor(l.qid(n.ID)),
+		nodeID:        l.qid(n.ID),
 		irKind:        ir.NodeGather,
 		parent:        parent,
-		rawAfter:      n.After,
-		overScatter:   activationFor(overName),
+		ns:            l.prefix,
+		rawAfter:      l.qAfter(n.After),
+		overScatter:   activationFor(qOver),
 		gatherMembers: memberActs,
 		combine:       combine,
 	})
@@ -332,10 +418,12 @@ func (l *lowerer) lowerGather(n ir.Node, parent string) error {
 // resolveDeps registers only the loop unit. A raw `after: [bodyID]` in hand-crafted
 // IR is a dangling ref, refused loudly (the compiler never emits it).
 func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
-	if parent != "" {
-		// A loop nested under a scatter/gather aggregate is a non-leaf member; refuse
-		// it this slice (scatter/combine-nested loops are a follow-up, §7.7). Top-level
-		// loops (possibly inside transparent blocks) carry parent "".
+	if l.inAggregate || l.prefix != "" {
+		// A loop nested under a scatter/gather aggregate is a non-leaf member; a loop
+		// inside a run sub-formula (prefix != "") uses the root loop scope this slice.
+		// Both are refused (scatter/combine-nested loops and loops-in-sub-formulas are a
+		// follow-up, §7.7). A top-level loop (possibly inside transparent blocks) carries
+		// inAggregate=false and prefix "".
 		return fmt.Errorf("%w: %q %q nested under an aggregate; loops are top-level only in this slice", ErrUnsupportedNode, n.Kind, n.ID)
 	}
 	spec := &loopSpec{irKind: n.Kind}
@@ -372,7 +460,7 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 	if body.ID == "" {
 		return fmt.Errorf("%w: %q %q body missing id", ErrUnsupportedNode, n.Kind, n.ID)
 	}
-	spec.bodyNodeID = body.ID
+	spec.bodyNodeID = l.qid(body.ID)
 	spec.bodyIRKind = body.Kind
 
 	switch n.Kind {
@@ -406,14 +494,215 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 
 	l.units = append(l.units, planUnit{
 		kind:       unitLoop,
-		activation: activationFor(n.ID),
-		nodeID:     n.ID,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
 		irKind:     n.Kind,
 		parent:     parent,
-		rawAfter:   n.After,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
 		loop:       spec,
 	})
 	return nil
+}
+
+// lowerRun lowers a run node — a transparent call to another formula — by
+// inlining the target formula's nodes as ordinary units under a `<runID>/`
+// namespace and emitting a unitRun aggregate that settles with the sub-formula's
+// transparent outcome. R1 supports TOP-LEVEL run only: a run nested under an
+// aggregate (scatter/gather/combine, parent != "") or as a loop body (refused by
+// lowerLoop's body switch) is refused loudly this slice; later slices lift those.
+// The target body comes from the document's flat `formulas` bundle; a missing
+// target, a recursive cycle, an unknown env field, or an unbound required input
+// all refuse HERE, before any append.
+func (l *lowerer) lowerRun(n ir.Node, parent string) error {
+	if l.inAggregate {
+		// A run under a scatter/gather aggregate (or a gather combine) is refused this
+		// slice — only a top-level run, at any run-nesting depth, lowers. (A run that is
+		// a sub-formula's own statement has a non-empty parent but inAggregate=false, so
+		// nested runs stay allowed.)
+		return fmt.Errorf("%w: %q %q nested under an aggregate; run is top-level only in this slice", ErrUnsupportedNode, n.Kind, n.ID)
+	}
+	// Closed-payload guards: the agent override and detached-run forms are deferred;
+	// only the transparent, by-name form lowers this slice.
+	if _, ok := n.Raw["with"]; ok {
+		return fmt.Errorf("%w: run %q with-agent override (node %q)", ErrUnsupportedNode, n.ID, n.ID)
+	}
+	if _, ok := n.Raw["runInput"]; ok {
+		return fmt.Errorf("%w: run %q runInput form (node %q)", ErrUnsupportedNode, n.ID, n.ID)
+	}
+	var outcome string
+	if raw, ok := n.Raw["outcome"]; ok {
+		_ = json.Unmarshal(raw, &outcome)
+	}
+	if outcome != "transparent" {
+		return fmt.Errorf("%w: run %q outcome %q (only transparent)", ErrUnsupportedNode, n.ID, outcome)
+	}
+	target, err := runTargetName(n)
+	if err != nil {
+		return err
+	}
+	sub, ok := l.formulas[target]
+	if !ok {
+		return fmt.Errorf("lumen: run %q targets formula %q not present in the document's formulas bundle", n.ID, target)
+	}
+	if sub == nil {
+		return fmt.Errorf("lumen: run %q target formula %q is null in the bundle", n.ID, target)
+	}
+	for _, t := range l.targetStack {
+		if t == target {
+			return fmt.Errorf("lumen: run %q: recursive formula cycle %s", n.ID, strings.Join(append(append([]string(nil), l.targetStack...), target), " -> "))
+		}
+	}
+
+	env, envRefs, err := decodeRunEnv(n, sub.Input.Fields)
+	if err != nil {
+		return err
+	}
+	spec := &runSpec{target: target, env: env, envRefs: envRefs, inputFields: sub.Input.Fields}
+
+	qRunID := l.qid(n.ID)
+	qAfter := l.qAfter(n.After)
+	runAct := activationFor(qRunID)
+	nodeNS := l.prefix // the namespace the run node itself lives in (parent scope)
+
+	// Inline the sub-graph one namespace deeper. The sub-formula's internal `after`
+	// refs qualify under the new prefix, so they resolve strictly within it.
+	savedPrefix, savedStack := l.prefix, l.targetStack
+	l.prefix = qRunID + "/"
+	// Fresh backing array per push: appending to savedStack directly could alias the
+	// same array across sibling runs (spare capacity), corrupting a later sibling's
+	// cycle stack. Copy so each nesting level owns its slice.
+	l.targetStack = append(append([]string(nil), savedStack...), target)
+	firstUnit := len(l.units)
+	if err := l.lowerNodes(sub.Nodes, runAct); err != nil {
+		l.prefix, l.targetStack = savedPrefix, savedStack
+		return err
+	}
+	l.prefix, l.targetStack = savedPrefix, savedStack
+
+	// Direct members: units lowered directly under this run (parent == runAct),
+	// non-silent — the same collection rule as lowerScatter, in source order.
+	var members []string
+	for i := firstUnit; i < len(l.units); i++ {
+		u := &l.units[i]
+		if u.parent == runAct && !u.silent {
+			members = append(members, u.activation)
+		}
+	}
+
+	// Propagate the run's own gate onto every sub-unit (lowerScatter H1 rule): a run
+	// gated on a failed dep runs no sub-effect (each sub-unit skip-cascades; the
+	// aggregate settles skipped via the blocked() intercept).
+	if len(qAfter) > 0 {
+		for i := firstUnit; i < len(l.units); i++ {
+			l.units[i].rawAfter = append(l.units[i].rawAfter, qAfter...)
+		}
+	}
+
+	l.units = append(l.units, planUnit{
+		kind:       unitRun,
+		activation: runAct,
+		nodeID:     qRunID,
+		irKind:     ir.NodeRun,
+		parent:     parent,
+		ns:         nodeNS,
+		rawAfter:   qAfter,
+		members:    members,
+		run:        spec,
+	})
+	return nil
+}
+
+// runTargetName decodes a run node's target ref, refusing anything but the
+// by-name form this slice supports.
+func runTargetName(n ir.Node) (string, error) {
+	raw, ok := n.Raw["target"]
+	if !ok {
+		return "", fmt.Errorf("lumen: run %q missing target", n.ID)
+	}
+	var target struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &target); err != nil {
+		return "", fmt.Errorf("lumen: run %q target: %w", n.ID, err)
+	}
+	if target.Kind != "by-name" || target.Name == "" {
+		return "", fmt.Errorf("%w: run %q target kind %q (only by-name)", ErrUnsupportedNode, n.ID, target.Kind)
+	}
+	return target.Name, nil
+}
+
+// decodeRunEnv decodes a run node's environment bindings, validates them against
+// the target formula's declared input schema (a binding for an undeclared field,
+// or a required input left unbound with no default, is a loud lowering error that
+// protects hand-authored bundles — the compiler itself enforces the same at
+// compile time), and returns the ordered bindings plus the parent-scope ref names
+// they read (for the DET sub-graph gating in resolveDeps).
+func decodeRunEnv(n ir.Node, inputFields []ir.Field) ([]runEnvField, []string, error) {
+	var env struct {
+		Fields []struct {
+			Name  string          `json:"name"`
+			Value json.RawMessage `json:"value"`
+		} `json:"fields"`
+	}
+	if raw, ok := n.Raw["environment"]; ok {
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return nil, nil, fmt.Errorf("lumen: run %q environment: %w", n.ID, err)
+		}
+	}
+	declared := make(map[string]bool, len(inputFields))
+	for _, f := range inputFields {
+		declared[f.Name] = true
+	}
+	bound := map[string]bool{}
+	var out []runEnvField
+	var refs []string
+	for _, f := range env.Fields {
+		if !declared[f.Name] {
+			return nil, nil, fmt.Errorf("lumen: run %q binds unknown environment field %q (not declared by target's accepts)", n.ID, f.Name)
+		}
+		bound[f.Name] = true
+		out = append(out, runEnvField{name: f.Name, value: f.Value})
+		refs = append(refs, collectRefs(f.Value)...)
+	}
+	for _, fld := range inputFields {
+		if fld.Required && !bound[fld.Name] && fld.Default == nil {
+			return nil, nil, fmt.Errorf("lumen: run %q leaves required target input %q unbound (no default)", n.ID, fld.Name)
+		}
+	}
+	return out, refs, nil
+}
+
+// collectRefs returns every ref name ({"kind":"ref","name":X}) reachable inside a
+// value expression, at any nesting depth. It is used to derive the parent-scope
+// dependencies a run's environment reads.
+func collectRefs(raw json.RawMessage) []string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	var refs []string
+	var walk func(x any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			if t["kind"] == "ref" {
+				if name, ok := t["name"].(string); ok && name != "" {
+					refs = append(refs, name)
+				}
+			}
+			for _, mv := range t {
+				walk(mv)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return refs
 }
 
 // lowerCombine lowers a gather's authored combine block into leaf units parented
@@ -445,14 +734,25 @@ func (l *lowerer) lowerCombine(n ir.Node) ([]planUnit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lumen: gather %q combine members: %w", n.ID, err)
 	}
-	gatherAct := activationFor(n.ID)
+	gatherAct := activationFor(l.qid(n.ID))
 	// A combine runs inline inside runGather, so a `do` combine member needs a Host
 	// (allowCombineDo), NOT merely a PoolRouter: the top-level pool-materialization
 	// walk never reaches a combine member. Gating the sub-lowerer's do arm on
 	// allowCombineDo refuses a combine `do` (at any nesting depth) HERE at lowering
 	// with ErrUnsupportedNode, before the lease is taken or any event is appended —
-	// never as a late hard fail after the drained members ran (M2).
-	sub := &lowerer{allowDo: l.allowCombineDo, allowCombineDo: l.allowCombineDo, scatterMembers: map[string][]string{}}
+	// never as a late hard fail after the drained members ran (M2). The sub-lowerer
+	// inherits this combine's namespace + bundle so a combine INSIDE a run sub-formula
+	// qualifies its ids identically, and a `run` combine member is refused by lowerRun's
+	// top-level check (parent != "").
+	sub := &lowerer{
+		allowDo:        l.allowCombineDo,
+		allowCombineDo: l.allowCombineDo,
+		formulas:       l.formulas,
+		prefix:         l.prefix,
+		targetStack:    l.targetStack,
+		inAggregate:    true, // combine members run under an aggregate: run/loop refused
+		scatterMembers: map[string][]string{},
+	}
 	if err := sub.lowerNodes(members, gatherAct); err != nil {
 		return nil, err
 	}
@@ -513,31 +813,6 @@ func (l *lowerer) resolveDeps() error {
 		u := &l.units[i]
 		seen := map[string]bool{}
 		var afterDeps []string
-		// addClosure adds a non-silent dependency directly; for a silent dep it
-		// recurses into that dep's own dependencies, substituting its transitive
-		// non-silent closure. guard breaks any (degenerate) silent cycle so the walk
-		// terminates; a silent cycle has no settleable input, so it contributes none.
-		var addClosure func(act string, guard map[string]bool)
-		addClosure = func(act string, guard map[string]bool) {
-			if act == "" {
-				return
-			}
-			if silent[act] {
-				if guard[act] {
-					return
-				}
-				guard[act] = true
-				for _, d := range rawDeps[act] {
-					addClosure(d, guard)
-				}
-				return
-			}
-			if seen[act] {
-				return
-			}
-			seen[act] = true
-			afterDeps = append(afterDeps, act)
-		}
 		for _, dep := range rawDeps[u.activation] {
 			// The scatter a gather drains is a drain dependency (memberDeps below),
 			// not a blocking gate — the whole point of a gather is to collect the
@@ -545,12 +820,19 @@ func (l *lowerer) resolveDeps() error {
 			if u.kind == unitGather && dep == u.overScatter {
 				continue
 			}
-			addClosure(dep, map[string]bool{})
+			// Substitute a silent (lit/interp) dep's transitive non-silent closure so
+			// the gate is always settleable (H2 — nonSilentClosure).
+			for _, g := range nonSilentClosure(dep, silent, rawDeps) {
+				if !seen[g] {
+					seen[g] = true
+					afterDeps = append(afterDeps, g)
+				}
+			}
 		}
 		u.afterDeps = afterDeps
 
 		switch u.kind {
-		case unitScatterAgg:
+		case unitScatterAgg, unitRun:
 			u.memberDeps = append([]string(nil), u.members...)
 		case unitGather:
 			if u.overScatter != "" {
@@ -558,7 +840,103 @@ func (l *lowerer) resolveDeps() error {
 			}
 		}
 	}
+
+	// DET hardening (seed #3): an env binding that reads a parent NODE output must
+	// gate the run's sub-graph, so the sub-scope a sub-unit renders against is
+	// stable before it renders — making genesis byte-identical to a crash-resume
+	// re-render for ANY bundle, not only compiler-emitted IR (whose statements
+	// already chain sequentially). An env ref to an input (not a node) is not a
+	// gate. Runs are top-level this slice, so an env ref resolves in the run's own
+	// namespace (u.ns). The gate is applied to the run aggregate AND every sub-unit
+	// so the whole sub-graph defers until the referenced parent node settles.
+	// byNodeID (built above) already maps every unit's node id to its activation.
+	for i := range l.units {
+		u := &l.units[i]
+		if u.kind != unitRun || u.run == nil {
+			continue
+		}
+		var gates []string
+		for _, refName := range u.run.envRefs {
+			act, ok := byNodeID[u.ns+refName]
+			if !ok {
+				continue
+			}
+			// A silent (lit/interp) env-ref node never settles, so gating on it
+			// directly would defer the sub-graph forever on the Advance path
+			// (red-team HIGH). Substitute its transitive non-silent closure — the real
+			// nodes the silent value derives from — exactly like the H2 after-dep rule.
+			// A pure constant (empty closure) correctly contributes no gate.
+			for _, g := range nonSilentClosure(act, silent, rawDeps) {
+				if g != u.activation {
+					gates = append(gates, g)
+				}
+			}
+		}
+		if len(gates) == 0 {
+			continue
+		}
+		subPrefix := u.nodeID + "/"
+		for j := range l.units {
+			s := &l.units[j]
+			if s.activation == u.activation || strings.HasPrefix(s.nodeID, subPrefix) {
+				s.afterDeps = appendMissing(s.afterDeps, gates)
+			}
+		}
+	}
 	return nil
+}
+
+// nonSilentClosure returns the settleable activations a dependency contributes as a
+// gate: the activation itself if it is non-silent; otherwise the transitive
+// non-silent closure over its own dependencies. A silent (lit/interp) unit emits no
+// journal event and never settles, so a dependent must gate on the REAL nodes the
+// silent value interpolates from (H2) — gating on the silent activation directly
+// would defer the dependent forever on the Advance path. A silent cycle or a pure
+// constant contributes nothing. It is the single source of truth for the
+// silent-substitution both resolveDeps' after-dep resolution and its env-ref gate
+// pass rely on.
+func nonSilentClosure(act string, silent map[string]bool, rawDeps map[string][]string) []string {
+	var out []string
+	seen := map[string]bool{}
+	var walk func(a string, guard map[string]bool)
+	walk = func(a string, guard map[string]bool) {
+		if a == "" {
+			return
+		}
+		if silent[a] {
+			if guard[a] {
+				return
+			}
+			guard[a] = true
+			for _, d := range rawDeps[a] {
+				walk(d, guard)
+			}
+			return
+		}
+		if seen[a] {
+			return
+		}
+		seen[a] = true
+		out = append(out, a)
+	}
+	walk(act, map[string]bool{})
+	return out
+}
+
+// appendMissing appends each element of add to dst that is not already present,
+// preserving order and skipping duplicates.
+func appendMissing(dst, add []string) []string {
+	seen := make(map[string]bool, len(dst))
+	for _, d := range dst {
+		seen[d] = true
+	}
+	for _, a := range add {
+		if !seen[a] {
+			dst = append(dst, a)
+			seen[a] = true
+		}
+	}
+	return dst
 }
 
 // topoSortUnits returns units in a stable topological order over their resolved
@@ -609,13 +987,14 @@ func topoSortUnits(units []planUnit) ([]planUnit, error) {
 func (l *lowerer) addLeaf(n ir.Node, parent string, memberIndex *int, s step, silent bool) {
 	l.units = append(l.units, planUnit{
 		kind:        unitLeaf,
-		activation:  activationFor(n.ID),
-		nodeID:      n.ID,
+		activation:  activationFor(l.qid(n.ID)),
+		nodeID:      l.qid(n.ID),
 		irKind:      n.Kind,
 		parent:      parent,
 		memberIndex: memberIndex,
 		silent:      silent,
-		rawAfter:    n.After,
+		ns:          l.prefix,
+		rawAfter:    l.qAfter(n.After),
 		leaf:        s,
 	})
 }
@@ -791,6 +1170,10 @@ func evalValue(raw json.RawMessage, scope map[string]string) (string, error) {
 	case "ref":
 		return scope[probe.Name], nil
 	case "interp":
+		return evalValue(probe.Expr, scope)
+	case "expr":
+		// The wrapper a run node's environment binding (and other value contexts)
+		// emits: {"kind":"expr","expr":{...}}. Recurse into the inner expression.
 		return evalValue(probe.Expr, scope)
 	default:
 		return "", fmt.Errorf("lumen: unsupported value expression kind %q", probe.Kind)

@@ -1,0 +1,78 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "run-do-chain",
+  "input": {
+    "name": "run-do-chain.input",
+    "fields": [
+      {
+        "name": "who",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "run",
+      "id": "greeting",
+      "name": "greeting",
+      "after": [],
+      "target": { "kind": "by-name", "name": "greeter" },
+      "environment": {
+        "fields": [
+          {
+            "name": "name",
+            "value": { "kind": "expr", "expr": { "kind": "ref", "name": "who" } }
+          }
+        ]
+      },
+      "outcome": "transparent"
+    },
+    {
+      "kind": "do",
+      "id": "consume",
+      "name": "consume",
+      "after": ["greeting"],
+      "source": { "kind": "prompt" },
+      "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+      "body": { "raw": "use {{ greeting }}" }
+    }
+  ],
+  "formulas": {
+    "greeter": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "greeter",
+      "input": {
+        "name": "greeter.input",
+        "fields": [
+          {
+            "name": "name",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "hello",
+          "name": "hello",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": { "raw": "EMIT=aval produce a value for {{ name }}" }
+        }
+      ]
+    }
+  }
+}

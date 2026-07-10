@@ -3,6 +3,7 @@ package ir
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -49,10 +50,42 @@ func (ir *IR) Validate() error {
 			}
 		}
 	})
+
+	// Recurse into the sub-formula bundle (§A). WalkNodes visits only the top
+	// document's nodes, so a sub-doc's node taxonomy and run-node closed payload
+	// would otherwise be a runtime surprise; validating each sub-doc here keeps a
+	// drifted bundle a load error. Sorted names give deterministic error text.
+	for _, name := range sortedFormulaNames(ir.Formulas) {
+		sub := ir.Formulas[name]
+		switch {
+		case sub == nil:
+			problems = append(problems, fmt.Sprintf("formulas[%q] is null", name))
+		case sub.Name != name:
+			problems = append(problems, fmt.Sprintf("formulas[%q] declares name %q", name, sub.Name))
+		case len(sub.Formulas) > 0:
+			problems = append(problems, fmt.Sprintf("formulas[%q] carries a nested formulas bundle (bundle must be flat)", name))
+		default:
+			if err := sub.Validate(); err != nil {
+				problems = append(problems, fmt.Sprintf("formulas[%q]: %v", name, err))
+			}
+		}
+	}
+
 	if len(problems) > 0 {
 		return fmt.Errorf("lumen.ir: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// sortedFormulaNames returns the bundle's formula names in lexical order so
+// Validate emits deterministic error text across runs.
+func sortedFormulaNames(formulas map[string]*IR) []string {
+	names := make([]string, 0, len(formulas))
+	for name := range formulas {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // runNodeFields is the closed key set for a run node (schema runNode,

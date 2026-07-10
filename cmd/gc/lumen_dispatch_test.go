@@ -123,6 +123,60 @@ func TestLumenObserveSeamStatuses(t *testing.T) {
 	}
 }
 
+// TestLumenObserveSeamOutputAndRetryable proves the observe seam's output + retry
+// plumbing: a closed bead's gc.output_json is reported as WorkObservation.Output (the
+// downstream {{ref}} value, HIGH-2/3), an explicit gc.outcome=fail is failed AND
+// retryable (a genuine worker failure the retry arm re-attempts, §5), but a BARE close
+// is failed and NON-retryable (MEDIUM-2 — a missing outcome is a definitive contract
+// violation, not a transient strand, so a retry loop must not re-run possibly-complete
+// work).
+func TestLumenObserveSeamOutputAndRetryable(t *testing.T) {
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	observe := lumenObserveWork(store)
+
+	closeWith := func(t *testing.T, meta map[string]string) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Type: "task", Title: "n"})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if len(meta) > 0 {
+			if err := store.Update(b.ID, beads.UpdateOpts{Metadata: meta}); err != nil {
+				t.Fatalf("stamp: %v", err)
+			}
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		return b
+	}
+
+	// pass + gc.output_json → terminal, pass, Output carried, NOT retryable.
+	passBead := closeWith(t, map[string]string{
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		beadmeta.OutputJSONMetadataKey: "aval",
+	})
+	if obs, err := observe(ctx, passBead.ID); err != nil || !obs.Terminal ||
+		obs.Outcome != engine.OutcomePass || obs.Output != "aval" || obs.Retryable {
+		t.Fatalf("pass+output observe = (%+v, %v), want terminal pass Output=aval retryable=false", obs, err)
+	}
+
+	// explicit gc.outcome=fail → failed AND retryable.
+	failBead := closeWith(t, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail})
+	if obs, err := observe(ctx, failBead.ID); err != nil ||
+		obs.Outcome != engine.OutcomeFailed || !obs.Retryable {
+		t.Fatalf("gc.outcome=fail observe = (%+v, %v), want failed + retryable", obs, err)
+	}
+
+	// bare close (no gc.outcome) → failed but NON-retryable (MEDIUM-2).
+	bareBead := closeWith(t, nil)
+	if obs, err := observe(ctx, bareBead.ID); err != nil ||
+		obs.Outcome != engine.OutcomeFailed || obs.Retryable {
+		t.Fatalf("bare close observe = (%+v, %v), want failed + NON-retryable (MEDIUM-2)", obs, err)
+	}
+}
+
 // TestLumenAttemptHistoryQueryable is the fresh-bead-per-attempt VISIBILITY proof
 // (Julian's requirement): after a do fails attempt 0 (fresh bead, closed fail) and
 // passes attempt 1 (fresh bead, closed pass), the attempt-history query surfaces BOTH

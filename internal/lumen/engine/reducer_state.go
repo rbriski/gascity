@@ -11,7 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
-// lumenState is the reducer v2 carried-forward state (blueprint §2.1): the run
+// lumenState is the reducer v3 carried-forward state (blueprint §2.1): the run
 // identity (all timestamps sourced from payloads, keeping the fold clock-free)
 // plus the DAG of activations. Nodes is keyed by activation; every map walk is
 // in canonical (sorted) key order so the fold is deterministic (R-PURE).

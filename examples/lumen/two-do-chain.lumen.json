@@ -1,0 +1,98 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "two-do-chain",
+  "input": {
+    "name": "two-do-chain.input",
+    "fields": [],
+    "origin": {
+      "uri": "examples/lumen/two-do-chain.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "do",
+      "id": "produce",
+      "name": "produce",
+      "after": [],
+      "origin": {
+        "uri": "examples/lumen/two-do-chain.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/two-do-chain.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "EMIT=aval produce the value",
+        "language": "markdown",
+        "source": {
+          "kind": "inline"
+        },
+        "origin": {
+          "uri": "examples/lumen/two-do-chain.lumen",
+          "line": 1,
+          "col": 0
+        }
+      }
+    },
+    {
+      "kind": "do",
+      "id": "consume",
+      "name": "consume",
+      "after": ["produce"],
+      "origin": {
+        "uri": "examples/lumen/two-do-chain.lumen",
+        "line": 2,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/two-do-chain.lumen",
+          "line": 2,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "use {{produce}}",
+        "language": "markdown",
+        "source": {
+          "kind": "inline"
+        },
+        "origin": {
+          "uri": "examples/lumen/two-do-chain.lumen",
+          "line": 2,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "examples/lumen/two-do-chain.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

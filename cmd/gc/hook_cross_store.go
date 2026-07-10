@@ -9,18 +9,13 @@ import (
 )
 
 // hookStore is one store the hook work_query runs against: a working dir and
-// the rig/city-scoped subprocess env that points bd at that store.
-//
-// A federated leg that is not a bd store — the Tier-B journal leg — sets name,
-// query, and claim instead of relying on the shell runner: query reads the
-// fold-owned claim surface in-process, and claim translates a worker's claim into
-// a journal owned.admitted append. Because query/claim are func fields (not
-// comparable), such a store's identity for sameHookStore/isZeroHookStore is its
-// name (+ dir/env), never a struct compare.
+// the rig/city-scoped subprocess env that points bd at that store. Every hook store
+// is an ordinary bd store queried through the shell runner — the real-bead do path
+// (REDESIGN) removed the former non-bd Tier-B journal leg, so a store's identity for
+// sameHookStore/isZeroHookStore is simply its dir + env.
 type hookStore struct {
-	dir  string
-	env  []string
-	name string
+	dir string
+	env []string
 }
 
 // runHookStoreQuery runs st's work query via the shell bd runner against st's
@@ -229,10 +224,9 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that firstStoreWithWork
-// returns when no store has ready work (no name, dir, or env).
+// returns when no store has ready work (no dir or env).
 func isZeroHookStore(s hookStore) bool {
-	return strings.TrimSpace(s.name) == "" && strings.TrimSpace(s.dir) == "" &&
-		len(s.env) == 0
+	return strings.TrimSpace(s.dir) == "" && len(s.env) == 0
 }
 
 // removeHookStore returns stores with the first entry equal to target removed.
@@ -255,9 +249,6 @@ func removeHookStore(stores []hookStore, target hookStore) []hookStore {
 // sameHookStore reports whether two stores address the same dir and env, so the
 // federated claim loop can drop the exact store it just exhausted.
 func sameHookStore(a, b hookStore) bool {
-	if a.name != b.name {
-		return false
-	}
 	if a.dir != b.dir || len(a.env) != len(b.env) {
 		return false
 	}

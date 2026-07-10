@@ -205,6 +205,83 @@ func TestLumenRunsTickDispatchObserveSeals(t *testing.T) {
 	}
 }
 
+// closeLumenDoBeadWithOutput closes the latest open real work bead for a do node the
+// way an ordinary pooled worker would — stamping gc.outcome AND gc.output_json (the
+// dispatcher's step-output convention the downstream {{ref}} consumes). Returns the id.
+func closeLumenDoBeadWithOutput(t *testing.T, store beads.Store, streamID, nodeID, outcome, output string) string {
+	t.Helper()
+	hist, err := lumenAttemptHistory(store, streamID, nodeID)
+	if err != nil {
+		t.Fatalf("attempt history: %v", err)
+	}
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Status != "closed" {
+			id := hist[i].BeadID
+			if uerr := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+				beadmeta.OutcomeMetadataKey:    outcome,
+				beadmeta.OutputJSONMetadataKey: output,
+			}}); uerr != nil {
+				t.Fatalf("stamp outcome+output on %q: %v", id, uerr)
+			}
+			if cerr := store.Close(id); cerr != nil {
+				t.Fatalf("close %q: %v", id, cerr)
+			}
+			return id
+		}
+	}
+	t.Fatalf("no open work bead for %s/%s to close", streamID, nodeID)
+	return ""
+}
+
+// lumenWorkBeadForActivation returns the (single) real work bead a run dispatched for
+// an exact gc.lumen_activation.
+func lumenWorkBeadForActivation(t *testing.T, store beads.Store, streamID, activation string) beads.Bead {
+	t.Helper()
+	rows, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{beadmeta.LumenRunMetadataKey: streamID, beadmeta.LumenActivationMetadataKey: activation},
+		IncludeClosed: true,
+		AllowScan:     true,
+	})
+	if err != nil {
+		t.Fatalf("list work beads for %s/%s: %v", streamID, activation, err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("work beads for activation %s = %d, want 1", activation, len(rows))
+	}
+	return rows[0]
+}
+
+// TestLumenRunsTickValuePlumbingDownstreamPrompt is the controller-level HIGH-2/3
+// value-plumbing proof: enqueue do A → do B (after A, prompt "use {{A}}"); tick 1
+// dispatches A; an ordinary worker closes A with gc.output_json="aval"; tick 2 observes
+// A, seeds the scope, and dispatches B in the SAME pass — so B's dispatched work bead
+// Description is the RESOLVED "use aval", not "use {{A}}". This exercises the full
+// chain end to end: the observe seam reads gc.output_json, the driver seeds scope, and
+// the next do renders against it.
+func TestLumenRunsTickValuePlumbingDownstreamPrompt(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	streamID := lumenSeedRun(t, cityPath, tbHookChainDoc(t), nil, "workers")
+	work := cr.cityBeadStore()
+
+	// Tick 1: dispatch A (B is deferred behind A).
+	cr.lumenRunsTick(ctx)
+	if _, err := work.List(beads.ListQuery{Metadata: map[string]string{beadmeta.LumenActivationMetadataKey: "B:0"}, AllowScan: true}); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	// An ordinary worker closes A pass with an output.
+	closeLumenDoBeadWithOutput(t, work, streamID, "A", beadmeta.OutcomePass, "aval")
+
+	// Tick 2: observe A → seed scope → dispatch B same pass with the resolved prompt.
+	cr.lumenRunsTick(ctx)
+
+	b := lumenWorkBeadForActivation(t, work, streamID, "B:0")
+	if b.Description != "use aval" {
+		t.Fatalf("B dispatched prompt = %q, want \"use aval\" ({{A}} must resolve to A's output)", b.Description)
+	}
+}
+
 // TestLumenRunsTickCrashResume (T-B3) is the L2 exit's crash-resume proof: after a
 // park, discarding ALL in-memory tick state and the store handle (a controller
 // restart) and re-ticking rebuilds from the journal + CAS dir, re-parks WITHOUT

@@ -2734,12 +2734,24 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workspace := packWorkspaceSlug(request); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackWorkspaceMetadataKey]) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+	switch workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); {
+	case workDir != "":
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
 			metadata[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
 			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		}
+	case lumenWorkBeadRunsInConfiguredDir(bp, request):
+		// Re-pointing a pooled session onto a Lumen do bead (no per-bead dir, suppressed
+		// above): clear any stale <city>/<bead-slug> a prior ordinary trigger bead
+		// stamped so the launch re-resolves the agent's city dir instead of doing
+		// `new-session -c <absent>` and wedging (HIGH-1).
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != "" {
+			metadata[beadmeta.WorkDirMetadataKey] = ""
+		}
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != "" {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = ""
 		}
 	}
 	if len(metadata) == 0 {
@@ -2777,6 +2789,12 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	}
 	if workspace := packWorkspaceSlug(request); workspace != "" {
 		return filepath.Join(base, workspace)
+	}
+	// A Lumen pool-mode do bead runs in the agent's configured dir, never a per-bead
+	// <beadID>-<nodeID> trigger workspace (HIGH-1): suppress the slug fallback so the
+	// launch resolves the agent's own work dir instead of an absent per-bead scratch.
+	if lumenWorkBeadRunsInConfiguredDir(bp, request) {
+		return ""
 	}
 	if slug := triggerBeadPathSlug(request.WorkBeadID, request.WorkBeadTitle); slug != "" {
 		return filepath.Join(base, slug)

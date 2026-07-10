@@ -69,3 +69,31 @@ func tbHookDoc(t *testing.T) *ir.IR {
 	}
 	return d
 }
+
+// tbHookChainDoc is a two-do chain IR: do "A" ("produce"), then do "B" (after A) whose
+// prompt "use {{A}}" interpolates A's output — the value-plumbing fixture (HIGH-2/3).
+func tbHookChainDoc(t *testing.T) *ir.IR {
+	t.Helper()
+	do := func(id, prompt, after string) string {
+		return `{"kind": "do", "id": "` + id + `", "name": "` + id + `", "after": [` + after + `],
+            "origin": {"uri": "t", "line": 1, "col": 0},
+            "source": {"kind": "prompt"},
+            "interpreter": {"kind": "agent", "mode": {"kind": "do"}, "origin": {"uri": "t", "line": 1, "col": 0}},
+            "body": {"raw": "` + prompt + `", "language": "markdown", "source": {"kind": "inline"}, "origin": {"uri": "t", "line": 1, "col": 0}}}`
+	}
+	doc := `{
+      "contract": {"name": "lumen.ir", "version": "0.2.5", "producer": "test"},
+      "name": "chain",
+      "input": {"name": "main.input", "fields": [], "origin": {"uri": "t", "line": 0, "col": 0}},
+      "origin": {"uri": "t", "line": 0, "col": 0},
+      "nodes": [
+        {"kind": "block", "id": "block_1", "after": [], "origin": {"uri": "t", "line": 1, "col": 0},
+         "members": [` + do("A", "produce", "") + `,` + do("B", "use {{A}}", `"A"`) + `]}
+      ]
+    }`
+	d, err := ir.Decode([]byte(doc))
+	if err != nil {
+		t.Fatalf("decode chain IR: %v", err)
+	}
+	return d
+}

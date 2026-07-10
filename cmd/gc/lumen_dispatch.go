@@ -85,9 +85,15 @@ func lumenDispatchWork(store beads.Store, cfg *config.City) func(context.Context
 // the dispatched bead's terminal state through ordinary bead reads. A closed bead is
 // terminal; its outcome is the raw gc.outcome mapped through the fail-closed value map
 // (LumenOutcomeForGCOutcome) — a bare/unknown close maps to failed, never laundered
-// into success. An open/in_progress bead (including an orphan-released bead re-read
-// as open) is still in flight. A missing bead is an error (ambiguous store outage vs
-// deletion): the run stays parked with a loud per-tick log, never an auto-fail.
+// into success. Its OUTPUT is the closed bead's gc.output_json — the dispatcher's
+// existing step-output convention (internal/dispatch propagates gc.output_json from a
+// completed step to the next), reused so a downstream do's {{ref}} interpolation
+// resolves to the prior do's output (HIGH-2/3). Retryable is true ONLY for an explicit
+// gc.outcome=fail (MEDIUM-2): a bare close is failed but non-retryable, so a retry
+// loop does not re-run possibly-complete work. An open/in_progress bead (including an
+// orphan-released bead re-read as open) is still in flight. A missing bead is an error
+// (ambiguous store outage vs deletion): the run stays parked with a loud per-tick log,
+// never an auto-fail.
 func lumenObserveWork(store beads.Store) func(context.Context, string) (engine.WorkObservation, error) {
 	return func(_ context.Context, beadID string) (engine.WorkObservation, error) {
 		if store == nil {
@@ -102,9 +108,12 @@ func lumenObserveWork(store beads.Store) func(context.Context, string) (engine.W
 			return engine.WorkObservation{}, fmt.Errorf("lumen dispatch: observing bead %q: %w", beadID, err)
 		}
 		if b.Status == "closed" {
+			raw := b.Metadata[beadmeta.OutcomeMetadataKey]
 			return engine.WorkObservation{
-				Terminal: true,
-				Outcome:  engine.LumenOutcomeForGCOutcome(b.Metadata[beadmeta.OutcomeMetadataKey]),
+				Terminal:  true,
+				Outcome:   engine.LumenOutcomeForGCOutcome(raw),
+				Output:    b.Metadata[beadmeta.OutputJSONMetadataKey],
+				Retryable: engine.LumenFailRetryableForGCOutcome(raw),
 			}, nil
 		}
 		return engine.WorkObservation{Terminal: false}, nil
@@ -127,6 +136,11 @@ type lumenAttemptRecord struct {
 // do by the bare node id of each bead's recorded activation, so a fail→retry→pass do
 // surfaces BOTH the failed attempt-0 bead and the passed attempt-1 bead with their
 // outcomes.
+//
+// NOTE: this is the query-only visibility surface (exercised by tests and the
+// controller-loop test's close helper); it has no production CLI caller yet. It is
+// the read a future `gc lumen show <run>` attempt-history view will front — kept
+// pure/read-only so that surface can wire it without added logic.
 func lumenAttemptHistory(store beads.Store, streamID, nodeID string) ([]lumenAttemptRecord, error) {
 	if store == nil {
 		return nil, fmt.Errorf("lumen dispatch: nil work store")
@@ -144,7 +158,19 @@ func lumenAttemptHistory(store beads.Store, streamID, nodeID string) ([]lumenAtt
 		if engine.ActivationNodeID(b.Metadata[beadmeta.LumenActivationMetadataKey]) != nodeID {
 			continue
 		}
-		attempt, _ := strconv.Atoi(b.Metadata[beadmeta.LumenAttemptMetadataKey])
+		// The dispatch seam always stamps a valid integer attempt (strconv.Itoa), so a
+		// non-integer value is corruption/tampering, not attempt 0 — surface it loudly
+		// rather than silently misordering the history. An absent value stays tolerant
+		// (attempt 0), matching activationAttempt's shape for pre-attempt beads.
+		attempt := 0
+		if raw := b.Metadata[beadmeta.LumenAttemptMetadataKey]; raw != "" {
+			n, aerr := strconv.Atoi(raw)
+			if aerr != nil {
+				return nil, fmt.Errorf("lumen dispatch: attempt history for %s/%s: bead %s carries malformed %s %q: %w",
+					streamID, nodeID, b.ID, beadmeta.LumenAttemptMetadataKey, raw, aerr)
+			}
+			attempt = n
+		}
 		out = append(out, lumenAttemptRecord{
 			Attempt: attempt,
 			BeadID:  b.ID,

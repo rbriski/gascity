@@ -3,10 +3,12 @@ package engine_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
@@ -56,11 +58,25 @@ func (f *fakeWorkStore) observe(_ context.Context, beadID string) (engine.WorkOb
 	return f.terminal[beadID], nil // zero value = not terminal
 }
 
-// settle scripts a bead id's terminal observation.
+// settle scripts a bead id's terminal observation. Retryable mirrors the cmd seam's
+// contract (LumenFailRetryableForGCOutcome): a genuine worker fail-close is retryable,
+// so the retry arm re-attempts it; pass/degraded are not. A bare/unknown-close case is
+// scripted explicitly via settleObservation.
 func (f *fakeWorkStore) settle(beadID, outcome, output string) {
+	f.settleObservation(beadID, engine.WorkObservation{
+		Terminal:  true,
+		Outcome:   outcome,
+		Output:    output,
+		Retryable: outcome == engine.OutcomeFailed,
+	})
+}
+
+// settleObservation scripts a bead id's exact terminal observation (for the
+// non-retryable bare-close case that decouples Outcome from Retryable).
+func (f *fakeWorkStore) settleObservation(beadID string, obs engine.WorkObservation) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.terminal[beadID] = engine.WorkObservation{Terminal: true, Outcome: outcome, Output: output}
+	f.terminal[beadID] = obs
 }
 
 // settleAct scripts the terminal observation of the work bead dispatched for an
@@ -509,6 +525,169 @@ func TestRetryDoBudgetExhaustionSealsFailed(t *testing.T) {
 	}
 	if _, reason, _, _ := loopSettle(t, rFinal.Run.Events, "attempt:0"); reason != "exhausted" {
 		t.Errorf("loop settle reason = %q, want exhausted", reason)
+	}
+}
+
+// dispatchPromptFor returns the prompt the seam was last dispatched with for an
+// activation — the resolved bead Description the worker would receive.
+func (f *fakeWorkStore) dispatchPromptFor(t *testing.T, activation string) string {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.dispatches) - 1; i >= 0; i-- {
+		if f.dispatches[i].Activation == activation {
+			return f.dispatches[i].Prompt
+		}
+	}
+	t.Fatalf("no dispatch for activation %q", activation)
+	return ""
+}
+
+// TestAdvanceObserveSeedsScopeForDownstream is the HIGH-2/3 value-plumbing proof:
+// do A (worker outputs "aval") → do B (after A, prompt "use {{A}}"). When A's bead
+// closes, the SAME observing pass must seed A's output into the interpolation scope
+// so B's dispatched prompt renders "use aval" (NOT "use {{A}}"). It also pins
+// DETERMINISM: the same-pass render EQUALS the crash-restart render — a crash after A
+// settles but before B dispatches, then a fresh-driver re-Advance (whose scope is
+// rebuilt from the fold via reconstructOutputs), must dispatch B with the identical
+// resolved prompt. Before the fix the settle updated only the fold state and left the
+// live scope stale, so the same-pass render diverged from the crash-restart render.
+func TestAdvanceObserveSeedsScopeForDownstream(t *testing.T) {
+	chainDoc := func() string {
+		return blockDoc("chain",
+			doNode("A", "produce", nil),
+			doNode("B", "use {{A}}", []string{"A"}),
+		)
+	}
+
+	// --- same-pass path: A closes, one Advance observes A AND dispatches B ---
+	samePass := func() string {
+		ctx := context.Background()
+		store := newStore(t)
+		doc := decodeIR(t, chainDoc())
+		streamID := "gcg-run-vp-same"
+		fake := newFakeWorkStore()
+		if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
+			t.Fatalf("same-pass advance 1: %v", err)
+		}
+		fake.settle("wb-1", engine.OutcomePass, "aval") // A closes with output "aval"
+		if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
+			t.Fatalf("same-pass advance 2: %v", err)
+		}
+		return fake.dispatchPromptFor(t, "B:0")
+	}()
+
+	// --- crash-restart path: crash after A settles, before B dispatches; fresh driver ---
+	crashRestart := func() string {
+		ctx := context.Background()
+		store := newStore(t)
+		doc := decodeIR(t, chainDoc())
+		streamID := "gcg-run-vp-crash"
+		fake := newFakeWorkStore()
+		if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
+			t.Fatalf("crash advance 1: %v", err)
+		}
+		fake.settle("wb-1", engine.OutcomePass, "aval")
+		// Crash right before B's node.activated: A observes+settles this pass, then B's
+		// materialize hits crashBeforeActivate, so A is journaled but B is not dispatched.
+		restore := engine.SetCrashHookForTest(func(b, _, act string) error {
+			if b == engine.CrashBeforeActivate && act == "B:0" {
+				return fmt.Errorf("injected crash before B activate")
+			}
+			return nil
+		})
+		_, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts())
+		restore()
+		if err == nil {
+			t.Fatal("crash advance 2 did not surface the injected crash")
+		}
+		// Fresh-driver re-Advance: scope is rebuilt from the fold (reconstructOutputs
+		// seeds A's "aval"), then B is dispatched.
+		if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
+			t.Fatalf("crash advance 3 (restart): %v", err)
+		}
+		return fake.dispatchPromptFor(t, "B:0")
+	}()
+
+	if samePass != "use aval" {
+		t.Errorf("same-pass B prompt = %q, want \"use aval\" (A's output must seed scope in the observing pass)", samePass)
+	}
+	if samePass != crashRestart {
+		t.Errorf("determinism hole: same-pass B prompt %q != crash-restart B prompt %q", samePass, crashRestart)
+	}
+}
+
+// TestAdvanceConcurrentDriverFencedSingleDispatch is the MEDIUM-1 mutual-exclusion
+// proof over one work store: a driver whose holder DIFFERS from the current lease
+// holder is FENCED with ErrLeaseHeld and dispatches nothing, while the driver whose
+// holder MATCHES re-acquires its OWN lease and dispatches exactly ONE bead — so two
+// concurrent instances never both create a bead (double execution). The matching-holder
+// dispatch is the assertion that fails before the fix: the old driver ignored
+// Options.LeaseHolder and acquired under a constant holder, so it was FENCED by the
+// prior lease and dispatched nothing (and two production controllers sharing that
+// constant would instead both STEAL and double-dispatch).
+func TestAdvanceConcurrentDriverFencedSingleDispatch(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	docJSON, streamID := doOnlyDoc()
+	doc := decodeIR(t, docJSON)
+	fake := newFakeWorkStore()
+
+	// Instance A holds the stream's writer lease (a driver mid-pass).
+	if _, err := store.AcquireWriterLease(ctx, streamID, "inst-A", 30*time.Second); err != nil {
+		t.Fatalf("acquire lease as inst-A: %v", err)
+	}
+
+	// A DISTINCT instance (inst-B) is FENCED while inst-A holds the lease: no dispatch.
+	optsB := fake.opts()
+	optsB.LeaseHolder = "inst-B"
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, optsB); !errors.Is(err, graphstore.ErrLeaseHeld) {
+		t.Fatalf("distinct-holder driver Advance error = %v, want ErrLeaseHeld (fenced, not a steal)", err)
+	}
+	if fake.dispatchCount() != 0 {
+		t.Fatalf("fenced driver dispatched %d work beads, want 0 (it must never reach the create seam)", fake.dispatchCount())
+	}
+
+	// The SAME instance (inst-A) re-acquires its OWN lease and dispatches exactly one
+	// bead — Options.LeaseHolder MUST be honored for the same-instance re-Advance path.
+	optsA := fake.opts()
+	optsA.LeaseHolder = "inst-A"
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, optsA); err != nil {
+		t.Fatalf("matching-holder re-Advance = %v, want success (Options.LeaseHolder honored)", err)
+	}
+	if fake.dispatchCount() != 1 {
+		t.Fatalf("matching-holder driver dispatched %d, want exactly 1 bead (single-instance mutual exclusion)", fake.dispatchCount())
+	}
+	fake.mu.Lock()
+	minted := fake.seq
+	fake.mu.Unlock()
+	if minted != 1 {
+		t.Fatalf("distinct beads minted = %d, want 1 across both drivers", minted)
+	}
+}
+
+// TestAdvanceObserveBareCloseNonRetryable is the MEDIUM-2 engine-side proof: a
+// non-retryable failed observation settles the do failed but WITHOUT the retryable
+// flag, so a retry loop stops rather than re-running a bare-closed (possibly complete)
+// do. (The seam maps a bare gc.outcome to failed+non-retryable — see the cmd seam
+// test; here the fake scripts that observation directly.)
+func TestAdvanceObserveBareCloseNonRetryable(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	docJSON, streamID := doOnlyDoc()
+	doc := decodeIR(t, docJSON)
+	fake := newFakeWorkStore()
+
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
+		t.Fatalf("advance 1: %v", err)
+	}
+	// A bare/unknown close: failed outcome, but the seam reports it NON-retryable.
+	fake.settleObservation("wb-1", engine.WorkObservation{Terminal: true, Outcome: engine.OutcomeFailed, Retryable: false})
+	if _, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts()); err != nil {
+		t.Fatalf("advance 2: %v", err)
+	}
+	if got := settledRetryable(t, streamStored(t, store, streamID), "hello:0"); got {
+		t.Fatalf("bare-close settle retryable = true, want false (a missing outcome is not a retryable strand)")
 	}
 }
 

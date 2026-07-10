@@ -408,6 +408,75 @@ func TestLumenDoDoltE2E_RetryFreshBeadVisibility(t *testing.T) {
 	t.Logf("PROOF graphstore.Verify(%s) clean; sequence %v", streamID, lumenStreamTypes(events))
 }
 
+// lumenChainDoIRPath is the committed two-do value-plumbing IR: do "produce"
+// (EMIT=aval) → do "consume" (after produce, prompt "use {{produce}}").
+func lumenChainDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "two-do-chain.lumen.json")
+}
+
+// TestLumenDoDoltE2E_ValuePlumbingDownstreamPrompt (the HIGH-2/3 seal) proves a do's
+// output flows into a downstream do's prompt through the real-bead path end to end: on
+// a DOLT city, `gc lumen sling` of a two-do chain dispatches "produce"; an ordinary
+// pooled worker closes it with gc.output_json=aval (the dispatcher's step-output
+// convention); the controller observes the close, seeds the scope, and dispatches
+// "consume" with its {{produce}} ref RESOLVED to "use aval"; a second worker claims and
+// closes it; the run seals pass. The load-bearing proof is the consume do's dispatched
+// prompt (read off its claim JSON) == "use aval", not the unresolved "use {{produce}}".
+func TestLumenDoDoltE2E_ValuePlumbingDownstreamPrompt(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do-chain.sh", 1, "")
+	ctx := context.Background()
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, lumenChainDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	// Drive to seal: sling → dispatch produce → claim → close(pass, output=aval) →
+	// observe+seed → dispatch consume (RESOLVED prompt) → claim → close → seal.
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 6*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	if got := outcomeSettledFor(t, events, "produce:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled produce:0 = %q, want pass", got)
+	}
+	if got := outcomeSettledFor(t, events, "consume:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled consume:0 = %q, want pass", got)
+	}
+
+	byActivation := lumenDoltRunBeadsByActivation(t, cityDir, streamID)
+	produce, okP := byActivation["produce:0"]
+	consume, okC := byActivation["consume:0"]
+	if !okP || !okC {
+		t.Fatalf("both do beads must be queryable in the work store; have activations %v, want produce:0 and consume:0", keysOfBeads(byActivation))
+	}
+	// produce closed carrying gc.output_json=aval (the do output the worker recorded).
+	if got := metaValue(produce, "gc.output_json"); got != "aval" {
+		t.Fatalf("produce %s gc.output_json = %q, want aval", produce.ID, got)
+	}
+	// THE value-plumbing proof: the consume do's dispatched prompt resolved {{produce}}
+	// to produce's output — read off its claim JSON description, keyed by its real bead id.
+	assertLumenPromptReadback(t, cityDir, consume.ID, "use aval")
+	t.Logf("PROOF value plumbing: produce gc.output_json=aval → consume prompt resolved to %q (not \"use {{produce}}\")", "use aval")
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+	t.Logf("PROOF graphstore.Verify(%s) clean; sequence %v", streamID, lumenStreamTypes(events))
+}
+
 // waitForOwnedAdmittedOrDiag waits for the dispatch fact and, on timeout, dumps the
 // journal stream + the work store so a controller/scope/advance gap is distinguishable
 // from a pure demand→spawn gap.

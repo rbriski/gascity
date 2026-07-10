@@ -191,13 +191,16 @@ func lumenPoolRouter(defaultRoute string) func(agentRef string) (string, bool) {
 // isRetryableAdvanceErr reports whether an Advance error is a transient
 // multi-writer race the controller loop should retry on the next tick rather than
 // surface as a terminal refusal: an expected-version CAS loss to a concurrent
-// append, a lease fence from a driver re-acquire, a busy store, or a Tier-A
-// rebuild that raced a concurrent append. This mirrors engine isRetryableRaceErr so
-// the same race is classified identically at every layer. Retry is safe: Advance is
-// a re-entrant parking driver.
+// append, a lease FENCE from a driver re-acquire, a lease HELD by another concurrent
+// controller instance (MEDIUM-1: the instance-unique holder makes a second driver
+// wait rather than steal — the holder releases on park/seal, so the next tick
+// proceeds), a busy store, or a Tier-A rebuild that raced a concurrent append. This
+// mirrors engine isRetryableRaceErr so the same race is classified identically at
+// every layer. Retry is safe: Advance is a re-entrant parking driver.
 func isRetryableAdvanceErr(err error) bool {
 	return err != nil && (errors.Is(err, graphstore.ErrWrongExpectedVersion) ||
 		errors.Is(err, graphstore.ErrLeaseFenced) ||
+		errors.Is(err, graphstore.ErrLeaseHeld) ||
 		errors.Is(err, graphstore.ErrBusy) ||
 		errors.Is(err, graphstore.ErrRebuildRaced))
 }

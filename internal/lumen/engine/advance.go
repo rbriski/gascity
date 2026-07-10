@@ -139,7 +139,7 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 	// return (park OR seal): between Advances the stream is unheld, so a pool
 	// worker's claim/settle appends cooperatively at the released-but-preserved
 	// epoch (correction #1).
-	lease, err := store.AcquireWriterLease(ctx, streamID, leaseHolder, leaseTTL)
+	lease, err := store.AcquireWriterLease(ctx, streamID, resolveLeaseHolder(opts), leaseTTL)
 	if err != nil {
 		return AdvanceResult{}, fmt.Errorf("lumen: advance: acquire writer lease %q: %w", streamID, err)
 	}
@@ -316,7 +316,7 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		// error is transient (the run stays parked, the loop retries next tick).
 		if opts.ObserveWork != nil {
 			if n := d.st().Nodes[u.activation]; n != nil && !n.Settled && n.BeadID != "" {
-				return d.observePoolWork(u.activation, u.nodeID, n.BeadID, opts)
+				return d.observePoolWork(u.activation, u.nodeID, n.BeadID, scope, nodeOutputs, opts)
 			}
 		}
 		return d.materializePoolWork(u, scope, opts)
@@ -423,11 +423,19 @@ func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, opts
 // observePoolWork consults the ObserveWork seam for a dispatched-but-unsettled pool
 // node and, when its real bead has reached a terminal close, copies the outcome into
 // the journal as the EXISTING outcome.settled (REDESIGN §1.4) — zero new settle arm.
-// Retryable is stamped true iff the outcome is failed, so the formula's retry arm
-// re-attempts a genuine worker failure with a FRESH bead (§5). A still-open bead
+// Retryable comes from the observation (the seam sets it true ONLY for an explicit
+// gc.outcome=fail — a bare/unknown close is failed but NOT retryable, MEDIUM-2), so
+// the formula's retry arm re-attempts a genuine worker failure with a FRESH bead
+// (§5) but never re-runs work a bare close left already-complete.
+//
+// It ALSO seeds the do's output into scope/nodeOutputs (HIGH-2/3), exactly as genesis
+// runDo's record() and the crash-restart reconstructOutputs do, so a same-pass
+// downstream {{ref}} renders the resolved value and byte-identically to a
+// crash-restart — closing the determinism hole where the settle updated only the
+// fold state and left the driver's live interpolation scope stale. A still-open bead
 // parks (nil, no append); an observer error is returned so the controller loop logs
 // it and leaves the run parked to retry next tick (§9.7).
-func (d *driver) observePoolWork(activation, nodeID, beadID string, opts Options) error {
+func (d *driver) observePoolWork(activation, nodeID, beadID string, scope, nodeOutputs map[string]string, opts Options) error {
 	obs, err := opts.ObserveWork(d.ctx, beadID)
 	if err != nil {
 		return fmt.Errorf("lumen: advance: observe do %q bead %q: %w", nodeID, beadID, err)
@@ -435,7 +443,15 @@ func (d *driver) observePoolWork(activation, nodeID, beadID string, opts Options
 	if !obs.Terminal {
 		return nil
 	}
-	return d.appendSettledRetryable(activation, obs.Outcome, obs.Output, "", obs.Outcome == OutcomeFailed)
+	if err := d.appendSettledRetryable(activation, obs.Outcome, obs.Output, "", obs.Retryable); err != nil {
+		return err
+	}
+	// Gated on ranOutcome to mirror reconstructOutputs' genesis rule (a skip/cancel
+	// records nothing); an observed terminal outcome is always a ran outcome.
+	if ranOutcome(obs.Outcome) {
+		d.record(nodeID, obs.Output, scope, nodeOutputs)
+	}
+	return nil
 }
 
 // appendPoolActivated emits a pool-mode node.activated: the plain engine
@@ -530,7 +546,7 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 		if opts.ObserveWork == nil || bn == nil || bn.BeadID == "" {
 			return nil
 		}
-		if err := d.observePoolWork(bodyAct, spec.bodyNodeID, bn.BeadID, opts); err != nil {
+		if err := d.observePoolWork(bodyAct, spec.bodyNodeID, bn.BeadID, scope, nodeOutputs, opts); err != nil {
 			return err
 		}
 		if bn := d.st().Nodes[bodyAct]; bn == nil || !bn.Settled {

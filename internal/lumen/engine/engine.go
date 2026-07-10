@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,8 +34,37 @@ import (
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
 
-// leaseHolder identifies the executor as the writer-lease holder.
-const leaseHolder = "lumen-engine"
+// leaseHolderBase names the executor class of the writer-lease holder.
+const leaseHolderBase = "lumen-engine"
+
+// leaseHolder is this process's INSTANCE-UNIQUE writer-lease holder (MEDIUM-1).
+// AcquireWriterLease treats a same-holder acquire as a re-acquire that STEALS the
+// lease regardless of expiry (lease.go), so a constant holder let two concurrent
+// controllers both steal one stream's lease and each dispatch the same do — a
+// double-execution hole. A per-process token makes a second concurrent driver a
+// DIFFERENT holder, so it is fenced with ErrLeaseHeld instead of stealing, while a
+// same-process re-Advance keeps this token and still re-acquires its OWN lease.
+// Tests inject a distinct holder via Options.LeaseHolder to model two instances.
+var leaseHolder = newLeaseHolder()
+
+// newLeaseHolder mints this process's instance-unique writer-lease holder.
+func newLeaseHolder() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%s:%d", leaseHolderBase, os.Getpid())
+	}
+	return fmt.Sprintf("%s:%d-%s", leaseHolderBase, os.Getpid(), hex.EncodeToString(b[:]))
+}
+
+// resolveLeaseHolder returns the writer-lease holder for a driver: the caller's
+// explicit Options.LeaseHolder when set (tests modeling two concurrent instances),
+// else this process's instance-unique holder.
+func resolveLeaseHolder(opts Options) string {
+	if opts.LeaseHolder != "" {
+		return opts.LeaseHolder
+	}
+	return leaseHolder
+}
 
 // lumenRepeatLoopCap is the mandatory hard bound on a repeat loop's iterations
 // (mirroring the reference runner). A cond that never turns truthy terminates
@@ -116,6 +146,12 @@ type Options struct {
 	// outcome.settled and advance the fold. Consulted for every pool node that
 	// carries a recorded BeadID; REQUIRED alongside DispatchWork.
 	ObserveWork func(ctx context.Context, beadID string) (WorkObservation, error)
+
+	// LeaseHolder overrides the writer-lease holder for this driver (MEDIUM-1).
+	// Production leaves it "" so the driver uses the process's instance-unique
+	// holder (resolveLeaseHolder); tests set distinct holders to model two
+	// concurrent controller instances contending one stream.
+	LeaseHolder string
 }
 
 // WorkDispatch describes one ready pool-mode do activation the DispatchWork seam
@@ -136,10 +172,18 @@ type WorkDispatch struct {
 // it (REDESIGN §1.4/§2.4). Outcome is a pre-mapped Lumen outcome
 // (pass/failed/degraded — the seam applies LumenOutcomeForGCOutcome, fail-closed),
 // so the driver copies it verbatim into outcome.settled with no further judgment.
+// Output is the do's result the downstream {{ref}} interpolation consumes (the seam
+// reads it from the closed bead's gc.output_json, the dispatcher's step-output
+// convention). Retryable is the fold retry arm's re-attempt gate for a failed
+// outcome (MEDIUM-2): the seam sets it true ONLY for an explicit gc.outcome=fail —
+// a bare/unknown close maps to failed too (fail-closed) but is NOT retryable, since
+// a missing outcome is a definitive contract violation, not a transient strand, and
+// re-running would re-execute possibly-complete work.
 type WorkObservation struct {
-	Terminal bool
-	Outcome  string
-	Output   string
+	Terminal  bool
+	Outcome   string
+	Output    string
+	Retryable bool
 }
 
 // Run executes doc with no agent host — the exec-only path.

@@ -700,7 +700,7 @@ func buildDesiredStateWithSessionBeads(
 		// the worker work_query/claim path match gc.routed_to canonically by raw
 		// string, so the route must be canonicalized before demand is counted or
 		// the cold pool never wakes for it.
-		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
+		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, graphStore, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
@@ -3726,7 +3726,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
 // migration re-home needs its own scan. Active-only List queries are served from
 // the CachingStore in steady state, so this adds no backing-store round trip.
-func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store) {
+func collectOpenUnassignedRoutedWork(cfg *config.City, store, graphStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -3735,6 +3735,16 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 		ref   string
 	}
 	stores := []workStore{{store: store, ref: "city"}}
+	// When the graph class is relocated, routed orchestration work (gcg- graph.v2
+	// workflow steps) is graph-resident, and the city/rig List legs below are work-only
+	// (plain List is deliberately NOT graph-unioned — that would leak rig-WORK beads into
+	// demand). Scan the shared city-scope graph store as its own leg so ready, unassigned,
+	// routed graph work is visible to pool demand — the assigned-work collector already
+	// attaches graphStore per leg (collectAssignedWorkBeadsWithStores); mirror it here.
+	// nil / graphStore == store (the bd default) is a no-op → byte-identical.
+	if graphStore != nil && graphStore != store {
+		stores = append(stores, workStore{store: graphStore, ref: "graph"})
+	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue

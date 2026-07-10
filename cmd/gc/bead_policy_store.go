@@ -347,12 +347,47 @@ func (s *beadPolicyStore) Children(parentID string, opts ...beads.QueryOpt) ([]b
 }
 
 func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	return s.List(beads.ListQuery{
+	work, err := s.List(beads.ListQuery{
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		TierMode:      policyTierFromOpts(opts),
 	})
+	if err != nil {
+		return nil, err
+	}
+	return s.federateGraphList(work, func(g beads.Store) ([]beads.Bead, error) {
+		return g.ListByLabel(label, limit, opts...)
+	})
+}
+
+// federateGraphList unions the work-store result with the graph store's matching beads
+// when the graph class is relocated, so a metadata/label scan finds graph-resident beads
+// (e.g. graphv2 workflow roots for singleton/dedup checks) that the work store alone
+// would miss — the read-scan analog of writeOwner. Byte-identical when graph is not
+// relocated (returns the work result unchanged).
+func (s *beadPolicyStore) federateGraphList(work []beads.Bead, graphQuery func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
+	if s.graphStore == nil || s.graphStore == s.Store {
+		return work, nil
+	}
+	graph, err := graphQuery(s.graphStore)
+	if err != nil {
+		return nil, err
+	}
+	if len(graph) == 0 {
+		return work, nil
+	}
+	seen := make(map[string]bool, len(work))
+	for _, b := range work {
+		seen[b.ID] = true
+	}
+	for _, b := range graph {
+		if !seen[b.ID] {
+			seen[b.ID] = true
+			work = append(work, b)
+		}
+	}
+	return work, nil
 }
 
 func (s *beadPolicyStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
@@ -365,11 +400,17 @@ func (s *beadPolicyStore) ListByAssignee(assignee, status string, limit int) ([]
 }
 
 func (s *beadPolicyStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	return s.List(beads.ListQuery{
+	work, err := s.List(beads.ListQuery{
 		Metadata:      filters,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		TierMode:      policyTierFromOpts(opts),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.federateGraphList(work, func(g beads.Store) ([]beads.Bead, error) {
+		return g.ListByMetadata(filters, limit, opts...)
 	})
 }
 

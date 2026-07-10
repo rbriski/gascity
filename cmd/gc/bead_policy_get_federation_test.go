@@ -101,3 +101,30 @@ func TestBeadPolicyWritesFederateToGraph(t *testing.T) {
 		t.Fatalf("work write must land on the work store: %v", got.Metadata)
 	}
 }
+
+// TestBeadPolicyScansFederateGraph proves ListByLabel/ListByMetadata union the graph
+// store: a graph-resident root (singleton/dedup lookups) is found through the policy
+// handle, not silently missed on a work-only scan.
+func TestBeadPolicyScansFederateGraph(t *testing.T) {
+	e := newCutoverEnv(t, true)
+	gb, err := e.store.Create(beads.Bead{Title: "graph root", Type: "task", Labels: []string{"gc:wisp", "scan-me"}})
+	if err != nil {
+		t.Fatalf("create graph bead: %v", err)
+	}
+	if _, err := e.graph.Get(gb.ID); err != nil {
+		t.Fatalf("precondition: graph bead not on graph store: %v", err)
+	}
+	byLabel, err := e.store.ListByLabel("scan-me", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	found := false
+	for _, b := range byLabel {
+		if b.ID == gb.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListByLabel must union the graph store; graph root %s missing from %v", gb.ID, byLabel)
+	}
+}

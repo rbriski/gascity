@@ -768,6 +768,92 @@ printf '[{"id":"gc-1","title":"ok"}]\n'
 	}
 }
 
+// TestGcBdFederatesGraphClassBeadByIdUnderRelocation pins that `gc bd` federates a
+// by-id verb on a graph-class (gcg-) bead when the graph class is relocated to a
+// dedicated store (graph_store=sqlite), instead of execing the Dolt-blind work bd.
+// Under relocation a gcg- id is invisible to the work-scoped bd, so `gc bd show gcg-…`
+// must take the same federated path as `gc bd-shim` (classify -> controller HTTP API).
+// With no controller reachable, the shim's routed disposition emits the distinctive
+// "no controller API reachable" error — that string, on the gcg- op but NOT on a work
+// bead under the same relocated city, is the discriminator that proves federation.
+func TestGcBdFederatesGraphClassBeadByIdUnderRelocation(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	origProbe := bdBeadExists
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+		bdBeadExists = origProbe
+	}()
+	cityFlag = ""
+	rigFlag = ""
+	// Force city scope: a false probe keeps resolveBdScopeTarget from auto-routing on
+	// the id prefix, so both ids resolve to the (bd-backed) city work store.
+	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// [beads] graph_store = "sqlite" relocates the graph class -> graphRelocated(cfg)
+	// is true, arming the by-id gcg- federation branch in doBd.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+graph_store = "sqlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Isolate cwd so no ambient .beads/redirect retargets the scope.
+	setCwd(t, cityDir)
+
+	// A bd stub that always succeeds: the work-bead branch must reach this (byte-identical
+	// direct exec), never the shim's "no controller API reachable" refusal.
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+printf '[]\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_RIG", "")
+	// Force the shim's API client to nil so the routed disposition emits the
+	// deterministic "no controller API reachable" discriminator without probing.
+	t.Setenv("GC_NO_API", "1")
+
+	const noController = "no controller API reachable"
+
+	// Graph-class (gcg-) by-id op: MUST federate through the shim.
+	var gStdout, gStderr bytes.Buffer
+	gotGraph := doBd([]string{"show", "gcg-does-not-exist"}, &gStdout, &gStderr)
+	if !strings.Contains(gStderr.String(), noController) {
+		t.Fatalf("gc bd show gcg-…: expected federated path (stderr contains %q), got exit=%d stdout=%q stderr=%q — it execed the Dolt-blind work bd instead of routing the graph bead",
+			noController, gotGraph, gStdout.String(), gStderr.String())
+	}
+
+	// Work-class (gc-) by-id op under the SAME relocated city: MUST NOT federate — it
+	// stays on the byte-identical direct bd exec (prefix gate confines federation to gcg-).
+	var wStdout, wStderr bytes.Buffer
+	gotWork := doBd([]string{"show", "gc-1"}, &wStdout, &wStderr)
+	if strings.Contains(wStderr.String(), noController) {
+		t.Fatalf("gc bd show gc-1 (work bead): must NOT federate, but stderr contains %q; exit=%d stdout=%q stderr=%q",
+			noController, gotWork, wStdout.String(), wStderr.String())
+	}
+	if gotWork != 0 {
+		t.Fatalf("gc bd show gc-1 (work bead): expected direct bd exec exit 0, got %d; stderr=%q", gotWork, wStderr.String())
+	}
+}
+
 func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 

@@ -224,6 +224,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// Graph-class beads (gcg-) under relocation live in the dedicated graph store,
+	// invisible to gc bd's work-scoped bd exec. Route a by-id op on such a bead
+	// through the same federated path as `gc bd-shim` (classify -> controller HTTP
+	// API / refuse), so `gc bd show|update gcg-…` reaches the graph store. Work
+	// beads and the non-relocated bd default keep gc bd's direct exec (byte-identical).
+	// Delegating the whole invocation (original args, not bdArgs) is intentional so
+	// `gc bd gcg-…` == `gc bd-shim gcg-…`: runBdShim re-derives scope/heartbeat/classify.
+	if graphRelocated(cfg) {
+		if verb, verbArgs := splitBdGlobalFlags(bdArgs); verb != "" {
+			if id, ok := firstBdPositional(verbArgs); ok && strings.HasPrefix(id, graphStoreIDPrefix+"-") {
+				return runBdShim(args, os.Stdin, stdout, stderr)
+			}
+		}
+	}
+
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {

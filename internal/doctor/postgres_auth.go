@@ -171,10 +171,17 @@ func loadPostgresAuthScope(scopeRoot, kind, displayBase, relEnv string) (postgre
 	if err != nil || meta.Backend != "postgres" {
 		return postgresAuthScope{}, false
 	}
+	// Effective endpoint: discrete draft-era fields, or derived from bd
+	// origin/main's postgres_dsn. A validated postgres state always derives;
+	// the error branch is defensive and mirrors the silent filtering above.
+	ep, err := meta.PostgresEndpoint()
+	if err != nil {
+		return postgresAuthScope{}, false
+	}
 	endpoint := pgauth.Endpoint{
-		Host: meta.PostgresHost,
-		Port: meta.PostgresPort,
-		User: meta.PostgresUser,
+		Host: ep.Host,
+		Port: ep.Port,
+		User: ep.User,
 	}
 	display := fmt.Sprintf("%s (%s:%s)", displayBase, endpoint.Host, endpoint.Port)
 	scope := postgresAuthScope{
@@ -215,7 +222,7 @@ func classifyPostgresAuthResult(res postgresAuthScopeResult) perScopeReport {
 	scopeRel := strings.TrimPrefix(res.scope.relPath, "./")
 	if res.resolveOK {
 		switch res.resolved.Source {
-		case pgauth.SourceProcessEnvBeads, pgauth.SourceProcessEnvGC:
+		case pgauth.SourceProcessEnvBeads, pgauth.SourceProcessEnvBeadsPg, pgauth.SourceProcessEnvGC:
 			out.status = StatusWarning
 			out.message = fmt.Sprintf("%s: password from parent shell env", res.scope.display)
 			out.detail = fmt.Sprintf("scope=%s  source=%s  user=%s", res.scope.root, res.resolved.Source.String(), res.resolved.User)
@@ -275,7 +282,7 @@ func classifyPermissionErrorTier(scope postgresAuthScope, path string) string {
 	if def := pgauth.DefaultCredentialsPath(); def != "" && filepath.Clean(path) == filepath.Clean(def) {
 		return pgauth.SourceCredentialsFileHome.String()
 	}
-	// Either tier 6 ($BEADS_CREDENTIALS_FILE) or an unknown path; pick
+	// Either tier 8 ($BEADS_CREDENTIALS_FILE) or an unknown path; pick
 	// the less-specific label per design §3.3.4 implementation note.
 	return "credentials_file"
 }
@@ -289,12 +296,16 @@ func humanSourceLabel(s pgauth.Source) string {
 		return "projected env (GC_POSTGRES_PASSWORD)"
 	case pgauth.SourceProjectedBeads:
 		return "projected env (BEADS_POSTGRES_PASSWORD)"
+	case pgauth.SourceProjectedBeadsPg:
+		return "projected env (BEADS_PG_PASSWORD)"
 	case pgauth.SourceProcessEnvGC:
 		return "parent shell env (GC_POSTGRES_PASSWORD)"
 	case pgauth.SourceScopeFile:
 		return "scope file"
 	case pgauth.SourceProcessEnvBeads:
 		return "parent shell env (BEADS_POSTGRES_PASSWORD)"
+	case pgauth.SourceProcessEnvBeadsPg:
+		return "parent shell env (BEADS_PG_PASSWORD)"
 	case pgauth.SourceCredentialsFileEnv:
 		return "$BEADS_CREDENTIALS_FILE"
 	case pgauth.SourceCredentialsFileHome:
@@ -453,17 +464,19 @@ func padForStatus(prefix, status string) string {
 	return prefix + pad + status
 }
 
-// buildExplainTiers returns the seven tier rows in resolution order.
+// buildExplainTiers returns the nine tier rows in resolution order.
 func buildExplainTiers(p perScopeReport, winnerTier, errTier int) []explainTier {
 	scopeRel := strings.TrimSuffix(p.scope.relPath, "")
 	tiers := []explainTier{
 		{number: 1, label: "projected env", ident: "GC_POSTGRES_PASSWORD"},
 		{number: 2, label: "projected env", ident: "BEADS_POSTGRES_PASSWORD"},
-		{number: 3, label: "os.Getenv", ident: "GC_POSTGRES_PASSWORD"},
-		{number: 4, label: "scope file", ident: scopeRel + " BEADS_POSTGRES_PASSWORD"},
-		{number: 5, label: "os.Getenv", ident: "BEADS_POSTGRES_PASSWORD"},
-		{number: 6, label: "$BEADS_CREDENTIALS_FILE", ident: fmt.Sprintf("[%s:%s]", p.scope.endpoint.Host, p.scope.endpoint.Port)},
-		{number: 7, label: "~/.config/beads/credentials", ident: fmt.Sprintf("[%s:%s]", p.scope.endpoint.Host, p.scope.endpoint.Port)},
+		{number: 3, label: "projected env", ident: "BEADS_PG_PASSWORD"},
+		{number: 4, label: "os.Getenv", ident: "GC_POSTGRES_PASSWORD"},
+		{number: 5, label: "scope file", ident: scopeRel + " BEADS_POSTGRES_PASSWORD"},
+		{number: 6, label: "os.Getenv", ident: "BEADS_POSTGRES_PASSWORD"},
+		{number: 7, label: "os.Getenv", ident: "BEADS_PG_PASSWORD"},
+		{number: 8, label: "$BEADS_CREDENTIALS_FILE", ident: fmt.Sprintf("[%s:%s]", p.scope.endpoint.Host, p.scope.endpoint.Port)},
+		{number: 9, label: "~/.config/beads/credentials", ident: fmt.Sprintf("[%s:%s]", p.scope.endpoint.Host, p.scope.endpoint.Port)},
 	}
 	stop := winnerTier
 	if errTier > 0 {
@@ -507,27 +520,31 @@ func explainFooter(p perScopeReport, winnerTier, errTier int) string {
 	if winnerTier == 0 {
 		return fmt.Sprintf("Source identifier: %s   No password resolvable. See: gc doctor (errors).", pgauth.SourceNone.String())
 	}
-	return fmt.Sprintf("Source identifier: %s   Source position: tier %d of 7", p.resolved.Source.String(), winnerTier)
+	return fmt.Sprintf("Source identifier: %s   Source position: tier %d of 9", p.resolved.Source.String(), winnerTier)
 }
 
 // sourceTier maps a pgauth.Source value to its resolution-chain tier
-// number (1..7). Returns 0 for SourceNone or unknown values.
+// number (1..9). Returns 0 for SourceNone or unknown values.
 func sourceTier(s pgauth.Source) int {
 	switch s {
 	case pgauth.SourceProjectedGC:
 		return 1
 	case pgauth.SourceProjectedBeads:
 		return 2
-	case pgauth.SourceProcessEnvGC:
+	case pgauth.SourceProjectedBeadsPg:
 		return 3
-	case pgauth.SourceScopeFile:
+	case pgauth.SourceProcessEnvGC:
 		return 4
-	case pgauth.SourceProcessEnvBeads:
+	case pgauth.SourceScopeFile:
 		return 5
-	case pgauth.SourceCredentialsFileEnv:
+	case pgauth.SourceProcessEnvBeads:
 		return 6
-	case pgauth.SourceCredentialsFileHome:
+	case pgauth.SourceProcessEnvBeadsPg:
 		return 7
+	case pgauth.SourceCredentialsFileEnv:
+		return 8
+	case pgauth.SourceCredentialsFileHome:
+		return 9
 	}
 	return 0
 }
@@ -540,18 +557,18 @@ func errorTierFor(p perScopeReport) int {
 		// Permission error: classify by path.
 		scopeEnv := filepath.Join(p.scope.root, ".beads", ".env")
 		if filepath.Clean(p.errPerm.Path) == filepath.Clean(scopeEnv) {
-			return 4
+			return 5
 		}
 		if def := pgauth.DefaultCredentialsPath(); def != "" && filepath.Clean(p.errPerm.Path) == filepath.Clean(def) {
-			return 7
+			return 9
 		}
-		return 6
+		return 8
 	case p.errParse != nil:
-		// Parse error: tier 6 if from $BEADS_CREDENTIALS_FILE, else 7.
+		// Parse error: tier 8 if from $BEADS_CREDENTIALS_FILE, else 9.
 		if def := pgauth.DefaultCredentialsPath(); def != "" && filepath.Clean(p.errParse.Path) == filepath.Clean(def) {
-			return 7
+			return 9
 		}
-		return 6
+		return 8
 	}
 	return 0
 }

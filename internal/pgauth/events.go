@@ -11,9 +11,9 @@ type PostgresCredentialResolvedPayload struct {
 	ScopeKind string `json:"scope_kind"` // "city" or "rig"
 	ScopeName string `json:"scope_name"` // city name, or rig name (no scheme prefix)
 	Source    string `json:"source"`     // pgauth.Source.String()
-	Host      string `json:"host"`       // contract.MetadataState.PostgresHost
-	Port      string `json:"port"`       // contract.MetadataState.PostgresPort (string, mirrors metadata)
-	User      string `json:"user"`       // contract.MetadataState.PostgresUser
+	Host      string `json:"host"`       // effective endpoint host (contract.MetadataState.PostgresEndpoint)
+	Port      string `json:"port"`       // effective endpoint port (string; discrete metadata or DSN-derived)
+	User      string `json:"user"`       // effective endpoint user (may be empty when the DSN omits one)
 }
 
 // IsEventPayload marks PostgresCredentialResolvedPayload as an

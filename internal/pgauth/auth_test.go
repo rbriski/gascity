@@ -17,6 +17,7 @@ func clearProcessEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("GC_POSTGRES_PASSWORD", "")
 	t.Setenv("BEADS_POSTGRES_PASSWORD", "")
+	t.Setenv("BEADS_PG_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", "")
 	// Redirect HOME to a temp dir so tier 7 cannot leak the operator's
 	// real ~/.config/beads/credentials into a test that intends to fall
@@ -621,9 +622,11 @@ func TestSourceString_AllConstantsHaveStableOutput(t *testing.T) {
 		{SourceNone, "none"},
 		{SourceProjectedGC, "projected_gc"},
 		{SourceProjectedBeads, "projected_beads"},
+		{SourceProjectedBeadsPg, "projected_beads_pg"},
 		{SourceProcessEnvGC, "process_env_gc"},
 		{SourceScopeFile, "scope_file"},
 		{SourceProcessEnvBeads, "process_env_beads"},
+		{SourceProcessEnvBeadsPg, "process_env_beads_pg"},
 		{SourceCredentialsFileEnv, "credentials_file_env"},
 		{SourceCredentialsFileHome, "credentials_file_home"},
 	}
@@ -644,18 +647,21 @@ func TestSourceString_OutOfRangeFallsBackToNone(t *testing.T) {
 }
 
 func TestSource_StableEnumOrdering(t *testing.T) {
-	// Asserts the iota positions match the resolution-chain order. If a
-	// future change reorders constants, slice-4 event payloads (which
-	// store int-valued Source) silently break.
+	// Asserts the iota positions match the resolution-chain order. The
+	// wire contract is String() (event payloads carry the snake_case
+	// identifier, never the int); this pin exists so an accidental
+	// reorder is caught rather than silently renumbering the chain.
 	want := map[Source]int{
 		SourceNone:                0,
 		SourceProjectedGC:         1,
 		SourceProjectedBeads:      2,
-		SourceProcessEnvGC:        3,
-		SourceScopeFile:           4,
-		SourceProcessEnvBeads:     5,
-		SourceCredentialsFileEnv:  6,
-		SourceCredentialsFileHome: 7,
+		SourceProjectedBeadsPg:    3,
+		SourceProcessEnvGC:        4,
+		SourceScopeFile:           5,
+		SourceProcessEnvBeads:     6,
+		SourceProcessEnvBeadsPg:   7,
+		SourceCredentialsFileEnv:  8,
+		SourceCredentialsFileHome: 9,
 	}
 	for s, n := range want {
 		if int(s) != n {

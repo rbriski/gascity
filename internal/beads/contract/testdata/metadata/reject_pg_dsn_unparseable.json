@@ -1,0 +1,6 @@
+{
+  "database": "beads",
+  "backend": "postgres",
+  "postgres_dsn": "host=pg.example.test port=5432 user=gc_city dbname=gascity_infra",
+  "postgres_schema": "city_x"
+}

@@ -35,18 +35,27 @@ type Resolved struct {
 type Source int
 
 // Source values, in resolution-chain reading order; see ResolveFromEnv.
+//
+// BEADS_PG_PASSWORD is bd origin/main's canonical static-password variable
+// (beads internal/storage/postgres/credential.go). Within each tier family
+// (projected env, process env) the long-standing gc-projected names keep
+// precedence so existing deployments never change resolution when both are
+// set; the bd-canonical name is recognized immediately after its legacy
+// sibling so an operator who sets only BEADS_PG_PASSWORD still resolves.
 const (
 	SourceNone                Source = iota // no tier supplied a value
 	SourceProjectedGC                       // envMap["GC_POSTGRES_PASSWORD"]
 	SourceProjectedBeads                    // envMap["BEADS_POSTGRES_PASSWORD"]
+	SourceProjectedBeadsPg                  // envMap["BEADS_PG_PASSWORD"] (bd-main canonical name)
 	SourceProcessEnvGC                      // os.Getenv("GC_POSTGRES_PASSWORD")
 	SourceScopeFile                         // <scope>/.beads/.env BEADS_POSTGRES_PASSWORD
 	SourceProcessEnvBeads                   // os.Getenv("BEADS_POSTGRES_PASSWORD")
+	SourceProcessEnvBeadsPg                 // os.Getenv("BEADS_PG_PASSWORD") (bd-main canonical name)
 	SourceCredentialsFileEnv                // $BEADS_CREDENTIALS_FILE [host:port] section
 	SourceCredentialsFileHome               // ~/.config/beads/credentials [host:port] section
 )
 
-// String returns the stable snake_case identifier for s. The eight values
+// String returns the stable snake_case identifier for s. The values
 // returned here are the eventing/logging contract — slice 4's payload
 // `source` field reads them verbatim, runbooks grep on them, and they
 // must not change.
@@ -58,12 +67,16 @@ func (s Source) String() string {
 		return "projected_gc"
 	case SourceProjectedBeads:
 		return "projected_beads"
+	case SourceProjectedBeadsPg:
+		return "projected_beads_pg"
 	case SourceProcessEnvGC:
 		return "process_env_gc"
 	case SourceScopeFile:
 		return "scope_file"
 	case SourceProcessEnvBeads:
 		return "process_env_beads"
+	case SourceProcessEnvBeadsPg:
+		return "process_env_beads_pg"
 	case SourceCredentialsFileEnv:
 		return "credentials_file_env"
 	case SourceCredentialsFileHome:
@@ -110,19 +123,21 @@ func (e *CredentialsParseError) Error() string {
 //
 //  1. envMap["GC_POSTGRES_PASSWORD"]
 //  2. envMap["BEADS_POSTGRES_PASSWORD"]
-//  3. os.Getenv("GC_POSTGRES_PASSWORD")
-//  4. scopeRoot/.beads/.env BEADS_POSTGRES_PASSWORD (chmod-checked)
-//  5. os.Getenv("BEADS_POSTGRES_PASSWORD")
-//  6. $BEADS_CREDENTIALS_FILE [host:port] section (chmod-checked, parse-checked)
-//  7. ~/.config/beads/credentials [host:port] section (chmod-checked, parse-checked)
+//  3. envMap["BEADS_PG_PASSWORD"] (bd origin/main's canonical name)
+//  4. os.Getenv("GC_POSTGRES_PASSWORD")
+//  5. scopeRoot/.beads/.env BEADS_POSTGRES_PASSWORD (chmod-checked)
+//  6. os.Getenv("BEADS_POSTGRES_PASSWORD")
+//  7. os.Getenv("BEADS_PG_PASSWORD") (bd origin/main's canonical name)
+//  8. $BEADS_CREDENTIALS_FILE [host:port] section (chmod-checked, parse-checked)
+//  9. ~/.config/beads/credentials [host:port] section (chmod-checked, parse-checked)
 //
-// Pass envMap == nil to skip tiers 1 and 2.
+// Pass envMap == nil to skip tiers 1–3.
 //
 // Returns ErrNoPasswordResolvable (wrapped, identifiable via errors.Is) when
 // every tier returns empty. Returns *PermissivePermissionError when an
 // on-disk source's mode permits group or other read; the chain stops at
 // that tier rather than falling through. Returns *CredentialsParseError
-// when a credentials file is malformed at tier 6 or 7.
+// when a credentials file is malformed at tier 8 or 9.
 func ResolveFromEnv(envMap map[string]string, scopeRoot string, endpoint Endpoint) (Resolved, error) {
 	user := strings.TrimSpace(endpoint.User)
 
@@ -135,26 +150,35 @@ func ResolveFromEnv(envMap map[string]string, scopeRoot string, endpoint Endpoin
 		if value := strings.TrimSpace(envMap["BEADS_POSTGRES_PASSWORD"]); value != "" {
 			return Resolved{User: user, Password: value, Source: SourceProjectedBeads}, nil
 		}
+		// Tier 3: envMap["BEADS_PG_PASSWORD"]
+		if value := strings.TrimSpace(envMap["BEADS_PG_PASSWORD"]); value != "" {
+			return Resolved{User: user, Password: value, Source: SourceProjectedBeadsPg}, nil
+		}
 	}
 
-	// Tier 3: os.Getenv("GC_POSTGRES_PASSWORD")
+	// Tier 4: os.Getenv("GC_POSTGRES_PASSWORD")
 	if value := strings.TrimSpace(os.Getenv("GC_POSTGRES_PASSWORD")); value != "" {
 		return Resolved{User: user, Password: value, Source: SourceProcessEnvGC}, nil
 	}
 
-	// Tier 4: <scope>/.beads/.env BEADS_POSTGRES_PASSWORD (chmod-checked)
+	// Tier 5: <scope>/.beads/.env BEADS_POSTGRES_PASSWORD (chmod-checked)
 	if value, err := readEnvValueChecked(storeLocalEnvPath(scopeRoot), "BEADS_POSTGRES_PASSWORD"); err != nil {
 		return Resolved{}, err
 	} else if value != "" {
 		return Resolved{User: user, Password: value, Source: SourceScopeFile}, nil
 	}
 
-	// Tier 5: os.Getenv("BEADS_POSTGRES_PASSWORD")
+	// Tier 6: os.Getenv("BEADS_POSTGRES_PASSWORD")
 	if value := strings.TrimSpace(os.Getenv("BEADS_POSTGRES_PASSWORD")); value != "" {
 		return Resolved{User: user, Password: value, Source: SourceProcessEnvBeads}, nil
 	}
 
-	// Tier 6: $BEADS_CREDENTIALS_FILE [host:port] section
+	// Tier 7: os.Getenv("BEADS_PG_PASSWORD")
+	if value := strings.TrimSpace(os.Getenv("BEADS_PG_PASSWORD")); value != "" {
+		return Resolved{User: user, Password: value, Source: SourceProcessEnvBeadsPg}, nil
+	}
+
+	// Tier 8: $BEADS_CREDENTIALS_FILE [host:port] section
 	if path := strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE")); path != "" {
 		value, err := readCredentialsFilePassword(path, endpoint.Host, endpoint.Port)
 		if err != nil {
@@ -165,7 +189,7 @@ func ResolveFromEnv(envMap map[string]string, scopeRoot string, endpoint Endpoin
 		}
 	}
 
-	// Tier 7: platform-default credentials file [host:port] section
+	// Tier 9: platform-default credentials file [host:port] section
 	if path := DefaultCredentialsPath(); path != "" {
 		value, err := readCredentialsFilePassword(path, endpoint.Host, endpoint.Port)
 		if err != nil {

@@ -11,14 +11,14 @@ import (
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
-// scrubAmbientPostgresEnv ensures resolver tier 3/5 (process env) cannot
-// leak into a test that means to exercise tier 4 (scope file).
+// scrubAmbientPostgresEnv ensures the process-env resolver tiers (4, 6, 7)
+// cannot leak into a test that means to exercise tier 5 (scope file).
 func scrubAmbientPostgresEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"GC_POSTGRES_PASSWORD", "BEADS_POSTGRES_PASSWORD", "BEADS_CREDENTIALS_FILE"} {
+	for _, key := range []string{"GC_POSTGRES_PASSWORD", "BEADS_POSTGRES_PASSWORD", "BEADS_PG_PASSWORD", "BEADS_CREDENTIALS_FILE"} {
 		t.Setenv(key, "")
 	}
-	// Sandbox HOME so tier 7 (~/.config/beads/credentials) cannot match.
+	// Sandbox HOME so tier 9 (~/.config/beads/credentials) cannot match.
 	t.Setenv("HOME", t.TempDir())
 }
 
@@ -240,7 +240,7 @@ func TestPostgresAuthCheck_RenderExtras_FlagOff(t *testing.T) {
 // TestPostgresAuthCheck_RenderExtras_ExplainTable_OK_TierFour confirms
 // the table shape for a §3.3.1 success: header + seven tier rows +
 // footer. The winning tier is 4 (scope file); tiers 5-7 are [skip].
-func TestPostgresAuthCheck_RenderExtras_ExplainTable_OK_TierFour(t *testing.T) {
+func TestPostgresAuthCheck_RenderExtras_ExplainTable_OK_TierFive(t *testing.T) {
 	scrubAmbientPostgresEnv(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "pwu")
@@ -260,30 +260,30 @@ func TestPostgresAuthCheck_RenderExtras_ExplainTable_OK_TierFour(t *testing.T) {
 		t.Errorf("missing scope header in:\n%s", out)
 	}
 
-	// Tier 4 winner.
+	// Tier 5 (scope file) winner.
 	if !strings.Contains(out, "[YES]  ← winner") {
 		t.Errorf("missing [YES]  ← winner mark in:\n%s", out)
 	}
-	if !strings.Contains(out, "Tier 4 ") {
-		t.Errorf("missing Tier 4 row in:\n%s", out)
+	if !strings.Contains(out, "Tier 5 ") {
+		t.Errorf("missing Tier 5 row in:\n%s", out)
 	}
 
-	// Tiers 5-7 skip.
-	for _, want := range []string{"Tier 5 ", "Tier 6 ", "Tier 7 "} {
+	// Tiers 6-9 skip.
+	for _, want := range []string{"Tier 6 ", "Tier 7 ", "Tier 8 ", "Tier 9 "} {
 		if !strings.Contains(out, want+"") {
 			t.Errorf("missing %s row in:\n%s", want, out)
 		}
 	}
 	skipCount := strings.Count(out, "[skip]")
-	if skipCount < 3 {
-		t.Errorf("[skip] tokens = %d; want >=3 for tiers 5-7", skipCount)
+	if skipCount < 4 {
+		t.Errorf("[skip] tokens = %d; want >=4 for tiers 6-9", skipCount)
 	}
 
 	// Footer.
 	if !strings.Contains(out, "Source identifier: scope_file") {
 		t.Errorf("missing footer Source identifier in:\n%s", out)
 	}
-	if !strings.Contains(out, "Source position: tier 4 of 7") {
+	if !strings.Contains(out, "Source position: tier 5 of 9") {
 		t.Errorf("missing footer Source position in:\n%s", out)
 	}
 

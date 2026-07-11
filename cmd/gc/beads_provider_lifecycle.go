@@ -619,6 +619,8 @@ func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
 		PostgresPort     string `json:"postgres_port"`
 		PostgresUser     string `json:"postgres_user"`
 		PostgresDatabase string `json:"postgres_database"`
+		PostgresDSN      string `json:"postgres_dsn"`
+		PostgresSchema   string `json:"postgres_schema"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return false
@@ -629,7 +631,9 @@ func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
 	return strings.TrimSpace(raw.PostgresHost) == "" &&
 		strings.TrimSpace(raw.PostgresPort) == "" &&
 		strings.TrimSpace(raw.PostgresUser) == "" &&
-		strings.TrimSpace(raw.PostgresDatabase) == ""
+		strings.TrimSpace(raw.PostgresDatabase) == "" &&
+		strings.TrimSpace(raw.PostgresDSN) == "" &&
+		strings.TrimSpace(raw.PostgresSchema) == ""
 }
 
 // verifyManagedDoltDatabaseExistsAfterInit confirms the named database is

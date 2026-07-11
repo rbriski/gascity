@@ -632,14 +632,19 @@ func buildDesiredStateWithSessionBeads(
 					namedOnDemandTemplates[template] = true
 				}
 				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
-				// Cross-store cold-wake for named-backing pools (vp-cl4): mirror the
-				// generic-pool guard (vp-s37 / #3078 line ~598). A cold rig pool that
+				// Cross-store probe for named-backing pools (vp-cl4): mirror the
+				// generic-pool guard (vp-s37 / #3078 line ~598). A rig pool that
 				// backs a named session and has no custom scale_check must also probe
-				// the city store so that routed demand delivered there (vp-kvp) can
-				// wake the pool. Same guard conditions apply: healthy own rig store,
-				// not city-aliased, not city-scoped. The named-session target list
-				// mirrors these probes only for partial-query retention bookkeeping.
-				if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+				// the city store so that routed demand delivered there (vp-kvp) is
+				// visible. Like the generic-pool probe below, this is UNCONDITIONAL
+				// (not gated on isCold): a warm tick that cannot see the routed
+				// demand computes 0, drops the just-woken session from desiredState,
+				// and drains it before it can claim (the spawn/drain treadmill).
+				// Same guard conditions apply: healthy own rig store, not
+				// city-aliased, not city-scoped, not a store-scoped control
+				// dispatcher. The named-session target list mirrors these probes
+				// only for partial-query retention bookkeeping.
+				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
@@ -668,14 +673,28 @@ func buildDesiredStateWithSessionBeads(
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
-			// Cross-store cold-wake (FR-S0.1 / vp-s37): a cold rig pool's routed
-			// demand may live in the city store (vp-kvp cross-store delivery),
-			// which the own-rig probe above cannot see while the pool sleeps —
-			// so a sleeping rig pool would never wake to discover it. Add a
-			// city-store probe for cold rig pools so their demand reflects
-			// routed work in either store. No clamp: unlike a custom-scale_check
-			// pool — where the probe is clamped so it cannot override the custom
-			// count (see coldWakeTemplates below) — the default probe IS the
+			// Cross-store probe (FR-S0.1 / vp-s37): a rig pool's routed demand
+			// may live in the city store (vp-kvp cross-store delivery) — the
+			// leading store the reconciler is handed, where routed graph-class
+			// molecule steps land — which the own-rig probe above cannot see.
+			// Add a city-store probe for rig pools so their demand reflects
+			// routed work in either store. This probe is UNCONDITIONAL, not
+			// gated on isCold: gating it on runningSessions == 0 caused a live
+			// spawn/drain treadmill — a cold tick saw the routed city-store
+			// demand and spawned, the next (warm) tick could not see it,
+			// pool_desired collapsed to 0, and every just-spawned session was
+			// drained as "orphaned" one patrol tick later, before the agent
+			// could claim (pool_desired cycling 5,0,0 on the live trace); a
+			// pool kept warm by even one resume-tier session never re-probed
+			// the city store, so fresh routed steps sat unassigned until the
+			// pool happened to go cold. The count-form
+			// stays leak-safe warm: defaultScaleCheckCounts counts only
+			// unassigned beads whose gc.routed_to resolves to THIS template, so
+			// a rig pool cannot scale on unrelated city work, and all rig pools
+			// share one "city" store group (one extra Ready() probe pair per
+			// tick, not per pool). No clamp: unlike a custom-scale_check pool —
+			// where the probe is clamped so it cannot override the custom count
+			// (see coldWakeTemplates below) — the default probe IS the
 			// authoritative count, so it scales to total routed demand (bounded
 			// by max_active and the daemon's max_wakes_per_tick), matching the
 			// retired cold-pool-spawner's scale-to-want. A city-scoped pool's
@@ -694,9 +713,9 @@ func buildDesiredStateWithSessionBeads(
 			// per group, not across groups. Current store-map builders skip
 			// such rigs, so this is defense-in-depth against future callers.
 			// Control dispatchers are deliberately store-scoped: a rig copy cannot
-			// claim a route from the city store. Keep their cold-wake probe on the
+			// claim a route from the city store. Keep their demand probe on the
 			// owning store instead of applying generic cross-store pool delivery.
-			if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue

@@ -970,12 +970,7 @@ func (c *CachingStore) DeleteAllOrphaning(ids []string) (int, error) {
 			continue
 		}
 		seq := c.noteLocalMutationLocked(id)
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
-		c.deletedSeq[id] = seq
+		c.tombstoneLocked(id, seq)
 		c.clearDependentReadyProjectionsLocked(id)
 	}
 	c.markFreshLocked(now)

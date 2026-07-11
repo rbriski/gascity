@@ -94,15 +94,16 @@ func buildUsageBody(facts []usage.Fact, warnings []string, now time.Time) UsageB
 		RecentWindowSecs: int(usageRecentWindow / time.Second),
 		Warnings:         warnings,
 	}
+	var totals, today, recent usage.Totals
 	bySession := make(map[string]*UsageSessionRecent)
 	for _, f := range facts {
 		at := time.UnixMilli(f.At)
-		foldFact(&body.Totals, f)
+		totals.Add(f)
 		if !at.Before(midnight) {
-			foldFact(&body.Today, f)
+			today.Add(f)
 		}
 		if !at.Before(recentFrom) {
-			foldFact(&body.Recent, f)
+			recent.Add(f)
 			if f.Kind == usage.KindModel && f.Worker != "" {
 				s, ok := bySession[f.Worker]
 				if !ok {
@@ -117,6 +118,9 @@ func buildUsageBody(facts []usage.Fact, warnings []string, now time.Time) UsageB
 			}
 		}
 	}
+	body.Totals = usageTotalsBody(totals)
+	body.Today = usageTotalsBody(today)
+	body.Recent = usageTotalsBody(recent)
 	for _, s := range bySession {
 		body.RecentBySession = append(body.RecentBySession, *s)
 	}
@@ -134,21 +138,17 @@ func buildUsageBody(facts []usage.Fact, warnings []string, now time.Time) UsageB
 	return body
 }
 
-// foldFact folds one fact into a window's totals.
-func foldFact(t *UsageTotals, f usage.Fact) {
-	switch f.Kind {
-	case usage.KindModel:
-		t.Invocations++
-		t.InputTokens += f.InputTokens
-		t.OutputTokens += f.OutputTokens
-		t.CacheReadTokens += f.CacheReadTokens
-		t.CacheCreationTokens += f.CacheCreationTokens
-	case usage.KindCompute:
-		t.ComputeFacts++
-		t.WallSeconds += f.WallSeconds
-	}
-	t.CostUSDEstimate += f.CostUSDEstimate
-	if f.Unpriced {
-		t.Unpriced++
+// usageTotalsBody projects the canonical usage fold onto the wire shape.
+func usageTotalsBody(t usage.Totals) UsageTotals {
+	return UsageTotals{
+		Invocations:         t.Invocations,
+		ComputeFacts:        t.ComputeFacts,
+		InputTokens:         t.InputTokens,
+		OutputTokens:        t.OutputTokens,
+		CacheReadTokens:     t.CacheReadTokens,
+		CacheCreationTokens: t.CacheCreationTokens,
+		WallSeconds:         t.WallSeconds,
+		CostUSDEstimate:     t.CostUSDEstimate,
+		Unpriced:            t.Unpriced,
 	}
 }

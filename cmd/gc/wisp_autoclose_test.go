@@ -607,6 +607,91 @@ func TestWispAutocloseClosesRootOnlyWispViaInputConvoy(t *testing.T) {
 	}
 }
 
+// TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores pins landmine
+// #10: on a split city the synthetic input convoy + its tracks edge are created
+// in the WORK store (PrepareInvocation writes through SlingDeps.Store) while the
+// graph.v2 workflow root lives in the INFRA/graph store. The reap must probe the
+// work store for the tracking convoy — reading only the graph store finds no
+// tracks edge and silently leaks the open root back to the pool.
+func TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores(t *testing.T) {
+	work := beads.NewMemStoreHonoringIDs()  // hq- : issue + input convoy + tracks edge
+	graph := beads.NewMemStoreHonoringIDs() // gcg-: root-only graph.v2 workflow root
+
+	issue, _ := work.Create(beads.Bead{ID: "hq-issue", Title: "work issue", Type: "task"})
+	convoy, _ := work.Create(beads.Bead{
+		ID: "hq-convoy", Title: "synthetic input convoy", Type: "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err := work.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks) in work store: %v", err)
+	}
+	root, _ := graph.Create(beads.Bead{
+		ID: "gcg-root", Title: "mol-focus-review", Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+			beadmeta.RoutedToMetadataKey:        "/pool",
+		},
+	})
+
+	_ = work.Close(issue.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(work, issue.ID, &stdout, graph)
+
+	rootAfter, err := graph.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "closed" {
+		t.Fatalf("cross-store root-only wisp status = %q, want closed (reaped via work-store input convoy)", rootAfter.Status)
+	}
+	if !strings.Contains(stdout.String(), "Auto-closed workflow "+root.ID+" on "+issue.ID) {
+		t.Fatalf("stdout = %q, want workflow auto-close message", stdout.String())
+	}
+}
+
+// TestWispAutocloseClosesRootOnlyWispViaMigratedInfraConvoy guards against a
+// "swap" fix instead of a "union": `gc migrate infra-store` leaves the synthetic
+// convoy + tracks edge in the GRAPH store while the issue stays in the WORK
+// store. The reap must still find the convoy in the graph store.
+func TestWispAutocloseClosesRootOnlyWispViaMigratedInfraConvoy(t *testing.T) {
+	work := beads.NewMemStoreHonoringIDs()  // hq- : issue only
+	graph := beads.NewMemStoreHonoringIDs() // gcg-: migrated convoy + tracks + root
+
+	issue, _ := work.Create(beads.Bead{ID: "hq-issue", Title: "work issue", Type: "task"})
+	convoy, _ := graph.Create(beads.Bead{
+		ID: "gcg-convoy", Title: "migrated input convoy", Type: "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err := graph.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks) in graph store: %v", err)
+	}
+	root, _ := graph.Create(beads.Bead{
+		ID: "gcg-root", Title: "mol-focus-review", Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+			beadmeta.RoutedToMetadataKey:        "/pool",
+		},
+	})
+
+	_ = work.Close(issue.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(work, issue.ID, &stdout, graph)
+
+	rootAfter, err := graph.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "closed" {
+		t.Fatalf("migrated-convoy root-only wisp status = %q, want closed (reaped via graph-store input convoy)", rootAfter.Status)
+	}
+}
+
 func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t *testing.T) {
 	// The input-convoy reap must not steamroll an orchestrated graph.v2 workflow
 	// whose step beads are still in flight: those roots close via their

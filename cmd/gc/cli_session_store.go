@@ -17,8 +17,13 @@ import (
 // The recorder is nil: a one-shot CLI command has no live event bus, matching
 // today's behavior where these paths emit no bead events. Threading a recorder
 // so relocated CLI writes emit bead.* is a separate follow-up.
+//
+// The infra store is sourced lazily from cachedCityInfraStore, so a split city's
+// session reads/writes reach the infra store from a one-shot command the same way
+// they reach the controller. It is nil (⇒ identity to the input store) on every
+// single-store city, so wrapping stays byte-identical until the split activates.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
-	return resolveSessionStore(store, cfg, cityPath, nil)
+	return resolveSessionStore(store, cachedCityInfraStore(cityPath, cfg), cfg, cityPath, nil)
 }
 
 // cliSessionFrontDoor builds the typed session write front door over the

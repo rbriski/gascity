@@ -1279,7 +1279,7 @@ func TestEnsureDrainUnitConvoyRepairsExistingTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unit, created, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member)
+	unit, created, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member, ProcessOptions{})
 	if err != nil {
 		t.Fatalf("ensureDrainUnitConvoy: %v", err)
 	}
@@ -1347,7 +1347,7 @@ func TestEnsureDrainUnitConvoyLooksAcrossBothTiers(t *testing.T) {
 		UnitKey:  "drain-unit:test:0:" + member.ID,
 	}
 
-	if _, _, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member); err != nil {
+	if _, _, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member, ProcessOptions{}); err != nil {
 		t.Fatalf("ensureDrainUnitConvoy: %v", err)
 	}
 	if len(store.listMetadataOpts) == 0 {
@@ -1857,5 +1857,110 @@ func assertNoBlockingDep(t *testing.T, store beads.Store, issueID, dependsOnID s
 		if beads.IsReadyBlockingDependencyType(dep.Type) && dep.DependsOnID == dependsOnID {
 			t.Fatalf("dependencies for %s = %+v, want no blocking dependency on %s", issueID, deps, dependsOnID)
 		}
+	}
+}
+
+// TestDrain_CrossStoreConvoyMembership proves a split-city drain resolves an
+// input convoy whose members + tracks edges live in the WORK store while the
+// drain control + workflow root live in the GRAPH store. Ids are prefix-disjoint
+// across the stores (gcg- infra vs hq- domain), as in production, so the convoy's
+// owning store resolves unambiguously. Before the fix, membership was read from
+// the graph store (empty) and the unit-convoy tracks write failed not-found.
+func TestDrain_CrossStoreConvoyMembership(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+
+	graph := beads.NewMemStoreHonoringIDs() // infra store: control + root (gcg-)
+	work := beads.NewMemStoreHonoringIDs()  // domain store: convoy + member (hq-)
+
+	member, err := work.Create(beads.Bead{ID: "hq-member", Title: "member", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err := work.Create(beads.Bead{ID: "hq-convoy", Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoycore.TrackItem(work, convoy.ID, member.ID); err != nil {
+		t.Fatalf("TrackItem(work): %v", err)
+	}
+
+	if _, err := graph.Create(beads.Bead{
+		ID: "gcg-root", Title: "workflow", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.input_convoy_id": convoy.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	drain, err := graph.Create(beads.Bead{
+		ID: "gcg-drain", Title: "drain", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind": "drain", "gc.root_bead_id": "gcg-root",
+			"gc.drain_context": "separate", "gc.drain_formula": "drain-item", "gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ProcessControl(graph, drain, ProcessOptions{FormulaSearchPaths: []string{dir}, MemberStores: []beads.Store{work}})
+	if err != nil {
+		t.Fatalf("ProcessControl(cross-store drain): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("Action = %q, want drain-expanded", result.Action)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
+	if len(manifest.Rows) != 1 || manifest.Rows[0].MemberID != member.ID {
+		t.Fatalf("manifest rows = %+v, want one row for member %s", manifest.Rows, member.ID)
+	}
+	hasTrack, err := convoycore.HasTrack(graph, manifest.Rows[0].UnitConvoyID, member.ID)
+	if err != nil {
+		t.Fatalf("HasTrack: %v", err)
+	}
+	if !hasTrack {
+		t.Fatalf("unit convoy %s missing tracks edge to work-store member %s", manifest.Rows[0].UnitConvoyID, member.ID)
+	}
+}
+
+// TestDrain_WorkStoreConvoyWithoutMemberStoresFailsLoud is the guard canary for
+// the vacuous-success hole: a drain whose convoy is invisible (in another store,
+// no MemberStores) must fail LOUD, not silently close drain-succeeded with 0 rows.
+func TestDrain_WorkStoreConvoyWithoutMemberStoresFailsLoud(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+
+	graph := beads.NewMemStoreHonoringIDs()
+	work := beads.NewMemStoreHonoringIDs()
+	member, _ := work.Create(beads.Bead{ID: "hq-member", Title: "member", Type: "task"})
+	convoy, _ := work.Create(beads.Bead{ID: "hq-convoy", Title: "input convoy", Type: "convoy"})
+	if err := convoycore.TrackItem(work, convoy.ID, member.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.Create(beads.Bead{
+		ID: "gcg-root", Title: "workflow", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.input_convoy_id": convoy.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	drain, _ := graph.Create(beads.Bead{
+		ID: "gcg-drain", Title: "drain", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind": "drain", "gc.root_bead_id": "gcg-root",
+			"gc.drain_context": "separate", "gc.drain_formula": "drain-item", "gc.drain_member_access": "read",
+		},
+	})
+
+	_, err := ProcessControl(graph, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}) // NO MemberStores
+	if err == nil {
+		t.Fatalf("want a loud error for an invisible convoy; got nil (vacuous success)")
+	}
+	if !strings.Contains(err.Error(), convoy.ID) {
+		t.Fatalf("error should name the unresolvable convoy %s; got: %v", convoy.ID, err)
+	}
+	reloaded := mustGetBead(t, graph, drain.ID)
+	if reloaded.Status == "closed" && reloaded.Metadata["gc.outcome"] == "pass" {
+		t.Fatalf("drain closed pass with an invisible convoy (vacuous success not prevented)")
 	}
 }

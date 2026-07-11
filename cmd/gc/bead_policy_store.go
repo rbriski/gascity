@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -28,6 +31,12 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// mintReservedClassIDs is set only by wrapInfraStoreWithBeadPolicies: the
+	// infra store pre-fills a reserved-prefix ID on every explicit-ID-less create
+	// so infra beads carry a reserved class prefix (the ID-prefix half of the
+	// boundary invariant). The work store leaves this false and mints ordinary
+	// bd/Dolt ids under the scope's EffectivePrefix.
+	mintReservedClassIDs bool
 }
 
 type beadPolicyGraphStore struct {
@@ -38,12 +47,29 @@ type beadPolicyGraphStore struct {
 var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapPolicyStore(store, cfg, false)
+}
+
+// wrapInfraStoreWithBeadPolicies wraps a city's INFRA store in the same
+// production policy stack as the work store, but with reserved-prefix ID minting
+// enabled so every infra bead created through the wrapper carries the infra
+// scope's reserved class prefix. It is used exclusively when opening the infra
+// store (openCityInfraStoreResultAt), so no work-store create path mints reserved
+// ids. Like wrapStoreWithBeadPolicies it never introduces a new wrapper LAYER —
+// beadPolicyStore stays the single universal wrapper, so the optional-capability
+// assertions (GraphApplyFor / HandlesFor / StorageCreateStore) stay intact.
+func wrapInfraStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapPolicyStore(store, cfg, true)
+}
+
+func wrapPolicyStore(store beads.Store, cfg *config.City, mintReservedClassIDs bool) beads.Store {
 	if store == nil {
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:                store,
+		cfg:                  cfg,
+		mintReservedClassIDs: mintReservedClassIDs,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{
@@ -66,8 +92,40 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
+	class := coordclass.Classify(b)
+	b = s.mintInfraBeadID(b)
 	_, storage := s.policyForCreate(b)
-	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
+	return createWithStoragePolicy(s.createTarget(class), b, storage)
+}
+
+// mintInfraBeadID pre-fills b.ID with an infra-scope reserved-prefix id when this
+// is the infra store (mintReservedClassIDs) and the caller supplied no explicit
+// id. bd mints an id under the scope's issue_prefix on its own, but the infra
+// scope's issue_prefix is InfraScopePrefix ("gcg"), so a bd-native id is already
+// reserved-prefixed; the explicit pre-fill makes the reserved prefix hold on ID-
+// clobbering stores too (e.g. the MemStore-backed boundary invariant test) and
+// keeps the id stable across the create round-trip. The pre-filled id equals the
+// scope's issue_prefix, so bd accepts it as --id without --force. A caller-set id
+// is respected verbatim (graph-apply plans and stable-id creates keep their ids).
+func (s *beadPolicyStore) mintInfraBeadID(b beads.Bead) beads.Bead {
+	if !s.mintReservedClassIDs || strings.TrimSpace(b.ID) != "" {
+		return b
+	}
+	b.ID = config.MintInfraBeadID(newInfraBeadIDSuffix())
+	return b
+}
+
+// newInfraBeadIDSuffix returns a short, collision-resistant hex token for infra
+// bead ids. bd's unique-id constraint is the ultimate collision guard; 8 hex
+// chars (32 bits) keep ids compact while making an accidental clash negligible.
+func newInfraBeadIDSuffix() string {
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand failure is effectively impossible on supported platforms;
+		// fall back to a time-derived token so a create never fails on entropy.
+		return fmt.Sprintf("%08x", uint32(time.Now().UnixNano()))
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -177,6 +235,34 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// DeleteAllOrphaning forwards the orphan-preserving batch delete to the inner
+// store so the beads.BatchDeleter capability survives the policy wrapper. The
+// policy layer adds no delete-side behavior, so this is a pure delegation; a
+// backing store without the capability returns an error (never a single-id
+// fallback, which would defeat the orphan-preserving contract).
+func (s *beadPolicyStore) DeleteAllOrphaning(ids []string) (int, error) {
+	deleter, ok := s.Store.(beads.BatchDeleter)
+	if !ok {
+		return 0, fmt.Errorf("policy store: backing store %T does not support orphan-preserving batch delete", s.Store)
+	}
+	return deleter.DeleteAllOrphaning(ids)
+}
+
+// CreateWithForeignID forwards a forced foreign-prefix create to the inner store
+// so the beads.ForeignIDCreator capability survives the policy wrapper. It
+// DELIBERATELY bypasses the policy Create path (mintInfraBeadID + storage
+// policy): the migration supplies the exact stable id to preserve, so there is
+// nothing to mint, and the id-prefix force is the whole point. Storage-tier
+// selection still rides the bead's own Ephemeral/NoHistory flags, which the
+// migration copies verbatim from the source bead.
+func (s *beadPolicyStore) CreateWithForeignID(b beads.Bead) (beads.Bead, error) {
+	creator, ok := s.Store.(beads.ForeignIDCreator)
+	if !ok {
+		return beads.Bead{}, fmt.Errorf("policy store: backing store %T does not support foreign-id create", s.Store)
+	}
+	return creator.CreateWithForeignID(b)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {

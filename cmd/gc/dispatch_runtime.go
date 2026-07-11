@@ -356,6 +356,22 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if err != nil {
 		return fmt.Errorf("building work query env: %w", err)
 	}
+	// On a split city, graph-class control beads live in the infra store
+	// (<city>/.gc/infra), not the city/rig work store. The control dispatcher is
+	// ClassGraph-only, so point BOTH its discovery scan (workEnv → BEADS_DIR) and
+	// its per-bead control-store open (workDir → openControlStoreAtForCity) at the
+	// infra scope root instead of federating. Gated to the control-dispatcher agent
+	// so the shared controllerWorkQueryEnv keeps scoping worker-hook discovery to
+	// city/rig; a legacy single-store city (cityHasInfraStore false) is
+	// byte-identical to before.
+	if isWorkflowServeControlDispatcherAgent(agentCfg) && cityHasInfraStore(cityPath) {
+		infraEnv, infraErr := controlDispatcherInfraWorkEnv(cityPath, cfg)
+		if infraErr != nil {
+			return fmt.Errorf("building control-dispatcher infra work query env: %w", infraErr)
+		}
+		workDir = infraScopeRoot(cityPath)
+		workEnv = infraEnv
+	}
 	cityName := loadedCityName(cfg, cityPath)
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell

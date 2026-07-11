@@ -309,7 +309,11 @@ const (
 	bdTransientReadAttempts  = 3
 )
 
-var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*BdStore)(nil)
+	_ BatchDeleter                  = (*BdStore)(nil)
+	_ ForeignIDCreator              = (*BdStore)(nil)
+)
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)
@@ -892,9 +896,30 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	return s.CreateWithStorage(b, StorageDefault)
 }
 
+// CreateWithForeignID persists a new bead whose explicit ID may carry a prefix
+// that differs from the store's own database prefix (a "foreign" prefix). bd
+// rejects a mismatched --id prefix unless --force is passed; this method adds
+// --force so a migration can create a bead in the infra store (issue_prefix=gcg)
+// while KEEPING its legacy HQ/rig-era id (e.g. gc-… / ga-…). It satisfies
+// ForeignIDCreator. The bead MUST carry a non-empty ID; use the ordinary Create
+// path for store-minted ids.
+func (s *BdStore) CreateWithForeignID(b Bead) (Bead, error) {
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("bd create: CreateWithForeignID requires an explicit ID")
+	}
+	return s.createWithStorage(b, StorageDefault, true)
+}
+
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	return s.createWithStorage(b, storage, false)
+}
+
+// createWithStorage is the shared bd-create implementation. forceID adds --force
+// so an explicit ID whose prefix differs from the database prefix is accepted
+// (used only by CreateWithForeignID for the store-migration copy).
+func (s *BdStore) createWithStorage(b Bead, storage StorageClass, forceID bool) (Bead, error) {
 	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)
@@ -910,6 +935,9 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 	hasStableID := false
 	if id := strings.TrimSpace(b.ID); id != "" {
 		args = append(args, "--id", id)
+		if forceID {
+			args = append(args, "--force")
+		}
 		hasStableID = true
 	}
 	if b.Priority != nil {
@@ -2099,6 +2127,142 @@ func (s *BdStore) Delete(id string) error {
 		return fmt.Errorf("deleting bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// bdBatchDeleteChunkSize bounds how many ids a single delete statement carries so
+// a very large delete set does not build an unbounded SQL IN-clause. Ordinary
+// migrations fit in one statement.
+const bdBatchDeleteChunkSize = 200
+
+// testBatchDeleteChunkSize is the chunk size DeleteAllOrphaning actually uses.
+// It defaults to bdBatchDeleteChunkSize and is overridable only by tests (to
+// force the multi-chunk path without seeding 200+ beads).
+var testBatchDeleteChunkSize = bdBatchDeleteChunkSize
+
+// DeleteAllOrphaning permanently removes every bead in ids via a raw
+// `DELETE FROM <table> WHERE id IN (...)` issued through `bd sql`, NOT through
+// `bd delete`. This is deliberate and load-bearing.
+//
+// `bd delete` — in BOTH its single-id and batch forms — runs
+// updateTextReferencesInIssues (cmd/bd/delete.go), which text-rewrites every
+// CONNECTED bead's free-text fields (description/notes/design) to "[deleted:ID]".
+// For the domain/infra store migration that is a data-corruption bomb: a STAYING
+// work bead that references a moved infra bead's id would have its description
+// silently mangled. A raw set-based DELETE removes only the target rows and lets
+// the schema's ON DELETE CASCADE foreign keys clean up the deleted beads' own
+// dependency/label/event/comment rows; it performs NO application-level text
+// rewrite, so staying beads are left untouched.
+//
+// It deletes from both the issues and wisps tables (a bead is in exactly one, so
+// the non-matching statement is a harmless zero-row delete), covering the wisp
+// tier. It satisfies BatchDeleter; see that interface for the full rationale and
+// the note that inbound dependency ROWS still cascade away on bd's schema.
+func (s *BdStore) DeleteAllOrphaning(ids []string) (int, error) {
+	ids = dedupeNonEmpty(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	deleted := 0
+	for _, chunk := range chunkIDs(ids, testBatchDeleteChunkSize) {
+		n, err := s.deleteRowsBySQL(chunk)
+		if err != nil {
+			return deleted, err
+		}
+		deleted += n
+	}
+	return deleted, nil
+}
+
+// deleteRowsBySQL deletes the given ids from both the issues and wisps tables via
+// `bd sql`, returning the total rows removed. Each id lives in exactly one table,
+// so the other statement removes zero rows.
+func (s *BdStore) deleteRowsBySQL(ids []string) (int, error) {
+	total := 0
+	for _, table := range []string{"issues", "wisps"} {
+		literals := make([]string, len(ids))
+		for i, id := range ids {
+			literals[i] = bdSQLStringLiteral(id)
+		}
+		query := fmt.Sprintf("DELETE FROM %s WHERE id IN (%s)", table, strings.Join(literals, ", "))
+		out, err := s.runBDTransientWriteOutput("sql", "--json", query)
+		if err != nil {
+			// The wisps table may not exist on a store that never created a wisp;
+			// treat a missing-table error as zero rows for that table.
+			if table == "wisps" && isBdMissingTableError(err) {
+				continue
+			}
+			return total, fmt.Errorf("deleting beads from %s %v: %w", table, ids, err)
+		}
+		if n, ok := parseRowsAffectedJSON(out); ok {
+			total += n
+		}
+	}
+	return total, nil
+}
+
+// isBdMissingTableError reports whether err indicates a referenced table does not
+// exist (e.g. a store that never materialized the wisps table).
+func isBdMissingTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") ||
+		strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "unknown table")
+}
+
+// parseRowsAffectedJSON extracts a rows-affected count from a `bd sql --json`
+// write result. bd emits {"rows_affected": N} for a non-SELECT statement; older
+// shapes may nest it. Returns (0,false) when no count is present.
+func parseRowsAffectedJSON(out []byte) (int, bool) {
+	trimmed := bytes.TrimSpace(extractJSON(out))
+	if len(trimmed) == 0 {
+		return 0, false
+	}
+	var envelope struct {
+		RowsAffected *int `json:"rows_affected"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err == nil && envelope.RowsAffected != nil {
+		return *envelope.RowsAffected, true
+	}
+	return 0, false
+}
+
+// dedupeNonEmpty returns ids with empty/whitespace entries dropped and
+// duplicates removed, preserving first-seen order.
+func dedupeNonEmpty(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// chunkIDs splits ids into chunks of at most size (size>=1), preserving order.
+func chunkIDs(ids []string, size int) [][]string {
+	if size < 1 {
+		size = 1
+	}
+	var chunks [][]string
+	for i := 0; i < len(ids); i += size {
+		end := i + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[i:end])
+	}
+	return chunks
 }
 
 // List returns beads matching the query via bd list and bd query.

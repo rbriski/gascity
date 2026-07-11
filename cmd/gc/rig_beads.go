@@ -105,5 +105,19 @@ func collectRigRoutes(cityPath string, cfg *config.City) []rigRoute {
 			AbsDir: cfg.Rigs[i].Path,
 		})
 	}
+	// On a split city the infra scope (<city>/.gc/infra, reserved prefix "gcg")
+	// is a routable peer: the domain scopes need gcg → .gc/infra so bd's
+	// subprocess prefix routing can resolve infra ids read-only, and the infra
+	// scope needs the domain prefixes for cross-boundary dependency targets. Since
+	// writeAllRoutes writes a per-scope routes.jsonl mapping every entry, adding
+	// this one route makes routing bidirectional. cityHasInfraStore is already
+	// true by first `gc start`/`gc rig` (seedInitInfraScope writes config.yaml at
+	// gc init). No-op on a single-store city.
+	if cityHasInfraStore(cityPath) {
+		rigs = append(rigs, rigRoute{
+			Prefix: config.InfraScopePrefix,
+			AbsDir: infraScopeRoot(cityPath),
+		})
+	}
 	return rigs
 }

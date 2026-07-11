@@ -468,7 +468,7 @@ func TestOpenRigAwareStoreUsesProviderAwareRigStore(t *testing.T) {
 
 	setCwd(t, cityDir)
 	var stderr bytes.Buffer
-	store, code := openRigAwareStore([]string{"fe-1"}, &stderr)
+	store, _, code := openRigAwareStore([]string{"fe-1"}, &stderr)
 	if code != 0 {
 		t.Fatalf("openRigAwareStore() = %d, stderr = %s", code, stderr.String())
 	}
@@ -498,7 +498,7 @@ func TestOpenRigAwareStoreLegacyFileCityUsesSharedCityStore(t *testing.T) {
 
 	setCwd(t, cityDir)
 	var stderr bytes.Buffer
-	store, code := openRigAwareStore([]string{"fe-1"}, &stderr)
+	store, _, code := openRigAwareStore([]string{"fe-1"}, &stderr)
 	if code != 0 {
 		t.Fatalf("openRigAwareStore() = %d, stderr = %s", code, stderr.String())
 	}

@@ -56,6 +56,8 @@ type controllerState struct {
 	cacheCtx               context.Context
 	beadStores             map[string]beads.Store
 	cityBeadStore          beads.Store // city-level store for session beads
+	cityInfraStore         beads.Store // infra store for coordination classes on a split city; nil on a single-store city
+	cityInfraDiagnostic    *beads.BeadsDiagnostic
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
@@ -97,6 +99,13 @@ var beadEventWatcherRetryDelay = time.Second
 // newControllerState. Test code can swap this to return an in-memory store
 // and skip spawning managed dolt (~12s per call).
 var newControllerStateOpenCityStore = openCityStoreResultAt
+
+// newControllerStateOpenCityInfraStore opens the city's infra bead store for
+// newControllerState, parallel to newControllerStateOpenCityStore. It returns
+// (zero, false, nil) on a single-store city (every existing city), so the
+// controller's cityInfraStore stays nil and class routing is identity. Test code
+// swaps this to inject an in-memory infra store and exercise the split.
+var newControllerStateOpenCityInfraStore = openCityInfraStoreResultAt
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
 // the same native-selection factory as direct city/rig store opens. Tests swap
@@ -152,6 +161,17 @@ func newControllerState(
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
+	// Open the city's infra store for the coordination classes (best-effort).
+	// Absent on every single-store city, so cityInfraStore stays nil and class
+	// routing is identity. The infra store gets the same CachingStore +
+	// event-feed treatment as the city store, or reconciler reads regress to a
+	// bd-subprocess per read.
+	if openedInfra, present, err := newControllerStateOpenCityInfraStore(cityPath); err != nil {
+		fmt.Fprintf(os.Stderr, "api: city infra bead store: %v (infra-class routing disabled)\n", err)
+	} else if present {
+		cs.cityInfraStore = wrapWithCachingStore(ctx, openedInfra.Store, ep, true)
+		cs.cityInfraDiagnostic = diagnosticPtr(openedInfra.Diagnostic)
+	}
 	// Open city-level store for session beads and mail (best-effort).
 	if opened, err := newControllerStateOpenCityStore(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
@@ -159,7 +179,7 @@ func newControllerState(
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
-		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
+		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cs.cityInfraStore, cfg, cityPath, ep)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
@@ -517,6 +537,13 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 			return workflowStoreRefForDir(rigPath, cityPath, cityName, cs.cfg)
 		}
 	}
+	// A reserved-prefix (infra, gcg-) bead deliberately gets no store-ref here: the
+	// molecule/wisp graph walk resolves through GraphBeadStore() (the infra store)
+	// in runBeadCloseAutoclose, and infra workflow roots carry the SourceStoreRef
+	// of their originating WORK source bead (a rig/city ref), not a synthetic
+	// infra ref — so an empty ref (bead-id-only match) is correct and a synthetic
+	// "city-infra" ref would mismatch every stamped root. Byte-identical to the
+	// pre-split fall-through for these ids.
 	return ""
 }
 
@@ -551,12 +578,15 @@ func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store
 		}
 	}
 
-	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
+	stores := make([]beads.Store, 0, len(cs.beadStores)+2)
 	for _, s := range cs.beadStores {
 		stores = append(stores, s)
 	}
 	if cs.cityBeadStore != nil {
 		stores = append(stores, cs.cityBeadStore)
+	}
+	if cs.cityInfraStore != nil {
+		stores = append(stores, cs.cityInfraStore)
 	}
 	return stores
 }
@@ -591,6 +621,14 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 			matchedLen = len(prefix)
 			matchedStore = store
 		}
+	}
+	// A reserved coordination-class id-prefix (gcg/gcs/gcm/gco/gcn) is owned by
+	// the city infra store on a split city — the infra store mints those prefixes,
+	// so a bead.* event for such an id routes straight to the infra cache instead
+	// of the all-stores fallback. On a single-store city cityInfraStore is nil, so
+	// this never matches and resolution is byte-identical to before.
+	if cs.cityInfraStore != nil {
+		match(config.InfraScopePrefix, cs.cityInfraStore)
 	}
 	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
 	for _, rig := range cs.cfg.Rigs {
@@ -627,6 +665,25 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Recompute the usage sink so a changed [usage].provider takes effect on
 	// reload instead of writing to the old sink until the controller restarts.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
+	// Reopen the city's infra store symmetrically with the city store. Absent on
+	// a single-store city, so newInfraStore stays nil and class routing is
+	// identity. Three outcomes are distinguished so the swap can retain a working
+	// handle across a transient open error (rather than silently deactivating the
+	// split): a successful reopen (present, no error) yields a fresh handle; a
+	// deactivation (present=false, no error) yields nil; an open error retains the
+	// prior handle. The retain decision is resolved below, coupled with the city
+	// store, so the mail provider and the class accessors never disagree about
+	// which infra store is live.
+	var newInfraStore beads.Store
+	var newInfraDiagnostic *beads.BeadsDiagnostic
+	openedInfra, infraPresent, infraErr := newControllerStateOpenCityInfraStore(cs.cityPath)
+	switch {
+	case infraErr != nil:
+		fmt.Fprintf(os.Stderr, "api: city infra bead store reload: %v\n", infraErr) //nolint:errcheck // best-effort stderr
+	case infraPresent:
+		newInfraStore = wrapWithCachingStore(cs.cacheCtx, openedInfra.Store, cs.eventProv, true)
+		newInfraDiagnostic = diagnosticPtr(openedInfra.Diagnostic)
+	}
 	// Reopen city-level store for session beads and mail.
 	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath)
 	if err != nil {
@@ -634,18 +691,45 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	cityStore := openedCityStore.Store
 	cityBeadsDiagnostic := diagnosticPtr(openedCityStore.Diagnostic)
+
+	// Compute the EFFECTIVE infra store used for BOTH the rebuilt mail provider and
+	// the class accessors so they can never disagree (split-brain). On a genuine
+	// open error the prior handle is retained; on a successful reopen or a real
+	// deactivation (present=false) the new value (fresh handle or nil) wins. This
+	// read is safe unlocked: update() is serialized by updateMu, so cs.cityInfraStore
+	// cannot change under us between here and the swap.
+	effectiveInfra := newInfraStore
+	effectiveInfraDiagnostic := newInfraDiagnostic
+	infraSwap := infraErr == nil // false ⇒ retain the prior handle unchanged
+	if !infraSwap {
+		cs.mu.RLock()
+		effectiveInfra = cs.cityInfraStore
+		effectiveInfraDiagnostic = cs.cityInfraDiagnostic
+		cs.mu.RUnlock()
+	}
+
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
-		cityMailProv = newCityMailProvider(cityStore, cfg, cs.cityPath, cs.eventProv)
+		cityMailProv = newCityMailProvider(cityStore, effectiveInfra, cfg, cs.cityPath, cs.eventProv)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
 	}
 
 	// Swap under short critical section.
 	var oldCityStore beads.Store
+	var oldInfraStore beads.Store
 	var oldRigStores map[string]beads.Store
+	// The infra store's swap and close are coupled with the city store: the mail
+	// provider (which embeds effectiveInfra as its message + session store) is only
+	// rebuilt when the city store reopen succeeds. If the city reopen fails, the
+	// retained provider still references the old infra store, so the old infra
+	// handle must NOT be swapped out or closed (use-after-close). We only touch the
+	// infra store when cityStore != nil AND this is a real infra decision
+	// (infraSwap), and even then only close the old handle when it is no longer
+	// referenced by the effective (retained-or-new) value.
+	infraDecided := cityStore != nil && infraSwap
 	cs.mu.Lock()
 	cs.cfg = cfg
 	if rawCfg != nil {
@@ -655,6 +739,11 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
+	if infraDecided {
+		oldInfraStore = cs.cityInfraStore
+		cs.cityInfraStore = effectiveInfra
+		cs.cityInfraDiagnostic = effectiveInfraDiagnostic
+	}
 	if cityStore != nil {
 		oldCityStore = cs.cityBeadStore
 		cs.cityBeadStore = cityStore
@@ -667,6 +756,16 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
+	if infraDecided && oldInfraStore != nil && oldInfraStore != effectiveInfra {
+		scheduleCloseBeadStoreHandle("city infra bead store", oldInfraStore)
+	}
+	// A fresh infra handle was opened (CachingStore reconciler running) but not
+	// adopted because the city reopen failed and the split swap is coupled with it.
+	// Close it so the reconcile goroutine and backing handle do not leak. nil on
+	// every single-store city, so this never fires there.
+	if !infraDecided && newInfraStore != nil {
+		scheduleCloseBeadStoreHandle("city infra bead store (unadopted reload)", newInfraStore)
+	}
 	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
 		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
 	}
@@ -1200,6 +1299,17 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 	return scopedStoreLike(ctx, cityPath, cfg, existing)
 }
 
+// CityInfraBeadStore returns the city's infra bead store — the store owning the
+// coordination classes (sessions, graph, messaging, orders, nudges) on a split
+// city. It is nil on every single-store city, so the class resolvers route to
+// the work store (identity). It is the source the typed accessors thread into
+// resolveClassStore, and CityRuntime reads it via cityInfraBeadStore().
+func (cs *controllerState) CityInfraBeadStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.cityInfraStore
+}
+
 // NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
 // default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
 // to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
@@ -1211,7 +1321,7 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.NudgesStore{Store: resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.NudgesStore{Store: resolveNudgesStore(cs.cityBeadStore, cs.cityInfraStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // SessionsBeadStore returns the store backing session-class beads. At the default
@@ -1225,13 +1335,13 @@ func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.SessionStore{Store: resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.SessionStore{Store: resolveSessionStore(cs.cityBeadStore, cs.cityInfraStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
-// GraphBeadStore returns the store backing graph-class beads. At the default backend
-// resolveGraphStore returns cityBeadStore, so this is byte-identical to CityBeadStore;
-// when [beads.classes.graph] is relocated it returns the dedicated graph store at the
-// legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
+// GraphBeadStore returns the store backing graph-class beads. On a single-store
+// city resolveGraphStore returns cityBeadStore, so this is byte-identical to
+// CityBeadStore; on a split city it returns the city infra store, which owns the
+// graph coordination class (and mints the gcg- reserved prefix). cs.eventProv is
 // passed for signature parity with the other accessors but is ignored by
 // resolveGraphStore: the graph store stays event-silent, matching the prior Router
 // graph leg. The result is wrapped in the strongly-typed beads.GraphStore so the
@@ -1240,7 +1350,7 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cityInfraStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
@@ -1826,9 +1936,15 @@ func (cs *controllerState) Poke() {
 // WaitForSessionCommandable waits until the controller has reconciled an async
 // session create into a lifecycle state that can accept normal commands.
 func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessionID string) (session.Info, error) {
-	store := cs.CityBeadStore()
+	// Session beads are the sessions coordination class: on a split city they
+	// live in the infra store (SessionsBeadStore routes there), so the
+	// commandability catalog must read from it. Reading CityBeadStore (the work
+	// store) made a deferred create wait miss its own gcg- session id
+	// ("getting session: getting bead ...: bead not found"). Identity to
+	// CityBeadStore on a single-store city.
+	store := cs.SessionsBeadStore().Store
 	if store == nil {
-		return session.Info{}, errors.New("city bead store is unavailable")
+		return session.Info{}, errors.New("session bead store is unavailable")
 	}
 	catalog, err := workerSessionCatalogWithConfig(cs.CityPath(), store, cs.SessionProvider(), cs.Config())
 	if err != nil {

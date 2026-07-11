@@ -30,7 +30,11 @@ type FileStore struct {
 	freshness fileFreshness
 }
 
-var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*FileStore)(nil)
+	_ BatchDeleter                  = (*FileStore)(nil)
+	_ ForeignIDCreator              = (*FileStore)(nil)
+)
 
 type fileFreshness struct {
 	known   bool
@@ -204,6 +208,30 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 	return result, nil
 }
 
+// CreateWithForeignID delegates to MemStore.CreateWithForeignID and flushes to
+// disk, rolling back on a flush failure. It satisfies ForeignIDCreator.
+func (fs *FileStore) CreateWithForeignID(b Bead) (Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return Bead{}, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return Bead{}, err
+	}
+	snap := fs.snapshotLocked()
+	result, err := fs.MemStore.CreateWithForeignID(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return Bead{}, err
+	}
+	return result, nil
+}
+
 // Update delegates to MemStore.Update and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Update(id string, opts UpdateOpts) error {
@@ -318,6 +346,33 @@ func (fs *FileStore) Delete(id string) error {
 		return err
 	}
 	return nil
+}
+
+// DeleteAllOrphaning delegates to MemStore.DeleteAllOrphaning and flushes once.
+// If the disk flush fails, the in-memory mutation is rolled back. It preserves
+// inbound dangling edges exactly as the MemStore twin does.
+func (fs *FileStore) DeleteAllOrphaning(ids []string) (int, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return 0, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return 0, err
+	}
+	snap := fs.snapshotLocked()
+	removed, err := fs.MemStore.DeleteAllOrphaning(ids)
+	if err != nil {
+		return 0, err
+	}
+	if removed > 0 {
+		if err := fs.save(); err != nil {
+			fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+			return 0, err
+		}
+	}
+	return removed, nil
 }
 
 // CloseAll closes multiple beads and sets metadata, then flushes once.

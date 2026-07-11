@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -974,5 +975,63 @@ title = "Do work for {{convoy_id}}"
 	}
 	if !reflect.DeepEqual(conflictErr.WorkflowIDs, []string{legacyRoot.ID}) {
 		t.Fatalf("WorkflowIDs = %+v, want [%s]", conflictErr.WorkflowIDs, legacyRoot.ID)
+	}
+}
+
+func TestEnsureFormulaCookAttachDep_CrossStoreStampsLinkageNotDanglingEdge(t *testing.T) {
+	work := beads.NewMemStoreHonoringIDs()
+	graph := beads.NewMemStoreHonoringIDs()
+	parent := mustCreateBead(t, work, beads.Bead{ID: "ga-parent", Title: "src", Type: "task"})
+	root := mustCreateBead(t, graph, beads.Bead{ID: "gcg-root", Title: "wf", Type: "task"})
+
+	if err := ensureFormulaCookAttachDep(work, graph, parent.ID, root.ID, "rig:test"); err != nil {
+		t.Fatalf("ensureFormulaCookAttachDep(cross-store): %v", err)
+	}
+	// No dangling cross-store blocks edge in the work store.
+	deps, err := work.DepList(parent.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	for _, d := range deps {
+		if d.DependsOnID == root.ID && d.Type == "blocks" {
+			t.Fatal("cross-store attach must NOT write a dangling work-store blocks edge to the infra root")
+		}
+	}
+	// Bidirectional linkage metadata instead.
+	p, _ := work.Get(parent.ID)
+	if got := p.Metadata[beadmeta.AttachedWorkflowRootMetadataKey]; got != root.ID {
+		t.Fatalf("parent gc.attached_workflow_root = %q, want %q", got, root.ID)
+	}
+	r, _ := graph.Get(root.ID)
+	if got := r.Metadata[beadmeta.AttachBeadIDMetadataKey]; got != parent.ID {
+		t.Fatalf("root gc.attach_bead_id = %q, want %q", got, parent.ID)
+	}
+	if got := r.Metadata[beadmeta.AttachStoreRefMetadataKey]; got != "rig:test" {
+		t.Errorf("root gc.attach_store_ref = %q, want rig:test", got)
+	}
+
+	// Missing root -> fail loud.
+	if err := ensureFormulaCookAttachDep(work, graph, parent.ID, "gcg-absent", "rig:test"); err == nil {
+		t.Fatal("attaching to an absent workflow root must fail loud")
+	}
+}
+
+func TestEnsureFormulaCookAttachDep_SameStoreKeepsLocalEdge(t *testing.T) {
+	store := beads.NewMemStoreHonoringIDs()
+	parent := mustCreateBead(t, store, beads.Bead{ID: "ga-parent", Title: "src", Type: "task"})
+	root := mustCreateBead(t, store, beads.Bead{ID: "ga-root", Title: "wf", Type: "task"})
+	// graphStore == workStore (single-store identity) -> local blocks edge, unchanged.
+	if err := ensureFormulaCookAttachDep(store, store, parent.ID, root.ID, ""); err != nil {
+		t.Fatalf("ensureFormulaCookAttachDep(same-store): %v", err)
+	}
+	deps, _ := store.DepList(parent.ID, "down")
+	found := false
+	for _, d := range deps {
+		if d.DependsOnID == root.ID && d.Type == "blocks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("same-store attach must keep the local blocks edge")
 	}
 }

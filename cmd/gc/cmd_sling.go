@@ -403,27 +403,21 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		SP:       sp,
 		Runner:   runner,
 		Store:    store,
-		StoreRef: storeRef,
+		// GraphStore routes the workflow/wisp molecule explosion to the graph
+		// coordination-class store. On a split city (infra store present) the
+		// graph class resolves to the infra store, so the molecule root + steps
+		// land there instead of the rig/work store. On a legacy single-store
+		// city cachedCityInfraStore returns nil, so we leave GraphStore unset
+		// (nil) — SlingDeps.graphStore() then collapses onto Store exactly as
+		// before this seam, preserving the historical rig-store graph
+		// destination byte-for-byte. We do NOT set GraphStore to the city store
+		// on legacy cities: that would move new molecules off the rig store, a
+		// behavior change without a boundary to justify it (design open
+		// question #5).
+		GraphStore: slingSplitGraphStore(store, cfg, cityPath),
+		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
-			stores, skips, err := openSourceWorkflowStores(cfg, cityPath, "")
-			if err != nil {
-				return nil, err
-			}
-			if len(skips) > 0 {
-				// The sling callback cannot push into SlingResult from
-				// this depth, but stderr is the only channel operators
-				// look at; silence here means singleton coverage can
-				// degrade without any breadcrumb.
-				fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(skips)) //nolint:errcheck
-			}
-			out := make([]sling.SourceWorkflowStore, 0, len(stores))
-			for _, storeView := range stores {
-				out = append(out, sling.SourceWorkflowStore{
-					Store:    storeView.store,
-					StoreRef: workflowStoreRefForDir(storeView.path, cityPath, cityName, cfg),
-				})
-			}
-			return out, nil
+			return slingSourceWorkflowStores(cfg, cityPath, cityName, stderr)
 		},
 	}
 
@@ -432,6 +426,78 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+}
+
+// slingSplitGraphStore returns the SlingDeps.GraphStore value for a sling: the
+// graph coordination-class store on a split city (the infra store), or nil on a
+// legacy single-store city so SlingDeps.graphStore() collapses onto Store
+// exactly as before the seam.
+//
+// The nil-on-legacy gate is deliberate and load-bearing for byte-identity:
+// cliGraphStore over the rig `store` returns that same rig store on a legacy
+// city (cachedCityInfraStore is nil ⇒ resolveGraphStore is identity), which is
+// what graphStore() would fall back to anyway — but wiring it as an explicit
+// nil keeps the SlingDeps shape identical to today's (GraphStore unset) rather
+// than pinning it to a concrete value, and documents that the divergence is
+// scoped to split cities only.
+// slingSourceWorkflowStores builds the SlingDeps.SourceWorkflowStores list: the
+// set of stores the source-workflow singleton scan (ListLiveRoots) and the
+// previous-workflow_id lookup consult. Workflow roots carry gc.source_bead_id
+// and, on a split city, live in the infra store — so this uses the graph-root
+// opener (openSourceWorkflowGraphStores, includeInfra=true) rather than the
+// work-class opener. Using the work-class opener let a duplicate workflow launch
+// (the singleton scan missed the live infra root) and could spuriously fail the
+// post-launch visibility check. On a legacy single-store city this is
+// byte-identical to the old work-only wiring.
+func slingSourceWorkflowStores(cfg *config.City, cityPath, cityName string, stderr io.Writer) ([]sling.SourceWorkflowStore, error) {
+	return slingSourceWorkflowStoresWith(cfg, cityPath, cityName, stderr, func(dir string) (beads.Store, error) {
+		return openStoreAtForCity(dir, cityPath)
+	})
+}
+
+// slingSourceWorkflowStoresWith is the testable core of slingSourceWorkflowStores
+// with the store-opening callback injected (mirrors
+// makeSourceWorkflowStoresListerWithOpenStore). A skip for the infra store on a
+// split city is escalated to a hard error — a broken infra store means the
+// singleton invariant is silently open — while a broken rig store keeps today's
+// warn-and-continue tolerance.
+func slingSourceWorkflowStoresWith(cfg *config.City, cityPath, cityName string, stderr io.Writer, openStore func(string) (beads.Store, error)) ([]sling.SourceWorkflowStore, error) {
+	stores, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", true, openStore)
+	if err != nil {
+		return nil, err
+	}
+	infraDir := infraScopeRoot(cityPath)
+	var rigSkips []sourceWorkflowStoreSkip
+	for _, skip := range skips {
+		if filepath.Clean(skip.path) == filepath.Clean(infraDir) {
+			return nil, fmt.Errorf("opening infra source-workflow store %s (singleton scan would miss infra-resident workflow roots): %w", infraDir, skip.err)
+		}
+		rigSkips = append(rigSkips, skip)
+	}
+	if len(rigSkips) > 0 {
+		// The sling callback cannot push into SlingResult from this depth, but
+		// stderr is the only channel operators look at; silence here means
+		// singleton coverage can degrade without any breadcrumb.
+		fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(rigSkips)) //nolint:errcheck
+	}
+	out := make([]sling.SourceWorkflowStore, 0, len(stores))
+	for _, storeView := range stores {
+		out = append(out, sling.SourceWorkflowStore{
+			Store:    storeView.store,
+			StoreRef: workflowStoreRefForDir(storeView.path, cityPath, cityName, cfg),
+		})
+	}
+	return out, nil
+}
+
+func slingSplitGraphStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
+	if cachedCityInfraStore(cityPath, cfg) == nil {
+		// Legacy single-store city: leave GraphStore unset so graphStore()
+		// falls back to Store (the rig/work store), byte-identical to today.
+		return nil
+	}
+	// Split city: route the molecule explosion to the graph-class (infra) store.
+	return cliGraphStore(store, cfg, cityPath)
 }
 
 func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
@@ -550,6 +616,15 @@ func probeExistingSlingSourceBead(cfg *config.City, cityPath, beadID string) (ex
 func slingSourceStoreRootForCandidate(cfg *config.City, cityPath, beadID string) (string, string, bool) {
 	if cfg == nil || !isBeadIDCandidate(beadID) {
 		return "", "", false
+	}
+	// A reserved coordination-class id-prefix (the infra scope's "gcg") resolves
+	// to the infra scope root on a split city, so `gc sling <gcg-...>` opens the
+	// store that actually holds the infra/graph bead. Gated on cityHasInfraStore
+	// so a single-store city keeps the historical HQ/rig-only resolution.
+	if cityHasInfraStore(cityPath) {
+		if bp := sling.BeadPrefix(beadID); config.IsReservedClassPrefix(bp) {
+			return resolveStoreScopeRoot(cityPath, infraScopeRoot(cityPath)), bp, true
+		}
 	}
 	bp := sling.BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
@@ -1542,7 +1617,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: cliNudgesStore(store, target.cfg, target.cityPath)}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

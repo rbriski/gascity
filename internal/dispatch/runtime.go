@@ -796,9 +796,19 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
-	if outcome == beadmeta.OutcomePass {
+	switch outcome {
+	case beadmeta.OutcomePass:
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))
+		}
+	case beadmeta.OutcomeFail:
+		// Failures leave the domain parent OPEN (a human investigates via the
+		// human-visible queue), but on a split city the parent got NO signal at
+		// all — the DAG closed in the infra store and nothing crossed the boundary.
+		// Stamp the failing step's diagnostics onto the still-open parent so it is
+		// visibly failed and redispatchable.
+		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead), opts); err != nil {
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
 		}
 	}
 	if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
@@ -865,6 +875,16 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 		if nextRef != "" {
 			effectiveRef = nextRef
 			if opts.ResolveStoreRef == nil {
+				// A cross-store source_store_ref that cannot be resolved means the
+				// domain parent lives in another store this finalize cannot reach.
+				// On the close (mutate) path that would silently STRAND the parent
+				// open forever, so fail LOUD instead of the traced no-op — the
+				// finalizer stays open and retries once the resolver is wired
+				// (production always sets it for workflow-finalize). The read-only
+				// preflight keeps the best-effort no-op.
+				if mutate {
+					return fmt.Errorf("close-source-chain root=%s: cannot close cross-store source bead %s (ref %s): no store-ref resolver provided; domain parent would be stranded open", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				}
 				opts.tracef("close-source-chain root=%s stop reason=missing_resolver source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 				return nil
 			}
@@ -1514,6 +1534,87 @@ func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, er
 		}
 	}
 	return outcome, nil
+}
+
+// resolveFinalizeFailureDiagnostics returns the failure metadata to stamp on the
+// domain parent when a workflow finalizes FAILED: the first failed blocker's
+// gc.failure_reason / gc.failure_class / gc.failure_subject. Best-effort — a read
+// error or a fail with no failed blocker (e.g. an abort-scope failure) still
+// yields a generic reason so the parent always carries a marker.
+func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead) map[string]string {
+	failure := map[string]string{beadmeta.FailureReasonMetadataKey: "workflow_failed"}
+	deps, err := store.DepList(finalizer.ID, "down")
+	if err != nil {
+		return failure
+	}
+	for _, dep := range deps {
+		if dep.Type != "blocks" {
+			continue
+		}
+		blocker, err := store.Get(dep.DependsOnID)
+		if err != nil || !beadOutcomeFailed(blocker) {
+			continue
+		}
+		failure[beadmeta.FailureSubjectMetadataKey] = blocker.ID
+		if r := strings.TrimSpace(blocker.Metadata[beadmeta.FailureReasonMetadataKey]); r != "" {
+			failure[beadmeta.FailureReasonMetadataKey] = r
+		}
+		if c := strings.TrimSpace(blocker.Metadata[beadmeta.FailureClassMetadataKey]); c != "" {
+			failure[beadmeta.FailureClassMetadataKey] = c
+		}
+		return failure
+	}
+	return failure
+}
+
+// annotateSourceBeadFailure stamps failure diagnostics onto the domain parent of
+// a failed workflow (the first gc.source_bead_id hop from the root), resolving a
+// cross-store gc.source_store_ref via opts.ResolveStoreRef. It leaves the parent
+// OPEN and redispatchable (no close). A cross-store ref with no resolver fails
+// LOUD (the parent would otherwise never learn its DAG failed); an empty ref
+// (same-store parent), a missing source, or a deleted parent is a traced no-op.
+func annotateSourceBeadFailure(rootStore beads.Store, rootID string, failure map[string]string, opts ProcessOptions) error {
+	root, err := rootStore.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("loading root %s for failure annotation: %w", rootID, err)
+	}
+	parentID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	if parentID == "" {
+		opts.tracef("annotate-source-failure root=%s stop reason=no_source", rootID)
+		return nil
+	}
+	ref := strings.TrimSpace(root.Metadata[sourceworkflow.SourceStoreRefMetadataKey])
+	parentStore := rootStore
+	if ref != "" {
+		if opts.ResolveStoreRef == nil {
+			return fmt.Errorf("annotate-source-failure root=%s: cannot mark cross-store source bead %s (ref %s): no store-ref resolver provided", rootID, parentID, sourceChainStoreLabel(ref))
+		}
+		resolved, err := opts.ResolveStoreRef(ref)
+		if err != nil {
+			return fmt.Errorf("resolving source store %q: %w", ref, err)
+		}
+		if resolved == nil {
+			return fmt.Errorf("resolving source store %q: nil store", ref)
+		}
+		parentStore = resolved
+	}
+	apply := func() error {
+		if _, err := parentStore.Get(parentID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				opts.tracef("annotate-source-failure root=%s stop reason=deleted_parent source=%s ref=%s", rootID, parentID, sourceChainStoreLabel(ref))
+				return nil
+			}
+			return fmt.Errorf("getting source bead %s in %s: %w", parentID, sourceChainStoreLabel(ref), err)
+		}
+		return parentStore.SetMetadataBatch(parentID, failure)
+	}
+	if opts.SourceWorkflowLock != nil {
+		return opts.SourceWorkflowLock(ref, parentID, apply)
+	}
+	return apply()
 }
 
 func resolveBlockedOutcome(store beads.Store, beadID string) (string, error) {

@@ -201,3 +201,48 @@ func TestCollectRigRoutes_UsesEffectivePrefix(t *testing.T) {
 		t.Errorf("backend prefix = %q, want %q", routes[2].Prefix, "ba")
 	}
 }
+
+func TestCollectRigRoutes_IncludesInfraScopeOnSplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	// Activate the split exactly as gc init does: the infra scope's canonical
+	// config.yaml IS the cityHasInfraStore boundary (main.go).
+	infraBeads := filepath.Join(infraScopeRoot(cityPath), ".beads")
+	if err := os.MkdirAll(infraBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(infraBeads, "config.yaml"), []byte("issue_prefix: gcg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !cityHasInfraStore(cityPath) {
+		t.Fatal("cityHasInfraStore false after writing the infra scope marker")
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "my-city", Prefix: "mc"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join(cityPath, "fe"), Prefix: "fe"}},
+	}
+	routes := collectRigRoutes(cityPath, cfg)
+
+	var infra *rigRoute
+	for i := range routes {
+		if routes[i].Prefix == config.InfraScopePrefix {
+			infra = &routes[i]
+		}
+	}
+	if infra == nil {
+		t.Fatalf("split-city route set missing infra scope %q; got %+v", config.InfraScopePrefix, routes)
+	}
+	if infra.AbsDir != infraScopeRoot(cityPath) {
+		t.Fatalf("infra route AbsDir = %q, want %q", infra.AbsDir, infraScopeRoot(cityPath))
+	}
+}
+
+func TestCollectRigRoutes_NoInfraScopeOnSingleStore(t *testing.T) {
+	cityPath := t.TempDir() // no infra marker
+	cfg := &config.City{Workspace: config.Workspace{Name: "c", Prefix: "mc"}}
+	for _, r := range collectRigRoutes(cityPath, cfg) {
+		if r.Prefix == config.InfraScopePrefix {
+			t.Fatalf("single-store city must not get an infra route; got %+v", r)
+		}
+	}
+}

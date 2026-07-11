@@ -694,10 +694,21 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Reserved coordination-class prefixes are a non-fatal advisory until
-	// per-class stores activate; warn but do not block startup.
-	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	// Reserved coordination-class prefixes are a non-fatal advisory on a
+	// single-store city (per-class routing is inert). On a split city the infra
+	// store actively mints these prefixes, so a work-store prefix that shadows one
+	// is a hard ambiguity — fail startup instead of warning.
+	if reserved := config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)); len(reserved) > 0 {
+		if cityHasInfraStore(cityPath) {
+			for _, w := range reserved {
+				fmt.Fprintf(stderr, "gc start: %s\n", w) //nolint:errcheck // best-effort stderr
+			}
+			fmt.Fprintln(stderr, "gc start: a work-store prefix collides with a reserved infra-store class prefix on a split city; rename it before starting") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		for _, w := range reserved {
+			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -62,6 +63,22 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	stores := s.state.BeadStores()
+	// Split city: graph-class beads (gcg- molecule roots, steps, control beads)
+	// live in the infra store, which BeadStores() does not include. Inject it as
+	// a federation leg or the whole DAG is invisible with an authoritative 200.
+	// ':' cannot appear in a rig name, so the synthetic key never collides with a
+	// real rig, and an explicit ?rig=<name> request never selects it. Copy the
+	// map so we never mutate the state's (fakeState returns its map by reference).
+	infraLeg := ""
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		merged := make(map[string]beads.Store, len(stores)+1)
+		for k, v := range stores {
+			merged[k] = v
+		}
+		infraLeg = "infra:" + s.state.CityName()
+		merged[infraLeg] = graph
+		stores = merged
+	}
 	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
 	var rigNames []string
 	if input.Rig != "" {
@@ -133,6 +150,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 					pa.success()
 				} else {
 					pa.record("rig "+rigName, err)
+					if rigName == infraLeg {
+						// The infra leg is the graph plane, not a rig: a hard read
+						// failure there means the whole DAG is unreadable, so fail
+						// LOUD rather than degrade to a work-only Partial 200 (the
+						// authoritative-failure contract, matching the ready arm).
+						return nil, huma.Error503ServiceUnavailable("infra store list read failed (graph plane unreadable): " + err.Error())
+					}
 					if boundedMode {
 						// This rig's exact Count was baked into boundedCounts
 						// upfront, but its List failed so its rows never reach
@@ -321,6 +345,29 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		}
 		federate("rig "+rigName, stores[rigName])
 	}
+	// Split city: graph-class ready work (gcg- steps, control beads, molecule
+	// roots) lives in the infra store, which BeadStores() does not include —
+	// federate it or the whole execution DAG is invisible behind an
+	// authoritative-looking 200. Unlike a degraded rig (which flags Partial and
+	// keeps serving), an infra-leg error is an AUTHORITATIVE failure: a work-only
+	// 200 would hide the entire graph plane, so fail LOUD (mirrors
+	// claimableStore.Ready's fail-loud contract on the CLI claim plane). No-op on
+	// a single-store city where GraphBeadStore() == CityBeadStore().
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		pa.attempt()
+		ready, err := beads.HandlesFor(graph).Live.Ready()
+		if err != nil {
+			return nil, huma.Error503ServiceUnavailable("infra store ready read failed (graph plane unreadable): " + err.Error())
+		}
+		pa.success()
+		for _, b := range ready {
+			if seen[b.ID] {
+				continue
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
+	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
@@ -369,7 +416,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 
-	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
+	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root, s.memberStoreComplement(foundStore)...)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}

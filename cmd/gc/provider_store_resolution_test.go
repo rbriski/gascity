@@ -74,7 +74,7 @@ prefix = "FE"
 	}
 	chdirProviderAwareTest(t, cityDir)
 
-	store, code := openRigAwareStore([]string{"FE-42"}, &bytes.Buffer{})
+	store, _, code := openRigAwareStore([]string{"FE-42"}, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("openRigAwareStore code = %d, want 0", code)
 	}

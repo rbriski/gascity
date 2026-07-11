@@ -18,7 +18,24 @@ const (
 	jsonSchemaManifestRole  = "manifest"
 	jsonSchemaResultRole    = "result"
 	jsonSchemaFailureRole   = "failure"
+	// jsonRawPassthroughAnnotation marks a command that owns its own JSON payload
+	// shape and opts out of the structured --json contract, exactly like the
+	// built-in `gc bd` passthrough. Its stdout is streamed raw; no schema is
+	// required or validated. Use it only for commands that intentionally emit a
+	// non-envelope shape (e.g. `gc ready`, which emits a bd-compatible bead array
+	// the hook/reconciler already parse).
+	jsonRawPassthroughAnnotation = "gc.json.raw_passthrough"
 )
+
+// commandOwnsRawJSONPayload reports whether a command opts out of the structured
+// --json contract because it emits its own raw JSON payload: the built-in `gc bd`
+// passthrough, or any command annotated jsonRawPassthroughAnnotation.
+func commandOwnsRawJSONPayload(cmd *cobra.Command, commandPath []string) bool {
+	if isBDCommandPath(commandPath) {
+		return true
+	}
+	return cmd != nil && strings.TrimSpace(cmd.Annotations[jsonRawPassthroughAnnotation]) == "true"
+}
 
 type jsonSchemaManifest struct {
 	SchemaVersion string                     `json:"schema_version"`
@@ -97,7 +114,7 @@ func handleJSONContractRequest(root *cobra.Command, args []string, stdout, stder
 	}
 
 	commandPath := commandPathWords(cmd)
-	if isBDCommandPath(commandPath) {
+	if commandOwnsRawJSONPayload(cmd, commandPath) {
 		return false, 0
 	}
 	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
@@ -120,7 +137,7 @@ func shouldBufferJSONExecution(root *cobra.Command, args []string) bool {
 		return true
 	}
 	commandPath := commandPathWords(request.cmd)
-	if isBDCommandPath(commandPath) {
+	if commandOwnsRawJSONPayload(request.cmd, commandPath) {
 		return false
 	}
 	schema, err := readCommandSchema(request.cmd, commandPath, jsonSchemaResultRole)
@@ -139,7 +156,7 @@ func shouldReportJSONExecutionError(root *cobra.Command, args []string) bool {
 		return true
 	}
 	commandPath := commandPathWords(request.cmd)
-	if isBDCommandPath(commandPath) {
+	if commandOwnsRawJSONPayload(request.cmd, commandPath) {
 		return false
 	}
 	if _, err := readCommandSchema(request.cmd, commandPath, jsonSchemaResultRole); err != nil {

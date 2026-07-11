@@ -17,13 +17,32 @@ type MemStore struct {
 	beads []Bead
 	deps  []Dep
 	seq   int
+	// honorExplicitID makes Create keep a caller-supplied non-empty, non-colliding
+	// bead ID instead of overwriting it with the sequence id. Off by default so
+	// NewMemStore is byte-identical to before; opt in with NewMemStoreHonoringIDs
+	// for tests that need a store which mirrors a real bd store's `--id` behavior
+	// (e.g. the infra store's reserved-prefix minting).
+	honorExplicitID bool
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ BatchDeleter                  = (*MemStore)(nil)
+	_ ForeignIDCreator              = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
 	return &MemStore{}
+}
+
+// NewMemStoreHonoringIDs returns an empty MemStore that honors a caller-supplied
+// explicit bead ID on Create (matching BdStore's `bd create --id` semantics),
+// falling back to the sequence id only when no id is set or the supplied id
+// already exists. Use it where a test needs a store that round-trips stable ids
+// like a real bd/Dolt store does — the default NewMemStore clobbers every id.
+func NewMemStoreHonoringIDs() *MemStore {
+	return &MemStore{honorExplicitID: true}
 }
 
 // NewMemStoreFrom returns a MemStore seeded with existing beads, deps, and
@@ -78,7 +97,12 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	defer m.mu.Unlock()
 
 	m.seq++
-	b.ID = fmt.Sprintf("gc-%d", m.seq)
+	// Honor a caller-supplied explicit ID only when opted in (see
+	// NewMemStoreHonoringIDs) and it does not collide; otherwise mint the
+	// sequence id. Default MemStore always mints, staying byte-identical.
+	if explicit := strings.TrimSpace(b.ID); !m.honorExplicitID || explicit == "" || m.hasBeadID(explicit) {
+		b.ID = fmt.Sprintf("gc-%d", m.seq)
+	}
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"
@@ -105,6 +129,54 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		})
 	}
 	return cloneBead(stored), nil
+}
+
+// CreateWithForeignID persists a new bead KEEPING its explicit ID unconditionally
+// (even when this MemStore does not otherwise honor explicit ids), so it mirrors
+// BdStore's forced foreign-prefix create for the store-migration copy. It errors
+// on an empty id or an id that already exists. It satisfies ForeignIDCreator.
+func (m *MemStore) CreateWithForeignID(b Bead) (Bead, error) {
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hasBeadID(b.ID) {
+		return Bead{}, fmt.Errorf("creating bead with foreign id %q: id already exists", b.ID)
+	}
+	m.seq++
+	b.Status = "open"
+	if b.Type == "" {
+		b.Type = "task"
+	}
+	b.CreatedAt = time.Now()
+	b.UpdatedAt = b.CreatedAt
+	stored := cloneBead(b)
+	m.beads = append(m.beads, stored)
+	for _, need := range stored.Needs {
+		depType := "blocks"
+		dependsOnID := need
+		if strings.Contains(need, ":") {
+			parts := strings.SplitN(need, ":", 2)
+			if parts[0] != "" && parts[1] != "" {
+				depType = parts[0]
+				dependsOnID = parts[1]
+			}
+		}
+		m.deps = append(m.deps, Dep{IssueID: stored.ID, DependsOnID: dependsOnID, Type: depType})
+	}
+	return cloneBead(stored), nil
+}
+
+// hasBeadID reports whether a bead with the given id already exists. Callers must
+// hold m.mu.
+func (m *MemStore) hasBeadID(id string) bool {
+	for i := range m.beads {
+		if m.beads[i].ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Update modifies fields of an existing bead. Only non-nil fields in opts
@@ -442,6 +514,50 @@ func (m *MemStore) Delete(id string) error {
 		}
 	}
 	return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+}
+
+// DeleteAllOrphaning removes every bead in ids and drops only the deleted beads'
+// OWN outbound dependency rows (edges whose issue_id is in the set), mirroring
+// bd's batch-delete fk cascade. Inbound edges — a staying bead depending on a
+// deleted bead — are PRESERVED as dangling rows, matching bd's orphan-preserving
+// batch semantics (bd delete <id1> <id2> … --force). This is the in-memory twin
+// of BdStore.DeleteAllOrphaning; it never strips references from staying beads.
+// Missing ids are ignored (idempotent). Returns the number of beads removed.
+func (m *MemStore) DeleteAllOrphaning(ids []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	del := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			del[id] = struct{}{}
+		}
+	}
+	if len(del) == 0 {
+		return 0, nil
+	}
+	kept := m.beads[:0]
+	removed := 0
+	for _, b := range m.beads {
+		if _, drop := del[b.ID]; drop {
+			removed++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	m.beads = kept
+	// Drop only the deleted beads' OWN outbound edges (issue_id in the set).
+	// Inbound edges (depends_on_id in the set, issue_id staying) survive as
+	// dangling rows — the orphan-preserving half of the contract.
+	deps := m.deps[:0]
+	for _, d := range m.deps {
+		if _, drop := del[d.IssueID]; drop {
+			continue
+		}
+		deps = append(deps, d)
+	}
+	m.deps = deps
+	return removed, nil
 }
 
 // Ping always succeeds for MemStore (in-memory, always available).

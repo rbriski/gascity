@@ -179,7 +179,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			return nil, apierr.ConvoyNotFound.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		children, err := convoycore.Members(store, id, true, s.memberStoreComplement(store)...)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
@@ -416,7 +416,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		children, err := convoycore.Members(store, id, true, s.memberStoreComplement(store)...)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}

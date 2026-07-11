@@ -75,7 +75,11 @@ func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*ag
 		}
 	}
 	if state.sessionID != "" {
-		if store := s.state.CityBeadStore(); store != nil {
+		// The session catalog reads the session bead (for SessionKey), so it must
+		// source from the session-class store: on a split city the session bead
+		// lives in the infra store, not the work store. SessionsBeadStore().Store
+		// == CityBeadStore() on a single-store city, so this is byte-identical there.
+		if store := s.state.SessionsBeadStore().Store; store != nil {
 			if catalog, err := s.workerSessionCatalog(store); err == nil {
 				if info, err := catalog.Get(state.sessionID); err == nil {
 					state.sessionKey = strings.TrimSpace(info.SessionKey)
@@ -223,7 +227,11 @@ func (s *Server) agentWorkerHandle(name string, cfg *config.City) agentPeekHandl
 		return nil
 	}
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	handle, _ := s.workerHandleForSessionTarget(s.state.CityBeadStore(), sessionName)
+	// workerHandleForSessionTarget resolves the session by name against the store
+	// (reads session beads), so it must use the session-class store — the infra
+	// store on a split city. Byte-identical on a single-store city where
+	// SessionsBeadStore().Store == CityBeadStore().
+	handle, _ := s.workerHandleForSessionTarget(s.state.SessionsBeadStore().Store, sessionName)
 	return handle
 }
 

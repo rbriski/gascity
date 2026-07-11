@@ -9930,3 +9930,144 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 		}
 	}
 }
+
+// TestProcessWorkflowFinalizeFailsLoudWhenCrossStoreRefUnresolvable pins P1
+// landmine #3: a successful finalize whose workflow root carries a cross-store
+// gc.source_store_ref but is handed NO store-ref resolver must FAIL LOUD (keeping
+// the finalizer open for retry), not silently no-op and strand the domain parent
+// open forever.
+func TestProcessWorkflowFinalizeFailsLoudWhenCrossStoreRefUnresolvable(t *testing.T) {
+	t.Parallel()
+	rigStore := beads.NewMemStore()
+
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   "ga-city-parent",
+			"gc.source_store_ref": "city:test", // cross-store ref, but no resolver below
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Clean up", Type: "task", Status: "closed",
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	_, err := ProcessControl(rigStore, finalizer, ProcessOptions{}) // ResolveStoreRef nil
+	if err == nil {
+		t.Fatal("want a loud error closing a cross-store source chain with no resolver; got nil (parent silently stranded)")
+	}
+	if !strings.Contains(err.Error(), "ga-city-parent") && !strings.Contains(err.Error(), "resolver") {
+		t.Fatalf("error should explain the unresolvable cross-store source close; got: %v", err)
+	}
+	// The finalizer must stay OPEN so it retries once the resolver is wired.
+	fin, gerr := rigStore.Get(finalizer.ID)
+	if gerr != nil {
+		t.Fatalf("get finalizer: %v", gerr)
+	}
+	if fin.Status == "closed" {
+		t.Fatalf("finalizer closed on a fail-loud source-close error; want open for retry")
+	}
+}
+
+// TestProcessWorkflowFinalizeStampsFailureOnOpenDomainParent pins P1 landmine #5
+// (the DAG-complete parent lifecycle): a FAILED workflow finalize now stamps the
+// failing step's diagnostics onto the cross-store domain parent and leaves it
+// OPEN/redispatchable, so the human-visible source bead shows why the DAG failed
+// instead of getting no cross-store signal at all.
+func TestProcessWorkflowFinalizeStampsFailureOnOpenDomainParent(t *testing.T) {
+	t.Parallel()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{Title: "Adopt PR: example#9", Type: "task"})
+
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			"gc.source_bead_id": citySource.ID, "gc.source_store_ref": "city:test",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Review", Type: "task", Status: "closed",
+		Metadata: map[string]string{"gc.outcome": "fail", "gc.failure_reason": "postcondition_failed", "gc.failure_class": "hard"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	resolver := func(ref string) (beads.Store, error) {
+		if ref == "city:test" {
+			return cityStore, nil
+		}
+		return nil, fmt.Errorf("unknown ref %s", ref)
+	}
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: resolver})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
+	}
+	if result.Action != "workflow-fail" {
+		t.Fatalf("Action = %q, want workflow-fail", result.Action)
+	}
+
+	parent, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("get domain parent: %v", err)
+	}
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open (failure leaves it redispatchable)", parent.Status)
+	}
+	if got := parent.Metadata["gc.failure_reason"]; got != "postcondition_failed" {
+		t.Fatalf("parent gc.failure_reason = %q, want postcondition_failed (no cross-store failure signal before the fix)", got)
+	}
+	if got := parent.Metadata["gc.failure_class"]; got != "hard" {
+		t.Errorf("parent gc.failure_class = %q, want hard", got)
+	}
+	if got := parent.Metadata["gc.failure_subject"]; got != cleanup.ID {
+		t.Errorf("parent gc.failure_subject = %q, want %q", got, cleanup.ID)
+	}
+}
+
+// TestProcessWorkflowFinalizeFailAnnotationFailsLoudWithoutResolver: a failed DAG
+// whose parent is cross-store but no resolver is wired must fail loud (finalizer
+// stays open), not silently skip the failure annotation.
+func TestProcessWorkflowFinalizeFailAnnotationFailsLoudWithoutResolver(t *testing.T) {
+	t.Parallel()
+	rigStore := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "wf", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			"gc.source_bead_id": "ga-parent", "gc.source_store_ref": "city:test",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "step", Type: "task", Status: "closed",
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "fin", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	if _, err := ProcessControl(rigStore, finalizer, ProcessOptions{}); err == nil {
+		t.Fatal("want a loud error marking a cross-store failed parent with no resolver; got nil")
+	}
+	fin, _ := rigStore.Get(finalizer.ID)
+	if fin.Status == "closed" {
+		t.Fatal("finalizer closed on a fail-loud annotation error; want open for retry")
+	}
+}

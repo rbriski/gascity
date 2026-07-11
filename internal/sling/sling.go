@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -1259,6 +1260,33 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 
 // InstantiateSlingFormula compiles and instantiates a formula, applying
 // graph routing if the formula is a graph.v2 workflow.
+// recipeMaterializesInfraClass reports whether instantiating recipe produces
+// infrastructure-class beads (a graph.v2 workflow, a wisp, a convergence root, or
+// any graph-marked step) that belong in the infra store — versus a plain v1
+// formula whose molecule/step scaffolding is work-class. It mirrors
+// coordclass.ClassifyGraphPlan's wholesale rule (any infra-class node ⇒ the whole
+// molecule is infra-class) over the compiled recipe steps, so a sling routes the
+// molecule to the store that its wholesale class owns and the domain/infra
+// boundary holds. Called after stampGraphV2RootMetadata, so a graph.v2 root
+// already carries gc.kind=workflow; a wisp root carries gc.kind=wisp from compile.
+func recipeMaterializesInfraClass(recipe *formula.Recipe) bool {
+	if recipe == nil {
+		return false
+	}
+	for _, step := range recipe.Steps {
+		b := beads.Bead{Type: step.Type, Labels: step.Labels, Metadata: step.Metadata}
+		if coordclass.Classify(b).IsInfrastructure() {
+			return true
+		}
+	}
+	return false
+}
+
+// InstantiateSlingFormula compiles the named formula and materializes its
+// molecule for a sling, routing the whole molecule to the store its wholesale
+// class implies: a graph.v2/wisp/convergence recipe lands in deps.graphStore()
+// (the infra store on a split city), a plain v1 recipe in deps.Store (the work
+// store). It returns the materialized molecule result.
 func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
 	compileStart := time.Now()
@@ -1325,7 +1353,19 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // atomic across processes.
 func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
-	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
+	// Route the whole molecule to the store its wholesale coordination class owns.
+	// graph.v2 workflows, wisps, convergence, and any graph-marked recipe are
+	// infra-class and go to the graph (infra) store; a plain v1 formula
+	// materializes a WORK-class molecule (root "molecule", steps "step" — no graph
+	// markers, no gc.root_bead_id) that must land in the work/domain store. Without
+	// this split, a v1 sling on a split city strands work-class molecule/step beads
+	// in the infra store and violates the domain/infra boundary invariant. On a
+	// single-store city graphStore()==deps.Store, so this is a no-op (byte-identical).
+	moleculeStore := graphStore
+	if !recipeMaterializesInfraClass(recipe) {
+		moleculeStore = deps.Store
+	}
+	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, moleculeStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
@@ -1355,7 +1395,7 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 			return nil, err
 		}
 	}
-	result, err := molecule.Instantiate(ctx, graphStore, recipe, opts)
+	result, err := molecule.Instantiate(ctx, moleculeStore, recipe, opts)
 	if err != nil {
 		SlingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
 		if len(replacedSnapshots) > 0 {

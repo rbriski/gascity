@@ -4028,14 +4028,14 @@ func validateDependsOn(agents []Agent) error {
 // prefixes. The hqPrefix is the city's HQ prefix for collision checks.
 //
 // Reserved coordination-class id-prefixes (gcg/gcm/gcs/gco/gcn) are not rejected
-// here. On a default city the relocated SQLite class stores are an identity
-// seam — every class store resolves to the work store and the by-id class-prefix
-// routing arm never fires — so a work prefix that shadows one is harmless until
-// the multi-backend fork makes per-class stores independently routable. Making
-// the prefix fatal would break gc start and config reload for an existing city
-// that already uses one, so ReservedPrefixWarnings surfaces it as a non-fatal
-// advisory instead. Promote it back into a hard error here once per-class
-// routing activates.
+// here. On a single-store city the class stores are an identity seam — every
+// class store resolves to the work store and the by-id class-prefix routing arm
+// never fires — so a work prefix that shadows one is harmless. Making the prefix
+// fatal here would break gc start and config reload for an existing city that
+// already uses one, so ReservedPrefixWarnings surfaces it as a non-fatal advisory
+// instead. The gc start / config-reload call sites promote it to a hard error on
+// a split city (cityHasInfraStore), where the infra store actively mints these
+// prefixes and the ambiguity is real.
 func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	seenNames := make(map[string]bool, len(rigs))
 	seenPrefixes := make(map[string]string) // lowercase prefix → rig name (for error messages)
@@ -4072,12 +4072,13 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix
-// (gcg/gcm/gcs/gco/gcn). The relocated SQLite class stores that mint these
-// prefixes are an identity seam on a default city, so such a prefix is allowed
-// today (see ValidateRigs) and only becomes ambiguous once the multi-backend
-// fork activates per-class routing. Callers should surface these as non-fatal
-// operator warnings so an existing city or rig that already uses one keeps
-// starting and reloading while it still has time to rename. The hqPrefix must
+// (gcg/gcm/gcs/gco/gcn). The class stores that mint these prefixes are an
+// identity seam on a single-store city, so such a prefix is allowed there (see
+// ValidateRigs) and only becomes ambiguous once the domain/infra store split
+// activates the second (infra) store. Callers surface these as non-fatal
+// operator warnings on a single-store city so an existing city or rig that
+// already uses one keeps starting and reloading while it still has time to
+// rename, and promote them to a hard error on a split city. The hqPrefix must
 // already be site-bound resolved (e.g. via EffectiveHQPrefix).
 func ReservedPrefixWarnings(rigs []Rig, hqPrefix string) []string {
 	var warnings []string

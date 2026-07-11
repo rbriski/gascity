@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -309,6 +310,135 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesReviewArtifactTemplate(t 
 	want := retryEvalResult{Outcome: "pass"}
 	if got != want {
 		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
+	}
+}
+
+// writeRequiredArtifact creates a non-empty artifact file inside worktree and
+// returns its basename for use as a gc.required_artifact template.
+func writeRequiredArtifact(t *testing.T, worktree, name string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(worktree, name), []byte("artifact\n"), 0o644); err != nil {
+		t.Fatalf("write required artifact: %v", err)
+	}
+	return name
+}
+
+// TestClassifyRetryAttemptWithPostconditionsResolvesSourceBeadAcrossStores pins
+// landmine #14: on a split city the workflow root lives in the graph store but
+// its source bead (carrying work_dir) lives in the work store, resolved via
+// gc.source_store_ref. Reading the source through the ambient graph store gets a
+// clean ErrNotFound and misclassifies a genuinely-passing attempt as transient
+// missing_required_artifact_context, burning retries.
+func TestClassifyRetryAttemptWithPostconditionsResolvesSourceBeadAcrossStores(t *testing.T) {
+	t.Parallel()
+
+	workStore := beads.NewMemStoreHonoringIDs()
+	graphStore := beads.NewMemStoreHonoringIDs()
+	worktree := t.TempDir()
+	artifact := writeRequiredArtifact(t, worktree, "codex-review.md")
+
+	source := mustCreateWorkflowBead(t, workStore, beads.Bead{
+		ID: "hq-source", Title: "source", Type: "task",
+		Metadata: map[string]string{"work_dir": worktree},
+	})
+	root := mustCreateWorkflowBead(t, graphStore, beads.Bead{
+		ID: "gcg-root", Title: "workflow", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.source_bead_id":   source.ID,
+			"gc.source_store_ref": "city:foo",
+		},
+	})
+
+	var resolverRef string
+	opts := ProcessOptions{ResolveStoreRef: func(ref string) (beads.Store, error) {
+		resolverRef = ref
+		return workStore, nil
+	}}
+	got, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": artifact,
+		},
+	}, opts)
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
+	}
+	if want := (retryEvalResult{Outcome: "pass"}); got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (cross-store source misclassified?)", got, want)
+	}
+	if resolverRef != "city:foo" {
+		t.Fatalf("resolver called with ref %q, want city:foo", resolverRef)
+	}
+}
+
+// TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFailsLoud:
+// a source ref present but no resolver wired must fail loud, not silently burn a
+// retry attempt with a fabricated missing_required_artifact_context reason.
+func TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	graphStore := beads.NewMemStoreHonoringIDs()
+	root := mustCreateWorkflowBead(t, graphStore, beads.Bead{
+		ID: "gcg-root", Title: "workflow", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.source_bead_id":   "hq-source", // deliberately absent from graphStore
+			"gc.source_store_ref": "city:foo",
+		},
+	})
+
+	_, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{}) // nil ResolveStoreRef
+	if err == nil {
+		t.Fatal("want a loud error when a cross-store source ref has no resolver, got nil (silent transient)")
+	}
+	if !strings.Contains(err.Error(), "no store-ref resolver provided") {
+		t.Fatalf("error = %v, want it to mention the missing resolver", err)
+	}
+}
+
+// TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores:
+// the gc.input_convoy_id hop has no store ref on the root, so it must be resolved
+// through opts.MemberStores (the work-store tail), like the drain lane.
+func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores(t *testing.T) {
+	t.Parallel()
+
+	workStore := beads.NewMemStoreHonoringIDs()
+	graphStore := beads.NewMemStoreHonoringIDs()
+	worktree := t.TempDir()
+	artifact := writeRequiredArtifact(t, worktree, "codex-review.md")
+
+	convoy := mustCreateWorkflowBead(t, workStore, beads.Bead{
+		ID: "hq-convoy", Title: "input convoy", Type: "convoy",
+		Metadata: map[string]string{"work_dir": worktree},
+	})
+	root := mustCreateWorkflowBead(t, graphStore, beads.Bead{
+		ID: "gcg-root", Title: "workflow", Type: "task",
+		Metadata: map[string]string{
+			"gc.kind":            "workflow",
+			"gc.input_convoy_id": convoy.ID,
+		},
+	})
+
+	got, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": artifact,
+		},
+	}, ProcessOptions{MemberStores: []beads.Store{workStore}})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
+	}
+	if want := (retryEvalResult{Outcome: "pass"}); got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via MemberStores?)", got, want)
 	}
 }
 

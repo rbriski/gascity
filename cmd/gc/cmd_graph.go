@@ -8,7 +8,9 @@ import (
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/spf13/cobra"
 )
 
@@ -80,35 +82,48 @@ type graphJSONSummary struct {
 
 // cmdGraph is the CLI entry point.
 func cmdGraph(args []string, opts graphOpts, stdout, stderr io.Writer) int {
-	store, code := openRigAwareStore(args, stderr)
+	store, memberStores, code := openRigAwareStore(args, stderr)
 	if store == nil {
 		return code
 	}
-	return doGraph(store, args, opts, stdout, stderr)
+	return doGraph(store, args, opts, stdout, stderr, memberStores...)
 }
 
 // openRigAwareStore opens a bead store, routing to the correct rig directory
 // if the first bead arg has a rig prefix. Uses rig-level Dolt config when
-// the rig has its own Dolt server.
-func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
+// the rig has its own Dolt server. On a split city it also routes a reserved
+// graph-class id (gcg-) to the infra store and returns the cross-class member
+// stores to probe when expanding a convoy, so a convoy's tracked members render
+// fully instead of as "unknown" placeholders. memberStores is nil on a legacy
+// single-store city.
+func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, []beads.Store, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc graph: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, nil, 1
 	}
 
-	// Try to resolve rig from the first bead arg's prefix.
+	// Try to resolve rig / graph-class routing from the first bead arg's prefix.
 	if len(args) > 0 {
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr == nil {
+			// Reserved graph-class id on a split city: the DAG (roots, steps,
+			// control beads, drain-unit convoys) lives in the infra store, which
+			// no rig/HQ prefix or route reaches — without this arm `gc graph gcg-…`
+			// hits the city store and returns NotFound.
+			if config.IsReservedClassPrefix(sling.BeadPrefix(args[0])) && cityHasInfraStore(cityPath) {
+				if infra := cachedCityInfraStore(cityPath, cfg); infra != nil {
+					return infra, graphWorkMemberStores(cfg, cityPath), 0
+				}
+			}
 			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
 				store, err := openStoreAtForCity(storeDir, cityPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
 					fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-					return nil, 1
+					return nil, nil, 1
 				}
-				return store, 0
+				return store, graphInfraMemberStores(cfg, cityPath), 0
 			}
 		}
 	}
@@ -117,9 +132,42 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, nil, 1
 	}
-	return store, 0
+	cfg, _ := loadCityConfig(cityPath, stderr)
+	return store, graphInfraMemberStores(cfg, cityPath), 0
+}
+
+// graphInfraMemberStores returns the infra store as the cross-class member probe
+// for a work-store primary on a split city (a work convoy can track members the
+// migrate step moved to infra). Nil on a single-store city.
+func graphInfraMemberStores(cfg *config.City, cityPath string) []beads.Store {
+	if !cityHasInfraStore(cityPath) {
+		return nil
+	}
+	if infra := cachedCityInfraStore(cityPath, cfg); infra != nil {
+		return []beads.Store{infra}
+	}
+	return nil
+}
+
+// graphWorkMemberStores returns the work-class stores (city HQ + rigs) as the
+// cross-class member probe for an infra-store primary on a split city — a
+// drain-unit convoy in infra tracks work-store members. Nil on a single-store
+// city.
+func graphWorkMemberStores(cfg *config.City, cityPath string) []beads.Store {
+	if !cityHasInfraStore(cityPath) {
+		return nil
+	}
+	views, _, err := openSourceWorkflowStores(cfg, cityPath, "")
+	if err != nil {
+		return nil
+	}
+	stores := make([]beads.Store, 0, len(views))
+	for _, v := range views {
+		stores = append(stores, v.store)
+	}
+	return stores
 }
 
 // graphNode holds a bead and its resolved dependency edges.
@@ -142,14 +190,14 @@ func isBlockingDep(depType string) bool {
 }
 
 // doGraph resolves beads and their dependencies, then prints the graph.
-func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io.Writer) int {
+func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io.Writer, memberStores ...beads.Store) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc graph: missing bead IDs") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Resolve input — expand containers, returning beads directly.
-	resolved, err := resolveGraphInput(store, args, stderr)
+	resolved, err := resolveGraphInput(store, args, stderr, memberStores...)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc graph: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -255,7 +303,7 @@ func buildGraphJSONResult(args []string, nodes []graphNode) graphJSONResult {
 // resolveGraphInput expands convoy inputs to their children.
 // Non-containers are passed through. Multiple args are resolved individually.
 // Duplicate IDs are removed. Returns the full Bead objects to avoid re-fetching.
-func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]beads.Bead, error) {
+func resolveGraphInput(store beads.Store, args []string, stderr io.Writer, memberStores ...beads.Store) ([]beads.Bead, error) {
 	seen := make(map[string]bool)
 	var result []beads.Bead
 	add := func(b beads.Bead) {
@@ -273,7 +321,9 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
-			children, err := convoycore.Members(store, b.ID, false)
+			// Probe the cross-class member stores so a convoy tracking members in
+			// the other store expands fully instead of to "unknown" placeholders.
+			children, err := convoycore.Members(store, b.ID, false, memberStores...)
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)
 			}

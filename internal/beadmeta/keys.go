@@ -39,6 +39,17 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
+	// AttachBeadIDMetadataKey back-links a cook --attach workflow root (in the
+	// graph/infra store) to its source parent bead in the work store.
+	AttachBeadIDMetadataKey = "gc.attach_bead_id"
+	// AttachStoreRefMetadataKey records the store-ref of the attach parent so a
+	// cross-store attach linkage can be resolved back to the parent's store.
+	AttachStoreRefMetadataKey = "gc.attach_store_ref"
+	// AttachedWorkflowRootMetadataKey marks a work-store source bead as blocked by
+	// an attached workflow root that lives in the infra store. bd cannot express a
+	// cross-store blocks edge, so the composite ready read enforces this marker:
+	// the parent is not claimable while the root is open.
+	AttachedWorkflowRootMetadataKey      = "gc.attached_workflow_root"
 	AttemptLogMetadataKey                = "gc.attempt_log"
 	AttemptMetadataKey                   = "gc.attempt"
 	BondMetadataKey                      = "gc.bond"
@@ -276,6 +287,9 @@ const OptionMetadataPrefix = "opt_"
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
 var KnownMetadataKeys = []string{
+	AttachBeadIDMetadataKey,
+	AttachStoreRefMetadataKey,
+	AttachedWorkflowRootMetadataKey,
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
 	BondMetadataKey,

@@ -125,7 +125,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		if row.UnitConvoyID == "" {
 			var created bool
 			var err error
-			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member)
+			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member, opts)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -212,9 +212,30 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return manifest, members, nil
 	}
-	members, err := convoycore.Members(store, parentConvoyID, false, opts.MemberStores...)
+	// Read membership from the store that OWNS the input convoy. On a split city
+	// the input convoy + its tracks edges live in the WORK store, while the drain
+	// control runs in the GRAPH store; convoycore.Members reads the tracks edges
+	// from the store it is handed (member-bead resolution federates, but the
+	// tracks-edge read does not), so it must be handed the convoy's own store.
+	// drainMemberOwningStore returns the primary store on a single-store city, so
+	// this is byte-identical there.
+	convoyStore, err := drainMemberOwningStore(store, parentConvoyID, opts)
+	if err != nil {
+		return drainManifest{}, nil, fmt.Errorf("%s: resolving input convoy %s store: %w", bead.ID, parentConvoyID, err)
+	}
+	members, err := convoycore.Members(convoyStore, parentConvoyID, false, opts.MemberStores...)
 	if err != nil {
 		return drainManifest{}, nil, fmt.Errorf("%s: loading convoy members for %s: %w", bead.ID, parentConvoyID, err)
+	}
+	// Fail LOUD on an invisible convoy: an empty member set is a genuine
+	// empty-convoy success ONLY if the convoy itself resolves. If it resolves
+	// nowhere (cross-store misroute, e.g. drain reading the graph store with no
+	// MemberStores tail), building a 0-row manifest would silently mark the drain
+	// pass and prematurely unblock the DAG.
+	if len(members) == 0 {
+		if _, rerr := convoyStore.Get(parentConvoyID); rerr != nil {
+			return drainManifest{}, nil, fmt.Errorf("%s: input convoy %s unresolvable from drain stores (cross-store membership misrouted): %w", bead.ID, parentConvoyID, rerr)
+		}
 	}
 	if err := rejectUnresolvedDrainMembers(bead.ID, parentConvoyID, members); err != nil {
 		var unresolved drainUnresolvedMemberError
@@ -548,7 +569,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 	createdCount := 0
 	var unit beads.Bead
 	if row.UnitConvoyID == "" {
-		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member)
+		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member, opts)
 		if err != nil {
 			return 0, err
 		}
@@ -944,7 +965,7 @@ func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead, op
 	return ordered, nil
 }
 
-func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
+func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
 	unlock := graphv2.LockKey(row.UnitKey)
 	defer unlock()
 	existing, err := store.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: row.UnitKey}, 1, beads.WithBothTiers)
@@ -952,7 +973,7 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 		return beads.Bead{}, false, fmt.Errorf("%s: looking up unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
 	if len(existing) > 0 {
-		if err := ensureDrainUnitTrack(store, control.ID, existing[0].ID, member); err != nil {
+		if err := ensureDrainUnitTrack(store, control.ID, existing[0].ID, member, opts); err != nil {
 			return beads.Bead{}, false, err
 		}
 		return existing[0], false, nil
@@ -977,13 +998,13 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: creating unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
-	if err := trackDrainMember(store, created.ID, member); err != nil {
+	if err := trackDrainMember(store, created.ID, member, opts); err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: tracking member %s from unit convoy %s: %w", control.ID, member.ID, created.ID, err)
 	}
 	return created, true, nil
 }
 
-func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, member beads.Bead) error {
+func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, member beads.Bead, opts ProcessOptions) error {
 	memberID := strings.TrimSpace(member.ID)
 	hasTrack, err := convoycore.HasTrack(store, unitConvoyID, memberID)
 	if err != nil {
@@ -992,17 +1013,20 @@ func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, mem
 	if hasTrack {
 		return nil
 	}
-	if err := trackDrainMember(store, unitConvoyID, member); err != nil {
+	if err := trackDrainMember(store, unitConvoyID, member, opts); err != nil {
 		return fmt.Errorf("%s: repairing unit convoy %s track for member %s: %w", controlID, unitConvoyID, memberID, err)
 	}
 	return nil
 }
 
-func trackDrainMember(store beads.Store, unitConvoyID string, member beads.Bead) error {
+func trackDrainMember(store beads.Store, unitConvoyID string, member beads.Bead, opts ProcessOptions) error {
 	if convoycore.IsUnresolvedTrackedItem(member) {
 		return store.SetMetadata(unitConvoyID, beadmeta.DrainMemberUnresolvedMetadataKey, "true")
 	}
-	return convoycore.TrackItem(store, unitConvoyID, member.ID)
+	// The unit convoy is created in the graph store, but the member may live in a
+	// work-class member store; pass the member tail so TrackItem's existence probe
+	// resolves it there instead of failing not-found on the graph store.
+	return convoycore.TrackItem(store, unitConvoyID, member.ID, opts.MemberStores...)
 }
 
 func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, blockerIDs []string, opts ProcessOptions) (string, bool, error) {

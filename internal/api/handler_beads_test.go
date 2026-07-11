@@ -2361,3 +2361,38 @@ func TestBeadPrefixAPI(t *testing.T) {
 		}
 	}
 }
+
+// TestBeadStoresForIDClassArmWinsOverGcgRouteInRig pins the fix for the split-city
+// routes.jsonl change (landmine #6): a split city now writes a "gcg" → .gc/infra
+// route into every scope's routes.jsonl. resolveStoreByPrefix must NOT capture
+// that (its target is neither a rig nor the city), so a gcg- id falls through to
+// the class-prefix arm and resolves to the graph/infra store — not the first rig.
+func TestBeadStoresForIDClassArmWinsOverGcgRouteInRig(t *testing.T) {
+	state, _, _ := configureBeadRouteState(t)
+	city := beads.NewMemStore()
+	graph := beads.NewMemStore()
+	state.cityBeadStore = city   // distinct work/city store
+	state.graphBeadStore = graph // distinct infra/graph store (split city)
+
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("ReservedClassPrefix(graph) ok=false")
+	}
+	// Simulate the route a split city now writes into a rig's routes.jsonl.
+	alphaRoutes := `{"prefix":"ga","path":"."}` + "\n" +
+		`{"prefix":"gb","path":"../beta"}` + "\n" +
+		`{"prefix":"` + prefix + `","path":"../../.gc/infra"}`
+	alphaBeads := filepath.Join(state.cityPath, "rigs", "alpha", ".beads")
+	if err := os.WriteFile(filepath.Join(alphaBeads, "routes.jsonl"), []byte(alphaRoutes), 0o644); err != nil {
+		t.Fatalf("rewrite alpha routes.jsonl: %v", err)
+	}
+
+	s := New(state)
+	if got := s.resolveStoreByPrefix(prefix); got != nil {
+		t.Fatalf("resolveStoreByPrefix(%q) = %v, want nil (the gcg route must not resolve to a rig store)", prefix, got)
+	}
+	got := s.beadStoresForID(prefix + "-1")
+	if len(got) != 2 || got[0] != s.state.GraphBeadStore().Store || got[1] != s.state.CityBeadStore() {
+		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, city] via the class arm", prefix, got, len(got))
+	}
+}

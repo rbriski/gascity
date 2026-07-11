@@ -260,6 +260,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newTraceCmd(stdout, stderr),
 		newOrderCmd(stdout, stderr),
 		newImportCmd(stdout, stderr),
+		newMigrateCmd(stdout, stderr),
 		newConfigCmd(stdout, stderr),
 		newPackCmd(stdout, stderr),
 		newLintCmd(stdout, stderr),
@@ -281,6 +282,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newVersionCmd(stdout, stderr),
 		newDashboardCmd(stdout, stderr),
 		newGraphCmd(stdout, stderr),
+		newReadyCmd(stdout, stderr),
 		newRegisterCmd(stdout, stderr),
 		newUnregisterCmd(stdout, stderr),
 		newCitiesCmd(stdout, stderr),
@@ -1110,6 +1112,143 @@ func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
 	return openStoreResultAtForCity(cityPath, cityPath)
 }
 
+// infraScopeRoot returns the scope-root directory for a city's infra bead store.
+// It lives under .gc/ (the established runtime-state dir), so infrastructure
+// coordination beads sit apart from the city's domain/work store.
+func infraScopeRoot(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "infra")
+}
+
+// initShouldSeedInfraStore reports whether `gc init` should provision a NEW city
+// with the domain/infra store split (a second INFRA Dolt store). Two-store is now
+// the DEFAULT for newly created cities (owner decision): a plain `gc init` seeds
+// the .gc/infra scope. Opt out to the legacy single-store shape either per-city
+// (`gc init --single-store`, passed here as forceSingleStore) or globally by
+// setting GC_INFRA_STORE_SPLIT to a falsy value ({0,false,no,off}) — the opt-out
+// for upstream-compat / single-store tests. Existing cities are never affected —
+// activation is the presence of the seeded .gc/infra scope (cityHasInfraStore),
+// which only this seed writes; an existing city has no .gc/infra scope and stays
+// single-store. Precedence: forceSingleStore OR an explicit falsy env value forces
+// single-store; the default (neither) is two-store.
+func initShouldSeedInfraStore(forceSingleStore bool) bool {
+	if forceSingleStore {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INFRA_STORE_SPLIT"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// cityHasInfraStore reports whether cityPath has a domain/infra store split. The
+// presence of the infra scope's canonical .beads/config.yaml IS the activation
+// boundary: no existing city has this dir, so this returns false everywhere until
+// a future phase seeds the scope, and routing stays single-store (identity).
+func cityHasInfraStore(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(infraScopeRoot(cityPath), ".beads", "config.yaml"))
+	return err == nil
+}
+
+// openCityInfraStoreResultAt opens the city's infra bead store. It returns
+// (zero, false, nil) when the city has no infra scope (every existing city), so
+// callers treat absence as "single-store, route to the work store". When the
+// scope exists it opens through the same production path as the city store
+// (openStoreResultAtForCity → policy-wrapped), so the infra store gets the exact
+// wrapper stack the work store gets.
+func openCityInfraStoreResultAt(cityPath string) (beads.StoreOpenResult, bool, error) {
+	if !cityHasInfraStore(cityPath) {
+		return beads.StoreOpenResult{}, false, nil
+	}
+	// The infra store opens through the SAME production path as the work store,
+	// but with the reserved-prefix minting wrapper so its coordination beads carry
+	// the infra scope's reserved class prefix (the ID-prefix half of the boundary
+	// invariant). It is the single wrapper LAYER, so the optional-capability
+	// assertions the create paths rely on stay intact.
+	result, err := openStoreResultAtForCityWith(infraScopeRoot(cityPath), cityPath, wrapInfraStoreWithBeadPolicies)
+	if err != nil {
+		return beads.StoreOpenResult{}, true, err
+	}
+	return result, true, nil
+}
+
+// openCityInfraStoreAt is the thin store-only unwrap of
+// openCityInfraStoreResultAt for callers that do not need the diagnostic. The
+// boolean reports whether the infra scope exists (false ⇒ single-store city).
+func openCityInfraStoreAt(cityPath string) (beads.Store, bool, error) {
+	result, present, err := openCityInfraStoreResultAt(cityPath)
+	if err != nil {
+		return nil, present, err
+	}
+	return result.Store, present, nil
+}
+
+// cachedCityInfraStore returns the per-process memoized infra store for cityPath,
+// or nil when the city has no infra scope (every existing city) or the open
+// failed. It is the CLI one-shot's lazy source of the infra store: nil ⇒ the
+// class resolvers route to the work store (identity), so one-shot commands stay
+// byte-identical on a single-store city while avoiding a re-open per resolve
+// call. cfg is accepted for signature parity with the resolve*Store callers and
+// to key future per-config behavior; it is not read today.
+//
+// Caching policy is deliberate: only an AUTHORITATIVE result is memoized — a
+// successful non-nil open, or a real absence (cityHasInfraStore false, the marker
+// file drives the boundary). An open ERROR is NOT cached: it is a transient
+// failure (dolt server hiccup, credential blip), so it returns nil this call and
+// is retried on the next, rather than being poisoned into a permanent
+// route-to-work-store. This matters because the running controller reaches this
+// path (circuit-reset socket → cliSessionStore → resolveSessionStore), where a
+// single early open failure must not permanently strand session writes on the
+// domain store.
+func cachedCityInfraStore(cityPath string, _ *config.City) beads.Store {
+	key := filepath.Clean(cityPath)
+	if v, ok := cityInfraStoreCache.Load(key); ok {
+		store, _ := v.(beads.Store)
+		return store
+	}
+	store, present, err := cachedInfraStoreOpen(cityPath)
+	if err != nil {
+		// Transient failure: log and route to the work store this call, but do NOT
+		// cache the nil — the next call retries the open.
+		fmt.Fprintf(os.Stderr, "gc: city infra bead store: %v (routing to work store)\n", err) //nolint:errcheck // best-effort stderr
+		return nil
+	}
+	if !present {
+		// Authoritative absence (single-store city): cache nil so the miss path
+		// stays a cheap map hit and avoids re-stat'ing the marker per resolve call.
+		cityInfraStoreCache.Store(key, beads.Store(nil))
+		return nil
+	}
+	// Successful open. LoadOrStore resolves a concurrent-first-open race; if
+	// another goroutine won, close our now-redundant handle so it does not leak.
+	actual, loaded := cityInfraStoreCache.LoadOrStore(key, store)
+	winner, _ := actual.(beads.Store)
+	if loaded && winner != store && store != nil {
+		if closeErr := closeBeadStoreHandle(store); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "gc: close redundant city infra bead store: %v\n", closeErr) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return winner
+}
+
+// cityInfraStoreCache memoizes the per-process infra store per clean cityPath so
+// CLI one-shots do not re-open it per resolve call. Only authoritative results
+// are cached: a successful non-nil open, or a real absence (nil). Open errors are
+// NOT cached — they retry on the next call — so a transient failure never poisons
+// the route permanently. Mirrors the cityDoltConfigs cache in
+// beads_provider_lifecycle.go.
+var cityInfraStoreCache sync.Map // clean cityPath → beads.Store (may be nil)
+
+// cachedInfraStoreOpen is the open seam cachedCityInfraStore uses on a cache miss.
+// Production opens the real infra scope; tests swap it to inject the three
+// outcomes (success, authoritative absence, transient error) without spawning
+// dolt.
+var cachedInfraStoreOpen = openCityInfraStoreAt
+
 const fileStoreLayoutScopedV1 = "scope-local-v1"
 
 func fileStoreLayoutMarkerPath(cityPath string) string {
@@ -1182,6 +1321,16 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWith(storePath, cityPath, wrapStoreWithBeadPolicies)
+}
+
+// openStoreResultAtForCityWith is openStoreResultAtForCity with an injectable
+// policy-wrap step. The work store uses wrapStoreWithBeadPolicies (the default);
+// the infra store uses wrapInfraStoreWithBeadPolicies so infra beads mint
+// reserved-prefix ids. wrap is the single wrapper LAYER (never re-wrapped), so
+// the optional-capability assertions (GraphApplyFor / HandlesFor /
+// StorageCreateStore) stay intact regardless of which variant is used.
+func openStoreResultAtForCityWith(storePath, cityPath string, wrap func(beads.Store, *config.City) beads.Store) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1198,7 +1347,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
+		return beads.StoreOpenResult{Store: wrap(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:        scopeRoot,
@@ -1229,7 +1378,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
-	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
+	result.Store = wrap(result.Store, cfg)
 	return result, nil
 }
 

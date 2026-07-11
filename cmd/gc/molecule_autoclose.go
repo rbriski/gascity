@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -71,13 +72,24 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 	rec := openCityRecorderAt(cityPath, stderr)
 
+	// cfg is loaded once, best-effort and quietly (io.Discard), for both the
+	// store-ref derivation and the graph-store route. A nil cfg (load failure or
+	// legacy city) leaves cliGraphStore an identity over the owning store, so the
+	// autoclose stays byte-identical to the pre-split single-store behavior. This
+	// is a bd on_close hook path, so a builtin-pack refresh is deliberately
+	// skipped.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+
 	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, and derive the store-ref from that store, so
 	// rig-store closes autoclose their molecule roots instead of silently
-	// no-op'ing (#3411).
+	// no-op'ing (#3411). The just-closed bead is read from its owning store, but
+	// its molecule/graph-workflow root lives in the graph-class store, so pass
+	// cliGraphStore as the graph-store route — exactly the controller precedent
+	// at api_state.go runBeadCloseAutoclose (which passes GraphBeadStore().Store).
 	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
+		doMoleculeAutocloseWith(store, autocloseStoreRefWithConfig(dir, cityPath, cfg), rec, beadID, stdout, cliGraphStore(store, cfg, cityPath))
 		return
 	}
 
@@ -85,19 +97,21 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
+	doMoleculeAutocloseWith(store, autocloseStoreRefWithConfig(storeRoot, cityPath, cfg), rec, beadID, stdout, cliGraphStore(store, cfg, cityPath))
 }
 
-// autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
-// for the store rooted at storeRoot. The source-bead reverse lookup uses it to
-// scope to roots whose source actually lives in this store: in multi-store
-// deployments bead IDs can collide across stores, so without the ref a close in
-// one store could auto-close a root sourced from a same-ID bead in another
-// store. Best-effort — returns "" when the city config cannot be loaded, which
-// makes the lookup match on bead ID alone (the prior single-store behavior).
-func autocloseStoreRef(storeRoot, cityPath string) string {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
+// autocloseStoreRefWithConfig resolves the store-ref label ("city:<name>" /
+// "rig:<name>") for the store rooted at storeRoot, using an already-loaded cfg.
+// The source-bead reverse lookup uses it to scope to roots whose source actually
+// lives in this store: in multi-store deployments bead IDs can collide across
+// stores, so without the ref a close in one store could auto-close a root
+// sourced from a same-ID bead in another store. Best-effort — returns "" when
+// cfg is nil (config load failed), which makes the lookup match on bead ID alone
+// (the prior single-store behavior). Taking cfg as a parameter avoids re-loading
+// the city config on the bd on_close hook path, where it is already loaded once
+// for the graph-store route.
+func autocloseStoreRefWithConfig(storeRoot, cityPath string, cfg *config.City) string {
+	if cfg == nil {
 		return ""
 	}
 	return workflowStoreRefForDir(storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)

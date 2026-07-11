@@ -73,7 +73,10 @@ func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef
 // without materializing one. HandleOutbound uses it to authorize publishes on
 // agent-bound conversations.
 func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
-	store := s.state.CityBeadStore()
+	// Session selectors resolve against session beads, so source from the
+	// session-class store (the infra store on a split city). Byte-identical on a
+	// single-store city where SessionsBeadStore().Store == CityBeadStore().
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return nil
 	}
@@ -94,7 +97,9 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.CityBeadStore()
+	// Resolves a selector to a session bead ID, so it reads session-class beads:
+	// the infra store on a split city. Byte-identical on a single-store city.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return extmsgHandleLabel(selector)
 	}
@@ -135,7 +140,11 @@ func (s *Server) extmsgNotifyMembers(
 	explicitTarget string,
 ) {
 	svc := s.state.ExtMsgServices()
-	store := s.state.CityBeadStore()
+	// Every store use below resolves, materializes, or messages a session — all
+	// session-class bead ops — so source from the session-class store (the infra
+	// store on a split city). Byte-identical on a single-store city where
+	// SessionsBeadStore().Store == CityBeadStore().
+	store := s.state.SessionsBeadStore().Store
 	if svc == nil || store == nil {
 		return
 	}

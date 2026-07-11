@@ -53,11 +53,13 @@ gc [flags]
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
+| [gc migrate](#gc-migrate) | Run opt-in data migrations |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc ready](#gc-ready) | List ready (claimable) work across a split city's stores |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -2003,6 +2005,7 @@ gc init --template gascity --default-provider claude \
 | `--no-start` | bool |  | initialize files and imports without registering or starting the city |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
+| `--single-store` | bool |  | provision a legacy single-store city (opt out of the default domain/infra two-store split) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
@@ -2340,6 +2343,58 @@ gc mcp list [flags]
 | `--agent` | string |  | show the projected MCP config for this agent |
 | `--json` | bool |  | Output one JSONL result record |
 | `--session` | string |  | show the projected MCP config for this session |
+
+## gc migrate
+
+Run owner-gated, stop-the-world data migrations on the city.
+
+These are explicit, one-time upgrades — never run automatically at gc start.
+Stop the city first (gc stop) before running a migration.
+
+```
+gc migrate
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc migrate infra-store](#gc-migrate-infra-store) | Migrate a single-db city to the domain/infra two-store layout |
+
+## gc migrate infra-store
+
+Upgrade an existing single-Dolt-db city to the two-store layout.
+
+Infrastructure-class beads (sessions, mail, nudges, orders, and the whole
+formula/orchestration explosion) move into a dedicated city infra store; work
+beads (tasks, epics, bugs, features, user convoys) stay in the domain stores
+untouched. Bead ids are preserved — legacy infra beads keep their HQ/rig-era
+prefix. Cross-boundary dependency edges are kept co-resident with their source
+bead (dangling across the boundary, resolved by the two-store Go seams).
+
+The migration is idempotent, resumable, and crash-safe: it recomputes its plan
+from live store state on every run (no status file), copies before deleting, and
+verifies before deleting, so a crash leaves only re-runnable states and a re-run
+on a migrated city moves nothing.
+
+Stop the city first (gc stop). This command refuses to run while a controller is
+alive. External/hosted Dolt cities are not supported.
+
+```
+gc migrate infra-store [flags]
+```
+
+**Example:**
+
+```
+gc stop
+gc migrate infra-store
+gc migrate infra-store --dry-run
+gc migrate infra-store --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the migration plan without making any writes |
+| `--json` | bool |  | emit the reconciliation ledger as JSON |
 
 ## gc nudge
 
@@ -2931,6 +2986,37 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
+## gc ready
+
+List ready, claimable work as a JSON array, federating the work store and the
+infra store (graph-class steps) on a split city.
+
+It is the composite, in-process drop-in for the external, single-store
+"bd ready" work_query, so workers and the control plane see graph step beads
+that live in the infra store. On a legacy single-store city it reads the one
+store, byte-identical.
+
+The flags mirror the "bd ready" contract the default work_query builds:
+  gc ready --metadata-field "gc.routed_to=$target" --unassigned \
+           --exclude-type=epic --sort oldest --limit 20
+
+```
+gc ready [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--assignee` | string |  | only work assigned to this identity |
+| `--count` | bool |  | print the number of matching beads instead of the array |
+| `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
+| `--include-ephemeral` | bool |  | include the wisp/ephemeral tier |
+| `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
+| `--limit` | int |  | max beads to return (0 = unlimited) |
+| `--metadata-field` | stringArray |  | require metadata key=value (repeatable) |
+| `--sort` | string |  | sort order: oldest\|newest (default: ready priority order) |
+| `--status` | string |  | status mode: empty = ready work; in_progress = list assigned in-progress work |
+| `--unassigned` | bool |  | only unassigned work |
 
 ## gc register
 

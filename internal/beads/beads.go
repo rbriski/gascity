@@ -471,6 +471,54 @@ type StorageGraphApplyStore interface {
 	ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error)
 }
 
+// ForeignIDCreator is an optional store capability for creating a bead whose
+// explicit ID carries a prefix that differs from the store's own database prefix
+// (a "foreign" prefix). The bd/Dolt store rejects a mismatched --id prefix unless
+// forced; this capability performs the forced create so the domain/infra store
+// migration can copy a legacy infra bead into the infra store (issue_prefix=gcg)
+// while KEEPING its HQ/rig-era id (stable references must not be re-minted). The
+// bead must carry a non-empty ID. Stores whose ids have no prefix rules (MemStore,
+// FileStore) implement this by honoring the explicit id unconditionally.
+type ForeignIDCreator interface {
+	CreateWithForeignID(b Bead) (Bead, error)
+}
+
+// BatchDeleter is an optional store capability for permanently removing many
+// beads at once WITHOUT the single-id mutation bomb. The single-id Store.Delete
+// path (bd delete <id>) is destructive to external neighbors: bd text-rewrites
+// every connected bead's free-text fields (description/notes/design) to
+// "[deleted:ID]" and removes the connecting dependency links one by one. The
+// batch path (bd delete <id1> <id2> …, taken only when two or more ids are
+// passed) instead ORPHANS external dependents: it performs NO text rewrite and
+// deletes the target beads with a single set-based DELETE, letting the schema's
+// foreign keys clean up dependency rows.
+//
+// The domain/infra store migration relies on that batch shape: deleting a set of
+// moved infra beads from a domain store must not text-rewrite the staying work
+// beads that reference them. Implementations therefore MUST take the batch delete
+// path and MUST NOT fall through to the single-id text-rewriting delete when
+// given a multi-bead set.
+//
+// CAVEAT ON INBOUND EDGE ROWS (design deviation, real-bd behavior): whether the
+// inbound dependency ROW (staying → deleted) SURVIVES depends on the backend's
+// foreign keys, NOT on this method. The bd/Dolt schema has
+// `fk_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id)
+// ON DELETE CASCADE` (beads migration 0043), so deleting a bead cascade-drops the
+// inbound rows that point AT it — the edge does not survive as a dangling row on
+// bd. That is the E2-native cross-boundary shape (the edge stops blocking). The
+// in-memory implementations here PRESERVE inbound rows (they have no such FK), so
+// they model a non-cascading backend; do not read row survival as a guarantee
+// across all backends.
+type BatchDeleter interface {
+	// DeleteAllOrphaning permanently removes every bead in ids, orphaning any
+	// external dependents rather than mutating them, and returns the number of
+	// beads deleted. A degenerate single-id set falls back to the single-id
+	// Delete (the batch shape is unavailable for one id); callers that require
+	// the orphan-preserving semantics must not pass a single id when a staying
+	// bead references it.
+	DeleteAllOrphaning(ids []string) (int, error)
+}
+
 // ParentProjectionWaiter is an optional capability for stores whose
 // parent-child listing path may lag a successful parent update. Callers that
 // need strict read-after-write semantics for parent projections can type-assert

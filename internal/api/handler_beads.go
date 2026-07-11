@@ -52,7 +52,11 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	if assignee == "" {
 		return []string{""}
 	}
-	store := s.state.CityBeadStore()
+	// The assignee resolves to a session bead, whose identity forms are then read
+	// back (store.Get below), so source from the session-class store — the infra
+	// store on a split city. Byte-identical on a single-store city where
+	// SessionsBeadStore().Store == CityBeadStore().
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return []string{assignee}
 	}
@@ -91,7 +95,11 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	if assignee == "" {
 		return "", nil
 	}
-	store := s.state.CityBeadStore()
+	// Resolves (and, on the ErrSessionNotFound branch below, materializes) a
+	// session bead, then reads it back (store.Get), so source from the
+	// session-class store — the infra store on a split city. Byte-identical on a
+	// single-store city where SessionsBeadStore().Store == CityBeadStore().
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return assignee, nil
 	}
@@ -317,9 +325,16 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 				return store
 			}
 		}
-		// Fallback: the route pointed to the same rig.
-		if store, exists := stores[rig.Name]; exists {
-			return store
+		// Fallback: the route resolved to this rig itself (a self-route). Only
+		// then return this rig's store — a route resolving to some OTHER path that
+		// is not a known rig (e.g. the reserved "gcg" → .gc/infra route a split
+		// city now writes into every scope's routes.jsonl) must NOT be captured
+		// here; it falls through so the caller's class-prefix arm can route it to
+		// the infra/graph store.
+		if cleanPath == filepath.Clean(rigPath) {
+			if store, exists := stores[rig.Name]; exists {
+				return store
+			}
 		}
 	}
 	return nil
@@ -357,7 +372,38 @@ type BeadGraphResponse struct {
 	Deps  []workflowDepResponse `json:"deps"`
 }
 
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+// memberStoreComplement returns the cross-class stores to probe (after the
+// primary foundStore) when resolving convoy members for a graph/convoy view. A
+// convoy bead lives in one class store but its tracked members can live in the
+// other: a drain-unit convoy in the infra/graph store tracks work-store members.
+// Without probing the complement the view renders those members as synthetic
+// "unknown" placeholders. On a single-store city GraphBeadStore().Store ==
+// CityBeadStore(), so this returns nil and the view is byte-identical.
+func (s *Server) memberStoreComplement(foundStore beads.Store) []beads.Store {
+	graph := s.state.GraphBeadStore().Store
+	city := s.state.CityBeadStore()
+	if graph == nil || graph == city {
+		return nil
+	}
+	if foundStore == graph {
+		// Primary is the graph store: members may live in the work stores.
+		stores := s.state.BeadStores()
+		out := make([]beads.Store, 0, len(stores)+1)
+		if city != nil {
+			out = append(out, city)
+		}
+		for _, name := range sortedRigNames(stores) {
+			if st := stores[name]; st != nil && st != city {
+				out = append(out, st)
+			}
+		}
+		return out
+	}
+	// Primary is a work store: members may live in the graph store.
+	return []beads.Store{graph}
+}
+
+func collectBeadGraph(store beads.Store, root beads.Bead, memberStores ...beads.Store) ([]beads.Bead, []workflowDepResponse, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -395,7 +441,10 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 
 	if root.Type == "convoy" {
-		members, err := convoycore.Members(store, root.ID, true)
+		// A convoy's tracked members can live in the other class store (a
+		// drain-unit convoy in the infra store tracks work-store members), so
+		// probe the class complement or members render as "unknown" placeholders.
+		members, err := convoycore.Members(store, root.ID, true, memberStores...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
 		}

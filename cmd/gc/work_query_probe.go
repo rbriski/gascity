@@ -81,6 +81,31 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 	return env, nil
 }
 
+// controlDispatcherInfraWorkEnv builds the control-dispatcher work-query env for a
+// split city, pinned to the infra scope root (where graph-class control beads live)
+// instead of the city/rig work scope. It layers the infra-scope store coordinates —
+// the same bdRuntimeEnvForRigWithError projection the infra store's own opener and the
+// sling write path use for <city>/.gc/infra, so `bd ready` reads
+// BEADS_DIR=<city>/.gc/infra/.beads — then stamps the GC_STORE_* scope hints last so
+// they stay authoritative. Only the control dispatcher uses this; workers keep the
+// city/rig controllerWorkQueryEnv.
+func controlDispatcherInfraWorkEnv(cityPath string, cfg *config.City) (map[string]string, error) {
+	infraRoot := infraScopeRoot(cityPath)
+	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, infraRoot)
+	if err != nil {
+		return nil, err
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["GC_STORE_ROOT"] = infraRoot
+	env["GC_STORE_SCOPE"] = "rig"
+	env["GC_BEADS_PREFIX"] = config.InfraScopePrefix
+	env["GC_RIG"] = ""
+	env["GC_RIG_ROOT"] = infraRoot
+	return env, nil
+}
+
 func controllerQueryPrefixEnv(source map[string]string) map[string]string {
 	if len(source) == 0 {
 		return nil
@@ -149,7 +174,7 @@ func prefixedWorkQueryForProbeWithEnv(
 		beadsCfg = cfg.Beads
 		rigs = cfg.Rigs
 	}
-	command := strings.TrimSpace(agentCfg.EffectiveWorkQueryForBeads(beadsCfg))
+	command := strings.TrimSpace(splitCityWorkQuery(cityPath, agentCfg, beadsCfg))
 	// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped agents probe with
 	// rig-specific metadata. Mirrors the scale_check expansion in
 	// build_desired_state.go; #793. Malformed templates are logged to

@@ -97,8 +97,9 @@ type CityRuntime struct {
 	poolDeathHandlers map[string]poolDeathInfo
 	suspendedNames    map[string]bool
 
-	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
-	standaloneRigStores map[string]beads.Store
+	standaloneCityStore      beads.Store // non-nil when API disabled; for chat auto-suspend
+	standaloneCityInfraStore beads.Store // non-nil when API disabled AND the city has an infra store; else nil (single-store → identity routing)
+	standaloneRigStores      map[string]beads.Store
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
@@ -396,6 +397,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {
 			cr.standaloneCityStore = store
+		}
+		// Open the standalone infra store when the city is split; nil on every
+		// single-store city, so class routing stays identity.
+		if store, present, err := openCityInfraStoreAt(cityRoot); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: city infra bead store: %v (infra-class routing disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		} else if present {
+			cr.standaloneCityInfraStore = store
 		}
 		cr.standaloneRigStores = buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr)
 	}
@@ -1842,8 +1850,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 		appendWarning(fmt.Sprintf("config reload: %v", err))
 	}
-	for _, w := range config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)) {
-		appendWarning(fmt.Sprintf("config reload: %s", w))
+	if reserved := config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); len(reserved) > 0 {
+		// On a split city the infra store actively mints these prefixes, so a
+		// work-store prefix that shadows one is a hard ambiguity rather than a
+		// forward-looking advisory. A live reload cannot abort the running
+		// controller, so surface it as an error-level reload warning (gc start
+		// blocks the same collision outright).
+		split := cityHasInfraStore(cityRoot)
+		for _, w := range reserved {
+			if split {
+				appendWarning(fmt.Sprintf("config reload: ERROR: %s (split city — rename before the collision misroutes infra beads)", w))
+			} else {
+				appendWarning(fmt.Sprintf("config reload: %s", w))
+			}
+		}
 	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
@@ -2013,6 +2033,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		} else {
 			cr.standaloneCityStore = s
+		}
+		// Refresh the standalone infra store symmetrically; nil on a single-store
+		// city, so class routing stays identity.
+		if s, present, err := openCityInfraStoreAt(cityRoot); err != nil {
+			if cr.standaloneCityInfraStore != nil {
+				appendWarning(fmt.Sprintf("city infra bead store reload: %v", err))
+			}
+		} else if present {
+			cr.standaloneCityInfraStore = s
 		}
 		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
 	}
@@ -3104,6 +3133,17 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 		return cr.cs.CityBeadStore()
 	}
 	return cr.standaloneCityStore
+}
+
+// cityInfraBeadStore returns the city's infra bead store — the store owning the
+// coordination classes on a split city — preferring the controllerState store
+// over the standalone store. It is nil on every single-store city, so the class
+// resolvers route to the work store (identity).
+func (cr *CityRuntime) cityInfraBeadStore() beads.Store {
+	if cr.cs != nil {
+		return cr.cs.CityInfraBeadStore()
+	}
+	return cr.standaloneCityInfraStore
 }
 
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {

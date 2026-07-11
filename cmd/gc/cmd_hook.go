@@ -269,7 +269,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+	// On a split city, route the default work_query through the composite
+	// `gc ready` so the hook sees graph-class step beads in the infra store;
+	// single-store cities and custom work_queries are unchanged.
+	workQuery := splitCityWorkQuery(cityPath, &a, cfg.Beads)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
@@ -389,7 +392,15 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		// On a split city, route the claim (and its sibling mutations) to the
+		// store that owns the bead by id-prefix — the composite work_query
+		// surfaces infra-resident graph steps, but the mutation must land in the
+		// infra store, not the work store the winning hookStore points at.
+		var claimOps hookClaimOps
+		if cityHasInfraStore(cityPath) {
+			claimOps = splitCityHookClaimOps(cityPath, cfg)
+		}
+		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, claimOps, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -397,8 +408,8 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 // claimHookWork claims routed work for gc hook --claim from the federated store
 // set, binding the production shell work-query runner and real claim ops. See
 // claimHookWorkWithRunner for the federation and lost-claim-race semantics.
-func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim

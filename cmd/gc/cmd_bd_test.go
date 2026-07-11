@@ -380,42 +380,35 @@ func TestResolveBdScopeTargetRoutesReservedPrefixToInfraStore(t *testing.T) {
 	})
 }
 
-func TestBdShimCommandRegisteredAndForwardsToDoBd(t *testing.T) {
-	// The workflows packs invoke `gc bd-shim …`, so the command must be
-	// registered (hidden) and forward its args verbatim to the same doBd path as
-	// `gc bd` — including the split-city infra-store routing.
+func TestBdShimCommandRemovedAndBdStillRoutesToDoBd(t *testing.T) {
+	// bd-shim was a redundant hidden duplicate of `gc bd` that the JSON-contract
+	// front door never exempted, so `gc bd-shim … --json` failed with
+	// json_unsupported. It has been removed; the workflows packs call `gc bd …`
+	// directly (which the front door exempts via isBDCommandPath, so --json
+	// works). Guard that bd-shim is gone — neither a registered command nor an
+	// alias of one — so it cannot silently come back.
 	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
-	found := false
-	var hidden, noFlagParse bool
 	for _, c := range root.Commands() {
 		if c.Name() == "bd-shim" {
-			found = true
-			hidden = c.Hidden
-			noFlagParse = c.DisableFlagParsing
-			break
+			t.Fatal("bd-shim command should be removed, but it is still registered")
+		}
+		for _, alias := range c.Aliases {
+			if alias == "bd-shim" {
+				t.Fatalf("bd-shim should be removed, but %q registers it as an alias", c.Name())
+			}
 		}
 	}
-	if !found {
-		t.Fatal("bd-shim command is not registered on the root command")
-	}
-	if !hidden {
-		t.Errorf("bd-shim should be hidden (internal alias for gc bd)")
-	}
-	if !noFlagParse {
-		t.Errorf("bd-shim should DisableFlagParsing so it forwards args verbatim to doBd")
-	}
 
-	// Prove the forward: a malformed heartbeat fails inside doBd (in
-	// rewriteBdHeartbeatArgs) before any bd exec, emitting gc bd's usage error.
-	// bd-shim surfacing that same error proves it routes through doBd.
+	// `gc bd` still routes through doBd: a malformed heartbeat fails inside doBd
+	// (rewriteBdHeartbeatArgs) before any bd exec, emitting gc bd's usage error.
 	var stderr bytes.Buffer
-	shim := newBdShimCmd(&bytes.Buffer{}, &stderr)
-	err := shim.RunE(shim, []string{"heartbeat"})
+	bd := newBdCmd(&bytes.Buffer{}, &stderr)
+	err := bd.RunE(bd, []string{"heartbeat"})
 	if err == nil {
-		t.Fatal("bd-shim heartbeat with no id should error via doBd")
+		t.Fatal("gc bd heartbeat with no id should error via doBd")
 	}
 	if !strings.Contains(stderr.String(), "usage: gc bd heartbeat") {
-		t.Errorf("bd-shim did not route through doBd; stderr = %q", stderr.String())
+		t.Errorf("gc bd did not route through doBd; stderr = %q", stderr.String())
 	}
 }
 

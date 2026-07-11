@@ -115,28 +115,6 @@ auto-export behavior, invoke bd directly.`,
 	return cmd
 }
 
-// newBdShimCmd is a hidden alias for `gc bd`: it forwards its args verbatim to
-// the same doBd path, so `gc bd-shim <bd-args…>` behaves identically to
-// `gc bd <bd-args…>`, including the split-city infra-store routing in
-// resolveBdScopeTarget. It exists because the workflows packs invoke
-// `gc bd-shim …` (e.g.
-// `gc bd-shim update gcg-… --set-metadata review.verdict=…`); registering it
-// makes those calls resolve on this build instead of failing as an unknown
-// command. DisableFlagParsing mirrors newBdCmd so gc-owned scope flags and bd's
-// own flags reach doBd unchanged.
-func newBdShimCmd(stdout, stderr io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:                "bd-shim [bd-args...]",
-		Short:              "Alias for `gc bd` (forwards to the bd wrapper)",
-		Hidden:             true,
-		DisableFlagParsing: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			return exitForCode(doBd(args, stdout, stderr))
-		},
-	}
-	return cmd
-}
-
 var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) bool {
 	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 	if err != nil {

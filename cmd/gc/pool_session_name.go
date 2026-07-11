@@ -295,9 +295,10 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		if sb.Status == "closed" {
 			continue
 		}
-		storeRef := openSessionReachableStoreRef(cityPath, cfg, sb)
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
-			addOpenSessionStoreRef(index, id, storeRef)
+		for _, storeRef := range openSessionReachableStoreRefs(cityPath, cfg, sb) {
+			for _, id := range sessionBeadAssigneeIdentities(sb) {
+				addOpenSessionStoreRef(index, id, storeRef)
+			}
 		}
 	}
 	return index

@@ -3809,7 +3809,7 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 }
 
 // reachableStoresForSession returns the store(s) in which the session's assigned
-// work can live, applying the same cross-store model as openSessionReachableStoreRef.
+// work can live, applying the same cross-store model as openSessionReachableStoreRefs.
 // A cross-store-eligible (city-scoped) session federates across the primary store
 // and every rig store (vp-kvp); a session whose template/agent can't be resolved
 // falls back to the same fan-out (legacy keep-on-match fail-safe); a rig-bound

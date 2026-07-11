@@ -287,7 +287,7 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 // guard the drain/close/recycle/stranded paths consult — the open-work check, the
 // awake check, the stranded-bead lookup, and the stranded-work collector — must
 // federate across the city store AND every rig store for it, exactly like
-// openSessionReachableStoreRef's cross-store wildcard. Before the fix these guards
+// openSessionReachableStoreRefs' cross-store wildcard. Before the fix these guards
 // resolved the city-scoped session to a single configured store and missed its
 // rig-store work, so a live holder could be closed/drained/recycled or
 // under-reported (#3453 re-regression). Rig-scoped sessions stay single-store

@@ -4072,26 +4072,38 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix
-// (gcg/gcm/gcs/gco/gcn). The class stores that mint these prefixes are an
-// identity seam on a single-store city, so such a prefix is allowed there (see
-// ValidateRigs) and only becomes ambiguous once the domain/infra store split
-// activates the second (infra) store. Callers surface these as non-fatal
-// operator warnings on a single-store city so an existing city or rig that
-// already uses one keeps starting and reloading while it still has time to
-// rename, and promote them to a hard error on a split city. The hqPrefix must
-// already be site-bound resolved (e.g. via EffectiveHQPrefix).
+// (gcg/gcm/gcs/gco/gcn) — exactly, or by namespace: a hyphenated prefix whose
+// first dash segment is reserved ("gcg-foo") mints bead ids that
+// ReservedClassBeadIDPrefix classifies as infra-owned, so its beads would
+// route to the infra store on a split city. The class stores that mint these
+// prefixes are an identity seam on a single-store city, so such a prefix is
+// allowed there (see ValidateRigs) and only becomes ambiguous once the
+// domain/infra store split activates the second (infra) store. Callers surface
+// these as non-fatal operator warnings on a single-store city so an existing
+// city or rig that already uses one keeps starting and reloading while it
+// still has time to rename, and promote them to a hard error on a split city.
+// The hqPrefix must already be site-bound resolved (e.g. via
+// EffectiveHQPrefix).
 func ReservedPrefixWarnings(rigs []Rig, hqPrefix string) []string {
 	var warnings []string
-	if IsReservedClassPrefix(hqPrefix) {
-		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
+	if shadowsReservedClassNamespace(hqPrefix) {
+		warnings = append(warnings, fmt.Sprintf("HQ prefix %q shadows a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
 	}
 	for _, r := range rigs {
 		prefix := strings.ToLower(r.EffectivePrefix())
-		if IsReservedClassPrefix(prefix) {
-			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", r.Name, prefix, reservedClassPrefixListText()))
+		if shadowsReservedClassNamespace(prefix) {
+			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q shadows a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", r.Name, prefix, reservedClassPrefixListText()))
 		}
 	}
 	return warnings
+}
+
+// shadowsReservedClassNamespace reports whether a work-store prefix collides
+// with the reserved coordination-class id namespace: it IS a reserved prefix,
+// or its first dash segment is one (so the ids it mints classify as
+// infra-owned under ReservedClassBeadIDPrefix).
+func shadowsReservedClassNamespace(prefix string) bool {
+	return IsReservedClassPrefix(prefix) || IsReservedClassBeadID(prefix)
 }
 
 // DefaultCity returns a City with the given name and a single default

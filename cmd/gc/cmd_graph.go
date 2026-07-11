@@ -10,7 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/spf13/cobra"
 )
 
@@ -108,10 +107,11 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, []beads.St
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr == nil {
 			// Reserved graph-class id on a split city: the DAG (roots, steps,
-			// control beads, drain-unit convoys) lives in the infra store, which
-			// no rig/HQ prefix or route reaches — without this arm `gc graph gcg-…`
+			// control beads, drain-unit convoys — including wisp-tier
+			// gcg-wisp-… molecule ids) lives in the infra store, which no
+			// rig/HQ prefix or route reaches — without this arm `gc graph gcg-…`
 			// hits the city store and returns NotFound.
-			if config.IsReservedClassPrefix(sling.BeadPrefix(args[0])) && cityHasInfraStore(cityPath) {
+			if config.IsReservedClassBeadID(args[0]) && cityHasInfraStore(cityPath) {
 				if infra := cachedCityInfraStore(cityPath, cfg); infra != nil {
 					return infra, graphWorkMemberStores(cfg, cityPath), 0
 				}

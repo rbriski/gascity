@@ -66,6 +66,39 @@ func ReservedClassPrefixes() map[string]string {
 	return out
 }
 
+// ReservedClassBeadIDPrefix returns the reserved coordination-class id-prefix
+// that owns beadID — its first dash segment, lower-cased — and whether beadID
+// lives in a reserved class id namespace at all.
+//
+// This is the single by-id ownership rule for cross-store routing on a split
+// city, and it is deliberately NAMESPACE-shaped (first segment, "gcg-…")
+// rather than parsed-prefix-shaped: bd's wisp tier mints ids as
+// <issue_prefix>-wisp-<suffix> (e.g. "gcg-wisp-a7gc"), so any classifier that
+// re-derives the prefix from the suffix shape (sling.BeadPrefix's last-hyphen
+// heuristic) answers differently depending on whether the random suffix
+// happens to contain a digit — routing one wisp to the infra store and its
+// sibling to the work store. The first-segment rule matches the ID-prefix
+// boundary invariant (every infra-store id begins with a reserved class
+// prefix segment; no domain-store id does — ValidateRigs warns on shadowing
+// work-store prefixes) and the controller's namespace match over configured
+// prefixes.
+func ReservedClassBeadIDPrefix(beadID string) (string, bool) {
+	first, _, ok := strings.Cut(strings.TrimSpace(beadID), "-")
+	if !ok || !IsReservedClassPrefix(first) {
+		return "", false
+	}
+	return strings.ToLower(first), true
+}
+
+// IsReservedClassBeadID reports whether beadID lives in a reserved
+// coordination-class id namespace (see ReservedClassBeadIDPrefix): on a split
+// city such a bead is owned by the infra store, everything else by the
+// work/domain store.
+func IsReservedClassBeadID(beadID string) bool {
+	_, ok := ReservedClassBeadIDPrefix(beadID)
+	return ok
+}
+
 // IsReservedClassPrefix reports whether p (without a trailing "-") is a reserved
 // class id-prefix. Case-insensitive, matching ValidateRigs' prefix handling.
 func IsReservedClassPrefix(p string) bool {

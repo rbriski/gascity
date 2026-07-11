@@ -5,7 +5,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // On a split city the worker's work_query (now composite `gc ready`) surfaces
@@ -17,11 +16,13 @@ import (
 // read-side storeForID routing and the existing per-rig crossStoreClaimDir.
 
 // hookClaimTargetsInfra reports whether a claim-time mutation on beadID must be
-// routed to the infra store: true only on a split city for a reserved-class
-// (gcg-...) id. This is the by-prefix ownership decision, mirroring the read-side
-// claimableStore.storeForID and slingSourceStoreRootForCandidate.
+// routed to the infra store: true only on a split city for a reserved-class id
+// namespace ("gcg-...", including bd's wisp-tier "gcg-wisp-..." ids — the shape
+// production molecules actually claim). This is the by-prefix ownership
+// decision, mirroring the read-side claimableStore.storeForID and
+// slingSourceStoreRootForCandidate.
 func hookClaimTargetsInfra(cityPath, beadID string) bool {
-	return cityHasInfraStore(cityPath) && config.IsReservedClassPrefix(sling.BeadPrefix(beadID))
+	return cityHasInfraStore(cityPath) && config.IsReservedClassBeadID(beadID)
 }
 
 // hookClaimInfraDirEnv returns the (dir, env) a claim-time bd mutation on beadID

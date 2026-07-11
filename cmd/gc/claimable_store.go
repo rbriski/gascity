@@ -8,7 +8,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // claimableStore is the composite "claimable work" view over a split city's two
@@ -55,11 +54,12 @@ func (c *claimableStore) legs() []beads.Store {
 }
 
 // storeForID routes a by-id operation to the store that owns beadID: the infra
-// store for a reserved coordination-class prefix ("gcg-...") on a split city,
-// otherwise the work store. Mirrors slingSourceStoreRootForCandidate's gating so
-// the read and write sides agree on ownership.
+// store for a reserved coordination-class id namespace ("gcg-...", including
+// bd's wisp-tier "gcg-wisp-..." ids) on a split city, otherwise the work
+// store. Mirrors slingSourceStoreRootForCandidate's gating so the read and
+// write sides agree on ownership.
 func (c *claimableStore) storeForID(beadID string) beads.Store {
-	if c.infra != nil && config.IsReservedClassPrefix(sling.BeadPrefix(beadID)) {
+	if c.infra != nil && config.IsReservedClassBeadID(beadID) {
 		return c.infra
 	}
 	return c.work

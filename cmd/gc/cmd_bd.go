@@ -14,7 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/spf13/cobra"
 )
 
@@ -718,26 +717,27 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	// Reserved-prefix by-id ops route to the INFRA store on a split city.
-	// Infra-class beads carry a reserved coordination-class id-prefix
-	// (gcg-/gcs-/gcm-/gco-/gcn-) and live in the infra store (.gc/infra), never
-	// the work store. Without this arm a `gcg-…` id matches no rig/HQ prefix and
-	// falls through to the city WORK store, where the bead does not exist — so
-	// `gc bd update gcg-X …` execs bd against the wrong store and silently drops
-	// the write. The reserved-prefix classification is authoritative (a bead lives
-	// in exactly one store, keyed by id-prefix), so route by prefix without a
-	// work-store existence probe. Gated on cityHasInfraStore: a single-store city
-	// has no infra scope, so this arm is skipped and routing stays byte-identical.
-	// Uses the same predicate as claimableStore.storeForID
-	// (config.IsReservedClassPrefix over sling.BeadPrefix) so the read and write
-	// sides agree on which store owns a reserved-prefix id. It runs after the
-	// explicit --rig/--city pins (which deliberately scope) but before HQ/rig
-	// prefix auto-detection.
+	// Infra-class beads live in a reserved coordination-class id namespace
+	// (gcg-/gcs-/gcm-/gco-/gcn-, including bd's wisp-tier gcg-wisp-… ids) in
+	// the infra store (.gc/infra), never the work store. Without this arm such
+	// an id matches no rig/HQ prefix and falls through to the city WORK store,
+	// where the bead does not exist — so `gc bd update gcg-X …` execs bd
+	// against the wrong store and silently drops the write. The reserved-prefix
+	// classification is authoritative (a bead lives in exactly one store, keyed
+	// by id namespace), so route by prefix without a work-store existence
+	// probe. Gated on cityHasInfraStore: a single-store city has no infra
+	// scope, so this arm is skipped and routing stays byte-identical. Uses the
+	// same predicate as claimableStore.storeForID
+	// (config.IsReservedClassBeadID) so the read and write sides agree on
+	// which store owns a reserved-prefix id. It runs after the explicit
+	// --rig/--city pins (which deliberately scope) but before HQ/rig prefix
+	// auto-detection.
 	if cityHasInfraStore(cityPath) {
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "-") {
 				continue
 			}
-			if config.IsReservedClassPrefix(sling.BeadPrefix(arg)) {
+			if config.IsReservedClassBeadID(arg) {
 				return bdInfraScopeTarget(cityPath), nil
 			}
 		}

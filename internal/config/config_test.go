@@ -4807,6 +4807,27 @@ func TestReservedPrefixWarnings_DerivedRigPrefix(t *testing.T) {
 	}
 }
 
+// A hyphenated prefix whose FIRST segment is reserved ("gcg-foo") shadows the
+// reserved class id NAMESPACE: by-id store routing classifies ownership by the
+// first dash segment (ReservedClassBeadIDPrefix — the rule that keeps bd's
+// wisp-tier gcg-wisp-… ids in the infra store), so a work bead "gcg-foo-x8o"
+// would route to the infra store on a split city. Warn on it like an exact
+// reserved prefix.
+func TestReservedPrefixWarnings_NamespaceShadowingPrefixes(t *testing.T) {
+	rigs := []Rig{
+		{Name: "wisps", Path: "/a", Prefix: "gcg-foo"},
+	}
+	warnings := ReservedPrefixWarnings(rigs, "gcs-hq")
+	if len(warnings) != 2 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want a warning for the HQ and the rig namespace-shadowing prefixes", warnings)
+	}
+	for _, w := range warnings {
+		if !strings.Contains(w, "reserved") {
+			t.Errorf("warning = %q, want mention of 'reserved'", w)
+		}
+	}
+}
+
 // The effective HQ prefix is warned about too; EffectiveHQPrefix already
 // resolves the site-bound value before this.
 func TestReservedPrefixWarnings_HQPrefix(t *testing.T) {

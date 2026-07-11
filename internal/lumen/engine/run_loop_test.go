@@ -601,3 +601,204 @@ func TestAdvanceRepeatRunBodyGuardPerAttemptRedecision(t *testing.T) {
 	}
 	assertProjectionEqualsRefold(t, store, streamID)
 }
+
+// --- for-each inside a repeat-run-body ATTEMPT namespace (FIS ⚑B2) -----------
+
+// TestForEachInRunBodyAttemptRefFormInline (§2.8a) proves a for-each ref-over fans inside
+// a repeat-run-body ATTEMPT namespace on the inline driver: the fan materializes fresh
+// members at stage/0/fan/<i>, the attempt aggregate + loop settle pass in ONE attempt
+// (the cond immediately passes). The ref-over resolves through scopeFor(stage/0/), which
+// consults the parentNS override registered at mint time.
+func TestForEachInRunBodyAttemptRefFormInline(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	sub := subDoc("reviewer", arrField("arr"),
+		forEachNode(nil, "item", "continue", refOver("arr"),
+			execNode("mem", `echo "{{ item }}"`, nil)))
+	doc := decodeIR(t, bundleDoc(
+		arrField("items"),
+		repeatRunLoop(nil,
+			runNodeRawEnv("stage", nil, "reviewer", `[`+envField("arr", "items")+`]`),
+			runCondPassOrIter()),
+		sub))
+	res, err := engine.Run(ctx, store, doc, map[string]any{"items": []any{"a", "b"}})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Outcome != engine.OutcomePass {
+		t.Fatalf("run outcome = %q, want pass", res.Outcome)
+	}
+	if got := res.NodeOutputs["stage/0/fan/0"]; got != "a" {
+		t.Errorf("attempt-0 member 0 = %q, want a (ref-over inside the attempt ns)", got)
+	}
+	if got := res.NodeOutputs["stage/0/fan/1"]; got != "b" {
+		t.Errorf("attempt-0 member 1 = %q, want b", got)
+	}
+	settled := settledOutcomeByID(t, res.Events)
+	if settled["stage/0/fan"] != engine.OutcomePass {
+		t.Errorf("attempt-0 aggregate stage/0/fan = %q, want pass", settled["stage/0/fan"])
+	}
+	// The dynamic '/'-bearing member rows at attempt depth refold byte-identically.
+	assertProjectionEqualsRefold(t, store, res.StreamID)
+}
+
+// TestForEachInRunBodyAttemptMemberFormInline (§2.8b ⚑B2) is the pin that kills a
+// structural-parentNamespace member arm: a member-over `input.arr` inside the ATTEMPT
+// namespace must read the ATTEMPT env layer (via the parentNS override) and fan N members
+// (NOT zero). A phantom structural parent (<bodyID>/) would collapse every binding to ""
+// and silently fan zero.
+func TestForEachInRunBodyAttemptMemberFormInline(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	sub := subDoc("reviewer", arrField("arr"),
+		forEachNode(nil, "item", "continue", memberOver("arr"),
+			execNode("mem", `echo "{{ item }}"`, nil)))
+	doc := decodeIR(t, bundleDoc(
+		arrField("items"),
+		repeatRunLoop(nil,
+			runNodeRawEnv("stage", nil, "reviewer", `[`+envField("arr", "items")+`]`),
+			runCondPassOrIter()),
+		sub))
+	res, err := engine.Run(ctx, store, doc, map[string]any{"items": []any{"a", "b"}})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := res.NodeOutputs["stage/0/fan/0"]; got != "a" {
+		t.Errorf("attempt-0 member 0 = %q, want a (member-over reads the attempt input layer, NOT a phantom parent)", got)
+	}
+	if got := res.NodeOutputs["stage/0/fan/1"]; got != "b" {
+		t.Errorf("attempt-0 member 1 = %q, want b (structural parentNamespace would fan ZERO here)", got)
+	}
+	settled := settledOutcomeByID(t, res.Events)
+	if settled["stage/0/fan"] != engine.OutcomePass {
+		t.Errorf("attempt-0 aggregate stage/0/fan = %q, want pass", settled["stage/0/fan"])
+	}
+	// The dynamic '/'-bearing member rows at attempt depth refold byte-identically.
+	assertProjectionEqualsRefold(t, store, res.StreamID)
+}
+
+// TestAdvanceForEachInRunBodyAttemptMemberForm (§2.8b ⚑B2, advance) is the pool twin:
+// a member-over inside the attempt ns dispatches N pool-do members (NOT zero) at
+// stage/0/fan/<i>:0.
+func TestAdvanceForEachInRunBodyAttemptMemberForm(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	fake := newFakeWorkStore()
+	sub := subDoc("reviewer", arrField("arr"),
+		forEachNode(nil, "item", "continue", memberOver("arr"),
+			doNode("mem", "review {{ item }}", nil)))
+	doc := decodeIR(t, bundleDoc(
+		arrField("items"),
+		repeatRunLoop(nil,
+			runNodeRawEnv("stage", nil, "reviewer", `[`+envField("arr", "items")+`]`),
+			runCondPassOrIter()),
+		sub))
+	res, err := engine.Advance(ctx, store, doc, "gcg-fis-attempt-member", map[string]any{"items": []any{"a", "b"}}, fake.opts())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if res.Sealed || !res.Parked {
+		t.Fatalf("advance = %+v, want Parked (2 attempt-ns members dispatched)", res)
+	}
+	if fake.dispatchCount() != 2 {
+		t.Fatalf("dispatch count = %d, want 2 (member-over reads the attempt input layer, NOT a phantom parent)", fake.dispatchCount())
+	}
+	if got := fake.dispatchPromptFor(t, "stage/0/fan/0:0"); got != "review a" {
+		t.Errorf("attempt member 0 prompt = %q, want %q", got, "review a")
+	}
+}
+
+// TestAdvanceForEachInRunBodyAttemptRefForm (§2.8a advance — closes the §2.8 4-cell
+// matrix) is the pool twin of the ref arm: a ref-over inside the attempt ns resolves
+// through scopeFor under the parentNS override and dispatches N pool-do members at
+// stage/0/fan/<i>:0 — the fast-suite tripwire for advance-path ref-arm-under-override
+// regressions (the dolt e2e covers this cell only under the integration tag).
+func TestAdvanceForEachInRunBodyAttemptRefForm(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	fake := newFakeWorkStore()
+	sub := subDoc("reviewer", arrField("arr"),
+		forEachNode(nil, "item", "continue", refOver("arr"),
+			doNode("mem", "review {{ item }}", nil)))
+	doc := decodeIR(t, bundleDoc(
+		arrField("items"),
+		repeatRunLoop(nil,
+			runNodeRawEnv("stage", nil, "reviewer", `[`+envField("arr", "items")+`]`),
+			runCondPassOrIter()),
+		sub))
+	res, err := engine.Advance(ctx, store, doc, "gcg-fis-attempt-ref", map[string]any{"items": []any{"a", "b"}}, fake.opts())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if res.Sealed || !res.Parked {
+		t.Fatalf("advance = %+v, want Parked (2 attempt-ns members dispatched)", res)
+	}
+	if fake.dispatchCount() != 2 {
+		t.Fatalf("dispatch count = %d, want 2 (ref-over resolves the attempt view under the override)", fake.dispatchCount())
+	}
+	if got := fake.dispatchPromptFor(t, "stage/0/fan/0:0"); got != "review a" {
+		t.Errorf("attempt member 0 prompt = %q, want %q", got, "review a")
+	}
+	if got := fake.dispatchPromptFor(t, "stage/0/fan/1:0"); got != "review b" {
+		t.Errorf("attempt member 1 prompt = %q, want %q", got, "review b")
+	}
+}
+
+// TestForEachInRunBodyPerAttemptRefanInline (the FIS marquee analog of the GIS
+// per-attempt re-decision) proves a failing fan member in attempt 0 re-fans FRESH
+// members in attempt 1 from the identically re-evaluated array: attempt 0's on_fail:stop
+// fan fails → the attempt aggregate settles failed → the cond re-mints attempt 1 at
+// stage/1/fan/<i> (distinct activations, same 2-element fan) → all pass → the loop exits
+// pass. Byte-identical drop+refold over both attempts' dynamic member rows.
+func TestForEachInRunBodyPerAttemptRefanInline(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	sub := subDoc("reviewer", arrField("arr"),
+		forEachNode(nil, "item", "stop", refOver("arr"),
+			doNode("mem", "review {{ item }}", nil)))
+	doc := decodeIR(t, bundleDoc(
+		arrField("items"),
+		repeatRunLoop(nil,
+			runNodeRawEnv("stage", nil, "reviewer", `[`+envField("arr", "items")+`]`),
+			runCondPassOrIter()),
+		sub))
+	host := &enginehost.StubHost{Results: map[string]enginehost.DoResult{
+		"stage/0/fan/0": {Outcome: enginehost.OutcomeFailed, Output: "no"},
+		"stage/0/fan/1": {Outcome: enginehost.OutcomePass, Output: "ok0"},
+		"stage/1/fan/0": {Outcome: enginehost.OutcomePass, Output: "ok1a"},
+		"stage/1/fan/1": {Outcome: enginehost.OutcomePass, Output: "ok1b"},
+	}}
+	res, err := engine.RunWithOptions(ctx, store, doc, map[string]any{"items": []any{"a", "b"}}, engine.Options{Host: host})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Outcome != engine.OutcomePass {
+		t.Fatalf("run outcome = %q, want pass (per-attempt re-fan)", res.Outcome)
+	}
+	settled := settledOutcomeByID(t, res.Events)
+	// Attempt 0: member 0 failed → on_fail:stop fails the fan → the attempt fails.
+	if settled["stage/0/fan/0"] != engine.OutcomeFailed || settled["stage/0/fan/1"] != engine.OutcomePass {
+		t.Errorf("attempt-0 members = {0:%q 1:%q}, want {failed pass}", settled["stage/0/fan/0"], settled["stage/0/fan/1"])
+	}
+	if settled["stage/0/fan"] != engine.OutcomeFailed {
+		t.Errorf("attempt-0 fan = %q, want failed (on_fail:stop)", settled["stage/0/fan"])
+	}
+	// Attempt 1: a FRESH fan at distinct activations, the SAME re-evaluated 2-element
+	// array, all pass.
+	if settled["stage/1/fan/0"] != engine.OutcomePass || settled["stage/1/fan/1"] != engine.OutcomePass {
+		t.Errorf("attempt-1 members = {0:%q 1:%q}, want {pass pass} (fresh re-fan)", settled["stage/1/fan/0"], settled["stage/1/fan/1"])
+	}
+	if settled["stage/1/fan"] != engine.OutcomePass {
+		t.Errorf("attempt-1 fan = %q, want pass", settled["stage/1/fan"])
+	}
+	// The re-fan is identical: exactly 2 members per attempt (no third, no zero).
+	for _, id := range []string{"stage/0/fan/2", "stage/1/fan/2"} {
+		if _, ok := settled[id]; ok {
+			t.Errorf("unexpected third member %s settled (the re-fan must mint the identical 2-element array)", id)
+		}
+	}
+	if _, _, _, out := loopSettle(t, res.Events, "loop:0"); out != "" {
+		t.Errorf("loop settle output = %q, want \"\" (the passing attempt's transparent aggregate output)", out)
+	}
+	assertProjectionEqualsRefold(t, store, res.StreamID)
+}

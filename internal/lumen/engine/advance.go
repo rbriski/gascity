@@ -885,9 +885,11 @@ func (d *driver) advanceForEach(u planUnit, scope, nodeOutputs map[string]string
 	if err := d.ensureDecisionActivated(u); err != nil {
 		return err
 	}
-	elems, ok, err := d.evalForEachArray(spec, scope)
+	elems, ok, err := d.evalForEachArray(u.ns, spec, scope)
 	if err != nil {
-		return err
+		// The wrap contract: evalForEachArray's messages carry no "lumen:"/id prefix;
+		// this (and runForEach, driver parity) names the failing fan exactly once.
+		return fmt.Errorf("lumen: for-each %q over: %w", u.nodeID, err)
 	}
 	if !ok {
 		return d.settleForEachInvalid(u, nodeOutputs)
@@ -905,7 +907,7 @@ func (d *driver) advanceForEach(u planUnit, scope, nodeOutputs map[string]string
 		case mn == nil || (!mn.Settled && mn.BeadID == ""):
 			// Not yet materialized (or activated but not dispatched): dispatch it, park.
 			member := mu
-			if err := d.withBinder(scope, spec.binder, elem, func() error {
+			if err := d.withBinder(scope, u.ns+spec.binder, elem, func() error {
 				return d.materializePoolWork(member, scope, opts)
 			}); err != nil {
 				return err

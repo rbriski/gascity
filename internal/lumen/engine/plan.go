@@ -160,11 +160,12 @@ type cleanupSpec struct {
 // minting) under a `<forEachID>/<index>` node id, with `binder` bound to the element.
 // The aggregate drains those dynamic members with the same outcome rule as
 // scatter(members). The decision (the array) is frozen by the over-ref gate (a
-// member-`over` reads the immutable input; a bare-ref `over` gates on the node it
-// reads), so genesis, re-Advance, and drop+refold fan the same members.
+// member-`over` reads the immutable input LAYER and contributes no gate; a bare-ref
+// `over` gates on the node it reads), so genesis, re-Advance, and drop+refold fan the
+// same members.
 type forEachSpec struct {
 	overRaw    json.RawMessage // the `over` array expression
-	overRefs   []string        // node/input names `over` reads (for the DET gate)
+	overRefs   []string        // node names `over` reads (head-derived; for the DET gate)
 	binder     string          // the per-element binding name (e.g. "item")
 	bodyIRKind ir.NodeKind     // NodeExec | NodeDo
 	body       step            // the decoded single leaf body (fanned per element)
@@ -542,25 +543,24 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 }
 
 // lowerForEach lowers a scatter(form:each) node — a dynamic fan over a runtime
-// array — to a SINGLE unitForEach aggregate. The member count is the evaluated
-// `over` array length (unknown here), so NO member units are lowered; the driver
-// materializes one member per element at run time under a `<forEachID>/<index>`
-// node id. That runtime id bypasses the authored-id `/`-ban (lowerNode), and since
-// a for-each is top-level only and every top-level id is distinct, a dynamic member
-// id can never collide with a static node's activation. Only a single exec/do body
-// leaf is supported this slice; a sub-formula placement, a multi-member or non-leaf
-// body, a missing binder/over, or an unsupported `over` shape refuses at LOAD.
+// array — to a SINGLE unitForEach aggregate, at the root OR inside a run sub-formula's
+// namespace (qid/ns qualified). The member count is the evaluated `over` array length
+// (unknown here), so NO member units are lowered; the driver materializes one member per
+// element at run time under a `<forEachID>/<index>` node id. That runtime id bypasses the
+// authored-id `/`-ban (lowerNode); it can never collide with a static node's activation
+// because the qualified for-each id occupies the `<ns>fanout` name in its namespace, which
+// precludes a run `fanout` that would create the `<ns>fanout/` sub-namespace a colliding
+// `<ns>fanout/<index>` authored id needs (the '/'-delimiter argument replaces the former
+// top-level-only rationale). Only a single exec/do body leaf is supported this slice; a
+// multi-member or non-leaf body, a missing binder/over, an unsupported `over` shape, or a
+// delimiter-bearing binder/over ref refuses at LOAD.
 func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
-	if l.prefix != "" {
-		// A for-each in a run sub-formula needs a namespace-aware member id + scope;
-		// deferred exactly like dispatch-in-sub-formula.
-		return fmt.Errorf("%w: for-each %q in a sub-formula", ErrUnsupportedNode, n.ID)
-	}
 	if l.inAggregate {
-		// A for-each nested as a scatter member / gather combine is deferred this
-		// slice (like lowerRun): keeping it top-level is what makes the '/'-banned
-		// authored ids + distinct top-level ids guarantee that a dynamic member id
-		// (forEachID/<index>) can never collide with a static node's activation.
+		// A for-each nested as a scatter member / gather combine is deferred this slice
+		// (like lowerRun): the aggregate-member drive path for a dynamic fan is unbuilt.
+		// (A run sub-formula placement IS supported — the qualified-id + '/'-delimiter
+		// argument above keeps a dynamic member id collision-free there; only an aggregate
+		// MEMBER stays fenced.)
 		return fmt.Errorf("%w: for-each %q nested in an aggregate", ErrUnsupportedNode, n.ID)
 	}
 	binder := ""
@@ -571,8 +571,11 @@ func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 		return fmt.Errorf("%w: for-each %q missing binder", ErrUnsupportedNode, n.ID)
 	}
 	if strings.ContainsAny(binder, "/:") {
-		// The binder is bound into the render scope; a '/' or ':' would let it collide
-		// with a member node-id scope key (forEachID/<index>) or an activation key.
+		// The binder is bound into the render scope at the ns-qualified key u.ns+binder,
+		// which the member's scopeFor(ns) view re-keys to the bare binder name via
+		// directChildKey. A '/' or ':' would let that key collide with a member node-id
+		// scope key (forEachID/<index>), an activation key, or a deeper-namespace child —
+		// forging a cross-namespace binding.
 		return fmt.Errorf("%w: for-each %q binder %q must not contain '/' or ':'", ErrUnsupportedNode, n.ID, binder)
 	}
 	over, ok := n.Raw["over"]
@@ -581,6 +584,19 @@ func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 	}
 	if reason := forEachOverReason(over); reason != "" {
 		return fmt.Errorf("%w: for-each %q over: %s", ErrUnsupportedNode, n.ID, reason)
+	}
+	// ⚑S1: derive the DET-gate over-refs from the over expression HEAD only (a bare ref
+	// contributes its own name; an input.<field> member reads the immutable input layer,
+	// contributing NO node ref). collectRefs over a member form would return the base ref
+	// "input" — a spurious gate / silent-over / synth-ban footprint on a node literally
+	// named "input" that the member arm never reads. Deriving from the head aligns the
+	// gate, the silent-over sweep, the charset ban, and the synth-body ban with the arm
+	// evalForEachArray actually reads.
+	overRefs := forEachOverRefs(over)
+	for _, ref := range overRefs {
+		if strings.ContainsAny(ref, "/:") {
+			return fmt.Errorf("%w: for-each %q over ref %q must not contain '/' or ':' (reserved delimiters)", ErrUnsupportedNode, n.ID, ref)
+		}
 	}
 	body, err := forEachBodyLeaf(n)
 	if err != nil {
@@ -616,13 +632,33 @@ func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 		onFail:     onFail,
 		forEach: &forEachSpec{
 			overRaw:    over,
-			overRefs:   collectRefs(over),
+			overRefs:   overRefs,
 			binder:     binder,
 			bodyIRKind: body.Kind,
 			body:       s,
 			onFail:     onFail,
 		},
 	})
+	return nil
+}
+
+// forEachOverRefs returns the DET-gate ref set for a for-each `over` expression, derived
+// from the HEAD: a bare `ref` contributes its own name (the node/input it reads); an
+// `input.<field>` member reads the immutable input layer, so it contributes NO ref. This
+// mirrors exactly what evalForEachArray's ref/member arms read — unlike collectRefs, which
+// descends into a member form and returns the literal base ref "input" (⚑S1). A malformed
+// head contributes nothing (forEachOverReason has already refused it).
+func forEachOverRefs(raw json.RawMessage) []string {
+	var head struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil
+	}
+	if head.Kind == "ref" && head.Name != "" {
+		return []string{head.Name}
+	}
 	return nil
 }
 
@@ -1391,9 +1427,9 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 // (exec/do). A non-leaf arm body (block/run/scatter) is refused this slice — a
 // dispatch-to-run composition is a follow-on. A dispatch inside a run sub-formula
 // (prefix != "") is refused because its SUBJECT path — matchingArm's evalValue over the
-// flat scope — is still namespace-unaware (unlike guard, whose condScope now takes the
-// unit ns); and a subject that reads the dispatch's own id or an arm body id is refused
-// (self-referential).
+// flat scope — is still namespace-unaware (unlike guard and for-each, whose condScope /
+// evalForEachArray now take the unit ns); and a subject that reads the dispatch's own id
+// or an arm body id is refused (self-referential).
 func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 	if l.prefix != "" {
 		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
@@ -1839,13 +1875,22 @@ func (l *lowerer) resolveDeps() error {
 			}
 		case unitDispatch:
 			if u.dispatch != nil {
+				// subjectRefs stay DEEP-collected (a subject is a general value expr, so
+				// collectRefs is the honest read-set for the gate) — which means a
+				// member-form subject contributes its base ref "input", and a synth body
+				// literally named "input" would false-positive the synth-body ban below.
+				// Accepted this slice (improbable trigger; the ban errs loud, never
+				// silent); revisit with the dispatch-in-sub-formula slice. Guard condRefs
+				// can never carry a member base (validateClosedExpr refuses member exprs)
+				// and for-each overRefs are head-derived (⚑S1), so only dispatch has this.
 				exprRefs = u.dispatch.subjectRefs
 			}
 		case unitForEach:
 			if u.forEach != nil {
 				// Gate the fan-out on the nodes `over` reads, so the array is frozen
-				// before any member materializes (a bare-ref `over` to a node; an
-				// input.<field> member reads the immutable input, contributing no gate).
+				// before any member materializes. overRefs is head-derived (⚑S1): a
+				// bare-ref `over` contributes its node; an input.<field> member head-derives
+				// to no ref, so it reads the immutable input layer and gates on nothing.
 				exprRefs = u.forEach.overRefs
 			}
 		case unitLoop:
@@ -1864,20 +1909,28 @@ func (l *lowerer) resolveDeps() error {
 		for _, refName := range exprRefs {
 			act, ok := byNodeID[u.ns+refName]
 			if !ok {
-				// A guard cond ref naming a SYNTHESIZED body (a sibling guard's then, a
+				// A DECISION ref naming a SYNTHESIZED body (a sibling guard's then, a
 				// dispatch arm body, a retry/repeat body id) is never a lowered unit, so it
 				// takes no gate edge here — yet once the body runs, record() exposes its
-				// qualified id in the flat nodeOutputs and the cond scope resolves it.
+				// qualified id in the flat nodeOutputs and the deciding scope resolves it.
 				// Ungated, the decision becomes DRIVER-dependent: the inline walk settles
-				// the sibling's then synchronously before the guard evaluates, while the
-				// pool walk evaluates the same pass and freezes a null miss write-once —
-				// the same doc takes opposite branches by driver. Refuse loudly at all
-				// levels (the ⚑SF-1 refuse-now-lift-later precedent); loop/run/for-each
-				// exprRefs are untouched (a loop legitimately reads its own body id via
-				// loopScope's bodyName arm).
-				if u.kind == unitGuard {
-					if _, isSynth := synthBodies[u.ns+refName]; isSynth {
+				// the sibling's body synchronously before the decision evaluates, while the
+				// pool walk evaluates the same pass and freezes a null miss write-once — the
+				// same doc takes opposite branches by driver. It bites a guard cond, a
+				// for-each `over` (head-derived ⚑S1, so a member form contributes no
+				// candidate), AND a dispatch subject (the live root hole: subjectRefs
+				// traverse this miss arm ungated while advanceDispatch freezes the chosen arm
+				// write-once). Refuse all three loudly at every level (the ⚑SF-1
+				// refuse-now-lift-later precedent); loop/run exprRefs are untouched (a loop
+				// legitimately reads its own body id via loopScope's bodyName arm).
+				if _, isSynth := synthBodies[u.ns+refName]; isSynth {
+					switch u.kind {
+					case unitGuard:
 						return fmt.Errorf("%w: guard %q cond ref %q names a synthesized decision body (not a referenceable node)", ErrUnsupportedNode, u.nodeID, refName)
+					case unitForEach:
+						return fmt.Errorf("%w: for-each %q over ref %q names a synthesized decision body (not a referenceable node)", ErrUnsupportedNode, u.nodeID, refName)
+					case unitDispatch:
+						return fmt.Errorf("%w: dispatch %q subject ref %q names a synthesized decision body (not a referenceable node)", ErrUnsupportedNode, u.nodeID, refName)
 					}
 				}
 				continue // a ref to an input (not a node) is not a gate
@@ -1938,8 +1991,8 @@ func (l *lowerer) resolveDeps() error {
 	// an empty non-silent closure (no gate edge), so topo order would fall back to source
 	// order and the fan could evaluate `over` against an uncomputed (empty) scope. Refuse
 	// it at load — the array must come from an input or a real (do/exec) node output this
-	// slice. (A member `input.<field>` over reads the immutable input, not a node, so it
-	// is never silent.)
+	// slice. (A member `input.<field>` over head-derives to NO overRef ⚑S1, so it never
+	// enters this sweep — it reads the immutable input layer, not a node.)
 	for i := range l.units {
 		u := &l.units[i]
 		if u.kind != unitForEach || u.forEach == nil {

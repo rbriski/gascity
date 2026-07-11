@@ -192,6 +192,33 @@ func TestForEachOverNodeOutputGated(t *testing.T) {
 	}
 }
 
+// TestForEachOverAggregateNameBindingWinsRoot (§1.2 collision, root mirror of the ns
+// aggregate row) proves a root ref-over naming a static SCATTER that shares an input
+// name fans from the INPUT SEED: an aggregate records nodeOutputs-only (never scope), so
+// the baseScope input survives — while the over-ref gate still defers the fan on the
+// aggregate.
+func TestForEachOverAggregateNameBindingWinsRoot(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	doc := decodeIR(t, blockDoc("feagg",
+		scatterNode("sc", nil, "continue", execNode("m1", `echo one`, nil)),
+		forEachNode(nil, "item", "continue", refOver("sc"),
+			execNode("mem", `echo "{{ item }}"`, nil)),
+	))
+	res, err := engine.Run(ctx, store, doc, map[string]any{"sc": []any{"a", "b"}})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	settled := settledIDs(t, res.Events)
+	assertSettled(t, settled, "sc", engine.OutcomePass)
+	if got := res.NodeOutputs["fan/0"]; got != "a" {
+		t.Errorf("member 0 = %q, want a (the input seed survives the aggregate settle)", got)
+	}
+	if got := res.NodeOutputs["fan/1"]; got != "b" {
+		t.Errorf("member 1 = %q, want b", got)
+	}
+}
+
 // TestForEachDropRefoldByteIdentity pins DET: the dynamically-materialized member
 // rows refold byte-identically.
 func TestForEachDropRefoldByteIdentity(t *testing.T) {
@@ -264,6 +291,11 @@ func TestForEachLoweringRefusals(t *testing.T) {
 				execNode("mem", `echo 1`, nil))},
 		},
 		{
+			name: "over ref with reserved delimiter",
+			nodes: []string{forEachNode(nil, "item", "continue", refOver("a/b"),
+				execNode("mem", `echo 1`, nil))},
+		},
+		{
 			name: "nested in an aggregate",
 			nodes: []string{scatterNode("outer", nil, "continue",
 				forEachNode(nil, "item", "continue", refOver("items"), execNode("mem", `echo 1`, nil)))},
@@ -284,6 +316,33 @@ func TestForEachLoweringRefusals(t *testing.T) {
 				t.Fatalf("run err = %v, want ErrUnsupportedNode", err)
 			}
 		})
+	}
+}
+
+// TestForEachMemberFormBesideSilentInputNode (§1.1.2 ⚑S1) proves the head-derived
+// overRefs fix: a member-over `input.things` lowers and fans even beside a SILENT node
+// literally named "input". Pre-fix, collectRefs returned the base ref "input" and the
+// silent-over sweep refused (a false positive); head-derived overRefs are empty, so the
+// member form reads the immutable input directly with no over-ref footprint.
+func TestForEachMemberFormBesideSilentInputNode(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	silentInput := `{"kind":"lit","id":"input","name":"input","after":[],` +
+		`"origin":{"uri":"t","line":1,"col":0},"value":{"kind":"literal","value":"hi"}}`
+	doc := decodeIR(t, blockDoc("fesi",
+		silentInput,
+		forEachNode(nil, "item", "continue", memberOver("things"),
+			execNode("mem", `echo "{{ item }}"`, nil)),
+	))
+	res, err := engine.Run(ctx, store, doc, map[string]any{"things": []any{"a", "b"}})
+	if err != nil {
+		t.Fatalf("run: %v (member-over must lower beside a silent node named input — ⚑S1)", err)
+	}
+	if got := res.NodeOutputs["fan/0"]; got != "a" {
+		t.Errorf("member 0 = %q, want a (member-over reads input.things; overRefs head-derived to [])", got)
+	}
+	if got := res.NodeOutputs["fan/1"]; got != "b" {
+		t.Errorf("member 1 = %q, want b", got)
 	}
 }
 

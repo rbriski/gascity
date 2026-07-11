@@ -700,9 +700,11 @@ func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) str
 // gated off — runUnit handles blocked()/skip-cascade before this switch arm.
 func (d *driver) runForEach(u planUnit, scope, nodeOutputs map[string]string) error {
 	spec := u.forEach
-	elems, ok, err := d.evalForEachArray(spec, scope)
+	elems, ok, err := d.evalForEachArray(u.ns, spec, scope)
 	if err != nil {
-		return err
+		// The wrap contract: evalForEachArray's messages carry no "lumen:"/id prefix;
+		// this (and advanceForEach, driver parity) names the failing fan exactly once.
+		return fmt.Errorf("lumen: for-each %q over: %w", u.nodeID, err)
 	}
 	if !ok {
 		if err := d.appendSettled(u.activation, OutcomeFailed, "", "invalid_input"); err != nil {
@@ -715,7 +717,7 @@ func (d *driver) runForEach(u planUnit, scope, nodeOutputs map[string]string) er
 	for i, elem := range elems {
 		mu := d.forEachMemberUnit(u, i)
 		memberActs = append(memberActs, mu.activation)
-		if err := d.withBinder(scope, spec.binder, elem, func() error {
+		if err := d.withBinder(scope, u.ns+spec.binder, elem, func() error {
 			return d.runUnit(mu, scope, nodeOutputs)
 		}); err != nil {
 			return err
@@ -729,9 +731,12 @@ func (d *driver) runForEach(u planUnit, scope, nodeOutputs map[string]string) er
 	return nil
 }
 
-// withBinder binds a for-each element to the binder name in scope for the duration
-// of fn, then restores the prior value (save/restore, like a repeat loop's iteration
-// binding) so an input field sharing the binder name survives the rest of the pass.
+// withBinder binds a for-each element to the (namespace-qualified) binder key in scope
+// for the duration of fn, then restores the prior value (save/restore, like a repeat
+// loop's iteration binding). The caller passes u.ns+spec.binder, so inside a run
+// sub-formula the element lands at the direct-child key the member's scopeFor(ns) view
+// re-keys to the bare binder name (shadowing a same-named sub-input/sub-node during the
+// member render, restored afterward). At the root the key is the bare binder.
 func (d *driver) withBinder(scope map[string]string, binder, elem string, fn func() error) error {
 	restore, had := scope[binder]
 	scope[binder] = elem
@@ -775,29 +780,56 @@ func forEachMemberNodeID(forEachID string, index int) string {
 	return forEachID + "/" + strconv.Itoa(index)
 }
 
-// evalForEachArray evaluates a for-each `over` expression to its element strings. A
-// bare `ref X` reads the flat scope (a node output / flattened input holding a JSON
-// array), DET-gated on node X by resolveDeps. An `input.<field>` member reads the
-// field from the IMMUTABLE input map directly — never the flat scope, where a node
-// output could shadow the field between passes and re-fan a different array. ok=false
-// marks a non-array `over` (the caller settles failed{invalid_input}); a nil/empty
-// array is (nil, true) — the vacuous PASS.
-func (d *driver) evalForEachArray(spec *forEachSpec, scope map[string]string) ([]string, bool, error) {
+// evalForEachArray evaluates a for-each `over` expression to its element strings for the
+// unit's namespace ns. At the root (ns == "") a bare `ref X` reads the flat scope (a node
+// output / flattened input holding a JSON array, DET-gated on node X by resolveDeps) and
+// an `input.<field>` member reads the field from the IMMUTABLE input map — never the flat
+// scope, where a node output could shadow the field between passes. Inside a run
+// sub-formula (ns != "") the ref arm reads the namespace VIEW (scopeFor: a settled
+// sub-sibling shadows a same-named binding, root child-wins parity) and the member arm
+// reads the run INPUT LAYER alone (runInputLayer: the env binding / declared default,
+// never the children — root's "never the flat scope" rationale). A miss (absent/empty)
+// is (nil, true) — the vacuous PASS (root parity); ok=false marks a PRESENT non-array
+// `over` (the caller settles failed{invalid_input}). An unregistered ns is a structural
+// bug (register-before-drive holds on every real path), refused loudly BEFORE the arm
+// switch so the ref arm never silently builds a children-only view.
+func (d *driver) evalForEachArray(ns string, spec *forEachSpec, scope map[string]string) ([]string, bool, error) {
 	var head struct {
 		Kind string          `json:"kind"`
 		Name string          `json:"name"`
 		Base json.RawMessage `json:"base"`
 	}
 	if err := json.Unmarshal(spec.overRaw, &head); err != nil {
-		return nil, false, fmt.Errorf("lumen: for-each over: %w", err)
+		return nil, false, fmt.Errorf("malformed over expression: %w", err)
+	}
+	// No "lumen:" / for-each-id prefix on this message — BOTH call sites (runForEach,
+	// advanceForEach) wrap every error from here as `lumen: for-each %q over: %w` (the
+	// GIS condScope-wrap parity), so the surfaced error names the failing fan exactly
+	// once.
+	if ns != "" && d.runEnvs[ns] == nil {
+		return nil, false, fmt.Errorf("namespace %q has no registered environment", ns)
 	}
 	switch head.Kind {
 	case "ref":
-		return decodeArrayString(scope[head.Name])
+		if ns == "" {
+			return decodeArrayString(scope[head.Name])
+		}
+		view, err := d.scopeFor(ns, scope)
+		if err != nil {
+			return nil, false, err
+		}
+		return decodeArrayString(view[head.Name])
 	case "member":
-		return arrayFromInputValue(d.input[head.Name])
+		if ns == "" {
+			return arrayFromInputValue(d.input[head.Name])
+		}
+		layer, err := d.runInputLayer(ns, scope)
+		if err != nil {
+			return nil, false, err
+		}
+		return decodeArrayString(layer[head.Name])
 	default:
-		return nil, false, fmt.Errorf("%w: for-each over kind %q", ErrUnsupportedNode, head.Kind)
+		return nil, false, fmt.Errorf("%w: over kind %q", ErrUnsupportedNode, head.Kind)
 	}
 }
 
@@ -1743,24 +1775,18 @@ func (d *driver) record(nodeID, output string, scope, nodeOutputs map[string]str
 	nodeOutputs[nodeID] = output
 }
 
-// scopeFor derives the render view for a unit's namespace (§C). The root
-// namespace ("") IS the flat scope, so a run-free document renders byte-identically
-// to before. A run sub-formula's namespace ("greeting/") gets a fresh view built
-// purely from (a) the run's environment bindings, evaluated in IR field order
-// against the PARENT view, keyed by the sub-input field name; (b) declared sub-input
-// defaults for any unbound field; and (c) the settled outputs of the namespace's
-// DIRECT sub-nodes, which shadow same-named bindings exactly as record() shadows
-// baseScope. It reads no clock and no randomness — everything derives from
-// (bundle, input, fold state) — so genesis, re-Advance, and crash-resume build an
-// identical view (DET). It is recomputed per render (cheap at these sizes), so there
-// is no cache to invalidate across passes.
-func (d *driver) scopeFor(ns string, scope map[string]string) (map[string]string, error) {
-	if ns == "" {
-		return scope, nil
-	}
-	// ⚑B1: a repeat run attempt namespace consults an explicit parent override — its
-	// string-derived parent is a phantom (no env spec) that would collapse the parent
-	// view to {}. A plain run namespace has no override and derives structurally.
+// runInputLayer derives a namespace's INPUT layer (§C, layers (a)+(b)): the run
+// environment bindings (evaluated in IR field order against the PARENT view, keyed by
+// the sub-input field name) plus declared sub-input defaults for any unbound field. It
+// is the shared source of that layer for both scopeFor (which overlays the direct-child
+// outputs on top) and evalForEachArray's member arm (which reads it ALONE — never the
+// children). The parent view is derived override-aware: a repeat run attempt namespace
+// consults an explicit parentNS override BEFORE the structural parentNamespace, whose
+// string-derived parent is a phantom (no env spec) that would collapse the parent view
+// to {} and every binding to "". It reads no clock and no randomness, so genesis,
+// re-Advance, and crash-resume build an identical layer (DET). ns is always non-empty
+// here (both callers handle ns == "" before descending).
+func (d *driver) runInputLayer(ns string, scope map[string]string) (map[string]string, error) {
 	parentNS := parentNamespace(ns)
 	if override, ok := d.parentNS[ns]; ok {
 		parentNS = override
@@ -1785,6 +1811,26 @@ func (d *driver) scopeFor(ns string, scope map[string]string) (map[string]string
 				view[fld.Name] = scalarDefaultToString(fld.Default)
 			}
 		}
+	}
+	return view, nil
+}
+
+// scopeFor derives the render view for a unit's namespace (§C). The root
+// namespace ("") IS the flat scope, so a run-free document renders byte-identically
+// to before. A run sub-formula's namespace ("greeting/") is the input LAYER
+// (runInputLayer: the run's environment bindings + declared sub-input defaults) plus
+// (c) the settled outputs of the namespace's DIRECT sub-nodes, which shadow same-named
+// bindings exactly as record() shadows baseScope. It reads no clock and no randomness —
+// everything derives from (bundle, input, fold state) — so genesis, re-Advance, and
+// crash-resume build an identical view (DET). It is recomputed per render (cheap at
+// these sizes), so there is no cache to invalidate across passes.
+func (d *driver) scopeFor(ns string, scope map[string]string) (map[string]string, error) {
+	if ns == "" {
+		return scope, nil
+	}
+	view, err := d.runInputLayer(ns, scope)
+	if err != nil {
+		return nil, err
 	}
 	for k, v := range scope {
 		if rest, ok := directChildKey(k, ns); ok {

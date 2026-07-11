@@ -256,10 +256,10 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
 		event.payload.Queued = boolPointer(result.Queued)
-		event.finish(err)
 		if err == nil {
-			h.recordInvocationTelemetry(ctx)
+			h.recordInvocationTelemetry(ctx, event)
 		}
+		event.finish(err)
 	}()
 
 	if strings.TrimSpace(req.Text) == "" {
@@ -300,10 +300,10 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
-		event.finish(err)
 		if err == nil {
-			h.recordInvocationTelemetry(ctx)
+			h.recordInvocationTelemetry(ctx, event)
 		}
+		event.finish(err)
 	}()
 
 	if strings.TrimSpace(req.Text) == "" {

@@ -566,6 +566,8 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 		wc.Open += r.wc.Open
 		wc.Ready += r.wc.Ready
 		wc.InProgress += r.wc.InProgress
+		wc.Hooked += r.wc.Hooked
+		wc.Review += r.wc.Review
 		errs = append(errs, r.errs...)
 	}
 	return wc, errs
@@ -605,6 +607,10 @@ func statusStoreWorkCounts(ctx context.Context, state State, rigName string, sto
 			result.wc.Ready++
 		case "open":
 			result.wc.Open++
+		case "hooked":
+			result.wc.Hooked++
+		case "review":
+			result.wc.Review++
 		}
 	}
 	return result
@@ -627,6 +633,8 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 		{"open", &wc.Open},
 		{"ready", &wc.Ready},
 		{"in_progress", &wc.InProgress},
+		{"hooked", &wc.Hooked},
+		{"review", &wc.Review},
 	} {
 		n, err := counter.Count(ctx, beads.ListQuery{Status: bucket.status, AllowScan: true}, statusWorkExcludedTypes...)
 		if err != nil {

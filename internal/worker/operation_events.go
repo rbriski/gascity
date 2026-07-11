@@ -128,7 +128,12 @@ func (h *SessionHandle) beginOperationEvent(ctx context.Context, op workerOperat
 	return newOperationEvent(ctx, h, op, h.providerLabel(), h.session.Transport, h.session.Template)
 }
 
-func (e *operationEvent) finish(err error) {
+// sealTiming freezes the operation's FinishedAt/DurationMs/Result the
+// moment the wrapped work completes. DurationMs times the operation only:
+// call sites that stamp best-effort telemetry after completion (Message,
+// Nudge) seal first, stamp, then emit, so telemetry I/O never inflates the
+// duration the dashboard renders.
+func (e *operationEvent) sealTiming(err error) {
 	if e == nil || e.target == nil || e.suppressed {
 		return
 	}
@@ -140,8 +145,22 @@ func (e *operationEvent) finish(err error) {
 	} else {
 		e.payload.Result = operationResultSucceeded
 	}
+}
+
+// emit records the sealed event.
+func (e *operationEvent) emit() {
+	if e == nil || e.target == nil || e.suppressed {
+		return
+	}
 	e.target.populateOperationEventIdentity(&e.payload)
 	e.target.recordWorkerOperationEvent(e.payload)
+}
+
+// finish seals and emits in one call — the contract for operations with no
+// post-completion stamping.
+func (e *operationEvent) finish(err error) {
+	e.sealTiming(err)
+	e.emit()
 }
 
 func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPayload) {

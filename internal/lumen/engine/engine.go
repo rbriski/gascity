@@ -327,7 +327,18 @@ type driver struct {
 	// bindings evaluated against the parent view + declared defaults). It is
 	// derived purely from the lowered units (runEnvIndex), so it is identical on a
 	// fresh run and a rebuild — keeping the sub-scope deterministic across resume.
+	// A repeat run body's per-attempt namespaces (`<bodyNodeID>/<N>/`) are registered
+	// into it at drive time (registerRunBodyEnv), re-derived identically every pass.
 	runEnvs map[string]*runSpec
+
+	// parentNS overrides the scopeFor parent-namespace derivation for a namespace
+	// whose STRING-derived parent is a phantom (⚑B1): a repeat run attempt namespace
+	// `<bodyNodeID>/<N>/` has string-parent `<bodyNodeID>/` — a namespace with no env
+	// spec, whose view is {} — so every env binding would render "" silently. The
+	// override points scopeFor at the loop's real namespace instead. registerRunBodyEnv
+	// populates it at drive time; a plain run's namespace is absent and derives its
+	// parent structurally exactly as before (nil-map read is a miss).
+	parentNS map[string]string
 }
 
 // st returns the driver's live fold state as the concrete lumenState so the
@@ -1317,6 +1328,10 @@ func (d *driver) runLoop(u planUnit, scope, nodeOutputs map[string]string) error
 	if spec == nil {
 		return fmt.Errorf("lumen: loop %q missing spec", u.nodeID)
 	}
+	// A repeat run body drives an inlined sub-graph per attempt, not a single leaf.
+	if spec.bodyRun != nil {
+		return d.runRunBodyLoop(u, scope, nodeOutputs)
+	}
 
 	// retry: evaluate the attempts budget ONCE. An invalid budget (non-integer or
 	// < 1) settles the loop failed{invalid_input} with ZERO attempts (reference
@@ -1390,6 +1405,73 @@ func (d *driver) runAttempt(u planUnit, attempt, maxAttempts int, scope, nodeOut
 		}
 	}
 	return err
+}
+
+// runRunBodyLoop drives a repeat whose body is a run inline (Run/Resume). It mirrors
+// runLoop but each attempt is a whole sub-graph (mintRunBodyAttempt) rather than a
+// single leaf: it re-mints attempt N, drives every minted sub-unit + the attempt
+// aggregate through runUnit (so resume memoization, per-attempt effect tokens, and
+// crash boundaries apply for free at any nesting level), then decides via the shared
+// loopDecide over the folded aggregate outcome. Only repeat reaches here (⚑S2 refuses
+// retry+run), so maxAttempts is unused (the cap is lumenRepeatLoopCap).
+func (d *driver) runRunBodyLoop(u planUnit, scope, nodeOutputs map[string]string) error {
+	spec := u.loop
+	for attempt := 0; ; attempt++ {
+		aggAct := activationForAttempt(spec.bodyNodeID, attempt)
+		bn := d.st().Nodes[aggAct]
+		if bn == nil || !bn.Settled {
+			if err := d.runRunBodyAttempt(u, attempt, scope, nodeOutputs); err != nil {
+				return err
+			}
+			bn = d.st().Nodes[aggAct]
+			if bn == nil || !bn.Settled {
+				return fmt.Errorf("lumen: loop %q run-body attempt %d aggregate did not settle in-pass", u.nodeID, attempt)
+			}
+		}
+		cont, err := d.loopDecide(u, attempt, 0, bn, scope, nodeOutputs)
+		if err != nil {
+			return err
+		}
+		if !cont {
+			return nil
+		}
+	}
+}
+
+// runRunBodyAttempt mints and drives one repeat run-body attempt inline: it re-lowers
+// the sub-graph (mintRunBodyAttempt), registers its env seam (⚑B1), emits the
+// bookkeeping attempt.minted, then runs every minted sub-unit and finally the
+// transparent aggregate through runUnit. The aggregate runs LAST (⚑S1 Tier-A FK
+// ordering — its Members edges reference the sub-node rows). No iteration binding is
+// threaded: the sub-graph renders against the run environment view (env-ref-to-
+// iteration is refused at lowering, ⚑S5), so the iteration is only ever read by the
+// loop's own cond (loopScope), never by a sub-node.
+func (d *driver) runRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs map[string]string) error {
+	spec := u.loop
+	subUnits, agg, err := spec.mintRunBodyAttempt(attempt, u.activation, u.ns, u.afterDeps, u.rawAfter)
+	if err != nil {
+		return err
+	}
+	d.registerRunBodyEnv(spec, attempt, u.ns, subUnits)
+	if err := d.appendAttemptMinted(u.activation, attempt, repeatRemaining(attempt)); err != nil {
+		return err
+	}
+	for i := range subUnits {
+		if err := d.runUnit(subUnits[i], scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+	return d.runUnit(agg, scope, nodeOutputs)
+}
+
+// repeatRemaining is the remaining-budget bookkeeping a repeat attempt stamps on
+// attempt.minted: the loop cap minus the 1-based attempt number, floored at zero.
+func repeatRemaining(attempt int) int {
+	remaining := lumenRepeatLoopCap - (attempt + 1)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // attemptUnit synthesizes the per-attempt leaf unit for a loop. It carries the
@@ -1583,7 +1665,14 @@ func (d *driver) scopeFor(ns string, scope map[string]string) (map[string]string
 	if ns == "" {
 		return scope, nil
 	}
-	parent, err := d.scopeFor(parentNamespace(ns), scope)
+	// ⚑B1: a repeat run attempt namespace consults an explicit parent override — its
+	// string-derived parent is a phantom (no env spec) that would collapse the parent
+	// view to {}. A plain run namespace has no override and derives structurally.
+	parentNS := parentNamespace(ns)
+	if override, ok := d.parentNS[ns]; ok {
+		parentNS = override
+	}
+	parent, err := d.scopeFor(parentNS, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -1623,6 +1712,36 @@ func runEnvIndex(units []planUnit) map[string]*runSpec {
 		}
 	}
 	return idx
+}
+
+// registerRunBodyEnv wires attempt N's env seam into scopeFor (⚑B1), so a run body's
+// sub-do prompts render against the environment bindings rather than "" (evalValue's
+// ref arm has no missing-key error, so the corruption would be silent). It is pure —
+// re-derived identically every pass and resume (genesis ≡ resume), so re-registering
+// is an idempotent map write. Two facts are registered:
+//
+//	(i)  the attempt namespace `<bodyNodeID>/<N>/` → the body run's env spec, PLUS an
+//	     explicit parent-namespace override = the loop's namespace (loopNS), consulted
+//	     by scopeFor BEFORE the structural parentNamespace (which would resolve to the
+//	     phantom `<bodyNodeID>/`);
+//	(ii) every nested run inside the attempt sub-graph → its own env spec; their
+//	     string-derived parent is `<bodyNodeID>/<N>/`, now registered by (i), so
+//	     scopeFor's recursion resolves the whole chain.
+func (d *driver) registerRunBodyEnv(spec *loopSpec, attempt int, loopNS string, subUnits []planUnit) {
+	if d.runEnvs == nil {
+		d.runEnvs = map[string]*runSpec{}
+	}
+	if d.parentNS == nil {
+		d.parentNS = map[string]string{}
+	}
+	attemptNS := spec.bodyNodeID + "/" + strconv.Itoa(attempt) + "/"
+	d.runEnvs[attemptNS] = spec.bodyRun
+	d.parentNS[attemptNS] = loopNS
+	for i := range subUnits {
+		if subUnits[i].kind == unitRun && subUnits[i].run != nil {
+			d.runEnvs[subUnits[i].nodeID+"/"] = subUnits[i].run
+		}
+	}
 }
 
 // parentNamespace returns the enclosing namespace of a run namespace: "greeting/"

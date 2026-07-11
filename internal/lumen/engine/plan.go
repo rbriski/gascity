@@ -231,20 +231,39 @@ type runEnvField struct {
 	value json.RawMessage
 }
 
-// loopSpec carries a retry/repeat loop node's decoded shape: the leaf body it
+// loopSpec carries a retry/repeat loop node's decoded shape: the body it
 // re-attempts, and the closed exit expression that decides re-runs (retry:
 // attempts count; repeat: the `until` condition + iteration binding). The body is
-// a SINGLE leaf (exec / do); block / run / nested-loop / scatter bodies are
-// refused at lowering (§3.2). No IR is read at run time — the driver evaluates
-// these expressions over folded attempt outcomes (D-P4-1).
+// usually a SINGLE leaf (exec / do); block / nested-loop / scatter bodies are
+// refused at lowering (§3.2). A repeat body MAY be a `run` (a transparent
+// sub-formula call — the RBL slice): then bodyRun (+ the re-lowering fields below)
+// is set, bodyIRKind == NodeRun, and each attempt mints the sub-graph fresh under
+// `<bodyNodeID>/<N>/` (mintRunBodyAttempt), the attempt aggregate settling at
+// activationForAttempt(bodyNodeID, N). retry with a run body is refused (⚑S2 — a
+// retry whose body settles a transparent aggregate can never re-attempt). No IR is
+// read at run time — the driver evaluates these expressions over folded attempt
+// outcomes (D-P4-1).
 type loopSpec struct {
 	irKind        ir.NodeKind     // NodeRetry | NodeRepeat
-	bodyNodeID    string          // the leaf body's node id (the re-attempted bare id)
-	bodyIRKind    ir.NodeKind     // NodeExec | NodeDo
-	body          step            // the decoded leaf body
+	bodyNodeID    string          // the body's node id (the re-attempted bare id)
+	bodyIRKind    ir.NodeKind     // NodeExec | NodeDo | NodeRun
+	body          step            // the decoded leaf body (empty when bodyRun != nil)
 	attemptsExpr  json.RawMessage // retry: the attempts count expression (closed subset)
 	condExpr      json.RawMessage // repeat: the `until` exit condition (closed subset)
 	iterationName string          // repeat: the 1-based iteration binding name
+
+	// Run-body fields (repeat { run <formula> given {…} }, the RBL slice): non-nil
+	// bodyRun switches the loop into the run-body arm. bodyFormula/bodyFormulas/
+	// bodyTargetStack/bodyAllowDo/bodyAllowCombineDo carry exactly the lowering
+	// context mintRunBodyAttempt re-invokes per attempt — captured at lower time
+	// (from the enclosing lowerer) so the runtime mint is byte-identical to the
+	// lower-time dry run (single source, no drift). All are nil/zero for a leaf body.
+	bodyRun            *runSpec          // the body run's decoded spec (env + target)
+	bodyFormula        *ir.IR            // the target sub-formula (re-lowered per attempt)
+	bodyFormulas       map[string]*ir.IR // the bundle (nested-run resolution)
+	bodyTargetStack    []string          // lowering-time targetStack (cycle guard for nested runs)
+	bodyAllowDo        bool              // whether a `do` may lower in the sub-graph
+	bodyAllowCombineDo bool              // whether a combine `do` may lower in the sub-graph
 }
 
 // allDeps returns the union of a unit's blocking and drain dependencies, for
@@ -291,6 +310,7 @@ func buildUnits(doc *ir.IR, allowDo, allowCombineDo bool) ([]planUnit, error) {
 		allowDo:        allowDo,
 		allowCombineDo: allowCombineDo,
 		formulas:       doc.Formulas,
+		inputNames:     fieldNameSet(doc.Input.Fields),
 		scatterMembers: map[string][]string{},
 	}
 	if err := l.lowerNodes(doc.Nodes, ""); err != nil {
@@ -322,6 +342,23 @@ type lowerer struct {
 	prefix      string
 	targetStack []string
 	inAggregate bool
+
+	// inputNames is the MAIN document's declared input field names — the immutable,
+	// tick-stable ref set a run-body repeat cond may read besides its own body and
+	// iteration (the re-decide freeze in lowerLoop). Run-body loops are entry-top-level
+	// only (prefix fence + inAggregate fence), so the main input is always the right
+	// namespace for the check.
+	inputNames map[string]bool
+}
+
+// fieldNameSet returns the set of declared input field names, for the run-body
+// cond ref freeze.
+func fieldNameSet(fields []ir.Field) map[string]bool {
+	names := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		names[f.Name] = true
+	}
+	return names
 }
 
 // qid qualifies an authored node id with the current namespace prefix. Authored
@@ -959,13 +996,13 @@ func (l *lowerer) lowerGather(n ir.Node, parent string) error {
 	return nil
 }
 
-// lowerLoop lowers a retry/repeat node to a unitLoop planUnit over a single leaf
-// body (§3.2). It is the ONLY place a retry/repeat's shape is validated: the body
-// must be exec/do (block / run / nested loop / scatter bodies are refused HERE,
-// before any append); the closed exit expression (retry: `attempts`; repeat:
-// `cond`) is validated by walking its tree, so a bad expression refuses at LOAD,
-// never at attempt N. A loop nested under an aggregate (scatter member / gather
-// combine) is refused this slice — it is a non-top-level, non-leaf placement.
+// lowerLoop lowers a retry/repeat node to a unitLoop planUnit (§3.2). It is the
+// ONLY place a retry/repeat's shape is validated: the body must be a leaf exec/do
+// — or, for a REPEAT only, a `run` (the RBL arm: the spec is stashed and the
+// sub-graph minted per attempt; retry+run is refused, ⚑S2) — while block / nested
+// loop / scatter bodies are refused HERE, before any append; the closed exit
+// expression (retry: `attempts`; repeat: `cond`) is validated by walking its tree,
+// so a bad expression refuses at LOAD, never at attempt N.
 //
 // The label names the BODY (compiled evidence: repeat/retry give the loop node a
 // synthetic id and the body keeps its own id), and dependents gate on the LOOP
@@ -978,7 +1015,8 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 	// scope (loopScope) is namespace-unaware, so cond/attempts refs would resolve wrong;
 	// that needs a namespace-aware loopScope (a follow-on). Also refused: a loop as a
 	// gather-COMBINE member (lowerCombine's leaf-only check), and a loop whose BODY is not
-	// a leaf exec/do (the body switch below refuses run/block/nested-loop bodies).
+	// a leaf exec/do or (repeat-only) a run — the body switch below refuses block /
+	// nested-loop / scatter bodies, and the retry arm refuses retry+run (⚑S2).
 	if l.prefix != "" {
 		return fmt.Errorf("%w: %q %q inside a run sub-formula; loops are top-level (or a top-level scatter member) only this slice", ErrUnsupportedNode, n.Kind, n.ID)
 	}
@@ -1010,8 +1048,29 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 			return err
 		}
 		spec.body = s
+	case ir.NodeRun:
+		// A run body (repeat { run <formula> given {…} }, the RBL slice): each attempt
+		// mints the sub-formula fresh under `<bodyNodeID>/<N>/`. Refuse a run-body loop
+		// as a scatter member (l.inAggregate) — the driver's re-mint arm is an
+		// entry-top-level surface this slice (the corpus loops are entry-top-level), and
+		// an aggregate placement is untested. decodeRunNode does the same validation
+		// lowerRun does (transparent, target present, cycle, env), so a bad run body
+		// refuses HERE at lowering, before any unit is emitted.
+		if l.inAggregate {
+			return fmt.Errorf("%w: %q %q with a run body is not a legal scatter member this slice (loops with run bodies are entry-top-level)", ErrUnsupportedNode, n.Kind, n.ID)
+		}
+		runSpec, sub, err := l.decodeRunNode(body)
+		if err != nil {
+			return err
+		}
+		spec.bodyRun = runSpec
+		spec.bodyFormula = sub
+		spec.bodyFormulas = l.formulas
+		spec.bodyTargetStack = append([]string(nil), l.targetStack...)
+		spec.bodyAllowDo = l.allowDo
+		spec.bodyAllowCombineDo = l.allowCombineDo
 	default:
-		return fmt.Errorf("%w: %q %q body kind %q (only exec/do leaf bodies)", ErrUnsupportedNode, n.Kind, n.ID, body.Kind)
+		return fmt.Errorf("%w: %q %q body kind %q (only exec/do leaf or run bodies)", ErrUnsupportedNode, n.Kind, n.ID, body.Kind)
 	}
 	if body.ID == "" {
 		return fmt.Errorf("%w: %q %q body missing id", ErrUnsupportedNode, n.Kind, n.ID)
@@ -1021,6 +1080,14 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 
 	switch n.Kind {
 	case ir.NodeRetry:
+		// ⚑S2: a retry whose body is a run can NEVER re-attempt — settleTransparentAgg
+		// always settles the aggregate non-retryable, so loopDecide's retry arm stops
+		// on attempt 0. Lifting it needs an aggregate-retryability rule (real design
+		// work); the corpus is all repeat. Refuse it loudly rather than silently emit a
+		// one-shot retry.
+		if spec.bodyRun != nil {
+			return fmt.Errorf("%w: retry %q with a run body cannot re-attempt (a transparent aggregate is never retryable); use repeat", ErrUnsupportedNode, n.ID)
+		}
 		att, ok := n.Raw["attempts"]
 		if !ok {
 			return fmt.Errorf("%w: retry %q missing attempts", ErrUnsupportedNode, n.ID)
@@ -1048,6 +1115,52 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 		spec.iterationName = iterName
 	}
 
+	if spec.bodyRun != nil {
+		// ⚑S5: an env binding that reads the repeat's iteration is refused. The
+		// iteration binding lives in the PARENT (loop) scope only inside the drive
+		// window; a memoized re-render of an in-flight sub-do sees the FOLDED prompt,
+		// not the live scope, so a `given { x: iteration }` binding would render its
+		// value on first materialization and "" on any re-render — a silent,
+		// path-dependent corruption. Refuse it at load. The body's OWN id is refused
+		// in the same sweep: byNodeID misses the spec-only body id (no gate installs),
+		// so `given { x: <bodyID> }` would render "" on attempt 0 but attempt N-1's
+		// transparent output on attempt N ≥ 1 (the bare scope[bodyID] last-wins key) —
+		// a silently attempt-VARYING mint that voids the byte-identical-mint premise.
+		for _, ref := range spec.bodyRun.envRefs {
+			if ref == spec.iterationName {
+				return fmt.Errorf("%w: repeat %q run body binds the iteration counter %q into the sub-formula environment (path-dependent render); reference it in the sub-formula prompt instead", ErrUnsupportedNode, n.ID, spec.iterationName)
+			}
+			if ref == spec.bodyNodeID {
+				return fmt.Errorf("%w: repeat %q run body binds its own body id %q into the sub-formula environment (attempt-varying render: \"\" on attempt 0, the prior attempt's output after)", ErrUnsupportedNode, n.ID, ref)
+			}
+		}
+		// Re-decide freeze: a run-body repeat cond may read ONLY the body's bare id,
+		// the iteration counter, and input fields (all tick-stable). advanceRunBodyLoop
+		// cannot park on liveAttempt (the attempt aggregate activates LAST, ⚑S1), so it
+		// re-runs loopDecide over the LAST SETTLED attempt on EVERY tick — including
+		// ticks where attempt N+1 is already minted with a live dispatched bead. An
+		// external node ref settling BETWEEN ticks would flip an already-acted-on
+		// continue into a stale settleLoop over the orphaned live attempt (the seal path
+		// never re-consults inFlightPoolWork). Freezing the ref set makes decide(N) a
+		// pure function of (bn(N), N) — write-once per attempt by construction. Lifting
+		// this needs a durable decision record (the guard write-once precedent) — a
+		// follow-up design, not this slice.
+		for _, ref := range collectRefs(spec.condExpr) {
+			if ref == spec.bodyNodeID || ref == spec.iterationName || l.inputNames[ref] {
+				continue
+			}
+			return fmt.Errorf("%w: repeat %q run-body cond reads %q — a run-body repeat cond may read only the body outcome, the iteration counter, and inputs this slice (an external node ref makes the per-tick re-decide non-write-once)", ErrUnsupportedNode, n.ID, ref)
+		}
+		// ⚑S4 DRY-RUN mint: lower attempt 0's sub-graph now (the same helper the runtime
+		// mint uses) so an un-lowerable run body — an unsupported sub-node, a nested loop
+		// (refused at the attempt prefix), a cycle — refuses HERE at buildUnits, before
+		// EnqueueRun ever seeds run.started. Attempt-invariant (N enters only via the
+		// prefix string), so validating attempt 0 validates every attempt.
+		if _, _, err := spec.mintRunBodyAttempt(0, activationFor(l.qid(n.ID)), l.prefix, nil, l.qAfter(n.After)); err != nil {
+			return fmt.Errorf("lumen: repeat %q run body does not lower: %w", n.ID, err)
+		}
+	}
+
 	l.units = append(l.units, planUnit{
 		kind:       unitLoop,
 		activation: activationFor(l.qid(n.ID)),
@@ -1061,6 +1174,55 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 	return nil
 }
 
+// decodeRunNode validates and decodes a run node's transparent, by-name shape into
+// a runSpec plus the resolved target sub-formula. It is the SINGLE run-node
+// validation path (⚑RBL §5): both lowerRun (which then inlines the sub-graph) and
+// lowerLoop's repeat-run-body arm (which stashes the spec for per-attempt minting)
+// call it, so there is no drift between an inlined run and a re-attempted one. It
+// refuses the deferred with-agent / runInput / non-transparent forms, a target
+// missing from the bundle, a recursive cycle (vs targetStack), and — via
+// decodeRunEnv — an env binding for an undeclared field, an unbound required input,
+// or a delimiter-bearing env ref. It reads l.formulas/l.targetStack (the current
+// namespace context), so a cycle check is correct at any nesting depth.
+func (l *lowerer) decodeRunNode(n ir.Node) (*runSpec, *ir.IR, error) {
+	// Closed-payload guards: the agent override and detached-run forms are deferred;
+	// only the transparent, by-name form lowers this slice.
+	if _, ok := n.Raw["with"]; ok {
+		return nil, nil, fmt.Errorf("%w: run %q with-agent override (node %q)", ErrUnsupportedNode, n.ID, n.ID)
+	}
+	if _, ok := n.Raw["runInput"]; ok {
+		return nil, nil, fmt.Errorf("%w: run %q runInput form (node %q)", ErrUnsupportedNode, n.ID, n.ID)
+	}
+	var outcome string
+	if raw, ok := n.Raw["outcome"]; ok {
+		_ = json.Unmarshal(raw, &outcome)
+	}
+	if outcome != "transparent" {
+		return nil, nil, fmt.Errorf("%w: run %q outcome %q (only transparent)", ErrUnsupportedNode, n.ID, outcome)
+	}
+	target, err := runTargetName(n)
+	if err != nil {
+		return nil, nil, err
+	}
+	sub, ok := l.formulas[target]
+	if !ok {
+		return nil, nil, fmt.Errorf("lumen: run %q targets formula %q not present in the document's formulas bundle", n.ID, target)
+	}
+	if sub == nil {
+		return nil, nil, fmt.Errorf("lumen: run %q target formula %q is null in the bundle", n.ID, target)
+	}
+	for _, t := range l.targetStack {
+		if t == target {
+			return nil, nil, fmt.Errorf("lumen: run %q: recursive formula cycle %s", n.ID, strings.Join(append(append([]string(nil), l.targetStack...), target), " -> "))
+		}
+	}
+	env, envRefs, err := decodeRunEnv(n, sub.Input.Fields)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &runSpec{target: target, env: env, envRefs: envRefs, inputFields: sub.Input.Fields}, sub, nil
+}
+
 // lowerRun lowers a run node — a transparent call to another formula — by
 // inlining the target formula's nodes as ordinary units under a `<runID>/`
 // namespace and emitting a unitRun aggregate that settles with the sub-formula's
@@ -1071,47 +1233,17 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 // (legal) from a gather-combine member (illegal), both arriving inAggregate=true,
 // parent != "" (⚑SF-2). Run-in-combine stays fenced SOLELY by lowerCombine's
 // leaf-only unit sweep, which rejects the unitRun agg after this inlines it. A run
-// as a loop body is refused by lowerLoop's body switch. The target body comes from
-// the document's flat `formulas` bundle; a missing target, a recursive cycle, an
-// unknown env field, or an unbound required input all refuse HERE, before any append.
+// as a REPEAT body never reaches here — lowerLoop's run-body arm stashes the spec
+// and mints the sub-graph per attempt (mintRunBodyAttempt); a retry run body is
+// refused there (⚑S2). The target body comes from the document's flat `formulas`
+// bundle; a missing target, a recursive cycle, an unknown env field, or an unbound
+// required input all refuse in decodeRunNode, before any append.
 func (l *lowerer) lowerRun(n ir.Node, parent string) error {
-	// Closed-payload guards: the agent override and detached-run forms are deferred;
-	// only the transparent, by-name form lowers this slice.
-	if _, ok := n.Raw["with"]; ok {
-		return fmt.Errorf("%w: run %q with-agent override (node %q)", ErrUnsupportedNode, n.ID, n.ID)
-	}
-	if _, ok := n.Raw["runInput"]; ok {
-		return fmt.Errorf("%w: run %q runInput form (node %q)", ErrUnsupportedNode, n.ID, n.ID)
-	}
-	var outcome string
-	if raw, ok := n.Raw["outcome"]; ok {
-		_ = json.Unmarshal(raw, &outcome)
-	}
-	if outcome != "transparent" {
-		return fmt.Errorf("%w: run %q outcome %q (only transparent)", ErrUnsupportedNode, n.ID, outcome)
-	}
-	target, err := runTargetName(n)
+	spec, sub, err := l.decodeRunNode(n)
 	if err != nil {
 		return err
 	}
-	sub, ok := l.formulas[target]
-	if !ok {
-		return fmt.Errorf("lumen: run %q targets formula %q not present in the document's formulas bundle", n.ID, target)
-	}
-	if sub == nil {
-		return fmt.Errorf("lumen: run %q target formula %q is null in the bundle", n.ID, target)
-	}
-	for _, t := range l.targetStack {
-		if t == target {
-			return fmt.Errorf("lumen: run %q: recursive formula cycle %s", n.ID, strings.Join(append(append([]string(nil), l.targetStack...), target), " -> "))
-		}
-	}
-
-	env, envRefs, err := decodeRunEnv(n, sub.Input.Fields)
-	if err != nil {
-		return err
-	}
-	spec := &runSpec{target: target, env: env, envRefs: envRefs, inputFields: sub.Input.Fields}
+	target := spec.target
 
 	qRunID := l.qid(n.ID)
 	qAfter := l.qAfter(n.After)
@@ -1487,6 +1619,7 @@ func (l *lowerer) lowerCombine(n ir.Node) ([]planUnit, error) {
 		prefix:         l.prefix,
 		targetStack:    l.targetStack,
 		inAggregate:    true, // fences for-each/cleanup/recover members; a non-leaf run/loop member is refused by the leaf-only sweep below
+		inputNames:     l.inputNames,
 		scatterMembers: map[string][]string{},
 	}
 	if err := sub.lowerNodes(members, gatherAct); err != nil {
@@ -1619,6 +1752,15 @@ func (l *lowerer) resolveDeps() error {
 				// before any member materializes (a bare-ref `over` to a node; an
 				// input.<field> member reads the immutable input, contributing no gate).
 				exprRefs = u.forEach.overRefs
+			}
+		case unitLoop:
+			// ⚑S6: a repeat whose body is a run gates the LOOP on the parent nodes the
+			// body run's environment reads, so the parent scope is frozen before the
+			// first attempt mints — every attempt then re-evaluates the same env against
+			// the same stable scope (byte-identical mints). The sub-graph is minted at
+			// runtime (not a top-level unit), so only the loop unit takes the gate.
+			if u.loop != nil && u.loop.bodyRun != nil {
+				exprRefs = u.loop.bodyRun.envRefs
 			}
 		default:
 			continue
@@ -1878,6 +2020,82 @@ func topoSortUnits(units []planUnit) ([]planUnit, error) {
 		}
 	}
 	return order, nil
+}
+
+// mintRunBodyAttempt lowers a repeat run body's sub-formula for attempt N — the
+// SINGLE lowering path shared by the lower-time dry run (⚑S4, attempt 0, validation
+// only) and the runtime per-attempt mint (advanceRunBodyLoop / runRunBodyLoop), so
+// there is no drift between a validated attempt and a driven one. It builds a fresh
+// lowerer at the attempt prefix `<bodyNodeID>/<N>/`, inlines the sub-formula's nodes
+// under the attempt aggregate activation (activationForAttempt(bodyNodeID, N) =
+// bodyNodeID:N), resolves deps, and topo-sorts (cycle detection lives in topoSort);
+// it then synthesizes the transparent attempt aggregate (kind unitRun, at
+// bodyNodeID:N, parented under the loop activation so the minted units stay OUT of
+// runOutcome — attemptUnit parity) and propagates the loop's own gate onto every
+// minted unit + the aggregate (⚑S6, the attemptUnit / lowerRun H1 rule: fold-edge
+// honesty even though a blocked loop never mints).
+//
+// The aggregate is NOT topo-linked into the returned unit list — the caller drives
+// the sub-units first, then the aggregate LAST (⚑S1: its Members edges' from_id are
+// the sub-node ids, whose node rows must already exist under the Tier-A edges.from_id
+// FK; a pre-activated aggregate is a committed poison event). It is attempt-invariant
+// (N enters only via the prefix string), so genesis, re-Advance, and resume mint
+// byte-identically.
+func (spec *loopSpec) mintRunBodyAttempt(attempt int, loopActivation, loopNS string, loopAfterDeps, loopRawAfter []string) ([]planUnit, planUnit, error) {
+	aggAct := activationForAttempt(spec.bodyNodeID, attempt)
+	prefix := spec.bodyNodeID + "/" + strconv.Itoa(attempt) + "/"
+	l := &lowerer{
+		allowDo:        spec.bodyAllowDo,
+		allowCombineDo: spec.bodyAllowCombineDo,
+		formulas:       spec.bodyFormulas,
+		prefix:         prefix,
+		// The sub-graph's nested runs check cycles against the body run's target on top
+		// of the lower-time chain — the exact stack lowerRun pushes for an inlined run.
+		targetStack:    append(append([]string(nil), spec.bodyTargetStack...), spec.bodyRun.target),
+		scatterMembers: map[string][]string{},
+	}
+	if err := l.lowerNodes(spec.bodyFormula.Nodes, aggAct); err != nil {
+		return nil, planUnit{}, err
+	}
+	if err := l.resolveDeps(); err != nil {
+		return nil, planUnit{}, err
+	}
+	ordered, err := topoSortUnits(l.units)
+	if err != nil {
+		return nil, planUnit{}, err
+	}
+	// Direct members: units parented directly by the aggregate, non-silent, collected
+	// from the PRE-topo unit list — SOURCE order, exactly lowerRun's rule (a nested
+	// aggregate contributes its own children, which must not inflate this member set;
+	// silent lit/interp never settle). Source order is load-bearing: the aggregate's
+	// Members payload and settleTransparentAgg's "returns lastResult" selection (the
+	// LAST source-order member that ran) must be byte-identical to an inlined static
+	// run of the same sub-formula — a forward `after` ref makes source ≠ topo.
+	var members []string
+	for i := range l.units {
+		if l.units[i].parent == aggAct && !l.units[i].silent {
+			members = append(members, l.units[i].activation)
+		}
+	}
+	// Propagate the loop's gate onto every minted unit (⚑S6 / lowerRun H1): a blocked
+	// loop never mints, but the fold edges stay honest across a drop+refold.
+	for i := range ordered {
+		ordered[i].afterDeps = appendMissing(ordered[i].afterDeps, loopAfterDeps)
+	}
+	agg := planUnit{
+		kind:       unitRun,
+		activation: aggAct,
+		nodeID:     spec.bodyNodeID,
+		irKind:     ir.NodeRun,
+		parent:     loopActivation,
+		ns:         loopNS,
+		afterDeps:  append([]string(nil), loopAfterDeps...),
+		rawAfter:   append([]string(nil), loopRawAfter...),
+		members:    members,
+		memberDeps: members,
+		run:        spec.bodyRun,
+	}
+	return ordered, agg, nil
 }
 
 func (l *lowerer) addLeaf(n ir.Node, parent string, memberIndex *int, s step, silent bool) {

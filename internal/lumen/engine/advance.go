@@ -308,7 +308,14 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 	// runUnit below (its attempts never materialize). An exec-bodied loop (no pool
 	// materialization) falls through to runUnit → runLoop, which runs its attempts
 	// inline in-pass exactly as Run does (Advance/Run parity).
-	if u.kind == unitLoop && loopPoolMode(u, opts) && !d.blocked(u) {
+	//
+	// A repeat RUN body (bodyRun != nil) ALSO routes here — in BOTH pool and inline
+	// modes (⚑B2): loopPoolMode keys bodyIRKind==NodeDo, so a run body would otherwise
+	// fall through to runUnit → runLoop → attemptUnit's nil-leaf host error. advanceLoop
+	// dispatches to its run-body arm, which drives each attempt's inlined sub-graph
+	// through advanceUnit (parking on any in-flight sub-do, settling exec/settle subs
+	// in-pass).
+	if u.kind == unitLoop && !d.blocked(u) && (loopPoolMode(u, opts) || (u.loop != nil && u.loop.bodyRun != nil)) {
 		return d.advanceLoop(u, scope, nodeOutputs, opts)
 	}
 
@@ -604,6 +611,13 @@ func recoverPoolMode(u planUnit, opts Options) bool {
 func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
 	spec := u.loop
 
+	// A repeat run body (⚑B2) drives an inlined sub-graph per attempt, not a single
+	// pool do — a distinct park/mint shape (the aggregate activates last, so liveAttempt
+	// is blind to a live attempt; the arm re-mints and re-drives idempotently instead).
+	if spec.bodyRun != nil {
+		return d.advanceRunBodyLoop(u, scope, nodeOutputs, opts)
+	}
+
 	// Ensure the loop node.activated (write-once): dependents gate on the loop node,
 	// and the seal condition keys on its settle.
 	if err := d.ensureLoopActivated(u); err != nil {
@@ -657,6 +671,98 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 		return nil // loop settled inside loopDecide
 	}
 	return d.materializeLoopAttempt(u, settledAttempt+1, maxAttempts, scope, opts)
+}
+
+// advanceRunBodyLoop is Advance's park-aware arm for a repeat whose body is a run
+// (⚑B2, the advanceLoop-owned nested mini-pass). Unlike a do-body loop it cannot key
+// on liveAttempt: the attempt aggregate settles at activationForAttempt(bodyNodeID, N)
+// but activates LAST (⚑S1), so while an attempt is in flight there is NO
+// activated-unsettled node at that node id. Instead it re-mints and re-drives the
+// current attempt idempotently each pass: settle the loop or mint the next attempt
+// from the last SETTLED aggregate (loopDecide), drive the current attempt's inlined
+// sub-graph through advanceUnit (a nested mini-pass), and PARK when a minted sub-do is
+// in flight (inFlightPoolWork reports it from the fold with zero changes). An
+// exec/settle-only attempt settles in-pass, so the loop can mint and settle several
+// attempts in one pass (Advance/Run parity), bounded by lumenRepeatLoopCap.
+//
+// DECIDE-EVERY-TICK is only sound because the cond's ref set is FROZEN at lowering
+// to {the body's bare id, the iteration counter, input fields} — all attempt-local /
+// immutable, so re-running loopDecide over the last settled attempt derives the SAME
+// answer on every tick. Without the freeze, an external node ref settling between
+// ticks could flip an already-acted-on continue into a stale settleLoop while the
+// next attempt's bead is live (the seal path never re-consults inFlightPoolWork) —
+// an orphaned live bead plus permanently activated-unsettled minted nodes. Lifting
+// the freeze needs a durable per-attempt decision record (the guard write-once
+// precedent) — a follow-up design, not this slice.
+//
+// WALL-TIME NOTE: this is the first Advance arm that can spend unbounded time in one
+// pass — up to lumenRepeatLoopCap (32) sequential exec-bodied attempts under the
+// non-renewed 30s writer lease, so a slow exec body can outlive the lease mid-pass
+// (the same class as inline Run's attempt loops). A lease renew or a per-tick attempt
+// budget is a deliberate follow-up, not this slice.
+func (d *driver) advanceRunBodyLoop(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	spec := u.loop
+	// Ensure the loop node.activated (write-once): dependents gate on the loop node,
+	// and the seal condition keys on its settle.
+	if err := d.ensureLoopActivated(u); err != nil {
+		return err
+	}
+	for {
+		attempt := 0
+		if settledAttempt, hasSettled := d.lastSettledAttempt(spec.bodyNodeID); hasSettled {
+			// The highest attempt's aggregate settled: decide (settle the loop OR
+			// re-attempt). loopDecide reads only bodyName/outcome + iteration, so a run
+			// aggregate is indistinguishable from a leaf attempt to it (ZERO changes there).
+			bn := d.st().Nodes[activationForAttempt(spec.bodyNodeID, settledAttempt)]
+			cont, err := d.loopDecide(u, settledAttempt, 0, bn, scope, nodeOutputs)
+			if err != nil {
+				return err
+			}
+			if !cont {
+				return nil // loop settled inside loopDecide
+			}
+			attempt = settledAttempt + 1
+		}
+		settled, err := d.driveRunBodyAttempt(u, attempt, scope, nodeOutputs, opts)
+		if err != nil {
+			return err
+		}
+		if !settled {
+			return nil // park — a minted sub-do is in flight (inFlightPoolWork reports it)
+		}
+		// The attempt aggregate settled this pass: loop back to decide (mint N+1 or settle).
+	}
+}
+
+// driveRunBodyAttempt mints attempt N's inlined sub-graph and drives it one nested
+// mini-pass, reporting whether the attempt aggregate has settled. It re-mints
+// deterministically every pass (mintRunBodyAttempt), registers the attempt env seam
+// (⚑B1), emits the idem-keyed attempt.minted, then drives each minted sub-unit and
+// finally the aggregate through advanceUnit — which inherits defer-on-deps, pool
+// materialize/observe/park, inline exec/settle, and resume memoization. The aggregate
+// is driven LAST (⚑S1 Tier-A FK ordering: its Members edges reference the sub-node
+// rows, which its members-gate defers behind); it stays unsettled — so this returns
+// false and the loop PARKS — while any sub-do is in flight.
+func (d *driver) driveRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs map[string]string, opts Options) (bool, error) {
+	spec := u.loop
+	subUnits, agg, err := spec.mintRunBodyAttempt(attempt, u.activation, u.ns, u.afterDeps, u.rawAfter)
+	if err != nil {
+		return false, err
+	}
+	d.registerRunBodyEnv(spec, attempt, u.ns, subUnits)
+	if err := d.appendAttemptMinted(u.activation, attempt, repeatRemaining(attempt)); err != nil {
+		return false, err
+	}
+	for i := range subUnits {
+		if err := d.advanceUnit(subUnits[i], scope, nodeOutputs, opts); err != nil {
+			return false, err
+		}
+	}
+	if err := d.advanceUnit(agg, scope, nodeOutputs, opts); err != nil {
+		return false, err
+	}
+	n := d.st().Nodes[agg.activation]
+	return n != nil && n.Settled, nil
 }
 
 // advanceGuard drives a guard's decision arm in the parking model: it activates the

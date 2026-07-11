@@ -916,9 +916,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
 	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps
-	// the plain oneShotStore, matching the daemon's cityBeadStore() there (its lone
-	// liveOpenSessionAssignmentExists session read is a shared work-release-boundary
-	// follow-up).
+	// the plain oneShotStore for its work reads/writes, matching the daemon's
+	// cityBeadStore() there; its lone liveOpenSessionAssignmentExists session read
+	// routes to sessStore, matching the daemon's sessions-store threading.
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
 
 	// One-shot bead reconciliation: same code path as the daemon.
@@ -938,7 +938,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	)
 
 	open := sessionBeads.Open()
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, open, dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, open, dsResult, rigStores, sessStore); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}

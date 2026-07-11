@@ -3813,9 +3813,12 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 // A cross-store-eligible (city-scoped) session federates across the primary store
 // and every rig store (vp-kvp); a session whose template/agent can't be resolved
 // falls back to the same fan-out (legacy keep-on-match fail-safe); a rig-bound
-// session routes to its one rig store; every other session routes to the primary
-// store. The slice is ordered primary-first so "first match" callers keep their
-// historical ordering. Returns an error only when a resolved rig store is missing.
+// session routes to its rig store — plus, on a split city, the primary
+// (sessions/infra) store, where routed graph wisps it has claimed live; every
+// other session routes to the primary store. The slice is ordered primary-first
+// so "first match" callers keep their historical ordering (the rig store stays
+// first for rig-bound sessions; the split-city infra store is appended). Returns
+// an error only when a resolved rig store is missing.
 func reachableStoresForSession(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]beads.Store, error) {
 	agentCfg := sessionAgentConfig(cfg, session)
 	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
@@ -3833,6 +3836,16 @@ func reachableStoresForSession(cityPath string, cfg *config.City, store beads.St
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+	}
+	// Split city: a rig-bound session's claimed graph wisps live in the
+	// primary (sessions/infra) store the reconciler threads as store, not in
+	// its rig store. Without this leg the *ForReachableStore drain/awake
+	// probes cannot see a claimed wisp and the drain just moves post-claim
+	// (spawn/drain treadmill, post-claim half). On a legacy single-store city
+	// cityHasInfraStore is false and the rig-bound session probes only its
+	// rig store, byte-identical to the historical behavior.
+	if cityHasInfraStore(cityPath) && store != nil && store != rigStore {
+		return []beads.Store{rigStore, store}, nil
 	}
 	return []beads.Store{rigStore}, nil
 }

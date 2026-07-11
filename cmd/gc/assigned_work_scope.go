@@ -80,6 +80,18 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	if agentIsCrossStoreEligible(agentCfg) {
 		return true
 	}
+	// Split city: the reconciler's leading store is the sessions/infra store,
+	// and its assigned-work arm is captured under the empty store-ref
+	// (coordClassStoreCandidates cityRef ""). Routed graph wisps a rig pool's
+	// agent has CLAIMED live there, so that leg must stay reachable from the
+	// rig-bound agent or the claim looks orphaned and the pool's resume tier
+	// drops the owning session (the post-claim half of the spawn/drain
+	// treadmill). On a legacy single-store city cityHasInfraStore is false and
+	// the "" (city) leg stays unreachable from rig-bound agents, byte-identical
+	// to the historical behavior.
+	if storeRefs[index] == "" && cityHasInfraStore(cityPath) {
+		return true
+	}
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 

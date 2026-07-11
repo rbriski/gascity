@@ -272,11 +272,11 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // controlDispatcherTick): the leading store of buildDesiredStateWithSessionBeads,
 // loadSessionBeadSnapshot, syncSessionBeadsWithSnapshotAndRigStores, and
 // reconcileSessionBeadsAtPathWithNamedDemand all take the session-class store via
-// cliSessionStore/cliSessionFrontDoor, with rigStores as the per-rig WORK tail. The
-// one residual — releaseOrphanedPoolAssignmentsWhenSnapshotsComplete's
-// liveOpenSessionAssignmentExists session read — stays on the plain store exactly as
-// the daemon leaves it on cityBeadStore(), a shared work-release-boundary follow-up,
-// not a cmd_start gap. The positive cliSessionStore( tripwire protects the routed
+// cliSessionStore/cliSessionFrontDoor, with rigStores as the per-rig WORK tail.
+// releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps the plain store for its
+// work reads/writes and threads sessStore for its lone
+// liveOpenSessionAssignmentExists session read, exactly as the daemon threads
+// sessionsBeadStore() there. The positive cliSessionStore( tripwire protects the routed
 // arm; no unrouted sessionFrontDoor(store...) needle is carried. As a non-front-door
 // router (its session reads go through store args, not front-door construction) this
 // guard is a regression canary for the file, not a completeness proof — the

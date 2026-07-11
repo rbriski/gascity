@@ -605,10 +605,14 @@ func reconstructOutputs(s *lumenState) (nodeOutputs, scope map[string]string) {
 }
 
 // isAggregateKind reports whether an IR node kind is a drain aggregate
-// (scatter / gather), whose settled output genesis writes to nodeOutputs (always
-// "") but never seeds into the interpolation scope.
+// (scatter / gather / a cleanup guarded block), whose settled output genesis writes to
+// nodeOutputs but never seeds into the interpolation scope. ir.NodeBlock is here for the
+// cleanup guarded-block drain aggregate (runCleanupGuarded seeds nodeOutputs only); it is
+// scope-excluded on drop+refold to match genesis. No unit today carries irKind==NodeBlock
+// EXCEPT that aggregate — plain blocks are hoisted/unwrapped at lowering, never settled as
+// units — so this changes no other stream's refold.
 func isAggregateKind(kind string) bool {
-	return kind == string(ir.NodeScatter) || kind == string(ir.NodeGather)
+	return kind == string(ir.NodeScatter) || kind == string(ir.NodeGather) || kind == string(ir.NodeBlock)
 }
 
 // storedToFoldEvent projects a committed journal row onto the I/O-free fold view.

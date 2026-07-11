@@ -1,0 +1,240 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [],
+    "origin": {
+      "uri": "cub_fixture.lumen",
+      "line": 1,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "cleanup",
+      "id": "cleanup_1",
+      "name": "scoped",
+      "after": [],
+      "origin": {
+        "uri": "cub_fixture.lumen",
+        "line": 6,
+        "col": 0
+      },
+      "guarded": {
+        "kind": "block",
+        "id": "block_101",
+        "after": [],
+        "origin": {
+          "uri": "cub_fixture.lumen",
+          "line": 2,
+          "col": 0
+        },
+        "members": [
+          {
+            "kind": "do",
+            "id": "stepA",
+            "name": "stepA",
+            "after": [],
+            "origin": {
+              "uri": "cub_fixture.lumen",
+              "line": 3,
+              "col": 0
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "origin": {
+                "uri": "cub_fixture.lumen",
+                "line": 3,
+                "col": 0
+              }
+            },
+            "body": {
+              "raw": "Do step A of the body, then settle.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "Do step A of the body, then settle."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "cub_fixture.lumen",
+                "line": 3,
+                "col": 0
+              }
+            }
+          },
+          {
+            "kind": "do",
+            "id": "stepB",
+            "name": "stepB",
+            "after": [
+              "stepA"
+            ],
+            "origin": {
+              "uri": "cub_fixture.lumen",
+              "line": 4,
+              "col": 0
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "origin": {
+                "uri": "cub_fixture.lumen",
+                "line": 4,
+                "col": 0
+              }
+            },
+            "body": {
+              "raw": "Do step B of the body, then settle.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "Do step B of the body, then settle."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "cub_fixture.lumen",
+                "line": 4,
+                "col": 0
+              }
+            }
+          },
+          {
+            "kind": "do",
+            "id": "stepC",
+            "name": "stepC",
+            "after": [
+              "stepB"
+            ],
+            "origin": {
+              "uri": "cub_fixture.lumen",
+              "line": 5,
+              "col": 0
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "origin": {
+                "uri": "cub_fixture.lumen",
+                "line": 5,
+                "col": 0
+              }
+            },
+            "body": {
+              "raw": "Do step C of the body, then settle.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "Do step C of the body, then settle."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "cub_fixture.lumen",
+                "line": 5,
+                "col": 0
+              }
+            }
+          }
+        ],
+        "name": "scoped"
+      },
+      "body": {
+        "kind": "do",
+        "id": "teardown",
+        "name": "teardown",
+        "after": [],
+        "origin": {
+          "uri": "cub_fixture.lumen",
+          "line": 6,
+          "col": 13
+        },
+        "source": {
+          "kind": "prompt"
+        },
+        "interpreter": {
+          "kind": "agent",
+          "mode": {
+            "kind": "do"
+          },
+          "origin": {
+            "uri": "cub_fixture.lumen",
+            "line": 6,
+            "col": 13
+          }
+        },
+        "body": {
+          "raw": "Tear down the scope no matter what.",
+          "template": {
+            "parts": [
+              {
+                "kind": "text",
+                "value": "Tear down the scope no matter what."
+              }
+            ]
+          },
+          "source": {
+            "kind": "inline"
+          },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": {
+            "uri": "cub_fixture.lumen",
+            "line": 6,
+            "col": 13
+          }
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "cub_fixture.lumen",
+    "line": 1,
+    "col": 0
+  }
+}

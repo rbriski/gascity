@@ -47,16 +47,17 @@ type step struct {
 type unitKind int
 
 const (
-	unitLeaf       unitKind = iota // exec / settle / lit / interp / do
-	unitScatterAgg                 // scatter aggregate: settles after its members
-	unitGather                     // gather: head-of-line drain + authored combine
-	unitLoop                       // retry / repeat: the attempt-loop over a leaf body
-	unitRun                        // run: transparent sub-formula call over an inlined sub-graph
-	unitGuard                      // guard: a conditional single-step arm (cond ? then : pass)
-	unitDispatch                   // dispatch: a multi-way branch (subject -> matching arm's body)
-	unitForEach                    // for-each: a dynamic scatter fanning a single-leaf body over a runtime array
-	unitCleanup                    // cleanup: try/finally — a guarded leaf, then an always-run body leaf
-	unitRecover                    // recover: try/catch — a guarded leaf, then a catch body run only on failure
+	unitLeaf           unitKind = iota // exec / settle / lit / interp / do
+	unitScatterAgg                     // scatter aggregate: settles after its members
+	unitGather                         // gather: head-of-line drain + authored combine
+	unitLoop                           // retry / repeat: the attempt-loop over a leaf body
+	unitRun                            // run: transparent sub-formula call over an inlined sub-graph
+	unitGuard                          // guard: a conditional single-step arm (cond ? then : pass)
+	unitDispatch                       // dispatch: a multi-way branch (subject -> matching arm's body)
+	unitForEach                        // for-each: a dynamic scatter fanning a single-leaf body over a runtime array
+	unitCleanup                        // cleanup: try/finally — a guarded leaf, then an always-run body leaf
+	unitRecover                        // recover: try/catch — a guarded leaf, then a catch body run only on failure
+	unitCleanupGuarded                 // cleanup(block guarded): a synthetic transparent drain aggregate over the block's inlined leaves
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -134,7 +135,14 @@ type recoverSpec struct {
 // out of the run's top-level aggregation — only the cleanup settles into it). The
 // always-run edge is driver-side (the body has no blocking dep on the guarded), so a
 // guarded failure never skip-cascades the teardown.
+//
+// When `guarded` is a BLOCK (guardedAgg != ""), the leaf form fields are empty: the
+// block's leaf children are lowered as ordinary BARE-ID units parented to a synthetic
+// transparent drain aggregate (unitCleanupGuarded, activation guardedAgg), and the
+// cleanup drains that aggregate via memberDeps rather than driving a single guarded leaf.
+// The finally (body) stays a single imperatively-driven leaf in either form.
 type cleanupSpec struct {
+	guardedAgg    string // block form: the drain-aggregate activation ("" = single-leaf guarded form)
 	guardedNodeID string
 	guardedIRKind ir.NodeKind
 	guarded       step
@@ -666,6 +674,12 @@ func (l *lowerer) lowerCleanup(n ir.Node, parent string) error {
 	if err := json.Unmarshal(bodyRaw, &body); err != nil {
 		return fmt.Errorf("lumen: cleanup %q body: %w", n.ID, err)
 	}
+	// A block guarded (a multi-step chain) lowers its leaves as ordinary BARE-ID units
+	// under a synthetic transparent drain aggregate — branch BEFORE decodeLeafSub, which
+	// only decodes a single leaf. The single-leaf guarded form below is unchanged.
+	if guarded.Kind == ir.NodeBlock {
+		return l.lowerCleanupBlock(n, parent, guarded, body)
+	}
 	gStep, gKind, err := decodeLeafSub(guarded, l.allowDo, "cleanup "+n.ID+" guarded")
 	if err != nil {
 		return err
@@ -689,6 +703,118 @@ func (l *lowerer) lowerCleanup(n ir.Node, parent string) error {
 			bodyNodeID:    l.qid(body.ID),
 			bodyIRKind:    bKind,
 			body:          bStep,
+		},
+	})
+	return nil
+}
+
+// lowerCleanupBlock lowers a cleanup whose `guarded` is a BLOCK: the block's leaf
+// children are inlined as ordinary BARE-ID plan units (ns "", parent = the synthetic
+// aggregate) so they render in the parent's flat scope — a guarded block is authored IN
+// the parent formula's scope, so namespacing the members would blind the finally and
+// downstream to their outputs and render their {{ref}}s "" (⚑BLOCKER-1). A transparent
+// drain aggregate (unitCleanupGuarded, activation <cleanupID>/__guarded, irKind block)
+// collects the leaves with the run's worst-of/last-ran rule, and the cleanup drains it
+// via memberDeps — a DRAIN edge, not a blocking gate, so a FAILED block never
+// skip-cascades the always-run finally. The finally (body) stays a single imperatively
+// driven leaf, decoded via decodeLeafSub. Refusals: an empty block, a non-leaf member
+// (message names the kind, ⚑NICE-9), a lit/interp member, and a guarded block carrying
+// its own `after` gate (⚑SHOULD-FIX-3 — silently discarding it would be worse than the
+// leaf path's loud refusal). Id collisions (dup members, member↔top-level-node,
+// member↔finally) are caught downstream by topoSortUnits' dup-activation guard and the
+// addSynth guard.
+func (l *lowerer) lowerCleanupBlock(n ir.Node, parent string, guarded, body ir.Node) error {
+	// ⚑SHOULD-FIX-3: the leaf path refuses a sub `after`; a block gate would be silently
+	// dropped (the driver sequences the block by its members' own edges), so refuse loudly.
+	if len(guarded.After) > 0 {
+		return fmt.Errorf("%w: cleanup %q guarded block %q must not carry an `after` gate", ErrUnsupportedNode, n.ID, guarded.ID)
+	}
+	members, err := childNodes(guarded.Raw["members"])
+	if err != nil {
+		return fmt.Errorf("lumen: cleanup %q guarded block: %w", n.ID, err)
+	}
+	if len(members) == 0 {
+		return fmt.Errorf("%w: cleanup %q guarded block has no members", ErrUnsupportedNode, n.ID)
+	}
+	// Leaf-kind + id check FIRST (before lowerNodes) so a non-leaf member refuses with the
+	// cleanup-specific message naming the kind (⚑NICE-9), not lowerNode's generic one. A
+	// lit/interp member is refused too — narrower than a scatter's silent members, since
+	// this slice's block guarded is exec/do/settle-only. An EMPTY member id is refused
+	// here as well: it would slip past lowerNode's '/'-and-':' ban (ContainsAny on "" is
+	// false) and lower to the anonymous activation ":0".
+	for i := range members {
+		if members[i].ID == "" {
+			return fmt.Errorf("%w: cleanup %q guarded block member %d missing id", ErrUnsupportedNode, n.ID, i)
+		}
+		switch members[i].Kind {
+		case ir.NodeExec, ir.NodeSettle, ir.NodeDo:
+		default:
+			return fmt.Errorf("%w: cleanup %q guarded block member %q kind %q (only exec/do/settle leaf)", ErrUnsupportedNode, n.ID, members[i].ID, members[i].Kind)
+		}
+	}
+
+	cleanupAct := activationFor(l.qid(n.ID))
+	guardedAggID := l.qid(n.ID) + "/__guarded"
+	guardedAggAct := activationFor(guardedAggID)
+
+	// Inline the members at BARE ids: NO prefix push (l.prefix stays ""), so intra-block
+	// `after` refs — including refs to an OUTSIDE top-level node — resolve in the flat
+	// namespace, matching plain block hoisting. lowerNode applies the '/'-and-':' authored
+	// id ban and (for do) the allowDo gate; a member leaf-kind escaping the pre-check
+	// above cannot occur.
+	firstUnit := len(l.units)
+	if err := l.lowerNodes(members, guardedAggAct); err != nil {
+		return err
+	}
+
+	// H1 gate propagation: append the CLEANUP's own `after` gate onto every inlined
+	// member's rawAfter, so a gated-off cleanup skip-cascades the whole block. Then collect
+	// the direct non-silent members (all exec/do/settle leaves) in source order.
+	gate := l.qAfter(n.After)
+	var memberActs []string
+	for i := firstUnit; i < len(l.units); i++ {
+		u := &l.units[i]
+		if len(gate) > 0 {
+			u.rawAfter = append(u.rawAfter, gate...)
+		}
+		if u.parent == guardedAggAct && !u.silent {
+			memberActs = append(memberActs, u.activation)
+		}
+	}
+
+	// The finally stays a single imperatively driven leaf (block finally deferred —
+	// decodeLeafSub's kind refusal covers it).
+	bStep, bKind, err := decodeLeafSub(body, l.allowDo, "cleanup "+n.ID+" body")
+	if err != nil {
+		return err
+	}
+
+	// The transparent drain aggregate. ⚑SHOULD-FIX-4: it also carries the cleanup's gate
+	// (like lowerRun), so a gate-failed path settles it via blocked() with the standard
+	// "upstream dependency did not pass" detail and the Tier-A DAG keeps the gate edge.
+	l.units = append(l.units, planUnit{
+		kind:       unitCleanupGuarded,
+		activation: guardedAggAct,
+		nodeID:     guardedAggID,
+		irKind:     ir.NodeBlock,
+		parent:     cleanupAct,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		members:    memberActs,
+	})
+	l.units = append(l.units, planUnit{
+		kind:       unitCleanup,
+		activation: cleanupAct,
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeCleanup,
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		cleanup: &cleanupSpec{
+			guardedAgg: guardedAggAct,
+			bodyNodeID: l.qid(body.ID),
+			bodyIRKind: bKind,
+			body:       bStep,
 		},
 	})
 	return nil
@@ -1426,11 +1552,18 @@ func (l *lowerer) resolveDeps() error {
 		u.afterDeps = afterDeps
 
 		switch u.kind {
-		case unitScatterAgg, unitRun:
+		case unitScatterAgg, unitRun, unitCleanupGuarded:
 			u.memberDeps = append([]string(nil), u.members...)
 		case unitGather:
 			if u.overScatter != "" {
 				u.memberDeps = []string{u.overScatter}
+			}
+		case unitCleanup:
+			// A block-form cleanup DRAINS its guarded aggregate (memberDep, not an `after`
+			// gate) so a FAILED block never skip-cascades the always-run finally. The
+			// single-leaf form has no aggregate and no member drain.
+			if u.cleanup != nil && u.cleanup.guardedAgg != "" {
+				u.memberDeps = []string{u.cleanup.guardedAgg}
 			}
 		}
 	}
@@ -1566,8 +1699,14 @@ func (l *lowerer) resolveDeps() error {
 				// they share an id (or collide with the cleanup, a loop body, or another
 				// node), the second resumeMemoizes the first's settled outcome and never
 				// runs — silently defeating the always-run finally. Refuse both here.
-				if err := addSynth(u.cleanup.guardedNodeID, u.nodeID); err != nil {
-					return err
+				// ⚑SHOULD-FIX-6: a block-form cleanup has NO synthesized guarded leaf
+				// (guardedNodeID == ""; its block members are REAL units caught by the
+				// dup-activation guard). Guard the registration so two block-form cleanups
+				// in one doc do not collide on synthBodies[""]. The finally is always synth.
+				if u.cleanup.guardedNodeID != "" {
+					if err := addSynth(u.cleanup.guardedNodeID, u.nodeID); err != nil {
+						return err
+					}
 				}
 				if err := addSynth(u.cleanup.bodyNodeID, u.nodeID); err != nil {
 					return err

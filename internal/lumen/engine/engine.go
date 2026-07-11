@@ -418,6 +418,12 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runForEach(u, scope, nodeOutputs)
 	case unitCleanup:
 		runErr = d.runCleanup(u, scope, nodeOutputs)
+	case unitCleanupGuarded:
+		// A cleanup's guarded-block drain aggregate settles transparently from its inlined
+		// leaf members (which ran as ordinary units before it in topo order). It has no
+		// advanceUnit arm — like unitScatterAgg/unitRun it defers via depsSettled and falls
+		// through to this runUnit call.
+		runErr = d.runCleanupGuarded(u, nodeOutputs)
 	case unitRecover:
 		runErr = d.runRecover(u, scope, nodeOutputs)
 	default:
@@ -835,16 +841,36 @@ func cleanupOutcome(guarded, body string) string {
 	return guarded
 }
 
-// runCleanup drives a cleanup (try/finally) inline: it runs the guarded leaf, then
-// ALWAYS runs the body (finally) leaf — regardless of the guarded's outcome, including a
-// failure — then settles the cleanup. Both subs run through runUnit (so each gets a
-// journal fact + resume memoization). The body's only blocking dep is the cleanup's own
-// gate (not the guarded), so a guarded failure never skip-cascades the teardown. A
-// gated-off cleanup is intercepted by runUnit's pre-switch skip-cascade before here.
+// runCleanup drives a cleanup (try/finally) inline. Single-leaf form: it runs the guarded
+// leaf, then ALWAYS runs the finally leaf, then settles. Block form (guardedAgg != ""):
+// PHASE-1 is a NO-OP — the guarded block's leaves and their drain aggregate already ran as
+// ordinary units before this cleanup (the aggregate is a memberDep, so topo order
+// guarantees it settled) — so runCleanup only runs the finally and settles from the
+// aggregate. In both forms the finally's only blocking dep is the cleanup's own gate (not
+// the guarded), so a guarded/block failure never skip-cascades the teardown: blocked()
+// reads only afterDeps, and the guarded aggregate is a memberDep.
+//
+// The finally is suppressed on exactly two paths — both intercepted BEFORE this function,
+// in runUnit's pre-switch (inline) and mirrored by the advanceUnit routing guard (pool),
+// and both meaning nothing ran so there is nothing to tear down:
+//   - the cleanup's own gate failed (blocked() — skip-cascade, "upstream dependency"
+//     detail), or
+//   - the whole guarded block did-not-run: every drain member settled skipped/canceled
+//     (a member's outside `after` gating it off, or an authored settle-canceled member),
+//     where aggregateAllSkipped() settles the cleanup skipped ("every drain member
+//     skipped" detail).
+//
+// Any FAILED member means the block RAN (didNotRun(failed)=false), the aggregate settles
+// failed — not skipped — and the finally always runs. A single-leaf cleanup has no
+// memberDeps, so only the gate path applies to it (its finally runs even for a canceled
+// guarded — the leaf is transparent, not a drain).
 func (d *driver) runCleanup(u planUnit, scope, nodeOutputs map[string]string) error {
-	gu := d.cleanupGuardedUnit(u)
-	if err := d.runUnit(gu, scope, nodeOutputs); err != nil {
-		return err
+	var gu planUnit
+	if u.cleanup.guardedAgg == "" {
+		gu = d.cleanupGuardedUnit(u)
+		if err := d.runUnit(gu, scope, nodeOutputs); err != nil {
+			return err
+		}
 	}
 	bu := d.cleanupBodyUnit(u)
 	if err := d.runUnit(bu, scope, nodeOutputs); err != nil {
@@ -873,8 +899,14 @@ func (d *driver) cleanupBodyUnit(u planUnit) planUnit {
 // identical across genesis and resume.
 func (d *driver) settleCleanup(u, gu, bu planUnit, scope, nodeOutputs map[string]string) error {
 	st := d.st()
+	// Block form reads the guarded outcome/output from the drain AGGREGATE (its last-ran
+	// block member's output); single-leaf form reads the synthesized guarded leaf (gu).
+	guardedAct := gu.activation
+	if u.cleanup.guardedAgg != "" {
+		guardedAct = u.cleanup.guardedAgg
+	}
 	guardedOutcome, guardedOutput := OutcomeSkipped, ""
-	if n := st.Nodes[gu.activation]; n != nil && n.Settled {
+	if n := st.Nodes[guardedAct]; n != nil && n.Settled {
 		guardedOutcome, guardedOutput = n.Outcome, n.Output
 	}
 	bodyOutcome := OutcomeSkipped
@@ -1021,18 +1053,52 @@ func (d *driver) settleRecoverFrom(u, su planUnit, scope, nodeOutputs map[string
 // recorded under the run's (parent-namespace) node id so a downstream `{{runRef}}`
 // in the parent resolves.
 func (d *driver) runRun(u planUnit, scope, nodeOutputs map[string]string) error {
+	output, err := d.settleTransparentAgg(u)
+	if err != nil {
+		return err
+	}
+	d.record(u.nodeID, output, scope, nodeOutputs)
+	return nil
+}
+
+// settleTransparentAgg settles a transparent drain aggregate — a run's sub-graph OR a
+// cleanup guarded block — from its already-settled members, and appends the settle. The
+// outcome is the worst-of transparent aggregation (transparentOutcome: failed|canceled
+// dominates → failed, then degraded, else pass; a skipped member is IGNORED) and the
+// output is the LAST source-order member that actually RAN (the "returns lastResult"
+// convention; last-wins for a linear chain). It records NOTHING into scope/nodeOutputs —
+// the two callers diverge there (⚑SHOULD-FIX-2): runRun d.records the run's downstream
+// value into the parent scope (a run's transparent output is {{runRef}}-consumable),
+// while the cleanup guarded aggregate seeds nodeOutputs ONLY, never the scope (the
+// scatter/gather aggregate convention). Genesis, resume, and drop+refold agree because
+// reconstructOutputs treats both the run and block aggregate kinds identically.
+func (d *driver) settleTransparentAgg(u planUnit) (output string, err error) {
 	st := d.st()
 	outcome := transparentOutcome(st, u.members)
-	output := ""
 	for _, m := range u.members {
 		if n := st.Nodes[m]; n != nil && n.Settled && ranOutcome(n.Outcome) {
 			output = n.Output
 		}
 	}
 	if err := d.appendSettled(u.activation, outcome, output, ""); err != nil {
+		return "", err
+	}
+	return output, nil
+}
+
+// runCleanupGuarded settles a cleanup's guarded-block drain aggregate. It shares runRun's
+// transparent outcome/last-ran-output logic (settleTransparentAgg) but seeds nodeOutputs
+// ONLY — never the interpolation scope (⚑SHOULD-FIX-2, the scatter/gather aggregate
+// convention). The synthetic aggregate node id (<cleanupID>/__guarded) is unreachable
+// from any {{ref}} (idents cannot contain '/'); the finally reads block-member outputs at
+// their BARE ids in the parent scope, not through this aggregate. reconstructOutputs
+// treats ir.NodeBlock as an aggregate kind, so genesis == resume == refold here.
+func (d *driver) runCleanupGuarded(u planUnit, nodeOutputs map[string]string) error {
+	output, err := d.settleTransparentAgg(u)
+	if err != nil {
 		return err
 	}
-	d.record(u.nodeID, output, scope, nodeOutputs)
+	nodeOutputs[u.nodeID] = output
 	return nil
 }
 

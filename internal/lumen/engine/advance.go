@@ -334,7 +334,16 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 	// A pool cleanup drives its guarded then its finally body sequentially, parking on
 	// whichever sub-do is in flight. An all-inline cleanup (or no PoolRouter) falls
 	// through to runUnit -> runCleanup. A blocked cleanup skip-cascades through runUnit.
-	if u.kind == unitCleanup && cleanupPoolMode(u, opts) && !d.blocked(u) {
+	// An all-didNotRun guarded block (every drain member skipped/canceled — nothing ran,
+	// so there is nothing to tear down) must NOT dispatch the finally: it falls through
+	// to runUnit's aggregate-skip intercept and settles skipped with the SAME detail
+	// string the inline driver emits, keeping the two drivers' journals byte-identical —
+	// and the reducer's ready() never fronts a cleanup whose every drain member
+	// did-not-run, so dispatching here would settle a node the fold refused to make
+	// ready. Any FAILED member means the block RAN (didNotRun(failed)=false) and the
+	// finally always runs; a leaf-form cleanup has no memberDeps, so the check is
+	// vacuously false and its routing is unchanged.
+	if u.kind == unitCleanup && cleanupPoolMode(u, opts) && !d.blocked(u) && !d.aggregateAllSkipped(u) {
 		return d.advanceCleanup(u, scope, nodeOutputs, opts)
 	}
 
@@ -567,7 +576,12 @@ func forEachPoolMode(u planUnit, opts Options) bool {
 
 // cleanupPoolMode reports whether a cleanup has a pool-do guarded OR body — the case
 // Advance drives through the park-aware advanceCleanup arm. An all-exec/settle cleanup
-// (or one with no PoolRouter) runs both subs inline through runCleanup instead.
+// (or one with no PoolRouter) runs both subs inline through runCleanup instead. A
+// BLOCK-form cleanup is routed by the existing bodyIRKind==NodeDo disjunct: its
+// guardedIRKind is zero (the guarded disjunct can never fire — the block's do MEMBERS
+// dispatch as ordinary pool units driven by the top loop, not through this arm), so only
+// a do FINALLY routes it here; a block cleanup with an exec/settle finally stays on
+// inline runCleanup (its aggregate is already settled by topo order when it is reached).
 func cleanupPoolMode(u planUnit, opts Options) bool {
 	return opts.PoolRouter != nil && u.kind == unitCleanup && u.cleanup != nil &&
 		(u.cleanup.guardedIRKind == ir.NodeDo || u.cleanup.bodyIRKind == ir.NodeDo)
@@ -836,16 +850,23 @@ func (d *driver) advanceCleanup(u planUnit, scope, nodeOutputs map[string]string
 	if err := d.ensureDecisionActivated(u); err != nil {
 		return err
 	}
-	gu := d.cleanupGuardedUnit(u)
-	settled, err := d.driveSubStep(gu, scope, nodeOutputs, opts)
-	if err != nil {
-		return err
+	var gu planUnit
+	if u.cleanup.guardedAgg == "" {
+		// Single-leaf form: drive the guarded sub-step to settlement first.
+		gu = d.cleanupGuardedUnit(u)
+		settled, err := d.driveSubStep(gu, scope, nodeOutputs, opts)
+		if err != nil {
+			return err
+		}
+		if !settled {
+			return nil // park on the in-flight guarded do
+		}
 	}
-	if !settled {
-		return nil // park on the in-flight guarded do
-	}
+	// Block form: PHASE-1 is a no-op — the guarded block's do members and drain aggregate
+	// are ordinary units driven by the top loop, and the cleanup's memberDep on the
+	// aggregate means advanceUnit only reaches here once the aggregate has settled.
 	bu := d.cleanupBodyUnit(u)
-	settled, err = d.driveSubStep(bu, scope, nodeOutputs, opts)
+	settled, err := d.driveSubStep(bu, scope, nodeOutputs, opts)
 	if err != nil {
 		return err
 	}

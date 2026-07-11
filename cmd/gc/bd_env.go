@@ -1175,6 +1175,22 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		}
 		ensureProjectedDoltEnvExplicit(env)
 		ensureProjectedPostgresEnvExplicit(env)
+		// envFn resolves credentials for the CITY scope. When this runner
+		// targets a different scope whose backend is Postgres (e.g. a
+		// metadata-backed infra store on a Dolt-work city), the projected
+		// password lands here as an explicit empty string. bd treats an
+		// explicit-empty BEADS_PG_PASSWORD as authoritative and skips its own
+		// .beads/.env resolution, so auth fails against the external endpoint.
+		// Drop the empty projected password keys for a Postgres scope so bd
+		// resolves the scope password from its scope file (the same .beads/.env
+		// gc's own pgauth Tier-5 reads).
+		if _, ok, metaErr := postgresMetadataForScope(cityPath, dir); metaErr == nil && ok {
+			for _, k := range []string{"GC_POSTGRES_PASSWORD", "BEADS_PG_PASSWORD", "BEADS_POSTGRES_PASSWORD"} {
+				if strings.TrimSpace(env[k]) == "" {
+					delete(env, k)
+				}
+			}
+		}
 		runner := beadsExecCommandRunnerWithEnv(env)
 		out, err := runner(dir, name, args...)
 		if name != "bd" {

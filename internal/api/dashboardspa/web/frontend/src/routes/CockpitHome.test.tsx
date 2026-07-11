@@ -441,6 +441,57 @@ describe('CockpitHomePage', () => {
     expect(screen.getByTestId('live-label').textContent).toBe('paused');
   });
 
+  it('does not apply a poll that resolves after pause (frozen synopsis)', async () => {
+    // usage A settles on mount; a deferred B stands in for the first post-mount
+    // poll so it can be left in flight across the pause boundary.
+    let resolveB: (value: UsageBody) => void = () => {};
+    const usageA = usageFixture(); // today tokens 5600 → "5.6K"
+    const usageB = usageFixture({
+      today: usageTotals({
+        input_tokens: 50_000,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      }),
+    }); // today tokens 50_000 → "50.0K"
+    const cityUsage = vi
+      .fn()
+      .mockResolvedValueOnce(usageA)
+      .mockImplementationOnce(() => new Promise<UsageBody>((res) => (resolveB = res)));
+    mockSupervisorApi.mockReturnValue({
+      cityUsage,
+      cityStatus: vi.fn().mockResolvedValue(statusFixture()),
+      listSessions: vi.fn().mockResolvedValue({ items: [sessionFixture()], total: 1 }),
+      listEvents: vi.fn().mockResolvedValue(closedEventsResult(0)),
+    });
+
+    render(wrap(<CockpitHomePage />));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(screen.getByTestId('cockpit-synopsis').textContent).toContain('5.6K tokens');
+
+    // Fire the first post-mount usage poll (USAGE_POLL_MS) while still live; its
+    // deferred fetch is now in flight.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(cityUsage).toHaveBeenCalledTimes(2);
+
+    // Pause, THEN let the in-flight poll resolve with different data.
+    await act(async () => {
+      screen.getByTestId('scope-pause').click();
+    });
+    await act(async () => {
+      resolveB(usageB);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // The synopsis is frozen at A — the late poll did not move the wall.
+    expect(screen.getByTestId('cockpit-synopsis').textContent).toContain('5.6K tokens');
+    expect(screen.getByTestId('cockpit-synopsis').textContent).not.toContain('50.0K');
+  });
+
   it('deep-links every instrument to its spec surface', async () => {
     await renderPage();
 

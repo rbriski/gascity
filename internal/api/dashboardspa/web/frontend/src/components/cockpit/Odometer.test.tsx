@@ -70,6 +70,12 @@ describe('Odometer', () => {
     expect(screen.getByText('since boot')).toBeTruthy();
   });
 
+  it('defaults to a 4-column readout when digits is omitted', () => {
+    const { container } = render(router(<Odometer value={7} label="beads closed today" />));
+    const columns = container.querySelectorAll('[data-testid="odometer-column"]');
+    expect([...columns].map((c) => c.getAttribute('data-digit'))).toEqual(['0', '0', '0', '7']);
+  });
+
   it('renders an unlinked labelled block when no href is given', () => {
     const { container } = render(
       router(<Odometer value={181} digits={4} label="beads closed today" sub="$1.00 est today" />),

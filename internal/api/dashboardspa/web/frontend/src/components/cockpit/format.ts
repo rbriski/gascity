@@ -35,3 +35,29 @@ export function agoStr(ms: number): string {
   if (h < 24) return `${h}h`;
   return `${Math.floor(h / 24)}d`;
 }
+
+/** ageMsOf parses an ISO timestamp into a non-negative age in ms, or null. */
+export function ageMsOf(iso: string): number | null {
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Date.now() - parsed);
+}
+
+/** fmtCount renders a nullable count as its number, or an em-dash when null. */
+export function fmtCount(value: number | null): string {
+  return value === null ? '—' : String(value);
+}
+
+/** connLabel maps a gc event-stream connection state to its live-chip word. */
+export function connLabel(state: string): string {
+  switch (state) {
+    case 'open':
+      return 'live';
+    case 'connecting':
+      return 'connecting';
+    case 'degraded':
+      return 'degraded';
+    default:
+      return 'offline';
+  }
+}

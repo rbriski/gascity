@@ -23,7 +23,7 @@ export function odometerColumns(value: number, digits: number): number[] {
 export interface OdometerProps {
   /** Current reading; floored and clamped to a non-negative integer. */
   value: number;
-  /** Minimum column count; the odometer widens when the value is longer. */
+  /** Minimum column count; the odometer widens when the value is longer. Defaults to 4. */
   digits?: number;
   /** Instrument caption under the digits. */
   label: string;
@@ -43,7 +43,7 @@ export interface OdometerProps {
  * the roll on value changes. Status is carried by the number itself, so it
  * never uses accent (maroon is reserved for needs-you).
  */
-export function Odometer({ value, digits = 1, label, sub, href }: OdometerProps) {
+export function Odometer({ value, digits = 4, label, sub, href }: OdometerProps) {
   const columns = odometerColumns(value, digits);
   const reading = Math.max(0, Math.floor(value));
   const ariaLabel = `${label}: ${reading}`;

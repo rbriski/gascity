@@ -95,7 +95,14 @@ func buildUsageBody(facts []usage.Fact, warnings []string, now time.Time) UsageB
 		Warnings:         warnings,
 	}
 	var totals, today, recent usage.Totals
-	bySession := make(map[string]*UsageSessionRecent)
+	// Per-session facts roll through the same canonical fold as the window
+	// blocks so the two surfaces cannot disagree (an unpriced fact's cost
+	// never counts as spend, per usage.Totals semantics).
+	type sessionAccum struct {
+		sessionID string
+		totals    usage.Totals
+	}
+	bySession := make(map[string]*sessionAccum)
 	for _, f := range facts {
 		at := time.UnixMilli(f.At)
 		totals.Add(f)
@@ -105,24 +112,28 @@ func buildUsageBody(facts []usage.Fact, warnings []string, now time.Time) UsageB
 		if !at.Before(recentFrom) {
 			recent.Add(f)
 			if f.Kind == usage.KindModel && f.Worker != "" {
-				s, ok := bySession[f.Worker]
+				a, ok := bySession[f.Worker]
 				if !ok {
-					s = &UsageSessionRecent{Session: f.Worker, SessionID: f.SessionID}
-					bySession[f.Worker] = s
+					a = &sessionAccum{sessionID: f.SessionID}
+					bySession[f.Worker] = a
 				}
-				s.InputTokens += f.InputTokens
-				s.OutputTokens += f.OutputTokens
-				s.CacheReadTokens += f.CacheReadTokens
-				s.CacheCreationTokens += f.CacheCreationTokens
-				s.CostUSDEstimate += f.CostUSDEstimate
+				a.totals.Add(f)
 			}
 		}
 	}
 	body.Totals = usageTotalsBody(totals)
 	body.Today = usageTotalsBody(today)
 	body.Recent = usageTotalsBody(recent)
-	for _, s := range bySession {
-		body.RecentBySession = append(body.RecentBySession, *s)
+	for worker, a := range bySession {
+		body.RecentBySession = append(body.RecentBySession, UsageSessionRecent{
+			Session:             worker,
+			SessionID:           a.sessionID,
+			InputTokens:         a.totals.InputTokens,
+			OutputTokens:        a.totals.OutputTokens,
+			CacheReadTokens:     a.totals.CacheReadTokens,
+			CacheCreationTokens: a.totals.CacheCreationTokens,
+			CostUSDEstimate:     a.totals.CostUSDEstimate,
+		})
 	}
 	slices.SortFunc(body.RecentBySession, func(a, b UsageSessionRecent) int {
 		ta := a.InputTokens + a.OutputTokens + a.CacheReadTokens + a.CacheCreationTokens

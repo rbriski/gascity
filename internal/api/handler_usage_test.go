@@ -65,7 +65,9 @@ func TestHandleUsageAggregatesWindows(t *testing.T) {
 			Kind: usage.KindModel, Model: "mystery",
 			Worker: "myrig/pack.worker_b", SessionID: "sess-b",
 			InputTokens: 10, OutputTokens: 5,
-			Unpriced: true, At: nowMs, IdempotencyKey: "k-unpriced",
+			// Non-conformant on purpose: unpriced facts should carry zero
+			// cost, but a corrupt record must still never count as spend.
+			Unpriced: true, CostUSDEstimate: 9.99, At: nowMs, IdempotencyKey: "k-unpriced",
 		}),
 		`{not json`,
 	}
@@ -147,6 +149,10 @@ func TestHandleUsageAggregatesWindows(t *testing.T) {
 	}
 	if body.RecentBySession[1].Session != "myrig/pack.worker_b" {
 		t.Errorf("RecentBySession[1] = %+v, want worker_b second", body.RecentBySession[1])
+	}
+	if body.RecentBySession[1].CostUSDEstimate != 0 {
+		t.Errorf("RecentBySession[1].CostUSDEstimate = %v, want 0 — unpriced cost must not count as per-session spend",
+			body.RecentBySession[1].CostUSDEstimate)
 	}
 	if len(body.Warnings) != 1 {
 		t.Errorf("Warnings = %v, want exactly 1 (the malformed line)", body.Warnings)

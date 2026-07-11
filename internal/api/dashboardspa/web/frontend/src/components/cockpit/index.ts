@@ -19,7 +19,7 @@ export { LiveChip } from './LiveChip';
 export { NeedsYouStrip } from './NeedsYouStrip';
 export { ColumnHeading, DialCell, Microcopy } from './layout';
 
-export { ageMsOf, agoStr, connLabel, fmtCompact, fmtCost, fmtCount, fmtRate } from './format';
+export { agoStr, connLabel, fmtCompact, fmtCost, fmtCount, fmtRate } from './format';
 
 export { computeUsageMetrics, laneToRing, pipelineSegments, statusLamps } from './derive';
 export { buildVuMeters } from './roster';

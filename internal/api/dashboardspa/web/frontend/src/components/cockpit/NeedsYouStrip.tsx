@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { AttentionItem } from '../../attention/compose';
-import { ageMsOf, agoStr } from './format';
+import { elapsedSince } from '../../attention/elapsed';
+import { agoStr } from './format';
 
 // The needs-you strip below the header: the ONLY place maroon may appear on the
 // cockpit home (DESIGN.md One Mark Rule). It surfaces the top actionable
@@ -19,7 +20,7 @@ export function NeedsYouStrip({ items }: NeedsYouStripProps) {
   );
   const needsYou = actionable[0] ?? null;
   const moreCount = Math.max(0, actionable.length - 1);
-  const needsYouAgeMs = needsYou?.updatedAt !== undefined ? ageMsOf(needsYou.updatedAt) : null;
+  const needsYouAgeMs = elapsedSince(needsYou?.updatedAt, Date.now());
 
   return (
     <div

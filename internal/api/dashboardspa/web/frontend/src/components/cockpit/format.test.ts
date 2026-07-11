@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { ageMsOf, agoStr, connLabel, fmtCompact, fmtCost, fmtCount, fmtRate } from './format';
+import { agoStr, connLabel, fmtCompact, fmtCost, fmtCount, fmtRate } from './format';
 
 describe('fmtCompact', () => {
   it('keeps small numbers whole and compacts K/M/B with one decimal', () => {
@@ -32,28 +32,6 @@ describe('agoStr', () => {
     expect(agoStr(3 * 60_000)).toBe('3m');
     expect(agoStr(2 * 3_600_000)).toBe('2h');
     expect(agoStr(30 * 3_600_000)).toBe('1d');
-  });
-});
-
-describe('ageMsOf', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-11T00:00:10.000Z'));
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('returns the non-negative age of an ISO timestamp', () => {
-    expect(ageMsOf('2026-07-11T00:00:00.000Z')).toBe(10_000);
-  });
-
-  it('floors a future timestamp to zero', () => {
-    expect(ageMsOf('2026-07-11T00:00:20.000Z')).toBe(0);
-  });
-
-  it('returns null for an unparseable timestamp', () => {
-    expect(ageMsOf('not-a-date')).toBeNull();
   });
 });
 

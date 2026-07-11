@@ -46,7 +46,7 @@ export interface FeedStats {
   sessionTokPerMin: Record<string, number>;
 }
 
-export const EMPTY_FEED_STATS: FeedStats = {
+const EMPTY_FEED_STATS: FeedStats = {
   perMin: 0,
   lastAgeMs: null,
   windowCostPerHr: null,
@@ -180,11 +180,13 @@ export function useCockpitTelemetry(city: string | null, paused: boolean): Cockp
       let sumCost = 0;
       let sumTokens = 0;
       let hasTokenBearingOp = false;
+      let hasCostBearingOp = false;
       const sessionTokPerMin: Record<string, number> = {};
       for (const op of workerOpsRef.current) {
         sumCost += op.cost;
         sumTokens += op.tokens;
         if (op.tokens > 0) hasTokenBearingOp = true;
+        if (op.cost > 0) hasCostBearingOp = true;
         if (op.key !== null && now - op.t <= VU_WINDOW_MS) {
           sessionTokPerMin[op.key] = (sessionTokPerMin[op.key] ?? 0) + op.tokens;
         }
@@ -193,7 +195,7 @@ export function useCockpitTelemetry(city: string | null, paused: boolean): Cockp
       setFeedStats({
         perMin: eventTimesRef.current.length,
         lastAgeMs: lastEventAtRef.current === null ? null : now - lastEventAtRef.current,
-        windowCostPerHr: hasTokenBearingOp ? sumCost * (3600 / WORKER_WINDOW_SECS) : null,
+        windowCostPerHr: hasCostBearingOp ? sumCost * (3600 / WORKER_WINDOW_SECS) : null,
         windowTokensPerSec: hasTokenBearingOp ? sumTokens / WORKER_WINDOW_SECS : null,
         beadsClosedToday: beadClosedCountRef.current ?? 0,
         orderFailedRecent:

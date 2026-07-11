@@ -92,6 +92,21 @@ describe('useCockpitTelemetry', () => {
     expect(result.current.feedStats.perMin).toBe(0);
   });
 
+  it('leaves the burn fallback in effect when window ops carry tokens but no cost', async () => {
+    const { result } = renderTelemetry();
+    await flushSeed();
+    emit({
+      type: 'worker.operation',
+      payload: { prompt_tokens: 500, completion_tokens: 100, session_id: 'gc-1' },
+    });
+    await tick();
+    // Tokens are real -> throughput reads from the window; cost was never
+    // measured -> burn must stay null so the usage-poll fallback applies
+    // (no fabricated $0/hr).
+    expect(result.current.feedStats.windowTokensPerSec).not.toBeNull();
+    expect(result.current.feedStats.windowCostPerHr).toBeNull();
+  });
+
   it('reports the age of the last event', async () => {
     const { result } = renderTelemetry();
     await flushSeed();

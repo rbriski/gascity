@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -200,5 +201,73 @@ func TestAllowLegacyDoltMetadataRepairRejectsPostgresDSN(t *testing.T) {
 	}
 	if allowLegacyDoltMetadataRepair(fs, path, loadErr) {
 		t.Fatal("allowLegacyDoltMetadataRepair = true for legacy metadata carrying postgres_dsn, want false")
+	}
+}
+
+// TestBdCommandRunnerDropsEmptyProjectedPGPasswordForPostgresScope pins
+// 1d1110b51 (the live pg-infra incident's second half): the internal bd
+// command runner builds its env for the CITY scope and reuses it for other
+// scopes, so on a Dolt-work city the projected Postgres password reaches a
+// metadata-backed pg INFRA scope as an explicit EMPTY string — which bd
+// treats as authoritative, skipping its own .beads/.env resolution and
+// failing SASL against the external endpoint. The runner must DROP
+// explicit-empty projected pg-password keys for a pg-backed scope (so bd's
+// own ladder resolves) while keeping them for non-pg scopes (the
+// explicit-empty hygiene that guards against inherited stale passwords) and
+// passing NON-empty values through untouched. The coverage red-team flagged
+// this commit as revert-silent; this test is the invariant.
+func TestBdCommandRunnerDropsEmptyProjectedPGPasswordForPostgresScope(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	orig := beadsExecCommandRunnerWithEnv
+	defer func() { beadsExecCommandRunnerWithEnv = orig }()
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = env
+		return func(_, _ string, _ ...string) ([]byte, error) { return []byte("[]"), nil }
+	}
+
+	cityPath := t.TempDir()
+	pgScope := t.TempDir()
+	writeBdMainPGScopeFixture(t, pgScope, "")
+	emptyProjected := func(_ string) (map[string]string, error) {
+		return map[string]string{
+			"GC_POSTGRES_PASSWORD":    "",
+			"BEADS_PG_PASSWORD":       "",
+			"BEADS_POSTGRES_PASSWORD": "",
+			"BEADS_POSTGRES_HOST":     "pg.example.test",
+		}, nil
+	}
+
+	if _, err := bdCommandRunnerWithManagedRetryErr(cityPath, emptyProjected)(pgScope, "bd", "list", "--json"); err != nil {
+		t.Fatalf("runner on pg scope: %v", err)
+	}
+	for _, k := range []string{"GC_POSTGRES_PASSWORD", "BEADS_PG_PASSWORD", "BEADS_POSTGRES_PASSWORD"} {
+		if v, present := captured[k]; present {
+			t.Errorf("pg scope: explicit-empty %s=%q must be DROPPED so bd's .beads/.env tier resolves", k, v)
+		}
+	}
+	if captured["BEADS_POSTGRES_HOST"] != "pg.example.test" {
+		t.Errorf("pg scope: non-password key must survive, got %q", captured["BEADS_POSTGRES_HOST"])
+	}
+
+	// A NON-empty projected password passes through untouched on a pg scope.
+	if _, err := bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		return map[string]string{"BEADS_PG_PASSWORD": "real-secret"}, nil
+	})(pgScope, "bd", "list", "--json"); err != nil {
+		t.Fatalf("runner with real password: %v", err)
+	}
+	if captured["BEADS_PG_PASSWORD"] != "real-secret" {
+		t.Errorf("pg scope: non-empty password must pass through, got %q", captured["BEADS_PG_PASSWORD"])
+	}
+
+	// A NON-pg scope keeps the explicit-empty keys (the stale-password guard).
+	plainScope := t.TempDir()
+	if _, err := bdCommandRunnerWithManagedRetryErr(cityPath, emptyProjected)(plainScope, "bd", "list", "--json"); err != nil {
+		t.Fatalf("runner on plain scope: %v", err)
+	}
+	for _, k := range []string{"GC_POSTGRES_PASSWORD", "BEADS_PG_PASSWORD", "BEADS_POSTGRES_PASSWORD"} {
+		if _, present := captured[k]; !present {
+			t.Errorf("non-pg scope: explicit-empty %s must be KEPT (inherited-password hygiene)", k)
+		}
 	}
 }

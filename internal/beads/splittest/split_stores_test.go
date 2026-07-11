@@ -133,6 +133,93 @@ func TestNewSplitStoresCrossStoreDepsFailLoudBothDirections(t *testing.T) {
 	}
 }
 
+func TestNewRigStoreMintsStrictRigPrefixedLeaf(t *testing.T) {
+	rig := NewRigStore(t, "ra")
+
+	// Store-minted ids land under the rig prefix — the exact capability the
+	// public Strict wrappers could not provide over a MemStore leaf (they
+	// never arm minting, and the leaf's own sequence mints "gc-<n>").
+	minted, err := rig.Create(beads.Bead{Title: "rig backlog item"})
+	if err != nil {
+		t.Fatalf("rig create: %v", err)
+	}
+	if !strings.HasPrefix(minted.ID, "ra-") {
+		t.Fatalf("rig store minted %s, want ra- prefix", minted.ID)
+	}
+	if config.IsReservedClassPrefix("ra") {
+		t.Fatalf("test rig prefix %q became a reserved class prefix; pick another", "ra")
+	}
+
+	// Explicit in-prefix ids round-trip (bd accepts an in-prefix --id), so
+	// RCA states with stable rig bead ids are stageable.
+	stable, err := rig.Create(beads.Bead{ID: "ra-stable-7", Title: "stable rig id"})
+	if err != nil {
+		t.Fatalf("explicit rig-prefixed create: %v", err)
+	}
+	if stable.ID != "ra-stable-7" {
+		t.Fatalf("explicit rig id not honored: got %s", stable.ID)
+	}
+
+	// Foreign-prefix creates fail loud in both directions: infra-shaped and
+	// default-work-shaped rows must not mint inside a rig store.
+	if _, err := rig.Create(beads.Bead{ID: "gcg-wisp-9", Title: "misrouted wisp"}); err == nil {
+		t.Fatal("rig store accepted an infra-prefixed row")
+	}
+	if _, err := rig.Create(beads.Bead{ID: "gc-9", Title: "misrouted work row"}); err == nil {
+		t.Fatal("rig store accepted a work-prefixed row")
+	}
+}
+
+func TestNewRigStoreRoutesAndFailsLoudAcrossTheStoreTrio(t *testing.T) {
+	work, infra := NewSplitStores(t)
+	rig := NewRigStore(t, "ra")
+
+	workBead, err := work.Create(beads.Bead{Title: "hq work"})
+	if err != nil {
+		t.Fatalf("work create: %v", err)
+	}
+	wisp, err := infra.Create(beads.Bead{ID: "gcg-wisp-r1", Title: "routed wisp", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("infra create: %v", err)
+	}
+	rigBead, err := rig.Create(beads.Bead{Title: "rig work"})
+	if err != nil {
+		t.Fatalf("rig create: %v", err)
+	}
+
+	// By-id prefix routing resolves each bead to its own store across the trio.
+	stores := []beads.Store{work, infra, rig}
+	if owner := storeref.PrefixOwner(rigBead.ID, stores); owner != rig {
+		t.Fatalf("PrefixOwner(%s) did not route to the rig store", rigBead.ID)
+	}
+	if owner := storeref.PrefixOwner(wisp.ID, stores); owner != infra {
+		t.Fatalf("PrefixOwner(%s) did not route to the infra store", wisp.ID)
+	}
+
+	// Cross-store deps fail loud from the rig store toward BOTH siblings —
+	// the treadmill RCA shape is a rig-pool agent working an infra-resident
+	// wisp, so a rig→infra reference that silently linked would hide the bug
+	// class the kit exists to surface.
+	if err := rig.DepAdd(rigBead.ID, wisp.ID, "blocks"); err == nil || !strings.Contains(err.Error(), "no issue found") {
+		t.Fatalf("rig→infra dep: got %v, want bd-shaped rejection", err)
+	}
+	if err := rig.DepAdd(rigBead.ID, workBead.ID, "blocks"); err == nil || !strings.Contains(err.Error(), "no issue found") {
+		t.Fatalf("rig→work dep: got %v, want bd-shaped rejection", err)
+	}
+	if err := work.DepAdd(workBead.ID, rigBead.ID, "blocks"); err == nil || !strings.Contains(err.Error(), "no issue found") {
+		t.Fatalf("work→rig dep: got %v, want bd-shaped rejection", err)
+	}
+
+	// Same-store references keep working.
+	other, err := rig.Create(beads.Bead{Title: "same-rig blocker"})
+	if err != nil {
+		t.Fatalf("rig create: %v", err)
+	}
+	if err := rig.DepAdd(rigBead.ID, other.ID, "blocks"); err != nil {
+		t.Fatalf("same-store rig dep rejected: %v", err)
+	}
+}
+
 func TestNewSplitStoresRejectForeignPrefixRowMinting(t *testing.T) {
 	work, infra := NewSplitStores(t)
 

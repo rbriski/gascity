@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -80,6 +81,35 @@ type splitEnv struct {
 	infra    beads.Store
 	store    beads.Store
 	split    bool
+
+	// Rig leg (only when built via newSplitEnvWithRig; nil/"" otherwise): one
+	// registered rig with a rig-scoped default-probe pool template — the
+	// newNoScaleCheckRigPoolCity shape (scale_from_zero_no_scalecheck_test.go,
+	// the shape split_store_treadmill_test.go built ad hoc) generalized over
+	// both topologies. rig is the policy-wrapped strict rig-prefixed work
+	// store; rigStores is the map shape reconciler paths take; qualified is
+	// the pool template identity routed wisps target (gc.routed_to).
+	rig       beads.Store
+	rigStores map[string]beads.Store
+	rigName   string
+	qualified string
+}
+
+// Rig-leg identity constants. The names match the treadmill/scale-from-zero
+// fixtures so RCA-shaped scenarios read the same across the suite; the bead-id
+// prefix is DERIVED from the rig name via config.Rig.EffectivePrefix ("ra"),
+// so the cfg the code under test consults and the ids the rig store mints
+// agree by construction.
+const (
+	splitEnvRigName   = "rig-A"
+	splitEnvPoolAgent = "executor"
+)
+
+// splitEnvOptions selects the optional legs of the fixture.
+type splitEnvOptions struct {
+	// rig adds the rig leg: cfg wiring for one rig plus a rig-scoped pool
+	// template, and a third strict store minting under the rig's prefix.
+	rig bool
 }
 
 // newSplitEnv builds one topology of the fixture. The leaves come from
@@ -95,8 +125,30 @@ type splitEnv struct {
 // production wisps are EPHEMERAL (defaultBeadStorage in bead_policy_store.go).
 func newSplitEnv(t *testing.T, split bool) splitEnv {
 	t.Helper()
+	return newSplitEnvWith(t, split, splitEnvOptions{})
+}
+
+// newSplitEnvWithRig is newSplitEnv plus the rig leg, for RCA-shaped scenarios
+// (warm-tick demand, orphan release, assigned work) that need a rig-scoped
+// pool working infra-resident routed wisps. The rig leg exists on BOTH
+// topologies — rigs are orthogonal to the split, and the single-store subtest
+// is what proves a rig-path fix keeps legacy byte-identity.
+func newSplitEnvWithRig(t *testing.T, split bool) splitEnv {
+	t.Helper()
+	return newSplitEnvWith(t, split, splitEnvOptions{rig: true})
+}
+
+func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
+	t.Helper()
 	cityPath := t.TempDir()
-	writeSplitTopologyCityConfig(t, cityPath)
+	rigPath := ""
+	if opts.rig {
+		rigPath = filepath.Join(cityPath, "rigs", splitEnvRigName)
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatalf("mkdir rig path: %v", err)
+		}
+	}
+	writeSplitTopologyCityConfig(t, cityPath, rigPath)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "split-topology-city", Prefix: "ga"},
 		Beads: config.BeadsConfig{
@@ -111,14 +163,43 @@ func newSplitEnv(t *testing.T, split bool) splitEnv {
 		seedSplitCityInfraMarker(t, cityPath)
 		e.infra = wrapInfraStoreWithBeadPolicies(infraLeaf, cfg)
 	}
+	if opts.rig {
+		e.attachRigLeg(t, rigPath)
+	}
 	return e
+}
+
+// attachRigLeg wires the rig leg into cfg and the env: the config for one rig
+// with a rig-scoped min=0 default-probe pool template (no scale_check — the
+// exact pool shape of the treadmill RCA), and a strict rig-prefixed leaf under
+// the same production policy wrap rig stores get from openStoreResultAtForCity.
+func (e *splitEnv) attachRigLeg(t *testing.T, rigPath string) {
+	t.Helper()
+	maxSess, minSess := 5, 0
+	e.cfg.Agents = []config.Agent{{
+		Name:              splitEnvPoolAgent,
+		MaxActiveSessions: &maxSess,
+		MinActiveSessions: &minSess,
+		// No ScaleCheck: default-probe pool.
+		Dir:      splitEnvRigName,
+		Provider: "mock",
+	}}
+	e.cfg.Rigs = []config.Rig{{Name: splitEnvRigName, Path: rigPath}}
+	e.cfg.Providers = map[string]config.ProviderSpec{"mock": {Command: "true"}}
+	rigLeaf := splittest.NewRigStore(t, e.cfg.Rigs[0].EffectivePrefix())
+	e.rig = wrapStoreWithBeadPolicies(rigLeaf, e.cfg)
+	e.rigStores = map[string]beads.Store{splitEnvRigName: e.rig}
+	e.rigName = splitEnvRigName
+	e.qualified = e.cfg.Agents[0].QualifiedName()
 }
 
 // writeSplitTopologyCityConfig writes the fixture's city.toml so code under
 // test that loads config from cityPath sees the same city the in-memory cfg
-// describes: file provider (no dolt/bd in the sandbox) and bd-1.0.5 storage
-// semantics (ephemeral wisp tier).
-func writeSplitTopologyCityConfig(t *testing.T, cityPath string) {
+// describes: file provider (no dolt/bd in the sandbox), bd-1.0.5 storage
+// semantics (ephemeral wisp tier), and — when the rig leg is on (rigPath
+// non-empty) — the same rig + pool-template wiring attachRigLeg puts in the
+// in-memory cfg.
+func writeSplitTopologyCityConfig(t *testing.T, cityPath, rigPath string) {
 	t.Helper()
 	content := "[workspace]\n" +
 		"name = \"split-topology-city\"\n" +
@@ -127,6 +208,22 @@ func writeSplitTopologyCityConfig(t *testing.T, cityPath string) {
 		"[beads]\n" +
 		"provider = \"file\"\n" +
 		"bd_compatibility = \"bd-1.0.5\"\n"
+	if rigPath != "" {
+		content += "\n" +
+			"[providers.mock]\n" +
+			"command = \"true\"\n" +
+			"\n" +
+			"[[agent]]\n" +
+			"name = " + fmt.Sprintf("%q", splitEnvPoolAgent) + "\n" +
+			"dir = " + fmt.Sprintf("%q", splitEnvRigName) + "\n" +
+			"provider = \"mock\"\n" +
+			"max_active_sessions = 5\n" +
+			"min_active_sessions = 0\n" +
+			"\n" +
+			"[[rigs]]\n" +
+			"name = " + fmt.Sprintf("%q", splitEnvRigName) + "\n" +
+			"path = " + fmt.Sprintf("%q", rigPath) + "\n"
+	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write split-topology city.toml: %v", err)
 	}
@@ -148,6 +245,21 @@ func forEachTopology(t *testing.T, fn func(t *testing.T, e splitEnv)) {
 	})
 }
 
+// forEachTopologyWithRig is forEachTopology over the rig-legged fixture, for
+// invariants about rig-scoped pools working routed orchestration wisps (the
+// treadmill RCA family: warm-tick demand, assigned-work reachability, orphan
+// release). The single-store subtest doubles as the legacy byte-identity
+// check for any rig-path fix under test.
+func forEachTopologyWithRig(t *testing.T, fn func(t *testing.T, e splitEnv)) {
+	t.Helper()
+	t.Run("single-store", func(t *testing.T) {
+		fn(t, newSplitEnvWithRig(t, false))
+	})
+	t.Run("split", func(t *testing.T) {
+		fn(t, newSplitEnvWithRig(t, true))
+	})
+}
+
 // classStore resolves the owning store for a coordination class through the
 // production dispatch point. Fixture consumers must route through this (or a
 // production seam under test) instead of touching e.work/e.infra directly, so
@@ -162,6 +274,15 @@ func (e splitEnv) classStore(class string) beads.Store {
 // creates.
 func (e splitEnv) graphStore() beads.Store {
 	return e.classStore(config.BeadClassGraph)
+}
+
+// sessionsStore is the sessions-class front door — and therefore the
+// reconciler's LEADING store (CityRuntime.buildDesiredState passes
+// sessionsBeadStore()): the infra store on a split city, the work store on a
+// legacy city. RCA-shaped reconciler scenarios (buildDesiredStateWithSessionBeads
+// and friends) must lead with this store, exactly as production wires it.
+func (e splitEnv) sessionsStore() beads.Store {
+	return e.classStore(config.BeadClassSessions)
 }
 
 // splitWispIDSeq feeds deterministic, process-unique wisp id suffixes.
@@ -199,19 +320,53 @@ func splitWispID() string {
 // Create when the bead under test represents orchestration work.
 func (e splitEnv) mintWisp(t *testing.T, title string) beads.Bead {
 	t.Helper()
+	return e.mintWispWith(t, wispOpts{title: title})
+}
+
+// wispOpts parameterizes mintWispWith so an RCA-shaped wisp state is mintable
+// in one call. The zero value plus a title is plain mintWisp.
+type wispOpts struct {
+	title string
+	// routedTo targets the wisp at a pool template (beadmeta.RoutedToMetadataKey,
+	// e.g. e.qualified) — the routed-demand shape of the treadmill RCA.
+	routedTo string
+	// status is applied AFTER the create ("" keeps the store's create default,
+	// "open"): stores mint open beads, so a claimed state is a post-create
+	// mutation exactly as production claims are.
+	status string
+	// assignee is applied with status (the claiming session's identity) — the
+	// claimed-wisp shape of the assigned-work/orphan-release RCA sites.
+	assignee string
+	// metadata is merged over the defaults (kind=wisp, routedTo) last, so a
+	// scenario can layer extra keys; overriding gc.kind trips the fixture
+	// honesty check below, loudly.
+	metadata map[string]string
+}
+
+// mintWispWith is mintWisp with the full RCA-state option set. See mintWisp
+// for why wisps (not durable beads) are the tier invariants must run on.
+func (e splitEnv) mintWispWith(t *testing.T, opts wispOpts) beads.Bead {
+	t.Helper()
+	md := map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWisp,
+	}
+	if opts.routedTo != "" {
+		md[beadmeta.RoutedToMetadataKey] = opts.routedTo
+	}
+	for k, v := range opts.metadata {
+		md[k] = v
+	}
 	b := beads.Bead{
-		Title: title,
-		Type:  "task", // graph.v2 wisps materialize as issue_type "task"
-		Metadata: map[string]string{
-			beadmeta.KindMetadataKey: beadmeta.KindWisp,
-		},
+		Title:    opts.title,
+		Type:     "task", // graph.v2 wisps materialize as issue_type "task"
+		Metadata: md,
 	}
 	if e.split {
 		b.ID = splitWispID()
 	}
 	created, err := e.graphStore().Create(b)
 	if err != nil {
-		t.Fatalf("minting wisp %q: %v", title, err)
+		t.Fatalf("minting wisp %q: %v", opts.title, err)
 	}
 	// Fixture honesty (mirrors newMigrateFastFixture.createWork): the minted
 	// bead must classify as infrastructure and must genuinely land on the
@@ -223,7 +378,24 @@ func (e splitEnv) mintWisp(t *testing.T, title string) beads.Bead {
 	if !created.Ephemeral {
 		t.Fatalf("minted wisp %s is not ephemeral; the fixture cfg must keep bd-1.0.5 storage semantics so the wisp policy maps to the ephemeral tier", created.ID)
 	}
-	return created
+	if opts.status == "" && opts.assignee == "" {
+		return created
+	}
+	up := beads.UpdateOpts{}
+	if opts.status != "" {
+		up.Status = &opts.status
+	}
+	if opts.assignee != "" {
+		up.Assignee = &opts.assignee
+	}
+	if err := e.graphStore().Update(created.ID, up); err != nil {
+		t.Fatalf("staging wisp %s state (status=%q assignee=%q): %v", created.ID, opts.status, opts.assignee, err)
+	}
+	staged, err := e.graphStore().Get(created.ID)
+	if err != nil {
+		t.Fatalf("reloading staged wisp %s: %v", created.ID, err)
+	}
+	return staged
 }
 
 // splitTopologyClassTable is the minimal per-class ownership table, mirroring
@@ -243,19 +415,152 @@ var splitTopologyClassTable = []struct {
 }
 
 // TestSplitEnvTopologies is the fixture self-test: it pins the properties every
-// P3 conformance invariant will assume, in both topologies.
+// P3 conformance invariant will assume, in both topologies. The plain env has
+// no rig leg — reconciler-shaped scenarios opt in via newSplitEnvWithRig.
 func TestSplitEnvTopologies(t *testing.T) {
 	forEachTopology(t, func(t *testing.T, e splitEnv) {
-		if !sameStorePtr(e.store, e.work) {
-			t.Fatalf("splitEnv.store front door = %p, want the work store handle %p", e.store, e.work)
+		assertSplitEnvPins(t, e)
+		if e.rig != nil || e.rigStores != nil || e.rigName != "" || e.qualified != "" {
+			t.Fatalf("plain splitEnv grew a rig leg (rig=%p rigStores=%v rigName=%q qualified=%q); the rig leg must stay opt-in",
+				e.rig, e.rigStores, e.rigName, e.qualified)
 		}
-		if e.split {
-			assertSplitTopology(t, e)
-		} else {
-			assertSingleStoreTopology(t, e)
-		}
-		assertWispTier(t, e)
 	})
+}
+
+// TestSplitEnvTopologiesWithRigLeg is the rig-leg self-test: every base pin
+// holds unchanged with the rig leg attached, plus the rig leg's own routing
+// and disjointness properties.
+func TestSplitEnvTopologiesWithRigLeg(t *testing.T) {
+	forEachTopologyWithRig(t, func(t *testing.T, e splitEnv) {
+		assertSplitEnvPins(t, e)
+		assertRigLeg(t, e)
+	})
+}
+
+// assertSplitEnvPins runs the topology-appropriate base pins (class routing,
+// prefix disjointness, wisp tier) shared by the plain and rig-legged envs.
+func assertSplitEnvPins(t *testing.T, e splitEnv) {
+	t.Helper()
+	if !sameStorePtr(e.store, e.work) {
+		t.Fatalf("splitEnv.store front door = %p, want the work store handle %p", e.store, e.work)
+	}
+	if e.split {
+		assertSplitTopology(t, e)
+	} else {
+		assertSingleStoreTopology(t, e)
+	}
+	assertWispTier(t, e)
+}
+
+// assertRigLeg pins the rig leg: the cfg wiring is the RCA pool shape, the rig
+// store is a genuine THIRD handle, class routing never resolves to it, and the
+// three id spaces are pairwise disjoint with strict residence in all
+// directions.
+func assertRigLeg(t *testing.T, e splitEnv) {
+	t.Helper()
+	if e.rig == nil {
+		t.Fatal("rig-legged env has a nil rig store")
+	}
+	if !sameStorePtr(e.rigStores[e.rigName], e.rig) {
+		t.Fatalf("rigStores[%q] is not the rig store handle", e.rigName)
+	}
+	if want := splitEnvRigName + "/" + splitEnvPoolAgent; e.qualified != want {
+		t.Fatalf("qualified pool template = %q, want %q", e.qualified, want)
+	}
+
+	// cfg wiring: one registered rig whose path exists, and one rig-scoped
+	// min=0 default-probe pool template — the exact treadmill RCA pool shape.
+	if len(e.cfg.Rigs) != 1 || e.cfg.Rigs[0].Name != e.rigName {
+		t.Fatalf("cfg.Rigs = %+v, want exactly the %q rig", e.cfg.Rigs, e.rigName)
+	}
+	if _, err := os.Stat(e.cfg.Rigs[0].Path); err != nil {
+		t.Fatalf("registered rig path %q not on disk: %v", e.cfg.Rigs[0].Path, err)
+	}
+	if len(e.cfg.Agents) != 1 {
+		t.Fatalf("cfg.Agents = %+v, want exactly the pool template", e.cfg.Agents)
+	}
+	agent := e.cfg.Agents[0]
+	if agent.Dir != e.rigName || agent.ScaleCheck != "" ||
+		agent.MinActiveSessions == nil || *agent.MinActiveSessions != 0 ||
+		agent.MaxActiveSessions == nil || *agent.MaxActiveSessions <= 0 {
+		t.Fatalf("pool template %+v is not the rig-scoped min=0 default-probe shape", agent)
+	}
+
+	// The rig store is a third handle, distinct from both split-boundary stores.
+	if sameStorePtr(e.rig, e.work) {
+		t.Fatal("rig store aliases the work store")
+	}
+	if e.infra != nil && sameStorePtr(e.rig, e.infra) {
+		t.Fatal("rig store aliases the infra store")
+	}
+
+	// Routing identity: resolveClassStore dispatches the split boundary only —
+	// no coordination (or work) CLASS may ever resolve to a rig store. Rig
+	// stores are addressed by rig NAME (store refs / rigStores), and a class
+	// arm quietly returning one would be a new landmine of the audited kind.
+	for _, row := range splitTopologyClassTable {
+		if sameStorePtr(e.classStore(row.class), e.rig) {
+			t.Errorf("resolveClassStore(%q) resolved to the RIG store", row.class)
+		}
+	}
+
+	assertRigPrefixDisjoint(t, e)
+}
+
+// assertRigPrefixDisjoint pins the x3 id-space disjointness the rig leg adds:
+// work, infra, and rig prefixes are pairwise distinct; the rig prefix is a
+// work-shaped (non-reserved) prefix that agrees with cfg's EffectivePrefix;
+// and residence is strict in every cross-store direction.
+func assertRigPrefixDisjoint(t *testing.T, e splitEnv) {
+	t.Helper()
+	rigPrefix := e.cfg.Rigs[0].EffectivePrefix()
+	if config.IsReservedClassPrefix(rigPrefix) {
+		t.Fatalf("rig prefix %q is a reserved class prefix; rig beads are WORK beads", rigPrefix)
+	}
+
+	rigBead, err := e.rig.Create(beads.Bead{Title: "rig-scoped backlog item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create rig bead: %v", err)
+	}
+	if !strings.HasPrefix(rigBead.ID, rigPrefix+"-") {
+		t.Errorf("rig-store bead id %q does not carry the cfg-derived rig prefix %q-; by-id routing paths that consult cfg would disagree with the store", rigBead.ID, rigPrefix)
+	}
+	workBead, err := e.work.Create(beads.Bead{Title: "hq work item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if workPrefix := sling.BeadPrefix(workBead.ID); workPrefix == rigPrefix {
+		t.Errorf("work and rig stores share the id prefix %q; the trio must stay pairwise disjoint", workPrefix)
+	}
+
+	// Residence: the rig bead resolves ONLY in the rig store.
+	if _, err := e.work.Get(rigBead.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("rig bead %s resolves in the WORK store (err=%v)", rigBead.ID, err)
+	}
+	if e.split {
+		if _, err := e.infra.Get(rigBead.ID); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("rig bead %s resolves in the INFRA store (err=%v)", rigBead.ID, err)
+		}
+	}
+
+	// Strict cross-prefix creates fail loud through the policy front doors in
+	// the directions the base pin does not already cover: infra- and
+	// work-shaped ids into the rig store, rig-shaped ids into work (and infra).
+	if leaked, err := e.rig.Create(beads.Bead{ID: config.MintInfraBeadID("rigleak"), Title: "misrouted infra bead", Type: "task"}); err == nil {
+		t.Errorf("rig front door accepted an infra-prefixed create (minted %q)", leaked.ID)
+	}
+	if leaked, err := e.rig.Create(beads.Bead{ID: sling.BeadPrefix(workBead.ID) + "-999", Title: "misrouted work bead", Type: "task"}); err == nil {
+		t.Errorf("rig front door accepted a work-prefixed create (minted %q)", leaked.ID)
+	}
+	rigShapedID := rigPrefix + "-leak"
+	if leaked, err := e.work.Create(beads.Bead{ID: rigShapedID, Title: "misrouted rig bead", Type: "task"}); err == nil {
+		t.Errorf("work front door accepted a rig-prefixed create (minted %q)", leaked.ID)
+	}
+	if e.split {
+		if leaked, err := e.infra.Create(beads.Bead{ID: rigShapedID, Title: "misrouted rig bead", Type: "task"}); err == nil {
+			t.Errorf("infra front door accepted a rig-prefixed create (minted %q)", leaked.ID)
+		}
+	}
 }
 
 // assertSplitTopology pins the split-city half: the presence boundary is on,
@@ -429,4 +734,100 @@ func beadListHasID(list []beads.Bead, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestSplitEnvFrontDoorDepAddStrictness pins the DepAdd half of the strict
+// residence guard THROUGH the production policy stack (Create was pinned by
+// assertPrefixDisjoint; DepAdd was the red-team gap). beadPolicyStore does not
+// override DepAdd — the embedded Store delegates it to the strict leaf — so a
+// cross-store dependency taken at a policy front door must fail with the
+// bd-shaped "no issue found" error on the split topology. If a future policy
+// wrapper grows a DepAdd override that resolves endpoints elsewhere (or
+// swallows the failure), this pin breaks first, before a P3 invariant silently
+// passes on leniency. The single-store subtest is the byte-identity half: one
+// store resolves both endpoints, so the same call must succeed.
+func TestSplitEnvFrontDoorDepAddStrictness(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		workBead, err := e.work.Create(beads.Bead{Title: "dep-strictness work bead", Type: "task"})
+		if err != nil {
+			t.Fatalf("create work bead: %v", err)
+		}
+		wisp := e.mintWisp(t, "dep-strictness wisp")
+
+		err = e.work.DepAdd(workBead.ID, wisp.ID, "blocks")
+		if !e.split {
+			if err != nil {
+				t.Fatalf("single-store front-door DepAdd(work → wisp) = %v, want success (one store resolves both endpoints)", err)
+			}
+			return
+		}
+		if err == nil || !strings.Contains(err.Error(), "no issue found") {
+			t.Errorf("work front-door DepAdd(%s → %s) = %v, want the bd-shaped \"no issue found\" rejection through the policy stack", workBead.ID, wisp.ID, err)
+		}
+		// The convoy-tracks landmine direction: a graph-side bead referencing a
+		// work-store bead through the graph front door must fail loud too.
+		if err := e.graphStore().DepAdd(wisp.ID, workBead.ID, "tracks"); err == nil || !strings.Contains(err.Error(), "no issue found") {
+			t.Errorf("graph front-door DepAdd(%s → %s) = %v, want the bd-shaped \"no issue found\" rejection through the policy stack", wisp.ID, workBead.ID, err)
+		}
+	})
+}
+
+// TestSplitEnvRigLegStagesWarmTickDemand proves the treadmill RCA driver state
+// is stageable purely on the seam: a warm rig pool (live session) plus a
+// routed wisp minted through the graph front door, fed to the production
+// reconciler entry with the sessions store LEADING, exactly as
+// CityRuntime.buildDesiredState wires it. Demand must read 1 in BOTH
+// topologies — on split the wisp is infra-resident (the store-blind warm path
+// read 0 here for hours on the live trace), on single-store it sits in the one
+// store (legacy byte-identity).
+func TestSplitEnvRigLegStagesWarmTickDemand(t *testing.T) {
+	forEachTopologyWithRig(t, func(t *testing.T, e splitEnv) {
+		// Slot 2 (not 1): a pool whose first slot drained earlier is a valid
+		// warm state, and the demand invariant must not key on slot numbering.
+		sess, err := e.sessionsStore().Create(newWarmPoolSessionBead(e.qualified, "executor-2", "2"))
+		if err != nil {
+			t.Fatalf("create warm pool session bead: %v", err)
+		}
+		e.mintWispWith(t, wispOpts{title: "routed warm-tick demand wisp", routedTo: e.qualified})
+
+		result := buildDesiredStateWithSessionBeads(
+			"split-topology-city", e.cityPath, time.Now(), e.cfg, &localMockProvider{},
+			e.sessionsStore(), e.rigStores, newSessionBeadSnapshot([]beads.Bead{sess}), nil, os.Stderr,
+		)
+
+		if got := result.ScaleCheckCounts[e.qualified]; got != 1 {
+			t.Errorf("warm-tick routed-wisp demand = %d, want 1 (routed wisp in the leading store must stay visible while sessions run)", got)
+		}
+	})
+}
+
+// TestSplitEnvRigLegStagesClaimedWispPoolDemand proves the post-claim RCA
+// state (treadmill site 2) is stageable in ONE mintWispWith call: a claimed
+// in_progress infra wisp routed to the rig pool, run through the production
+// pool-demand filter with the leading-store leg (store-ref ""). The topologies
+// MUST diverge — the claimed wisp survives on a split city (its store is
+// reachable from the rig-bound agent) and is dropped on a legacy city
+// (byte-identity) — which is exactly the differential this fixture exists to
+// hold on every such path.
+func TestSplitEnvRigLegStagesClaimedWispPoolDemand(t *testing.T) {
+	forEachTopologyWithRig(t, func(t *testing.T, e splitEnv) {
+		wisp := e.mintWispWith(t, wispOpts{
+			title:    "claimed routed wisp",
+			routedTo: e.qualified,
+			status:   "in_progress",
+			assignee: "s-abc123",
+		})
+		if wisp.Status != "in_progress" || wisp.Assignee != "s-abc123" {
+			t.Fatalf("mintWispWith staged status=%q assignee=%q, want in_progress/s-abc123", wisp.Status, wisp.Assignee)
+		}
+
+		filtered := filterAssignedWorkBeadsForPoolDemand(e.cfg, e.cityPath, nil, []beads.Bead{wisp}, []string{""})
+		want := 0
+		if e.split {
+			want = 1
+		}
+		if len(filtered) != want {
+			t.Errorf("pool-demand filter kept %d beads, want %d (claimed leading-store wisp must survive on split, drop on legacy)", len(filtered), want)
+		}
+	})
 }

@@ -713,9 +713,9 @@ dashboard-build:
 dashboard-dev:
 	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend dev
 
-## dashboard-check: typecheck + build the SPA, then go test the embedded handler + BFF
+## dashboard-check: typecheck (src + test files) + build the SPA, then go test the embedded handler + BFF
 dashboard-check: dashboard-build
-	cd internal/api/dashboardspa/web && npm run typecheck
+	cd internal/api/dashboardspa/web && npm run typecheck && npm run --workspace gas-city-dashboard-frontend typecheck:test
 	$(TEST_ENV) go test ./internal/api/dashboardspa/... ./internal/api/dashboardbff/...
 
 ## dashboard-smoke: serve the built SPA bundle via Vite preview and verify it responds
@@ -734,9 +734,17 @@ dashboard-smoke: dashboard-build
 	cat "$$LOG" >&2; \
 	exit 1
 
-## dashboard-ci: rebuild the SPA bundle and fail if the embedded dist/ is stale.
-## Used by CI to enforce that internal/api/dashboardspa/dist/ matches the source.
+## dashboard-ci: regenerate the typed API client + rebuild the SPA bundle, and
+## fail if the generated gc-supervisor-client or the embedded dist/ is stale.
+## Used by CI to enforce that the dashboard's generated client (from
+## internal/api/openapi.json via openapi-ts.config.ts) and dist/ match sources.
 dashboard-ci: dashboard-check
+	cd internal/api/dashboardspa/web && npm run generate:client
+	@if ! git diff --quiet -- internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client; then \
+		echo "ERROR: dashboard API client is stale — run 'npm run generate:client' in internal/api/dashboardspa/web and commit." >&2; \
+		git --no-pager diff --stat -- internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client; \
+		exit 1; \
+	fi
 	@if ! git diff --quiet -- internal/api/dashboardspa/dist; then \
 		echo "ERROR: internal/api/dashboardspa/dist/ is stale — run 'make dashboard-build' and commit." >&2; \
 		git --no-pager diff --stat -- internal/api/dashboardspa/dist; \

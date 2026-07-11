@@ -361,7 +361,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 		if b.Metadata[beadmeta.RootBeadIDMetadataKey] != rootBeadID {
 			continue
 		}
-		if b.Metadata["molecule_failed"] == "true" {
+		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
 			if failedRootID == "" {
 				failedRootID = b.ID
 			}
@@ -534,7 +534,7 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 		return nil, err
 	}
 	for _, bead := range all {
-		if bead.Metadata["molecule_failed"] == "true" {
+		if bead.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
 			continue
 		}
 		ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
@@ -1403,14 +1403,14 @@ func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Option
 	return errs
 }
 
-// markFailed sets "molecule_failed" metadata on all created beads.
+// markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
 // Best-effort: errors are silently ignored since we're already in an
 // error path.
 func markFailed(store beads.Store, ids []string) {
 	for _, id := range ids {
 		_ = store.SetMetadataBatch(id, map[string]string{
-			"molecule_failed":        "true",
-			InstantiatingMetadataKey: "",
+			beadmeta.MoleculeFailedMetadataKey: "true",
+			InstantiatingMetadataKey:           "",
 		})
 	}
 }

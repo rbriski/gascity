@@ -187,12 +187,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 
 	c.mu.Lock()
 	seq := c.noteLocalMutationLocked(id)
-	delete(c.beads, id)
-	delete(c.deps, id)
-	delete(c.dirty, id)
-	delete(c.beadSeq, id)
-	delete(c.localBeadAt, id)
-	c.deletedSeq[id] = seq
+	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()

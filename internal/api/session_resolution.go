@@ -163,7 +163,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			retired = append(retired, b)
 			continue
 		}
-		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
+		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
 				_ = handle.Kill(context.Background())
 			}
@@ -346,21 +346,20 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-			ctx,
-			spec.Identity,
-			spec.SessionName,
-			qualifiedTemplate,
-			spec.Identity,
-			launchCommand.Command,
-			workDir,
-			resolved.Name,
-			transport,
-			sessionEnv,
-			resume,
-			hints,
-			extraMeta,
-		)
+		info, createErr = mgr.CreateSession(ctx, session.CreateOptions{
+			Alias:        spec.Identity,
+			ExplicitName: spec.SessionName,
+			Template:     qualifiedTemplate,
+			Title:        spec.Identity,
+			Command:      launchCommand.Command,
+			WorkDir:      workDir,
+			Provider:     resolved.Name,
+			Transport:    transport,
+			Env:          sessionEnv,
+			Resume:       resume,
+			Hints:        hints,
+			ExtraMeta:    extraMeta,
+		})
 		return createErr
 	})
 	if err == nil {
@@ -432,7 +431,9 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 		if strings.TrimSpace(b.Title) != identifier {
 			continue
 		}
-		state := session.State(b.Metadata["state"])
+		// MetadataState is the RAW state mirror; Info.State is normalizeInfoState-
+		// folded (awake->active), which would change this predicate.
+		state := session.State(session.InfoFromPersistedBead(b).MetadataState)
 		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
 			continue
 		}

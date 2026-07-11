@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 type countingWakeMetadataStore struct {
@@ -39,6 +40,22 @@ func makeWakeBead(id string, meta map[string]string) beads.Bead {
 		cloned["work_dir"] = "/tmp/gc-session-test"
 	}
 	return beads.Bead{ID: id, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: cloned}
+}
+
+// wakeInfo projects a store-created fixture bead through the session front door
+// (sessiontest.SeedBead runs the production codec at the store edge) instead of
+// cracking it raw. These fixtures come from store.Create, which stamps
+// Type="task"; the front door narrows on session shape, so the seed copy is
+// retyped to a session bead. That retype is the ONLY projection delta —
+// Info.Type becomes "session" instead of "task" — and no wake/drain consumer
+// (preWakeCommit, completeDrain) reads Info.Type, so the returned Info is
+// identical for every field they read (id, session_name, generation, wake_mode,
+// continuation/identity metadata, created_at, closed) to the former raw
+// InfoFromPersistedBead crack. b is taken by value, so the retype does
+// not disturb the caller's bead or the store the consumer writes back to.
+func wakeInfo(t *testing.T, b beads.Bead) sessionpkg.Info {
+	t.Helper()
+	return seedSessionInfo(b)
 }
 
 func (s *countingWakeMetadataStore) SetMetadata(id, key, value string) error {
@@ -72,7 +89,7 @@ func TestPreWakeCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newGen, token, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
+	newGen, token, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk)
 	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
@@ -120,7 +137,7 @@ func TestPreWakeCommitUsesSingleBatchMetadataWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if store.batchCalls != 1 {
@@ -143,7 +160,7 @@ func TestPreWakeCommit_InvalidName(t *testing.T) {
 		},
 	})
 
-	_, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
+	_, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk)
 	if err == nil {
 		t.Error("expected error for invalid session_name")
 	}
@@ -169,7 +186,7 @@ func TestPreWakeCommit_BumpsContinuationEpochForFreshWake(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -204,7 +221,8 @@ func TestPreWakeCommit_FreshModeClearsPreviousConversationMetadata(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	_, _, fold, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk)
+	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -218,8 +236,10 @@ func TestPreWakeCommit_FreshModeClearsPreviousConversationMetadata(t *testing.T)
 		if got.Metadata[key] != "" {
 			t.Errorf("%s = %q, want cleared for wake_mode=fresh", key, got.Metadata[key])
 		}
-		if b.Metadata[key] != "" {
-			t.Errorf("in-memory %s = %q, want cleared for wake_mode=fresh", key, b.Metadata[key])
+		// The returned fold is the in-memory carrier (the caller folds it onto its
+		// coherent Info snapshot); it must clear each fresh-wake conversation key.
+		if v, ok := fold[key]; !ok || v != "" {
+			t.Errorf("fold %s = %q (present=%v), want cleared for wake_mode=fresh", key, v, ok)
 		}
 	}
 	if got.Metadata["continuation_epoch"] != "4" {
@@ -254,7 +274,7 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		t.Fatal(err)
 	}
 
-	newGen, token, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
+	newGen, token, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk)
 	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
@@ -305,6 +325,11 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 			"started_live_hash":       "old-live-hash",
 			"live_hash":               "old-live-hash",
 			"startup_dialog_verified": "true",
+			// Priming markers share the fresh-wake reset (S19 Stage 2); set them
+			// so the trace log lists them among the cleared keys.
+			"primed_at":            "2026-03-08T11:00:00Z",
+			"priming_attempted_at": "2026-03-08T11:00:00Z",
+			"prompt_hash":          "abc123",
 		},
 	})
 	if err != nil {
@@ -324,7 +349,7 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 
@@ -374,7 +399,7 @@ func TestPreWakeCommit_FreshModeTraceSilentWhenTraceDisabled(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -413,7 +438,7 @@ func TestPreWakeCommit_FreshModeTraceSilentWhenNothingCleared(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -457,7 +482,7 @@ func TestPreWakeCommit_ResumeModeTraceSilent(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -504,7 +529,7 @@ func TestPreWakeCommit_FreshModeTraceSilentOnStoreFailure(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err == nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err == nil {
 		t.Fatal("preWakeCommit: expected error")
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -531,7 +556,7 @@ func TestPreWakeCommit_BumpsContinuationEpochForPendingReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -573,7 +598,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -582,7 +607,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessionpkg.InfoFromPersistedBead(session), store, sp, nil)
+	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with matching token: %v", err)
 	}
@@ -595,7 +620,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -610,7 +635,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessionpkg.InfoFromPersistedBead(session), store, sp, nil)
+	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
 	if err == nil {
 		t.Error("expected error for mismatched token")
 	}
@@ -623,7 +648,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -635,7 +660,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessionpkg.InfoFromPersistedBead(session), store, sp, nil)
+	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with no token: %v", err)
 	}
@@ -645,7 +670,7 @@ func TestVerifiedInterrupt_MismatchedToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -679,7 +704,7 @@ func TestBeginSessionDrain(t *testing.T) {
 		"generation":   "5",
 	})
 
-	if transitioned := beginSessionDrain(session, sp, dt, "idle", clk, 30*time.Second); !transitioned {
+	if transitioned := beginSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt, "idle", clk, 30*time.Second); !transitioned {
 		t.Fatal("first beginSessionDrain = false, want true (state transition)")
 	}
 
@@ -711,10 +736,10 @@ func TestBeginSessionDrain_AlreadyDraining(t *testing.T) {
 		"generation":   "5",
 	})
 
-	if transitioned := beginSessionDrain(session, sp, dt, "idle", clk, 30*time.Second); !transitioned {
+	if transitioned := beginSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt, "idle", clk, 30*time.Second); !transitioned {
 		t.Fatal("first beginSessionDrain = false, want true (state transition)")
 	}
-	if transitioned := beginSessionDrain(session, sp, dt, "config-drift", clk, 60*time.Second); transitioned {
+	if transitioned := beginSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt, "config-drift", clk, 60*time.Second); transitioned {
 		t.Error("second beginSessionDrain = true, want false (already draining)")
 	}
 
@@ -737,7 +762,7 @@ func TestCancelSessionDrain(t *testing.T) {
 		"generation": "5",
 	})
 
-	if !cancelSessionDrain(session, sp, dt) {
+	if !cancelSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt) {
 		t.Error("expected cancel to succeed")
 	}
 	if dt.get("b1") != nil {
@@ -762,7 +787,7 @@ func TestCancelSessionDrain_ClearsAck(t *testing.T) {
 		"generation":   "5",
 	})
 
-	if !cancelSessionDrain(session, sp, dt) {
+	if !cancelSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt) {
 		t.Error("expected cancel to succeed")
 	}
 	// GC_DRAIN_ACK should be cleared.
@@ -784,7 +809,7 @@ func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
 		"generation": "6", // re-woken
 	})
 
-	if cancelSessionDrain(session, sp, dt) {
+	if cancelSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt) {
 		t.Error("cancel should fail when generation doesn't match")
 	}
 }
@@ -801,7 +826,7 @@ func TestCancelSessionDrain_NonCancelableReason(t *testing.T) {
 		"generation": "5",
 	})
 
-	if cancelSessionDrain(session, sp, dt) {
+	if cancelSessionDrainInfo(sessiontest.SeedBead(t, session), sp, dt) {
 		t.Error("cancel should fail for non-cancelable drain reason")
 	}
 	if ds := dt.get("b1"); ds == nil || ds.reason != "orphaned" {
@@ -819,7 +844,9 @@ func infoLookupFromBeadLookup(sessionLookup func(id string) *beads.Bead) func(id
 		if b == nil {
 			return sessionpkg.Info{}, false
 		}
-		return sessionpkg.InfoFromPersistedBead(*b), true
+		// The looked-up bead has a non-empty id and is session-shaped; project it
+		// through the shared front-door seeder (type-stamp is a no-op / unread).
+		return seedSessionInfo(*b), true
 	}
 }
 
@@ -995,10 +1022,10 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	})
 
 	// beginSessionDrain no longer sends Ctrl-C immediately.
-	beginSessionDrain(makeWakeBead(b.ID, map[string]string{
+	beginSessionDrainInfo(sessiontest.SeedBead(t, makeWakeBead(b.ID, map[string]string{
 		"session_name": "test-session",
 		"generation":   "3",
-	}), sp, dt, "orphaned", clk, 30*time.Second)
+	})), sp, dt, "orphaned", clk, 30*time.Second)
 
 	// No interrupt should have been sent yet.
 	for _, c := range sp.Calls {
@@ -1227,10 +1254,10 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 	})
 
 	// Begin a cancelable drain (no-wake-reason).
-	beginSessionDrain(makeWakeBead(b.ID, map[string]string{
+	beginSessionDrainInfo(sessiontest.SeedBead(t, makeWakeBead(b.ID, map[string]string{
 		"session_name": "test-session",
 		"generation":   "3",
-	}), sp, dt, "no-wake-reason", clk, 30*time.Second)
+	})), sp, dt, "no-wake-reason", clk, 30*time.Second)
 
 	// No interrupt yet.
 	for _, c := range sp.Calls {
@@ -1371,7 +1398,7 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["last_woke_at"] != "" {
@@ -1402,7 +1429,7 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "" {
@@ -1436,7 +1463,7 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "resume-key" {
@@ -1464,7 +1491,7 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), ds, clk)
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["pending_create_claim"] != "" {

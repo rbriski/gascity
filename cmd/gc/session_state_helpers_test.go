@@ -32,7 +32,7 @@ func TestPoolSessionIsLiveInfo_Matrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := poolSessionIsLiveInfo(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: tc.meta}))
+			got := poolSessionIsLiveInfo(sessionpkg.Info{MetadataState: tc.meta["state"], SleepReason: tc.meta["sleep_reason"]})
 			if got != tc.want {
 				t.Fatalf("poolSessionIsLiveInfo(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
@@ -54,10 +54,10 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+drained-reason", map[string]string{"state": "asleep", "sleep_reason": "drained"}, true},
 		{"asleep+idle", map[string]string{"state": "asleep", "sleep_reason": "idle"}, true},
 		{"asleep+idle-timeout", map[string]string{"state": "asleep", "sleep_reason": "idle-timeout"}, true},
-		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": sleepReasonCityStop}, true},
+		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonCityStop)}, true},
 		{"asleep+failed-create", map[string]string{"state": "asleep", "sleep_reason": "failed-create"}, true},
-		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": sleepReasonRuntimeMissing}, true},
-		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": sleepReasonProviderTerminalError}, true},
+		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing)}, true},
+		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonProviderTerminalError)}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},

@@ -2053,6 +2053,44 @@ type APIConfig struct {
 	// gate writes fails closed if the key is ever dropped. The
 	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
 	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
+	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
+	// already-registered city on the typed per-city API — the routes under
+	// /v0/city/{cityName} — to carry a signed read grant from a configured
+	// trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding
+	// in-process, grant-based admission control to the typed city read surface
+	// (beads, mail, sessions, agent transcripts) instead of trusting network
+	// position.
+	//
+	// Scope boundary: this gate covers ONLY the typed /v0/city/{cityName} read
+	// routes. It does NOT cover other surfaces on the same listener that can also
+	// expose per-city data: the supervisor-scope aggregate event feed (/v0/events
+	// and /v0/events/stream, which multiplex every running city's events), the
+	// default-on dashboard host plane (/api/*, including its /api/city/{cityName}/*
+	// samplers, run detail, run diff, and config reads), and the supervisor-scope
+	// routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the
+	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the
+	// only complete mitigation is to front the whole listener with the
+	// grant-minting authority/edge (the intended deployment), which protects
+	// every surface above. Disabling the dashboard host plane with
+	// GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*
+	// only, while the supervisor-scope event feed /v0/events and
+	// /v0/events/stream stays readable by network position until the follow-up
+	// supervisor-scope grant lands. Gating those feeds is tracked as that
+	// follow-up work.
+	//
+	// Built-in callers (the bundled gc API client and dashboard SPA) mint no
+	// grant, so enabling this gate turns their direct /v0/city reads away with a
+	// clear 401; such deployments front reads through the authority that mints
+	// grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma
+	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
+	// via an epoch floor is an ops-plane control set only through the
+	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
+	// instead of silently disabling the gate, so a config that intends to gate
+	// reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1
+	// env var has the same effect.
+	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
@@ -3206,6 +3244,47 @@ type Agent struct {
 	// V2Convention) collision into a migration-guidance variant.
 	// Unexported, runtime-only, never on any wire. (See ga-9ogb.)
 	layout agentLayout
+}
+
+// Clone returns a deep copy of the agent. Every slice, map, and pointer field
+// is independently allocated so that mutating the clone never affects the
+// original (and vice versa) — the guarantee the pack-load cache and pool
+// expansion both rely on. Scalar and unexported value fields (including the
+// source/layout provenance enums) are carried over by the initial struct copy.
+//
+// This is the single deep-copy source for Agent: deepCopyAgents (pack cache)
+// and cmd/gc's pool deepCopyAgent both call through here. TestAgentCloneIsDeep
+// enforces completeness — any new reference-type field must be cloned here or
+// the build fails.
+func (a Agent) Clone() Agent {
+	out := a
+	out.PreStart = append([]string(nil), a.PreStart...)
+	out.Args = append([]string(nil), a.Args...)
+	out.ProcessNames = append([]string(nil), a.ProcessNames...)
+	out.NamepoolNames = append([]string(nil), a.NamepoolNames...)
+	out.InstallAgentHooks = append([]string(nil), a.InstallAgentHooks...)
+	out.Skills = append([]string(nil), a.Skills...)
+	out.MCP = append([]string(nil), a.MCP...)
+	out.SessionSetup = append([]string(nil), a.SessionSetup...)
+	out.SessionLive = append([]string(nil), a.SessionLive...)
+	out.InjectFragments = append([]string(nil), a.InjectFragments...)
+	out.AppendFragments = append([]string(nil), a.AppendFragments...)
+	out.InheritedAppendFragments = append([]string(nil), a.InheritedAppendFragments...)
+	out.DependsOn = append([]string(nil), a.DependsOn...)
+	out.SharedSkills = append([]string(nil), a.SharedSkills...)
+	out.SharedMCP = append([]string(nil), a.SharedMCP...)
+	out.Env = deepCopyStringMap(a.Env)
+	out.OptionDefaults = deepCopyStringMap(a.OptionDefaults)
+	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
+	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
+	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
+	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
+	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
+	out.Attach = copyBoolPtr(a.Attach)
+	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
+	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)
+	return out
 }
 
 // agentSource enumerates the configuration origins recognized by

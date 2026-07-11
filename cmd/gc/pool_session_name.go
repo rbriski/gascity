@@ -46,27 +46,12 @@ func sessionBeadAssigneeIdentities(sb beads.Bead) []string {
 
 // sessionBeadAssigneeIdentitiesInfo is the session.Info mirror of
 // sessionBeadAssigneeIdentities. It reads the RAW session_name
-// (Info.SessionNameMetadata) and the pre-normalized Info.AliasHistory.
+// (Info.SessionNameMetadata) and the pre-normalized Info.AliasHistory. The body
+// is the confined session.AssigneeIdentities codec; the bead-form peer above
+// stays inline to avoid a per-iteration Info projection in the hot reconciler
+// loops (the classifier-equivalence oracle guards their agreement).
 func sessionBeadAssigneeIdentitiesInfo(i session.Info) []string {
-	identities := make([]string, 0, 5)
-	if id := strings.TrimSpace(i.ID); id != "" {
-		identities = append(identities, id)
-	}
-	if sn := strings.TrimSpace(i.SessionNameMetadata); sn != "" {
-		identities = append(identities, sn)
-	}
-	if ni := strings.TrimSpace(i.ConfiguredNamedIdentity); ni != "" {
-		identities = append(identities, ni)
-	}
-	if al := strings.TrimSpace(i.Alias); al != "" {
-		identities = append(identities, al)
-	}
-	for _, prior := range i.AliasHistory {
-		if prior = strings.TrimSpace(prior); prior != "" {
-			identities = append(identities, prior)
-		}
-	}
-	return identities
+	return session.AssigneeIdentities(i)
 }
 
 type releasedPoolAssignment struct {
@@ -85,20 +70,22 @@ func PoolSessionName(template, beadID string) string {
 // GCSweepSessionBeads closes open session beads that have no remaining
 // open/in-progress work beads anywhere — primary store OR any attached
 // rig store. Work-bead assignment is verified by a live cross-store
-// query inside closeSessionBeadIfUnassigned, so the caller does not
+// query inside closeSessionInfoIfUnassigned, so the caller does not
 // pass a work snapshot — that pattern was retired to prevent pre-close
-// tick snapshots from poisoning close decisions. Returns the IDs of
-// session beads that were closed.
-func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionBeads []beads.Bead) []string {
+// tick snapshots from poisoning close decisions. Candidates arrive as the
+// typed session.Info projection (WI-5 W4); the close is a session-class op
+// routed through the session front door. Returns the IDs of session beads
+// that were closed.
+func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
 	var closed []string
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, info := range sessionInfos {
+		if info.Closed {
 			continue
 		}
-		if !closeSessionBeadIfUnassigned(store, rigStores, nil, sb, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
-		closed = append(closed, sb.ID)
+		closed = append(closed, info.ID)
 	}
 	return closed
 }
@@ -109,7 +96,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	store beads.Store,
 	cfg *config.City,
 	cityPath string,
-	openSessionBeads []beads.Bead,
+	openSessionInfos []session.Info,
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
 ) []releasedPoolAssignment {
@@ -119,7 +106,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
+	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
@@ -130,7 +117,7 @@ func releaseOrphanedPoolAssignments(
 	store beads.Store,
 	cfg *config.City,
 	cityPath string,
-	openSessionBeads []beads.Bead,
+	openSessionInfos []session.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStores []beads.Store,
 	assignedWorkStoreRefs []string,
@@ -148,13 +135,13 @@ func releaseOrphanedPoolAssignments(
 		log.Printf("releaseOrphanedPoolAssignments: assigned work/store-ref length mismatch: work=%d storeRefs=%d", len(assignedWorkBeads), len(assignedWorkStoreRefs))
 	}
 
-	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, openSessionBeads, storeRefAware)
-	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionBeads)*5)
-	for _, sb := range openSessionBeads {
-		if sb.Status == "closed" {
+	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, openSessionInfos, storeRefAware)
+	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
+	for _, info := range openSessionInfos {
+		if info.Closed {
 			continue
 		}
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
 			legacyOpenIdentifiers[id] = struct{}{}
 		}
 	}
@@ -283,17 +270,21 @@ const unresolvedOpenSessionStoreRef = "\x00unresolved"
 // The \x00 prefix cannot collide with a real rig name.
 const crossStoreOpenSessionStoreRef = "\x00crossstore"
 
-func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionBeads []beads.Bead, storeRefAware bool) map[string]map[string]struct{} {
-	index := make(map[string]map[string]struct{}, len(openSessionBeads)*5)
+func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionInfos []session.Info, storeRefAware bool) map[string]map[string]struct{} {
+	index := make(map[string]map[string]struct{}, len(openSessionInfos)*5)
 	if !storeRefAware {
 		return index
 	}
-	for _, sb := range openSessionBeads {
-		if sb.Status == "closed" {
+	for _, info := range openSessionInfos {
+		if info.Closed {
 			continue
 		}
-		storeRef := openSessionReachableStoreRef(cityPath, cfg, sb)
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		// The caller feeds the typed snapshot (OpenInfos()); read the session
+		// through Info for both the store-ref resolution and the assignee
+		// identities (WI-5 W4 — the boundary projection this loop used to carry
+		// moved to the snapshot's load edge).
+		storeRef := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
 			addOpenSessionStoreRef(index, id, storeRef)
 		}
 	}

@@ -290,6 +290,135 @@ func TestResolveBdScopeTarget(t *testing.T) {
 	}
 }
 
+func TestResolveBdScopeTargetRoutesReservedPrefixToInfraStore(t *testing.T) {
+	// Isolate cwd so no ambient rig redirect steals routing (see the note in
+	// TestResolveBdScopeTarget).
+	setCwd(t, t.TempDir())
+	t.Setenv("GC_RIG", "")
+
+	// The infra arm must route by reserved-prefix classification alone, without
+	// probing the work store — an infra bead never exists there. Fail the probe
+	// so a regression that reintroduces a work-store existence gate is caught.
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+
+	cfgForTest := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "gascity"},
+			Rigs: []config.Rig{
+				{Name: "wren", Path: filepath.Join("rigs", "wren"), Prefix: "projectwrenunity"},
+			},
+		}
+	}
+
+	// Split city: cityHasInfraStore(cityPath) is true (the .gc/infra marker), so a
+	// reserved-prefix (gcg-) id routes to the infra store.
+	splitCity := filepath.Join(t.TempDir(), "split")
+	seedSplitCityInfraMarker(t, splitCity)
+
+	// Single-store city: no .gc/infra marker, so the same gcg- id falls through
+	// to the city work store — byte-identical to pre-split routing.
+	singleCity := filepath.Join(t.TempDir(), "single")
+	if err := os.MkdirAll(singleCity, 0o755); err != nil {
+		t.Fatalf("mkdir single city: %v", err)
+	}
+
+	t.Run("reserved prefix update routes to infra on split city", func(t *testing.T) {
+		got, err := resolveBdScopeTarget(cfgForTest(), splitCity, "", []string{"update", "gcg-1", "--set-metadata", "review.verdict=pass"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: infraScopeRoot(splitCity),
+			ScopeKind: "infra",
+			Prefix:    config.InfraScopePrefix,
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("reserved prefix show routes to infra on split city", func(t *testing.T) {
+		got, err := resolveBdScopeTarget(cfgForTest(), splitCity, "", []string{"show", "gcg-42"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		if got.ScopeKind != "infra" || got.ScopeRoot != infraScopeRoot(splitCity) {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want infra scope %q", got, infraScopeRoot(splitCity))
+		}
+	})
+
+	t.Run("reserved prefix falls to city on single-store city", func(t *testing.T) {
+		got, err := resolveBdScopeTarget(cfgForTest(), singleCity, "", []string{"update", "gcg-1", "--set-metadata", "review.verdict=pass"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		if got.ScopeKind != "city" || got.ScopeRoot != singleCity {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want city scope %q (single-store byte-identical)", got, singleCity)
+		}
+	})
+
+	t.Run("explicit rig still pins over infra arm on split city", func(t *testing.T) {
+		got, err := resolveBdScopeTarget(cfgForTest(), splitCity, "wren", []string{"show", "gcg-1"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		if got.ScopeKind != "rig" || got.RigName != "wren" {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want rig scope wren (explicit --rig pins)", got)
+		}
+	})
+
+	t.Run("explicit city still pins over infra arm on split city", func(t *testing.T) {
+		got, err := resolveBdScopeTarget(cfgForTest(), splitCity, "", []string{"show", "gcg-1"}, true)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		if got.ScopeKind != "city" || got.ScopeRoot != splitCity {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want city scope %q (explicit --city pins)", got, splitCity)
+		}
+	})
+}
+
+func TestBdShimCommandRegisteredAndForwardsToDoBd(t *testing.T) {
+	// The workflows packs invoke `gc bd-shim …`, so the command must be
+	// registered (hidden) and forward its args verbatim to the same doBd path as
+	// `gc bd` — including the split-city infra-store routing.
+	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	found := false
+	var hidden, noFlagParse bool
+	for _, c := range root.Commands() {
+		if c.Name() == "bd-shim" {
+			found = true
+			hidden = c.Hidden
+			noFlagParse = c.DisableFlagParsing
+			break
+		}
+	}
+	if !found {
+		t.Fatal("bd-shim command is not registered on the root command")
+	}
+	if !hidden {
+		t.Errorf("bd-shim should be hidden (internal alias for gc bd)")
+	}
+	if !noFlagParse {
+		t.Errorf("bd-shim should DisableFlagParsing so it forwards args verbatim to doBd")
+	}
+
+	// Prove the forward: a malformed heartbeat fails inside doBd (in
+	// rewriteBdHeartbeatArgs) before any bd exec, emitting gc bd's usage error.
+	// bd-shim surfacing that same error proves it routes through doBd.
+	var stderr bytes.Buffer
+	shim := newBdShimCmd(&bytes.Buffer{}, &stderr)
+	err := shim.RunE(shim, []string{"heartbeat"})
+	if err == nil {
+		t.Fatal("bd-shim heartbeat with no id should error via doBd")
+	}
+	if !strings.Contains(stderr.String(), "usage: gc bd heartbeat") {
+		t.Errorf("bd-shim did not route through doBd; stderr = %q", stderr.String())
+	}
+}
+
 func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 	cityDir := t.TempDir()
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "frontend", "polecats", "polecat-1")

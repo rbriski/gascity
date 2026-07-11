@@ -1,0 +1,63 @@
+{
+  "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+  "name": "cleanup-do",
+  "input": {
+    "name": "cleanup-do.input",
+    "fields": [],
+    "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 0, "col": 0 }
+  },
+  "nodes": [
+    {
+      "kind": "cleanup",
+      "id": "clean",
+      "name": "clean",
+      "after": [],
+      "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 1, "col": 0 },
+      "guarded": {
+        "kind": "do",
+        "id": "work",
+        "name": "work",
+        "after": [],
+        "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 1, "col": 0 },
+        "source": { "kind": "prompt" },
+        "interpreter": {
+          "kind": "agent",
+          "mode": { "kind": "do" },
+          "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 1, "col": 0 }
+        },
+        "body": {
+          "raw": "Hold the lock and do the thing.",
+          "template": { "parts": [ { "kind": "text", "value": "Hold the lock and do the thing." } ] },
+          "source": { "kind": "inline" },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 1, "col": 0 }
+        }
+      },
+      "body": {
+        "kind": "do",
+        "id": "unlock",
+        "name": "unlock",
+        "after": [],
+        "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 2, "col": 0 },
+        "source": { "kind": "prompt" },
+        "interpreter": {
+          "kind": "agent",
+          "mode": { "kind": "do" },
+          "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 2, "col": 0 }
+        },
+        "body": {
+          "raw": "Release the lock, then settle this step.",
+          "template": { "parts": [ { "kind": "text", "value": "Release the lock, then settle this step." } ] },
+          "source": { "kind": "inline" },
+          "templated": true,
+          "language": "markdown",
+          "syntax": "bare",
+          "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 2, "col": 0 }
+        }
+      }
+    }
+  ],
+  "origin": { "uri": "examples/lumen/cleanup-do.lumen", "line": 0, "col": 0 }
+}

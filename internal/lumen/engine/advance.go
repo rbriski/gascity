@@ -331,6 +331,13 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceForEach(u, scope, nodeOutputs, opts)
 	}
 
+	// A pool cleanup drives its guarded then its finally body sequentially, parking on
+	// whichever sub-do is in flight. An all-inline cleanup (or no PoolRouter) falls
+	// through to runUnit -> runCleanup. A blocked cleanup skip-cascades through runUnit.
+	if u.kind == unitCleanup && cleanupPoolMode(u, opts) && !d.blocked(u) {
+		return d.advanceCleanup(u, scope, nodeOutputs, opts)
+	}
+
 	// Materialize a READY pool-mode do as claimable work. A pool node whose
 	// blocking dep failed is NOT offered to the pool — it skip-cascades through
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
@@ -549,6 +556,14 @@ func loopPoolMode(u planUnit, opts Options) bool {
 // runForEach instead (Advance/Run parity).
 func forEachPoolMode(u planUnit, opts Options) bool {
 	return opts.PoolRouter != nil && u.kind == unitForEach && u.forEach != nil && u.forEach.bodyIRKind == ir.NodeDo
+}
+
+// cleanupPoolMode reports whether a cleanup has a pool-do guarded OR body — the case
+// Advance drives through the park-aware advanceCleanup arm. An all-exec/settle cleanup
+// (or one with no PoolRouter) runs both subs inline through runCleanup instead.
+func cleanupPoolMode(u planUnit, opts Options) bool {
+	return opts.PoolRouter != nil && u.kind == unitCleanup && u.cleanup != nil &&
+		(u.cleanup.guardedIRKind == ir.NodeDo || u.cleanup.bodyIRKind == ir.NodeDo)
 }
 
 // advanceLoop is Advance's park-aware attempt-loop arm (§4.1) for a pool-mode
@@ -793,6 +808,68 @@ func (d *driver) settleForEachInvalid(u planUnit, nodeOutputs map[string]string)
 	}
 	nodeOutputs[u.nodeID] = ""
 	return nil
+}
+
+// advanceCleanup is Advance's park-aware arm for a pool cleanup (try/finally): it drives
+// the guarded to settlement, then — ALWAYS, regardless of the guarded's outcome — the
+// finally body to settlement, parking on whichever sub-do is in flight, then settles the
+// cleanup (finally-failure-wins). It FALLS THROUGH within a pass on any in-pass
+// settlement (an exec/settle sub, or an observe that closes a sub-do) so a mixed
+// exec+do cleanup never returns with a pending sub and no pool work in flight (which
+// would trip ErrAdvanceStalled). Re-entrant: a settled sub is a no-op reporting settled.
+func (d *driver) advanceCleanup(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	if err := d.ensureDecisionActivated(u); err != nil {
+		return err
+	}
+	gu := d.cleanupGuardedUnit(u)
+	settled, err := d.driveSubStep(gu, scope, nodeOutputs, opts)
+	if err != nil {
+		return err
+	}
+	if !settled {
+		return nil // park on the in-flight guarded do
+	}
+	bu := d.cleanupBodyUnit(u)
+	settled, err = d.driveSubStep(bu, scope, nodeOutputs, opts)
+	if err != nil {
+		return err
+	}
+	if !settled {
+		return nil // park on the in-flight finally do
+	}
+	return d.settleCleanup(u, gu, bu, scope, nodeOutputs)
+}
+
+// driveSubStep drives one cleanup sub-unit one step toward settlement and reports
+// whether it is now settled. A pool-mode do is materialized (if not yet dispatched) or
+// observed (if in flight) — reporting settled only once its bead closes; an exec/settle
+// (or a do with a Host and no pool) sub runs inline in-pass. An already-settled sub is a
+// no-op that reports settled, so a re-Advance is idempotent (the write-once appends
+// dedupe, and a closed sub never re-runs).
+func (d *driver) driveSubStep(su planUnit, scope, nodeOutputs map[string]string, opts Options) (bool, error) {
+	if n := d.st().Nodes[su.activation]; n != nil && n.Settled {
+		return true, nil
+	}
+	if poolMode(su, opts) {
+		n := d.st().Nodes[su.activation]
+		switch {
+		case n == nil || (!n.Settled && n.BeadID == ""):
+			return false, d.materializePoolWork(su, scope, opts)
+		case !n.Settled:
+			if opts.ObserveWork == nil {
+				return false, nil
+			}
+			if err := d.observePoolWork(su.activation, su.nodeID, n.BeadID, scope, nodeOutputs, opts); err != nil {
+				return false, err
+			}
+			m := d.st().Nodes[su.activation]
+			return m != nil && m.Settled, nil
+		}
+	}
+	if err := d.runUnit(su, scope, nodeOutputs); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ensureDecisionActivated emits a guard node's node.activated once (write-once via the

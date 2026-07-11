@@ -474,3 +474,67 @@ func TestLumenForEachDoltE2E_FansAndSeals(t *testing.T) {
 		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
 	}
 }
+
+func cleanupDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "cleanup-do.lumen.json")
+}
+
+// TestLumenCleanupDoltE2E_BodyRunsThenSeals (cleanup acceptance) proves a cleanup
+// (try/finally) drives its guarded do first, then — after it closes — ALWAYS runs its
+// finally do (the teardown), then seals: the guarded `work` and the finally `unlock`
+// each dispatch as ordinary pooled work beads, are claimed+closed by a native worker
+// in order, and the cleanup settles pass. Two owned.admitted (one per sub) proves the
+// finally ran; zero control beads.
+func TestLumenCleanupDoltE2E_BodyRunsThenSeals(t *testing.T) {
+	// 2 workers: the cleanup dispatches its guarded then its finally SEQUENTIALLY, so a
+	// single worker would go idle after the guarded and could be swept before the finally
+	// dispatches (matching the retry/for-each multi-bead e2es, which also use 2).
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 2, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, cleanupDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling (cleanup-do) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF cleanup-do streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 4*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	// The guarded ran and the finally teardown ran (the always-run edge), and the
+	// cleanup settled transparently from the guarded.
+	if got := outcomeSettledFor(t, events, "work:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled work:0 = %q, want pass (guarded)", got)
+	}
+	if got := outcomeSettledFor(t, events, "unlock:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled unlock:0 = %q, want pass (finally teardown ran)", got)
+	}
+	if got := outcomeSettledFor(t, events, "clean:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled clean:0 = %q, want pass (cleanup)", got)
+	}
+	// Both subs dispatched as ordinary work beads — the finally is not skipped.
+	if n := len(lumenEventsOfType(events, engine.EventOwnedAdmitted)); n != 2 {
+		t.Fatalf("owned.admitted count = %d, want 2 (guarded + finally)", n)
+	}
+	t.Logf("PROOF cleanup drove guarded -> finally (always-run) -> sealed pass")
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}

@@ -55,6 +55,7 @@ const (
 	unitGuard                      // guard: a conditional single-step arm (cond ? then : pass)
 	unitDispatch                   // dispatch: a multi-way branch (subject -> matching arm's body)
 	unitForEach                    // for-each: a dynamic scatter fanning a single-leaf body over a runtime array
+	unitCleanup                    // cleanup: try/finally — a guarded leaf, then an always-run body leaf
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -98,6 +99,26 @@ type planUnit struct {
 	dispatch *dispatchSpec // unitDispatch: the multi-way branch spec
 
 	forEach *forEachSpec // unitForEach: the dynamic-scatter fan-over-array spec
+
+	cleanup *cleanupSpec // unitCleanup: the try/finally guarded+body spec
+}
+
+// cleanupSpec carries a cleanup(try/finally) node's decoded shape: a `guarded` leaf
+// that runs, and a `body` (finally) leaf that runs ALWAYS afterward — even when the
+// guarded step failed. The cleanup settles from the guarded's outcome UNLESS the body
+// itself fails, in which case the body's failure wins (finally never swallows a
+// success but its own failure supersedes). Both are single leaves (exec/do/settle);
+// they are synthesized as sub-units parented under the cleanup (so their outcomes stay
+// out of the run's top-level aggregation — only the cleanup settles into it). The
+// always-run edge is driver-side (the body has no blocking dep on the guarded), so a
+// guarded failure never skip-cascades the teardown.
+type cleanupSpec struct {
+	guardedNodeID string
+	guardedIRKind ir.NodeKind
+	guarded       step
+	bodyNodeID    string
+	bodyIRKind    ir.NodeKind
+	body          step
 }
 
 // forEachSpec carries a scatter(form:each) node's decoded shape: the `over` array
@@ -361,6 +382,9 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 	case ir.NodeDispatch:
 		return l.lowerDispatch(n, parent)
 
+	case ir.NodeCleanup:
+		return l.lowerCleanup(n, parent)
+
 	default:
 		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
 		// fail-channel, for-each(scatter form:each), guard, map, quote, raise,
@@ -586,6 +610,96 @@ func forEachBodyLeaf(n ir.Node) (ir.Node, error) {
 		return ir.Node{}, fmt.Errorf("%w: for-each %q body has %d members (only a single exec/do leaf)", ErrUnsupportedNode, n.ID, len(members))
 	}
 	return members[0], nil
+}
+
+// lowerCleanup lowers a cleanup(try/finally) node: a `guarded` leaf that runs, then a
+// `body` (finally) leaf that runs ALWAYS afterward. Both are single leaves; the driver
+// sequences them and the cleanup settles from the guarded UNLESS the body itself fails.
+// Only a top-level cleanup with single exec/do/settle guarded+body is supported this
+// slice; a sub-formula/aggregate placement, a non-leaf guarded/body, a missing/gated
+// sub, or a delimiter-bearing sub id refuses at LOAD. (A guarded/body id colliding with
+// each other, the cleanup, or another node is refused in resolveDeps' synth-id guard.)
+func (l *lowerer) lowerCleanup(n ir.Node, parent string) error {
+	if l.prefix != "" {
+		return fmt.Errorf("%w: cleanup %q in a sub-formula", ErrUnsupportedNode, n.ID)
+	}
+	if l.inAggregate {
+		return fmt.Errorf("%w: cleanup %q nested in an aggregate", ErrUnsupportedNode, n.ID)
+	}
+	guardedRaw, ok := n.Raw["guarded"]
+	if !ok {
+		return fmt.Errorf("%w: cleanup %q missing guarded", ErrUnsupportedNode, n.ID)
+	}
+	bodyRaw, ok := n.Raw["body"]
+	if !ok {
+		return fmt.Errorf("%w: cleanup %q missing body", ErrUnsupportedNode, n.ID)
+	}
+	var guarded, body ir.Node
+	if err := json.Unmarshal(guardedRaw, &guarded); err != nil {
+		return fmt.Errorf("lumen: cleanup %q guarded: %w", n.ID, err)
+	}
+	if err := json.Unmarshal(bodyRaw, &body); err != nil {
+		return fmt.Errorf("lumen: cleanup %q body: %w", n.ID, err)
+	}
+	gStep, gKind, err := decodeLeafSub(guarded, l.allowDo, "cleanup "+n.ID+" guarded")
+	if err != nil {
+		return err
+	}
+	bStep, bKind, err := decodeLeafSub(body, l.allowDo, "cleanup "+n.ID+" body")
+	if err != nil {
+		return err
+	}
+	l.units = append(l.units, planUnit{
+		kind:       unitCleanup,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeCleanup,
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		cleanup: &cleanupSpec{
+			guardedNodeID: l.qid(guarded.ID),
+			guardedIRKind: gKind,
+			guarded:       gStep,
+			bodyNodeID:    l.qid(body.ID),
+			bodyIRKind:    bKind,
+			body:          bStep,
+		},
+	})
+	return nil
+}
+
+// decodeLeafSub decodes a single-leaf sub-node (a cleanup guarded/body) into a step +
+// its IR kind. Only exec/do/settle leaves are supported; a block/aggregate/loop/run/
+// nested-decision sub refuses. The sub id must be non-empty and delimiter-free (it
+// becomes the sub-unit node id / activation), and a non-empty inner `after` refuses
+// loudly — the sub runs in the cleanup's fixed sequence, not on an authored gate that
+// would be silently discarded.
+func decodeLeafSub(n ir.Node, allowDo bool, owner string) (step, ir.NodeKind, error) {
+	if n.ID == "" {
+		return step{}, "", fmt.Errorf("%w: %s missing id", ErrUnsupportedNode, owner)
+	}
+	if strings.ContainsAny(n.ID, "/:") {
+		return step{}, "", fmt.Errorf("%w: %s id %q must not contain '/' or ':'", ErrUnsupportedNode, owner, n.ID)
+	}
+	if len(n.After) > 0 {
+		return step{}, "", fmt.Errorf("%w: %s %q must not carry an `after` gate", ErrUnsupportedNode, owner, n.ID)
+	}
+	switch n.Kind {
+	case ir.NodeExec:
+		s, err := decodeExec(n)
+		return s, n.Kind, err
+	case ir.NodeSettle:
+		return decodeSettle(n), n.Kind, nil
+	case ir.NodeDo:
+		if !allowDo {
+			return step{}, "", fmt.Errorf("%w: %s do %q needs a host/pool", ErrUnsupportedNode, owner, n.ID)
+		}
+		s, err := decodeDo(n)
+		return s, n.Kind, err
+	default:
+		return step{}, "", fmt.Errorf("%w: %s %q kind %q (only exec/do/settle leaf)", ErrUnsupportedNode, owner, n.ID, n.Kind)
+	}
 }
 
 // lowerGather lowers a gather(authored) node: the head-of-line drain over the
@@ -1315,11 +1429,15 @@ func (l *lowerer) resolveDeps() error {
 		}
 	}
 
-	// Synthesized decision-arm bodies (a guard `then`, dispatch arm bodies) are NOT
-	// plan units, so topoSortUnits' duplicate-activation guard cannot see them. A body
-	// id that collides with a real unit's node id or with another synthesized body id
-	// would collide on activationFor(bodyID) — corrupting the write-once decision
-	// record (dispatch chosenArm) and the Tier-A projection. Refuse it loudly.
+	// Synthesized/spec-only body ids (a guard `then`, dispatch arm bodies, cleanup
+	// guarded/body, AND a retry/repeat loop's body) are NOT plan units, so
+	// topoSortUnits' duplicate-activation guard cannot see them. Two of them sharing an
+	// id collide on activationFor(bodyID) / activationForAttempt(bodyID,0) — the SAME
+	// fold node — so whichever settles first is silently adopted by the other (a cleanup
+	// sub reloads a loop attempt's outcome and its teardown never runs; a loop adopts a
+	// sub's settle as attempt 0). A body id colliding with a real node has the same
+	// hazard. Refuse all of it loudly. (A loop's body id is registered here too so a
+	// decision/cleanup sub can never alias a loop attempt activation.)
 	synthBodies := map[string]string{}
 	addSynth := func(bodyID, owner string) error {
 		if prev, ok := synthBodies[bodyID]; ok {
@@ -1346,6 +1464,29 @@ func (l *lowerer) resolveDeps() error {
 					if err := addSynth(arm.bodyNodeID, u.nodeID); err != nil {
 						return err
 					}
+				}
+			}
+		case unitCleanup:
+			if u.cleanup != nil {
+				// The guarded and body synthesize sub-units on activationFor(subID). If
+				// they share an id (or collide with the cleanup, a loop body, or another
+				// node), the second resumeMemoizes the first's settled outcome and never
+				// runs — silently defeating the always-run finally. Refuse both here.
+				if err := addSynth(u.cleanup.guardedNodeID, u.nodeID); err != nil {
+					return err
+				}
+				if err := addSynth(u.cleanup.bodyNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		case unitLoop:
+			if u.loop != nil {
+				// A retry/repeat body id is spec-only (the loop lowers ONE unit), but its
+				// attempts activate on activationForAttempt(bodyID, N) — attempt 0 is
+				// activationFor(bodyID), byte-identical to a decision/cleanup sub's
+				// activation. Register it so a sub can never alias a loop attempt node.
+				if err := addSynth(u.loop.bodyNodeID, u.nodeID); err != nil {
+					return err
 				}
 			}
 		}

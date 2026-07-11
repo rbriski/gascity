@@ -126,6 +126,31 @@ func TestForEachDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestCleanupDoFixtureLowers guards the cleanup dolt-e2e fixture: a cleanup with a do
+// guarded + a do finally body lowers to one unitCleanup.
+func TestCleanupDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "cleanup-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("lower cleanup-do: %v", err)
+	}
+	clean := unitByNode(units, "clean")
+	if clean == nil || clean.kind != unitCleanup || clean.cleanup == nil {
+		t.Fatalf("clean unit = %+v, want a unitCleanup", clean)
+	}
+	if clean.cleanup.guardedNodeID != "work" || clean.cleanup.bodyNodeID != "unlock" {
+		t.Fatalf("cleanup spec = %+v, want guarded=work body=unlock", clean.cleanup)
+	}
+}
+
 // decodeBundle builds an *ir.IR from a JSON literal, failing the test on a
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {

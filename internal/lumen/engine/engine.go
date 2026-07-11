@@ -416,6 +416,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runDispatch(u, scope, nodeOutputs)
 	case unitForEach:
 		runErr = d.runForEach(u, scope, nodeOutputs)
+	case unitCleanup:
+		runErr = d.runCleanup(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -808,6 +810,73 @@ func arrayFromInputValue(v any) ([]string, bool, error) {
 	default:
 		return nil, false, nil
 	}
+}
+
+// cleanupOutcome computes a cleanup's settled outcome from its guarded and body
+// (finally) outcomes: the finally NEVER swallows a result — it changes the outcome
+// only if it ITSELF fails, in which case its failure supersedes. So a failed/canceled
+// body wins; otherwise the outcome is transparently the guarded's (pass/degraded/failed).
+func cleanupOutcome(guarded, body string) string {
+	if body == OutcomeFailed || body == OutcomeCanceled {
+		return body
+	}
+	return guarded
+}
+
+// runCleanup drives a cleanup (try/finally) inline: it runs the guarded leaf, then
+// ALWAYS runs the body (finally) leaf — regardless of the guarded's outcome, including a
+// failure — then settles the cleanup. Both subs run through runUnit (so each gets a
+// journal fact + resume memoization). The body's only blocking dep is the cleanup's own
+// gate (not the guarded), so a guarded failure never skip-cascades the teardown. A
+// gated-off cleanup is intercepted by runUnit's pre-switch skip-cascade before here.
+func (d *driver) runCleanup(u planUnit, scope, nodeOutputs map[string]string) error {
+	gu := d.cleanupGuardedUnit(u)
+	if err := d.runUnit(gu, scope, nodeOutputs); err != nil {
+		return err
+	}
+	bu := d.cleanupBodyUnit(u)
+	if err := d.runUnit(bu, scope, nodeOutputs); err != nil {
+		return err
+	}
+	return d.settleCleanup(u, gu, bu, scope, nodeOutputs)
+}
+
+// cleanupGuardedUnit / cleanupBodyUnit synthesize the guarded and finally sub-units,
+// each parented under the cleanup (so their outcomes stay out of the run's top-level
+// aggregation — only the cleanup settles into it).
+func (d *driver) cleanupGuardedUnit(u planUnit) planUnit {
+	s := u.cleanup
+	return d.decisionBodyUnit(u, s.guardedNodeID, s.guardedIRKind, s.guarded)
+}
+
+func (d *driver) cleanupBodyUnit(u planUnit) planUnit {
+	s := u.cleanup
+	return d.decisionBodyUnit(u, s.bodyNodeID, s.bodyIRKind, s.body)
+}
+
+// settleCleanup settles the cleanup from its (settled) guarded + body outcomes via the
+// finally-failure-wins rule, with the guarded's output as the result. The scope seed is
+// gated on ranOutcome so a canceled/skipped cleanup seeds nothing — matching resume's
+// reconstructOutputs (which skips a non-ran node), keeping a downstream {{cleanupID}}
+// identical across genesis and resume.
+func (d *driver) settleCleanup(u, gu, bu planUnit, scope, nodeOutputs map[string]string) error {
+	st := d.st()
+	guardedOutcome, guardedOutput := OutcomeSkipped, ""
+	if n := st.Nodes[gu.activation]; n != nil && n.Settled {
+		guardedOutcome, guardedOutput = n.Outcome, n.Output
+	}
+	bodyOutcome := OutcomeSkipped
+	if n := st.Nodes[bu.activation]; n != nil && n.Settled {
+		bodyOutcome = n.Outcome
+	}
+	outcome := cleanupOutcome(guardedOutcome, bodyOutcome)
+	if err := d.appendSettled(u.activation, outcome, guardedOutput, ""); err != nil {
+		return err
+	}
+	if ranOutcome(outcome) {
+		d.record(u.nodeID, guardedOutput, scope, nodeOutputs)
+	}
+	return nil
 }
 
 // runRun settles a run's transparent aggregate from its (already-settled) members

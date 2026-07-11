@@ -408,7 +408,7 @@ func (d *driver) resumeMemoized(u planUnit, scope, nodeOutputs map[string]string
 			// parent reads via {{runRef}} (genesis record()s it in runRun). A scatter/gather
 			// aggregate seeds nodeOutputs only (it never wrote scope). This reproduces the
 			// genesis scope exactly, so a resumed run's downstream render matches (B1).
-			if u.kind == unitLeaf || u.kind == unitRun {
+			if u.kind == unitLeaf || u.kind == unitRun || u.kind == unitCleanup {
 				scope[u.nodeID] = n.Output
 			}
 		}

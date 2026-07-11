@@ -1,0 +1,515 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [
+      {
+        "name": "convoy_id",
+        "type": {
+          "kind": "union",
+          "of": [
+            {
+              "kind": "atomic",
+              "name": "string",
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 12,
+                "col": 14
+              }
+            },
+            {
+              "kind": "atomic",
+              "name": "null",
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 12,
+                "col": 14
+              }
+            }
+          ],
+          "origin": {
+            "uri": "mol-review-quorum-routed.lumen",
+            "line": 12,
+            "col": 14
+          }
+        },
+        "required": false,
+        "default": null,
+        "body": false,
+        "origin": {
+          "uri": "mol-review-quorum-routed.lumen",
+          "line": 12,
+          "col": 2
+        }
+      },
+      {
+        "name": "base_ref",
+        "type": {
+          "kind": "atomic",
+          "name": "string",
+          "origin": {
+            "uri": "mol-review-quorum-routed.lumen",
+            "line": 13,
+            "col": 12
+          }
+        },
+        "required": false,
+        "default": "origin/main",
+        "body": false,
+        "origin": {
+          "uri": "mol-review-quorum-routed.lumen",
+          "line": 13,
+          "col": 2
+        }
+      },
+      {
+        "name": "lane_one_id",
+        "type": {
+          "kind": "atomic",
+          "name": "string",
+          "origin": {
+            "uri": "mol-review-quorum-routed.lumen",
+            "line": 14,
+            "col": 15
+          }
+        },
+        "required": true,
+        "body": false,
+        "origin": {
+          "uri": "mol-review-quorum-routed.lumen",
+          "line": 14,
+          "col": 2
+        }
+      },
+      {
+        "name": "lane_two_id",
+        "type": {
+          "kind": "atomic",
+          "name": "string",
+          "origin": {
+            "uri": "mol-review-quorum-routed.lumen",
+            "line": 15,
+            "col": 15
+          }
+        },
+        "required": true,
+        "body": false,
+        "origin": {
+          "uri": "mol-review-quorum-routed.lumen",
+          "line": 15,
+          "col": 2
+        }
+      }
+    ],
+    "origin": {
+      "uri": "mol-review-quorum-routed.lumen",
+      "line": 11,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "lanes",
+      "name": "lanes",
+      "after": [],
+      "origin": {
+        "uri": "mol-review-quorum-routed.lumen",
+        "line": 17,
+        "col": 0
+      },
+      "form": "members",
+      "members": [
+        {
+          "kind": "retry",
+          "id": "retry_101",
+          "after": [],
+          "origin": {
+            "uri": "mol-review-quorum-routed.lumen",
+            "line": 18,
+            "col": 0
+          },
+          "attempts": {
+            "kind": "literal",
+            "value": 3
+          },
+          "body": {
+            "kind": "do",
+            "id": "reviewLaneOne",
+            "name": "reviewLaneOne",
+            "after": [],
+            "origin": {
+              "uri": "mol-review-quorum-routed.lumen",
+              "line": 18,
+              "col": 14
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "agent": {
+                "kind": "ref",
+                "name": "laneOneAgent",
+                "origin": {
+                  "uri": "mol-review-quorum-routed.lumen",
+                  "line": 18,
+                  "col": 14
+                }
+              },
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 18,
+                "col": 14
+              }
+            },
+            "body": {
+              "raw": "Review convoy {{ convoy_id }} as lane {{ lane_one_id }} against {{ base_ref }}; persist durable JSON.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "Review convoy "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "convoy_id",
+                      "origin": {
+                        "uri": "mol-review-quorum-routed.lumen",
+                        "line": 18,
+                        "col": 14
+                      }
+                    },
+                    "origin": {
+                      "uri": "mol-review-quorum-routed.lumen",
+                      "line": 18,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": " as lane "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "lane_one_id",
+                      "origin": {
+                        "uri": "mol-review-quorum-routed.lumen",
+                        "line": 18,
+                        "col": 14
+                      }
+                    },
+                    "origin": {
+                      "uri": "mol-review-quorum-routed.lumen",
+                      "line": 18,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": " against "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "base_ref",
+                      "origin": {
+                        "uri": "mol-review-quorum-routed.lumen",
+                        "line": 18,
+                        "col": 14
+                      }
+                    },
+                    "origin": {
+                      "uri": "mol-review-quorum-routed.lumen",
+                      "line": 18,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": "; persist durable JSON."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 18,
+                "col": 14
+              }
+            }
+          }
+        },
+        {
+          "kind": "retry",
+          "id": "retry_102",
+          "after": [],
+          "origin": {
+            "uri": "mol-review-quorum-routed.lumen",
+            "line": 19,
+            "col": 0
+          },
+          "attempts": {
+            "kind": "literal",
+            "value": 3
+          },
+          "body": {
+            "kind": "do",
+            "id": "reviewLaneTwo",
+            "name": "reviewLaneTwo",
+            "after": [],
+            "origin": {
+              "uri": "mol-review-quorum-routed.lumen",
+              "line": 19,
+              "col": 14
+            },
+            "source": {
+              "kind": "prompt"
+            },
+            "interpreter": {
+              "kind": "agent",
+              "mode": {
+                "kind": "do"
+              },
+              "agent": {
+                "kind": "ref",
+                "name": "laneTwoAgent",
+                "origin": {
+                  "uri": "mol-review-quorum-routed.lumen",
+                  "line": 19,
+                  "col": 14
+                }
+              },
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 19,
+                "col": 14
+              }
+            },
+            "body": {
+              "raw": "Review convoy {{ convoy_id }} as lane {{ lane_two_id }} against {{ base_ref }}; persist durable JSON.",
+              "template": {
+                "parts": [
+                  {
+                    "kind": "text",
+                    "value": "Review convoy "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "convoy_id",
+                      "origin": {
+                        "uri": "mol-review-quorum-routed.lumen",
+                        "line": 19,
+                        "col": 14
+                      }
+                    },
+                    "origin": {
+                      "uri": "mol-review-quorum-routed.lumen",
+                      "line": 19,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": " as lane "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "lane_two_id",
+                      "origin": {
+                        "uri": "mol-review-quorum-routed.lumen",
+                        "line": 19,
+                        "col": 14
+                      }
+                    },
+                    "origin": {
+                      "uri": "mol-review-quorum-routed.lumen",
+                      "line": 19,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": " against "
+                  },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "base_ref",
+                      "origin": {
+                        "uri": "mol-review-quorum-routed.lumen",
+                        "line": 19,
+                        "col": 14
+                      }
+                    },
+                    "origin": {
+                      "uri": "mol-review-quorum-routed.lumen",
+                      "line": 19,
+                      "col": 14
+                    }
+                  },
+                  {
+                    "kind": "text",
+                    "value": "; persist durable JSON."
+                  }
+                ]
+              },
+              "source": {
+                "kind": "inline"
+              },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 19,
+                "col": 14
+              }
+            }
+          }
+        }
+      ],
+      "on_fail": "continue"
+    },
+    {
+      "kind": "do",
+      "id": "synthesize",
+      "name": "synthesize",
+      "after": [
+        "lanes"
+      ],
+      "origin": {
+        "uri": "mol-review-quorum-routed.lumen",
+        "line": 21,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "mol-review-quorum-routed.lumen",
+          "line": 21,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Synthesize lanes {{ lane_one_id }} and {{ lane_two_id }} for convoy {{ convoy_id }} into a quorum verdict.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Synthesize lanes "
+            },
+            {
+              "kind": "interp",
+              "expr": {
+                "kind": "ref",
+                "name": "lane_one_id",
+                "origin": {
+                  "uri": "mol-review-quorum-routed.lumen",
+                  "line": 21,
+                  "col": 21
+                }
+              },
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 21,
+                "col": 21
+              }
+            },
+            {
+              "kind": "text",
+              "value": " and "
+            },
+            {
+              "kind": "interp",
+              "expr": {
+                "kind": "ref",
+                "name": "lane_two_id",
+                "origin": {
+                  "uri": "mol-review-quorum-routed.lumen",
+                  "line": 21,
+                  "col": 21
+                }
+              },
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 21,
+                "col": 21
+              }
+            },
+            {
+              "kind": "text",
+              "value": " for convoy "
+            },
+            {
+              "kind": "interp",
+              "expr": {
+                "kind": "ref",
+                "name": "convoy_id",
+                "origin": {
+                  "uri": "mol-review-quorum-routed.lumen",
+                  "line": 21,
+                  "col": 21
+                }
+              },
+              "origin": {
+                "uri": "mol-review-quorum-routed.lumen",
+                "line": 21,
+                "col": 21
+              }
+            },
+            {
+              "kind": "text",
+              "value": " into a quorum verdict."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "mol-review-quorum-routed.lumen",
+          "line": 21,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "mol-review-quorum-routed.lumen",
+    "line": 11,
+    "col": 0
+  }
+}

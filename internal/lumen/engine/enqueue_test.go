@@ -10,16 +10,20 @@ import (
 )
 
 // TestEnqueueRefusesUnlowerableIR pins the §6 L6 enqueue-wedge fix: an IR that will
-// not lower (here a `run` nested under a scatter — run is top-level only this slice)
-// is refused LOUD at EnqueueRun, BEFORE run.started is appended, so no wedged,
-// unsealable run is ever discoverable. Head stays 0. (retry-in-scatter now lowers
-// after the RN slice, so it is no longer a valid un-lowerable example.)
+// not lower is refused LOUD at EnqueueRun, BEFORE run.started is appended, so no
+// wedged, unsealable run is ever discoverable. Head stays 0. (run-under-scatter now
+// lowers after the run-in-scatter slice, so the fixture is a loop INSIDE a run
+// sub-formula — still unlowerable, fenced by lowerLoop's prefix guard.)
 func TestEnqueueRefusesUnlowerableIR(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	// A run nested under a scatter is un-lowerable (run is top-level only this slice).
-	doc := decodeIR(t, blockDoc("bad",
-		scatterNode("s", nil, "continue", runNodeJSON("r", nil, "sometarget", "", "")),
+	// A retry loop INSIDE a run sub-formula is un-lowerable (loops are top-level or a
+	// top-level scatter member only; a namespace-unaware loopScope is a follow-on).
+	loopBody := execNodeExit("body", "echo hi", []int{0}, nil)
+	doc := decodeIR(t, bundleDoc(
+		"",
+		runNodeJSON("r", nil, "sub", "", ""),
+		subDoc("sub", "", retryNode(`{"kind":"literal","value":2}`, loopBody)),
 	))
 
 	streamID, err := engine.EnqueueRun(ctx, store, doc, nil, "packs/x@v1", "workers")

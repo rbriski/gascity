@@ -1,0 +1,310 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "main",
+  "input": {
+    "name": "main.input",
+    "fields": [
+      {
+        "name": "topic",
+        "type": {
+          "kind": "atomic",
+          "name": "string",
+          "origin": {
+            "uri": "scatter-run.formula",
+            "line": 11,
+            "col": 9
+          }
+        },
+        "required": false,
+        "default": "lanterns",
+        "body": false,
+        "origin": {
+          "uri": "scatter-run.formula",
+          "line": 11,
+          "col": 2
+        }
+      }
+    ],
+    "origin": {
+      "uri": "scatter-run.formula",
+      "line": 10,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "lanes",
+      "name": "lanes",
+      "after": [],
+      "origin": {
+        "uri": "scatter-run.formula",
+        "line": 13,
+        "col": 0
+      },
+      "form": "members",
+      "members": [
+        {
+          "kind": "do",
+          "id": "direct",
+          "name": "direct",
+          "after": [],
+          "origin": {
+            "uri": "scatter-run.formula",
+            "line": 14,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "scatter-run.formula",
+              "line": 14,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do the direct lane work, then settle this step.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do the direct lane work, then settle this step."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "scatter-run.formula",
+              "line": 14,
+              "col": 0
+            }
+          }
+        },
+        {
+          "kind": "run",
+          "id": "extra",
+          "name": "extra",
+          "after": [],
+          "origin": {
+            "uri": "scatter-run.formula",
+            "line": 15,
+            "col": 0
+          },
+          "target": {
+            "kind": "by-name",
+            "name": "subwork"
+          },
+          "environment": {
+            "fields": [
+              {
+                "name": "topic",
+                "value": {
+                  "kind": "expr",
+                  "expr": {
+                    "kind": "ref",
+                    "name": "topic",
+                    "origin": {
+                      "uri": "scatter-run.formula",
+                      "line": 15,
+                      "col": 55
+                    }
+                  }
+                },
+                "origin": {
+                  "uri": "scatter-run.formula",
+                  "line": 15,
+                  "col": 0
+                }
+              }
+            ]
+          },
+          "outcome": "transparent"
+        }
+      ],
+      "on_fail": "continue"
+    },
+    {
+      "kind": "do",
+      "id": "wrap",
+      "name": "wrap",
+      "after": [
+        "lanes"
+      ],
+      "origin": {
+        "uri": "scatter-run.formula",
+        "line": 17,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "scatter-run.formula",
+          "line": 17,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Wrap up the scatter results, then settle this step.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Wrap up the scatter results, then settle this step."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "scatter-run.formula",
+          "line": 17,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "scatter-run.formula",
+    "line": 10,
+    "col": 0
+  },
+  "formulas": {
+    "subwork": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "subwork",
+      "input": {
+        "name": "subwork.input",
+        "fields": [
+          {
+            "name": "topic",
+            "type": {
+              "kind": "atomic",
+              "name": "string",
+              "origin": {
+                "uri": "scatter-run.formula",
+                "line": 6,
+                "col": 9
+              }
+            },
+            "required": true,
+            "body": false,
+            "origin": {
+              "uri": "scatter-run.formula",
+              "line": 6,
+              "col": 2
+            }
+          }
+        ],
+        "origin": {
+          "uri": "scatter-run.formula",
+          "line": 5,
+          "col": 0
+        }
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "inner",
+          "name": "inner",
+          "after": [],
+          "origin": {
+            "uri": "scatter-run.formula",
+            "line": 8,
+            "col": 0
+          },
+          "source": {
+            "kind": "prompt"
+          },
+          "interpreter": {
+            "kind": "agent",
+            "mode": {
+              "kind": "do"
+            },
+            "origin": {
+              "uri": "scatter-run.formula",
+              "line": 8,
+              "col": 0
+            }
+          },
+          "body": {
+            "raw": "Do the sub-formula work about {{ topic }}, then settle this step.",
+            "template": {
+              "parts": [
+                {
+                  "kind": "text",
+                  "value": "Do the sub-formula work about "
+                },
+                {
+                  "kind": "interp",
+                  "expr": {
+                    "kind": "ref",
+                    "name": "topic",
+                    "origin": {
+                      "uri": "scatter-run.formula",
+                      "line": 8,
+                      "col": 16
+                    }
+                  },
+                  "origin": {
+                    "uri": "scatter-run.formula",
+                    "line": 8,
+                    "col": 16
+                  }
+                },
+                {
+                  "kind": "text",
+                  "value": ", then settle this step."
+                }
+              ]
+            },
+            "source": {
+              "kind": "inline"
+            },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare",
+            "origin": {
+              "uri": "scatter-run.formula",
+              "line": 8,
+              "col": 0
+            }
+          }
+        }
+      ],
+      "origin": {
+        "uri": "scatter-run.formula",
+        "line": 5,
+        "col": 0
+      }
+    }
+  }
+}

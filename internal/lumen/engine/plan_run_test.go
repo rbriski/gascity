@@ -379,10 +379,11 @@ func plainDoc(nodes string) string {
 		`"name":"main","input":{"name":"main.input","fields":[]},"nodes":[` + nodes + `]}`
 }
 
-// retryMember renders a retry loop (distinct loop + body ids) with a literal attempts count.
-func retryMember(loopID, bodyID, script, attempts string) string {
+// retryMember renders a retry loop (distinct loop + body ids) with a literal
+// 2-attempt budget (the budget is irrelevant to the lowering-shape pins that use it).
+func retryMember(loopID, bodyID, script string) string {
 	return `{"kind":"retry","id":"` + loopID + `","name":"` + loopID + `","after":[],` +
-		`"attempts":{"kind":"literal","value":` + attempts + `},` +
+		`"attempts":{"kind":"literal","value":2},` +
 		`"body":{"kind":"exec","id":"` + bodyID + `","name":"` + bodyID + `","after":[],` +
 		`"interpreter":{"program":{"kind":"shell"}},"body":{"raw":` + jsonStr(script) + `},` +
 		`"exitMap":{"pass":[0],"retryable":[]}}}`
@@ -401,8 +402,8 @@ func scatterOf(id string, after []string, members ...string) string {
 func TestLowerRetryInScatterLowers(t *testing.T) {
 	doc := decodeBundle(t, plainDoc(
 		scatterOf("lanes", nil,
-			retryMember("r1", "b1", "echo a", "2"),
-			retryMember("r2", "b2", "echo b", "2")),
+			retryMember("r1", "b1", "echo a"),
+			retryMember("r2", "b2", "echo b")),
 	))
 	units, err := buildUnits(doc, true, true)
 	if err != nil {
@@ -436,7 +437,7 @@ func TestLowerRetryInScatterLowers(t *testing.T) {
 func TestLowerLoopInSubFormulaRefused(t *testing.T) {
 	sub := `"greeter":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"greeter","input":{"name":"greeter.input","fields":[]},"nodes":[` +
-		retryMember("r1", "b1", "echo hi", "2") + `]}`
+		retryMember("r1", "b1", "echo hi") + `]}`
 	runNoEnv := `{"kind":"run","id":"greeting","name":"greeting","after":[],` +
 		`"target":{"kind":"by-name","name":"greeter"},"environment":{"fields":[]},"outcome":"transparent"}`
 	doc := decodeBundle(t, runMainDoc(runNoEnv, sub))
@@ -569,17 +570,54 @@ func TestLowerRunCycleRefused(t *testing.T) {
 	}
 }
 
-// TestLowerRunUnderScatterRefused pins §E: a run nested under a scatter is refused.
-func TestLowerRunUnderScatterRefused(t *testing.T) {
+// TestLowerRunUnderScatterLowers is the placement flip (⚑SF-2/⚑SF-3): a run is now a
+// legal scatter member. It pins the member-collection shape — the run aggregate IS the
+// member (parent = scatterAct), collected ALONGSIDE a leaf member, while its inlined
+// sub-units (parent = runAct) are EXCLUDED from the scatter's member set. It also pins
+// ⚑NICE: the run agg folds with memberIndex ABSENT (lowerNode's NodeRun arm never
+// threads it), consumed by nothing.
+func TestLowerRunUnderScatterLowers(t *testing.T) {
 	scatterWithRun := `{"kind":"scatter","id":"s","name":"s","after":[],"form":"members",` +
-		`"members":[` + runNode("r", nil, "greeter", "name", "who") + `]}`
+		`"members":[` + execNode("direct", nil, "echo d") + `,` +
+		runNode("extra", nil, "greeter", "name", "who") + `]}`
 	doc := decodeBundle(t, runMainDoc(
 		scatterWithRun,
 		greeterFormula("greeter", execNode("hello", nil, "echo hi")),
 	))
-	_, err := buildUnits(doc, true, true)
-	if err == nil || !strings.Contains(err.Error(), "top-level") {
-		t.Fatalf("want a run-under-aggregate refusal, got %v", err)
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused run-in-scatter: %v", err)
+	}
+
+	// The run aggregate is a scatter member: parent = scatterAct, memberIndex ABSENT.
+	extra := unitByNode(units, "extra")
+	if extra == nil || extra.kind != unitRun {
+		t.Fatalf("extra = %+v, want a unitRun", extra)
+	}
+	if extra.parent != "s:0" {
+		t.Errorf("extra parent = %q, want s:0 (a scatter member)", extra.parent)
+	}
+	if extra.memberIndex != nil {
+		t.Errorf("extra memberIndex = %v, want nil (⚑NICE: NodeRun arm threads none)", *extra.memberIndex)
+	}
+
+	// The run's inlined sub-unit is parented to the run activation and EXCLUDED from
+	// the scatter member set.
+	sub := unitByNode(units, "extra/hello")
+	if sub == nil || sub.parent != "extra:0" {
+		t.Fatalf("extra/hello = %+v, want parent extra:0", sub)
+	}
+
+	// The scatter aggregates the leaf AND the run agg — never the run's sub-unit.
+	agg := unitByNode(units, "s")
+	if agg == nil || agg.kind != unitScatterAgg {
+		t.Fatalf("s = %+v, want a scatter aggregate", agg)
+	}
+	if len(agg.members) != 2 || !containsStr(agg.members, "direct:0") || !containsStr(agg.members, "extra:0") {
+		t.Errorf("scatter members = %v, want exactly [direct:0 extra:0] (run agg is the member, sub excluded)", agg.members)
+	}
+	if containsStr(agg.members, "extra/hello:0") {
+		t.Errorf("scatter members = %v, must NOT include the run's sub-unit extra/hello:0", agg.members)
 	}
 }
 
@@ -604,6 +642,29 @@ func TestLowerRunEnvUnknownFieldRefused(t *testing.T) {
 	_, err := buildUnits(doc, true, true)
 	if err == nil || !strings.Contains(err.Error(), "nosuchfield") {
 		t.Fatalf("want an unknown-env-field refusal, got %v", err)
+	}
+}
+
+// TestLowerRunEnvRefDelimiterRefused pins the env-ref charset guard: an environment
+// binding whose ref NAME carries '/' or ':' is refused at lowering. A legal ref can only
+// name a same-namespace node or an input (idents cannot contain those chars); a
+// delimiter-bearing ref is a forged cross-namespace key — e.g. "sibling/hello" would
+// resolve in byNodeID to a SIBLING run's sub-node, bypassing the sibling-member refusal
+// (⚑SF-1) and installing a hidden intra-scatter edge. Refusing the whole malformed-ref
+// class here closes the bypass at the source.
+func TestLowerRunEnvRefDelimiterRefused(t *testing.T) {
+	for _, ref := range []string{"x/y", "x:0"} {
+		doc := decodeBundle(t, runMainDoc(
+			runNode("greeting", nil, "greeter", "name", ref),
+			greeterFormula("greeter", execNode("hello", nil, "echo hi")),
+		))
+		_, err := buildUnits(doc, true, true)
+		if err == nil {
+			t.Fatalf("ref %q: want a delimiter-ref refusal, got nil", ref)
+		}
+		if !strings.Contains(err.Error(), "greeting") || !strings.Contains(err.Error(), ref) {
+			t.Errorf("ref %q: error = %v, want it to name the run and the ref", ref, err)
+		}
 	}
 }
 

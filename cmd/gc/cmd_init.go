@@ -1277,7 +1277,24 @@ func hasInitRigSiteBindings(rigs []config.Rig) bool {
 // when a provider or start command is supplied; otherwise init writes the
 // default mayor-only city. Errors if the runtime scaffold already exists. Accepts an
 // injected FS for testability.
+// warnEmptyTemplateMissingBootstrapProfile emits a warning when the "empty"
+// template is scaffolded without a --bootstrap-profile. The empty template
+// ships no [api] block by design; it composes deterministic API config from a
+// bootstrap profile (k8s-cell binds 0.0.0.0:9443 with mutations allowed).
+// Without one the API binds to localhost — reachable only within this box.
+// That is a legitimate default for a LOCAL controller; the warning exists for
+// the HOSTED case, where an entrypoint that forgets --bootstrap-profile leaves
+// its front door reachable only inside the pod, and that regression should
+// surface in logs rather than pass silently.
+func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer) {
+	if wiz.configName != "empty" || strings.TrimSpace(wiz.bootstrapProfile) != "" {
+		return
+	}
+	fmt.Fprintf(stderr, "gc init: WARNING: --template empty ships no [api] block; without --bootstrap-profile the controller API binds to localhost and is not reachable outside this box. That is fine for a local controller, but a hosted controller must pass --bootstrap-profile %s (0.0.0.0:9443) to serve the front door externally.\n", bootstrapProfileK8sCell) //nolint:errcheck // best-effort stderr
+}
+
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
+	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)

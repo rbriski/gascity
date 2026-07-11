@@ -282,15 +282,15 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 
 // canonicalScopeDoltProjectionAuthoritative reports whether canonical
 // Dolt projection would resolve auth for the city scope: the scope
-// backend is not postgres and the scope config resolves authoritative —
-// the same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv
+// backend is not postgres or sqlite and the scope config resolves
+// authoritative — the same gates applyOrderExecCanonicalDoltEnv
 // and its managed fallback apply before calling
 // applyCanonicalDoltAuthEnv. Callers that feed ambient environments
 // into the projection use this to strip untrusted password mirrors
 // from the resolution input without breaking the strict no-op
 // pass-through for non-authoritative scopes.
 func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
-	if scopeBackendIsPostgres(cityPath, cityPath) {
+	if scopeBackendIsNonDolt(cityPath, cityPath) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
@@ -350,6 +350,16 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 // (true, err) on a known backend that failed to project; caller MUST
 // surface this error rather than retrying.
 func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	// A scope whose metadata declares bd's sqlite backend is bd-owned:
+	// metadata.json is the routing identity (config.yaml is a compatibility
+	// mirror), so the projection is a clean slate regardless of what shape
+	// the scope's config.yaml resolves to. Checked before config resolution
+	// because contract.LoadMetadataState rejects "sqlite" and would
+	// otherwise surface a parse error for an authoritative scope config.
+	if scopeBackendIsSQLite(scopeRoot) {
+		applySQLiteScopeBackendEnv(env)
+		return true, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return false, err
@@ -604,6 +614,14 @@ func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataStat
 	}
 	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if err != nil {
+		// bd's sqlite backend is not representable in MetadataState (the
+		// loader rejects it as unknown), but the classification answer is
+		// unambiguous: a sqlite scope is not Postgres. Answering instead of
+		// erroring keeps the bd error-classification and doctor paths from
+		// wrapping every sqlite-scope failure in a metadata parse error.
+		if scopeBackendIsSQLite(scopeRoot) {
+			return contract.MetadataState{}, false, nil
+		}
 		return contract.MetadataState{}, false, fmt.Errorf("loading metadata for scope %s: %w", scopeRoot, err)
 	}
 	if ok {
@@ -644,6 +662,53 @@ func scopeBackendIsPostgres(cityPath, scopeRoot string) bool {
 		return false
 	}
 	return ok
+}
+
+// scopeBackendIsSQLite reports whether the scope's .beads/metadata.json
+// declares backend "sqlite" — bd's file-based embedded backend, authored by
+// `bd init --backend=sqlite`. gc never manages sqlite storage (no server, no
+// credentials, no Dolt machinery); the only decision this answer feeds is
+// "skip Dolt/Postgres-specific machinery for this scope". The raw JSON read
+// is deliberate: contract.LoadMetadataState rejects "sqlite" as an unknown
+// backend, so callers cannot classify the scope through it (same pattern as
+// allowLegacyDoltMetadataRepair).
+func scopeBackendIsSQLite(scopeRoot string) bool {
+	data, err := os.ReadFile(scopeMetadataJSONPath(scopeRoot))
+	if err != nil {
+		return false
+	}
+	var raw struct {
+		Backend string `json:"backend"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(raw.Backend), "sqlite")
+}
+
+// scopeBackendIsNonDolt reports whether the scope's declared beads backend is
+// one gc must not project Dolt machinery onto: an external Postgres endpoint
+// or bd's sqlite backend. Callers use it where the semantic is "skip
+// Dolt-specific env/preflight/init for this scope" — bd reaches the scope
+// through BEADS_DIR and resolves the backend from the scope's own
+// .beads/metadata.json.
+func scopeBackendIsNonDolt(cityPath, scopeRoot string) bool {
+	return scopeBackendIsPostgres(cityPath, scopeRoot) || scopeBackendIsSQLite(scopeRoot)
+}
+
+// applySQLiteScopeBackendEnv projects the env for a bd-owned sqlite scope: a
+// clean slate. sqlite is file-based and embedded — no server endpoint, no
+// credentials — so gc strips every Dolt/Postgres projection and lets bd
+// resolve the backend from the scope's own .beads/metadata.json via
+// BEADS_DIR (which the callers pin).
+func applySQLiteScopeBackendEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	clearProjectedBeadsBackendEnv(env)
+	clearProjectedDoltEnv(env)
+	clearProjectedPostgresEnv(env)
+	mirrorBeadsDoltEnv(env)
 }
 
 func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot string, state contract.ConfigState) {
@@ -1101,6 +1166,12 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// error gets wrapped with an operator-facing hint and surfaced; gc
 		// does not manage external PG endpoints.
 		if err != nil {
+			// Same for bd's sqlite backend: file-based, no server endpoint —
+			// no PG hint applies and no managed-Dolt recovery could help.
+			// Surface the bd error as-is.
+			if scopeBackendIsSQLite(dir) {
+				return out, err
+			}
 			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
 			if classifyErr != nil {
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)

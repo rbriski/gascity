@@ -262,7 +262,10 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
 	}
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	// Non-Dolt scopes (postgres, bd's sqlite backend) take no Dolt endpoint
+	// projection: postgres env is projected by the scope backend helpers, and
+	// sqlite needs only BEADS_DIR (no server, no creds).
+	if scopeBackendIsNonDolt(cityPath, scopeRoot) {
 		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
@@ -288,7 +291,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeBackendIsNonDolt(cityPath, scopeRoot) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")

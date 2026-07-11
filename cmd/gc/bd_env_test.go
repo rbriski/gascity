@@ -5204,6 +5204,11 @@ func projectedKeyStripped(key string) bool {
 	return true
 }
 
+// TestApplyCanonicalScopeBackendEnv_UnsupportedBackend pins the rejection of
+// genuinely unknown metadata backends. It previously used "sqlite" as the
+// exemplar unknown value; bd's sqlite backend is now recognized as a bd-owned
+// scope (clean-slate projection, see TestBdRuntimeEnvForRigSQLiteScopeSkipsDoltProjection),
+// so the pin uses a value no backend will ever claim.
 func TestApplyCanonicalScopeBackendEnv_UnsupportedBackend(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
@@ -5216,7 +5221,7 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"sqlite"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"frobnitz"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

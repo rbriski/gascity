@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -373,6 +374,265 @@ func TestLowerGuardSelfRefCondRefused(t *testing.T) {
 	}
 }
 
+// TestLowerGuardInSubFormulaLowers (§3 lowering-success shape at prefix) pins the core
+// slice: a guard inlined in a run sub-formula lowers to a unitGuard at the qualified id
+// `greeting/g`, carrying the namespace (ns "greeting/"), a QUALIFIED thenNodeID
+// `greeting/gthen`, and a QUALIFIED rawAfter (`greeting/b` — the authored `after: b`
+// follows the prefix); the then stays synthesized (no separate unit).
+func TestLowerGuardInSubFormulaLowers(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		runNode("greeting", nil, "greeter", "name", "who"),
+		greeterFormula("greeter",
+			execNode("b", nil, "echo bv")+","+
+				guardNode("g", []string{"b"}, condRefEq("name", "x"), execNode("gthen", nil, "echo t"))),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused a guard-in-sub-formula: %v", err)
+	}
+	g := unitByNode(units, "greeting/g")
+	if g == nil || g.kind != unitGuard {
+		t.Fatalf("greeting/g = %+v, want a unitGuard; got %v", g, nodeIDs(units))
+	}
+	if g.ns != "greeting/" {
+		t.Errorf("guard ns = %q, want greeting/", g.ns)
+	}
+	if g.activation != "greeting/g:0" {
+		t.Errorf("guard activation = %q, want greeting/g:0", g.activation)
+	}
+	if g.guard == nil || g.guard.thenNodeID != "greeting/gthen" {
+		t.Errorf("guard spec thenNodeID = %+v, want greeting/gthen (qualified)", deref(g).guard)
+	}
+	if len(g.rawAfter) != 1 || g.rawAfter[0] != "greeting/b" {
+		t.Errorf("guard rawAfter = %v, want [greeting/b] (authored after qualified by the prefix)", g.rawAfter)
+	}
+	if !containsStr(g.afterDeps, "greeting/b:0") {
+		t.Errorf("guard afterDeps = %v, want to include greeting/b:0", g.afterDeps)
+	}
+	// The then is synthesized at run time, not a separate unit.
+	if unitByNode(units, "greeting/gthen") != nil {
+		t.Errorf("greeting/gthen must NOT be a separate unit; got %v", nodeIDs(units))
+	}
+}
+
+// TestLowerGuardShapeRefusalMatrix (§2.8) pins the structural refusals with their exact
+// messages, at the ROOT and inside a SUB-FORMULA: a missing cond, a missing then, a then
+// missing its id, and a non-leaf then all refuse with ErrUnsupportedNode at load.
+func TestLowerGuardShapeRefusalMatrix(t *testing.T) {
+	cond := condRefEq("name", "x")
+	cases := []struct {
+		name  string
+		guard string
+		want  string
+	}{
+		{
+			name:  "missing cond",
+			guard: `{"kind":"guard","id":"g","name":"g","after":[],"then":` + execNode("gthen", nil, "echo t") + `}`,
+			want:  `guard "g" missing cond`,
+		},
+		{
+			name:  "missing then",
+			guard: `{"kind":"guard","id":"g","name":"g","after":[],"cond":` + cond + `}`,
+			want:  `guard "g" missing then`,
+		},
+		{
+			name:  "then missing id",
+			guard: `{"kind":"guard","id":"g","name":"g","after":[],"cond":` + cond + `,"then":{"kind":"exec","name":"x","after":[],"interpreter":{"program":{"kind":"shell"}},"body":{"raw":"echo t"}}}`,
+			want:  `guard "g" then missing id`,
+		},
+		{
+			name:  "non-leaf then",
+			guard: `{"kind":"guard","id":"g","name":"g","after":[],"cond":` + cond + `,"then":` + scatterOf("tb", execNode("m", nil, "echo m")) + `}`,
+			want:  `guard "g" then kind "scatter" (only exec/do leaf then)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Root placement.
+			_, err := buildUnits(decodeBundle(t, plainDoc(tc.guard)), true, true)
+			if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("root: err = %v, want ErrUnsupportedNode containing %q", err, tc.want)
+			}
+			// Sub-formula placement (the restructured region must refuse identically).
+			_, err = buildUnits(decodeBundle(t, runMainDoc(
+				runNode("greeting", nil, "greeter", "name", "who"),
+				greeterFormula("greeter", tc.guard))), true, true)
+			if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("sub-formula: err = %v, want ErrUnsupportedNode containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestLowerGuardSelfRefCondRefusedInSubFormula (§2.8) pins the self-referential-cond
+// refusal INSIDE a run sub-formula (the root pin lives in TestLowerGuardSelfRefCondRefused;
+// the self-ref sweep compares BARE ids, so it must keep firing at any prefix).
+func TestLowerGuardSelfRefCondRefusedInSubFormula(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		runNode("greeting", nil, "greeter", "name", "who"),
+		greeterFormula("greeter",
+			guardNode("g", nil, condRefEq("gthen", "x"), execNode("gthen", nil, "echo t"))),
+	))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "self-referential") {
+		t.Fatalf("want a self-referential-cond refusal inside the sub-formula, got %v", err)
+	}
+}
+
+// TestLowerGuardInSubFormulaCondRefGatesQualified (§3 condRef gate qualification) pins
+// that a guard cond reading a sub-SIBLING node gates the guard on that sibling's
+// QUALIFIED activation (`greeting/b:0`), so the ns decision is stable across passes —
+// the DET cond-ref gate follows the prefix exactly like a leaf's `after`.
+func TestLowerGuardInSubFormulaCondRefGatesQualified(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		runNode("greeting", nil, "greeter", "name", "who"),
+		greeterFormula("greeter",
+			execNode("b", nil, "echo bv")+","+
+				guardNode("g", nil, condRefEq("b", "x"), execNode("gthen", nil, "echo t"))),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits: %v", err)
+	}
+	g := unitByNode(units, "greeting/g")
+	if g == nil {
+		t.Fatal("no greeting/g unit")
+	}
+	if !containsStr(g.afterDeps, "greeting/b:0") {
+		t.Errorf("guard afterDeps = %v, want to include greeting/b:0 (qualified cond-ref gate)", g.afterDeps)
+	}
+}
+
+// TestLowerGuardInSubFormulaSilentRefSubstitutesClosure (§2.5 gate substitution) pins
+// that a guard cond reading a SILENT sub-let gates on the let's transitive NON-SILENT
+// closure (its real inputs), not on the silent activation itself — a silent unit never
+// settles, so gating on it would defer the sub-graph forever on the Advance path. The
+// guard reads msg, a silent interp over {{prep}}.
+func TestLowerGuardInSubFormulaSilentRefSubstitutesClosure(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		runNode("greeting", nil, "greeter", "name", "who"),
+		greeterFormula("greeter",
+			execNode("prep", nil, "echo p")+","+
+				`{"kind":"interp","id":"msg","name":"msg","after":["prep"],"body":{"raw":"{{ prep }}"}}`+","+
+				guardNode("g", nil, condRefEq("msg", "x"), execNode("gthen", nil, "echo t"))),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits: %v", err)
+	}
+	g := unitByNode(units, "greeting/g")
+	if g == nil {
+		t.Fatal("no greeting/g unit")
+	}
+	if containsStr(g.afterDeps, "greeting/msg:0") {
+		t.Errorf("guard gates on SILENT greeting/msg:0 (never settles → Advance wedge); afterDeps=%v", g.afterDeps)
+	}
+	if !containsStr(g.afterDeps, "greeting/prep:0") {
+		t.Errorf("guard must gate on greeting/prep:0 (silent msg's non-silent closure); afterDeps=%v", g.afterDeps)
+	}
+}
+
+// TestLowerGuardInScatterInSubFormulaLowers (§2.9a) pins that a guard is a legal scatter
+// member INSIDE a run sub-formula: it lowers (no ErrUnsupportedNode), is parented to the
+// namespaced scatter activation, and is collected as a scatter member alongside a leaf.
+func TestLowerGuardInScatterInSubFormulaLowers(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		runNode("greeting", nil, "greeter", "name", "who"),
+		greeterFormula("greeter",
+			scatterOf("lanes",
+				execNode("direct", nil, "echo d"),
+				guardNode("g", nil, condRefEq("name", ""), execNode("gthen", nil, "echo t")))),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused a guard-in-scatter-in-sub-formula: %v", err)
+	}
+	g := unitByNode(units, "greeting/g")
+	if g == nil || g.kind != unitGuard {
+		t.Fatalf("greeting/g = %+v, want a unitGuard", g)
+	}
+	if g.parent != "greeting/lanes:0" {
+		t.Errorf("guard parent = %q, want greeting/lanes:0 (a scatter member)", g.parent)
+	}
+	agg := unitByNode(units, "greeting/lanes")
+	if agg == nil || agg.kind != unitScatterAgg {
+		t.Fatalf("greeting/lanes = %+v, want a scatter aggregate", agg)
+	}
+	if !containsStr(agg.members, "greeting/g:0") {
+		t.Errorf("scatter members = %v, want to include the guard greeting/g:0", agg.members)
+	}
+}
+
+// TestLowerGuardCondRefDelimiterRefused (§2.8 charset ban) pins that a guard cond ref
+// carrying '/' or ':' is refused with ErrUnsupportedNode at BOTH the root and inside a
+// sub-formula — a delimiter-bearing ref is a forged cross-namespace key (idents carry
+// neither delimiter). It mirrors the decodeRunEnv env-ref charset parity.
+func TestLowerGuardCondRefDelimiterRefused(t *testing.T) {
+	for _, ref := range []string{"a/b", "a:0"} {
+		// Root placement.
+		rootDoc := decodeBundle(t, plainDoc(
+			guardNode("g", nil, condRefEq(ref, "x"), execNode("gthen", nil, "echo t"))))
+		_, err := buildUnits(rootDoc, true, true)
+		if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), "must not contain") {
+			t.Errorf("root ref %q: err = %v, want an ErrUnsupportedNode charset refusal", ref, err)
+		}
+		// Sub-formula placement.
+		subDocIR := decodeBundle(t, runMainDoc(
+			runNode("greeting", nil, "greeter", "name", "who"),
+			greeterFormula("greeter",
+				guardNode("g", nil, condRefEq(ref, "x"), execNode("gthen", nil, "echo t")))))
+		_, err = buildUnits(subDocIR, true, true)
+		if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), "must not contain") {
+			t.Errorf("sub-formula ref %q: err = %v, want an ErrUnsupportedNode charset refusal", ref, err)
+		}
+	}
+}
+
+// errorsIsUnsupported reports whether err wraps ErrUnsupportedNode (the enqueue-gate
+// triage sentinel the charset ban must carry).
+func errorsIsUnsupported(err error) bool { return errors.Is(err, ErrUnsupportedNode) }
+
+// TestLowerGuardCondRefSynthBodyRefused (P1) pins the synth-body cond-ref refusal: a
+// guard cond ref naming a SIBLING guard's synthesized then id ("b.then" — '.' passes the
+// charset ban) is never a lowered unit, so it would take NO gate edge, yet record()
+// exposes it in the flat nodeOutputs once the then runs — an ungated read whose decision
+// diverges by driver (inline sees the settled then; pool freezes null the same pass).
+// Refused loudly at the ROOT and inside a SUB-FORMULA, ErrUnsupportedNode-wrapped.
+func TestLowerGuardCondRefSynthBodyRefused(t *testing.T) {
+	guards := guardNode("b", nil, condRefEq("mode", "go"), execNode("b.then", nil, "echo bt")) + "," +
+		guardNode("a", nil, condRefEq("b.then", "x"), execNode("a.then", nil, "echo at"))
+	// Root placement.
+	rootDoc := decodeBundle(t, plainDoc(guards))
+	_, err := buildUnits(rootDoc, true, true)
+	if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), "synthesized decision body") || !strings.Contains(err.Error(), "b.then") {
+		t.Errorf("root: err = %v, want an ErrUnsupportedNode synth-body refusal naming b.then", err)
+	}
+	// Sub-formula placement.
+	subDocIR := decodeBundle(t, runMainDoc(
+		runNode("greeting", nil, "greeter", "name", "who"),
+		greeterFormula("greeter", guards)))
+	_, err = buildUnits(subDocIR, true, true)
+	if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), "synthesized decision body") || !strings.Contains(err.Error(), "b.then") {
+		t.Errorf("sub-formula: err = %v, want an ErrUnsupportedNode synth-body refusal naming b.then", err)
+	}
+}
+
+// TestLowerGuardCondRefLoopBodyRefused (P1) pins the loop-body variant of the same
+// hole: a guard cond reffing a retry/repeat's spec-only BODY id (byNodeID misses the
+// runtime-minted attempt activation too, but nodeOutputs resolves it once an attempt
+// settles) is refused through the same synth registry (lowerLoop addSynth-registers
+// bodyNodeID).
+func TestLowerGuardCondRefLoopBodyRefused(t *testing.T) {
+	doc := decodeBundle(t, plainDoc(
+		retryMember("r1", "rbody", "echo a")+","+
+			guardNode("g", nil, condRefEq("rbody", "x"), execNode("gthen", nil, "echo t")),
+	))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), "synthesized decision body") || !strings.Contains(err.Error(), "rbody") {
+		t.Errorf("err = %v, want an ErrUnsupportedNode synth-body refusal naming the loop body rbody", err)
+	}
+}
+
 // plainDoc wraps a node list into a full IR doc (no formulas bundle).
 func plainDoc(nodes string) string {
 	return `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
@@ -389,10 +649,9 @@ func retryMember(loopID, bodyID, script string) string {
 		`"exitMap":{"pass":[0],"retryable":[]}}}`
 }
 
-// scatterOf renders a members-form scatter over the given member node JSONs.
-func scatterOf(id string, after []string, members ...string) string {
-	a, _ := json.Marshal(after)
-	return `{"kind":"scatter","id":"` + id + `","name":"` + id + `","after":` + string(a) +
+// scatterOf renders an ungated members-form scatter over the given member node JSONs.
+func scatterOf(id string, members ...string) string {
+	return `{"kind":"scatter","id":"` + id + `","name":"` + id + `","after":[]` +
 		`,"form":"members","on_fail":"continue","members":[` + strings.Join(members, ",") + `]}`
 }
 
@@ -401,7 +660,7 @@ func scatterOf(id string, after []string, members ...string) string {
 // collected as a scatter member. Before the slice this refused (loops top-level only).
 func TestLowerRetryInScatterLowers(t *testing.T) {
 	doc := decodeBundle(t, plainDoc(
-		scatterOf("lanes", nil,
+		scatterOf("lanes",
 			retryMember("r1", "b1", "echo a"),
 			retryMember("r2", "b2", "echo b")),
 	))

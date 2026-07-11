@@ -1122,7 +1122,11 @@ func (d *driver) runCleanupGuarded(u planUnit, nodeOutputs map[string]string) er
 // re-evaluates it identically.
 func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) error {
 	spec := u.guard
-	truthy, err := evalCondTruthy(spec.cond, d.condScope(nodeOutputs))
+	cs, err := d.condScope(u.ns, scope, nodeOutputs)
+	if err != nil {
+		return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
+	}
+	truthy, err := evalCondTruthy(spec.cond, cs)
 	if err != nil {
 		return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
 	}
@@ -1235,13 +1239,102 @@ func (d *driver) dispatchArmUnit(u planUnit, arm *dispatchArm) planUnit {
 	return d.decisionBodyUnit(u, arm.bodyNodeID, arm.bodyIRKind, arm.body)
 }
 
-// condScope builds the closed-expression scope a guard cond (and any non-loop
-// decision) evaluates against: the run input plus every settled node's
-// output/outcome. It reuses the loop machinery's scope assembly with an empty loop
-// spec (no iteration / body binding — a guard cond references only inputs and node
-// results).
-func (d *driver) condScope(nodeOutputs map[string]string) loopScope {
-	return d.loopScope(&loopSpec{}, 0, nil, nodeOutputs)
+// condScope builds the closed-expression scope a guard cond evaluates against for a
+// unit in namespace ns. At the root (ns == "") it is byte-identical to the loop
+// machinery's assembly: the run input plus every settled node's flat qualified
+// output/outcome (an empty loop spec — a cond reads only inputs and node results, no
+// iteration/body binding). Inside a run sub-formula (ns != "") it builds a
+// NAMESPACE-LOCAL view instead — the same world the namespace's prompts render against
+// (scopeFor) plus the fold's direct-child outputs/outcomes at their bare ids — so a
+// bare cond ref resolves a sub-sibling or a sub-input binding and can never silently
+// hit a same-named MAIN input. It reads no clock and no randomness (scopeFor + a fold
+// walk only), so genesis, re-Advance, and crash-resume build an identical scope (DET).
+func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loopScope, error) {
+	if ns == "" {
+		return d.loopScope(&loopSpec{}, 0, nil, nodeOutputs), nil
+	}
+	// ⚑S5: register-before-drive holds on every drive path today, so an unregistered
+	// namespace here is a structural bug — the view would collapse and freeze a wrong
+	// write-once decision. Refuse loudly rather than fold silently. (No "lumen:"
+	// prefix — both call sites wrap this with `lumen: guard %q cond: %w`.)
+	spec := d.runEnvs[ns]
+	if spec == nil {
+		return loopScope{}, fmt.Errorf("guard cond scope: namespace %q has no registered environment", ns)
+	}
+	// The render view: env bindings (evaluated against the parent view, parentNS
+	// override honored), declared sub-input defaults, and direct scope children (silent
+	// lets + settled non-aggregate outputs) at their bare ids (§C, scopeFor).
+	view, err := d.scopeFor(ns, scope)
+	if err != nil {
+		return loopScope{}, err
+	}
+	// ⚑B1: overlay the fold's direct-child outputs from the FLAT nodeOutputs, which —
+	// unlike scope — carries scatter/gather/for-each/cleanup aggregate outputs (the
+	// nodeOutputs-only convention, reconstructOutputs excludes aggregates from scope).
+	// Without this a guard cond reading a sub-aggregate sibling (`sc.outcome == "pass"`,
+	// `sc == ""`) resolves null inside ns while it resolves at root; and
+	// loopScope.resolve gates the outcome lookup on nodeOutputs membership, so the
+	// bare-keyed outcome below is UNREACHABLE unless the value is in the view too.
+	childKeys := map[string]bool{}
+	// Defensive redundancy: every ns-child scope key is ALSO a nodeOutputs key today
+	// (record() and the silent arm write both), so this pass adds nothing the overlay
+	// below misses — it only keeps the shadow set honest if that invariant ever bends.
+	for k := range scope {
+		if rest, ok := directChildKey(k, ns); ok {
+			childKeys[rest] = true
+		}
+	}
+	for k, v := range nodeOutputs {
+		if rest, ok := directChildKey(k, ns); ok {
+			view[rest] = v
+			childKeys[rest] = true
+		}
+	}
+	// Bare-keyed outcomes for the namespace's settled direct children, walked exactly
+	// like loopScope's assembly (Settled && ranOutcome, highest attempt per id wins).
+	outcomes := map[string]string{}
+	best := map[string]int{}
+	for act, n := range d.st().Nodes {
+		if !n.Settled || !ranOutcome(n.Outcome) {
+			continue
+		}
+		rest, ok := directChildKey(activationNodeID(act), ns)
+		if !ok {
+			continue
+		}
+		att := activationAttempt(act)
+		if prev, ok := best[rest]; ok && att <= prev {
+			continue
+		}
+		best[rest] = att
+		outcomes[rest] = n.Outcome
+	}
+	// ⚑B2: back-fill OutcomePass for the SPEC-DERIVED binding/default names ONLY — an env
+	// binding, or a defaulted-unbound sub-input, is a pre-settled run input (root input
+	// parity: "its outcome is pass"). A name shadowed by a direct-child key keeps that
+	// node's real outcome, and a name already walked above is left alone. NEVER
+	// blanket-stamp view keys: a silent let is in the view but never settles, so stamping
+	// it would flip `mylet.outcome == "pass"` TRUE inside ns where root yields "".
+	bound := map[string]bool{}
+	backfill := func(name string) {
+		if childKeys[name] {
+			return
+		}
+		if _, ok := outcomes[name]; ok {
+			return
+		}
+		outcomes[name] = OutcomePass
+	}
+	for _, f := range spec.env {
+		bound[f.name] = true
+		backfill(f.name)
+	}
+	for _, fld := range spec.inputFields {
+		if !bound[fld.Name] && fld.Default != nil {
+			backfill(fld.Name)
+		}
+	}
+	return loopScope{input: nil, nodeOutputs: view, nodeOutcomes: outcomes}, nil
 }
 
 // transparentOutcome aggregates a run's direct-member outcomes into the transparent

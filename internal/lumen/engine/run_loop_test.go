@@ -528,8 +528,7 @@ func TestRunRepeatRunBodyMidAttemptCrashResumes(t *testing.T) {
 	}
 
 	// Crash right after the first scatter member settles, then resume.
-	resumed, store, stream := injectCrashThenResumeInput(t, doc, host,
-		engine.CrashAfterSettle, "stage/0/m1:0", map[string]any{"who": "world"}, 0)
+	resumed, store, stream := injectCrashThenResumeInput(t, doc, host, "stage/0/m1:0")
 	if resumed.Outcome != want.Outcome || resumed.Outcome != engine.OutcomePass {
 		t.Errorf("resumed outcome = %q, want %q (pass)", resumed.Outcome, want.Outcome)
 	}
@@ -538,4 +537,67 @@ func TestRunRepeatRunBodyMidAttemptCrashResumes(t *testing.T) {
 		t.Errorf("resumed sub outputs = {m1:%q m2:%q}, want {r1 r2}", resumed.NodeOutputs["stage/0/m1"], resumed.NodeOutputs["stage/0/m2"])
 	}
 	assertProjectionEqualsRefold(t, store, stream)
+}
+
+// TestAdvanceRepeatRunBodyGuardPerAttemptRedecision (§2.7, the GIS marquee) proves a
+// guard INSIDE a repeat-run-body re-decides fresh per attempt: attempt 0's guard decides
+// TRUE (reuse defaulted "") and dispatches its then-do at stage/0/draft.then:0; that then
+// FAILS → the guard settles failed → the attempt aggregate settles failed → the cond
+// re-mints attempt 1 under the FRESH namespace stage/1/, whose guard RE-decides fresh and
+// dispatches a DISTINCT write-once then activation stage/1/draft.then:0 with a fresh bead;
+// it passes → the loop settles pass → seal. Pins distinct per-attempt then activations,
+// two distinct dispatch facts, re-rendered attempt-1 prompt, and a byte-identical refold.
+func TestAdvanceRepeatRunBodyGuardPerAttemptRedecision(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-gis-redecide"
+	fake := newFakeWorkStore()
+	sub := subDoc("greeter", strField("note")+","+defaultReuseField(),
+		guardDoID("draft", condEqualRaw("reuse", `""`), "draft.then", "greet {{ note }}"))
+	doc := decodeIR(t, bundleDoc(
+		strField("who"),
+		repeatRunLoop(nil,
+			runNodeJSON("stage", nil, "greeter", "note", "who"),
+			runCondPassOrIter()),
+		sub))
+
+	// Pass 1: attempt 0's guard decides TRUE and dispatches its then-do, park.
+	r1, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	if err != nil || !r1.Parked || len(r1.InFlight) != 1 || r1.InFlight[0].Activation != "stage/0/draft.then:0" {
+		t.Fatalf("advance 1 = %+v err %v, want Parked with stage/0/draft.then:0", r1, err)
+	}
+	if got := fake.dispatchPromptFor(t, "stage/0/draft.then:0"); got != "greet world" {
+		t.Fatalf("attempt-0 then prompt = %q, want %q", got, "greet world")
+	}
+
+	// Attempt 0's then FAILS → re-mint attempt 1, whose guard re-decides fresh.
+	fake.settle("wb-1", engine.OutcomeFailed, "no")
+	r2, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	if err != nil || !r2.Parked || len(r2.InFlight) != 1 || r2.InFlight[0].Activation != "stage/1/draft.then:0" {
+		t.Fatalf("advance 2 = %+v err %v, want Parked with stage/1/draft.then:0 (per-attempt re-decision)", r2, err)
+	}
+	if got := fake.dispatchPromptFor(t, "stage/1/draft.then:0"); got != "greet world" {
+		t.Fatalf("attempt-1 re-rendered then prompt = %q, want %q", got, "greet world")
+	}
+
+	// Attempt 1's then PASSES → loop settles pass → seal.
+	fake.settle("wb-2", engine.OutcomePass, "done")
+	r3, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	if err != nil || !r3.Sealed {
+		t.Fatalf("advance 3 = %+v err %v, want Sealed", r3, err)
+	}
+	if r3.Run.Outcome != engine.OutcomePass {
+		t.Errorf("run outcome = %q, want pass", r3.Run.Outcome)
+	}
+	if fake.dispatchCount() != 2 {
+		t.Fatalf("DispatchWork calls = %d, want 2 (one fresh then-do per attempt)", fake.dispatchCount())
+	}
+	settled := settledOutcomeByID(t, streamStored(t, store, streamID))
+	if settled["stage/0/draft"] != engine.OutcomeFailed || settled["stage/1/draft"] != engine.OutcomePass {
+		t.Errorf("per-attempt guards = {0:%q 1:%q}, want {failed pass} (fresh transparent decision each)", settled["stage/0/draft"], settled["stage/1/draft"])
+	}
+	if settled["stage/0/draft.then"] != engine.OutcomeFailed || settled["stage/1/draft.then"] != engine.OutcomePass {
+		t.Errorf("per-attempt then-dos = {0:%q 1:%q}, want {failed pass}", settled["stage/0/draft.then"], settled["stage/1/draft.then"])
+	}
+	assertProjectionEqualsRefold(t, store, streamID)
 }

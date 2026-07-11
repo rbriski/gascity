@@ -162,7 +162,7 @@ func TestLowerLoopInScatterInSubFormulaRefused(t *testing.T) {
 func TestLowerRunInCombineRefusedLeafOnly(t *testing.T) {
 	combineRun := runNode("cr", nil, "greeter", "name", "who")
 	doc := decodeBundle(t, runMainDoc(
-		scatterOf("lanes", nil, execNode("m1", nil, "echo m"))+","+
+		scatterOf("lanes", execNode("m1", nil, "echo m"))+","+
 			gatherOverCombine("G", "lanes", combineRun),
 		greeterFormula("greeter", execNode("hello", nil, "echo hi")),
 	))
@@ -186,7 +186,7 @@ func TestLowerRunInCombineRefusedLeafOnly(t *testing.T) {
 func TestLowerRunInCombineMissingTargetError(t *testing.T) {
 	combineRun := runNode("cr", nil, "nonexistent", "name", "who")
 	doc := decodeBundle(t, runMainDoc(
-		scatterOf("lanes", nil, execNode("m1", nil, "echo m"))+","+
+		scatterOf("lanes", execNode("m1", nil, "echo m"))+","+
 			gatherOverCombine("G", "lanes", combineRun),
 		greeterFormula("greeter", execNode("hello", nil, "echo hi")),
 	))

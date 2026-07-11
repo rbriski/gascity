@@ -1,0 +1,120 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "guard-run-do",
+  "input": {
+    "name": "guard-run-do.input",
+    "fields": [
+      {
+        "name": "who",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "repeat",
+      "id": "loop",
+      "name": "loop",
+      "after": [],
+      "iterationName": "iteration",
+      "body": {
+        "kind": "run",
+        "id": "stage",
+        "name": "stage",
+        "after": [],
+        "target": { "kind": "by-name", "name": "greeter" },
+        "environment": {
+          "fields": [
+            {
+              "name": "name",
+              "value": { "kind": "expr", "expr": { "kind": "ref", "name": "who" } }
+            }
+          ]
+        },
+        "outcome": "transparent"
+      },
+      "cond": {
+        "kind": "operator",
+        "op": "||",
+        "operands": [
+          {
+            "kind": "operator",
+            "op": "==",
+            "operands": [
+              { "kind": "ref", "name": "stage", "field": "outcome" },
+              { "kind": "literal", "value": "pass" }
+            ]
+          },
+          {
+            "kind": "operator",
+            "op": ">=",
+            "operands": [
+              { "kind": "ref", "name": "iteration" },
+              { "kind": "literal", "value": 2 }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "formulas": {
+    "greeter": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "greeter",
+      "input": {
+        "name": "greeter.input",
+        "fields": [
+          {
+            "name": "name",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          },
+          {
+            "name": "reuse",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": false,
+            "default": "",
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "guard",
+          "id": "draft",
+          "name": "draft",
+          "after": [],
+          "cond": {
+            "kind": "operator",
+            "op": "==",
+            "operands": [
+              { "kind": "ref", "name": "reuse" },
+              { "kind": "literal", "value": "" }
+            ]
+          },
+          "then": {
+            "kind": "do",
+            "id": "draft.then",
+            "name": "draft.then",
+            "after": [],
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Say hello to {{ name }}, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        }
+      ]
+    }
+  }
+}

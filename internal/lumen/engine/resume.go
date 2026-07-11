@@ -408,6 +408,12 @@ func (d *driver) resumeMemoized(u planUnit, scope, nodeOutputs map[string]string
 			// parent reads via {{runRef}} (genesis record()s it in runRun). A scatter/gather
 			// aggregate seeds nodeOutputs only (it never wrote scope). This reproduces the
 			// genesis scope exactly, so a resumed run's downstream render matches (B1).
+			//
+			// unitGuard is deliberately OMITTED even though its genesis settle records BOTH
+			// maps (settleDecisionFromBody/Skipped): a guard's scope value is masked on every
+			// reachable resume path by reconstructOutputs, which re-seeds it from the qualified
+			// fold before any downstream unit renders — so this omission is not observable, and
+			// the guard-in-sub-formula slice keeps the list narrow rather than widening it.
 			if u.kind == unitLeaf || u.kind == unitRun || u.kind == unitCleanup || u.kind == unitRecover {
 				scope[u.nodeID] = n.Output
 			}

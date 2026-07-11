@@ -13,12 +13,17 @@ import (
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
 
-// injectCrashThenResumeInput is injectCrashThenResume with a run input threaded
-// through both the crashed run and the resume (the base helper passes nil input).
-func injectCrashThenResumeInput(t *testing.T, doc *ir.IR, host enginehost.AgentHost, boundary, activation string, input map[string]any, snapEvery int) (engine.RunResult, *graphstore.Store, string) {
+// injectCrashThenResumeInput is injectCrashThenResume specialized to the run-driver
+// fixtures: it crashes at the CrashAfterSettle boundary on the given activation and
+// threads the canonical {who: world} run input through both the crashed run and the
+// resume (the base helper passes nil input; no snapshots).
+func injectCrashThenResumeInput(t *testing.T, doc *ir.IR, host enginehost.AgentHost, activation string) (engine.RunResult, *graphstore.Store, string) {
 	t.Helper()
 	ctx := context.Background()
 	store := newStore(t)
+	boundary := engine.CrashAfterSettle
+	input := map[string]any{"who": "world"}
+	snapEvery := 0
 
 	errCrash := errors.New("crash injected at " + boundary + " @ " + activation)
 	var crashedStream string
@@ -332,8 +337,7 @@ func TestResumeMidSubGraphSealsIdentically(t *testing.T) {
 	}
 
 	// Crash right after the sub-node greeting/hello settles, then resume.
-	resumed, store, stream := injectCrashThenResumeInput(t, doc, nil,
-		engine.CrashAfterSettle, "greeting/hello:0", map[string]any{"who": "world"}, 0)
+	resumed, store, stream := injectCrashThenResumeInput(t, doc, nil, "greeting/hello:0")
 
 	if resumed.Outcome != want.Outcome {
 		t.Errorf("resumed outcome = %q, want %q", resumed.Outcome, want.Outcome)

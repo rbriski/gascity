@@ -553,7 +553,7 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 	if l.prefix != "" {
 		// A for-each in a run sub-formula needs a namespace-aware member id + scope;
-		// deferred exactly like guard/dispatch-in-sub-formula.
+		// deferred exactly like dispatch-in-sub-formula.
 		return fmt.Errorf("%w: for-each %q in a sub-formula", ErrUnsupportedNode, n.ID)
 	}
 	if l.inAggregate {
@@ -1308,12 +1308,12 @@ func (l *lowerer) lowerRun(n ir.Node, parent string) error {
 // time). The `then` is a SINGLE leaf (exec/do); a non-leaf then (block/scatter/loop)
 // is refused this slice. The then is NOT a separate unit — it is synthesized and run
 // (or skipped) by the driver, so a false condition runs no side effect. A guard is
-// top-level or a scatter member (like a leaf); a guard inside a run sub-formula
-// renders/decides against the root scope this slice — refuse it when prefix != "".
+// top-level, a scatter member, or inlined in a run sub-formula (like a leaf): its cond
+// and then are qualified by the lowerer prefix, so it renders/decides against the
+// unit's namespace view (condScope keys `l.prefix`). A cond ref carrying a reserved
+// delimiter is refused below — a '/'-ref both gates via byNodeID and resolves the flat
+// nodeOutputs qualified key, forging a cross-namespace read.
 func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
-	if l.prefix != "" {
-		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
-	}
 	cond, ok := n.Raw["cond"]
 	if !ok {
 		return fmt.Errorf("%w: guard %q missing cond", ErrUnsupportedNode, n.ID)
@@ -1333,9 +1333,20 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 		return fmt.Errorf("%w: guard %q then missing id", ErrUnsupportedNode, n.ID)
 	}
 	condRefs := collectRefs(cond)
-	// A cond that references the guard's own id or its `then` is self-referential — the
-	// guard/then have not settled when the decision is made, so the ref folds to null on
-	// genesis but could flip on a resume that reloaded the then. Refuse it at load.
+	// Charset sweep FIRST, over ALL refs, then the self-ref sweep — a multi-defect
+	// cond reports the malformed-ref class before the semantic one. A cond ref
+	// carrying '/' or ':' is a forged cross-namespace key (idents carry neither
+	// delimiter): it would gate via byNodeID AND resolve the flat nodeOutputs
+	// qualified key, so it must refuse at ALL levels — the decodeRunEnv charset
+	// parity. The ErrUnsupportedNode wrap is load-bearing (enqueue-gate triage).
+	for _, r := range condRefs {
+		if strings.ContainsAny(r, "/:") {
+			return fmt.Errorf("%w: guard %q cond ref %q must not contain '/' or ':' (reserved delimiters)", ErrUnsupportedNode, n.ID, r)
+		}
+	}
+	// A cond that references the guard's own id or its `then` is self-referential —
+	// the guard/then have not settled when the decision is made, so the ref folds to
+	// null on genesis but could flip on a resume that reloaded the then. Refuse it at load.
 	for _, r := range condRefs {
 		if r == n.ID || r == then.ID {
 			return fmt.Errorf("%w: guard %q cond references its own %s (self-referential decision)", ErrUnsupportedNode, n.ID, r)
@@ -1378,9 +1389,11 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 // lowerDispatch lowers a dispatch node — a multi-way branch — to a unitDispatch. The
 // subject is a value expression; each arm has a match literal and a SINGLE leaf body
 // (exec/do). A non-leaf arm body (block/run/scatter) is refused this slice — a
-// dispatch-to-run composition is a follow-on. Like guard, a dispatch inside a run
-// sub-formula (prefix != "") is refused (namespace-unaware decision), and a subject
-// that reads the dispatch's own id or an arm body id is refused (self-referential).
+// dispatch-to-run composition is a follow-on. A dispatch inside a run sub-formula
+// (prefix != "") is refused because its SUBJECT path — matchingArm's evalValue over the
+// flat scope — is still namespace-unaware (unlike guard, whose condScope now takes the
+// unit ns); and a subject that reads the dispatch's own id or an arm body id is refused
+// (self-referential).
 func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 	if l.prefix != "" {
 		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
@@ -1717,6 +1730,88 @@ func (l *lowerer) resolveDeps() error {
 		}
 	}
 
+	// Synthesized/spec-only body ids (a guard `then`, dispatch arm bodies, cleanup
+	// guarded/body, AND a retry/repeat loop's body) are NOT plan units, so
+	// topoSortUnits' duplicate-activation guard cannot see them. Two of them sharing an
+	// id collide on activationFor(bodyID) / activationForAttempt(bodyID,0) — the SAME
+	// fold node — so whichever settles first is silently adopted by the other (a cleanup
+	// sub reloads a loop attempt's outcome and its teardown never runs; a loop adopts a
+	// sub's settle as attempt 0). A body id colliding with a real node has the same
+	// hazard. Refuse all of it loudly. (A loop's body id is registered here too so a
+	// decision/cleanup sub can never alias a loop attempt activation.) The registry is
+	// built BEFORE the expr-ref gate pass below, which consults it for guard cond refs.
+	synthBodies := map[string]string{}
+	addSynth := func(bodyID, owner string) error {
+		if prev, ok := synthBodies[bodyID]; ok {
+			return fmt.Errorf("lumen: decision body id %q used by both %q and %q", bodyID, prev, owner)
+		}
+		if _, ok := byNodeID[bodyID]; ok {
+			return fmt.Errorf("lumen: decision %q body id %q collides with node %q", owner, bodyID, bodyID)
+		}
+		synthBodies[bodyID] = owner
+		return nil
+	}
+	for i := range l.units {
+		u := &l.units[i]
+		switch u.kind {
+		case unitGuard:
+			if u.guard != nil {
+				if err := addSynth(u.guard.thenNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		case unitDispatch:
+			if u.dispatch != nil {
+				for _, arm := range u.dispatch.arms {
+					if err := addSynth(arm.bodyNodeID, u.nodeID); err != nil {
+						return err
+					}
+				}
+			}
+		case unitCleanup:
+			if u.cleanup != nil {
+				// The guarded and body synthesize sub-units on activationFor(subID). If
+				// they share an id (or collide with the cleanup, a loop body, or another
+				// node), the second resumeMemoizes the first's settled outcome and never
+				// runs — silently defeating the always-run finally. Refuse both here.
+				// ⚑SHOULD-FIX-6: a block-form cleanup has NO synthesized guarded leaf
+				// (guardedNodeID == ""; its block members are REAL units caught by the
+				// dup-activation guard). Guard the registration so two block-form cleanups
+				// in one doc do not collide on synthBodies[""]. The finally is always synth.
+				if u.cleanup.guardedNodeID != "" {
+					if err := addSynth(u.cleanup.guardedNodeID, u.nodeID); err != nil {
+						return err
+					}
+				}
+				if err := addSynth(u.cleanup.bodyNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		case unitRecover:
+			if u.recover != nil {
+				// Same collision hazard as cleanup: a guarded/body sub sharing an id (with
+				// each other, the recover, a loop body, or a node) would alias one fold
+				// activation and silently skip a sub.
+				if err := addSynth(u.recover.guardedNodeID, u.nodeID); err != nil {
+					return err
+				}
+				if err := addSynth(u.recover.bodyNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		case unitLoop:
+			if u.loop != nil {
+				// A retry/repeat body id is spec-only (the loop lowers ONE unit), but its
+				// attempts activate on activationForAttempt(bodyID, N) — attempt 0 is
+				// activationFor(bodyID), byte-identical to a decision/cleanup sub's
+				// activation. Register it so a sub can never alias a loop attempt node.
+				if err := addSynth(u.loop.bodyNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	// DET hardening (seed #3): an env binding that reads a parent NODE output must
 	// gate the run's sub-graph, so the sub-scope a sub-unit renders against is
 	// stable before it renders — making genesis byte-identical to a crash-resume
@@ -1769,6 +1864,22 @@ func (l *lowerer) resolveDeps() error {
 		for _, refName := range exprRefs {
 			act, ok := byNodeID[u.ns+refName]
 			if !ok {
+				// A guard cond ref naming a SYNTHESIZED body (a sibling guard's then, a
+				// dispatch arm body, a retry/repeat body id) is never a lowered unit, so it
+				// takes no gate edge here — yet once the body runs, record() exposes its
+				// qualified id in the flat nodeOutputs and the cond scope resolves it.
+				// Ungated, the decision becomes DRIVER-dependent: the inline walk settles
+				// the sibling's then synchronously before the guard evaluates, while the
+				// pool walk evaluates the same pass and freezes a null miss write-once —
+				// the same doc takes opposite branches by driver. Refuse loudly at all
+				// levels (the ⚑SF-1 refuse-now-lift-later precedent); loop/run/for-each
+				// exprRefs are untouched (a loop legitimately reads its own body id via
+				// loopScope's bodyName arm).
+				if u.kind == unitGuard {
+					if _, isSynth := synthBodies[u.ns+refName]; isSynth {
+						return fmt.Errorf("%w: guard %q cond ref %q names a synthesized decision body (not a referenceable node)", ErrUnsupportedNode, u.nodeID, refName)
+					}
+				}
 				continue // a ref to an input (not a node) is not a gate
 			}
 			// A silent (lit/interp) ref node never settles, so gating on it directly
@@ -1841,86 +1952,6 @@ func (l *lowerer) resolveDeps() error {
 		}
 	}
 
-	// Synthesized/spec-only body ids (a guard `then`, dispatch arm bodies, cleanup
-	// guarded/body, AND a retry/repeat loop's body) are NOT plan units, so
-	// topoSortUnits' duplicate-activation guard cannot see them. Two of them sharing an
-	// id collide on activationFor(bodyID) / activationForAttempt(bodyID,0) — the SAME
-	// fold node — so whichever settles first is silently adopted by the other (a cleanup
-	// sub reloads a loop attempt's outcome and its teardown never runs; a loop adopts a
-	// sub's settle as attempt 0). A body id colliding with a real node has the same
-	// hazard. Refuse all of it loudly. (A loop's body id is registered here too so a
-	// decision/cleanup sub can never alias a loop attempt activation.)
-	synthBodies := map[string]string{}
-	addSynth := func(bodyID, owner string) error {
-		if prev, ok := synthBodies[bodyID]; ok {
-			return fmt.Errorf("lumen: decision body id %q used by both %q and %q", bodyID, prev, owner)
-		}
-		if _, ok := byNodeID[bodyID]; ok {
-			return fmt.Errorf("lumen: decision %q body id %q collides with node %q", owner, bodyID, bodyID)
-		}
-		synthBodies[bodyID] = owner
-		return nil
-	}
-	for i := range l.units {
-		u := &l.units[i]
-		switch u.kind {
-		case unitGuard:
-			if u.guard != nil {
-				if err := addSynth(u.guard.thenNodeID, u.nodeID); err != nil {
-					return err
-				}
-			}
-		case unitDispatch:
-			if u.dispatch != nil {
-				for _, arm := range u.dispatch.arms {
-					if err := addSynth(arm.bodyNodeID, u.nodeID); err != nil {
-						return err
-					}
-				}
-			}
-		case unitCleanup:
-			if u.cleanup != nil {
-				// The guarded and body synthesize sub-units on activationFor(subID). If
-				// they share an id (or collide with the cleanup, a loop body, or another
-				// node), the second resumeMemoizes the first's settled outcome and never
-				// runs — silently defeating the always-run finally. Refuse both here.
-				// ⚑SHOULD-FIX-6: a block-form cleanup has NO synthesized guarded leaf
-				// (guardedNodeID == ""; its block members are REAL units caught by the
-				// dup-activation guard). Guard the registration so two block-form cleanups
-				// in one doc do not collide on synthBodies[""]. The finally is always synth.
-				if u.cleanup.guardedNodeID != "" {
-					if err := addSynth(u.cleanup.guardedNodeID, u.nodeID); err != nil {
-						return err
-					}
-				}
-				if err := addSynth(u.cleanup.bodyNodeID, u.nodeID); err != nil {
-					return err
-				}
-			}
-		case unitRecover:
-			if u.recover != nil {
-				// Same collision hazard as cleanup: a guarded/body sub sharing an id (with
-				// each other, the recover, a loop body, or a node) would alias one fold
-				// activation and silently skip a sub.
-				if err := addSynth(u.recover.guardedNodeID, u.nodeID); err != nil {
-					return err
-				}
-				if err := addSynth(u.recover.bodyNodeID, u.nodeID); err != nil {
-					return err
-				}
-			}
-		case unitLoop:
-			if u.loop != nil {
-				// A retry/repeat body id is spec-only (the loop lowers ONE unit), but its
-				// attempts activate on activationForAttempt(bodyID, N) — attempt 0 is
-				// activationFor(bodyID), byte-identical to a decision/cleanup sub's
-				// activation. Register it so a sub can never alias a loop attempt node.
-				if err := addSynth(u.loop.bodyNodeID, u.nodeID); err != nil {
-					return err
-				}
-			}
-		}
-	}
 	return nil
 }
 

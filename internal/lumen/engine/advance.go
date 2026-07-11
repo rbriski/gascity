@@ -784,7 +784,11 @@ func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, 
 	// while the then's bead is already dispatched. The cond-ref gate (resolveDeps)
 	// makes the FIRST evaluation stable; this makes it permanent across passes.
 	if d.st().Nodes[tu.activation] == nil {
-		truthy, err := evalCondTruthy(spec.cond, d.condScope(nodeOutputs))
+		cs, err := d.condScope(u.ns, scope, nodeOutputs)
+		if err != nil {
+			return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
+		}
+		truthy, err := evalCondTruthy(spec.cond, cs)
 		if err != nil {
 			return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
 		}

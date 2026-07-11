@@ -42,6 +42,45 @@ func TestRepeatRunDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestGuardRunDoFixtureLowers guards the hand-authored guard-in-run-body dolt-e2e
+// bundle fixture: `repeat { run stage -> greeter{ draft: guard (reuse=="") -> do } }
+// until stage.outcome==pass || iteration>=2` decodes and lowers (allowDo), so a fixture
+// typo fails fast here — not 10min into the e2e. It confirms both the inline and the
+// controller-loop pool flag pairs lower the guard under the attempt prefix.
+func TestGuardRunDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "guard-run-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	for _, combineDo := range []bool{true, false} {
+		units, err := buildUnits(doc, true, combineDo)
+		if err != nil {
+			t.Fatalf("lower guard-run-do (allowCombineDo=%v): %v", combineDo, err)
+		}
+		loop := unitByNode(units, "loop")
+		if loop == nil || loop.loop == nil || loop.loop.bodyRun == nil {
+			t.Fatalf("no repeat-run-body loop unit; got %v", nodeIDs(units))
+		}
+		if loop.loop.bodyNodeID != "stage" {
+			t.Errorf("body node id = %q, want stage", loop.loop.bodyNodeID)
+		}
+		// The attempt-0 mint lowers the guard under stage/0/draft with a synthesized then.
+		sub, _, err := loop.loop.mintRunBodyAttempt(0, "loop:0", "", nil, nil)
+		if err != nil {
+			t.Fatalf("mint attempt 0 (allowCombineDo=%v): %v", combineDo, err)
+		}
+		g := unitByNode(sub, "stage/0/draft")
+		if g == nil || g.kind != unitGuard || g.guard == nil || g.guard.thenNodeID != "stage/0/draft.then" {
+			t.Fatalf("minted guard = %+v, want a unitGuard over stage/0/draft.then; got %v", g, nodeIDs(sub))
+		}
+	}
+}
+
 // --- repeat-run-body (RBL) lowering fixtures --------------------------------
 
 // repeatRunNode builds an ungated repeat loop (fixed id "loop") whose body is a
@@ -141,7 +180,7 @@ func TestLowerRepeatRunBodyInScatterRefused(t *testing.T) {
 	loopMember := repeatRunNode(runNode("stage", nil, "greeter", "name", "who"),
 		repeatRunCondPassOrIter())
 	doc := decodeBundle(t, runMainDoc(
-		scatterOf("lanes", nil, loopMember),
+		scatterOf("lanes", loopMember),
 		greeterFormula("greeter", execNode("hello", nil, "echo hi")),
 	))
 	_, err := buildUnits(doc, true, true)
@@ -391,6 +430,74 @@ func TestMintRunBodyAttemptPropagatesLoopGate(t *testing.T) {
 	}
 	if !containsStr(agg.afterDeps, "gate:0") {
 		t.Errorf("agg afterDeps = %v, want the loop gate gate:0 propagated", agg.afterDeps)
+	}
+}
+
+// TestLowerGuardInRunBodyLowersAtGate (§2.14) pins that a repeat run body whose
+// sub-formula contains a guard now LOWERS at the ⚑S4 dry-run gate: buildUnits (which
+// runs the attempt-0 mint) accepts it, and the minted guard is qualified under the
+// attempt prefix (stage/0/draft), with its then synthesized (stage/0/draft.then).
+func TestLowerGuardInRunBodyLowersAtGate(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		repeatRunNode(runNode("stage", nil, "greeter", "name", "who"),
+			repeatRunCondPassOrIter()),
+		greeterFormula("greeter",
+			guardNode("draft", nil, condRefEq("name", ""), execNode("draft.then", nil, "echo t"))),
+	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused a guard-in-run-body at the dry-run gate: %v", err)
+	}
+	loop := unitByNode(units, "loop")
+	if loop == nil || loop.loop == nil || loop.loop.bodyRun == nil {
+		t.Fatalf("no repeat-run-body loop unit; got %v", nodeIDs(units))
+	}
+	// The attempt-0 mint lowers the guard under the attempt prefix.
+	spec := loop.loop
+	sub, _, err := spec.mintRunBodyAttempt(0, "loop:0", "", nil, nil)
+	if err != nil {
+		t.Fatalf("mint attempt 0: %v", err)
+	}
+	g := unitByNode(sub, "stage/0/draft")
+	if g == nil || g.kind != unitGuard {
+		t.Fatalf("minted guard = %+v, want a unitGuard at stage/0/draft; got %v", g, nodeIDs(sub))
+	}
+	if g.guard == nil || g.guard.thenNodeID != "stage/0/draft.then" {
+		t.Errorf("minted guard thenNodeID = %+v, want stage/0/draft.then", deref(g).guard)
+	}
+}
+
+// TestLowerGuardInRunBodyForgedCondRefRefusesAtGate (§2.14) pins that a '/'-forged guard
+// cond ref inside a run body refuses at the ENQUEUE gate, wrapped in the repeat
+// provenance (`repeat %q run body does not lower: …must not contain '/'…`).
+func TestLowerGuardInRunBodyForgedCondRefRefusesAtGate(t *testing.T) {
+	doc := decodeBundle(t, runMainDoc(
+		repeatRunNode(runNode("stage", nil, "greeter", "name", "who"),
+			repeatRunCondPassOrIter()),
+		greeterFormula("greeter",
+			guardNode("draft", nil, condRefEq("a/b", "x"), execNode("draft.then", nil, "echo t"))),
+	))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "does not lower") || !strings.Contains(err.Error(), "must not contain") {
+		t.Fatalf("want a dry-run refusal (does not lower / must not contain), got %v", err)
+	}
+}
+
+// TestLowerGuardInRunBodySynthCondRefRefusesAtGate (P1 provenance) pins that the
+// synth-body cond-ref refusal fires INSIDE a repeat run body wrapped in the repeat
+// provenance (`repeat %q run body does not lower: …synthesized decision body…`), so the
+// enqueue gate triages it before any run.started.
+func TestLowerGuardInRunBodySynthCondRefRefusesAtGate(t *testing.T) {
+	guards := guardNode("b", nil, condRefEq("name", "go"), execNode("b.then", nil, "echo bt")) + "," +
+		guardNode("a", nil, condRefEq("b.then", "x"), execNode("a.then", nil, "echo at"))
+	doc := decodeBundle(t, runMainDoc(
+		repeatRunNode(runNode("stage", nil, "greeter", "name", "who"),
+			repeatRunCondPassOrIter()),
+		greeterFormula("greeter", guards),
+	))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "does not lower") || !strings.Contains(err.Error(), "synthesized decision body") {
+		t.Fatalf("want a dry-run refusal (does not lower / synthesized decision body), got %v", err)
 	}
 }
 

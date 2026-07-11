@@ -11,7 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
-// lumenState is the reducer v3 carried-forward state (blueprint §2.1): the run
+// lumenState is the reducer v4 carried-forward state (blueprint §2.1): the run
 // identity (all timestamps sourced from payloads, keeping the fold clock-free)
 // plus the DAG of activations. Nodes is keyed by activation; every map walk is
 // in canonical (sorted) key order so the fold is deterministic (R-PURE).
@@ -40,7 +40,13 @@ type nodeState struct {
 	Settled          bool     `json:"settled"`
 	Outcome          string   `json:"outcome,omitempty"`
 	Output           string   `json:"output,omitempty"`
-	InFrontier       bool     `json:"in_frontier,omitempty"`
+	// Detail is the settle's failure/skip detail (a settle's authored reason, a skip
+	// message, invalid_input, …), folded from outcome.settled so a recover catch can
+	// bind {{ error.reason }} from a failed guarded. omitempty; NOT projected to Tier-A
+	// (only carried in the fold state) — but because it is non-empty on pre-existing
+	// settles it is the reason reducerVersion bumped to 4.
+	Detail     string `json:"detail,omitempty"`
+	InFrontier bool   `json:"in_frontier,omitempty"`
 	// Retryable is the L5 attempt-loop classification folded from a settle: an
 	// engine-inline exec settle carrying exit ∈ exitMap.retryable, or a pool settle
 	// the firewall marked a retryable infrastructure strand. The retry arm reads it

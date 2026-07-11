@@ -290,7 +290,7 @@ func TestSplitPointEquivalence_DETT20(t *testing.T) {
 				CoveredSeq:            all[k-1].Seq,
 				Engine:                "lumen",
 				ReducerVersion:        r.ReducerVersion(),
-				SnapshotFormatVersion: 3,
+				SnapshotFormatVersion: 4,
 				StateHash:             prefixState.StateHash(),
 				State:                 blob,
 			}
@@ -402,7 +402,7 @@ func TestDETT20_ScatterGatherSplitPointEquivalence(t *testing.T) {
 				CoveredSeq:            all[k-1].Seq,
 				Engine:                "lumen",
 				ReducerVersion:        r.ReducerVersion(),
-				SnapshotFormatVersion: 3,
+				SnapshotFormatVersion: 4,
 				StateHash:             prefixState.StateHash(),
 				State:                 blob,
 			}

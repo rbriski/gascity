@@ -338,6 +338,13 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceCleanup(u, scope, nodeOutputs, opts)
 	}
 
+	// A pool recover drives its guarded, then — ONLY if the guarded failed — its catch
+	// body (with the error bound), parking on whichever sub-do is in flight. An
+	// all-inline recover (or no PoolRouter) falls through to runUnit -> runRecover.
+	if u.kind == unitRecover && recoverPoolMode(u, opts) && !d.blocked(u) {
+		return d.advanceRecover(u, scope, nodeOutputs, opts)
+	}
+
 	// Materialize a READY pool-mode do as claimable work. A pool node whose
 	// blocking dep failed is NOT offered to the pool — it skip-cascades through
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
@@ -564,6 +571,14 @@ func forEachPoolMode(u planUnit, opts Options) bool {
 func cleanupPoolMode(u planUnit, opts Options) bool {
 	return opts.PoolRouter != nil && u.kind == unitCleanup && u.cleanup != nil &&
 		(u.cleanup.guardedIRKind == ir.NodeDo || u.cleanup.bodyIRKind == ir.NodeDo)
+}
+
+// recoverPoolMode reports whether a recover has a pool-do guarded OR catch body — the
+// case Advance drives through advanceRecover. An all-exec/settle recover (or one with no
+// PoolRouter) runs both subs inline through runRecover instead.
+func recoverPoolMode(u planUnit, opts Options) bool {
+	return opts.PoolRouter != nil && u.kind == unitRecover && u.recover != nil &&
+		(u.recover.guardedIRKind == ir.NodeDo || u.recover.bodyIRKind == ir.NodeDo)
 }
 
 // advanceLoop is Advance's park-aware attempt-loop arm (§4.1) for a pool-mode
@@ -870,6 +885,42 @@ func (d *driver) driveSubStep(su planUnit, scope, nodeOutputs map[string]string,
 		return false, err
 	}
 	return true, nil
+}
+
+// advanceRecover is Advance's park-aware arm for a pool recover (try/catch): it drives
+// the guarded to settlement; if the guarded did NOT fail it settles the recover
+// transparently (the catch is never dispatched); if it FAILED it binds the error and
+// drives the catch body to settlement, parking on whichever sub-do is in flight, then
+// settles from the catch. It falls through on any in-pass settlement (driveSubStep), so
+// a mixed exec/settle+do recover never stalls. Re-entrant like advanceCleanup.
+func (d *driver) advanceRecover(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	if err := d.ensureDecisionActivated(u); err != nil {
+		return err
+	}
+	gu := d.recoverGuardedUnit(u)
+	settled, err := d.driveSubStep(gu, scope, nodeOutputs, opts)
+	if err != nil {
+		return err
+	}
+	if !settled {
+		return nil // park on the guarded
+	}
+	if !recoverCaught(d.settledOutcome(gu.activation)) {
+		return d.settleRecoverFrom(u, gu, scope, nodeOutputs) // transparent; catch never dispatched
+	}
+	bu := d.recoverBodyUnit(u)
+	var bodySettled bool
+	if err := d.withErrorBindings(scope, d.errorBindings(u), func() error {
+		var e error
+		bodySettled, e = d.driveSubStep(bu, scope, nodeOutputs, opts)
+		return e
+	}); err != nil {
+		return err
+	}
+	if !bodySettled {
+		return nil // park on the catch
+	}
+	return d.settleRecoverFrom(u, bu, scope, nodeOutputs)
 }
 
 // ensureDecisionActivated emits a guard node's node.activated once (write-once via the

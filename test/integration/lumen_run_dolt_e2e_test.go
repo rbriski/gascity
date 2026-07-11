@@ -538,3 +538,65 @@ func TestLumenCleanupDoltE2E_BodyRunsThenSeals(t *testing.T) {
 		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
 	}
 }
+
+func recoverDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "recover-do.lumen.json")
+}
+
+// TestLumenRecoverDoltE2E_CatchRunsOnFailure (recover acceptance) proves a recover
+// (try/catch) runs its catch on the guarded's failure and binds the error: the guarded
+// `charge` settles failed with reason "the card was declined" inline, the catch `refund`
+// then dispatches as a pooled work bead whose prompt has {{ error.reason }} bound —
+// "Reverse anything from the card was declined." — a worker claims+closes it, and the
+// recover settles pass (the error is handled). Proves the error binding + nodeState.Detail
+// fold + the v4 reducer end-to-end; zero control beads.
+func TestLumenRecoverDoltE2E_CatchRunsOnFailure(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 1, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+	const wantPrompt = "Reverse anything from the card was declined."
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, recoverDoIRPath(t))
+	if err != nil {
+		t.Fatalf("gc lumen sling (recover-do) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF recover-do streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+	admitted := waitForOwnedAdmitted(t, gs, streamID, 60*time.Second)
+	realBeadID := admitted.BeadID
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 4*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	// The guarded failed; the catch ran and the recover settled pass (handled).
+	if got := outcomeSettledFor(t, events, "charge:0"); got != engine.OutcomeFailed {
+		t.Fatalf("outcome.settled charge:0 = %q, want failed (guarded)", got)
+	}
+	if got := outcomeSettledFor(t, events, "refund:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled refund:0 = %q, want pass (catch ran on the failure)", got)
+	}
+	if got := outcomeSettledFor(t, events, "rec:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled rec:0 = %q, want pass (recover handled the error)", got)
+	}
+	// The catch's prompt has {{ error.reason }} bound from the guarded's failure.
+	assertLumenPromptReadback(t, cityDir, realBeadID, wantPrompt)
+	t.Logf("PROOF recover caught the failure -> catch prompt = %q (error.reason bound) -> sealed pass", wantPrompt)
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}

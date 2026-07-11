@@ -209,6 +209,7 @@ func applyOutcomeSettled(next *lumenState, e fold.Event) (fold.State, fold.Delta
 	n.Settled = true
 	n.Outcome = p.Outcome
 	n.Output = p.Output
+	n.Detail = p.Detail
 	n.Retryable = p.Retryable
 	n.InFrontier = false
 

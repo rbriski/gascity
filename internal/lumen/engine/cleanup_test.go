@@ -137,12 +137,6 @@ func TestCleanupLoweringRefusals(t *testing.T) {
 		nodes []string
 	}{
 		{
-			name: "recover deferred",
-			nodes: []string{`{"kind":"recover","id":"r","name":"r","after":[],` +
-				`"origin":{"uri":"t","line":1,"col":0},` +
-				`"guarded":` + settleNode("g", "failed") + `,"body":` + execNode("b", `echo 1`, nil) + `,"errorBinding":"error"}`},
-		},
-		{
 			name:  "non-leaf guarded",
 			nodes: []string{cleanupNode(nil, scatterNode("s", nil, "continue", execNode("x", `echo 1`, nil)), execNode("b", `echo 1`, nil))},
 		},

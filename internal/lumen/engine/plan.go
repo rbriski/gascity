@@ -56,6 +56,7 @@ const (
 	unitDispatch                   // dispatch: a multi-way branch (subject -> matching arm's body)
 	unitForEach                    // for-each: a dynamic scatter fanning a single-leaf body over a runtime array
 	unitCleanup                    // cleanup: try/finally — a guarded leaf, then an always-run body leaf
+	unitRecover                    // recover: try/catch — a guarded leaf, then a catch body run only on failure
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -101,6 +102,27 @@ type planUnit struct {
 	forEach *forEachSpec // unitForEach: the dynamic-scatter fan-over-array spec
 
 	cleanup *cleanupSpec // unitCleanup: the try/finally guarded+body spec
+
+	recover *recoverSpec // unitRecover: the try/catch guarded+body spec
+}
+
+// recoverSpec carries a recover(try/catch) node's decoded shape: a `guarded` leaf that
+// runs, and a `body` (catch) leaf that runs ONLY when the guarded FAILED — with the
+// guarded's error bound into the body scope under `errorBinding` (`error.reason` =
+// the guarded's failure detail, `error.step` = its node id). A guarded that passes or
+// degrades settles the recover transparently from itself (the catch never runs); a
+// CANCELED guarded is likewise transparent (cancellation is not a recoverable failure).
+// Both are single leaves synthesized as sub-units parented under the recover (out of the
+// run's top-level aggregation). Structurally the twin of cleanupSpec with an inverted,
+// conditional body.
+type recoverSpec struct {
+	guardedNodeID string
+	guardedIRKind ir.NodeKind
+	guarded       step
+	bodyNodeID    string
+	bodyIRKind    ir.NodeKind
+	body          step
+	errorBinding  string
 }
 
 // cleanupSpec carries a cleanup(try/finally) node's decoded shape: a `guarded` leaf
@@ -384,6 +406,9 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 
 	case ir.NodeCleanup:
 		return l.lowerCleanup(n, parent)
+
+	case ir.NodeRecover:
+		return l.lowerRecover(n, parent)
 
 	default:
 		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
@@ -700,6 +725,75 @@ func decodeLeafSub(n ir.Node, allowDo bool, owner string) (step, ir.NodeKind, er
 	default:
 		return step{}, "", fmt.Errorf("%w: %s %q kind %q (only exec/do/settle leaf)", ErrUnsupportedNode, owner, n.ID, n.Kind)
 	}
+}
+
+// lowerRecover lowers a recover(try/catch) node: a `guarded` leaf that runs, and a
+// `body` (catch) leaf that runs ONLY when the guarded FAILED, with the error bound under
+// `errorBinding`. Structurally the twin of lowerCleanup (single exec/do/settle subs, same
+// refusals + collision guard); adds the errorBinding (default "error"), refused if it
+// carries a `.`/`/`/`:` (it flat-keys `<errorBinding>.reason`).
+func (l *lowerer) lowerRecover(n ir.Node, parent string) error {
+	if l.prefix != "" {
+		return fmt.Errorf("%w: recover %q in a sub-formula", ErrUnsupportedNode, n.ID)
+	}
+	if l.inAggregate {
+		return fmt.Errorf("%w: recover %q nested in an aggregate", ErrUnsupportedNode, n.ID)
+	}
+	guardedRaw, ok := n.Raw["guarded"]
+	if !ok {
+		return fmt.Errorf("%w: recover %q missing guarded", ErrUnsupportedNode, n.ID)
+	}
+	bodyRaw, ok := n.Raw["body"]
+	if !ok {
+		return fmt.Errorf("%w: recover %q missing body", ErrUnsupportedNode, n.ID)
+	}
+	var guarded, body ir.Node
+	if err := json.Unmarshal(guardedRaw, &guarded); err != nil {
+		return fmt.Errorf("lumen: recover %q guarded: %w", n.ID, err)
+	}
+	if err := json.Unmarshal(bodyRaw, &body); err != nil {
+		return fmt.Errorf("lumen: recover %q body: %w", n.ID, err)
+	}
+	gStep, gKind, err := decodeLeafSub(guarded, l.allowDo, "recover "+n.ID+" guarded")
+	if err != nil {
+		return err
+	}
+	bStep, bKind, err := decodeLeafSub(body, l.allowDo, "recover "+n.ID+" body")
+	if err != nil {
+		return err
+	}
+	errorBinding := "error"
+	if raw, ok := n.Raw["errorBinding"]; ok {
+		var eb string
+		if err := json.Unmarshal(raw, &eb); err != nil {
+			return fmt.Errorf("lumen: recover %q errorBinding: %w", n.ID, err)
+		}
+		if eb != "" {
+			errorBinding = eb
+		}
+	}
+	if strings.ContainsAny(errorBinding, "./:") {
+		return fmt.Errorf("%w: recover %q errorBinding %q must not contain '.', '/', or ':'", ErrUnsupportedNode, n.ID, errorBinding)
+	}
+	l.units = append(l.units, planUnit{
+		kind:       unitRecover,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeRecover,
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		recover: &recoverSpec{
+			guardedNodeID: l.qid(guarded.ID),
+			guardedIRKind: gKind,
+			guarded:       gStep,
+			bodyNodeID:    l.qid(body.ID),
+			bodyIRKind:    bKind,
+			body:          bStep,
+			errorBinding:  errorBinding,
+		},
+	})
+	return nil
 }
 
 // lowerGather lowers a gather(authored) node: the head-of-line drain over the
@@ -1479,6 +1573,18 @@ func (l *lowerer) resolveDeps() error {
 					return err
 				}
 			}
+		case unitRecover:
+			if u.recover != nil {
+				// Same collision hazard as cleanup: a guarded/body sub sharing an id (with
+				// each other, the recover, a loop body, or a node) would alias one fold
+				// activation and silently skip a sub.
+				if err := addSynth(u.recover.guardedNodeID, u.nodeID); err != nil {
+					return err
+				}
+				if err := addSynth(u.recover.bodyNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
 		case unitLoop:
 			if u.loop != nil {
 				// A retry/repeat body id is spec-only (the loop lowers ONE unit), but its
@@ -1783,6 +1889,25 @@ func evalValue(raw json.RawMessage, scope map[string]string) (string, error) {
 		// The wrapper a run node's environment binding (and other value contexts)
 		// emits: {"kind":"expr","expr":{...}}. Recurse into the inner expression.
 		return evalValue(probe.Expr, scope)
+	case "member":
+		// A member `X.Y` resolves against a FLAT-keyed scope entry "X.Y" — used by the
+		// recover error binding ({{ error.reason }} etc., which the recover driver binds
+		// as error.reason/step/message). Localized: resolve ONLY when the flat key
+		// exists, so any OTHER member expr in a template stays a loud unsupported error
+		// (never a silent empty render).
+		var m struct {
+			Base struct {
+				Name string `json:"name"`
+			} `json:"base"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return "", fmt.Errorf("lumen: member value: %w", err)
+		}
+		if v, ok := scope[m.Base.Name+"."+m.Name]; ok {
+			return v, nil
+		}
+		return "", fmt.Errorf("lumen: unsupported value expression kind %q", probe.Kind)
 	default:
 		return "", fmt.Errorf("lumen: unsupported value expression kind %q", probe.Kind)
 	}

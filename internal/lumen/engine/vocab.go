@@ -201,11 +201,23 @@ const (
 	// stream or snapshot exists on any real deployment (this branch is unpushed local
 	// dev); fold.Fold's version gate strands any (nonexistent) v2 snapshot LOUDLY
 	// (ErrReducerVersionSkew, resume.go), so the bump costs nothing.
-	reducerVersion = 3
+	//
+	// RECOVER (error binding) — v4. applyOutcomeSettled now folds the settle's Detail
+	// into a new nodeState.Detail field so a recover catch can bind {{ error.reason }}
+	// from the guarded's failure. UNLIKE the BeadID field, this is NOT byte-identical:
+	// Detail is ALREADY non-empty on many existing settles (skip-cascade, "no branch
+	// taken", a failed inline do, invalid_input, interrupted effects), so folding it
+	// changes the refolded state bytes / StateHash of essentially every stream. A
+	// persisted v3 snapshot would then silently diverge from a drop+refold — so this
+	// takes the honest bump. It is free: no persisted v3 Lumen snapshot exists on any
+	// real deployment (this branch is unpushed local dev), and fold.Fold's version gate
+	// strands any (nonexistent) v3 snapshot LOUDLY (ErrReducerVersionSkew, resume.go).
+	reducerVersion = 4
 	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped 2 → 3 with
-	// reducerVersion for the additive nodeState.BeadID field; no v2 snapshot ever
-	// persisted (unpushed branch), so there is no fixture debt.
-	snapshotFormatVersion = 3
+	// reducerVersion for the additive nodeState.BeadID field, then 3 → 4 with the
+	// nodeState.Detail field (the recover error binding); no v3 snapshot ever persisted
+	// (unpushed branch), so there is no fixture debt.
+	snapshotFormatVersion = 4
 )
 
 // ---- Typed event payloads (R-CANON) ----

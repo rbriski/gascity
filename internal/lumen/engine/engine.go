@@ -418,6 +418,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runForEach(u, scope, nodeOutputs)
 	case unitCleanup:
 		runErr = d.runCleanup(u, scope, nodeOutputs)
+	case unitRecover:
+		runErr = d.runRecover(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -514,7 +516,17 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 		if outcome == "" {
 			outcome = OutcomePass
 		}
-		if err := d.appendSettled(u.activation, outcome, value, ""); err != nil {
+		// A settle's authored `reason` is carried as the settle's detail so a recover
+		// catch can bind {{ error.reason }} from a failed guarded (folded to
+		// nodeState.Detail, v4). A reason-less settle keeps detail "" (byte-identical).
+		// A malformed (non-string) reason is a loud load/render error, never a silent "".
+		reason := ""
+		if raw, ok := u.leaf.raw["reason"]; ok {
+			if err := json.Unmarshal(raw, &reason); err != nil {
+				return fmt.Errorf("lumen: settle %q reason: %w", u.nodeID, err)
+			}
+		}
+		if err := d.appendSettled(u.activation, outcome, value, reason); err != nil {
 			return err
 		}
 		d.record(u.nodeID, value, scope, nodeOutputs)
@@ -875,6 +887,122 @@ func (d *driver) settleCleanup(u, gu, bu planUnit, scope, nodeOutputs map[string
 	}
 	if ranOutcome(outcome) {
 		d.record(u.nodeID, guardedOutput, scope, nodeOutputs)
+	}
+	return nil
+}
+
+// recoverCaught reports whether a guarded outcome triggers the catch. A FAILED guarded
+// is caught (recovered); a passing/degraded guarded is not, and a CANCELED guarded is
+// NOT caught either — cancellation is not a recoverable failure, and catching it would
+// let a passing catch flip the run to pass despite the cancel.
+func recoverCaught(guardedOutcome string) bool {
+	return guardedOutcome == OutcomeFailed
+}
+
+// runRecover drives a recover (try/catch) inline: it runs the guarded; if the guarded
+// did NOT fail, the recover settles transparently from it (the catch never runs); if it
+// FAILED, the recover binds the error into the catch scope, runs the catch, and settles
+// from it (a handled error, or a re-failed catch). Both subs run through runUnit. A
+// gated-off recover is intercepted by runUnit's pre-switch skip-cascade.
+func (d *driver) runRecover(u planUnit, scope, nodeOutputs map[string]string) error {
+	gu := d.recoverGuardedUnit(u)
+	if err := d.runUnit(gu, scope, nodeOutputs); err != nil {
+		return err
+	}
+	if !recoverCaught(d.settledOutcome(gu.activation)) {
+		return d.settleRecoverFrom(u, gu, scope, nodeOutputs)
+	}
+	bu := d.recoverBodyUnit(u)
+	if err := d.withErrorBindings(scope, d.errorBindings(u), func() error {
+		return d.runUnit(bu, scope, nodeOutputs)
+	}); err != nil {
+		return err
+	}
+	return d.settleRecoverFrom(u, bu, scope, nodeOutputs)
+}
+
+// recoverGuardedUnit / recoverBodyUnit synthesize the guarded and catch sub-units, each
+// parented under the recover (so a caught guarded failure stays out of the run outcome).
+func (d *driver) recoverGuardedUnit(u planUnit) planUnit {
+	s := u.recover
+	return d.decisionBodyUnit(u, s.guardedNodeID, s.guardedIRKind, s.guarded)
+}
+
+func (d *driver) recoverBodyUnit(u planUnit) planUnit {
+	s := u.recover
+	return d.decisionBodyUnit(u, s.bodyNodeID, s.bodyIRKind, s.body)
+}
+
+// settledOutcome returns an activation's settled outcome from the fold ("" if absent/unsettled).
+func (d *driver) settledOutcome(activation string) string {
+	if n := d.st().Nodes[activation]; n != nil && n.Settled {
+		return n.Outcome
+	}
+	return ""
+}
+
+// errorBindings returns the flat error scope keys for a caught guarded: <binding>.reason
+// = the guarded's failure Detail, <binding>.step = the guarded node id, <binding>.message
+// = the Detail. It reads the guarded's settled fold node, so it is a pure function of the
+// fold (stable across passes and drop+refold).
+//
+// Detail is populated for a SETTLE guarded (its authored reason). It is EMPTY for a
+// failed exec guarded (the exit code carries no structured reason) and for a pool-do
+// guarded (the WorkObservation carries no reason field) — for those, error.reason is ""
+// and error.step still names the failing node. Threading exec exit codes / a do bead's
+// close detail into the fold is a follow-up (it would broaden the Detail fold to every
+// failed node); this slice binds the reason for the try/catch-settle shape (the golden).
+func (d *driver) errorBindings(u planUnit) map[string]string {
+	s := u.recover
+	detail := ""
+	if n := d.st().Nodes[activationFor(s.guardedNodeID)]; n != nil {
+		detail = n.Detail
+	}
+	return map[string]string{
+		s.errorBinding + ".reason":  detail,
+		s.errorBinding + ".step":    s.guardedNodeID,
+		s.errorBinding + ".message": detail,
+	}
+}
+
+// withErrorBindings binds the error keys into scope for the duration of fn, then restores
+// each (save/restore, so a same-named pre-existing scope entry survives). The catch body's
+// prompt renders {{ error.reason }} against these; the keys are order-independent.
+func (d *driver) withErrorBindings(scope, bindings map[string]string, fn func() error) error {
+	type saved struct {
+		v   string
+		had bool
+	}
+	prev := make(map[string]saved, len(bindings))
+	for k, v := range bindings {
+		old, had := scope[k]
+		prev[k] = saved{old, had}
+		scope[k] = v
+	}
+	err := fn()
+	for k, s := range prev {
+		if s.had {
+			scope[k] = s.v
+		} else {
+			delete(scope, k)
+		}
+	}
+	return err
+}
+
+// settleRecoverFrom settles the recover transparently from a sub (the guarded when not
+// caught, the catch body when caught): the sub's outcome + output. The scope seed is
+// gated on ranOutcome (a canceled/skipped recover seeds nothing — resume parity).
+func (d *driver) settleRecoverFrom(u, su planUnit, scope, nodeOutputs map[string]string) error {
+	outcome, output := OutcomeSkipped, ""
+	if n := d.st().Nodes[su.activation]; n != nil && n.Settled {
+		outcome, output = n.Outcome, n.Output
+	}
+	if err := d.appendSettled(u.activation, outcome, output, ""); err != nil {
+		return err
+	}
+	if ranOutcome(outcome) {
+		d.record(u.nodeID, output, scope, nodeOutputs)
 	}
 	return nil
 }

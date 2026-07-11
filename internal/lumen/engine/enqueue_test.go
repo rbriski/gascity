@@ -231,7 +231,7 @@ func TestDefaultRouteFieldDropRefoldIdentity(t *testing.T) {
 	// Drop+refold byte-identity: the additive field carries no hidden state.
 	assertProjectionEqualsRefold(t, store, streamID)
 
-	if v := engine.Reducer().ReducerVersion(); v != 3 {
-		t.Fatalf("reducerVersion = %d, want 3 (real-bead do-node redesign took the honest bump)", v)
+	if v := engine.Reducer().ReducerVersion(); v != 4 {
+		t.Fatalf("reducerVersion = %d, want 4 (v4 folds nodeState.Detail for the recover error binding)", v)
 	}
 }

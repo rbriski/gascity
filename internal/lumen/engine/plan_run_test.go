@@ -151,6 +151,31 @@ func TestCleanupDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestRecoverDoFixtureLowers guards the recover dolt-e2e fixture: a recover with a
+// settle guarded + a do catch body lowers to one unitRecover.
+func TestRecoverDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "recover-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("lower recover-do: %v", err)
+	}
+	rec := unitByNode(units, "rec")
+	if rec == nil || rec.kind != unitRecover || rec.recover == nil {
+		t.Fatalf("rec unit = %+v, want a unitRecover", rec)
+	}
+	if rec.recover.guardedNodeID != "charge" || rec.recover.bodyNodeID != "refund" || rec.recover.errorBinding != "error" {
+		t.Fatalf("recover spec = %+v, want guarded=charge body=refund errorBinding=error", rec.recover)
+	}
+}
+
 // decodeBundle builds an *ir.IR from a JSON literal, failing the test on a
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {

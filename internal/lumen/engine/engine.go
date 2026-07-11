@@ -414,6 +414,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runGuard(u, scope, nodeOutputs)
 	case unitDispatch:
 		runErr = d.runDispatch(u, scope, nodeOutputs)
+	case unitForEach:
+		runErr = d.runForEach(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -616,11 +618,23 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 // honest outcome is `failed` (a total loss, not a partial success); a mix of
 // pass and non-pass is `degraded`; all-pass is `pass`.
 func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
-	st := d.st()
-	anyPass := false
-	anyNonPass := false
-	anyBlocking := false
-	for _, m := range u.members {
+	outcome := scatterDrainOutcome(d.st(), u.members, u.onFail)
+	if err := d.appendSettled(u.activation, outcome, "", ""); err != nil {
+		return err
+	}
+	nodeOutputs[u.nodeID] = ""
+	return nil
+}
+
+// scatterDrainOutcome computes a drain aggregate's outcome from its settled member
+// activations (M1): with on_fail "stop", any failed/canceled member fails the
+// aggregate; otherwise the outcome reflects the degree of success — no pass with at
+// least one blocking failure is `failed` (a total loss), a mix of pass and non-pass
+// is `degraded`, all-pass is `pass`. It is the single source of the scatter(members)
+// and for-each fan outcome rule, so the static and dynamic fans agree.
+func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) string {
+	anyPass, anyNonPass, anyBlocking := false, false, false
+	for _, m := range memberActs {
 		o, settled := st.outcomeOf(m)
 		if !settled {
 			continue
@@ -634,20 +648,166 @@ func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 			anyBlocking = true
 		}
 	}
-	outcome := OutcomePass
 	switch {
-	case u.onFail == "stop" && anyBlocking:
-		outcome = OutcomeFailed
+	case onFail == "stop" && anyBlocking:
+		return OutcomeFailed
 	case anyBlocking && !anyPass:
-		outcome = OutcomeFailed
+		return OutcomeFailed
 	case anyNonPass:
-		outcome = OutcomeDegraded
+		return OutcomeDegraded
 	}
+	return OutcomePass
+}
+
+// runForEach drives a for-each (scatter form:each) inline: it evaluates the `over`
+// array, materializes one member per element with the binder bound into the render
+// scope, runs each through runUnit (so every member gets its own journal fact
+// node.activated/outcome.settled and resume memoization — NOT runLeaf, which would
+// skip both), then settles the aggregate with the shared scatter drain rule. An
+// empty/absent array settles PASS (a vacuous fan — never skipped); a non-array
+// `over` settles failed{invalid_input}. It is reached only when the for-each is not
+// gated off — runUnit handles blocked()/skip-cascade before this switch arm.
+func (d *driver) runForEach(u planUnit, scope, nodeOutputs map[string]string) error {
+	spec := u.forEach
+	elems, ok, err := d.evalForEachArray(spec, scope)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if err := d.appendSettled(u.activation, OutcomeFailed, "", "invalid_input"); err != nil {
+			return err
+		}
+		nodeOutputs[u.nodeID] = ""
+		return nil
+	}
+	memberActs := make([]string, 0, len(elems))
+	for i, elem := range elems {
+		mu := d.forEachMemberUnit(u, i)
+		memberActs = append(memberActs, mu.activation)
+		if err := d.withBinder(scope, spec.binder, elem, func() error {
+			return d.runUnit(mu, scope, nodeOutputs)
+		}); err != nil {
+			return err
+		}
+	}
+	outcome := scatterDrainOutcome(d.st(), memberActs, spec.onFail)
 	if err := d.appendSettled(u.activation, outcome, "", ""); err != nil {
 		return err
 	}
 	nodeOutputs[u.nodeID] = ""
 	return nil
+}
+
+// withBinder binds a for-each element to the binder name in scope for the duration
+// of fn, then restores the prior value (save/restore, like a repeat loop's iteration
+// binding) so an input field sharing the binder name survives the rest of the pass.
+func (d *driver) withBinder(scope map[string]string, binder, elem string, fn func() error) error {
+	restore, had := scope[binder]
+	scope[binder] = elem
+	err := fn()
+	if had {
+		scope[binder] = restore
+	} else {
+		delete(scope, binder)
+	}
+	return err
+}
+
+// forEachMemberUnit synthesizes the per-index member leaf for a for-each: a fresh
+// activation under a `<forEachID>/<index>` node id, parented under the aggregate so a
+// failed member drains into the aggregate and stays OUT of the run's top-level
+// outcome (the same parenting rule as a loop attemptUnit). The binder is bound around
+// the run/materialize call by the caller.
+func (d *driver) forEachMemberUnit(u planUnit, index int) planUnit {
+	spec := u.forEach
+	memberID := forEachMemberNodeID(u.nodeID, index)
+	idx := index
+	return planUnit{
+		kind:        unitLeaf,
+		activation:  activationFor(memberID),
+		nodeID:      memberID,
+		irKind:      spec.bodyIRKind,
+		parent:      u.activation,
+		memberIndex: &idx,
+		ns:          u.ns,
+		afterDeps:   u.afterDeps,
+		rawAfter:    u.rawAfter,
+		leaf:        spec.body,
+	}
+}
+
+// forEachMemberNodeID is the node id of a for-each's Nth member: forEachID/N. The '/'
+// makes it distinct from any authored id (which the lowerer bans '/' in) and from a
+// loop attempt (bodyID:N), and activation parsing splits on the last ':' so the '/'
+// is preserved in the node id.
+func forEachMemberNodeID(forEachID string, index int) string {
+	return forEachID + "/" + strconv.Itoa(index)
+}
+
+// evalForEachArray evaluates a for-each `over` expression to its element strings. A
+// bare `ref X` reads the flat scope (a node output / flattened input holding a JSON
+// array), DET-gated on node X by resolveDeps. An `input.<field>` member reads the
+// field from the IMMUTABLE input map directly — never the flat scope, where a node
+// output could shadow the field between passes and re-fan a different array. ok=false
+// marks a non-array `over` (the caller settles failed{invalid_input}); a nil/empty
+// array is (nil, true) — the vacuous PASS.
+func (d *driver) evalForEachArray(spec *forEachSpec, scope map[string]string) ([]string, bool, error) {
+	var head struct {
+		Kind string          `json:"kind"`
+		Name string          `json:"name"`
+		Base json.RawMessage `json:"base"`
+	}
+	if err := json.Unmarshal(spec.overRaw, &head); err != nil {
+		return nil, false, fmt.Errorf("lumen: for-each over: %w", err)
+	}
+	switch head.Kind {
+	case "ref":
+		return decodeArrayString(scope[head.Name])
+	case "member":
+		return arrayFromInputValue(d.input[head.Name])
+	default:
+		return nil, false, fmt.Errorf("%w: for-each over kind %q", ErrUnsupportedNode, head.Kind)
+	}
+}
+
+// decodeArrayString decodes a JSON-array scope string (`["a","b"]`) to its element
+// strings. Empty/whitespace → (nil, true) (an empty fan is a vacuous PASS). A value
+// that is not a JSON array → (nil, false) (invalid_input). Each element is stringified
+// exactly as baseScope seeds an input value (string as-is, else canonical JSON).
+func decodeArrayString(s string) ([]string, bool, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, true, nil
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(s), &arr); err != nil {
+		return nil, false, nil
+	}
+	out := make([]string, len(arr))
+	for i, e := range arr {
+		out[i] = canonScalar(e)
+	}
+	return out, true, nil
+}
+
+// arrayFromInputValue converts a raw input value (from the immutable input map) to
+// element strings: a []any array or a JSON-array string decodes (via the same
+// canonicalization decodeArrayString applies); nil/absent → empty (PASS); any other
+// type → invalid_input.
+func arrayFromInputValue(v any) ([]string, bool, error) {
+	switch t := v.(type) {
+	case nil:
+		return nil, true, nil
+	case string:
+		return decodeArrayString(t)
+	case []any:
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return nil, false, nil
+		}
+		return decodeArrayString(string(raw))
+	default:
+		return nil, false, nil
+	}
 }
 
 // runRun settles a run's transparent aggregate from its (already-settled) members

@@ -54,6 +54,7 @@ const (
 	unitRun                        // run: transparent sub-formula call over an inlined sub-graph
 	unitGuard                      // guard: a conditional single-step arm (cond ? then : pass)
 	unitDispatch                   // dispatch: a multi-way branch (subject -> matching arm's body)
+	unitForEach                    // for-each: a dynamic scatter fanning a single-leaf body over a runtime array
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -95,6 +96,28 @@ type planUnit struct {
 	guard *guardSpec // unitGuard: the conditional single-step spec
 
 	dispatch *dispatchSpec // unitDispatch: the multi-way branch spec
+
+	forEach *forEachSpec // unitForEach: the dynamic-scatter fan-over-array spec
+}
+
+// forEachSpec carries a scatter(form:each) node's decoded shape: the `over` array
+// expression, the node/input refs it reads (for the DET gate), the per-element
+// binding name, the single leaf body fanned once per element, and the on_fail
+// policy. The member COUNT is a runtime property of the evaluated array (unknown at
+// lowering), so — unlike scatter(members) — no member units are lowered; the driver
+// materializes one member per element at run time (mirroring a loop's per-attempt
+// minting) under a `<forEachID>/<index>` node id, with `binder` bound to the element.
+// The aggregate drains those dynamic members with the same outcome rule as
+// scatter(members). The decision (the array) is frozen by the over-ref gate (a
+// member-`over` reads the immutable input; a bare-ref `over` gates on the node it
+// reads), so genesis, re-Advance, and drop+refold fan the same members.
+type forEachSpec struct {
+	overRaw    json.RawMessage // the `over` array expression
+	overRefs   []string        // node/input names `over` reads (for the DET gate)
+	binder     string          // the per-element binding name (e.g. "item")
+	bodyIRKind ir.NodeKind     // NodeExec | NodeDo
+	body       step            // the decoded single leaf body (fanned per element)
+	onFail     string          // "continue" | "stop"
 }
 
 // dispatchSpec carries a dispatch node's decoded shape: the subject value expression
@@ -356,9 +379,10 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 	if raw, ok := n.Raw["form"]; ok {
 		_ = json.Unmarshal(raw, &form)
 	}
+	if form == "each" {
+		return l.lowerForEach(n, parent)
+	}
 	if form != "members" {
-		// P4.2-deferred: scatter form:each iterates `over` a runtime array; it
-		// needs member materialization from a value, out of scope for this slice.
 		return fmt.Errorf("%w: %q form %q (node %q)", ErrUnsupportedNode, n.Kind, form, n.ID)
 	}
 	members, err := childNodes(n.Raw["members"])
@@ -418,6 +442,150 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 		onFail:     onFail,
 	})
 	return nil
+}
+
+// lowerForEach lowers a scatter(form:each) node — a dynamic fan over a runtime
+// array — to a SINGLE unitForEach aggregate. The member count is the evaluated
+// `over` array length (unknown here), so NO member units are lowered; the driver
+// materializes one member per element at run time under a `<forEachID>/<index>`
+// node id. That runtime id bypasses the authored-id `/`-ban (lowerNode), and since
+// a for-each is top-level only and every top-level id is distinct, a dynamic member
+// id can never collide with a static node's activation. Only a single exec/do body
+// leaf is supported this slice; a sub-formula placement, a multi-member or non-leaf
+// body, a missing binder/over, or an unsupported `over` shape refuses at LOAD.
+func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
+	if l.prefix != "" {
+		// A for-each in a run sub-formula needs a namespace-aware member id + scope;
+		// deferred exactly like guard/dispatch-in-sub-formula.
+		return fmt.Errorf("%w: for-each %q in a sub-formula", ErrUnsupportedNode, n.ID)
+	}
+	if l.inAggregate {
+		// A for-each nested as a scatter member / gather combine is deferred this
+		// slice (like lowerRun): keeping it top-level is what makes the '/'-banned
+		// authored ids + distinct top-level ids guarantee that a dynamic member id
+		// (forEachID/<index>) can never collide with a static node's activation.
+		return fmt.Errorf("%w: for-each %q nested in an aggregate", ErrUnsupportedNode, n.ID)
+	}
+	binder := ""
+	if raw, ok := n.Raw["binder"]; ok {
+		_ = json.Unmarshal(raw, &binder)
+	}
+	if binder == "" {
+		return fmt.Errorf("%w: for-each %q missing binder", ErrUnsupportedNode, n.ID)
+	}
+	if strings.ContainsAny(binder, "/:") {
+		// The binder is bound into the render scope; a '/' or ':' would let it collide
+		// with a member node-id scope key (forEachID/<index>) or an activation key.
+		return fmt.Errorf("%w: for-each %q binder %q must not contain '/' or ':'", ErrUnsupportedNode, n.ID, binder)
+	}
+	over, ok := n.Raw["over"]
+	if !ok || len(over) == 0 {
+		return fmt.Errorf("%w: for-each %q missing over", ErrUnsupportedNode, n.ID)
+	}
+	if reason := forEachOverReason(over); reason != "" {
+		return fmt.Errorf("%w: for-each %q over: %s", ErrUnsupportedNode, n.ID, reason)
+	}
+	body, err := forEachBodyLeaf(n)
+	if err != nil {
+		return err
+	}
+	var s step
+	switch body.Kind {
+	case ir.NodeExec:
+		s, err = decodeExec(body)
+	case ir.NodeDo:
+		if !l.allowDo {
+			return fmt.Errorf("%w: %q (for-each %q body)", ErrUnsupportedNode, body.Kind, n.ID)
+		}
+		s, err = decodeDo(body)
+	default:
+		return fmt.Errorf("%w: for-each %q body member kind %q (only a single exec/do leaf)", ErrUnsupportedNode, n.ID, body.Kind)
+	}
+	if err != nil {
+		return err
+	}
+	onFail := "continue"
+	if raw, ok := n.Raw["on_fail"]; ok {
+		_ = json.Unmarshal(raw, &onFail)
+	}
+	l.units = append(l.units, planUnit{
+		kind:       unitForEach,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeScatter, // the IR node kind is scatter (form:each) — an aggregate
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		onFail:     onFail,
+		forEach: &forEachSpec{
+			overRaw:    over,
+			overRefs:   collectRefs(over),
+			binder:     binder,
+			bodyIRKind: body.Kind,
+			body:       s,
+			onFail:     onFail,
+		},
+	})
+	return nil
+}
+
+// forEachOverReason returns "" if the `over` expression is in the supported subset
+// (a bare `ref` — a node output / flattened input holding a JSON array — or an
+// `input.<field>` member, the conformance-golden form), else a human reason the
+// caller wraps in ErrUnsupportedNode. Every other shape (operator, call, member on a
+// non-input base, …) is an unsupported-node load error. It returns a reason string
+// (not an error) so the caller wraps only the sentinel.
+func forEachOverReason(raw json.RawMessage) string {
+	var head struct {
+		Kind string          `json:"kind"`
+		Base json.RawMessage `json:"base"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return "malformed over expression"
+	}
+	switch head.Kind {
+	case "ref":
+		return ""
+	case "member":
+		var base struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(head.Base, &base); err != nil {
+			return "malformed member base"
+		}
+		if base.Kind != "ref" || base.Name != "input" {
+			return fmt.Sprintf("member base must be the input record (got kind %q name %q)", base.Kind, base.Name)
+		}
+		return ""
+	default:
+		return fmt.Sprintf("kind %q (only a bare ref or an input.<field> member)", head.Kind)
+	}
+}
+
+// forEachBodyLeaf unwraps a for-each `body` block and returns its SINGLE leaf member.
+// A body that is not a block, or a block that does not hold exactly one member, is a
+// load error — the multi-statement / nested-aggregate body is deferred this slice.
+func forEachBodyLeaf(n ir.Node) (ir.Node, error) {
+	raw, ok := n.Raw["body"]
+	if !ok {
+		return ir.Node{}, fmt.Errorf("%w: for-each %q missing body", ErrUnsupportedNode, n.ID)
+	}
+	var body ir.Node
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return ir.Node{}, fmt.Errorf("lumen: for-each %q body: %w", n.ID, err)
+	}
+	if body.Kind != ir.NodeBlock {
+		return ir.Node{}, fmt.Errorf("%w: for-each %q body must be a block", ErrUnsupportedNode, n.ID)
+	}
+	members, err := childNodes(body.Raw["members"])
+	if err != nil {
+		return ir.Node{}, fmt.Errorf("lumen: for-each %q body members: %w", n.ID, err)
+	}
+	if len(members) != 1 {
+		return ir.Node{}, fmt.Errorf("%w: for-each %q body has %d members (only a single exec/do leaf)", ErrUnsupportedNode, n.ID, len(members))
+	}
+	return members[0], nil
 }
 
 // lowerGather lowers a gather(authored) node: the head-of-line drain over the
@@ -1088,6 +1256,13 @@ func (l *lowerer) resolveDeps() error {
 			if u.dispatch != nil {
 				exprRefs = u.dispatch.subjectRefs
 			}
+		case unitForEach:
+			if u.forEach != nil {
+				// Gate the fan-out on the nodes `over` reads, so the array is frozen
+				// before any member materializes (a bare-ref `over` to a node; an
+				// input.<field> member reads the immutable input, contributing no gate).
+				exprRefs = u.forEach.overRefs
+			}
 		default:
 			continue
 		}
@@ -1117,6 +1292,25 @@ func (l *lowerer) resolveDeps() error {
 			s := &l.units[j]
 			if s.activation == u.activation || (u.kind == unitRun && strings.HasPrefix(s.nodeID, subPrefix)) {
 				s.afterDeps = appendMissing(s.afterDeps, gates)
+			}
+		}
+	}
+
+	// A for-each `over` that reads a SILENT (lit/interp) node has no settleable gate to
+	// order the fan after the value is computed: a pure-constant silent node contributes
+	// an empty non-silent closure (no gate edge), so topo order would fall back to source
+	// order and the fan could evaluate `over` against an uncomputed (empty) scope. Refuse
+	// it at load — the array must come from an input or a real (do/exec) node output this
+	// slice. (A member `input.<field>` over reads the immutable input, not a node, so it
+	// is never silent.)
+	for i := range l.units {
+		u := &l.units[i]
+		if u.kind != unitForEach || u.forEach == nil {
+			continue
+		}
+		for _, ref := range u.forEach.overRefs {
+			if act, ok := byNodeID[u.ns+ref]; ok && silent[act] {
+				return fmt.Errorf("%w: for-each %q over reads silent node %q (the array must come from an input or a do/exec output)", ErrUnsupportedNode, u.nodeID, ref)
 			}
 		}
 	}

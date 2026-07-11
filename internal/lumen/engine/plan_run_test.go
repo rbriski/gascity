@@ -101,6 +101,31 @@ func TestDispatchDoFixtureLowers(t *testing.T) {
 	}
 }
 
+// TestForEachDoFixtureLowers guards the for-each dolt-e2e fixture: a scatter(form:each)
+// over the input array `items` with a single do body lowers to one unitForEach.
+func TestForEachDoFixtureLowers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "examples", "lumen", "for-each-do.lumen.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	doc, err := ir.Decode(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("lower for-each-do: %v", err)
+	}
+	fan := unitByNode(units, "fan")
+	if fan == nil || fan.kind != unitForEach || fan.forEach == nil {
+		t.Fatalf("fan unit = %+v, want a unitForEach", fan)
+	}
+	if fan.forEach.binder != "item" || fan.forEach.bodyIRKind != ir.NodeDo {
+		t.Fatalf("for-each spec = %+v, want binder=item bodyIRKind=do", fan.forEach)
+	}
+}
+
 // decodeBundle builds an *ir.IR from a JSON literal, failing the test on a
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {

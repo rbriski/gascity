@@ -413,3 +413,64 @@ func TestLumenRunDoltE2E_ValuePlumbingThroughRunBoundary(t *testing.T) {
 		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
 	}
 }
+
+func forEachDoIRPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "examples", "lumen", "for-each-do.lumen.json")
+}
+
+// TestLumenForEachDoltE2E_FansAndSeals (for-each acceptance) proves a dynamic scatter
+// fans one work bead PER runtime-array element and seals: over the input array
+// ["alpha","beta"], the for-each materializes two members (fan/0, fan/1) — each a do
+// rendering `Review {{ item }}.` with the binder bound to its element — dispatched as
+// ordinary pooled work beads, claimed+closed by a native worker, observed by the
+// controller, and drained up through the for-each aggregate, which seals pass. The
+// member COUNT is a runtime property of the array, not the IR.
+func TestLumenForEachDoltE2E_FansAndSeals(t *testing.T) {
+	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 2, "GC_LUMEN_E2E_WORK_SECONDS=2")
+	ctx := context.Background()
+
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, forEachDoIRPath(t), "--input", `{"items":["alpha","beta"]}`)
+	if err != nil {
+		t.Fatalf("gc lumen sling (for-each-do) failed: %v\noutput: %s", err, slingOut)
+	}
+	streamID := parseLumenStreamID(t, slingOut)
+	t.Logf("PROOF for-each-do streamID = %s", streamID)
+
+	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
+	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})
+	if err != nil {
+		t.Fatalf("opening run journal %q: %v", journalPath, err)
+	}
+	defer func() { _ = gs.Close() }()
+
+	if _, err := waitForOwnedAdmittedOrDiag(t, gs, streamID, 3*time.Minute, cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	events := waitForLumenSealOrDiagRun(t, gs, streamID, 4*time.Minute, cityDir)
+	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
+	if closed.Outcome != engine.OutcomePass {
+		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	}
+	// Both dynamically-materialized members sealed pass (binder rendered, worker closed).
+	for _, member := range []string{"fan/0:0", "fan/1:0"} {
+		if got := outcomeSettledFor(t, events, member); got != engine.OutcomePass {
+			t.Fatalf("outcome.settled %s = %q, want pass (fanned member)", member, got)
+		}
+	}
+	// The for-each aggregate drained both members and sealed pass.
+	if got := outcomeSettledFor(t, events, "fan:0"); got != engine.OutcomePass {
+		t.Fatalf("outcome.settled fan:0 = %q, want pass (for-each aggregate)", got)
+	}
+	// Exactly two work beads fanned — one per array element (the count is runtime).
+	if n := len(lumenEventsOfType(events, engine.EventOwnedAdmitted)); n != 2 {
+		t.Fatalf("owned.admitted count = %d, want 2 (one per element)", n)
+	}
+	t.Logf("PROOF for-each fanned 2 members over the runtime array -> both sealed pass -> aggregate sealed pass")
+
+	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
+	if err := gs.Verify(ctx, streamID); err != nil {
+		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
+	}
+}

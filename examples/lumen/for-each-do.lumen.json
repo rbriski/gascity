@@ -1,0 +1,79 @@
+{
+  "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+  "name": "for-each-do",
+  "input": {
+    "name": "for-each-do.input",
+    "fields": [
+      {
+        "name": "items",
+        "type": { "kind": "array", "element": { "kind": "atomic", "name": "string" } },
+        "required": true,
+        "body": false,
+        "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 0, "col": 0 }
+      }
+    ],
+    "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 0, "col": 0 }
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "fan",
+      "name": "fan",
+      "after": [],
+      "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 1, "col": 0 },
+      "form": "each",
+      "binder": "item",
+      "over": {
+        "kind": "ref",
+        "name": "items",
+        "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 1, "col": 18 }
+      },
+      "body": {
+        "kind": "block",
+        "id": "fan.body",
+        "after": [],
+        "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 1, "col": 0 },
+        "members": [
+          {
+            "kind": "do",
+            "id": "review",
+            "name": "review",
+            "after": [],
+            "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 2, "col": 0 },
+            "source": { "kind": "prompt" },
+            "interpreter": {
+              "kind": "agent",
+              "mode": { "kind": "do" },
+              "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 2, "col": 0 }
+            },
+            "body": {
+              "raw": "Review {{ item }}.",
+              "template": {
+                "parts": [
+                  { "kind": "text", "value": "Review " },
+                  {
+                    "kind": "interp",
+                    "expr": {
+                      "kind": "ref",
+                      "name": "item",
+                      "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 2, "col": 19 }
+                    },
+                    "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 2, "col": 19 }
+                  },
+                  { "kind": "text", "value": "." }
+                ]
+              },
+              "source": { "kind": "inline" },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 2, "col": 0 }
+            }
+          }
+        ]
+      },
+      "on_fail": "continue"
+    }
+  ],
+  "origin": { "uri": "examples/lumen/for-each-do.lumen", "line": 0, "col": 0 }
+}

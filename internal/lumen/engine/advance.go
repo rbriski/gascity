@@ -323,6 +323,14 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceDispatch(u, scope, nodeOutputs, opts)
 	}
 
+	// A pool-do for-each fans its body over the runtime array as claimable pool work
+	// and parks on the members. An exec-bodied for-each (or a do-bodied one with a
+	// Host and no PoolRouter) falls through to runUnit -> runForEach, running its
+	// members inline in-pass. A blocked for-each skip-cascades through runUnit below.
+	if u.kind == unitForEach && forEachPoolMode(u, opts) && !d.blocked(u) {
+		return d.advanceForEach(u, scope, nodeOutputs, opts)
+	}
+
 	// Materialize a READY pool-mode do as claimable work. A pool node whose
 	// blocking dep failed is NOT offered to the pool — it skip-cascades through
 	// runUnit below (blocked() settles it skipped), exactly like an engine node,
@@ -535,6 +543,14 @@ func loopPoolMode(u planUnit, opts Options) bool {
 	return opts.PoolRouter != nil && u.kind == unitLoop && u.loop != nil && u.loop.bodyIRKind == ir.NodeDo
 }
 
+// forEachPoolMode reports whether u is a for-each whose body is a pool-mode do — the
+// case Advance drives through the park-aware advanceForEach fan arm. An exec-bodied
+// for-each (or a do-bodied one with no PoolRouter) runs its members inline through
+// runForEach instead (Advance/Run parity).
+func forEachPoolMode(u planUnit, opts Options) bool {
+	return opts.PoolRouter != nil && u.kind == unitForEach && u.forEach != nil && u.forEach.bodyIRKind == ir.NodeDo
+}
+
 // advanceLoop is Advance's park-aware attempt-loop arm (§4.1) for a pool-mode
 // retry/repeat: it materializes ONE body attempt at a time as claimable pool work
 // and PARKS on it, minting the next attempt only after the current one settles.
@@ -700,6 +716,83 @@ func (d *driver) advanceDispatch(u planUnit, scope, nodeOutputs map[string]strin
 		}
 	}
 	return d.settleDecisionFromBody(u, au, scope, nodeOutputs)
+}
+
+// advanceForEach is Advance's park-aware fan arm for a pool-do for-each: it activates
+// the aggregate once, evaluates the `over` array (stable — the over-ref gate froze
+// it), and materializes EVERY not-yet-minted member as claimable pool work in this
+// pass (a concurrent fan-out, unlike a loop's one-at-a-time minting). It then observes
+// the live members and PARKS until all settle, at which point it settles the aggregate
+// with the shared scatter drain rule. An empty array settles PASS in one pass. It is
+// re-entrant: re-mint is write-once (a member already in the fold is skipped) and the
+// array is DET-stable, so a re-Advance with no new settlement converges.
+func (d *driver) advanceForEach(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	spec := u.forEach
+	if err := d.ensureDecisionActivated(u); err != nil {
+		return err
+	}
+	elems, ok, err := d.evalForEachArray(spec, scope)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return d.settleForEachInvalid(u, nodeOutputs)
+	}
+	if len(elems) == 0 {
+		return d.settleForEach(u, nil, nodeOutputs)
+	}
+	memberActs := make([]string, len(elems))
+	allSettled := true
+	for i, elem := range elems {
+		mu := d.forEachMemberUnit(u, i)
+		memberActs[i] = mu.activation
+		mn := d.st().Nodes[mu.activation]
+		switch {
+		case mn == nil || (!mn.Settled && mn.BeadID == ""):
+			// Not yet materialized (or activated but not dispatched): dispatch it, park.
+			member := mu
+			if err := d.withBinder(scope, spec.binder, elem, func() error {
+				return d.materializePoolWork(member, scope, opts)
+			}); err != nil {
+				return err
+			}
+			allSettled = false
+		case !mn.Settled:
+			// In flight: observe its bead; if still open, it stays unsettled (park).
+			if opts.ObserveWork != nil {
+				if err := d.observePoolWork(mu.activation, mu.nodeID, mn.BeadID, scope, nodeOutputs, opts); err != nil {
+					return err
+				}
+			}
+			if n := d.st().Nodes[mu.activation]; n == nil || !n.Settled {
+				allSettled = false
+			}
+		}
+	}
+	if !allSettled {
+		return nil // park — the members are in-flight pool work (inFlightPoolWork reports them)
+	}
+	return d.settleForEach(u, memberActs, nodeOutputs)
+}
+
+// settleForEach settles the for-each aggregate from its (settled) member activations
+// via the shared scatter drain rule (an empty member set is a vacuous PASS).
+func (d *driver) settleForEach(u planUnit, memberActs []string, nodeOutputs map[string]string) error {
+	outcome := scatterDrainOutcome(d.st(), memberActs, u.forEach.onFail)
+	if err := d.appendSettled(u.activation, outcome, "", ""); err != nil {
+		return err
+	}
+	nodeOutputs[u.nodeID] = ""
+	return nil
+}
+
+// settleForEachInvalid settles the aggregate failed{invalid_input} for a non-array over.
+func (d *driver) settleForEachInvalid(u planUnit, nodeOutputs map[string]string) error {
+	if err := d.appendSettled(u.activation, OutcomeFailed, "", "invalid_input"); err != nil {
+		return err
+	}
+	nodeOutputs[u.nodeID] = ""
+	return nil
 }
 
 // ensureDecisionActivated emits a guard node's node.activated once (write-once via the

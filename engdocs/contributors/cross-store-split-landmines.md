@@ -264,3 +264,120 @@ Fast-unit: `TestWalkSourceBeadChain_MissingRef_IsErrorNotSilentNoop` (3),
 4. Land `TestSplitCity_EndToEndFormulaLifecycle` as the standing regression that
    a formula runs discovery→claim→drain→finalize→parent-close on a real split
    city.
+
+## Soundness — invariant coverage + revert-matrix falsification (2026-07-11)
+
+The landmines above are not merely "fixed"; the fix set is now
+*invariant-covered* and *falsifiable*. Three artifacts turn "the split-store
+architecture is sound" from a claim into a standing, reproducible test.
+
+### 1. The conformance suite — 11 invariants × 2 topologies
+
+`cmd/gc/split_topology_conformance_test.go` (`TestSplitTopologyConformance`)
+runs every store-ownership invariant on **both** topologies via
+`forEachTopology` / `forEachTopologyWithRig` over the `splitEnv` fixture:
+
+- **single-store** — `infra == nil`; `resolveClassStore` collapses to the work
+  store. This is the legacy, pre-split city and doubles as the byte-identity
+  regression (a fix must not change legacy behavior).
+- **split** — `infra != nil`; coordination classes (`gcg`/`gcs`/`gcm`/…)
+  resolve to the infra store. The two-database city under test.
+
+The `internal/beads/splittest` strict-store leaf decorator fails loud on any
+cross-store dependency edge, so an invariant that silently resolved a bead in
+the wrong store reds instead of passing on an empty result.
+
+| Invariant | Guards |
+| --- | --- |
+| I1 ready-federation | #2 — `gc hook --claim` / composite `gc ready` surfaces infra work |
+| I2 assigned-work-capture | post-claim capture of infra `in_progress` wisps (orphan-release/treadmill family) |
+| I3 by-id-write-residence | by-id writes land in the owning store, never the wrong one |
+| I4 materialization-residence | #17 — a v1 formula molecule materializes in the work store |
+| I5 claim-routing | #2/#19 — claim mutation routes by id-prefix incl. all wisp-id shapes |
+| I6 strict-cross-store-deps | #4 — `cook --attach` cross-store dep fails loud, not open |
+| I7 by-id-read-federation | by-id reads federate across work∪infra |
+| I8 residence-sweep | integrity backstop: class ⇔ owning store, swept over all beads |
+| I9 warm-tick-demand | the spawn/drain treadmill driver (mc-wisp-orphan RCA) |
+| I10 wake-ownership-fast-path | the session-wake ownership filter (`7ee481bf2`) |
+| I11 read-path-consistency | the operator-confusion class (#19 read-path) |
+
+### 2. The row-guard — `make check` enforces both topologies
+
+`scripts/check-split-topology-rows.sh` (wired into `make check` beside
+`check-routed-test-rows`) statically forbids adding a one-topology invariant:
+every `t.Run("I…")` must route through `forEachTopology`, and the suite may not
+call `newSplitEnv` directly. Cheap and always-on. It prevents the slow rot where
+a new invariant quietly covers only the split path and a single-store
+regression sails through (or vice versa).
+
+### 3. The revert-matrix — falsifies each guard, on demand
+
+`scripts/check-split-topology-reverts.sh` (`make check-split-topology-reverts`)
+is the soundness ledger made executable. For each split-store fix commit it
+reverts the production change in a throwaway detached worktree — narrow
+production-hunk reverse-apply first, 3-way whole-commit revert (with the
+commit's own test files restored from `HEAD`) as fallback — then runs the named
+guarding test and asserts it **reds**. A fix whose test still passes with the
+fix reverted is a **HOLE**: the guard is decorative and the soundness claim over
+that landmine is unbacked. Expensive (a worktree + per-package build per entry),
+so it is on-demand, not part of `check`.
+
+**Last run — 2026-07-11, HEAD `0de8cc719`: `checked=8 guarded=8 holes=0
+conflicts=1`.**
+
+| Fix commit | Landmine | Guarding test (package) | Outcome |
+| --- | --- | --- | --- |
+| `5b03f0686` | #3 fail-loud cross-store source close | `TestProcessWorkflowFinalizeFailsLoudWhenCrossStoreRefUnresolvable` (internal/dispatch) | RED |
+| `3bfeaff84` | #10 reap root-only wisp via owning store | `TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores` (cmd/gc) | RED |
+| `c224a9792` | #13 federate infra in HTTP ready/list | `TestBeadReadyFederatesInfraStore` (internal/api) | RED (build) |
+| `237c2fc9c` | #17 v1 molecule → work store | `TestInstantiateSlingFormulaRoutesMoleculeByClass` (internal/sling) | CONFLICT |
+| `09890178b` | #18 session commandability from infra | `TestWaitForSessionCommandable_ReadsInfraStoreSessionOnSplitCity` (cmd/gc) | RED |
+| `180ad7dd8` | spawn/drain treadmill (isCold gate) | `TestBuildDesiredState_WarmTick_TreadmillSessionsStayDesired` (cmd/gc) | RED (build) |
+| `6b58b621b` | #19 reserved-class id by first segment | `TestReservedClassBeadIDPrefix` (internal/config) | RED (build) |
+| `6b58b621b` | #19 wisp-id claim routing | `TestClaimableStoreRoutesWispIDsToInfra` (cmd/gc) | RED (build) |
+| `7ee481bf2` | wake-filter infra store-ref leg | `TestReleaseOrphanedPoolAssignments_OwnsClaimedInfraWispWithoutLiveProbe` (cmd/gc) | RED |
+
+Outcome legend:
+
+- **RED** — the test fails *behaviorally* with the fix reverted. The strongest
+  signal: the guard demonstrates the bug returning.
+- **RED (build)** — the test cannot *compile* without the fix, because it is
+  coupled to a symbol/signature/new-file the fix introduced. Still guarded (the
+  test cannot pass without the fix), but it does not demonstrate the behavior
+  breaking. Typical for new-file fixes (`reserved_prefixes.go`) and
+  new-signature reconciler helpers.
+- **CONFLICT** — the fix's production lines were superseded by later refactors,
+  so neither revert method can isolate this historical commit. The behavior
+  stays guarded by the standing green test; this row is simply not
+  revert-falsifiable. #17's sling routing was subsequently reworked.
+
+Keep the `MATRIX` in the script in sync: when a new split-store fix lands, add
+its commit + the regression test that must red without it, and run the matrix.
+
+### Named residuals — the honest boundary
+
+The architecture is sound **for the store-ownership-resolution class** on this
+branch's bd-backed (Dolt / sqlite / postgres) topology. This is *not* a claim
+that every path is covered. The known, deliberately-deferred gaps:
+
+- **Fixture fidelity.** The fast conformance fixtures use `MemStore`, not real
+  Dolt/Postgres/`CachingStore`. Backend-contract drift (a bd metadata-format
+  change, a real-Dolt-only claim race) is caught only by the standing managed
+  integration tests, not the conformance suite. A real-bd contract pin is a
+  named follow-up.
+- **#12 merge-order guard is prose-only.** No test enforces the finalize/merge
+  ordering; it is documented, not gated.
+- **`resolveBdScopeTarget` arg-scan hijack.** A reserved-shaped *value* on a
+  `gc bd` command line (e.g. `--label gcg-wisp-ta1`) can reroute the exec's
+  scope. By-id routing is guarded (I5); the arg-scan surface is not.
+- **The named-session assignee arm.** `assigneePreservesNamedSessionRoute`
+  lacks the `""` infra leg its siblings received.
+- **The city WORK-store drop (E2).** `rigBeadStores` deletes the `cityName`
+  key, so a city-scope *non-workflow* pool bead orphaned by a dead worker can
+  miss orphan-release. Confirmed empirically a non-issue for the maintainer-city
+  workload (0 `in_progress` non-`gcg` city-scope work beads) and deferred, but a
+  real residual on the general model.
+
+These are the boundary, stated plainly rather than hidden. The revert-matrix
+reds the moment a mapped fix regresses; the residuals list is where to look when
+a *new* class of split bug appears.

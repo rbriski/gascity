@@ -176,6 +176,18 @@
         "/^contrib/k8s/Dockerfile\\.base$/"
       ],
       "matchStrings": [
+        "NPM_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
         "CODEX_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ],
       "datasourceTemplate": "github-releases",

@@ -3,12 +3,16 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: install-node-archive.sh VERSION [--cache]
+Usage: install-node-archive.sh VERSION [NPM_VERSION] [--cache]
 
 Downloads an official Node.js release tarball from nodejs.org, verifies its
 pinned SHA-256 against the release SHASUMS256.txt, and installs node/npm/npx
-into the target prefix. Use --cache on self-hosted runners to install under
-RUNNER_TOOL_CACHE/HOME and add that bin directory to GITHUB_PATH.
+into the target prefix. When NPM_VERSION is given, upgrades the bundled npm
+to that exact version afterwards (npm verifies the package tarball against
+the registry's sha512 integrity digest and fails on mismatch): the tarball's
+bundled npm can lag on fixes for vulnerable transitive dependencies. Use
+--cache on self-hosted runners to install under RUNNER_TOOL_CACHE/HOME and
+add that bin directory to GITHUB_PATH.
 USAGE
 }
 
@@ -18,6 +22,12 @@ if [[ -z "$version" ]]; then
   exit 2
 fi
 shift || true
+
+npm_version=""
+if (($#)) && [[ "$1" != -* ]]; then
+  npm_version="${1#v}"
+  shift
+fi
 
 use_cache=false
 while (($#)); do
@@ -128,6 +138,33 @@ else
   fi
   tar -xzf "${tmp}/${archive}" -C "$tmp"
   install_tree_with_sudo_fallback "${tmp}/node-v${version_no_v}-${platform}" "$prefix"
+fi
+
+if [[ -n "$npm_version" ]]; then
+  npm_bin="${bin_dir}/npm"
+  if [[ "$("$npm_bin" --version 2>/dev/null)" == "$npm_version" ]]; then
+    echo "Reusing npm ${npm_version} at ${npm_bin}"
+  else
+    export npm_config_fund=false
+    export npm_config_audit=false
+    export npm_config_update_notifier=false
+    if [[ -w "${prefix}/lib/node_modules" ]]; then
+      "$npm_bin" install -g "npm@${npm_version}"
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo --preserve-env=npm_config_fund,npm_config_audit,npm_config_update_notifier \
+        "$npm_bin" install -g "npm@${npm_version}"
+    else
+      echo "Cannot write ${prefix}/lib/node_modules and sudo is unavailable" >&2
+      exit 1
+    fi
+  fi
+  actual_npm="$("$npm_bin" --version)"
+  if [[ "$actual_npm" != "$npm_version" ]]; then
+    echo "npm version mismatch after upgrade" >&2
+    echo "expected: $npm_version" >&2
+    echo "actual:   $actual_npm" >&2
+    exit 1
+  fi
 fi
 
 if $use_cache && [[ -n "${GITHUB_PATH:-}" ]]; then

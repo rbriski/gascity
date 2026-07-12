@@ -53,10 +53,13 @@ RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
     && rm -f /tmp/install-dolt-archive.sh
 
 # Node.js — required by the pi coding agent (npm global install). Pinned
-# version (keep in sync with deps.env), installed into /usr/local.
+# version (keep in sync with deps.env), installed into /usr/local. npm is
+# upgraded past the tarball-bundled copy: the bundled npm ships vulnerable
+# transitive deps (picomatch, sigstore) that newer npm releases have fixed.
 ARG NODE_VERSION=22.23.1
+ARG NPM_VERSION=12.0.1
 COPY .github/scripts/install-node-archive.sh /tmp/install-node-archive.sh
-RUN /tmp/install-node-archive.sh "${NODE_VERSION}" \
+RUN /tmp/install-node-archive.sh "${NODE_VERSION}" "${NPM_VERSION}" \
     && rm -f /tmp/install-node-archive.sh
 
 # Codex CLI — openai/codex release binary, pinned + SHA-256 verified.

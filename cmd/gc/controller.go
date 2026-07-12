@@ -102,22 +102,6 @@ func controllerSocketPath(cityPath string) string {
 	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
 }
 
-// acquireControllerLock takes an exclusive flock on .gc/controller.lock.
-// Returns the locked file (caller must defer Close) or an error if another
-// controller is already running.
-func acquireControllerLock(cityPath string) (*os.File, error) {
-	path := filepath.Join(cityPath, ".gc", "controller.lock")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("opening controller lock: %w", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close() //nolint:errcheck // closing after flock failure
-		return nil, errControllerAlreadyRunning
-	}
-	return f, nil
-}
-
 // startControllerSocket listens on a Unix socket at .gc/controller.sock.
 // When a client sends "stop\n", cancelFn is called to shut down the
 // controller loop. convergenceReqCh is used to route convergence commands

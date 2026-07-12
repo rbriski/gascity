@@ -23,6 +23,29 @@ func TestControllerStopResultZeroValueIsNotAcknowledged(t *testing.T) {
 	}
 }
 
+func TestGenericControllerCommandRejectsStopTransport(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{
+		"stop",
+		"stop-force",
+		"stop\nanything",
+		"stop-force\nanything",
+		"stop\r",
+		"stop-force\r",
+	} {
+		t.Run(command, func(t *testing.T) {
+			response, err := sendControllerCommandWithTimeouts(t.TempDir(), command, time.Second, time.Second, time.Second)
+			if response != nil {
+				t.Fatalf("response = %q, want nil", response)
+			}
+			if !errors.Is(err, errControllerStopRequiresTypedClient) {
+				t.Fatalf("errors.Is(err, errControllerStopRequiresTypedClient) = false: %v", err)
+			}
+		})
+	}
+}
+
 func TestControllerStopClientClassifiesPreEntryFailures(t *testing.T) {
 	t.Parallel()
 
@@ -132,12 +155,19 @@ func TestControllerStopClientAcknowledgesOnlyCompleteExactReply(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &scriptedStopConn{reads: append([]scriptedStopRead(nil), tt.reads...)}
-			client := sameIdentityStopClient(t, conn)
+			client, socketInfo := sameIdentityStopClient(t, conn)
+			cityPath := t.TempDir()
 
-			got := client.stop(t.TempDir(), tt.force)
+			got := client.stop(cityPath, tt.force)
 
 			if got.outcome != controllerStopAcknowledged || got.err != nil {
 				t.Fatalf("stop result = {%v, %v}, want acknowledged", got.outcome, got.err)
+			}
+			if got.socketPath != controllerSocketPath(cityPath) {
+				t.Fatalf("socket witness path = %q, want %q", got.socketPath, controllerSocketPath(cityPath))
+			}
+			if got.socketInfo == nil || !os.SameFile(got.socketInfo, socketInfo) {
+				t.Fatal("acknowledged result did not retain its pre-dial socket identity")
 			}
 			if gotCommand := conn.writes.String(); gotCommand != tt.wantCmd {
 				t.Fatalf("command = %q, want %q", gotCommand, tt.wantCmd)
@@ -165,6 +195,7 @@ func TestControllerStopClientClassifiesEveryPostDialFailureAsMayHaveEntered(t *t
 		conn         *scriptedStopConn
 		postStatErr  error
 		mismatchInfo bool
+		wantWritten  int
 	}{
 		{
 			name:         "socket identity changed",
@@ -181,44 +212,64 @@ func TestControllerStopClientClassifiesEveryPostDialFailureAsMayHaveEntered(t *t
 			conn: &scriptedStopConn{setWriteDeadlineErr: deadlineErr},
 		},
 		{
-			name: "short write",
-			conn: &scriptedStopConn{writeLimit: 2},
+			name:        "short write",
+			conn:        &scriptedStopConn{writeLimit: 2},
+			wantWritten: 2,
 		},
 		{
-			name: "write error",
-			conn: &scriptedStopConn{writeErr: writeErr},
+			name:        "write error",
+			conn:        &scriptedStopConn{writeErr: writeErr},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "read deadline failure",
-			conn: &scriptedStopConn{setReadDeadlineErr: deadlineErr},
+			name:        "read deadline failure",
+			conn:        &scriptedStopConn{setReadDeadlineErr: deadlineErr},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "empty eof",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{err: io.EOF}}},
+			name:        "empty eof",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{err: io.EOF}}},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "partial acknowledgement",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("ok")}, {err: io.EOF}}},
+			name:        "partial acknowledgement",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("ok")}, {err: io.EOF}}},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "malformed acknowledgement",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("no\n")}, {err: io.EOF}}},
+			name:        "malformed acknowledgement",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("no\n")}, {err: io.EOF}}},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "extra acknowledgement bytes",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("ok\nextra")}, {err: io.EOF}}},
+			name:        "extra acknowledgement bytes",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("ok\nextra")}, {err: io.EOF}}},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "connection reset",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{err: readReset}}},
+			name:        "connection reset",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{err: readReset}}},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "read timeout",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{err: scriptedStopTimeoutError{}}}},
+			name:        "read timeout",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{err: scriptedStopTimeoutError{}}}},
+			wantWritten: len("stop\n"),
 		},
 		{
-			name: "reply exceeds bound",
-			conn: &scriptedStopConn{reads: []scriptedStopRead{{data: bytes.Repeat([]byte("x"), controllerStopResponseLimit+1)}, {err: io.EOF}}},
+			name:        "complete acknowledgement followed by reset",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("ok\n")}, {err: readReset}}},
+			wantWritten: len("stop\n"),
+		},
+		{
+			name:        "complete acknowledgement followed by timeout",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{data: []byte("ok\n")}, {err: scriptedStopTimeoutError{}}}},
+			wantWritten: len("stop\n"),
+		},
+		{
+			name:        "reply exceeds bound",
+			conn:        &scriptedStopConn{reads: []scriptedStopRead{{data: bytes.Repeat([]byte("x"), controllerStopResponseLimit+1)}, {err: io.EOF}}},
+			wantWritten: len("stop\n"),
 		},
 	}
 
@@ -263,11 +314,109 @@ func TestControllerStopClientClassifiesEveryPostDialFailureAsMayHaveEntered(t *t
 			if !tt.conn.closed {
 				t.Fatal("connection was not closed")
 			}
+			if got := tt.conn.writes.Len(); got != tt.wantWritten {
+				t.Fatalf("bytes written = %d, want %d", got, tt.wantWritten)
+			}
 		})
 	}
 }
 
-func sameIdentityStopClient(t *testing.T, conn net.Conn) controllerStopClient {
+func TestControllerStopClientRealUnixReplacementAfterDialIsAmbiguous(t *testing.T) {
+	cityPath := shortSocketTempDir(t, "gc-stop-replacement-")
+	for len(filepath.Join(normalizePathForCompare(cityPath), ".gc", "controller.sock")) <= controllerSocketPathLimit {
+		cityPath = filepath.Join(cityPath, "long-controller-path-segment")
+	}
+	sockPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	listenerA, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerA.SetUnlinkOnClose(false)
+	t.Cleanup(func() {
+		_ = listenerA.Close()
+		_ = os.Remove(sockPath)
+	})
+	infoA, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var listenerB *net.UnixListener
+	var acceptedA net.Conn
+	client := controllerStopClient{
+		stat: os.Stat,
+		dial: func(network, address string, timeout time.Duration) (net.Conn, error) {
+			clientA, dialErr := net.DialTimeout(network, address, timeout)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			acceptedA, dialErr = listenerA.Accept()
+			if dialErr != nil {
+				_ = clientA.Close()
+				return nil, dialErr
+			}
+			if removeErr := os.Remove(sockPath); removeErr != nil {
+				_ = clientA.Close()
+				_ = acceptedA.Close()
+				return nil, removeErr
+			}
+			listenerB, dialErr = net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
+			if dialErr != nil {
+				_ = clientA.Close()
+				_ = acceptedA.Close()
+				return nil, dialErr
+			}
+			listenerB.SetUnlinkOnClose(false)
+			return clientA, nil
+		},
+		dialTimeout:  time.Second,
+		writeTimeout: time.Second,
+		readTimeout:  time.Second,
+	}
+
+	result := client.stop(cityPath, false)
+	if listenerB == nil || acceptedA == nil {
+		t.Fatal("dial replacement barrier did not establish both socket owners")
+	}
+	t.Cleanup(func() {
+		_ = acceptedA.Close()
+		_ = listenerB.Close()
+	})
+	infoB, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.outcome != controllerStopMayHaveEntered || !errors.Is(result.err, errControllerStopMayHaveEntered) {
+		t.Fatalf("stop result = {%v, %v}, want may-have-entered", result.outcome, result.err)
+	}
+	if result.socketPath != sockPath {
+		t.Fatalf("socket witness path = %q, want %q", result.socketPath, sockPath)
+	}
+	if result.socketInfo == nil || !os.SameFile(result.socketInfo, infoA) {
+		t.Fatal("socket witness does not identify the dialed socket")
+	}
+	if os.SameFile(result.socketInfo, infoB) {
+		t.Fatal("socket witness incorrectly identifies the replacement socket")
+	}
+	if err := acceptedA.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1)
+	n, readErr := acceptedA.Read(buf)
+	if n != 0 || !errors.Is(readErr, io.EOF) {
+		t.Fatalf("dialed controller received %d bytes with error %v, want zero bytes then EOF", n, readErr)
+	}
+}
+
+func sameIdentityStopClient(t *testing.T, conn net.Conn) (controllerStopClient, os.FileInfo) {
 	t.Helper()
 	info := statFixtureInfo(t, "same-identity")
 	return controllerStopClient{
@@ -276,7 +425,7 @@ func sameIdentityStopClient(t *testing.T, conn net.Conn) controllerStopClient {
 		dialTimeout:  time.Second,
 		writeTimeout: time.Second,
 		readTimeout:  time.Second,
-	}
+	}, info
 }
 
 func statFixtureInfo(t *testing.T, name string) os.FileInfo {

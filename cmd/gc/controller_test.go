@@ -276,13 +276,34 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	default:
 		t.Fatal("reload did not enqueue poke")
 	}
-	if !tryStopController(cityPath, &bytes.Buffer{}) {
-		t.Fatal("tryStopController returned false, want true via fallback socket")
+	preStopInfo, err := os.Stat(fallback)
+	if err != nil {
+		t.Fatalf("stat fallback socket before stop: %v", err)
+	}
+	if preStopInfo.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("fallback path mode = %v, want Unix socket", preStopInfo.Mode())
+	}
+	stopResult := sendControllerStop(cityPath, false)
+	if stopResult.outcome != controllerStopAcknowledged || stopResult.err != nil {
+		t.Fatalf("sendControllerStop = {%v, %v}, want acknowledged", stopResult.outcome, stopResult.err)
+	}
+	if stopResult.socketPath != fallback {
+		t.Fatalf("socket witness path = %q, want %q", stopResult.socketPath, fallback)
+	}
+	if stopResult.socketInfo == nil || !os.SameFile(stopResult.socketInfo, preStopInfo) {
+		t.Fatal("socket witness does not identify the real fallback socket")
+	}
+	postStopInfo, err := os.Stat(fallback)
+	if err != nil {
+		t.Fatalf("stat fallback socket after acknowledgement: %v", err)
+	}
+	if !os.SameFile(preStopInfo, postStopInfo) {
+		t.Fatal("fallback socket identity changed during acknowledged exchange")
 	}
 	select {
 	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("stop did not invoke cancel via fallback socket")
+	default:
+		t.Fatal("acknowledgement returned before stop cancellation became visible")
 	}
 }
 

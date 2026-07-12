@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -183,6 +184,25 @@ type failRateLimitHoldStore struct {
 	*beads.MemStore
 	failRateLimitHold  bool
 	rateLimitHoldCalls int
+}
+
+type failHealMetadataStore struct {
+	beads.Store
+	id       string
+	err      error
+	attempts int
+}
+
+func (s *failHealMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	_, clearsPriming := kvs[sessionpkg.PrimedAtMetadataKey]
+	if id == s.id &&
+		kvs["state"] == string(sessionpkg.StateAsleep) &&
+		kvs["continuation_reset_pending"] == "true" &&
+		clearsPriming {
+		s.attempts++
+		return s.err
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 func (s *failRateLimitHoldStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -437,6 +457,107 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 		e.startOptions...,
 	)
+}
+
+func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		desired bool
+	}{
+		{name: "orphan caller"},
+		{name: "desired caller", desired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_CONVERGE_SHADOW", "1")
+			previousMetrics := convergeShadowMetrics
+			convergeShadowMetrics = newConvergeShadowCounters()
+			t.Cleanup(func() { convergeShadowMetrics = previousMetrics })
+
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			if tc.desired {
+				env.addDesired("worker", "worker", false)
+			}
+			session := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&session, map[string]string{
+				"state":                                  string(sessionpkg.StateCreating),
+				"pending_create_started_at":              env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+				"session_key":                            "conversation-1",
+				"started_config_hash":                    "config-1",
+				sessionpkg.PrimedAtMetadataKey:           "2026-03-08T11:00:00Z",
+				sessionpkg.PrimingAttemptedAtMetadataKey: "2026-03-08T10:59:00Z",
+				sessionpkg.PromptHashMetadataKey:         "prompt-1",
+			})
+			preimage, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get preimage: %v", err)
+			}
+			wantErr := errors.New("ambiguous heal commit")
+			failing := &failHealMetadataStore{Store: env.store, id: session.ID, err: wantErr}
+			env.store = failing
+			eventRecorder := events.NewFake()
+			env.rec = eventRecorder
+			trace := newPoolDesiredStateTestTrace("worker")
+
+			poolDesired := map[string]int{}
+			if tc.desired {
+				poolDesired["worker"] = 1
+			}
+			woken := reconcileSessionBeadsTraced(
+				context.Background(), "", []beads.Bead{preimage}, env.desiredState,
+				configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+				nil, nil, nil, nil, env.dt, poolDesired, false, nil, "", nil,
+				env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, trace,
+			)
+
+			if woken != 0 {
+				t.Fatalf("wake attempts = %d, want 0 after failed heal", woken)
+			}
+			if failing.attempts != 1 {
+				t.Fatalf("heal write attempts = %d, want 1", failing.attempts)
+			}
+			persisted, err := failing.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get persisted: %v", err)
+			}
+			if !reflect.DeepEqual(persisted, preimage) {
+				t.Fatalf("failed heal changed persisted bead:\n got = %#v\nwant = %#v", persisted, preimage)
+			}
+			if pending := env.dt.get(session.ID); pending != nil {
+				t.Fatalf("failed heal started a drain: %#v", pending)
+			}
+			if len(eventRecorder.Events) != 0 {
+				t.Fatalf("failed heal emitted events: %#v", eventRecorder.Events)
+			}
+			mutatingMethods := map[string]bool{
+				"Start": true, "Stop": true, "Nudge": true, "SendKeys": true,
+				"Interrupt": true, "Relaunch": true, "SetMeta": true, "RemoveMeta": true,
+			}
+			for _, call := range env.sp.SnapshotCalls() {
+				if mutatingMethods[call.Method] {
+					t.Fatalf("failed heal reached provider effect: %#v", call)
+				}
+			}
+			if got := strings.Count(env.stderr.String(), wantErr.Error()); got != 1 {
+				t.Fatalf("heal error diagnostic count = %d, want 1; stderr=%q", got, env.stderr.String())
+			}
+			if got := strings.Count(env.stderr.String(), "healState: SetMetadataBatch "+session.ID); got != 1 {
+				t.Fatalf("injected stderr heal diagnostic count = %d, want 1; stderr=%q", got, env.stderr.String())
+			}
+			for _, record := range trace.records {
+				if record.SessionName == "worker" || record.SessionBeadID == session.ID {
+					t.Fatalf("failed heal emitted session trace: %#v", record)
+				}
+			}
+			shadow := convergeShadowMetrics.snapshot()
+			if shadow.SessionsSkipped[skipHealWriteFailed] != 1 || shadow.SessionsEvaluated != 0 {
+				t.Fatalf("shadow result = evaluated:%d skipped:%v, want one heal_write_failed skip and no evaluation", shadow.SessionsEvaluated, shadow.SessionsSkipped)
+			}
+			if shadow.SessionsSkipped[skipCaptureLoss] != 0 || len(shadow.CompareTotal) != 0 || len(shadow.DivergenceTotal) != 0 {
+				t.Fatalf("failed heal polluted shadow evidence: %#v", shadow)
+			}
+		})
+	}
 }
 
 func TestReconcileSessionBeads_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
@@ -3062,10 +3183,12 @@ func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 type failSetMetadataBatchStore struct {
 	beads.Store
-	err error
+	err   error
+	calls int
 }
 
 func (s *failSetMetadataBatchStore) SetMetadataBatch(string, map[string]string) error {
+	s.calls++
 	if s.err != nil {
 		return s.err
 	}

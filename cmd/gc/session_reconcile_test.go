@@ -124,7 +124,8 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 	if session == nil {
 		return
 	}
-	batch := healStateWithRollbackInfo(seedSessionInfo(*session), alive, sessFront, clk, 0, true)
+	result := healStateWithRollbackInfo(seedSessionInfo(*session), alive, sessFront, clk, 0, true)
+	batch := result.Applied
 	if session.Metadata == nil && len(batch) > 0 {
 		session.Metadata = make(map[string]string, len(batch))
 	}

@@ -8,7 +8,7 @@ import (
 )
 
 // lumenReducer is the pure, total fold from the Lumen event stream to the
-// graph projection (nodes / edges / frontier) — reducer v3 (blueprint §2). It
+// graph projection (nodes / edges / frontier) — reducer v4 (blueprint §2). It
 // performs no I/O and reads no clock: every timestamp it projects comes from an
 // event payload (run.started carries created_at, threaded onto every node row).
 //
@@ -22,14 +22,14 @@ type lumenReducer struct{}
 
 var _ fold.Reducer = lumenReducer{}
 
-// Reducer returns the Lumen fold reducer (v3). It is the reducer a store uses to
+// Reducer returns the Lumen fold reducer (v4). It is the reducer a store uses to
 // rebuild or resume a lumen stream, and the one tests fold goldens through.
 func Reducer() fold.Reducer { return lumenReducer{} }
 
 // Engine reports the engine tag.
 func (lumenReducer) Engine() string { return Engine }
 
-// ReducerVersion reports the stamped reducer version (v3).
+// ReducerVersion reports the stamped reducer version (v4).
 func (lumenReducer) ReducerVersion() int { return reducerVersion }
 
 // Zero returns the empty fold state. The stream id is read from each event

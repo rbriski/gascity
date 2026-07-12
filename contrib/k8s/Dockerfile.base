@@ -1,8 +1,9 @@
 # Gas City agent base image — system dependencies.
 #
 # Contains everything an agent needs EXCEPT gc/bd/br binaries: OS packages,
-# Claude Code CLI, Dolt. Rebuild only when system dependencies change
-# (~2.5 min). Agent image rebuilds on top take ~5s.
+# the agent CLI fleet (Claude Code, Codex, opencode, pi, Antigravity), Node,
+# and Dolt. Rebuild only when system dependencies change (~2.5 min). Agent
+# image rebuilds on top take ~5s.
 #
 # Build:
 #   make docker-base
@@ -11,7 +12,7 @@
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG CLAUDE_CODE_VERSION=2.1.123
+ARG CLAUDE_CODE_VERSION=2.1.197
 ARG DOLT_VERSION=2.1.7
 
 # System packages.
@@ -51,6 +52,39 @@ COPY .github/scripts/install-dolt-archive.sh /tmp/install-dolt-archive.sh
 RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
     && rm -f /tmp/install-dolt-archive.sh
 
+# Node.js — required by the pi coding agent (npm global install). Pinned
+# version (keep in sync with deps.env), installed into /usr/local.
+ARG NODE_VERSION=22.23.1
+COPY .github/scripts/install-node-archive.sh /tmp/install-node-archive.sh
+RUN /tmp/install-node-archive.sh "${NODE_VERSION}" \
+    && rm -f /tmp/install-node-archive.sh
+
+# Codex CLI — openai/codex release binary, pinned + SHA-256 verified.
+ARG CODEX_VERSION=0.144.1
+COPY .github/scripts/install-codex-archive.sh /tmp/install-codex-archive.sh
+RUN /tmp/install-codex-archive.sh "${CODEX_VERSION}" \
+    && rm -f /tmp/install-codex-archive.sh
+
+# opencode CLI — sst/opencode release binary, pinned + SHA-256 verified.
+ARG OPENCODE_VERSION=1.17.18
+COPY .github/scripts/install-opencode-archive.sh /tmp/install-opencode-archive.sh
+RUN /tmp/install-opencode-archive.sh "${OPENCODE_VERSION}" \
+    && rm -f /tmp/install-opencode-archive.sh
+
+# pi coding agent — @earendil-works/pi-coding-agent, exact version via npm
+# (integrity-verified by npm). Requires Node from the step above.
+ARG PI_VERSION=0.80.6
+COPY .github/scripts/install-pi-npm.sh /tmp/install-pi-npm.sh
+RUN /tmp/install-pi-npm.sh "${PI_VERSION}" \
+    && rm -f /tmp/install-pi-npm.sh
+
+# Antigravity CLI (agy) — google-antigravity/antigravity-cli release tarball,
+# pinned + SHA-256 verified.
+ARG ANTIGRAVITY_VERSION=1.1.1
+COPY .github/scripts/install-antigravity-archive.sh /tmp/install-antigravity-archive.sh
+RUN /tmp/install-antigravity-archive.sh "${ANTIGRAVITY_VERSION}" \
+    && rm -f /tmp/install-antigravity-archive.sh
+
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
 # When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic
 # user via useradd and drops privileges via su. gcagent is kept as fallback.
@@ -60,3 +94,13 @@ RUN useradd -m -s /bin/bash gcagent \
 ENV HOME=/home/gcagent
 
 USER gcagent
+
+# Smoke test: every bundled agent CLI must run for the non-root runtime user.
+# The build fails fast if any binary is missing from PATH or otherwise broken.
+RUN set -eux; \
+    node --version; \
+    claude --version; \
+    codex --version; \
+    opencode --version; \
+    pi --version; \
+    agy --version

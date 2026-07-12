@@ -26,6 +26,11 @@
     {
       "matchManagers": ["custom.regex"],
       "groupName": "pinned build tools"
+    },
+    {
+      "matchDatasources": ["node-version"],
+      "matchPackageNames": ["node"],
+      "allowedVersions": "<23"
     }
   ],
   "customManagers": [
@@ -151,6 +156,68 @@
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "Dicklesworthstone/beads_rust",
       "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
+        "NODE_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "node-version",
+      "depNameTemplate": "node"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
+        "CODEX_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "openai/codex",
+      "extractVersionTemplate": "^rust-v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
+        "OPENCODE_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "sst/opencode",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
+        "PI_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "@earendil-works/pi-coding-agent"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
+        "ANTIGRAVITY_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "google-antigravity/antigravity-cli"
     },
     {
       "customType": "regex",

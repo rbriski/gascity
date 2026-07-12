@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -675,6 +676,11 @@ func buildDesiredStateWithSessionBeads(
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+			if demandDiagEnabled() && demandDiagScoped(template) {
+				demandDiagf(stderr, "probe-assembly pool=%s own-target: storeKey=%s store=%s err=%v (rig=%q rigStorePresent=%t cityStore=%s)",
+					template, ownTarget.storeKey, demandDiagStoreID(ownTarget.store), ownTarget.err,
+					rigName, rigStores[rigName] != nil, demandDiagStoreID(store))
+			}
 			// Cross-store probe (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery) — on a
 			// split city that is the sessions/infra store, where routed graph
@@ -713,6 +719,12 @@ func buildDesiredStateWithSessionBeads(
 			// such rigs, so this is defense-in-depth against future callers.
 			if ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				if demandDiagEnabled() && demandDiagScoped(template) {
+					demandDiagf(stderr, "probe-assembly pool=%s cross-store city target ADDED: cityStore=%s", template, demandDiagStoreID(store))
+				}
+			} else if demandDiagEnabled() && demandDiagScoped(template) {
+				demandDiagf(stderr, "probe-assembly pool=%s cross-store city target SKIPPED: ownStoreKeyIsCity=%t ownStoreNil=%t ownErr=%v ownStoreAliasesCity=%t",
+					template, ownTarget.storeKey == "city", ownTarget.store == nil, ownTarget.err, ownTarget.store == store)
 			}
 			continue
 		}
@@ -871,6 +883,16 @@ func buildDesiredStateWithSessionBeads(
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		if demandDiagEnabled() {
+			finalPoolDesired := 0
+			for _, ps := range poolDesiredStates {
+				if ps.Template == demandDiagTemplate {
+					finalPoolDesired = len(ps.Requests)
+				}
+			}
+			demandDiagf(stderr, "FINAL pool=%s scaleCheckCount=%d poolDesired=%d (poolWorkBeads=%d)",
+				demandDiagTemplate, scaleCheckCounts[demandDiagTemplate], finalPoolDesired, len(poolWorkBeads))
+		}
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1465,6 +1487,73 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 	return result
 }
 
+// --- TEMPORARY DEMAND DROP DIAGNOSTICS (GC_DEMAND_DIAG) ---------------------
+// The helpers below are pure instrumentation for a live-mc incident where a
+// ready, open, unassigned wisp routed to beads/gc.run-operator yields
+// poolDesired=0. They add NO behavior: every call site is gated on
+// demandDiagEnabled() (a cheap env lookup) and only emits log lines. Remove
+// this block once the drop is located.
+
+// demandDiagTemplate scopes the diagnostics to the one pool under
+// investigation so a busy fleet's other pools stay quiet. Empty means "all".
+const demandDiagTemplate = "beads/gc.run-operator"
+
+// demandDiagEnabled reports whether the GC_DEMAND_DIAG diagnostic gate is set.
+// Read fresh each call so the logging can be toggled without a rebuild; every
+// diag call site short-circuits on this before doing any formatting work.
+func demandDiagEnabled() bool {
+	return os.Getenv("GC_DEMAND_DIAG") == "1"
+}
+
+// demandDiagScoped reports whether template is the pool being diagnosed.
+func demandDiagScoped(template string) bool {
+	return demandDiagTemplate == "" || strings.TrimSpace(template) == demandDiagTemplate
+}
+
+// demandDiagScopedGroup reports whether a scale-check store group covers the
+// pool being diagnosed.
+func demandDiagScopedGroup(templates map[string]struct{}) bool {
+	if demandDiagTemplate == "" {
+		return true
+	}
+	_, ok := templates[demandDiagTemplate]
+	return ok
+}
+
+// demandDiagInterestingBead reports whether a ready bead is one the drop hunt
+// cares about: a routing wisp or anything routed to the diagnosed pool.
+func demandDiagInterestingBead(b beads.Bead) bool {
+	if strings.Contains(b.ID, "gcg-wisp-") {
+		return true
+	}
+	return strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == demandDiagTemplate
+}
+
+// demandDiagStoreID returns a cheap, per-instance store identity (concrete type
+// plus pointer) so logs can tell the infra store from the city/sessions store
+// and detect a rig store that aliases the city store.
+func demandDiagStoreID(store beads.Store) string {
+	if store == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%T@%p", store, store)
+}
+
+// demandDiagf writes one DEMAND_DIAG: line to w when the gate is on. w is the
+// reconciler stderr where available; pure demand probes without a threaded
+// writer pass os.Stderr. It is a no-op (after the env check) when disabled.
+func demandDiagf(w io.Writer, format string, args ...any) {
+	if !demandDiagEnabled() {
+		return
+	}
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "DEMAND_DIAG: "+format+"\n", args...) //nolint:errcheck
+}
+
+// --- END TEMPORARY DEMAND DROP DIAGNOSTICS ---------------------------------
+
 func defaultScaleCheckTargetForAgent(
 	cityPath string,
 	cfg *config.City,
@@ -1560,13 +1649,31 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 				ready = nil
 			}
 		}
+		if demandDiagEnabled() && demandDiagScopedGroup(group.templates) {
+			demandDiagf(os.Stderr, "store-read group storeKey=%s store=%s iterRows=%d err=%v partial=%t templates=%s",
+				group.storeKey, demandDiagStoreID(group.store), len(ready), readyErr, beads.IsPartialResult(readyErr),
+				strings.Join(sortedStringSet(group.templates), ","))
+		}
 		for _, b := range ready {
 			if strings.TrimSpace(b.Assignee) != "" {
+				if demandDiagEnabled() && demandDiagScopedGroup(group.templates) && demandDiagInterestingBead(b) {
+					demandDiagf(os.Stderr, "route bead=%s DROPPED(assignee) assignee=%q routed_to=%q status=%s storeKey=%s",
+						b.ID, b.Assignee, b.Metadata[beadmeta.RoutedToMetadataKey], b.Status, group.storeKey)
+				}
 				continue
 			}
 			template := controllerDemandRouteTarget(b, group.templates)
 			if _, ok := group.templates[template]; !ok {
+				if demandDiagEnabled() && demandDiagScopedGroup(group.templates) && demandDiagInterestingBead(b) {
+					demandDiagf(os.Stderr, "route bead=%s DROPPED(no-template-match) routed_to=%q candidates=%v groupTemplates=%s storeKey=%s",
+						b.ID, b.Metadata[beadmeta.RoutedToMetadataKey], controllerDemandRouteCandidates(b),
+						strings.Join(sortedStringSet(group.templates), ","), group.storeKey)
+				}
 				continue
+			}
+			if demandDiagEnabled() && demandDiagScopedGroup(group.templates) && demandDiagInterestingBead(b) {
+				demandDiagf(os.Stderr, "route bead=%s COUNTED template=%s routed_to=%q storeKey=%s",
+					b.ID, template, b.Metadata[beadmeta.RoutedToMetadataKey], group.storeKey)
 			}
 			counts[template]++
 			entry := demand[template]

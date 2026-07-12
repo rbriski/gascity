@@ -322,6 +322,13 @@ func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
 	return newNativeDoltStoreWithStorage(storage, "native-test")
 }
 
+// NewNativeDoltStoreWithStorageForTesting returns an exact NativeDoltStore
+// backed by caller-supplied storage for cross-package conformance tests.
+// Production callers open scoped storage through OpenNativeDoltStoreAt.
+func NewNativeDoltStoreWithStorageForTesting(storage beadslib.Storage) *NativeDoltStore {
+	return newNativeDoltStoreForTest(storage)
+}
+
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
 func (s *NativeDoltStore) IDPrefix() string {
 	if s == nil {

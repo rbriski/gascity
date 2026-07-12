@@ -24,6 +24,14 @@ import (
 // of the string.
 var indexShapeRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_-]*)\[(.*)\]$`)
 
+// callShapeRe is the call pre-grammar: a lumen ident (same charset as indexShapeRe, so a
+// forged '/'/':' base can never form a call) IMMEDIATELY followed by a parenthesized tail
+// spanning the rest of the string. It has NO strict-grammar companion — a template part is
+// never evaluated as a call (closed exprs are the cond surface, templates only interpolate),
+// so `{{ length(x) }}` or `{{ unknownFn(x) }}` in a prompt would render VERBATIM. Every hit is
+// refused at lower on EVERY route (no renderable subset, so no carve-out anywhere).
+var callShapeRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*\(.*\)$`)
+
 // indexIntRe / indexIdentRe / indexSubRe are the strict inner-index forms: a bare int, a
 // bare ident, or `ident ws '-' ws int` (subtraction with whitespace on BOTH sides — stricter
 // than the reference tokenizer's before-only rule, DELIBERATELY, so a kebab ident like
@@ -62,6 +70,14 @@ func (e *indexRenderError) Error() string { return e.detail }
 // index the lower sweep refuses (do) rather than misrendering verbatim.
 func matchIndexPreGrammar(s string) bool {
 	return indexShapeRe.MatchString(s)
+}
+
+// matchCallPreGrammar reports whether a literal part looks like a call expression: a lumen
+// ident immediately followed by a parenthesized tail spanning the whole string. Unlike the
+// index pre-grammar it has no strict-grammar refinement — every hit is a loud refusal, since
+// no template part can render a call.
+func matchCallPreGrammar(s string) bool {
+	return callShapeRe.MatchString(s)
 }
 
 // parseIndexExpr strictly parses base[index] with index := int | ident | ident ws '-' ws
@@ -165,16 +181,16 @@ func exprLiteralString(raw json.RawMessage) (string, bool) {
 	return "", false
 }
 
-// collectIndexPreGrammarLiterals returns the literal-part source strings under a node/body
-// raw that MATCH the index pre-grammar (candidate index interpolations, §1.2.5). It inspects
-// a bare `value` (a lit leaf / value-form interp), direct `parts`, a `template`.parts, and a
-// nested `body` (a do/exec body carries its parts under body.template.parts). Only a literal
-// STRING matching the pre-grammar is a candidate; a text part, a ref/member interp, or a
-// genuine literal contributes nothing.
-func collectIndexPreGrammarLiterals(raw map[string]json.RawMessage) []string {
+// collectPreGrammarLiterals returns the literal-part source strings under a node/body raw
+// that MATCH the supplied pre-grammar predicate (candidate index or call interpolations,
+// §1.2.5). It inspects a bare `value` (a lit leaf / value-form interp), direct `parts`, a
+// `template`.parts, and a nested `body` (a do/exec body carries its parts under
+// body.template.parts). Only a literal STRING matching the predicate is a candidate; a text
+// part, a ref/member interp, or a non-matching literal contributes nothing.
+func collectPreGrammarLiterals(raw map[string]json.RawMessage, match func(string) bool) []string {
 	var out []string
 	consider := func(src string, ok bool) {
-		if ok && matchIndexPreGrammar(src) {
+		if ok && match(src) {
 			out = append(out, src)
 		}
 	}
@@ -199,7 +215,7 @@ func collectIndexPreGrammarLiterals(raw map[string]json.RawMessage) []string {
 	if body, ok := raw["body"]; ok {
 		var bm map[string]json.RawMessage
 		if json.Unmarshal(body, &bm) == nil {
-			out = append(out, collectIndexPreGrammarLiterals(bm)...)
+			out = append(out, collectPreGrammarLiterals(bm, match)...)
 		}
 	}
 	return out
@@ -229,13 +245,26 @@ func partLiteralStrings(partsRaw json.RawMessage) []string {
 // The error wraps ErrUnsupportedNode so the enqueue gate triages it (and the run-body /
 // dispatch-arm dry-run mints wrap it with their provenance).
 func sweepIndexParts(raw map[string]json.RawMessage, strictAllowed bool) error {
-	for _, src := range collectIndexPreGrammarLiterals(raw) {
+	for _, src := range collectPreGrammarLiterals(raw, matchIndexPreGrammar) {
 		if strictAllowed {
 			if _, ok := parseIndexExpr(src); ok {
 				continue
 			}
 		}
 		return fmt.Errorf("%w: interp index expr %q", ErrUnsupportedNode, src)
+	}
+	return nil
+}
+
+// sweepCallParts refuses a call-looking interp-literal template part on EVERY route (do, exec,
+// silent lit/interp). Unlike sweepIndexParts there is no strictAllowed carve-out: a template
+// part is never evaluated as a call, so a `{{ ident(...) }}` literal would render VERBATIM into
+// the prompt — the call-shaped silent-misrender class. The error wraps ErrUnsupportedNode so
+// the enqueue gate triages it (and the run-body / dispatch-arm dry-run mints wrap it with their
+// provenance).
+func sweepCallParts(raw map[string]json.RawMessage) error {
+	for _, src := range collectPreGrammarLiterals(raw, matchCallPreGrammar) {
+		return fmt.Errorf("%w: interp call expr %q", ErrUnsupportedNode, src)
 	}
 	return nil
 }

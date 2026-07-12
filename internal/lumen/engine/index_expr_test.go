@@ -31,6 +31,36 @@ func TestMatchIndexPreGrammar(t *testing.T) {
 	}
 }
 
+// TestMatchCallPreGrammar pins the call pre-grammar: a lumen ident IMMEDIATELY followed by a
+// parenthesized tail spanning the rest of the string (same ident charset as the index
+// pre-grammar). Unlike the index grammar there is NO renderable subset — every hit is refused
+// at lower on every route — so there is no strict-grammar companion. A space before the '(', a
+// forged '/'/':' base, no leading ident, or a paren that does not span the rest does NOT match
+// (verbatim survives).
+func TestMatchCallPreGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"unknownFn(x)", true},
+		{"length(items)", true}, // the confusion case — a closed-expr call, never a template call
+		{"f()", true},
+		{"work-fn(a, b)", true}, // kebab ident
+		{"see (docs)", false},   // space before '(' — leading-ident rule fails, verbatim
+		{"just text", false},
+		{"fn/x(0)", false},    // forged '/' base — charset excludes it
+		{"a:b(0)", false},     // forged ':' base
+		{"noparen", false},    // no parenthesized tail
+		{"(x)", false},        // no leading ident
+		{"fn(x) tail", false}, // paren does not span the rest
+		{"items[0]", false},   // an index shape, not a call
+	} {
+		if got := matchCallPreGrammar(tc.in); got != tc.want {
+			t.Errorf("matchCallPreGrammar(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestParseIndexExpr pins §1.2.3: the strict grammar base '[' (int | ident | ident ws '-'
 // ws int) ']' — NO '+', subtraction requires whitespace on BOTH sides (so kebab idents
 // survive as plain idents).

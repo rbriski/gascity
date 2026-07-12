@@ -500,6 +500,10 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 		if err := sweepIndexParts(n.Raw, false); err != nil {
 			return err
 		}
+		// A call-looking literal part (`ident(...)`) can never render either — refuse it too.
+		if err := sweepCallParts(n.Raw); err != nil {
+			return err
+		}
 		l.addLeaf(n, parent, memberIndex, step{kind: n.Kind, id: n.ID, raw: n.Raw}, true)
 		return nil
 
@@ -2745,6 +2749,12 @@ func decodeDo(n ir.Node) (step, error) {
 	if err := sweepIndexParts(n.Raw, true); err != nil {
 		return step{}, err
 	}
+	// A call-looking literal part (`ident(...)`) has NO renderable subset — even on the do
+	// route (which renders index interpolations) it is refused, since a template part is never
+	// evaluated as a call.
+	if err := sweepCallParts(n.Raw); err != nil {
+		return step{}, err
+	}
 	s := step{kind: ir.NodeDo, id: n.ID, raw: n.Raw}
 	if raw, ok := n.Raw["interpreter"]; ok {
 		var interp struct {
@@ -2798,6 +2808,11 @@ func decodeExec(n ir.Node) (step, error) {
 	// so ANY index interpolation in its template parts is refused here (no strict carve-out)
 	// — a strict-passing part would sweep clean then misrender verbatim on the exec path.
 	if err := sweepIndexParts(n.Raw, false); err != nil {
+		return step{}, err
+	}
+	// A call-looking literal part (`ident(...)`) can never render on the exec path either —
+	// refuse it too.
+	if err := sweepCallParts(n.Raw); err != nil {
 		return step{}, err
 	}
 	s := step{kind: ir.NodeExec, id: n.ID, program: exechost.ProgramExec}

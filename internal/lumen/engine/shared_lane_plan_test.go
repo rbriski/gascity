@@ -87,6 +87,67 @@ func TestSharedLaneTemplateSweepRefusals(t *testing.T) {
 	}
 }
 
+// TestSharedLaneTemplateSweepCallRefusals pins the call-looking-literal loud wall: an
+// interp-literal template part shaped `ident(...)` compiles upstream to the same verbatim
+// literal fallback as an out-of-subset index and would render VERBATIM into the prompt — the
+// call-shaped silent-misrender class. Unlike the index sweep there is NO renderable subset, so
+// EVERY route (do/exec/interp-leaf) refuses ANY hit — the do route takes no strict carve-out.
+// A non-matching literal survives verbatim.
+func TestSharedLaneTemplateSweepCallRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		node    string
+		wantErr bool
+	}{
+		// The do route refuses a call-shaped literal with NO strict carve-out (contrast the
+		// index sweep, where a strict-passing index lowers).
+		{"do-call-refused", slxDoIdx("d", "unknownFn(x)"), true},
+		// length(...) in a TEMPLATE part refuses LOUDLY here, even though `length` is a real
+		// closed-expr call. Closed exprs are the COND surface (typed, evaluated); a template
+		// part is never evaluated as a call, so `{{ length(items) }}` in a prompt was already a
+		// silent verbatim render. Refusing it prevents the "why doesn't length() work in
+		// prompts" confusion — it fails loudly instead of leaking the source text.
+		{"do-length-call-refused", slxDoIdx("d", "length(items)"), true},
+		{"do-verbatim-survives", slxDoIdx("d", "see (docs)"), false},
+		{"exec-call-refused", slxExecIdx("ec", "unknownFn(x)"), true},
+		{"exec-verbatim-survives", slxExecIdx("ec", "see (docs)"), false},
+		{"lit-call-refused", slxLitIdx("lc", "unknownFn(x)"), true},
+		{"lit-verbatim-survives", slxLitIdx("lc", "see (docs)"), false},
+		{"interp-toplevel-parts-call-refused", slxInterpPartsIdx("ic", "unknownFn(x)"), true},
+		{"interp-toplevel-parts-verbatim-survives", slxInterpPartsIdx("ic", "see (docs)"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildUnits(decodeBundle(t, plainDoc(tc.node)), true, true)
+			if tc.wantErr {
+				if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), "interp call expr") {
+					t.Fatalf("err = %v, want an ErrUnsupportedNode `interp call expr` refusal", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want the node to lower", err)
+			}
+		})
+	}
+}
+
+// TestSharedLaneEnqueueCallProvenance mirrors TestSharedLaneEnqueueProvenance for the call
+// sweep: a call-shaped do inside a repeat RUN body refuses at buildUnits wrapped in the
+// run-body dry-run provenance (`run body does not lower`), so a call-looking template part
+// refuses before any effect.
+func TestSharedLaneEnqueueCallProvenance(t *testing.T) {
+	inner := lisSubFormula("inner", "", slxDoIdx("bad", "unknownFn(x)"))
+	runBody := `{"kind":"run","id":"round","name":"round","after":[],` +
+		`"target":{"kind":"by-name","name":"inner"},"environment":{"fields":[]},"outcome":"transparent"}`
+	loop := `{"kind":"repeat","id":"loop","name":"loop","after":[],"iterationName":"iteration",` +
+		`"cond":` + lisIterGE1() + `,"body":` + runBody + `}`
+	wrapper := lisSubFormula("wrapper", "", loop)
+	doc := decodeBundle(t, runMainDoc(lisWrapperRunNoEnv(), wrapper+","+inner))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !strings.Contains(err.Error(), "run body does not lower") ||
+		!strings.Contains(err.Error(), "interp call expr") {
+		t.Fatalf("err = %v, want the call-sweep refusal wrapped in the run-body dry-run provenance", err)
+	}
+}
+
 // TestSharedLaneEnqueueProvenance pins §2.6: a STRICT-FAILING index do inside a repeat RUN
 // body refuses at buildUnits wrapped in the run-body dry-run provenance (`run body does not
 // lower`), so a bad index refuses before any effect.

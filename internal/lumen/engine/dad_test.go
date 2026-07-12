@@ -145,9 +145,9 @@ func dadTwoRunArms() []string {
 // TestDispatchAtDepthSeededDefaultMatches (§2.2 case a / §0.6a) proves the depth-seeded-default
 // shape: leafChain declares `drain_policy: string = "separate"` and it is NOT env-bound at the
 // last hop, so runInputLayer SEEDS the default at the dispatch namespace and the subject matches
-// the "separate" arm. Contrast the ROOT case where an omitted default is NEVER seeded
-// (TestDispatchRootDefaultNotSeededNoMatch, ga-ospbql) — when root-default seeding lands this
-// depth shape is unaffected, but the bound-"" chain (case c) flips transitively.
+// the "separate" arm. The ROOT case now seeds an omitted default too (ga-ospbql,
+// TestDispatchRootDefaultSeededMatchesAtRoot) — this depth shape is unaffected, and the bound-""
+// chain (case c) flipped to a match transitively.
 func TestDispatchAtDepthSeededDefaultMatches(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -177,13 +177,13 @@ func TestDispatchAtDepthSeededDefaultMatches(t *testing.T) {
 	}
 }
 
-// TestDispatchRootDefaultNotSeededNoMatch (§2.2 case b / §0.6b, ga-ospbql) pins the ROOT
-// contrast to the depth-seeded case: an omitted subject input with a declared default is NOT
-// seeded at the root (baseScope flattens only the provided map), so the subject evaluates "" →
-// no-match → PASS no-op with zero mints. This is the pinned CURRENT behavior; when the
-// ga-ospbql root-seeding slice lands, THIS flips directly and the bound-"" chain flips
-// transitively. (The DAR twin is TestDispatchRunArmRootDefaultGotcha.)
-func TestDispatchRootDefaultNotSeededNoMatch(t *testing.T) {
+// TestDispatchRootDefaultSeededMatchesAtRoot (§2.2 case b / §0.6b, ga-ospbql) pins the FLIPPED
+// ROOT behavior: an omitted subject input with a declared default is now SEEDED at genesis
+// (resolveDeclaredInput lands the default in d.input, baseScope flattens it), so the subject
+// evaluates "separate" → the run arm MATCHES and mints. Pre-INS this was a no-match no-op; the
+// bound-"" chain (case c, TestDispatchAtDepthBoundChainSeededMatches) flipped transitively.
+// (The DAR twin is TestDispatchRunArmRootDefaultGotcha.)
+func TestDispatchRootDefaultSeededMatchesAtRoot(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	defaultedPolicy := `{"name":"policy","type":{"kind":"atomic","name":"string"},"required":false,"body":false,"default":"separate"}`
@@ -192,33 +192,36 @@ func TestDispatchRootDefaultNotSeededNoMatch(t *testing.T) {
 		darDispatch("policy",
 			darRunArm("separate", "sepLane", "drainSeparate", darLaneEnv("fanout"))),
 		darLaneExecSub("drainSeparate")))
-	res, err := engine.Run(ctx, store, doc, map[string]any{"target": "t"}) // policy omitted
+	res, err := engine.Run(ctx, store, doc, map[string]any{"target": "t"}) // policy omitted → seeded "separate"
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	settled := settledOutcomeByID(t, res.Events)
 	if settled["d"] != engine.OutcomePass {
-		t.Errorf("root dispatch d = %q, want pass (omitted default is NOT seeded at root → no-match)", settled["d"])
+		t.Errorf("root dispatch d = %q, want pass (transparent from the chosen arm)", settled["d"])
 	}
-	if _, ok := settled["sepLane"]; ok {
-		t.Errorf("arm sepLane settled, want ZERO mints (default subject never seeded)")
+	if settled["sepLane"] != engine.OutcomePass {
+		t.Errorf("arm sepLane = %q, want pass (omitted default seeded at root → subject 'separate' matched)", settled["sepLane"])
+	}
+	if got := res.NodeOutputs["sepLane/drain"]; got != "item=fanout target=t" {
+		t.Errorf("chosen arm drain = %q, want item=fanout target=t (root default seeded the subject)", got)
 	}
 }
 
-// TestDispatchAtDepthBoundEmptyChainNoMatch (§2.2 case c / §0.6c — THE CORPUS TOPOLOGY) pins the
-// bound-"" chain: the root input drain_policy is declared with a default but OMITTED; every hop
-// binds drain_policy <- ref drain_policy. The root omission renders "" (root defaults unseeded),
-// runInputLayer marks the sub-input bound=true and SKIPS leafChain's default, so "" propagates
-// to the dispatch namespace → deep no-match no-op with zero mints, and a deep {{d}} consumer
-// renders "". ga-ospbql cross-ref: when root-default seeding lands, the seeded root value flows
-// through the bindings and THIS chain flips to a match transitively. The marquee e2e passes
-// drain_policy EXPLICITLY to sidestep exactly this.
-func TestDispatchAtDepthBoundEmptyChainNoMatch(t *testing.T) {
+// TestDispatchAtDepthBoundChainSeededMatches (§2.2 case c / §0.6c — THE CORPUS TOPOLOGY) pins the
+// ga-ospbql FLIP of the bound-"" chain: the root input drain_policy is declared with a default but
+// OMITTED; every hop binds drain_policy <- ref drain_policy. Genesis now SEEDS the root default
+// "separate" into d.input/baseScope, so the FIRST hop binds bound=true "separate" and the value
+// propagates through every hop to the deep dispatch namespace → the "separate" arm MATCHES deep,
+// mints its sub-graph, and the deep {{d}} consumer renders the chosen arm's output. Pre-INS the
+// root omission rendered "" and the deep dispatch was a no-match no-op. This asserts the deep
+// MATCH is specifically on the STRING "separate" (the "fanout" lane output, not the "shared" one).
+func TestDispatchAtDepthBoundChainSeededMatches(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	defaultedDP := `{"name":"drain_policy","type":{"kind":"atomic","name":"string"},"required":false,"default":"separate","body":false}`
-	// leafChain also declares drain_policy defaulted — but it arrives BOUND (to "") from the hop,
-	// so the default is skipped (the load-bearing part of the corpus gotcha).
+	// leafChain also declares drain_policy defaulted — but it arrives BOUND (to the seeded
+	// "separate") from the hop, so the default is skipped and the seeded value is what matches.
 	doc := decodeIR(t, bundleDoc(
 		defaultedDP+","+strField("target"),
 		runNodeRawEnv("continue-chain", nil, "midChain", dadHopEnv()),
@@ -228,23 +231,31 @@ func TestDispatchAtDepthBoundEmptyChainNoMatch(t *testing.T) {
 				darDispatch("drain_policy", dadTwoRunArms()...)+","+
 					execNode("after", `echo "after: {{ d }}"`, []string{"d"}))+","+
 			darLaneExecSub("drainSeparate")+","+darLaneExecSub("drainShared")))
-	res, err := engine.Run(ctx, store, doc, map[string]any{"target": "t"}) // drain_policy omitted
+	res, err := engine.Run(ctx, store, doc, map[string]any{"target": "t"}) // drain_policy omitted → seeded "separate"
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if res.Outcome != engine.OutcomePass {
-		t.Fatalf("run outcome = %q, want pass (bound-\"\" chain → deep no-match no-op)", res.Outcome)
+		t.Fatalf("run outcome = %q, want pass", res.Outcome)
 	}
 	settled := settledOutcomeByID(t, res.Events)
 	if settled[dadBase+"d"] != engine.OutcomePass {
-		t.Errorf("deep dispatch d = %q, want pass (bound \"\" → no-match no-op)", settled[dadBase+"d"])
+		t.Errorf("deep dispatch d = %q, want pass (transparent from the chosen arm)", settled[dadBase+"d"])
 	}
-	if _, ok := settled[dadBase+"lanes"]; ok {
-		t.Errorf("arm lanes minted, want ZERO (bound-\"\" subject matched nothing)")
+	if settled[dadBase+"lanes"] != engine.OutcomePass {
+		t.Errorf("deep arm lanes = %q, want pass (seeded 'separate' propagated through the bound chain → match)", settled[dadBase+"lanes"])
 	}
-	// The deep {{d}} consumer runs (no skip-cascade) and renders "" for the no-op dispatch.
-	if got := res.NodeOutputs[dadBase+"after"]; got != "after: " {
-		t.Errorf("deep after = %q, want %q (no-match no-op does not skip-cascade; {{d}} empty)", got, "after: ")
+	// Deep MATCH is on the STRING "separate": the "separate" arm (lanes, reviewer "fanout") ran,
+	// the "same-session" arm (sharedLanes, reviewer "shared") did NOT.
+	if got := res.NodeOutputs[dadBase+"lanes/drain"]; got != "item=fanout target=t" {
+		t.Errorf("deep chosen arm drain = %q, want item=fanout target=t (the 'separate' arm was chosen)", got)
+	}
+	if _, ok := settled[dadBase+"sharedLanes"]; ok {
+		t.Errorf("unchosen 'same-session' arm sharedLanes settled, want ZERO activations")
+	}
+	// The deep {{d}} consumer renders the chosen arm's transparent output (transitive seed match).
+	if got := res.NodeOutputs[dadBase+"after"]; got != "after: item=fanout target=t" {
+		t.Errorf("deep after = %q, want %q ({{d}} carries the chosen arm output)", got, "after: item=fanout target=t")
 	}
 }
 
@@ -535,7 +546,7 @@ func TestDispatchAtDepthLeafDoArmRendersEnvBoundValue(t *testing.T) {
 // the deep arm render + transparent settle carry no driver-dependent divergence.
 func TestDispatchAtDepthExecArmByteParity(t *testing.T) {
 	ctx := context.Background()
-	leaf := darDispatch("drain_policy", darExecArm("separate", "lanesExec", `echo "drain {{ target }}"`))
+	leaf := darDispatch("drain_policy", darExecArm("lanesExec", `echo "drain {{ target }}"`))
 	doc := decodeIR(t, dadChainNodes(leaf))
 	input := map[string]any{"drain_policy": "separate", "target": "t"}
 

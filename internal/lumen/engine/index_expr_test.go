@@ -76,6 +76,11 @@ func TestParseIndexExpr(t *testing.T) {
 // zero-based; the index ident resolves from scope with '-' arithmetic; every failure row
 // returns *indexRenderError (base absent, base not an array, index absent/non-integral,
 // out of range), and a present-EMPTY base is distinct from an ABSENT base.
+//
+// INS catalog annotation (ga-ospbql): the base-MISS row deliberately uses `missing`, an
+// UNDECLARED name. Post-seeding a DECLARED input never misses — an optional-unbound declared
+// input seeds present-null → baseScope "" → a present-EMPTY base (the out-of-range detail row),
+// NOT base-absent — so only an undeclared name can exercise the absent-base arm here.
 func TestRenderIndexExpr(t *testing.T) {
 	scope := map[string]string{
 		"items":     `["alpha","beta"]`,

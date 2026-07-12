@@ -319,6 +319,15 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 		return nil, nil, nil, fmt.Errorf("lumen: resume %q: %w", streamID, err)
 	}
 
+	// ⚑B1 seed-only (ga-ospbql): the SEEDED map feeds d.input + baseScope; the
+	// InputHash pin ABOVE already checked against the RAW input (hashing seeded
+	// bytes would refuse every pre-INS journal). ⚑B2: NO required-unbound refusal
+	// here — the ADVISORY error is deliberately discarded, so a pre-INS in-flight
+	// journal with an incomplete input rebuilds with tolerant declared-null
+	// semantics mid-flight (the accepted mixed-semantics row) instead of stranding
+	// forever (the enqueue-wedge class).
+	seeded, _ := resolveDeclaredInput(doc.Input.Fields, input)
+
 	d := &driver{
 		ctx:              ctx,
 		store:            store,
@@ -329,7 +338,7 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 		state:            state,
 		head:             head,
 		host:             opts.Host,
-		input:            input,
+		input:            seeded,
 		snapshotEvery:    opts.SnapshotEvery,
 		crashInterrupted: crashInterrupted,
 		settledEffects:   recordedEffects,
@@ -341,7 +350,7 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 	// skipped node / aggregate is NOT seeded), no less (B1). NodeOutputs and the
 	// scope are seeded separately: aggregates land in NodeOutputs but never scope.
 	nodeOutputs, scopeSeed := reconstructOutputs(ls)
-	scope := baseScope(input)
+	scope := baseScope(seeded)
 	for id, out := range scopeSeed {
 		scope[id] = out
 	}

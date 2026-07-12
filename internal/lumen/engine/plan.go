@@ -2250,12 +2250,14 @@ func (l *lowerer) resolveDeps() error {
 	// the children view), so a sibling synth named like either must not false-refuse (the
 	// body id is in synthBodies as the loop's own attempt activation).
 	//
-	// Catalog rows (accepted, recorded): (a) a declared INPUT named like a same-ns synth
+	// Catalog row (accepted, recorded): a declared INPUT named like a same-ns synth
 	// body is loud-refused here even though the input arm would resolve it — the
-	// improbable-trigger/errs-loud class the dispatch subjectRefs note accepts; (b) the
-	// run-body FREEZE admits an optional-unbound-undefaulted input name that falls
-	// through the input layer to the child view at eval time — pre-existing ROOT parity
-	// (l.inputNames is name-set, not bound-set), a documented follow-up, not fixed here.
+	// improbable-trigger/errs-loud class the dispatch subjectRefs note accepts.
+	// (The freeze allowlist admitting an input NAME regardless of bound-ness is now
+	// honest at every level: resolveDeclaredInput lands every declared field —
+	// present-null when optional-unbound — in both the ns typed layer (ga-wvqsay)
+	// and the genesis-seeded root d.input (ga-ospbql), so a cond input ref can never
+	// fall through to the child view; l.inputNames stays a name-set.)
 	for i := range l.units {
 		u := &l.units[i]
 		if u.kind != unitLoop || u.loop == nil {

@@ -62,9 +62,10 @@ func darRunArm(match, armID, target, fieldsJSON string) string {
 		runNodeRawEnv(armID, nil, target, fieldsJSON) + `}`
 }
 
-// darExecArm renders one dispatch arm whose body is a plain exec leaf (id armID).
-func darExecArm(match, armID, script string) string {
-	return `{"match":{"kind":"literal","value":"` + match + `"},"body":` + execNode(armID, script, nil) + `}`
+// darExecArm renders one "separate"-matched dispatch arm whose body is a plain
+// exec leaf (id armID) — every caller matches the "separate" subject value.
+func darExecArm(armID, script string) string {
+	return `{"match":{"kind":"literal","value":"separate"},"body":` + execNode(armID, script, nil) + `}`
 }
 
 // darDoArm renders one dispatch arm whose body is a pool-materializable do (id armID).
@@ -283,7 +284,7 @@ func TestDispatchMixedLeafChosenBesideRun(t *testing.T) {
 	doc := decodeIR(t, bundleDoc(
 		strField("policy")+","+strField("target"),
 		darDispatch("policy",
-			darExecArm("separate", "leafArm", `echo "leaf-out"`),
+			darExecArm("leafArm", `echo "leaf-out"`),
 			darRunArm("same-session", "runArm", "drainShared", darLaneEnv("shared")))+","+
 			execNode("done", `echo "d={{ d }}"`, []string{"d"}),
 		darLaneExecSub("drainShared")))
@@ -318,7 +319,7 @@ func TestDispatchMixedRunChosenBesideLeaf(t *testing.T) {
 	doc := decodeIR(t, bundleDoc(
 		strField("policy")+","+strField("target"),
 		darDispatch("policy",
-			darExecArm("separate", "leafArm", `echo "leaf-out"`),
+			darExecArm("leafArm", `echo "leaf-out"`),
 			darRunArm("same-session", "runArm", "drainShared", darLaneEnv("shared"))),
 		darLaneExecSub("drainShared")))
 	res, err := engine.Run(ctx, store, doc, map[string]any{"policy": "same-session", "target": "rel"})
@@ -567,11 +568,12 @@ func TestDispatchRunArmDepthComposedForEachInArm(t *testing.T) {
 	assertProjectionEqualsRefold(t, store, res.StreamID)
 }
 
-// TestDispatchRunArmRootDefaultGotcha (§2.8, PINNED CURRENT BEHAVIOR) pins the root-default
-// gotcha: an OMITTED subject input with a declared default is NOT seeded (root defaults are
-// never seeded — baseScope flattens only the provided map), so the subject evaluates "" →
-// no-match → the whole dispatch silently PASSes with zero mints. Follow-up bead filed
-// (seeding root defaults is a root-semantics slice of its own).
+// TestDispatchRunArmRootDefaultGotcha (§2.8) pins the ga-ospbql FLIP of the root-default gotcha
+// (the DAR twin of the DAD pins): an OMITTED subject input with a declared default is now SEEDED
+// at genesis (resolveDeclaredInput lands the default in d.input, baseScope flattens it), so the
+// subject evaluates "separate" → the run arm MATCHES and mints its whole sub-graph. Pre-INS the
+// omitted default was never seeded and the dispatch silently PASSed with zero mints; this slice
+// closes that gotcha.
 func TestDispatchRunArmRootDefaultGotcha(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -582,19 +584,22 @@ func TestDispatchRunArmRootDefaultGotcha(t *testing.T) {
 		darDispatch("policy",
 			darRunArm("separate", "sepLane", "drainSeparate", darLaneEnv("fanout"))),
 		darLaneExecSub("drainSeparate")))
-	res, err := engine.Run(ctx, store, doc, map[string]any{"target": "t"}) // policy omitted
+	res, err := engine.Run(ctx, store, doc, map[string]any{"target": "t"}) // policy omitted → seeded "separate"
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if res.Outcome != engine.OutcomePass {
-		t.Fatalf("run outcome = %q, want pass (omitted-default subject → no-match no-op)", res.Outcome)
+		t.Fatalf("run outcome = %q, want pass", res.Outcome)
 	}
 	settled := settledOutcomeByID(t, res.Events)
 	if settled["d"] != engine.OutcomePass {
-		t.Errorf("dispatch d = %q, want pass (no-match no-op — the root default is NOT seeded)", settled["d"])
+		t.Errorf("dispatch d = %q, want pass (transparent from the chosen arm)", settled["d"])
 	}
-	if _, ok := settled["sepLane"]; ok {
-		t.Errorf("arm sepLane settled, want ZERO mints (the default subject was never seeded, so no arm matched)")
+	if settled["sepLane"] != engine.OutcomePass {
+		t.Errorf("arm sepLane = %q, want pass (the seeded default 'separate' matched the run arm)", settled["sepLane"])
+	}
+	if got := res.NodeOutputs["sepLane/drain"]; got != "item=fanout target=t" {
+		t.Errorf("chosen arm drain = %q, want item=fanout target=t (omitted default seeded the subject → match)", got)
 	}
 }
 
@@ -1009,7 +1014,7 @@ func TestDispatchMixedLeafAndNoMatchPoolInlineJournalParity(t *testing.T) {
 	doc := decodeIR(t, bundleDoc(
 		strField("policy")+","+strField("target"),
 		darDispatch("policy",
-			darExecArm("separate", "leafArm", `echo "leaf-out"`),
+			darExecArm("leafArm", `echo "leaf-out"`),
 			darRunArm("same-session", "runArm", "drainShared", darLaneEnv("shared"))),
 		darLaneExecSub("drainShared")))
 	for _, tc := range []struct{ name, policy string }{

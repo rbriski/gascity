@@ -51,6 +51,14 @@ func EnqueueRun(ctx context.Context, store *graphstore.Store, doc *ir.IR, input 
 	if _, err := buildUnits(doc, true, false); err != nil {
 		return "", fmt.Errorf("lumen: enqueue: IR does not lower: %w", err)
 	}
+	// ⚑B2 (ga-ospbql): refuse a required-unbound input LOUDLY beside the lowering
+	// gate, before any stream exists — no discoverable run is minted (an
+	// invalid_input settle would journal-litter a dead run the controller loop
+	// re-logs forever). Enqueue threads input ONLY to the raw inputHash stamp below
+	// — no seeding here, ever (⚑B1: the controller's Advance seeds at drive time).
+	if _, err := resolveDeclaredInput(doc.Input.Fields, input); err != nil {
+		return "", fmt.Errorf("lumen: enqueue: %w", err)
+	}
 
 	streamID := streamIDForRun(doc.Name, true)
 	if strings.ContainsRune(streamID, ':') {

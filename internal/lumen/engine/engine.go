@@ -211,6 +211,16 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		return RunResult{}, err
 	}
 
+	// ⚑B1/⚑B2 genesis (ga-ospbql): resolve the declared input schema BEFORE any
+	// side effect. The SEEDED map feeds d.input + baseScope ONLY; the RAW input
+	// feeds inputHash below (hashing seeded bytes would orphan every pre-INS
+	// journal on resume). A required-unbound field refuses HERE — pre-run.started,
+	// typed sentinel, no journal litter.
+	seeded, err := resolveDeclaredInput(doc.Input.Fields, input)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("lumen: run %q: %w", doc.Name, err)
+	}
+
 	streamID := streamIDForRun(doc.Name, opts.Host != nil)
 	RegisterVocabulary(store)
 
@@ -235,7 +245,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		reducer:       reducer,
 		state:         reducer.Zero(streamID),
 		host:          opts.Host,
-		input:         input,
+		input:         seeded,
 		snapshotEvery: opts.SnapshotEvery,
 		runEnvs:       runEnvIndex(units),
 	}
@@ -257,7 +267,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	}
 
 	nodeOutputs := make(map[string]string)
-	scope := baseScope(input)
+	scope := baseScope(seeded)
 
 	for i := range units {
 		if err := d.runUnit(units[i], scope, nodeOutputs); err != nil {
@@ -1697,33 +1707,90 @@ func (d *driver) loopEvalScope(u planUnit, iteration int, bn *nodeState, scope, 
 	return d.loopScopeNS(u.loop, iteration, bn, u.ns, scope, nodeOutputs)
 }
 
+// ErrRequiredInputUnbound is the typed genesis refusal (⚑B2, ga-ospbql): a formula
+// input field declared required with neither a caller-provided value nor a default.
+// It fires at EXACTLY three surfaces, all pre-journal: RunWithOptions and Advance's
+// fresh (head==0) seed — both before run.started — and EnqueueRun beside its
+// buildUnits gate (loud at the CLI, no discoverable run minted). It NEVER fires at
+// rebuildDriver (resume / re-entrant Advance): a rebuild-side check would
+// permanently strand every pre-INS in-flight journal with an incomplete input. It
+// is deliberately distinct from ErrInputHashMismatch — an input can hash-match the
+// journal and still be refused at a fresh genesis.
+var ErrRequiredInputUnbound = errors.New("lumen: required input unbound")
+
+// resolveDeclaredInput resolves a formula's DECLARED input schema against the raw
+// caller-provided values into a fresh, fully-populated input layer — the shared rule
+// behind the namespace-local typed layer (typedSubInput) and genesis seeding (⚑B1:
+// the SEEDED map feeds d.input + baseScope at the drive entries ONLY; the RAW map
+// feeds every hash/identity surface). For each declared field: a value present in
+// raw (even an explicit null) is taken verbatim; otherwise the field's default;
+// otherwise present-NULL. An optional, unbound, undefaulted field is therefore
+// declared-NULL — present in the layer, not absent — so a same-named node can never
+// shadow it in an input-first scope. A schema with NO declared fields passes raw
+// through unchanged (fresh copy) — the reference bindLumenInput's empty-schema arm;
+// with a non-empty schema only UNDECLARED names are left out (they fall through to
+// children / miss downstream). The map is FRESH; raw is never mutated (⚑B1).
+//
+// The error arm is ADVISORY (⚑B2): the returned map is ALWAYS the tolerant full
+// layer, and a required field with neither a provided value nor a default
+// (`default: null` ≡ absent) additionally returns ErrRequiredInputUnbound naming
+// the field(s). The three genesis surfaces consume the error and refuse before any
+// journal append; typedSubInput and rebuildDriver DISCARD it and keep the tolerant
+// present-null layer.
+func resolveDeclaredInput(fields []ir.Field, raw map[string]any) (map[string]any, error) {
+	if len(fields) == 0 {
+		out := make(map[string]any, len(raw))
+		for k, v := range raw {
+			out[k] = v
+		}
+		return out, nil
+	}
+	out := make(map[string]any, len(fields))
+	var missing []string
+	for _, f := range fields {
+		if v, ok := raw[f.Name]; ok {
+			out[f.Name] = v
+			continue
+		}
+		out[f.Name] = f.Default
+		if f.Required && f.Default == nil {
+			missing = append(missing, strconv.Quote(f.Name))
+		}
+	}
+	if len(missing) > 0 {
+		return out, fmt.Errorf("%w: %s (no value provided, no default)", ErrRequiredInputUnbound, strings.Join(missing, ", "))
+	}
+	return out, nil
+}
+
 // typedSubInput builds the loop cond/attempts INPUT layer for a run sub-formula's
 // namespace (§1.2 ⚑B1): the run's declared inputs as TYPED scalars, so the loop cond
-// compares against numbers/bools the way the ROOT cond compares against d.input. For
-// each declared field: an env-BOUND field takes runInputLayer's render string RE-TYPED
-// per the field's declared atomic type (number → ParseFloat, boolean → ParseBool, else
-// the string verbatim; a parse failure keeps the string — the garbage-in root analog); a
-// defaulted-UNBOUND field takes the field's TYPED default directly. It reads runInputLayer
-// (env bindings against the parent view) + the IR field schema only, so genesis and
-// resume build an identical layer (DET).
+// compares against numbers/bools the way the ROOT cond compares against d.input. An
+// env-BOUND field is runInputLayer's render string RE-TYPED per the field's declared
+// atomic type (number → ParseFloat, boolean → ParseBool, array → json.Unmarshal, else the
+// string verbatim; a parse failure keeps the string — the garbage-in root analog); those
+// re-typed values seed the raw layer that resolveDeclaredInput resolves the full declared
+// schema against, so a defaulted-UNBOUND field lands its TYPED default and an optional
+// unbound-undefaulted field lands present-NULL (input-first: the child view no longer
+// shadows it). It reads runInputLayer (env bindings against the parent view) + the IR field
+// schema only, so genesis and resume build an identical layer (DET).
 func (d *driver) typedSubInput(ns string, spec *runSpec, scope map[string]string) (map[string]any, error) {
 	layer, err := d.runInputLayer(ns, scope)
 	if err != nil {
 		return nil, err
 	}
-	bound := make(map[string]bool, len(spec.env))
-	for _, f := range spec.env {
-		bound[f.name] = true
-	}
-	input := make(map[string]any, len(spec.inputFields))
+	fieldType := make(map[string]ir.Type, len(spec.inputFields))
 	for _, fld := range spec.inputFields {
-		switch {
-		case bound[fld.Name]:
-			input[fld.Name] = retypeScalar(layer[fld.Name], fld.Type)
-		case fld.Default != nil:
-			input[fld.Name] = fld.Default
-		}
+		fieldType[fld.Name] = fld.Type
 	}
+	raw := make(map[string]any, len(spec.env))
+	for _, f := range spec.env {
+		raw[f.name] = retypeScalar(layer[f.name], fieldType[f.name])
+	}
+	// ns tolerates a required-unbound input as present-null (⚑B2: the required-unbound
+	// refusal is genesis-only — never on this rebuild/decide path), so the ADVISORY
+	// error arm is deliberately discarded here; the tolerant full layer is kept.
+	input, _ := resolveDeclaredInput(spec.inputFields, raw)
 	return input, nil
 }
 
@@ -2549,16 +2616,26 @@ func interpolate(s string, scope map[string]string) string {
 	})
 }
 
-// baseScope seeds the interpolation scope from the run input.
+// baseScope seeds the interpolation scope from the run input. A nil value — a
+// declared-null input seeded by resolveDeclaredInput, or an explicit caller-passed
+// null — renders "" (Q-C, ga-ospbql): the json.Marshal arm would write the 4-byte
+// STRING "null" (wrong on every render surface), and skipping the key would leave
+// {{name}} VERBATIM on interpolate's miss arm (also wrong). The "null"→"" flip for
+// explicit caller nulls is an intended reference-parity fix; old journals with
+// explicit nulls still resume green (the raw bytes hashing is unchanged) and run
+// mixed-semantics mid-flight — the accepted compat row.
 func baseScope(input map[string]any) map[string]string {
 	scope := make(map[string]string, len(input))
 	for k, v := range input {
-		if s, ok := v.(string); ok {
-			scope[k] = s
-			continue
-		}
-		if b, err := json.Marshal(v); err == nil {
-			scope[k] = string(b)
+		switch t := v.(type) {
+		case nil:
+			scope[k] = ""
+		case string:
+			scope[k] = t
+		default:
+			if b, err := json.Marshal(v); err == nil {
+				scope[k] = string(b)
+			}
 		}
 	}
 	return scope

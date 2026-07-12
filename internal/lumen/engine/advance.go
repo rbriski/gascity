@@ -159,6 +159,14 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 		// Fresh run: seed run.started exactly as Run does (stamping ir/input hashes
 		// so a later Advance's rebuild guard refuses a foreign doc/input). A crash
 		// after this point re-enters through the rebuild path below.
+		// ⚑B1/⚑B2 genesis (ga-ospbql): the SEEDED map feeds d.input + baseScope
+		// ONLY; the RAW input feeds the run.started inputHash stamp. A
+		// required-unbound field refuses HERE — pre-run.started; the rebuild arm
+		// below never refuses (a pre-INS in-flight journal must keep resuming).
+		seeded, err := resolveDeclaredInput(doc.Input.Fields, input)
+		if err != nil {
+			return AdvanceResult{}, fmt.Errorf("lumen: advance %q: %w", streamID, err)
+		}
 		reducer := lumenReducer{}
 		d = &driver{
 			ctx:           ctx,
@@ -169,7 +177,7 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 			reducer:       reducer,
 			state:         reducer.Zero(streamID),
 			host:          opts.Host,
-			input:         input,
+			input:         seeded,
 			snapshotEvery: opts.SnapshotEvery,
 		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -185,7 +193,7 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 		if err := d.crashAt(crashAfterRunStarted, streamID); err != nil {
 			return AdvanceResult{}, err
 		}
-		scope = baseScope(input)
+		scope = baseScope(seeded)
 		nodeOutputs = map[string]string{}
 	} else {
 		// Re-entrant: rebuild state from the journal (the same restore core as

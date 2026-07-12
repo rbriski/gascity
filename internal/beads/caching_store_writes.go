@@ -410,6 +410,16 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		return nil
 	}
 	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
+		// A generic Store error cannot tell us whether the backing rejected the
+		// batch, committed a subset, or committed everything before losing the
+		// response. Fence every outcome and force the next ordinary projection to
+		// reread backing truth. This is deliberately not noteLocalMutationLocked:
+		// the cached pre-write row is not trusted local truth and its recency window
+		// must not hide a later foreign mutation.
+		c.mu.Lock()
+		c.noteMutationLocked(id)
+		c.markDirtyLocked(id)
+		c.mu.Unlock()
 		return err
 	}
 

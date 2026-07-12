@@ -171,7 +171,8 @@ func (s *Server) humaHandleRunSteps(_ context.Context, input *RunStepsInput) (*R
 func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, beadList []beads.Bead) Run {
 	root, rootFound := byID[lane.ID]
 	started := 0
-	if !(rootFound && isClosedStatus(root.Status)) {
+	needsStartedCount := !rootFound || !isClosedStatus(root.Status)
+	if needsStartedCount {
 		started = countStartedMembers(beadList, lane.ID)
 	}
 	run := Run{

@@ -880,6 +880,61 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	}, nil
 }
 
+// BeadGraphDep is a topology edge (parent-child) in a bead/molecule graph.
+type BeadGraphDep struct {
+	From string
+	To   string
+	Kind string
+}
+
+// BeadGraph is a molecule/bead topology — the root, its member/step beads, and
+// their parent-child edges — as returned by GET /beads/graph/{rootID}.
+type BeadGraph struct {
+	Root  beads.Bead
+	Beads []beads.Bead
+	Deps  []BeadGraphDep
+}
+
+// GetBeadGraph fetches the molecule/bead graph rooted at rootID — the routed data
+// source for `gc bd mol current`/`progress` on a split city. The controller
+// handler federates across the work and infra stores, so this reaches molecule
+// topology whose step beads live in the infra store (the single-store `bd` the
+// passthrough execs cannot see them).
+func (c *Client) GetBeadGraph(rootID string) (BeadGraph, error) {
+	if err := c.requireCityScope(); err != nil {
+		return BeadGraph{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsGraphByRootIdWithResponse(context.Background(), c.cityName, rootID)
+	if err != nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return BeadGraph{}, err
+	}
+	if resp.JSON200 == nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("empty graph response for %q", rootID)}
+	}
+	g := BeadGraph{Root: beadFromGen(resp.JSON200.Root)}
+	if resp.JSON200.Beads != nil {
+		for _, b := range *resp.JSON200.Beads {
+			g.Beads = append(g.Beads, beadFromGen(b))
+		}
+	}
+	if resp.JSON200.Deps != nil {
+		for _, d := range *resp.JSON200.Deps {
+			kind := ""
+			if d.Kind != nil {
+				kind = *d.Kind
+			}
+			g.Deps = append(g.Deps, BeadGraphDep{From: d.From, To: d.To, Kind: kind})
+		}
+	}
+	return g, nil
+}
+
 // GetStatus fetches the city-wide status snapshot via
 // GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header

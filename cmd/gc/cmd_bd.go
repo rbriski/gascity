@@ -239,6 +239,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// `mol current|progress <id>` on a split city cannot be answered by the
+	// single-store bd exec below: the molecule's step beads are graph-class and
+	// live in the infra store, invisible to the work-scoped bd, so it returns
+	// steps: null and blocks every reader (workflow progress, finalize approval).
+	// Federate the topology through the controller's bead-graph endpoint and
+	// render the same JSON shape bd emits. Single-store cities, non-routable mol
+	// forms, and a controller-down city all fall through to the byte-identical
+	// passthrough. (split-store-conformance port of X2 / commit 305bed90d.)
+	if code, handled := maybeRouteBdMolViaAPI(cityPath, bdArgs, stdout, stderr); handled {
+		return code
+	}
+
 	// Use the full config load path (includes pack expansion + site
 	// binding overlay) so migrated rigs (path only in .gc/site.toml)
 	// resolve to their bound path. A raw config.Load here would make

@@ -1,0 +1,145 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "repeat-run-in-sub",
+  "input": {
+    "name": "repeat-run-in-sub.input",
+    "fields": [
+      {
+        "name": "who",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "run",
+      "id": "wrapper",
+      "name": "wrapper",
+      "after": [],
+      "target": { "kind": "by-name", "name": "reviewWrapper" },
+      "environment": {
+        "fields": [
+          {
+            "name": "who",
+            "value": { "kind": "expr", "expr": { "kind": "ref", "name": "who" } }
+          },
+          {
+            "name": "max_review_rounds",
+            "value": { "kind": "expr", "expr": { "kind": "literal", "value": 12 } }
+          }
+        ]
+      },
+      "outcome": "transparent"
+    }
+  ],
+  "formulas": {
+    "reviewWrapper": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "reviewWrapper",
+      "input": {
+        "name": "reviewWrapper.input",
+        "fields": [
+          {
+            "name": "who",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          },
+          {
+            "name": "max_review_rounds",
+            "type": { "kind": "atomic", "name": "number" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "repeat",
+          "id": "rounds",
+          "name": "rounds",
+          "after": [],
+          "iterationName": "iteration",
+          "body": {
+            "kind": "run",
+            "id": "round",
+            "name": "round",
+            "after": [],
+            "target": { "kind": "by-name", "name": "reviewRound" },
+            "environment": {
+              "fields": [
+                {
+                  "name": "name",
+                  "value": { "kind": "expr", "expr": { "kind": "ref", "name": "who" } }
+                }
+              ]
+            },
+            "outcome": "transparent"
+          },
+          "cond": {
+            "kind": "operator",
+            "op": "||",
+            "operands": [
+              {
+                "kind": "operator",
+                "op": "==",
+                "operands": [
+                  { "kind": "ref", "name": "round", "field": "outcome" },
+                  { "kind": "literal", "value": "pass" }
+                ]
+              },
+              {
+                "kind": "operator",
+                "op": ">=",
+                "operands": [
+                  { "kind": "ref", "name": "iteration" },
+                  { "kind": "ref", "name": "max_review_rounds" }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "reviewRound": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "reviewRound",
+      "input": {
+        "name": "reviewRound.input",
+        "fields": [
+          {
+            "name": "name",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "review",
+          "name": "review",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": { "raw": "Review the work for {{ name }}, then settle this step (fail the first attempt, pass after)." }
+        }
+      ]
+    }
+  }
+}

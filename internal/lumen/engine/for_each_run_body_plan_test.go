@@ -311,17 +311,18 @@ func TestLowerForEachRunBodyDecodeInheritance(t *testing.T) {
 	}
 }
 
-// TestLowerForEachRunBodyDryRunRefusesNestedLoop (§2.10 ⚑S4) pins that a run-bodied fan whose
-// member sub-formula contains a LOOP does not lower — the member-prefix mint hits the loop's
-// prefix fence ("top-level only") and buildUnits refuses with the for-each run-body
-// provenance wrap, so EnqueueRun refuses before seeding a run.
-func TestLowerForEachRunBodyDryRunRefusesNestedLoop(t *testing.T) {
-	sub := reviewLaneFormula("reviewLane", retryMember("r1", "b1", "echo hi"))
+// TestLowerForEachRunBodyDryRunRefusesUnlowerableMember (§2.10 ⚑S4) pins that a run-bodied
+// fan whose member sub-formula contains an UN-LOWERABLE node does not lower — buildUnits
+// refuses with the for-each run-body provenance wrap, so EnqueueRun refuses before seeding a
+// run. (A plain nested loop now lowers after LIS; the durable un-lowerable shape is a
+// '/'-forged cond ref.)
+func TestLowerForEachRunBodyDryRunRefusesUnlowerableMember(t *testing.T) {
+	sub := reviewLaneFormula("reviewLane", repeatMemberForgedCond("r1", "b1"))
 	doc := decodeBundle(t, fbrMainDoc(
 		fbrFanNode(refV("reviewers"), fbrRunMember("reviewLane", corpusEnv())), sub))
 	_, err := buildUnits(doc, true, true)
-	if err == nil || !strings.Contains(err.Error(), "run body does not lower") || !strings.Contains(err.Error(), "top-level") {
-		t.Fatalf("want a for-each run-body dry-run refusal (does not lower / top-level), got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "run body does not lower") || !strings.Contains(err.Error(), "reserved delimiter") {
+		t.Fatalf("want a for-each run-body dry-run refusal (does not lower / reserved delimiter), got %v", err)
 	}
 	if !strings.Contains(err.Error(), "for-each") {
 		t.Errorf("refusal %v should name the for-each provenance", err)
@@ -332,8 +333,9 @@ func TestLowerForEachRunBodyDryRunRefusesNestedLoop(t *testing.T) {
 // run-bodied fan inside a repeat run body, whose fan member sub contains a loop, refuses with
 // the for-each wrap composed UNDER the repeat wrap.
 func TestLowerForEachRunBodyDryRunProvenanceUnderRepeat(t *testing.T) {
-	// reviewer sub-formula body is a run-bodied fan whose member (innerLane) has a loop.
-	inner := reviewLaneFormula("innerLane", retryMember("r1", "b1", "echo hi"))
+	// reviewer sub-formula body is a run-bodied fan whose member (innerLane) has an
+	// un-lowerable ('/'-forged cond ref) loop.
+	inner := reviewLaneFormula("innerLane", repeatMemberForgedCond("r1", "b1"))
 	reviewer := `"reviewer":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"reviewer","input":{"name":"reviewer.input","fields":[` +
 		`{"name":"reviewers","type":{"kind":"array","element":{"kind":"atomic","name":"string"}},"required":true,"body":false}]},` +

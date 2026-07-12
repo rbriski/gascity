@@ -438,16 +438,19 @@ func TestAdvanceRepeatRunBodyBlockedSkipsWithZeroMints(t *testing.T) {
 }
 
 // TestEnqueueRepeatRunBodyDryRunRefuses (§6 seed #8) proves the ⚑S4 dry-run guards the
-// ENQUEUE gate: a repeat run body whose sub-formula contains a loop does not lower, so
-// EnqueueRun refuses LOUDLY (naming the top-level fence) rather than seeding a run.started
-// that would wedge open forever — pre-validated with the controller-loop flags.
+// ENQUEUE gate: a repeat run body whose sub-formula contains an un-lowerable node does not
+// lower, so EnqueueRun refuses LOUDLY rather than seeding a run.started that would wedge
+// open forever — pre-validated with the controller-loop flags. (A plain nested loop now
+// lowers after LIS; the durable un-lowerable shape is a '/'-forged cond ref.)
 func TestEnqueueRepeatRunBodyDryRunRefuses(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	// greeter's own body is a retry loop — legal at the top level, refused at the
-	// attempt prefix (loops are top-level only), so the dry-run mint refuses.
+	// greeter's own body is a repeat loop whose cond forges a '/'-bearing ref — a
+	// permanent reserved-delimiter refusal, so the dry-run mint refuses.
+	forgedCond := `{"kind":"operator","op":"==","operands":[` +
+		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"pass"}]}`
 	subLoop := subDoc("greeter", strField("name"),
-		retryNode(`{"kind":"literal","value":2}`, execNode("b1", "echo hi", nil)))
+		repeatNode(execNode("b1", "echo hi", nil), forgedCond))
 	doc := decodeIR(t, bundleDoc(
 		strField("who"),
 		repeatRunLoop(nil,
@@ -459,8 +462,8 @@ func TestEnqueueRepeatRunBodyDryRunRefuses(t *testing.T) {
 	if err == nil {
 		t.Fatalf("enqueue accepted a run body that cannot lower (streamID=%q); want a loud refusal", streamID)
 	}
-	if !strings.Contains(err.Error(), "does not lower") || !strings.Contains(err.Error(), "top-level") {
-		t.Errorf("enqueue error = %v, want it to name the un-lowerable run body (does not lower / top-level)", err)
+	if !strings.Contains(err.Error(), "does not lower") || !strings.Contains(err.Error(), "reserved delimiter") {
+		t.Errorf("enqueue error = %v, want it to name the un-lowerable run body (does not lower / reserved delimiter)", err)
 	}
 }
 

@@ -11,19 +11,22 @@ import (
 
 // TestEnqueueRefusesUnlowerableIR pins the §6 L6 enqueue-wedge fix: an IR that will
 // not lower is refused LOUD at EnqueueRun, BEFORE run.started is appended, so no
-// wedged, unsealable run is ever discoverable. Head stays 0. (run-under-scatter now
-// lowers after the run-in-scatter slice, so the fixture is a loop INSIDE a run
-// sub-formula — still unlowerable, fenced by lowerLoop's prefix guard.)
+// wedged, unsealable run is ever discoverable. Head stays 0. (A loop inside a run
+// sub-formula now lowers after the LIS slice, so the fixture is a repeat whose cond
+// carries a '/'-FORGED ref — a permanent reserved-delimiter language invariant, not a
+// slice-of-the-week wall.)
 func TestEnqueueRefusesUnlowerableIR(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	// A retry loop INSIDE a run sub-formula is un-lowerable (loops are top-level or a
-	// top-level scatter member only; a namespace-unaware loopScope is a follow-on).
+	// A repeat cond referencing a '/'-bearing name forges a cross-namespace flat key;
+	// the charset ban refuses it at lowering (durable — idents never carry '/' or ':').
 	loopBody := execNodeExit("body", "echo hi", []int{0}, nil)
+	forgedCond := `{"kind":"operator","op":"==","operands":[` +
+		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"pass"}]}`
 	doc := decodeIR(t, bundleDoc(
 		"",
-		runNodeJSON("r", nil, "sub", "", ""),
-		subDoc("sub", "", retryNode(`{"kind":"literal","value":2}`, loopBody)),
+		repeatNode(loopBody, forgedCond),
+		"",
 	))
 
 	streamID, err := engine.EnqueueRun(ctx, store, doc, nil, "packs/x@v1", "workers")

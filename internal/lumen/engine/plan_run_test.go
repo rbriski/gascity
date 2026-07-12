@@ -649,6 +649,20 @@ func retryMember(loopID, bodyID, script string) string {
 		`"exitMap":{"pass":[0],"retryable":[]}}}`
 }
 
+// repeatMemberForgedCond renders a repeat leaf loop whose cond carries a '/'-FORGED ref
+// — a DURABLE un-lowerable body (the reserved-delimiter charset ban is a permanent
+// language invariant), used by the ⚑S4 dry-run refusal pins now that a plain nested loop
+// lowers inside a sub-formula (LIS).
+func repeatMemberForgedCond(loopID, bodyID string) string {
+	forged := `{"kind":"operator","op":"==","operands":[` +
+		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+	return `{"kind":"repeat","id":"` + loopID + `","name":"` + loopID + `","after":[],` +
+		`"iterationName":"iteration","cond":` + forged + `,` +
+		`"body":{"kind":"exec","id":"` + bodyID + `","name":"` + bodyID + `","after":[],` +
+		`"interpreter":{"program":{"kind":"shell"}},"body":{"raw":"echo hi"},` +
+		`"exitMap":{"pass":[0],"retryable":[]}}}`
+}
+
 // scatterOf renders an ungated members-form scatter over the given member node JSONs.
 func scatterOf(id string, members ...string) string {
 	return `{"kind":"scatter","id":"` + id + `","name":"` + id + `","after":[]` +
@@ -688,21 +702,27 @@ func TestLowerRetryInScatterLowers(t *testing.T) {
 	}
 }
 
-// TestLowerLoopInSubFormulaRefused pins that a retry/repeat loop INSIDE a run
-// sub-formula is refused this slice: the loop's decision scope (loopScope) is
-// namespace-unaware, so a nested loop's cond/attempts refs would resolve wrong.
-// retry-in-scatter (top-level, ns="") is the supported shape; loop-in-sub-formula
-// is a follow-on that also needs a namespace-aware loopScope.
-func TestLowerLoopInSubFormulaRefused(t *testing.T) {
+// TestLowerLoopInSubFormulaLowers pins the LIS flip: a retry/repeat loop INSIDE a run
+// sub-formula now LOWERS (the prefix fence is deleted; loopScopeNS makes the decision
+// scope namespace-aware). The loop unit is namespaced under the run and carries its
+// bare + qualified body ids.
+func TestLowerLoopInSubFormulaLowers(t *testing.T) {
 	sub := `"greeter":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"greeter","input":{"name":"greeter.input","fields":[]},"nodes":[` +
 		retryMember("r1", "b1", "echo hi") + `]}`
 	runNoEnv := `{"kind":"run","id":"greeting","name":"greeting","after":[],` +
 		`"target":{"kind":"by-name","name":"greeter"},"environment":{"fields":[]},"outcome":"transparent"}`
 	doc := decodeBundle(t, runMainDoc(runNoEnv, sub))
-	_, err := buildUnits(doc, true, true)
-	if err == nil || !strings.Contains(err.Error(), "top-level") {
-		t.Fatalf("want a loop-in-sub-formula refusal, got %v", err)
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused a loop inside a sub-formula (LIS should lower it): %v", err)
+	}
+	loop := unitByNode(units, "greeting/r1")
+	if loop == nil || loop.kind != unitLoop {
+		t.Fatalf("greeting/r1 = %+v, want a namespaced unitLoop", loop)
+	}
+	if loop.ns != "greeting/" || loop.loop.bodyNodeID != "greeting/b1" || loop.loop.bodyBareID != "b1" {
+		t.Errorf("loop = ns %q bodyNodeID %q bodyBareID %q, want greeting/, greeting/b1, b1", loop.ns, loop.loop.bodyNodeID, loop.loop.bodyBareID)
 	}
 }
 

@@ -136,11 +136,11 @@ func TestLowerScatterRunMemberInSubFormulaLowers(t *testing.T) {
 	}
 }
 
-// TestLowerLoopInScatterInSubFormulaRefused pins the double-fence proof: a LOOP nested
-// under a scatter that is itself inside a run sub-formula still REFUSES — via the prefix
-// fence in lowerLoop (loops are top-level or a top-level scatter member only). The
-// inAggregate reset does not un-fence it; the prefix fence holds.
-func TestLowerLoopInScatterInSubFormulaRefused(t *testing.T) {
+// TestLowerLeafLoopInScatterInSubFormulaLowers pins the LIS flip (Q-A): a LEAF-body loop
+// nested under a scatter that is itself inside a run sub-formula now LOWERS — the prefix
+// fence is gone, and a leaf loop as a scatter member inside a sub-formula falls out
+// generically (the pool routing is ns-blind). The loop is parented to the sub-scatter.
+func TestLowerLeafLoopInScatterInSubFormulaLowers(t *testing.T) {
 	subScatter := `{"kind":"scatter","id":"sc","name":"sc","after":[],"form":"members",` +
 		`"members":[` + retryMember("r1", "b1", "echo hi") + `]}`
 	doc := decodeBundle(t, runMainDoc(
@@ -149,9 +149,39 @@ func TestLowerLoopInScatterInSubFormulaRefused(t *testing.T) {
 			`"name":"mid","input":{"name":"mid.input","fields":[{"name":"name","type":{"kind":"atomic","name":"string"},"required":true,"body":false}]},`+
 			`"nodes":[`+subScatter+`]}`,
 	))
+	units, err := buildUnits(doc, true, true)
+	if err != nil {
+		t.Fatalf("buildUnits refused a leaf loop in a scatter in a sub-formula (LIS should lower it): %v", err)
+	}
+	loop := unitByNode(units, "R/r1")
+	if loop == nil || loop.kind != unitLoop {
+		t.Fatalf("R/r1 = %+v, want a doubly-namespaced unitLoop", loop)
+	}
+	if loop.parent != "R/sc:0" {
+		t.Errorf("R/r1 parent = %q, want R/sc:0 (a sub-scatter member)", loop.parent)
+	}
+}
+
+// TestLowerRunBodyLoopInScatterInSubFormulaRefused pins that the inAggregate fence still
+// holds for the RUN-body arm: a repeat whose body is a `run`, placed as a scatter member
+// (here inside a sub-formula), is refused — the per-attempt re-mint arm is entry-top-level
+// only. Only the run-body loop stays fenced; the leaf loop above lowers.
+func TestLowerRunBodyLoopInScatterInSubFormulaRefused(t *testing.T) {
+	runBodyLoop := `{"kind":"repeat","id":"loop","name":"loop","after":[],"iterationName":"iteration",` +
+		`"cond":{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"round","field":"outcome"},{"kind":"literal","value":"pass"}]},` +
+		`"body":{"kind":"run","id":"round","name":"round","after":[],"target":{"kind":"by-name","name":"leaf"},` +
+		`"environment":{"fields":[]},"outcome":"transparent"}}`
+	subScatter := `{"kind":"scatter","id":"sc","name":"sc","after":[],"form":"members","members":[` + runBodyLoop + `]}`
+	doc := decodeBundle(t, runMainDoc(
+		runNode("R", nil, "mid", "name", "who"),
+		`"mid":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},`+
+			`"name":"mid","input":{"name":"mid.input","fields":[{"name":"name","type":{"kind":"atomic","name":"string"},"required":true,"body":false}]},`+
+			`"nodes":[`+subScatter+`]}`+","+
+			`"leaf":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},"name":"leaf","input":{"name":"leaf.input","fields":[]},"nodes":[`+execNode("hello", nil, "echo hi")+`]}`,
+	))
 	_, err := buildUnits(doc, true, true)
-	if err == nil || !strings.Contains(err.Error(), "top-level") {
-		t.Fatalf("want a loop-in-sub-formula prefix-fence refusal, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "entry-top-level") {
+		t.Fatalf("want a run-body-loop-in-scatter refusal (inAggregate fence), got %v", err)
 	}
 }
 

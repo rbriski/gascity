@@ -233,14 +233,15 @@ func TestLowerRepeatRunBodyDecodeInheritance(t *testing.T) {
 	}
 }
 
-// TestLowerRepeatRunBodyNestedLoopRefusedAtDryRun pins the ⚑S4 dry-run: a run body whose
-// sub-formula contains a LOOP does not lower — the attempt-prefix mint hits the
-// prefix-fence in lowerLoop ("top-level only") and buildUnits refuses, so EnqueueRun
-// refuses before seeding a run.
-func TestLowerRepeatRunBodyNestedLoopRefusedAtDryRun(t *testing.T) {
+// TestLowerRepeatRunBodyUnlowerableMemberRefusedAtDryRun pins the ⚑S4 dry-run: a run body
+// whose sub-formula contains an UN-LOWERABLE node does not lower — buildUnits refuses with
+// the repeat run-body provenance wrap, so EnqueueRun refuses before seeding a run. (A plain
+// nested loop now lowers after LIS; the durable un-lowerable shape is a '/'-forged cond
+// ref — a permanent reserved-delimiter refusal.)
+func TestLowerRepeatRunBodyUnlowerableMemberRefusedAtDryRun(t *testing.T) {
 	sub := `"greeter":{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"greeter","input":{"name":"greeter.input","fields":[]},"nodes":[` +
-		retryMember("r1", "b1", "echo hi") + `]}`
+		repeatMemberForgedCond("r1", "b1") + `]}`
 	runNoEnv := `{"kind":"run","id":"stage","name":"stage","after":[],` +
 		`"target":{"kind":"by-name","name":"greeter"},"environment":{"fields":[]},"outcome":"transparent"}`
 	doc := decodeBundle(t, runMainDoc(
@@ -248,8 +249,8 @@ func TestLowerRepeatRunBodyNestedLoopRefusedAtDryRun(t *testing.T) {
 		sub,
 	))
 	_, err := buildUnits(doc, true, true)
-	if err == nil || !strings.Contains(err.Error(), "does not lower") || !strings.Contains(err.Error(), "top-level") {
-		t.Fatalf("want a dry-run refusal (does not lower / top-level), got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "does not lower") || !strings.Contains(err.Error(), "reserved delimiter") {
+		t.Fatalf("want a dry-run refusal (does not lower / reserved delimiter), got %v", err)
 	}
 }
 

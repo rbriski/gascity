@@ -1362,46 +1362,41 @@ func (d *driver) dispatchArmUnit(u planUnit, arm *dispatchArm) planUnit {
 	return d.decisionBodyUnit(u, arm.bodyNodeID, arm.bodyIRKind, arm.body)
 }
 
-// condScope builds the closed-expression scope a guard cond evaluates against for a
-// unit in namespace ns. At the root (ns == "") it is byte-identical to the loop
-// machinery's assembly: the run input plus every settled node's flat qualified
-// output/outcome (an empty loop spec — a cond reads only inputs and node results, no
-// iteration/body binding). Inside a run sub-formula (ns != "") it builds a
-// NAMESPACE-LOCAL view instead — the same world the namespace's prompts render against
-// (scopeFor) plus the fold's direct-child outputs/outcomes at their bare ids — so a
-// bare cond ref resolves a sub-sibling or a sub-input binding and can never silently
-// hit a same-named MAIN input. It reads no clock and no randomness (scopeFor + a fold
-// walk only), so genesis, re-Advance, and crash-resume build an identical scope (DET).
-func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loopScope, error) {
-	if ns == "" {
-		return d.loopScope(&loopSpec{}, 0, nil, nodeOutputs), nil
-	}
+// subScopeFold is the shared namespace-local fold assembly both the guard cond scope
+// (child-wins, GIS ⚑S4) and the loop cond/attempts scope (typed input-first, ⚑B1)
+// build from a run sub-formula's registered env + the fold — the Q-C shared-builder
+// product. The two callers layer the sub-input differently over these pieces.
+type subScopeFold struct {
+	spec      *runSpec          // the namespace's registered env (bindings + declared input schema)
+	childView map[string]string // the fold's DIRECT-child outputs at their bare ids (⚑B1, incl. aggregates)
+	outcomes  map[string]string // bare-keyed direct-child outcomes (Settled && ranOutcome, highest attempt wins)
+	childKeys map[string]bool   // the direct-child bare-id shadow set (scope + nodeOutputs children)
+}
+
+// subScope assembles the shared namespace-local fold pieces for ns (§1.2): the
+// registered env spec, the direct-child outputs from the FLAT nodeOutputs (which —
+// unlike scope — carries scatter/gather/for-each/cleanup aggregate outputs, the
+// nodeOutputs-only convention), the settled direct-child outcomes at bare ids, and the
+// child-id shadow set. It reads no clock and no randomness (a fold walk only), so
+// genesis, re-Advance, and crash-resume build identical pieces (DET). unitKind names
+// the caller for the ⚑S5 unregistered-namespace refusal (which loops must not report as
+// a guard); call sites wrap it with `lumen: <kind> %q cond: %w` / `… attempts: %w`.
+// The inner noun stays "cond scope" even under the attempts wrap — accepted cosmetic:
+// the unit KIND (what triage keys on) is parametrized, and cond-vs-attempts is visible
+// from the call-site wrap.
+func (d *driver) subScope(ns, unitKind string, scope, nodeOutputs map[string]string) (subScopeFold, error) {
 	// ⚑S5: register-before-drive holds on every drive path today, so an unregistered
 	// namespace here is a structural bug — the view would collapse and freeze a wrong
-	// write-once decision. Refuse loudly rather than fold silently. (No "lumen:"
-	// prefix — both call sites wrap this with `lumen: guard %q cond: %w`.)
+	// write-once decision. Refuse loudly rather than fold silently. (No "lumen:" prefix.)
 	spec := d.runEnvs[ns]
 	if spec == nil {
-		return loopScope{}, fmt.Errorf("guard cond scope: namespace %q has no registered environment", ns)
+		return subScopeFold{}, fmt.Errorf("%s cond scope: namespace %q has no registered environment", unitKind, ns)
 	}
-	// The render view: env bindings (evaluated against the parent view, parentNS
-	// override honored), declared sub-input defaults, and direct scope children (silent
-	// lets + settled non-aggregate outputs) at their bare ids (§C, scopeFor).
-	view, err := d.scopeFor(ns, scope)
-	if err != nil {
-		return loopScope{}, err
-	}
-	// ⚑B1: overlay the fold's direct-child outputs from the FLAT nodeOutputs, which —
-	// unlike scope — carries scatter/gather/for-each/cleanup aggregate outputs (the
-	// nodeOutputs-only convention, reconstructOutputs excludes aggregates from scope).
-	// Without this a guard cond reading a sub-aggregate sibling (`sc.outcome == "pass"`,
-	// `sc == ""`) resolves null inside ns while it resolves at root; and
-	// loopScope.resolve gates the outcome lookup on nodeOutputs membership, so the
-	// bare-keyed outcome below is UNREACHABLE unless the value is in the view too.
+	childView := map[string]string{}
 	childKeys := map[string]bool{}
 	// Defensive redundancy: every ns-child scope key is ALSO a nodeOutputs key today
-	// (record() and the silent arm write both), so this pass adds nothing the overlay
-	// below misses — it only keeps the shadow set honest if that invariant ever bends.
+	// (record() and the silent arm write both), so the scope pass adds nothing the
+	// nodeOutputs overlay misses — it only keeps the shadow set honest if that ever bends.
 	for k := range scope {
 		if rest, ok := directChildKey(k, ns); ok {
 			childKeys[rest] = true
@@ -1409,12 +1404,10 @@ func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loo
 	}
 	for k, v := range nodeOutputs {
 		if rest, ok := directChildKey(k, ns); ok {
-			view[rest] = v
+			childView[rest] = v
 			childKeys[rest] = true
 		}
 	}
-	// Bare-keyed outcomes for the namespace's settled direct children, walked exactly
-	// like loopScope's assembly (Settled && ranOutcome, highest attempt per id wins).
 	outcomes := map[string]string{}
 	best := map[string]int{}
 	for act, n := range d.st().Nodes {
@@ -1432,15 +1425,47 @@ func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loo
 		best[rest] = att
 		outcomes[rest] = n.Outcome
 	}
+	return subScopeFold{spec: spec, childView: childView, outcomes: outcomes, childKeys: childKeys}, nil
+}
+
+// condScope builds the closed-expression scope a guard cond evaluates against for a
+// unit in namespace ns. At the root (ns == "") it is byte-identical to the loop
+// machinery's assembly: the run input plus every settled node's flat qualified
+// output/outcome (an empty loop spec — a cond reads only inputs and node results, no
+// iteration/body binding). Inside a run sub-formula (ns != "") it builds the
+// GUARD-flavored namespace-local view (Q-C): the render view scopeFor renders against
+// (env bindings + defaults + direct children) with the fold's direct-child outputs
+// overlaid on top (child-wins, GIS ⚑S4 prompt parity), input nil, plus the ⚑B2
+// spec-derived outcome backfill. So a bare cond ref resolves a sub-sibling or a
+// sub-input binding and can never silently hit a same-named MAIN input.
+func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loopScope, error) {
+	if ns == "" {
+		return d.loopScope(&loopSpec{}, 0, nil, nodeOutputs), nil
+	}
+	parts, err := d.subScope(ns, "guard", scope, nodeOutputs)
+	if err != nil {
+		return loopScope{}, err
+	}
+	// The render view (scopeFor: env bindings + declared sub-input defaults + direct scope
+	// children at their bare ids), with the flat-nodeOutputs direct children overlaid on
+	// top — child-wins, byte-identical to the pre-refactor overlay.
+	view, err := d.scopeFor(ns, scope)
+	if err != nil {
+		return loopScope{}, err
+	}
+	for k, v := range parts.childView {
+		view[k] = v
+	}
 	// ⚑B2: back-fill OutcomePass for the SPEC-DERIVED binding/default names ONLY — an env
 	// binding, or a defaulted-unbound sub-input, is a pre-settled run input (root input
 	// parity: "its outcome is pass"). A name shadowed by a direct-child key keeps that
-	// node's real outcome, and a name already walked above is left alone. NEVER
-	// blanket-stamp view keys: a silent let is in the view but never settles, so stamping
-	// it would flip `mylet.outcome == "pass"` TRUE inside ns where root yields "".
+	// node's real outcome, and a name already walked is left alone. NEVER blanket-stamp
+	// view keys: a silent let is in the view but never settles, so stamping it would flip
+	// `mylet.outcome == "pass"` TRUE inside ns where root yields "".
+	outcomes := parts.outcomes
 	bound := map[string]bool{}
 	backfill := func(name string) {
-		if childKeys[name] {
+		if parts.childKeys[name] {
 			return
 		}
 		if _, ok := outcomes[name]; ok {
@@ -1448,16 +1473,115 @@ func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loo
 		}
 		outcomes[name] = OutcomePass
 	}
-	for _, f := range spec.env {
+	for _, f := range parts.spec.env {
 		bound[f.name] = true
 		backfill(f.name)
 	}
-	for _, fld := range spec.inputFields {
+	for _, fld := range parts.spec.inputFields {
 		if !bound[fld.Name] && fld.Default != nil {
 			backfill(fld.Name)
 		}
 	}
 	return loopScope{input: nil, nodeOutputs: view, nodeOutcomes: outcomes}, nil
+}
+
+// loopScopeNS builds the LOOP-flavored namespace-local cond/attempts scope (⚑B1, Q-C):
+// a TYPED sub-input layer as `input` (so an ORDERED cond `iteration >= max_review_rounds`
+// compares number-to-number — root parity — instead of the render-string lexicographic
+// compare a two-digit budget would defeat), the fold's direct children as a bare
+// nodeOutputs/nodeOutcomes view (WITHOUT the binding layer — it now lives in `input`),
+// and the just-settled attempt bound under the BARE body id (⚑B2). Resolution precedence
+// is therefore iterationName → bodyBareID → input → children (root parity, input-FIRST),
+// deliberately diverging from condScope's child-wins order: the loop's freeze premise
+// requires input-first so a same-named node can never shadow a frozen cond value between
+// ticks. bn is nil when evaluating a retry's attempts expression (before any attempt).
+func (d *driver) loopScopeNS(spec *loopSpec, iteration int, bn *nodeState, ns string, scope, nodeOutputs map[string]string) (loopScope, error) {
+	parts, err := d.subScope(ns, "loop", scope, nodeOutputs)
+	if err != nil {
+		return loopScope{}, err
+	}
+	input, err := d.typedSubInput(ns, parts.spec, scope)
+	if err != nil {
+		return loopScope{}, err
+	}
+	sc := loopScope{
+		iterationName: spec.iterationName,
+		iteration:     iteration,
+		input:         input,
+		nodeOutputs:   parts.childView,
+		nodeOutcomes:  parts.outcomes,
+	}
+	if bn != nil {
+		sc.bodyName = spec.bodyBareID
+		sc.bodyOutcome = bn.Outcome
+		sc.bodyOutput = bn.Output
+	}
+	return sc, nil
+}
+
+// loopEvalScope builds the scope a loop's cond (repeat) / attempts (retry) evaluates
+// against for a unit in namespace u.ns. At the root it is the flat loopScope
+// (byte-identical); inside a run sub-formula it is the namespace-local loop-flavored
+// view (loopScopeNS). It is the single dispatcher both drivers' evalAttempts and
+// loopDecide route through, so inline Run and pool Advance decide over an identical
+// scope at any depth.
+func (d *driver) loopEvalScope(u planUnit, iteration int, bn *nodeState, scope, nodeOutputs map[string]string) (loopScope, error) {
+	if u.ns == "" {
+		return d.loopScope(u.loop, iteration, bn, nodeOutputs), nil
+	}
+	return d.loopScopeNS(u.loop, iteration, bn, u.ns, scope, nodeOutputs)
+}
+
+// typedSubInput builds the loop cond/attempts INPUT layer for a run sub-formula's
+// namespace (§1.2 ⚑B1): the run's declared inputs as TYPED scalars, so the loop cond
+// compares against numbers/bools the way the ROOT cond compares against d.input. For
+// each declared field: an env-BOUND field takes runInputLayer's render string RE-TYPED
+// per the field's declared atomic type (number → ParseFloat, boolean → ParseBool, else
+// the string verbatim; a parse failure keeps the string — the garbage-in root analog); a
+// defaulted-UNBOUND field takes the field's TYPED default directly. It reads runInputLayer
+// (env bindings against the parent view) + the IR field schema only, so genesis and
+// resume build an identical layer (DET).
+func (d *driver) typedSubInput(ns string, spec *runSpec, scope map[string]string) (map[string]any, error) {
+	layer, err := d.runInputLayer(ns, scope)
+	if err != nil {
+		return nil, err
+	}
+	bound := make(map[string]bool, len(spec.env))
+	for _, f := range spec.env {
+		bound[f.name] = true
+	}
+	input := make(map[string]any, len(spec.inputFields))
+	for _, fld := range spec.inputFields {
+		switch {
+		case bound[fld.Name]:
+			input[fld.Name] = retypeScalar(layer[fld.Name], fld.Type)
+		case fld.Default != nil:
+			input[fld.Name] = fld.Default
+		}
+	}
+	return input, nil
+}
+
+// retypeScalar re-types a run env binding's render STRING to the scalar its declared
+// atomic type implies (root-cond parity): a "number" field ParseFloats, a "boolean"
+// field ParseBools, and every other type (string, or a non-atomic) keeps the string
+// verbatim. A parse failure keeps the string too — the garbage-in analog of the root
+// path, where a malformed input value flows through as-is (loopScope.resolve then
+// normalizes and compares it as a string).
+func retypeScalar(s string, t ir.Type) any {
+	if t.Kind == ir.TypeAtomic {
+		switch t.Name {
+		case "number":
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return f
+			}
+		case "boolean":
+			if b, err := strconv.ParseBool(s); err == nil {
+				return b
+			}
+		}
+	}
+	return s
 }
 
 // transparentOutcome aggregates a run's direct-member outcomes into the transparent
@@ -1554,7 +1678,11 @@ func (d *driver) runLoop(u planUnit, scope, nodeOutputs map[string]string) error
 	// parity). repeat has no budget expression (it is capped at lumenRepeatLoopCap).
 	maxAttempts := 0
 	if spec.irKind == ir.NodeRetry {
-		n, ok := evalAttempts(spec.attemptsExpr, d.loopScope(spec, 0, nil, nodeOutputs))
+		as, err := d.loopEvalScope(u, 0, nil, scope, nodeOutputs)
+		if err != nil {
+			return fmt.Errorf("lumen: loop %q attempts: %w", u.nodeID, err)
+		}
+		n, ok := evalAttempts(spec.attemptsExpr, as)
 		if !ok {
 			return d.settleLoop(u, OutcomeFailed, "", "invalid_input", nil, scope, nodeOutputs)
 		}
@@ -1606,18 +1734,22 @@ func (d *driver) runAttempt(u planUnit, attempt, maxAttempts int, scope, nodeOut
 	au := d.attemptUnit(u, attempt)
 	// A repeat body's prompt/interp may reference {{iteration}} (1-based). Bind it
 	// for THIS attempt only, then restore — the binding is loop-local (reference
-	// parity). retry has no iteration binding.
+	// parity). The scope key is NAMESPACE-QUALIFIED (u.ns + name) so an attempt unit
+	// rendering in the loop's namespace resolves {{iteration}} via scopeFor's direct-child
+	// overlay; at the root u.ns == "" so the key is the bare name (byte-identical). retry
+	// has no iteration binding.
+	iterKey := u.ns + spec.iterationName
 	restore, had := "", false
 	if spec.irKind == ir.NodeRepeat {
-		restore, had = scope[spec.iterationName]
-		scope[spec.iterationName] = strconv.Itoa(attempt + 1)
+		restore, had = scope[iterKey]
+		scope[iterKey] = strconv.Itoa(attempt + 1)
 	}
 	err := d.runUnit(au, scope, nodeOutputs)
 	if spec.irKind == ir.NodeRepeat {
 		if had {
-			scope[spec.iterationName] = restore
+			scope[iterKey] = restore
 		} else {
-			delete(scope, spec.iterationName)
+			delete(scope, iterKey)
 		}
 	}
 	return err
@@ -1704,6 +1836,7 @@ func (d *driver) attemptUnit(u planUnit, attempt int) planUnit {
 		nodeID:     spec.bodyNodeID,
 		irKind:     spec.bodyIRKind,
 		parent:     u.activation, // loopID:0
+		ns:         u.ns,         // render the attempt in the loop's namespace (decisionBodyUnit precedent)
 		afterDeps:  u.afterDeps,
 		rawAfter:   u.rawAfter,
 		leaf:       spec.body,
@@ -1720,7 +1853,11 @@ func (d *driver) loopDecide(u planUnit, attempt, maxAttempts int, bn *nodeState,
 	switch spec.irKind {
 	case ir.NodeRepeat:
 		iteration := attempt + 1
-		truthy, err := evalCondTruthy(spec.condExpr, d.loopScope(spec, iteration, bn, nodeOutputs))
+		cs, err := d.loopEvalScope(u, iteration, bn, scope, nodeOutputs)
+		if err != nil {
+			return false, fmt.Errorf("lumen: loop %q cond: %w", u.nodeID, err)
+		}
+		truthy, err := evalCondTruthy(spec.condExpr, cs)
 		if err != nil {
 			return false, err
 		}
@@ -1796,7 +1933,8 @@ func (d *driver) loopScope(spec *loopSpec, iteration int, bn *nodeState, nodeOut
 		nodeOutcomes:  outcomes,
 	}
 	if bn != nil {
-		sc.bodyName = spec.bodyNodeID
+		// ⚑B2: the cond names the body by its BARE authored id (root: bare == qualified).
+		sc.bodyName = spec.bodyBareID
 		sc.bodyOutcome = bn.Outcome
 		sc.bodyOutput = bn.Output
 	}

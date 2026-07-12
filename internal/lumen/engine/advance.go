@@ -638,7 +638,11 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 	// failed{invalid_input} with zero attempts (reference parity).
 	maxAttempts := 0
 	if spec.irKind == ir.NodeRetry {
-		n, ok := evalAttempts(spec.attemptsExpr, d.loopScope(spec, 0, nil, nodeOutputs))
+		as, err := d.loopEvalScope(u, 0, nil, scope, nodeOutputs)
+		if err != nil {
+			return fmt.Errorf("lumen: loop %q attempts: %w", u.nodeID, err)
+		}
+		n, ok := evalAttempts(spec.attemptsExpr, as)
 		if !ok {
 			return d.settleLoop(u, OutcomeFailed, "", "invalid_input", nil, scope, nodeOutputs)
 		}
@@ -1186,17 +1190,21 @@ func (d *driver) materializeLoopAttempt(u planUnit, attempt, maxAttempts int, sc
 	}
 
 	au := d.attemptUnit(u, attempt)
+	// The 1-based iteration binding is NAMESPACE-QUALIFIED (u.ns + name), so an attempt
+	// rendering in the loop's namespace resolves {{iteration}} via scopeFor; at the root
+	// u.ns == "" so the key is the bare name (byte-identical to before).
+	iterKey := u.ns + spec.iterationName
 	restore, had := "", false
 	if spec.irKind == ir.NodeRepeat {
-		restore, had = scope[spec.iterationName]
-		scope[spec.iterationName] = strconv.Itoa(attempt + 1)
+		restore, had = scope[iterKey]
+		scope[iterKey] = strconv.Itoa(attempt + 1)
 	}
 	err := d.materializePoolWork(au, scope, opts)
 	if spec.irKind == ir.NodeRepeat {
 		if had {
-			scope[spec.iterationName] = restore
+			scope[iterKey] = restore
 		} else {
-			delete(scope, spec.iterationName)
+			delete(scope, iterKey)
 		}
 	}
 	return err

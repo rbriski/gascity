@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ type ciCriticalPathWorkflow struct {
 }
 
 type ciCriticalPathJob struct {
+	Name     string                    `yaml:"name"`
 	If       string                    `yaml:"if"`
 	Needs    ciCriticalPathNeeds       `yaml:"needs"`
 	Steps    []ciCriticalPathStep      `yaml:"steps"`
@@ -83,11 +85,11 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
 	providerSetupMarker := map[string]string{
-		"preflight-acceptance":        "install-bd-archive.sh",
-		"contract-acceptance-current": "go -C \"$src\" build",
-		"contract-radar-bd-head":      "go -C \"$src\" build",
+		"contract-acceptance-previous": "install-bd-archive.sh",
+		"contract-acceptance-current":  "go -C \"$src\" build",
+		"contract-radar-bd-head":       "go -C \"$src\" build",
 	}
-	for _, jobName := range []string{"preflight-acceptance", "contract-acceptance-current", "contract-radar-bd-head"} {
+	for _, jobName := range []string{"contract-acceptance-previous", "contract-acceptance-current", "contract-radar-bd-head"} {
 		job := wf.Jobs[jobName]
 		var hasSetupGo bool
 		providerSetupIndex := -1
@@ -102,8 +104,11 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 			if strings.Contains(step.Run, providerSetupMarker[jobName]) {
 				providerSetupIndex = i
 			}
-			if strings.Contains(step.Run, "make test-acceptance") {
+			if strings.Contains(step.Run, "make test-bd-cli-contract") {
 				acceptanceIndex = i
+			}
+			if strings.TrimSpace(step.Run) == "make test-acceptance" {
+				t.Errorf("%s step %q repeats broad Tier A instead of the focused bd contract", jobName, step.Name)
 			}
 		}
 		if !hasSetupGo {
@@ -119,12 +124,173 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 		}
 	}
 
-	for _, step := range wf.Jobs["preflight-acceptance"].Steps {
+	var previousBDInstalled bool
+	for _, step := range wf.Jobs["contract-acceptance-previous"].Steps {
 		if strings.Contains(step.Run, "install-bd-archive.sh") && strings.Contains(step.Run, "BD_PREV_VERSION") {
-			return
+			previousBDInstalled = true
 		}
 	}
-	t.Error("preflight acceptance must install the deps.env minimum-supported bd so CLI contract tests cannot silently skip")
+	if !previousBDInstalled {
+		t.Error("previous-bd contract job must install the deps.env minimum-supported bd so CLI contract tests cannot silently skip")
+	}
+
+	var tierAHasSetupGo, tierARunsBroadSuite bool
+	for _, step := range wf.Jobs["preflight-acceptance"].Steps {
+		if strings.Contains(step.Uses, "actions/setup-go") {
+			tierAHasSetupGo = true
+		}
+		if strings.TrimSpace(step.Run) == "make test-acceptance" {
+			tierARunsBroadSuite = true
+		}
+		if strings.Contains(step.Uses, "setup-gascity-ubuntu") {
+			t.Errorf("Tier A uses full-stack setup %q despite selecting controlled providers", step.Uses)
+		}
+		if strings.Contains(step.Run, "install-bd-archive.sh") {
+			t.Errorf("Tier A step %q installs bd even though external CLI contracts have a focused parallel job", step.Name)
+		}
+		if strings.Contains(step.Run, "test-bd-cli-contract") {
+			t.Errorf("Tier A step %q repeats the focused external bd contract", step.Name)
+		}
+	}
+	if !tierAHasSetupGo {
+		t.Error("Tier A must install the pinned Go toolchain")
+	}
+	if !tierARunsBroadSuite {
+		t.Error("Tier A must run the broad hermetic acceptance suite")
+	}
+
+	check := wf.Jobs["check"]
+	for _, need := range []string{"contract-acceptance-previous", "contract-acceptance-current"} {
+		if !slices.Contains(check.Needs, need) {
+			t.Errorf("Check needs = %v, want required bd contract %q", check.Needs, need)
+		}
+	}
+	if slices.Contains(check.Needs, "contract-radar-bd-head") {
+		t.Errorf("Check needs = %v: bd main HEAD radar must remain advisory", check.Needs)
+	}
+}
+
+func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
+	root := repoRoot(t)
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makeText := string(makefile)
+	if !strings.Contains(makeText, "test-bd-cli-contract:") {
+		t.Fatal("Makefile has no focused test-bd-cli-contract target")
+	}
+	wantTests := []string{"TestBdBasicCRUD", "TestBdDependencies", "TestBdDestructive", "TestBdWorkflow"}
+	for _, testName := range wantTests {
+		if !strings.Contains(makeText, testName) {
+			t.Errorf("focused bd contract target does not name %s", testName)
+		}
+	}
+	for _, marker := range []string{
+		"command -v bd",
+		"-tags acceptance_bd_contract",
+		"-count=1",
+		"-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$'",
+		"./test/acceptance",
+	} {
+		if !strings.Contains(makeText, marker) {
+			t.Errorf("focused bd contract target is missing %q", marker)
+		}
+	}
+
+	contractTest, err := os.ReadFile(filepath.Join(root, "test", "acceptance", "beads_cli_contract_test.go"))
+	if err != nil {
+		t.Fatalf("read beads CLI contract test: %v", err)
+	}
+	firstLine, _, _ := strings.Cut(string(contractTest), "\n")
+	if firstLine != "//go:build acceptance_bd_contract" {
+		t.Fatalf("beads CLI contract build constraint = %q, want focused acceptance_bd_contract tag", firstLine)
+	}
+	matches := regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(t \*testing\.T\)`).FindAllStringSubmatch(string(contractTest), -1)
+	gotTests := make([]string, 0, len(matches))
+	for _, match := range matches {
+		gotTests = append(gotTests, match[1])
+	}
+	if !slices.Equal(gotTests, wantTests) {
+		t.Fatalf("bd contract tests = %v, want focused manifest %v", gotTests, wantTests)
+	}
+}
+
+func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job := wf.Jobs["mac-acceptance"]
+	var runsTierA, runsBDContract bool
+	for _, step := range job.Steps {
+		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance"
+		runsBDContract = runsBDContract || strings.TrimSpace(step.Run) == "make test-bd-cli-contract"
+	}
+	if !runsTierA {
+		t.Error("Mac acceptance must retain hermetic Tier A")
+	}
+	if !runsBDContract {
+		t.Error("Mac acceptance must retain the external bd CLI contract split from Tier A")
+	}
+}
+
+func TestStaticChecksUseOnlyTheGoToolchain(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job := wf.Jobs["preflight-static"]
+	var hasSetupGo bool
+	for _, step := range job.Steps {
+		if strings.Contains(step.Uses, "actions/setup-go") {
+			hasSetupGo = true
+			if step.With["go-version-file"] != "go.mod" {
+				t.Errorf("static checks setup-go version file = %q, want go.mod", step.With["go-version-file"])
+			}
+		}
+		if strings.Contains(step.Uses, "setup-gascity-ubuntu") || strings.Contains(step.Uses, "actions/setup-node") {
+			t.Errorf("static checks use unnecessary full-stack dependency setup %q", step.Uses)
+		}
+		if strings.Contains(step.Run, "make install-tools") {
+			t.Errorf("static checks step %q installs oapi-codegen even though generated-artifact CI owns it", step.Name)
+		}
+	}
+	if !hasSetupGo {
+		t.Error("static checks must install the pinned Go toolchain")
+	}
+}
+
+func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	if got := wf.Jobs["check"].Name; got != "Check" {
+		t.Errorf("historical branch-protection job name = %q, want Check", got)
+	}
+	job := wf.Jobs["ci-preflight"]
+	if slices.Contains(job.Needs, "check") {
+		t.Errorf("ci-preflight needs = %v: historical Check fan-in adds a serialized job", job.Needs)
+	}
+	for _, need := range []string{
+		"runner-policy",
+		"changes",
+		"preflight-static",
+		"preflight-acceptance",
+		"preflight-generated",
+		"contract-acceptance-previous",
+		"contract-acceptance-current",
+		"release-config",
+		"dashboard",
+	} {
+		if !slices.Contains(job.Needs, need) {
+			t.Errorf("ci-preflight needs = %v, want direct dependency %q", job.Needs, need)
+		}
+	}
+	var permitsCurrentContractSkip bool
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"contract-acceptance-current"`) {
+			permitsCurrentContractSkip = true
+		}
+	}
+	if !permitsCurrentContractSkip {
+		t.Error("ci-preflight must allow the path-gated current-bd contract to skip")
+	}
+	if !slices.Contains(wf.Jobs["ci-required"].Needs, "ci-preflight") {
+		t.Errorf("ci-required needs = %v, want ci-preflight aggregate", wf.Jobs["ci-required"].Needs)
+	}
 }
 
 func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {

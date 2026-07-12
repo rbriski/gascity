@@ -2271,7 +2271,7 @@ func reconcileCities(
 			ul.SetUnlinkOnClose(false)
 		}
 
-		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
+		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *controllerLockLease) {
 			// Recovery and close(done) defer is pushed FIRST so it
 			// executes LAST (Go LIFO), preserving the invariant that
 			// completion is signaled only after all resource cleanup.

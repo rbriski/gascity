@@ -3231,6 +3231,12 @@ func (cr *CityRuntime) loadDemandSnapshot(
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
 	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+		// Stamp the staleness clock from when the data is READ (before the build),
+		// not when the build completes. buildDesiredState can take tens of seconds
+		// under load; stamping at build-end would inflate the patrol re-eval window
+		// by that whole duration and stretch the reconcile interval well past
+		// demandSnapshotPatrolMaxAge (maintainer-city).
+		builtAt := time.Now()
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
@@ -3250,7 +3256,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:          time.Now(),
+			createdAt:          builtAt,
 			sessionFingerprint: sessionFingerprint,
 			result:             result,
 		}
@@ -3292,7 +3298,15 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 // tick. Non-patrol triggers bypass this entirely (see shouldRefreshDemandSnapshot).
 func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	if cr.demandSnapshotsEnabled() {
-		return runtimeDemandSnapshotMaxAge
+		// Re-evaluate at most once per patrol interval, capped at the 30s
+		// event-backed ceiling. With patrol_interval below 30s the snapshot
+		// tracks the tick cadence instead of idling on a fixed 30s floor; the
+		// event stream still invalidates it earlier via the non-patrol path.
+		maxAge := runtimeDemandSnapshotMaxAge
+		if pi := cr.cfg.Daemon.PatrolIntervalDuration(); pi > 0 && pi < maxAge {
+			maxAge = pi
+		}
+		return maxAge
 	}
 	// Snapshots are not event-backed. Without an event provider the cache
 	// cannot be invalidated by routed-work events, so patrol must rebuild every

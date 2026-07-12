@@ -841,6 +841,59 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeDemandSnapshotStampsCreatedAtBeforeBuild pins that the demand
+// snapshot's staleness clock starts when the data is READ (build start), not
+// when the build finishes. Stamping at build-end inflated the patrol re-eval
+// window by the whole build duration, stretching the maintainer-city reconcile
+// interval well past the 30s max-age.
+func TestCityRuntimeDemandSnapshotStampsCreatedAtBeforeBuild(t *testing.T) {
+	var buildStart time.Time
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg:      &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cs:       &controllerState{eventProv: events.NewFake()},
+		stderr:   io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildStart = time.Now()
+		time.Sleep(20 * time.Millisecond) // separate build-start from build-end
+		return DesiredStateResult{}
+	}
+
+	_ = cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, "patrol", false)
+
+	if cr.demandSnapshot == nil {
+		t.Fatal("demandSnapshot is nil after patrol load")
+	}
+	if cr.demandSnapshot.createdAt.After(buildStart) {
+		t.Errorf("createdAt %v is after build start %v: staleness window inflated by the build duration",
+			cr.demandSnapshot.createdAt, buildStart)
+	}
+}
+
+// TestCityRuntimeDemandSnapshotPatrolMaxAgeHonorsPatrolInterval pins that an
+// event-backed demand snapshot is re-evaluated at the patrol cadence, capped at
+// the 30s event-backed ceiling, instead of a fixed 30s. Without this a sub-30s
+// patrol_interval was ignored: a 15s tick still waited the full 30s to rebuild.
+func TestCityRuntimeDemandSnapshotPatrolMaxAgeHonorsPatrolInterval(t *testing.T) {
+	newCR := func(patrol string) *CityRuntime {
+		return &CityRuntime{
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "c"},
+				Daemon:    config.DaemonConfig{PatrolInterval: patrol},
+			},
+			cs: &controllerState{eventProv: events.NewFake()},
+		}
+	}
+	if got := newCR("15s").demandSnapshotPatrolMaxAge(); got != 15*time.Second {
+		t.Errorf("maxAge(patrol_interval=15s) = %v, want 15s (track the tick cadence)", got)
+	}
+	if got := newCR("60s").demandSnapshotPatrolMaxAge(); got != runtimeDemandSnapshotMaxAge {
+		t.Errorf("maxAge(patrol_interval=60s) = %v, want %v (capped at the event-backed ceiling)", got, runtimeDemandSnapshotMaxAge)
+	}
+}
+
 func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

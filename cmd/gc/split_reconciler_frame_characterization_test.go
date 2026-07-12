@@ -109,7 +109,7 @@ func TestSplitReconcilerFrame_OpenUnassignedInfraSeenAtLeg0(t *testing.T) {
 		t.Fatalf("create open routed: %v", err)
 	}
 
-	got, stores := collectOpenUnassignedRoutedWork(cfg, infra, nil, nil, nil)
+	got, stores, _ := collectOpenUnassignedRoutedWork(cfg, infra, nil, nil, nil)
 	idx := -1
 	for i, b := range got {
 		if b.ID == open.ID {

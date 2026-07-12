@@ -264,6 +264,133 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 	}
 }
 
+// codexHookReviewPane is the mid-session dialog Codex re-raises on step and
+// worktree changes. It carries the three substrings the runtime matcher keys on.
+const codexHookReviewPane = "Hooks need review\n" +
+	"  4 hooks are new or changed.\n" +
+	"  Hooks can run outside the sandbox after you trust them.\n\n" +
+	"› 1. Review hooks\n" +
+	"  2. Trust all and continue\n" +
+	"  3. Continue without trusting (hooks won't run)\n\n" +
+	"  Press enter to confirm or esc to go back"
+
+// A verified Codex session that later hits the recurring hook-review dialog must
+// still be recovered: the one-time deferred verification has already been marked,
+// so the nudge path itself has to clear the dialog before delivering, or the
+// nudge is typed into the menu and the session wedges (the mc merge-stall).
+func TestSubmitCodexClearsRecurringHookReviewDialogBeforeNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, startupDialogVerifiedKey, "true"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", startupDialogVerifiedKey, err)
+	}
+	sp.SetPeekOutput(info.SessionName, codexHookReviewPane)
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+
+	// The dialog is peeked, dismissed with Down+Enter ("Trust all and continue"),
+	// and only then is the nudge delivered — in that order.
+	steps := hookReviewNudgeSteps(sp.Calls, info.SessionName)
+	want := []string{"Peek", "SendKeys:Down", "SendKeys:Enter", "NudgeNow"}
+	if !containsSubsequence(steps, want) {
+		t.Fatalf("steps = %v, want subsequence %v (calls = %#v)", steps, want, sp.Calls)
+	}
+	// The recurring clear must not re-run the one-time deferred verification.
+	for _, call := range sp.Calls {
+		if call.Method == "DismissKnownDialogs" {
+			t.Fatalf("calls = %#v, did not want deferred dialog dismissal after verification", sp.Calls)
+		}
+	}
+}
+
+// A running Codex session with no dialog on screen is left untouched: the clear
+// peeks once and sends no keystrokes, so it never interferes with a normal turn.
+func TestSubmitCodexLeavesDialogFreeSessionUntouched(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, startupDialogVerifiedKey, "true"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", startupDialogVerifiedKey, err)
+	}
+	sp.SetPeekOutput(info.SessionName, "› Implement {feature}")
+
+	if _, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+
+	for _, call := range sp.Calls {
+		if call.Method == "SendKeys" {
+			t.Fatalf("calls = %#v, did not want any keystrokes on a dialog-free session", sp.Calls)
+		}
+	}
+	if got := sp.CountCalls("NudgeNow", info.SessionName); got != 1 {
+		t.Fatalf("NudgeNow count = %d, want 1", got)
+	}
+}
+
+// The recurring clear is Codex-specific: a non-Codex session never gets peeked or
+// keyed by it, even when the pane happens to carry the matcher text.
+func TestSubmitClaudeSkipsRecurringHookReviewClear(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPeekOutput(info.SessionName, codexHookReviewPane)
+
+	if _, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+
+	for _, call := range sp.Calls {
+		if call.Method == "SendKeys" {
+			t.Fatalf("calls = %#v, did not want the Codex hook-review clear to run for a Claude session", sp.Calls)
+		}
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName); got != 1 {
+		t.Fatalf("Nudge count = %d, want 1", got)
+	}
+}
+
+// hookReviewNudgeSteps projects the Peek/SendKeys/NudgeNow calls for name into an
+// ordered, comparable trace (SendKeys carries the keystroke), so a test can
+// assert the peek -> Down -> Enter -> nudge ordering with containsSubsequence.
+func hookReviewNudgeSteps(calls []runtime.Call, name string) []string {
+	var steps []string
+	for _, call := range calls {
+		if call.Name != name {
+			continue
+		}
+		switch call.Method {
+		case "Peek", "NudgeNow", "Nudge":
+			steps = append(steps, call.Method)
+		case "SendKeys":
+			steps = append(steps, "SendKeys:"+call.Message)
+		}
+	}
+	return steps
+}
+
 func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

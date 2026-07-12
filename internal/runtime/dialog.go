@@ -594,6 +594,40 @@ func containsPostCodexHookReviewStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
+// ClearRecurringHookReviewDialog dismisses the Codex hook-review dialog when it
+// is on screen right now, with a single peek and no polling. Codex re-raises
+// "Hooks need review" mid-session on step and worktree changes, so the one-shot
+// startup handler ([AcceptStartupDialogs]) — which runs only at launch — cannot
+// clear a dialog that appears later; a nudge delivered into the dialog is typed
+// as menu input and the session wedges. Call this immediately before delivering a
+// mid-session nudge to a Codex session: when the hook-review matcher hits it
+// sends the same Down+Enter the startup handler uses to select "Trust all and
+// continue", so the pane is a live prompt again before the nudge lands; otherwise
+// it sends nothing and the running session is untouched. It never waits for a
+// dialog to appear, so a busy dialog-free session is not blocked. Returns whether
+// the dialog was found and dismissed.
+func ClearRecurringHookReviewDialog(
+	ctx context.Context,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	content, err := peek(startupDialogPeekLines)
+	if err != nil {
+		return false, err
+	}
+	if !containsCodexHookReviewDialog(content) {
+		return false, nil
+	}
+	if err := sendKeys("Down"); err != nil {
+		return false, err
+	}
+	sleep(ctx, bypassDialogConfirmDelay)
+	if err := sendKeys("Enter"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // acceptBypassPermissionsWarning dismisses the Claude Code bypass permissions
 // warning. When Claude starts with --dangerously-skip-permissions, it shows a
 // warning requiring Down arrow to select "Yes, I accept" and then Enter.

@@ -620,7 +620,8 @@ func formatWaitIdleReminder(source, message string) string {
 	return sb.String()
 }
 
-func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
+func (m *Manager) nudgeSession(ctx context.Context, b beads.Bead, sessName, message string, immediate bool) error {
+	m.clearRecurringHookReviewDialogLocked(ctx, b, sessName)
 	content := runtime.TextContent(message)
 	err := m.nudgeContent(sessName, content, immediate)
 	recordCtx := ctx
@@ -656,7 +657,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 			return false, err
 		}
-		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
+		if err := m.nudgeSession(ctx, b, sessName, message, false); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -674,7 +675,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
-	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+	if err := m.nudgeSession(ctx, b, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
 	}
 	return true, nil
@@ -685,7 +686,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 		return false, nil
 	}
 	if transportFromMetadata(b) == "acp" {
-		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
+		if err := m.nudgeSession(ctx, b, sessName, message, false); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -700,7 +701,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
-	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+	if err := m.nudgeSession(ctx, b, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
 	}
 	return true, nil
@@ -728,6 +729,29 @@ func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string
 	return true
 }
 
+// clearRecurringHookReviewDialogLocked dismisses the Codex hook-review dialog if
+// the session is blocked on it right now, before a nudge is delivered. Codex
+// re-raises "Hooks need review" on step and worktree changes mid-session; the
+// one-shot startup handler runs only at launch and the deferred verification runs
+// only once (it marks startup_dialog_verified and never checks again), so without
+// this a later nudge is typed into the recurring dialog and the session wedges.
+// Gated to non-ACP Codex sessions (mirroring the deferred startup verification
+// gate) and to a live matcher hit, so a normal or non-Codex session is never
+// touched — a dialog-free session costs one peek and no keystrokes. Best-effort:
+// a peek/keystroke transport error is ignored and the nudge still proceeds.
+func (m *Manager) clearRecurringHookReviewDialogLocked(ctx context.Context, b beads.Bead, sessName string) {
+	if transportFromMetadata(b) == "acp" || providerKind(b) != "codex" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, _ = runtime.ClearRecurringHookReviewDialog(ctx,
+		func(lines int) (string, error) { return m.sp.Peek(sessName, lines) },
+		func(keys ...string) error { return m.sp.SendKeys(sessName, keys...) },
+	)
+}
+
 func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 	if err := m.store.SetMetadata(id, startupDialogVerifiedKey, "true"); err != nil {
 		return
@@ -749,7 +773,7 @@ func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessN
 	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return err
 	}
-	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+	if err := m.nudgeSession(ctx, b, sessName, message, immediate); err != nil {
 		return err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
@@ -771,7 +795,7 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
+		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
@@ -779,7 +803,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 			delivered = false
 			return nil
 		}
-		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		if err := m.nudgeSession(ctx, b, sessName, message, immediate); err != nil {
 			return err
 		}
 		delivered = true

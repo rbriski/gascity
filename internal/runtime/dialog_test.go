@@ -1098,3 +1098,65 @@ func TestContainsCustomAPIKeyDialog(t *testing.T) {
 		})
 	}
 }
+
+func TestClearRecurringHookReviewDialogDismissesDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	var peeks atomic.Int32
+	var sent []string
+	dismissed, err := ClearRecurringHookReviewDialog(
+		context.Background(),
+		func(_ int) (string, error) {
+			peeks.Add(1)
+			return codexHookReviewDialogFixture(), nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ClearRecurringHookReviewDialog returned error: %v", err)
+	}
+	if !dismissed {
+		t.Fatal("dismissed = false, want true")
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+	// A recurring mid-session check must not poll: it peeks exactly once so a
+	// busy, dialog-free session is never blocked waiting for a dialog to appear.
+	if got := peeks.Load(); got != 1 {
+		t.Fatalf("peeks = %d, want 1 (single peek, no polling)", got)
+	}
+}
+
+func TestClearRecurringHookReviewDialogLeavesNormalSessionUntouched(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	var peeks atomic.Int32
+	var sent []string
+	dismissed, err := ClearRecurringHookReviewDialog(
+		context.Background(),
+		func(_ int) (string, error) {
+			peeks.Add(1)
+			return "› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ClearRecurringHookReviewDialog returned error: %v", err)
+	}
+	if dismissed {
+		t.Fatal("dismissed = true, want false for a session with no dialog")
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none (no keystrokes on a normal session)", sent)
+	}
+	if got := peeks.Load(); got != 1 {
+		t.Fatalf("peeks = %d, want 1", got)
+	}
+}

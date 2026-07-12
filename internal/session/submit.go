@@ -209,7 +209,7 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.B
 	// This is a fresh replacement turn after a hard restart. The previous run's
 	// pending-interaction state is irrelevant, and probing tmux immediately after
 	// the restart is race-prone for Claude-backed sessions.
-	return m.nudgeSession(ctx, sessName, message, true)
+	return m.nudgeSession(ctx, b, sessName, message, true)
 }
 
 func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName string, timeout time.Duration) error {

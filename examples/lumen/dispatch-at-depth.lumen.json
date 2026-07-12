@@ -1,0 +1,171 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "dispatch-at-depth",
+  "input": {
+    "name": "dispatch-at-depth.input",
+    "fields": [
+      {
+        "name": "drain_policy",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      },
+      {
+        "name": "target",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "run",
+      "id": "continue-chain",
+      "name": "continue-chain",
+      "after": [],
+      "target": { "kind": "by-name", "name": "midChain" },
+      "environment": {
+        "fields": [
+          { "name": "drain_policy", "value": { "kind": "expr", "expr": { "kind": "ref", "name": "drain_policy" } } },
+          { "name": "target", "value": { "kind": "expr", "expr": { "kind": "ref", "name": "target" } } }
+        ]
+      },
+      "outcome": "transparent"
+    }
+  ],
+  "formulas": {
+    "midChain": {
+      "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+      "name": "midChain",
+      "input": {
+        "name": "midChain.input",
+        "fields": [
+          { "name": "drain_policy", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
+          { "name": "target", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "run",
+          "id": "continue-chain",
+          "name": "continue-chain",
+          "after": [],
+          "target": { "kind": "by-name", "name": "leafChain" },
+          "environment": {
+            "fields": [
+              { "name": "drain_policy", "value": { "kind": "expr", "expr": { "kind": "ref", "name": "drain_policy" } } },
+              { "name": "target", "value": { "kind": "expr", "expr": { "kind": "ref", "name": "target" } } }
+            ]
+          },
+          "outcome": "transparent"
+        }
+      ]
+    },
+    "leafChain": {
+      "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+      "name": "leafChain",
+      "input": {
+        "name": "leafChain.input",
+        "fields": [
+          { "name": "drain_policy", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
+          { "name": "target", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "dispatch",
+          "id": "implement",
+          "name": "implement",
+          "after": [],
+          "subject": { "kind": "ref", "name": "drain_policy" },
+          "arms": [
+            {
+              "match": { "kind": "literal", "value": "separate" },
+              "body": {
+                "kind": "run",
+                "id": "lanes",
+                "name": "lanes",
+                "after": [],
+                "target": { "kind": "by-name", "name": "drainSeparate" },
+                "environment": {
+                  "fields": [
+                    { "name": "reviewer", "value": { "kind": "expr", "expr": { "kind": "literal", "value": "fanout" } } },
+                    { "name": "target", "value": { "kind": "expr", "expr": { "kind": "ref", "name": "target" } } }
+                  ]
+                },
+                "outcome": "transparent"
+              }
+            },
+            {
+              "match": { "kind": "literal", "value": "same-session" },
+              "body": {
+                "kind": "do",
+                "id": "sharedLane",
+                "name": "sharedLane",
+                "after": [],
+                "source": { "kind": "prompt" },
+                "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+                "body": {
+                  "raw": "Drain the shared session for {{ target }}.",
+                  "template": {
+                    "parts": [
+                      { "kind": "text", "value": "Drain the shared session for " },
+                      { "kind": "interp", "expr": { "kind": "ref", "name": "target" } },
+                      { "kind": "text", "value": "." }
+                    ]
+                  },
+                  "source": { "kind": "inline" },
+                  "templated": true,
+                  "language": "markdown",
+                  "syntax": "bare"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "drainSeparate": {
+      "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+      "name": "drainSeparate",
+      "input": {
+        "name": "drainSeparate.input",
+        "fields": [
+          { "name": "reviewer", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
+          { "name": "target", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "drain",
+          "name": "drain",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": {
+            "raw": "Drain the {{ reviewer }} lane for {{ target }}.",
+            "template": {
+              "parts": [
+                { "kind": "text", "value": "Drain the " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "reviewer" } },
+                { "kind": "text", "value": " lane for " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "target" } },
+                { "kind": "text", "value": "." }
+              ]
+            },
+            "source": { "kind": "inline" },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -344,9 +344,10 @@ type driver struct {
 	// instead. registerRunBodyEnv, registerForEachRunMemberEnv, and
 	// registerDispatchArmRunEnv populate it at drive time, UNCONDITIONALLY including the
 	// empty string (⚑S1 — the phantom exists at EVERY depth, and "" is the load-bearing
-	// override for a ROOT loop/fan; a dispatch is root-only, so its arm override is "");
-	// a plain run's namespace is absent and derives its parent structurally exactly as
-	// before (nil-map read is a miss).
+	// override for a ROOT loop/fan; a dispatch arm's override is its dispatch ns u.ns, "" at
+	// root and deep-qualified inside a run sub-formula since DAD lowers dispatches at any
+	// depth); a plain run's namespace is absent and derives its parent structurally exactly
+	// as before (nil-map read is a miss).
 	parentNS map[string]string
 }
 
@@ -1383,10 +1384,11 @@ func (d *driver) dispatchArmRunBody(u planUnit, arm *dispatchArm) ([]planUnit, p
 // registerDispatchArmRunEnv wires a matched run arm's env seam into scopeFor (⚑B1),
 // analogous to registerForEachRunMemberEnv: the arm namespace `<armBodyID>/` → the arm run's
 // env spec, PLUS an explicit parent-namespace override = the dispatch's namespace (u.ns),
-// registered UNCONDITIONALLY including u.ns == "" (⚑S1 parity — a dispatch is root-only, so
-// u.ns is always "" and the structural parent of `<armBodyID>/` is already root, but the
-// unconditional write keeps the FBR/RBL registration shape). Nested runs inside the arm
-// sub-graph register too. It is pure — re-derived identically every pass and resume — so
+// registered UNCONDITIONALLY including u.ns == "" (⚑S1 parity). Since DAD lowers dispatches at
+// any depth, u.ns is "" for a root dispatch and the deep-qualified prefix inside a run
+// sub-formula — the override points the arm's env eval at the dispatch's real ns view either
+// way, and the unconditional write keeps the FBR/RBL registration shape. Nested runs inside the
+// arm sub-graph register too. It is pure — re-derived identically every pass and resume — so
 // re-registering is an idempotent map write.
 func (d *driver) registerDispatchArmRunEnv(u planUnit, arm *dispatchArm, subUnits []planUnit) {
 	if d.runEnvs == nil {
@@ -1408,7 +1410,14 @@ func (d *driver) registerDispatchArmRunEnv(u planUnit, arm *dispatchArm, subUnit
 // matchingArm evaluates a dispatch's subject against the scope and returns the first
 // arm whose match value equals it.
 func (d *driver) matchingArm(u planUnit, scope map[string]string) (*dispatchArm, bool, error) {
-	subjectVal, err := evalValue(u.dispatch.subject, scope)
+	if u.ns != "" && d.runEnvs[u.ns] == nil {
+		return nil, false, fmt.Errorf("namespace %q has no registered environment", u.ns)
+	}
+	view, err := d.scopeFor(u.ns, scope)
+	if err != nil {
+		return nil, false, err
+	}
+	subjectVal, err := evalValue(u.dispatch.subject, view)
 	if err != nil {
 		return nil, false, err
 	}

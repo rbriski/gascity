@@ -1695,11 +1695,12 @@ func (l *lowerer) lowerTimeout(n ir.Node, parent string) error {
 // subject is a value expression; each arm has a match literal and a body that is EITHER a
 // single leaf (exec/do) OR a `run <formula> given {…}` sub-formula call (the DAR arm: the
 // MATCHED arm mints the target's whole sub-graph under `<armBodyID>/`, lowerDispatchRunArm,
-// the shared RBL/FBR helper). A block/scatter arm body is refused. A dispatch inside a run
-// sub-formula (prefix != "") is refused because its SUBJECT path — matchingArm's evalValue
-// over the flat scope — is still namespace-unaware (unlike guard and for-each, whose
-// condScope / evalForEachArray now take the unit ns); and a subject that reads the
-// dispatch's own id or an arm body id is refused (self-referential).
+// the shared RBL/FBR helper). A block/scatter arm body is refused. A dispatch may live at ANY
+// depth (the DAD slice deleted the prefix fence): matchingArm evaluates its subject against the
+// unit-ns view (scopeFor(u.ns, scope)), exactly as guard's condScope and for-each's
+// evalForEachArray do, so the arm mechanism — already qualified-key-general — mints under the
+// deep-qualified `<armBodyID>/`. A subject that reads the dispatch's own id or an arm body id is
+// refused (self-referential).
 //
 // ⚑B1: subject REFS and arm BODY IDS are held to the '/'+':' charset ban (guard-cond /
 // authored-id parity), at ALL times. It is load-bearing for the STATELESS DAR design: an
@@ -1707,9 +1708,6 @@ func (l *lowerer) lowerTimeout(n ir.Node, parent string) error {
 // minted sub-key on a later pass → an arm FLIP mid-mint (dual live beads); a forged arm body
 // id `armA/x` aliases arm A's minted sub-unit activation → chosenArm returns arm B mid-mint.
 func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
-	if l.prefix != "" {
-		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
-	}
 	subject, ok := n.Raw["subject"]
 	if !ok {
 		return fmt.Errorf("%w: dispatch %q missing subject", ErrUnsupportedNode, n.ID)
@@ -1812,7 +1810,8 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 	// byNodeID), so `given { x: <someArmBody> }` would render a stable "" — but the render is
 	// silently meaningless (the arm sub-graph is not a referenceable node from a sibling arm's
 	// env). Refuse it loudly over the stable-"" oddity. Deferred to AFTER the arm loop so a
-	// forward ref (arm i naming arm j > i) is caught. Body ids are bare (root-only dispatch).
+	// forward ref (arm i naming arm j > i) is caught. Body ids and refs are qualified to the
+	// dispatch's own ns (l.qid) — bare at root, deep-qualified inside a run sub-formula (DAD).
 	for i := range spec.arms {
 		if spec.arms[i].bodyRun == nil {
 			continue
@@ -1842,8 +1841,9 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 // runInput / non-transparent / missing-target / recursive-cycle / env-charset refusals — the
 // same single path lowerRun and the repeat/for-each run-body arms use), stashes the
 // PER-ARM re-lowering context, and DRY-RUN mints the arm's sub-graph (⚑S4) so an un-lowerable
-// body — an unsupported sub-node, a dispatch inside the arm target (refused by the prefix
-// fence), a nested loop refused at the arm prefix — refuses at buildUnits before any effect.
+// body — an unsupported sub-node, a '/'-forged cond ref, a nested loop refused at the arm prefix
+// — refuses at buildUnits before any effect. (A dispatch inside the arm target now lowers, at the
+// arm-qualified prefix, since DAD deleted the prefix fence.)
 // The refusal is wrapped `dispatch %q arm %q run body does not lower: %w`. Every run arm is
 // dry-run minted (Q-B: arms target DIFFERENT formulas, so validating one validates nothing
 // about the others). It reads no index — an arm mints exactly once — so genesis, re-Advance,
@@ -2302,10 +2302,11 @@ func (l *lowerer) resolveDeps() error {
 				// collectRefs is the honest read-set for the gate) — which means a
 				// member-form subject contributes its base ref "input", and a synth body
 				// literally named "input" would false-positive the synth-body ban below.
-				// Accepted this slice (improbable trigger; the ban errs loud, never
-				// silent); revisit with the dispatch-in-sub-formula slice. Guard condRefs
-				// can never carry a member base (validateClosedExpr refuses member exprs)
-				// and for-each overRefs are head-derived (⚑S1), so only dispatch has this.
+				// DAD is the dispatch-in-sub-formula slice that was to revisit this: we
+				// RE-ACCEPT the false-positive at every depth (improbable trigger; the ban
+				// errs LOUD, never silent — the member-subject loud-error contract). Guard
+				// condRefs can never carry a member base (validateClosedExpr refuses member
+				// exprs) and for-each overRefs are head-derived (⚑S1), so only dispatch has this.
 				exprRefs = u.dispatch.subjectRefs
 			}
 		case unitForEach:
@@ -2341,9 +2342,10 @@ func (l *lowerer) resolveDeps() error {
 				// pool walk evaluates the same pass and freezes a null miss write-once — the
 				// same doc takes opposite branches by driver. It bites a guard cond, a
 				// for-each `over` (head-derived ⚑S1, so a member form contributes no
-				// candidate), AND a dispatch subject (the live root hole: subjectRefs
-				// traverse this miss arm ungated while advanceDispatch freezes the chosen arm
-				// write-once). Refuse all three loudly at every level (the ⚑SF-1
+				// candidate), AND a dispatch subject (the live hole at ANY level now DAD lowers
+				// deep dispatches: subjectRefs traverse this miss arm ungated while
+				// advanceDispatch freezes the chosen arm write-once). Refuse all three loudly at
+				// every level (the ⚑SF-1
 				// refuse-now-lift-later precedent); loop/run exprRefs are untouched (a loop
 				// legitimately reads its own body id via loopScope's bodyName arm).
 				if _, isSynth := synthBodies[u.ns+refName]; isSynth {

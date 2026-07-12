@@ -577,6 +577,39 @@ func TestRunConditionFail(t *testing.T) {
 	}
 }
 
+// TestRunConditionInfraTempFailExitCodeMapsToGateError pins the reserved gate
+// sentinel: a check/finalize script that exits EX_TEMPFAIL (75) signals an INFRA
+// condition that never reflects the work's correctness (schema skew, cross-store
+// read gap, store hiccup). It must map to GateError, not GateFail, so the
+// dispatcher re-runs it on the bounded infra-retry path instead of burning a
+// ralph attempt and abort_scope-ing green work (maintainer-city
+// schema_skew_mol_current_null_steps; the #4176 gate-exec residual). Any other
+// non-zero exit keeps normal GateFail semantics.
+func TestRunConditionInfraTempFailExitCodeMapsToGateError(t *testing.T) {
+	dir := t.TempDir()
+	env := ConditionEnv{BeadID: "b3", CityPath: dir, WispID: "w3", ArtifactDir: dir}
+
+	sentinel := filepath.Join(dir, "infra.sh")
+	if err := os.WriteFile(sentinel, []byte("#!/bin/sh\necho 'infra hiccup' >&2\nexit 75\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := RunCondition(context.Background(), sentinel, env, 5*time.Second, 0)
+	if got.Outcome != GateError {
+		t.Errorf("exit 75 Outcome = %q, want %q (infra sentinel must not burn a ralph attempt)", got.Outcome, GateError)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 75 {
+		t.Errorf("exit 75 ExitCode = %v, want 75", got.ExitCode)
+	}
+
+	ordinary := filepath.Join(dir, "fail.sh")
+	if err := os.WriteFile(ordinary, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := RunCondition(context.Background(), ordinary, env, 5*time.Second, 0); got.Outcome != GateFail {
+		t.Errorf("exit 1 Outcome = %q, want %q (ordinary failures still burn)", got.Outcome, GateFail)
+	}
+}
+
 func TestRunConditionRetriesTextFileBusy(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not return text-file-busy for executing an open script")

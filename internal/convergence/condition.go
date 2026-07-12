@@ -262,6 +262,15 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 	return resolved, nil
 }
 
+// gateInfraTempFailExitCode is the reserved gate exit code (EX_TEMPFAIL from
+// sysexits.h) a check/finalize script uses to signal an INFRA condition that
+// never reflects the work's correctness — a schema skew, a cross-store read
+// gap, a transient store hiccup. runOnceNoPreExecRetry maps it to GateError (not
+// GateFail) so the dispatcher re-runs it on the bounded infra-retry path rather
+// than burning a ralph attempt and abort_scope-ing green work. Any other
+// non-zero exit keeps the normal GateFail semantics.
+const gateInfraTempFailExitCode = 75
+
 // RunCondition executes a gate condition script with the given environment.
 // Handles timeout, output capture (truncated to MaxOutputBytes), and retry logic.
 // The retryBudget parameter controls max retries on timeout (0 = no retries).
@@ -373,8 +382,16 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			code := exitErr.ExitCode()
+			// A script that exits EX_TEMPFAIL signals an infra condition, not a
+			// verdict on the work — classify it as GateError so the dispatcher
+			// re-runs it on the bounded infra-retry path instead of burning a
+			// ralph attempt (the #4176 gate-exec residual).
+			outcome := GateFail
+			if code == gateInfraTempFailExitCode {
+				outcome = GateError
+			}
 			return GateResult{
-				Outcome:   GateFail,
+				Outcome:   outcome,
 				ExitCode:  &code,
 				Stdout:    outStr,
 				Stderr:    errStr,

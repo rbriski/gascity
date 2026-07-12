@@ -4,13 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
-	"os"
 	"slices"
-	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -689,54 +684,25 @@ func (c *CachingStore) notifyChanges(notifications []cacheNotification) {
 }
 
 func beadChanged(old, fresh Bead, skipLabels bool) bool {
-	field := beadChangeField(old, fresh, skipLabels)
-	if field == "" {
-		return false
+	if old.ID != fresh.ID ||
+		old.Title != fresh.Title ||
+		old.Status != fresh.Status ||
+		old.Type != fresh.Type ||
+		!intPtrEqual(old.Priority, fresh.Priority) ||
+		!old.CreatedAt.Equal(fresh.CreatedAt) ||
+		old.Assignee != fresh.Assignee ||
+		old.From != fresh.From ||
+		old.ParentID != fresh.ParentID ||
+		old.Ref != fresh.Ref ||
+		old.Description != fresh.Description ||
+		old.Ephemeral != fresh.Ephemeral ||
+		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
+		return true
 	}
-	if beadChangeDiagEnabled {
-		logBeadChangeDiag(old, fresh, field)
+	if !metadataEqual(old.Metadata, fresh.Metadata) {
+		return true
 	}
-	return true
-}
-
-// beadChangeField returns the name of the first field for which old and fresh
-// differ under beadChanged's comparison semantics, or "" when they are equal.
-// It is the field-identifying core of beadChanged, factored out so the
-// diagnostic diff-log can name the tripping field. The switch mirrors the exact
-// order and conditions of the original beadChanged, so beadChanged's boolean
-// result (field != "") is byte-for-byte unchanged.
-func beadChangeField(old, fresh Bead, skipLabels bool) string {
-	switch {
-	case old.ID != fresh.ID:
-		return "id"
-	case old.Title != fresh.Title:
-		return "title"
-	case old.Status != fresh.Status:
-		return "status"
-	case old.Type != fresh.Type:
-		return "type"
-	case !intPtrEqual(old.Priority, fresh.Priority):
-		return "priority"
-	case !old.CreatedAt.Equal(fresh.CreatedAt):
-		return "created_at"
-	case old.Assignee != fresh.Assignee:
-		return "assignee"
-	case old.From != fresh.From:
-		return "from"
-	case old.ParentID != fresh.ParentID:
-		return "parent_id"
-	case old.Ref != fresh.Ref:
-		return "ref"
-	case old.Description != fresh.Description:
-		return "description"
-	case old.Ephemeral != fresh.Ephemeral:
-		return "ephemeral"
-	case !timePtrEqual(old.DeferUntil, fresh.DeferUntil):
-		return "defer_until"
-	case !boolPtrEqual(old.IsBlocked, fresh.IsBlocked):
-		return "is_blocked"
-	case !metadataEqual(old.Metadata, fresh.Metadata):
-		return "metadata"
 	// Labels, needs, and dependencies are SETS: their order carries no meaning.
 	// Compare them order-insensitively. A backing store that returns these in a
 	// different order than the cache holds (the Dolt gcg rig store does not
@@ -744,178 +710,13 @@ func beadChangeField(old, fresh Bead, skipLabels bool) string {
 	// change on every reconcile pass — the cache-reconcile re-absorb flood that
 	// re-touched every live molecule wisp ~every 80s and starved review
 	// molecules from advancing (ga-ocypq2).
-	case !skipLabels && !stringSetEqual(old.Labels, fresh.Labels):
-		return "labels"
-	case !stringSetEqual(old.Needs, fresh.Needs):
-		return "needs"
-	case !depSetEqual(old.Dependencies, fresh.Dependencies):
-		return "dependencies"
-	default:
-		return ""
-	}
-}
-
-// beadChangeDiagEnabled gates the diagnostic-only beadChanged diff-log. It
-// defaults on so a deployed binary emits the log without any extra flag, is
-// force-disabled under `go test` (an init in the diag test sets it false) so the
-// reconcile differential/oracle suites — which drive beadChanged across ~12k
-// seeded cases — do not spam, and can be silenced in production with
-// GC_BEADS_CHANGE_DIAG=off. It never affects beadChanged's boolean result.
-var beadChangeDiagEnabled = beadChangeDiagEnvDefault()
-
-func beadChangeDiagEnvDefault() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_BEADS_CHANGE_DIAG"))) {
-	case "0", "off", "false", "no":
-		return false
-	default:
+	if !skipLabels && !stringSetEqual(old.Labels, fresh.Labels) {
 		return true
 	}
-}
-
-const (
-	// beadChangeDiagPerIDInterval rate-limits the diff-log to at most one line
-	// per bead id per interval, so a single wisp churning every reconcile pass
-	// cannot spam the log under the flood.
-	beadChangeDiagPerIDInterval = 5 * time.Second
-	// beadChangeDiagMaxTrackedIDs bounds the rate-limiter's memory: a churn of
-	// many distinct ids resets the tracker rather than growing without bound.
-	beadChangeDiagMaxTrackedIDs = 1024
-	// beadChangeDiagValueMax caps each logged old/fresh value length.
-	beadChangeDiagValueMax = 120
-)
-
-var (
-	beadChangeDiagMu       sync.Mutex
-	beadChangeDiagLastByID = make(map[string]time.Time)
-)
-
-// beadChangeDiagShouldLog reports whether the diff-log for id may fire now,
-// enforcing the per-id rate limit. Caller passes a single clock read.
-func beadChangeDiagShouldLog(id string, now time.Time) bool {
-	beadChangeDiagMu.Lock()
-	defer beadChangeDiagMu.Unlock()
-	if last, ok := beadChangeDiagLastByID[id]; ok && now.Sub(last) < beadChangeDiagPerIDInterval {
-		return false
+	if !stringSetEqual(old.Needs, fresh.Needs) {
+		return true
 	}
-	if len(beadChangeDiagLastByID) >= beadChangeDiagMaxTrackedIDs {
-		beadChangeDiagLastByID = make(map[string]time.Time)
-	}
-	beadChangeDiagLastByID[id] = now
-	return true
-}
-
-// logBeadChangeDiag emits a single rate-limited diagnostic line naming the
-// tripping field and its old vs fresh values (truncated). Diagnostic only — it
-// is invoked on the path where beadChanged has already decided to return true
-// and does not alter that decision.
-func logBeadChangeDiag(old, fresh Bead, field string) {
-	id := fresh.ID
-	if id == "" {
-		id = old.ID
-	}
-	if !beadChangeDiagShouldLog(id, time.Now()) {
-		return
-	}
-	detailField := field
-	var oldVal, freshVal string
-	switch field {
-	case "metadata":
-		key, ov, fv := metadataDiffDetail(old.Metadata, fresh.Metadata)
-		detailField = "metadata[" + key + "]"
-		oldVal, freshVal = ov, fv
-	case "labels":
-		oldVal, freshVal = strings.Join(old.Labels, ","), strings.Join(fresh.Labels, ",")
-	case "needs":
-		oldVal, freshVal = strings.Join(old.Needs, ","), strings.Join(fresh.Needs, ",")
-	case "dependencies":
-		oldVal, freshVal = depsDiagString(old.Dependencies), depsDiagString(fresh.Dependencies)
-	default:
-		oldVal, freshVal = scalarDiagValue(old, field), scalarDiagValue(fresh, field)
-	}
-	log.Printf("beads cache: beadChanged DIAG id=%s field=%s old=%q fresh=%q",
-		id, detailField, truncateDiag(oldVal), truncateDiag(freshVal))
-}
-
-// metadataDiffDetail returns the first metadata key whose value differs under
-// metadataValueEqual (or a presence difference), with its old and fresh values.
-func metadataDiffDetail(old, fresh map[string]string) (key, oldVal, freshVal string) {
-	for k, ov := range old {
-		fv, ok := fresh[k]
-		if !ok {
-			return k, ov, "<absent>"
-		}
-		if !metadataValueEqual(ov, fv) {
-			return k, ov, fv
-		}
-	}
-	for k, fv := range fresh {
-		if _, ok := old[k]; !ok {
-			return k, "<absent>", fv
-		}
-	}
-	return "?", fmt.Sprintf("%v", old), fmt.Sprintf("%v", fresh)
-}
-
-// scalarDiagValue renders a scalar bead field as a string for the diff-log.
-func scalarDiagValue(b Bead, field string) string {
-	switch field {
-	case "id":
-		return b.ID
-	case "title":
-		return b.Title
-	case "status":
-		return b.Status
-	case "type":
-		return b.Type
-	case "priority":
-		if b.Priority == nil {
-			return "<nil>"
-		}
-		return strconv.Itoa(*b.Priority)
-	case "created_at":
-		return b.CreatedAt.Format(time.RFC3339Nano)
-	case "assignee":
-		return b.Assignee
-	case "from":
-		return b.From
-	case "parent_id":
-		return b.ParentID
-	case "ref":
-		return b.Ref
-	case "description":
-		return b.Description
-	case "ephemeral":
-		return strconv.FormatBool(b.Ephemeral)
-	case "defer_until":
-		if b.DeferUntil == nil {
-			return "<nil>"
-		}
-		return b.DeferUntil.Format(time.RFC3339Nano)
-	case "is_blocked":
-		if b.IsBlocked == nil {
-			return "<nil>"
-		}
-		return strconv.FormatBool(*b.IsBlocked)
-	default:
-		return ""
-	}
-}
-
-func depsDiagString(deps []Dep) string {
-	parts := make([]string, 0, len(deps))
-	for _, d := range deps {
-		parts = append(parts, d.Type+":"+d.DependsOnID)
-	}
-	return strings.Join(parts, ",")
-}
-
-// truncateDiag caps a logged value at beadChangeDiagValueMax bytes, appending
-// the original length so a truncated field is obvious.
-func truncateDiag(s string) string {
-	if len(s) <= beadChangeDiagValueMax {
-		return s
-	}
-	return s[:beadChangeDiagValueMax] + fmt.Sprintf("...(%d)", len(s))
+	return !depSetEqual(old.Dependencies, fresh.Dependencies)
 }
 
 func depsChanged(old, fresh []Dep) bool {
@@ -940,31 +741,21 @@ func metadataEqual(a, b map[string]string) bool {
 		if !ok {
 			return false
 		}
-		if !metadataValueEqual(av, bv) {
-			return false
+		if av == bv {
+			continue
 		}
+		// Both sides must be valid JSON for a canonical compare to be
+		// meaningful; otherwise the raw strings genuinely differ.
+		if json.Valid([]byte(av)) && json.Valid([]byte(bv)) {
+			ca, okA := canonicalJSON(av)
+			cb, okB := canonicalJSON(bv)
+			if okA && okB && ca == cb {
+				continue
+			}
+		}
+		return false
 	}
 	return true
-}
-
-// metadataValueEqual reports whether two metadata values are equal, treating
-// them as equal when both are valid JSON with the same canonical form (see
-// metadataEqual). Shared by metadataEqual and the beadChanged diff-log so the
-// log pinpoints exactly the key metadataEqual tripped on.
-func metadataValueEqual(av, bv string) bool {
-	if av == bv {
-		return true
-	}
-	// Both sides must be valid JSON for a canonical compare to be meaningful;
-	// otherwise the raw strings genuinely differ.
-	if json.Valid([]byte(av)) && json.Valid([]byte(bv)) {
-		ca, okA := canonicalJSON(av)
-		cb, okB := canonicalJSON(bv)
-		if okA && okB && ca == cb {
-			return true
-		}
-	}
-	return false
 }
 
 // canonicalJSON returns a stable canonical serialization of a JSON value:

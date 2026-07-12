@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -588,6 +589,18 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 	}
 	prompt, err := renderPrompt(u.leaf.raw, view)
 	if err != nil {
+		// ⚑B2: an index-render failure SETTLES the step failed{detail} (non-retryable) — the
+		// evalForEachArray→failed{invalid_input} precedent — rather than erroring the pass;
+		// the loop then exits via its own `lane.outcome == failed` clause. Any other render
+		// error keeps today's error path (the conversion matches ONLY this sentinel).
+		var ire *indexRenderError
+		if errors.As(err, &ire) {
+			if err := d.settleIndexRenderFailed(u, ire.detail); err != nil {
+				return err
+			}
+			d.record(u.nodeID, "", scope, nodeOutputs)
+			return nil
+		}
 		return fmt.Errorf("lumen: do %q prompt: %w", u.nodeID, err)
 	}
 	// The effect suffix is the live attempt number (1-based): attempt 0 derives
@@ -653,6 +666,30 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 	}
 	d.record(u.nodeID, out, scope, nodeOutputs)
 	return nil
+}
+
+// settleIndexRenderFailed converts a do-template index-render failure into a settled
+// failed{detail} outcome (⚑B2, §1.2.4), mirroring evalForEachArray→failed{invalid_input}: it
+// activates the node if the fold has not seen it (the pool render precedes node.activated;
+// the inline render follows it — activate-if-needed via ensureDecisionActivated), then
+// appends a NON-retryable outcome.settled carrying the index error as detail. The failure
+// NEVER errors the dispatch. Callers that hold the live scope (inline runDo) additionally
+// record the empty output; the pool path reads the fold and needs no in-pass record.
+//
+// The activate→settle pair is CRASH-CONVERGENT (amended ⚑B2): the crashAfterActivate seam
+// between the two appends is the injectable death that leaves an ENGINE-mode
+// activated-unsettled node with no bead — the half-settled window both pool resume arms
+// (materializePoolWork's unsettled branch, advanceLoop's live-attempt arm) detect via
+// resettleIndexWindow and re-settle (the re-render deterministically re-errors; the
+// activate no-ops under its idem token; the settle lands).
+func (d *driver) settleIndexRenderFailed(u planUnit, detail string) error {
+	if err := d.ensureDecisionActivated(u); err != nil {
+		return err
+	}
+	if err := d.crashAt(crashAfterActivate, u.activation); err != nil {
+		return err
+	}
+	return d.appendSettled(u.activation, OutcomeFailed, "", detail)
 }
 
 // runScatter settles a scatter aggregate from its members' outcomes. It is
@@ -1654,14 +1691,17 @@ func (d *driver) typedSubInput(ns string, spec *runSpec, scope map[string]string
 	return input, nil
 }
 
-// retypeScalar re-types a run env binding's render STRING to the scalar its declared
-// atomic type implies (root-cond parity): a "number" field ParseFloats, a "boolean"
-// field ParseBools, and every other type (string, or a non-atomic) keeps the string
-// verbatim. A parse failure keeps the string too — the garbage-in analog of the root
-// path, where a malformed input value flows through as-is (loopScope.resolve then
-// normalizes and compares it as a string).
+// retypeScalar re-types a run env binding's render STRING to the value its declared type
+// implies (root-cond parity): a "number" field ParseFloats, a "boolean" field ParseBools,
+// an ARRAY field json.Unmarshals its JSON-array text to []any (so length/ordered compare
+// see a first-class array, not the render string), and every other type (string, or a
+// non-atomic record) keeps the string verbatim. A parse/decode failure keeps the string
+// too — the garbage-in analog of the root path, where a malformed input value flows through
+// as-is (length then counts the string's UTF-16 units; loopScope.resolve normalizes and
+// compares it as a string).
 func retypeScalar(s string, t ir.Type) any {
-	if t.Kind == ir.TypeAtomic {
+	switch t.Kind {
+	case ir.TypeAtomic:
 		switch t.Name {
 		case "number":
 			if f, err := strconv.ParseFloat(s, 64); err == nil {
@@ -1671,6 +1711,11 @@ func retypeScalar(s string, t ir.Type) any {
 			if b, err := strconv.ParseBool(s); err == nil {
 				return b
 			}
+		}
+	case ir.TypeArray:
+		var arr []any
+		if err := json.Unmarshal([]byte(s), &arr); err == nil {
+			return arr
 		}
 	}
 	return s

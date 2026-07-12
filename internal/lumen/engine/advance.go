@@ -418,6 +418,14 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 		if n.BeadID != "" {
 			return nil
 		}
+		// Amended ⚑B2 crash window: an ENGINE-mode activation (no pool dispatch marker)
+		// with no bead is the half-settled index-failure pair — settleIndexRenderFailed's
+		// activate committed, its settle did not. Re-derive the settle (the re-render
+		// deterministically re-errors); falling through instead would dispatch a REAL bead
+		// with the fold's empty route/prompt — a garbage dispatch that loses the detail.
+		if n.DispatchMode != DispatchModePool {
+			return d.resettleIndexWindow(u, scope)
+		}
 		return d.dispatchPoolWork(u.activation, u.nodeID, n.Route, n.Prompt, opts)
 	}
 	route, ok := opts.PoolRouter(u.leaf.agentRef)
@@ -432,6 +440,15 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 	}
 	prompt, err := renderPrompt(u.leaf.raw, view)
 	if err != nil {
+		// ⚑B2: an index-render failure SETTLES the node failed{detail} (non-retryable)
+		// in-pass — activate-if-needed + outcome.settled, the evalForEachArray→
+		// failed{invalid_input} precedent — rather than erroring the Advance; the loop then
+		// exits via its own `lane.outcome == failed` clause. Any other render error
+		// (ErrPromptTooLarge etc.) keeps today's error path.
+		var ire *indexRenderError
+		if errors.As(err, &ire) {
+			return d.settleIndexRenderFailed(u, ire.detail)
+		}
 		return fmt.Errorf("lumen: advance: do %q prompt: %w", u.nodeID, err)
 	}
 	if len(prompt) > maxPromptBytes {
@@ -484,6 +501,30 @@ func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, opts
 		Kind:       OwnedKindWorkBead,
 		BeadID:     beadID,
 	})
+}
+
+// resettleIndexWindow re-derives the ⚑B2 settle for a HALF-SETTLED index-failure window
+// (amended contract): the fold holds an ENGINE-mode activated-unsettled node with no bead —
+// a death between settleIndexRenderFailed's two appends. The prompt render is a pure
+// function of (IR, scope), so re-rendering deterministically re-errors with the SAME
+// sentinel detail; settleIndexRenderFailed then no-ops the activate under its idem token
+// and lands the missing settle. A non-sentinel re-render outcome here is a structural
+// inconsistency (nothing else writes an engine-mode activation for a pool-routed do) and
+// is refused loudly rather than guessed around.
+func (d *driver) resettleIndexWindow(u planUnit, scope map[string]string) error {
+	view, err := d.scopeFor(u.ns, scope)
+	if err != nil {
+		return err
+	}
+	_, err = renderPrompt(u.leaf.raw, view)
+	var ire *indexRenderError
+	if errors.As(err, &ire) {
+		return d.settleIndexRenderFailed(u, ire.detail)
+	}
+	if err != nil {
+		return fmt.Errorf("lumen: advance: do %q prompt: %w", u.nodeID, err)
+	}
+	return fmt.Errorf("lumen: advance: do %q is activated engine-mode with no bead yet its prompt renders (inconsistent half-settled window)", u.nodeID)
 }
 
 // observePoolWork consults the ObserveWork seam for a dispatched-but-unsettled pool
@@ -655,36 +696,92 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 	if liveAtt, hasLive := d.liveAttempt(spec.bodyNodeID); hasLive {
 		bodyAct := activationForAttempt(spec.bodyNodeID, liveAtt)
 		bn := d.st().Nodes[bodyAct]
-		if opts.ObserveWork == nil || bn == nil || bn.BeadID == "" {
+		switch {
+		case bn != nil && bn.BeadID == "" && bn.DispatchMode != DispatchModePool:
+			// Amended ⚑B2 crash window: an ENGINE-mode activation with no bead is the
+			// half-settled index-failure pair (settleIndexRenderFailed's activate committed,
+			// its settle did not). Without this arm the empty BeadID parks the loop FOREVER
+			// (a silent wedge — nothing will ever settle the attempt). Re-derive the settle,
+			// then fall through to the decide logic below. The PRE-EXISTING pool-mode
+			// activated-undispatched wedge (DispatchMode=pool, no bead) is deliberately NOT
+			// routed here — it keeps its documented park behavior.
+			if err := d.resettleLoopAttemptIndexWindow(u, liveAtt, scope); err != nil {
+				return err
+			}
+			// Re-settled this pass: fall through to the decide logic below.
+		case opts.ObserveWork == nil || bn == nil || bn.BeadID == "":
 			return nil
+		default:
+			if err := d.observePoolWork(bodyAct, spec.bodyNodeID, bn.BeadID, scope, nodeOutputs, opts); err != nil {
+				return err
+			}
+			if bn := d.st().Nodes[bodyAct]; bn == nil || !bn.Settled {
+				return nil // still in flight — park
+			}
+			// Settled this pass: fall through to the decide logic below.
 		}
-		if err := d.observePoolWork(bodyAct, spec.bodyNodeID, bn.BeadID, scope, nodeOutputs, opts); err != nil {
+	}
+
+	// Decide over the highest settled attempt (if any), then mint. An attempt can settle
+	// IN-PASS — the ⚑B2 index-fail settle is the only pool-path writer — in which case
+	// parking would strand the run (no in-flight work → a false ErrAdvanceStalled): decide
+	// immediately instead, the observe arm's settled-this-pass discipline. The chain is
+	// bounded: loopDecide's loop_cap / retry budget settles the loop before the mint loop
+	// can spin unboundedly.
+	next := 0
+	if settledAttempt, hasSettled := d.lastSettledAttempt(spec.bodyNodeID); hasSettled {
+		bn := d.st().Nodes[activationForAttempt(spec.bodyNodeID, settledAttempt)]
+		cont, err := d.loopDecide(u, settledAttempt, maxAttempts, bn, scope, nodeOutputs)
+		if err != nil {
 			return err
 		}
-		if bn := d.st().Nodes[bodyAct]; bn == nil || !bn.Settled {
-			return nil // still in flight — park
+		if !cont {
+			return nil // loop settled inside loopDecide
 		}
-		// Settled this pass: fall through to the decide logic below.
+		next = settledAttempt + 1
 	}
+	for {
+		if err := d.materializeLoopAttempt(u, next, maxAttempts, scope, opts); err != nil {
+			return err
+		}
+		bn := d.st().Nodes[activationForAttempt(spec.bodyNodeID, next)]
+		if bn == nil || !bn.Settled {
+			return nil // dispatched — park on the in-flight attempt
+		}
+		cont, err := d.loopDecide(u, next, maxAttempts, bn, scope, nodeOutputs)
+		if err != nil {
+			return err
+		}
+		if !cont {
+			return nil // loop settled inside loopDecide
+		}
+		next++
+	}
+}
 
-	settledAttempt, hasSettled := d.lastSettledAttempt(spec.bodyNodeID)
-	if !hasSettled {
-		// No attempt yet: mint attempt 0.
-		return d.materializeLoopAttempt(u, 0, maxAttempts, scope, opts)
+// resettleLoopAttemptIndexWindow re-derives the ⚑B2 settle for a half-settled loop ATTEMPT
+// (the amended crash window): it rebuilds attempt N's unit and render window exactly as
+// materializeLoopAttempt does — the 1-based iteration binding seeded at the namespace-
+// qualified key around the render, then restored — and routes through resettleIndexWindow,
+// so the re-derived detail is byte-identical to the no-crash settle.
+func (d *driver) resettleLoopAttemptIndexWindow(u planUnit, attempt int, scope map[string]string) error {
+	spec := u.loop
+	au := d.attemptUnit(u, attempt)
+	iterKey := u.ns + spec.iterationName
+	restore, had := "", false
+	if spec.irKind == ir.NodeRepeat {
+		restore, had = scope[iterKey]
+		scope[iterKey] = strconv.Itoa(attempt + 1)
 	}
-
-	// The highest attempt has settled: decide (settle the loop OR re-attempt). The
-	// decision is the shared closed-expression evaluation (loopDecide); it settles
-	// the loop itself on a stop, and on a continue we mint the next pool attempt.
-	bn := d.st().Nodes[activationForAttempt(spec.bodyNodeID, settledAttempt)]
-	cont, err := d.loopDecide(u, settledAttempt, maxAttempts, bn, scope, nodeOutputs)
-	if err != nil {
-		return err
+	err := d.resettleIndexWindow(au, scope)
+	if spec.irKind == ir.NodeRepeat {
+		if had {
+			scope[iterKey] = restore
+		} else {
+			delete(scope, iterKey)
+		}
 	}
-	if !cont {
-		return nil // loop settled inside loopDecide
-	}
-	return d.materializeLoopAttempt(u, settledAttempt+1, maxAttempts, scope, opts)
+	return err
 }
 
 // advanceRunBodyLoop is Advance's park-aware arm for a repeat whose body is a run

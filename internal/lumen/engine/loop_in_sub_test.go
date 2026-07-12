@@ -33,10 +33,10 @@ func lisdIterGECond(n int) string {
 		`{"kind":"ref","name":"iteration"},{"kind":"literal","value":` + strconv.Itoa(n) + `}]}`
 }
 
-// settledActContains reports whether the settled-activation list carries (activation, outcome).
-func settledActContains(pairs [][2]string, activation, outcome string) bool {
+// settledActFailed reports whether the settled-activation list carries (activation, failed).
+func settledActFailed(pairs [][2]string, activation string) bool {
 	for _, p := range pairs {
-		if p[0] == activation && p[1] == outcome {
+		if p[0] == activation && p[1] == engine.OutcomeFailed {
 			return true
 		}
 	}
@@ -276,7 +276,7 @@ func TestRunRetryLeafLoopInSubAttemptsTyped(t *testing.T) {
 	}
 	acts := settledActivations(t, res.Events)
 	for _, want := range []string{"wrap/body:0", "wrap/body:1", "wrap/body:2"} {
-		if !settledActContains(acts, want, engine.OutcomeFailed) {
+		if !settledActFailed(acts, want) {
 			t.Fatalf("attempt %s did not run failed; the typed budget 3 was not honored (invalid_input?) acts=%v", want, acts)
 		}
 	}

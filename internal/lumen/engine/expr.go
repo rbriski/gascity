@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // This file is the CLOSED-EXPRESSION evaluator the attempt-loop arm (retry /
@@ -20,11 +21,14 @@ import (
 // (validateClosedExpr, before any effect), never a runtime surprise.
 //
 // The closed subset (blueprint §1.3):
-//   - kinds:    literal, ref (field "" = bare value, or "outcome"), operator
+//   - kinds:    literal, ref (field "" = bare value, or "outcome"), operator,
+//               call (length only — the one length-shaped cond the *-shared corpus needs)
 //   - operators: == != >= <= > < && || !
-// Every other kind (array, object, member, call, handleConstruct, channel-facet),
-// operator (in, ?:, + - * / %), and ref field (error, kind, result, reason) is
-// refused with ErrUnsupportedNode.
+// Every other kind (array, object, member, handleConstruct, channel-facet), call name
+// (json/string/join stay render helpers, outside the cond subset), operator (in, ?:,
+// + - * / %), and ref field (error, kind, result, reason) is refused with
+// ErrUnsupportedNode. Arrays and maps are first-class VALUES here (a ref may resolve to
+// one), but only `length` consumes them in a cond.
 
 // closedRefFields is the closed set of ref fields the loop conditions may read.
 // A bare ref ("") reads the binding's value (folded output / iteration number /
@@ -130,8 +134,51 @@ func evalClosedExpr(raw json.RawMessage, scope loopScope) (any, error) {
 	case "operator":
 		return evalClosedOperator(raw, scope)
 
+	case "call":
+		return evalClosedCall(raw, scope)
+
 	default:
 		return nil, fmt.Errorf("%w: closed expr kind %q", ErrUnsupportedNode, head.Kind)
+	}
+}
+
+// evalClosedCall evaluates the one supported call — `length(x)` — over the single
+// evaluated argument. It is the defensive twin of validateClosedExpr's call arm (lowering
+// already refused a non-length name or a wrong arity).
+func evalClosedCall(raw json.RawMessage, scope loopScope) (any, error) {
+	var c struct {
+		Name string            `json:"name"`
+		Args []json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, fmt.Errorf("lumen: closed expr call: %w", err)
+	}
+	if c.Name != "length" {
+		return nil, fmt.Errorf("%w: closed expr call %q", ErrUnsupportedNode, c.Name)
+	}
+	if len(c.Args) != 1 {
+		return nil, fmt.Errorf("%w: closed expr call \"length\" wants 1 arg, got %d", ErrUnsupportedNode, len(c.Args))
+	}
+	arg, err := evalClosedExpr(c.Args[0], scope)
+	if err != nil {
+		return nil, err
+	}
+	return lengthOf(arg), nil
+}
+
+// lengthOf mirrors the reference callExprFunction("length", …): an array or a map returns
+// its element/key count; a string returns its UTF-16 code-unit count (JS `.length`, NOT
+// bytes or rune count); null/number/bool return 0.
+func lengthOf(v any) float64 {
+	switch x := v.(type) {
+	case []any:
+		return float64(len(x))
+	case map[string]any:
+		return float64(len(x))
+	case string:
+		return float64(len(utf16.Encode([]rune(x))))
+	default:
+		return 0
 	}
 }
 
@@ -243,6 +290,21 @@ func validateClosedExpr(raw json.RawMessage) error {
 			}
 		}
 		return nil
+	case "call":
+		var c struct {
+			Name string            `json:"name"`
+			Args []json.RawMessage `json:"args"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fmt.Errorf("lumen: closed expr call: %w", err)
+		}
+		if c.Name != "length" {
+			return fmt.Errorf("%w: closed expr call %q", ErrUnsupportedNode, c.Name)
+		}
+		if len(c.Args) != 1 {
+			return fmt.Errorf("%w: closed expr call \"length\" wants 1 arg, got %d", ErrUnsupportedNode, len(c.Args))
+		}
+		return validateClosedExpr(c.Args[0])
 	default:
 		return fmt.Errorf("%w: closed expr kind %q", ErrUnsupportedNode, head.Kind)
 	}
@@ -268,11 +330,15 @@ func decodeLiteralValue(raw json.RawMessage) any {
 }
 
 // normalizeExprValue coerces an input value (decoded from JSON into map[string]any)
-// to a comparable scalar. JSON numbers are already float64; anything non-scalar
-// falls back to its Go string form.
+// to a comparable scalar. JSON numbers are already float64; arrays and maps pass THROUGH
+// as first-class values (§1.1.3 — length reads them, ordered/equality compare coerces them
+// via jsString, truthiness reads array length); anything else non-scalar falls back to its
+// Go string form.
 func normalizeExprValue(v any) any {
 	switch x := v.(type) {
 	case nil, bool, float64, string:
+		return x
+	case []any, map[string]any:
 		return x
 	case int:
 		return float64(x)
@@ -289,7 +355,8 @@ func normalizeExprValue(v any) any {
 }
 
 // isExprTruthy mirrors the reference isTruthy: null/false falsy; a number falsy
-// iff 0 or NaN; a string falsy iff empty; everything else truthy.
+// iff 0 or NaN; a string falsy iff empty; an array falsy iff empty; everything else
+// (a map/object, …) truthy.
 func isExprTruthy(v any) bool {
 	switch x := v.(type) {
 	case nil:
@@ -299,6 +366,8 @@ func isExprTruthy(v any) bool {
 	case float64:
 		return x != 0 && x == x // x == x is false for NaN
 	case string:
+		return len(x) > 0
+	case []any:
 		return len(x) > 0
 	default:
 		return true
@@ -310,7 +379,11 @@ func isExprTruthy(v any) bool {
 // makes every comparison operator false. Numbers compare numerically; booleans
 // by value; everything else by String()-coercion (so "3" and 3 compare equal).
 func compareExprValues(left, right any) (cmp int, nan bool) {
-	if left == right { // strict value equality (both are comparable scalars)
+	// ⚑B1: Go's == PANICS on two non-comparable dynamic types ([]any / map[string]any).
+	// Take the value-equality fast path ONLY when both operands are comparable scalars
+	// (nil/bool/float64/string); array/map operands route straight to the jsString-coercion
+	// arms below (reference parity: an identity-miss falls to String()).
+	if exprScalar(left) && exprScalar(right) && left == right {
 		return 0, false
 	}
 	if left == nil || right == nil {
@@ -346,9 +419,12 @@ func compareExprValues(left, right any) (cmp int, nan bool) {
 	}
 }
 
-// jsString mirrors JS String() for the scalar values the evaluator handles: a
-// number renders without a trailing ".0", a bool as "true"/"false", a string
-// verbatim, null as "null".
+// jsString mirrors JS String() for the values the evaluator handles: a number renders
+// without a trailing ".0", a bool as "true"/"false", a string verbatim, a top-level null as
+// "null". An array joins its elements with "," — a nil/undefined element renders EMPTY (NOT
+// "null"; `String([null,"a"]) === ",a"`), a nested array recurses with the same join rule,
+// and a map element renders "[object Object]" (⚑B3). A top-level map renders "[object
+// Object]".
 func jsString(v any) string {
 	switch x := v.(type) {
 	case nil:
@@ -362,7 +438,31 @@ func jsString(v any) string {
 		return strconv.FormatFloat(x, 'f', -1, 64)
 	case string:
 		return x
+	case []any:
+		parts := make([]string, len(x))
+		for i, e := range x {
+			if e == nil {
+				parts[i] = "" // JS String() renders a null/undefined array element as ""
+				continue
+			}
+			parts[i] = jsString(e)
+		}
+		return strings.Join(parts, ",")
+	case map[string]any:
+		return "[object Object]"
 	default:
 		return fmt.Sprintf("%v", x)
+	}
+}
+
+// exprScalar reports whether v is one of the comparable scalar dynamic types (nil, bool,
+// float64, string). It guards compareExprValues' == fast path: Go's == panics on two
+// []any/map[string]any operands, so those route to the String()-coercion arms instead.
+func exprScalar(v any) bool {
+	switch v.(type) {
+	case nil, bool, float64, string:
+		return true
+	default:
+		return false
 	}
 }

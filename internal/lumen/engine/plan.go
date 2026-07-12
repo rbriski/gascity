@@ -464,6 +464,13 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 		return nil
 
 	case ir.NodeLit, ir.NodeInterp:
+		// Loud wall (§1.2.5): a silent lit/interp leaf renders through evalValue and CANNOT
+		// index, so ANY index interpolation is refused here (corpus-absent; this avoids
+		// defining silent-render failure semantics this slice). Gather-combine interp members
+		// ride this arm.
+		if err := sweepIndexParts(n.Raw, false); err != nil {
+			return err
+		}
 		l.addLeaf(n, parent, memberIndex, step{kind: n.Kind, id: n.ID, raw: n.Raw}, true)
 		return nil
 
@@ -1484,6 +1491,15 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 	if err := validateClosedExpr(cond); err != nil {
 		return err
 	}
+	// Amended SLX §1.1.7: a call expr (length) in a guard cond is ROOT-only. Inside a run
+	// sub-formula the cond evaluates through condScope's DELIBERATELY string-typed
+	// child-wins view (GIS-pinned — retyping it would flip settled semantics), so
+	// `length(<array binding>)` would count the UTF-16 units of the JSON render TEXT and
+	// an empty bound array would go truthy. Refuse loudly at load; loop conds keep depth
+	// call support (loopScopeNS is typed).
+	if l.prefix != "" && exprContainsCall(cond) {
+		return fmt.Errorf("%w: guard %q cond: call expressions unsupported in a sub-formula (string-typed decision scope)", ErrUnsupportedNode, n.ID)
+	}
 	thenRaw, ok := n.Raw["then"]
 	if !ok {
 		return fmt.Errorf("%w: guard %q missing then", ErrUnsupportedNode, n.ID)
@@ -1824,6 +1840,39 @@ func collectRefs(raw json.RawMessage) []string {
 	}
 	walk(v)
 	return refs
+}
+
+// exprContainsCall reports whether an expression tree contains a {kind:"call"} node at any
+// depth — the same generic deep walk as collectRefs, keyed on kind. lowerGuard uses it to
+// fence call exprs out of NAMESPACE guard conds (amended SLX §1.1.7).
+func exprContainsCall(raw json.RawMessage) bool {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	found := false
+	var walk func(x any)
+	walk = func(x any) {
+		if found {
+			return
+		}
+		switch t := x.(type) {
+		case map[string]any:
+			if t["kind"] == "call" {
+				found = true
+				return
+			}
+			for _, mv := range t {
+				walk(mv)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return found
 }
 
 // lowerCombine lowers a gather's authored combine block into leaf units parented
@@ -2529,6 +2578,13 @@ func gatherOverName(n ir.Node) (string, error) {
 // prompt renders against the live scope at run time, and extracting the optional
 // interpreter.agent binding name.
 func decodeDo(n ir.Node) (step, error) {
+	// Loud wall (§1.2.5): a do template may carry an index interpolation `{{ base[i] }}`,
+	// but only a STRICT-parsing one renders at runtime — a pre-grammar hit that fails the
+	// strict grammar would sweep clean then misrender verbatim, so refuse it here at
+	// buildUnits (with the run-body / dispatch-arm dry-run provenance when re-entered).
+	if err := sweepIndexParts(n.Raw, true); err != nil {
+		return step{}, err
+	}
 	s := step{kind: ir.NodeDo, id: n.ID, raw: n.Raw}
 	if raw, ok := n.Raw["interpreter"]; ok {
 		var interp struct {
@@ -2578,6 +2634,12 @@ func childNodes(raw json.RawMessage) ([]ir.Node, error) {
 
 // decodeExec lifts an exec node's interpreter/body/exitMap into a step.
 func decodeExec(n ir.Node) (step, error) {
+	// Loud wall (§1.2.5): an exec renders via interpolate(body.raw) ONLY and CANNOT index,
+	// so ANY index interpolation in its template parts is refused here (no strict carve-out)
+	// — a strict-passing part would sweep clean then misrender verbatim on the exec path.
+	if err := sweepIndexParts(n.Raw, false); err != nil {
+		return step{}, err
+	}
 	s := step{kind: ir.NodeExec, id: n.ID, program: exechost.ProgramExec}
 
 	if raw, ok := n.Raw["interpreter"]; ok {
@@ -2739,6 +2801,22 @@ func evalInterp(raw map[string]json.RawMessage, scope map[string]string) (string
 			expr, err := json.Marshal(p)
 			if err != nil {
 				return "", err
+			}
+			// A literal part the compiler could not lower to a structured index kind is an
+			// index interpolation `{{ base[index] }}` (§0.3): render it engine-defined
+			// (SLX §1.2.4). A render failure returns *indexRenderError, which the do drivers
+			// catch and settle the step failed — every non-index literal (and any strict-fail
+			// on a non-do route) was refused at LOWER, so this arm is reached only for a
+			// strict-passing do-template index.
+			if src, ok := exprLiteralString(expr); ok {
+				if pi, ok := parseIndexExpr(src); ok {
+					v, err := renderIndexExpr(pi, scope)
+					if err != nil {
+						return "", err
+					}
+					sb.WriteString(v)
+					continue
+				}
 			}
 			v, err := evalValue(expr, scope)
 			if err != nil {

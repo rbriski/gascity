@@ -1,0 +1,104 @@
+{
+  "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+  "name": "shared-lane",
+  "input": {
+    "name": "shared-lane.input",
+    "fields": [
+      { "name": "mode", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
+      { "name": "work_items", "type": { "kind": "array", "element": { "kind": "atomic", "name": "string" } }, "required": true, "body": false }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "dispatch",
+      "id": "route",
+      "name": "route",
+      "after": [],
+      "subject": { "kind": "ref", "name": "mode" },
+      "arms": [
+        {
+          "match": { "kind": "literal", "value": "same-session" },
+          "body": {
+            "kind": "run",
+            "id": "sharedLane",
+            "name": "sharedLane",
+            "after": [],
+            "target": { "kind": "by-name", "name": "doWorkShared" },
+            "environment": {
+              "fields": [
+                { "name": "items", "value": { "kind": "expr", "expr": { "kind": "ref", "name": "work_items" } } }
+              ]
+            },
+            "outcome": "transparent"
+          }
+        }
+      ]
+    }
+  ],
+  "formulas": {
+    "doWorkShared": {
+      "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
+      "name": "doWorkShared",
+      "input": {
+        "name": "doWorkShared.input",
+        "fields": [
+          { "name": "items", "type": { "kind": "array", "element": { "kind": "atomic", "name": "string" } }, "required": true, "body": false }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "repeat",
+          "id": "lane_loop",
+          "name": "lane_loop",
+          "after": [],
+          "iterationName": "iteration",
+          "cond": {
+            "kind": "operator",
+            "op": "||",
+            "operands": [
+              {
+                "kind": "operator",
+                "op": "==",
+                "operands": [
+                  { "kind": "ref", "name": "lane", "field": "outcome" },
+                  { "kind": "literal", "value": "failed" }
+                ]
+              },
+              {
+                "kind": "operator",
+                "op": ">=",
+                "operands": [
+                  { "kind": "ref", "name": "iteration" },
+                  { "kind": "call", "name": "length", "args": [ { "kind": "ref", "name": "items" } ] }
+                ]
+              }
+            ]
+          },
+          "body": {
+            "kind": "do",
+            "id": "lane",
+            "name": "lane",
+            "after": [],
+            "origin": { "uri": "shared-lane", "line": 1, "col": 0 },
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" }, "origin": { "uri": "shared-lane", "line": 1, "col": 0 } },
+            "body": {
+              "raw": "Work item: {{ items[iteration - 1] }}",
+              "template": {
+                "parts": [
+                  { "kind": "text", "value": "Work item: " },
+                  { "kind": "interp", "expr": { "kind": "literal", "value": "items[iteration - 1]" } }
+                ]
+              },
+              "source": { "kind": "inline" },
+              "templated": true,
+              "language": "markdown",
+              "syntax": "bare",
+              "origin": { "uri": "shared-lane", "line": 1, "col": 0 }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

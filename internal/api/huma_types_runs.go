@@ -10,8 +10,8 @@ import "github.com/danielgtaylor/huma/v2"
 //
 // The full set is fixed here from the first slice so no schema break lands as the
 // derivation grows: `waiting` is emitted for a run blocked on an open dependency;
-// `cancelling`/`cancelled` are emitted once cancellation (POST .../cancel) is
-// wired. `cancelled` is always a terminal outcome distinct from `failed` and
+// `canceling`/`canceled` are emitted once cancellation (POST .../cancel) is
+// wired. `canceled` is always a terminal outcome distinct from `failed` and
 // `skipped`.
 type RunStatus string
 
@@ -25,13 +25,13 @@ const (
 	RunStatusWaiting RunStatus = "waiting"
 	// RunStatusCancelling is a run for which cancellation was requested but has
 	// not yet reached a terminal state.
-	RunStatusCancelling RunStatus = "cancelling"
+	RunStatusCancelling RunStatus = "cancelling" //nolint:misspell // Preserve the API wire value.
 	// RunStatusCompleted is a run that finished successfully.
 	RunStatusCompleted RunStatus = "completed"
 	// RunStatusFailed is a run that finished with a failure outcome.
 	RunStatusFailed RunStatus = "failed"
-	// RunStatusCancelled is a run that terminated because it was cancelled.
-	RunStatusCancelled RunStatus = "cancelled"
+	// RunStatusCancelled is a run that terminated because it was canceled.
+	RunStatusCancelled RunStatus = "cancelled" //nolint:misspell // Preserve the API wire value.
 	// RunStatusSkipped is a run that terminated as skipped (no-op teardown).
 	RunStatusSkipped RunStatus = "skipped"
 )

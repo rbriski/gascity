@@ -25,13 +25,16 @@ var (
 type controllerStopOutcome uint8
 
 const (
-	controllerStopAcknowledged controllerStopOutcome = iota
+	controllerStopOutcomeInvalid controllerStopOutcome = iota
+	controllerStopAcknowledged
 	controllerStopDefinitePreEntryUnavailable
 	controllerStopMayHaveEntered
 )
 
 func (o controllerStopOutcome) String() string {
 	switch o {
+	case controllerStopOutcomeInvalid:
+		return "invalid"
 	case controllerStopAcknowledged:
 		return "acknowledged"
 	case controllerStopDefinitePreEntryUnavailable:

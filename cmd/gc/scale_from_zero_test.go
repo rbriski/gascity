@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -90,6 +94,572 @@ func TestBuildDesiredState_ScaleFromZero_CrossRig(t *testing.T) {
 
 	if len(result.State) != 1 {
 		t.Errorf("expected 1 desired session, got %d", len(result.State))
+	}
+}
+
+func TestBuildDesiredStateReadySnapshotsAcceptUncomparableStores(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maxSess := 2
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "planner",
+			Dir:               "rig-A",
+			Provider:          "mock",
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		}},
+		Rigs: []config.Rig{{Name: "rig-A", Path: rigPath}},
+		Providers: map[string]config.ProviderSpec{
+			"mock": {Command: "true"},
+		},
+	}
+	cityBacking := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	rigBacking := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	if _, err := rigBacking.Create(beads.Bead{
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "rig-A/planner",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cityStore := uncomparableReadyStore{Store: cityBacking, marker: []byte("city")}
+	rigStore := uncomparableReadyStore{Store: rigBacking, marker: []byte("rig")}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("full desired-state pass compared or map-keyed an uncomparable Store: %v", recovered)
+		}
+	}()
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, map[string]beads.Store{"rig-A": rigStore},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	if got := result.ScaleCheckCounts["rig-A/planner"]; got != 1 {
+		t.Fatalf("scale demand = %d, want 1", got)
+	}
+	if got := len(cityBacking.readyQueries); got != 1 {
+		t.Fatalf("untouched city Ready reads = %d, want 1", got)
+	}
+	if got := len(rigBacking.readyQueries); got != 1 {
+		t.Fatalf("untouched rig Ready reads = %d, want 1", got)
+	}
+}
+
+func TestBuildDesiredStateReadySnapshotsShareSameUncomparableStoreValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := filepath.Join(tmpDir, "rigs", "rig-A")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maxSess, minSess := 2, 0
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "planner",
+			Dir:               "rig-A",
+			Provider:          "mock",
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		}},
+		Rigs:      []config.Rig{{Name: "rig-A", Path: rigPath}},
+		Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}},
+	}
+	backing := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "rig-A/planner",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	aliased := uncomparableReadyStore{Store: backing, marker: []byte("same-value")}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		aliased, map[string]beads.Store{"rig-A": aliased},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	if got := result.ScaleCheckCounts["rig-A/planner"]; got != 1 {
+		t.Fatalf("scale demand = %d, want one physical bead counted once", got)
+	}
+	if got := len(backing.readyQueries); got != 1 {
+		t.Fatalf("aliased uncomparable store Ready reads = %d, want one logical generation", got)
+	}
+}
+
+func TestBuildDesiredStateReadySnapshotsSharePointerAliasedRigStores(t *testing.T) {
+	tmpDir := t.TempDir()
+	maxSess, minSess := 2, 0
+	cfg := &config.City{Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}}}
+	for _, rigName := range []string{"rig-A", "rig-B"} {
+		rigPath := filepath.Join(tmpDir, "rigs", rigName)
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: rigName, Path: rigPath})
+		cfg.Agents = append(cfg.Agents, config.Agent{
+			Name:              "planner",
+			Dir:               rigName,
+			Provider:          "mock",
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		})
+	}
+	shared := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	for _, target := range []string{"rig-A/planner", "rig-B/planner"} {
+		if _, err := shared.Create(beads.Bead{
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": target},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		beads.NewMemStore(), map[string]beads.Store{"rig-A": shared, "rig-B": shared},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	for _, target := range []string{"rig-A/planner", "rig-B/planner"} {
+		if got := result.ScaleCheckCounts[target]; got != 1 {
+			t.Errorf("scale demand for %q = %d, want 1", target, got)
+		}
+	}
+	if got := len(shared.readyQueries); got != 1 {
+		t.Fatalf("pointer-aliased rig Ready reads = %d, want one logical generation", got)
+	}
+}
+
+func TestBuildDesiredStateCustomScaleCheckSharedRigStoreKeepsHomeProvenance(t *testing.T) {
+	tmpDir := t.TempDir()
+	maxSess, minSess := 1, 0
+	cfg := &config.City{Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}}}
+	shared := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	wantIDs := make(map[string]string)
+	for _, rigName := range []string{"rig-A", "rig-B"} {
+		rigPath := filepath.Join(tmpDir, "rigs", rigName)
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		template := rigName + "/planner"
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: rigName, Path: rigPath})
+		cfg.Agents = append(cfg.Agents, config.Agent{
+			Name:              "planner",
+			Dir:               rigName,
+			Provider:          "mock",
+			ScaleCheck:        "printf 0",
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		})
+		created, err := shared.Create(beads.Bead{
+			Title:    template,
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": template},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantIDs[template] = created.ID
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		beads.NewMemStore(), map[string]beads.Store{"rig-A": shared, "rig-B": shared},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	seen := make(map[string]bool)
+	for _, desired := range result.State {
+		template := desired.TemplateName
+		wantID, ok := wantIDs[template]
+		if !ok {
+			continue
+		}
+		seen[template] = true
+		if got := desired.Env["GC_TRIGGER_BEAD_ID"]; got != wantID {
+			t.Errorf("%s trigger bead = %q, want %q", template, got, wantID)
+		}
+		wantRef := strings.Split(template, "/")[0]
+		if got := desired.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != wantRef {
+			t.Errorf("%s trigger store ref = %q, want home scope %q", template, got, wantRef)
+		}
+	}
+	for template := range wantIDs {
+		if !seen[template] {
+			t.Errorf("no desired session created for %s; state=%v", template, result.State)
+		}
+	}
+	if got := len(shared.readyQueries); got != 1 {
+		t.Fatalf("shared pointer Ready reads = %d, want one coherent generation", got)
+	}
+}
+
+func TestBuildDesiredStateOpenRouteMigrationListErrorDoesNotSuppressDrains(t *testing.T) {
+	tmpDir := t.TempDir()
+	minSess, maxSess := 0, 1
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "mock",
+			MinActiveSessions: &minSess,
+			MaxActiveSessions: &maxSess,
+		}},
+		Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}},
+	}
+	wantErr := errors.New("migration-only open list unavailable")
+	store := &openListAfterFirstErrorStore{MemStore: beads.NewMemStore(), err: wantErr}
+	var stderr strings.Builder
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		store, nil, newSessionBeadSnapshot(nil), nil, &stderr,
+	)
+	if result.StoreQueryPartial {
+		t.Fatalf("StoreQueryPartial = true, want legacy drain behavior for migration-only List error; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), wantErr.Error()) {
+		t.Fatalf("stderr = %q, want migration List diagnostic", stderr.String())
+	}
+}
+
+func TestBuildDesiredStateReadyStoreScopesTreatRigNamesAsOpaque(t *testing.T) {
+	tmpDir := t.TempDir()
+	maxSess := 1
+	minSess := 0
+	type rigFixture struct {
+		name      string
+		agent     string
+		legacy    string
+		canonical string
+		backing   *readyQueryRecordingStore
+		store     *canonicalizationAttemptStore
+		beadID    string
+	}
+	fixtures := []*rigFixture{
+		{name: "city", agent: "worker-city", legacy: "city/core.worker-city", canonical: "city/worker-city"},
+		{name: "foo", agent: "worker-foo", legacy: "foo/core.worker-foo", canonical: "foo/worker-foo"},
+		{name: "rig:foo", agent: "worker-prefixed", legacy: "rig:foo/core.worker-prefixed", canonical: "rig:foo/worker-prefixed"},
+	}
+	cfg := &config.City{Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}}}
+	rigStores := make(map[string]beads.Store, len(fixtures))
+	for _, fixture := range fixtures {
+		path := filepath.Join(tmpDir, "rigs", strings.ReplaceAll(fixture.name, ":", "_"))
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: fixture.name, Path: path})
+		cfg.Agents = append(cfg.Agents, config.Agent{
+			Name:              fixture.agent,
+			Dir:               fixture.name,
+			Provider:          "mock",
+			MinActiveSessions: &minSess,
+			MaxActiveSessions: &maxSess,
+		})
+		fixture.backing = &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+		created, err := fixture.backing.Create(beads.Bead{
+			Title:  fixture.name + " legacy work",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": fixture.legacy,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.beadID = created.ID
+		fixture.store = &canonicalizationAttemptStore{readyQueryRecordingStore: fixture.backing, commit: true}
+		rigStores[fixture.name] = fixture.store
+	}
+	cityBacking := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	if _, err := cityBacking.Create(beads.Bead{
+		Title:  "city-scope unrelated work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "unrelated",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cityStore := &canonicalizationAttemptStore{readyQueryRecordingStore: cityBacking, commit: true}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	for _, fixture := range fixtures {
+		if got := result.ScaleCheckCounts[fixture.canonical]; got != 1 {
+			t.Errorf("scale demand for %q = %d, want 1", fixture.canonical, got)
+		}
+		persisted, err := fixture.backing.Get(fixture.beadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if route := persisted.Metadata["gc.routed_to"]; route != fixture.canonical {
+			t.Errorf("%q persisted route = %q, want %q", fixture.name, route, fixture.canonical)
+		}
+		if got := fixture.store.updates.Load(); got != 1 {
+			t.Errorf("%q Update calls = %d, want exactly its own repair", fixture.name, got)
+		}
+		if got := len(fixture.backing.readyQueries); got != 2 {
+			t.Errorf("%q Ready calls = %d, want pre+post", fixture.name, got)
+		}
+	}
+	if got := cityStore.updates.Load(); got != 0 {
+		t.Errorf("city-scope Update calls = %d, want 0 (rig named city must not capture city writer)", got)
+	}
+	if got := len(cityBacking.readyQueries); got != 1 {
+		t.Errorf("untouched city-scope Ready calls = %d, want 1", got)
+	}
+}
+
+func TestBuildDesiredStateControlDemandUsesPostCanonicalizationOpenSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maxSess := 1
+	minSess := 0
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			Dir:               "rig-A",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		}},
+		Rigs: []config.Rig{{Name: "rig-A", Path: rigPath}},
+	}
+	backing := beads.NewMemStore()
+	blocker, err := backing.Create(beads.Bead{Title: "unfinished worker", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := backing.Create(beads.Bead{
+		Title:  "blocked retry",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": "rig-A/core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewCachingStoreForTest(backing, nil)
+	if err := store.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		store, map[string]beads.Store{"rig-A": store},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	const canonical = "rig-A/control-dispatcher"
+	if got := result.ScaleCheckCounts[canonical]; got != 1 {
+		t.Fatalf("control demand = %d, want 1 from post-repair blocked open work", got)
+	}
+	got, err := backing.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route := got.Metadata["gc.routed_to"]; route != canonical {
+		t.Fatalf("persisted route = %q, want %q", route, canonical)
+	}
+}
+
+func TestBuildDesiredStateControlDemandObservesCanonicalizationCommitThenError(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maxSess := 1
+	minSess := 0
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			Dir:               "rig-A",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		}},
+		Rigs: []config.Rig{{Name: "rig-A", Path: rigPath}},
+	}
+	backing := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	blocker, err := backing.Create(beads.Bead{Title: "unfinished worker", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := backing.Create(beads.Bead{
+		Title:  "blocked retry",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": "rig-A/core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	store := &canonicalizationAttemptStore{
+		readyQueryRecordingStore: backing,
+		commit:                   true,
+		updateErr:                errors.New("write committed but acknowledgement was lost"),
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		beads.NewMemStore(), map[string]beads.Store{"rig-A": store},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	const canonical = "rig-A/control-dispatcher"
+	if got := result.ScaleCheckCounts[canonical]; got != 1 {
+		t.Fatalf("control demand = %d, want 1 from authoritative post-error open snapshot", got)
+	}
+	got, err := backing.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route := got.Metadata["gc.routed_to"]; route != canonical {
+		t.Fatalf("persisted route = %q, want %q", route, canonical)
+	}
+	if got := len(backing.readyQueries); got != 2 {
+		t.Fatalf("rig Ready reads = %d, want pre+post = 2", got)
+	}
+}
+
+func TestBuildDesiredStateControlRouteRepairCommitThenErrorUsesPostGeneration(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := filepath.Join(tmpDir, "rigs", "rig-A")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maxSess, minSess := 1, 0
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "rig-A",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		}},
+		Rigs: []config.Rig{{Name: "rig-A", Path: rigPath}},
+	}
+	backing := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	control, err := backing.Create(beads.Bead{
+		Title:  "misrouted finalizer",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "wrong-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:rig-A",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &canonicalizationAttemptStore{
+		readyQueryRecordingStore: backing,
+		commit:                   true,
+		updateErr:                errors.New("route repair committed but acknowledgement was lost"),
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		beads.NewMemStore(), map[string]beads.Store{"rig-A": store},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	const wantRoute = "rig-A/core.control-dispatcher"
+	if got := result.ScaleCheckCounts[wantRoute]; got != 1 {
+		t.Fatalf("control demand = %d, want 1 from authoritative post-error route", got)
+	}
+	persisted, err := backing.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.RoutedToMetadataKey]; got != wantRoute {
+		t.Fatalf("persisted route = %q, want committed %q", got, wantRoute)
+	}
+}
+
+func TestBuildDesiredStateControlRouteRepairKeepsOpaqueRigName(t *testing.T) {
+	tmpDir := t.TempDir()
+	const rigName = "rig:foo"
+	rigPath := filepath.Join(tmpDir, "rigs", "rig_foo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maxSess, minSess := 1, 0
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               rigName,
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxSess,
+			MinActiveSessions: &minSess,
+		}},
+		Rigs: []config.Rig{{Name: rigName, Path: rigPath}},
+	}
+	backing := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	control, err := backing.Create(beads.Bead{
+		Title:  "misrouted opaque-rig finalizer",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "wrong-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:rig:foo",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &canonicalizationAttemptStore{readyQueryRecordingStore: backing, commit: true}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		beads.NewMemStore(), map[string]beads.Store{rigName: store},
+		newSessionBeadSnapshot(nil), nil, os.Stderr,
+	)
+	const wantRoute = "rig:foo/core.control-dispatcher"
+	if got := result.ScaleCheckCounts[wantRoute]; got != 1 {
+		t.Fatalf("control demand = %d, want 1 for opaque rig owner", got)
+	}
+	persisted, err := backing.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.RoutedToMetadataKey]; got != wantRoute {
+		t.Fatalf("persisted route = %q, want %q", got, wantRoute)
 	}
 }
 

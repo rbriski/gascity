@@ -1543,6 +1543,18 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 	if then.ID == "" {
 		return fmt.Errorf("%w: guard %q then missing id", ErrUnsupportedNode, n.ID)
 	}
+	// An authored then bypasses lowerNode's id check (decoded inline here), so this is the
+	// ban site (decodeLeafSub / timeout-body parity): a '/' or ':' in the then id would forge
+	// a cross-namespace activation key (a forged `sib/x` aliases a sibling's minted sub-unit
+	// activation). A non-empty then `after` is refused LOUDLY — the then is a single
+	// synthesized leaf (activationFor(thenID), gates inherited from the wrapper), so a gate
+	// slot on it would silently drop (decisionBodyUnit substitutes the wrapper's afterDeps).
+	if strings.ContainsAny(then.ID, "/:") {
+		return fmt.Errorf("%w: guard %q then id %q must not contain '/' or ':'", ErrUnsupportedNode, n.ID, then.ID)
+	}
+	if len(then.After) > 0 {
+		return fmt.Errorf("%w: guard %q then %q must not carry an 'after' gate", ErrUnsupportedNode, n.ID, then.ID)
+	}
 	condRefs := collectRefs(cond)
 	// Charset sweep FIRST, over ALL refs, then the self-ref sweep — a multi-defect
 	// cond reports the malformed-ref class before the semantic one. A cond ref
@@ -1762,6 +1774,13 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 		// arm bodies bypass lowerNode's id check (decoded inline), so this is the ban site.
 		if strings.ContainsAny(body.ID, "/:") {
 			return fmt.Errorf("%w: dispatch %q arm %q body id %q must not contain '/' or ':' (reserved delimiters)", ErrUnsupportedNode, n.ID, matchVal, body.ID)
+		}
+		// An arm body is a single synthesized decision leaf (activationFor(bodyID), gates
+		// inherited from the dispatch), so a non-empty `after` on it silently drops today.
+		// Refuse it LOUDLY (the timeout-body precedent). Before the kind switch, so it covers
+		// exec/do leaf AND run arm bodies uniformly (decodeRunNode ignores a run node's after).
+		if len(body.After) > 0 {
+			return fmt.Errorf("%w: dispatch %q arm %q body %q must not carry an 'after' gate", ErrUnsupportedNode, n.ID, matchVal, body.ID)
 		}
 		// Arm body ids must be distinct: their activations (bodyID:0) are the durable
 		// write-once decision records + Tier-A node ids, so a shared id would collide.

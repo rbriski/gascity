@@ -280,6 +280,23 @@ func TestLowerDispatchArmBodyIdCharsetBan(t *testing.T) {
 	}
 }
 
+// TestLowerDispatchArmBodyAfterGateRefused (ga-2f1zwh) pins the LOUD refusal of a
+// non-empty arm-body `after`: an arm body is a single synthesized decision leaf
+// (activationFor(bodyID), gates inherited from the dispatch), so an authored `after`
+// slot on it is silently dropped today. Refuse it (the decodeLeafSub / timeout-body
+// precedent). The ban sits before the arm kind switch, so it covers exec/do leaf AND
+// run arm bodies uniformly (a run arm's `after` is dropped by decodeRunNode just the same).
+func TestLowerDispatchArmBodyAfterGateRefused(t *testing.T) {
+	armWithAfter := `{"match":{"kind":"literal","value":"separate"},"body":` +
+		execNode("armx", []string{"prep"}, "echo a") + `}`
+	doc := decodeBundle(t, darMainDoc(darDispatch("policy", armWithAfter), ""))
+	_, err := buildUnits(doc, true, true)
+	if err == nil || !errorsIsUnsupported(err) ||
+		!strings.Contains(err.Error(), "must not carry an 'after' gate") || !strings.Contains(err.Error(), "arm") {
+		t.Fatalf("err = %v, want an arm-body-after refusal", err)
+	}
+}
+
 // TestLowerDispatchRunArmDecodeInheritance (§2.7) pins that the DAR arm inherits every
 // decodeRunNode refusal (shared path, no drift) — the full six-row set: with-agent /
 // runInput / non-transparent / missing-target / delimiter-bearing env ref / recursive

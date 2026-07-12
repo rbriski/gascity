@@ -445,6 +445,22 @@ func TestLowerGuardShapeRefusalMatrix(t *testing.T) {
 			guard: `{"kind":"guard","id":"g","name":"g","after":[],"cond":` + cond + `,"then":` + scatterOf("tb", execNode("m", nil, "echo m")) + `}`,
 			want:  `guard "g" then kind "scatter" (only exec/do leaf then)`,
 		},
+		{
+			// A '/'- or ':'-forged then id would alias a sibling's minted sub-unit
+			// activation (the decodeLeafSub / timeout-body charset parity). Authored thens
+			// bypass lowerNode's id check (decoded inline), so this is the ban site.
+			name:  "then id charset",
+			guard: `{"kind":"guard","id":"g","name":"g","after":[],"cond":` + cond + `,"then":` + execNode("a/b", nil, "echo t") + `}`,
+			want:  `guard "g" then id "a/b" must not contain '/' or ':'`,
+		},
+		{
+			// The then is a single synthesized leaf (activationFor(thenID), gates inherited
+			// from the wrapper), so a non-empty `after` on it is silently dropped today —
+			// refuse it LOUDLY (the timeout-body precedent).
+			name:  "then after gate",
+			guard: `{"kind":"guard","id":"g","name":"g","after":[],"cond":` + cond + `,"then":` + execNode("gthen", []string{"prep"}, "echo t") + `}`,
+			want:  `guard "g" then "gthen" must not carry an 'after' gate`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -459,6 +475,43 @@ func TestLowerGuardShapeRefusalMatrix(t *testing.T) {
 				greeterFormula("greeter", tc.guard))), true, true)
 			if err == nil || !errorsIsUnsupported(err) || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("sub-formula: err = %v, want ErrUnsupportedNode containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestLowerGuardThenHardeningComposedProvenance (ga-2f1zwh) pins BOTH then-decode
+// hardenings — the '/'+':' charset ban and the LOUD non-empty-`after` refusal — firing
+// through a run DRY-RUN mint (the guard lives in a sub-formula reached by a repeat run
+// body). The refusal composes UNDER the repeat's mint-wrap provenance, proving the ban
+// fires at depth, not only at the root (the TNK deep-route precedent). The refusal
+// substring is checked bare (the then-id charset/after checks compare bare ids), so the
+// same message rides at any prefix.
+func TestLowerGuardThenHardeningComposedProvenance(t *testing.T) {
+	cond := condRefEq("name", "x") // name is greeter's declared input
+	cases := []struct {
+		name string
+		then string
+		want string
+	}{
+		{"then id charset", execNode("a/b", nil, "echo t"), `then id "a/b" must not contain '/' or ':'`},
+		{"then after gate", execNode("gthen", []string{"prep"}, "echo t"), `then "gthen" must not carry an 'after' gate`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := decodeBundle(t, runMainDoc(
+				repeatRunNode(runNode("stage", nil, "greeter", "name", "who"), repeatRunCondPassOrIter()),
+				greeterFormula("greeter", guardNode("g", nil, cond, tc.then)),
+			))
+			_, err := buildUnits(doc, true, true)
+			if err == nil || !errorsIsUnsupported(err) {
+				t.Fatalf("err = %v, want ErrUnsupportedNode (the composed mint-wrap chain)", err)
+			}
+			msg := err.Error()
+			for _, want := range []string{"repeat", "run body does not lower", "guard", tc.want} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("composed refusal %q missing chain substring %q", msg, want)
+				}
 			}
 		})
 	}

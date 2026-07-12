@@ -700,7 +700,7 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
 		return true
 	}
-	if !maps.Equal(old.Metadata, fresh.Metadata) {
+	if !metadataEqual(old.Metadata, fresh.Metadata) {
 		return true
 	}
 	// Labels, needs, and dependencies are SETS: their order carries no meaning.
@@ -721,6 +721,57 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 
 func depsChanged(old, fresh []Dep) bool {
 	return !depSetEqual(old, fresh)
+}
+
+// metadataEqual reports whether two metadata maps are equal, treating a value
+// that is valid JSON on both sides as equal when their canonical JSON forms
+// match. Metadata is map[string]string, but a value is often a JSON blob (or a
+// bare JSON number). The Dolt rig-store scan and the cache can re-serialize such
+// a value differently — object key order, insignificant whitespace, 1 vs 1.0 —
+// so an exact maps.Equal compare reports a spurious change on every ~80s
+// reconcile pass and drives a re-absorb flood of update-only wisps (ga-ocypq2
+// follow-up). A representation-insensitive compare collapses those
+// re-serialization artifacts while still catching a genuine value change.
+func metadataEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok {
+			return false
+		}
+		if av == bv {
+			continue
+		}
+		// Both sides must be valid JSON for a canonical compare to be
+		// meaningful; otherwise the raw strings genuinely differ.
+		if json.Valid([]byte(av)) && json.Valid([]byte(bv)) {
+			ca, okA := canonicalJSON(av)
+			cb, okB := canonicalJSON(bv)
+			if okA && okB && ca == cb {
+				continue
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// canonicalJSON returns a stable canonical serialization of a JSON value:
+// json.Unmarshal into interface{} then json.Marshal, which sorts object keys
+// and drops insignificant whitespace. Reports false when the input is not
+// decodable JSON so callers fall back to an exact compare.
+func canonicalJSON(s string) (string, bool) {
+	var v interface{}
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return "", false
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
 }
 
 // stringSetEqual reports whether two string slices hold the same multiset of

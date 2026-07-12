@@ -3013,8 +3013,17 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		true,
 		sessionBeads,
 	)
-	open := filterSessionBeadsByName(updated, cfgNames)
-	openInfos := filterSessionInfosByName(updated, cfgNames)
+	// This targeted tick must include dynamically named pool sessions it just
+	// materialized. configuredSessionNamesWithSnapshot intentionally contains
+	// only named-session identities, so filtering by cfgNames alone leaves a new
+	// dispatcher in start-pending forever. desiredState is already restricted to
+	// control-dispatcher configs and is therefore the exact safe row domain.
+	reconcileNames := make(map[string]bool, len(desiredState))
+	for sessionName := range desiredState {
+		reconcileNames[sessionName] = true
+	}
+	open := filterSessionBeadsByName(updated, reconcileNames)
+	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
@@ -3032,7 +3041,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cityPath,
 		open,
 		desiredState,
-		cfgNames,
+		reconcileNames,
 		filteredCfg,
 		cr.sp,
 		cr.sessionsBeadStore().Store,

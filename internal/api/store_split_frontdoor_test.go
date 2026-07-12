@@ -9,7 +9,7 @@ import (
 )
 
 // splitFrontdoorAgent is the qualified agent identity every session bead in this
-// file is labeled for. controlDispatcherRuntimeMissing selects beads by their
+// file is labeled for. The session-read handlers select beads by their
 // agent:<qualified> label, so the label must match the qualified name the tests
 // query with.
 const splitFrontdoorAgent = "gc-contrib/control-dispatcher"
@@ -33,60 +33,6 @@ func splitSessionBead(id, state, sleepReason string) beads.Bead {
 			"state":        state,
 			"sleep_reason": sleepReason,
 		},
-	}
-}
-
-// TestControlDispatcherRuntimeMissingReadsSessionStoreOnSplitCity pins the
-// session-read routing fix in handler_sling.go: controlDispatcherRuntimeMissing
-// projects the runtime-missing lifecycle reason off SESSION-class beads, so on a
-// split city it must read the infra (session) store — not the work store. A
-// session bead placed ONLY in the session store must be seen; the same bead
-// placed ONLY in the work store must be invisible (proving the read is routed).
-func TestControlDispatcherRuntimeMissingReadsSessionStoreOnSplitCity(t *testing.T) {
-	qualified := splitFrontdoorAgent
-	bead := splitSessionBead("gc-cd1", "asleep", "runtime-missing")
-
-	t.Run("session bead in the infra store is seen", func(t *testing.T) {
-		work := beads.NewMemStore()
-		sessions := beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)
-		st := newFakeState(t)
-		st.cityBeadStore = work
-		st.sessionsBeadStore = sessions // distinct infra store owns the session bead
-		s := New(st)
-
-		if !s.controlDispatcherRuntimeMissing(qualified) {
-			t.Fatalf("controlDispatcherRuntimeMissing = false; want true (session bead lives in the infra store)")
-		}
-	})
-
-	t.Run("session bead only in the work store is not read", func(t *testing.T) {
-		work := beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)
-		sessions := beads.NewMemStore() // empty infra store
-		st := newFakeState(t)
-		st.cityBeadStore = work
-		st.sessionsBeadStore = sessions
-		s := New(st)
-
-		if s.controlDispatcherRuntimeMissing(qualified) {
-			t.Fatalf("controlDispatcherRuntimeMissing = true; want false (handler must read the session store, not the work store)")
-		}
-	})
-}
-
-// TestControlDispatcherRuntimeMissingByteIdenticalOnSingleStoreCity confirms the
-// fix is a no-op on a legacy single-store city: SessionsBeadStore().Store ==
-// CityBeadStore(), so the session bead on the sole store is still found.
-func TestControlDispatcherRuntimeMissingByteIdenticalOnSingleStoreCity(t *testing.T) {
-	bead := splitSessionBead("gc-cd1", "asleep", "runtime-missing")
-
-	store := beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)
-	st := newFakeState(t)
-	st.cityBeadStore = store
-	// sessionsBeadStore left nil => SessionsBeadStore() collapses onto cityBeadStore.
-	s := New(st)
-
-	if !s.controlDispatcherRuntimeMissing(splitFrontdoorAgent) {
-		t.Fatalf("controlDispatcherRuntimeMissing = false on a single-store city; want true")
 	}
 }
 

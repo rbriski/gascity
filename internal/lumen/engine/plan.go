@@ -54,7 +54,7 @@ const (
 	unitRun                            // run: transparent sub-formula call over an inlined sub-graph
 	unitGuard                          // guard: a conditional single-step arm (cond ? then : pass)
 	unitDispatch                       // dispatch: a multi-way branch (subject -> matching arm's body)
-	unitForEach                        // for-each: a dynamic scatter fanning a single-leaf body over a runtime array
+	unitForEach                        // for-each: a dynamic scatter fanning a single-leaf or run-sub-formula body over a runtime array
 	unitCleanup                        // cleanup: try/finally — a guarded leaf, then an always-run body leaf
 	unitRecover                        // recover: try/catch — a guarded leaf, then a catch body run only on failure
 	unitCleanupGuarded                 // cleanup(block guarded): a synthetic transparent drain aggregate over the block's inlined leaves
@@ -153,23 +153,36 @@ type cleanupSpec struct {
 
 // forEachSpec carries a scatter(form:each) node's decoded shape: the `over` array
 // expression, the node/input refs it reads (for the DET gate), the per-element
-// binding name, the single leaf body fanned once per element, and the on_fail
-// policy. The member COUNT is a runtime property of the evaluated array (unknown at
-// lowering), so — unlike scatter(members) — no member units are lowered; the driver
-// materializes one member per element at run time (mirroring a loop's per-attempt
-// minting) under a `<forEachID>/<index>` node id, with `binder` bound to the element.
-// The aggregate drains those dynamic members with the same outcome rule as
-// scatter(members). The decision (the array) is frozen by the over-ref gate (a
-// member-`over` reads the immutable input LAYER and contributes no gate; a bare-ref
-// `over` gates on the node it reads), so genesis, re-Advance, and drop+refold fan the
-// same members.
+// binding name, the single body fanned once per element, and the on_fail policy. The
+// member COUNT is a runtime property of the evaluated array (unknown at lowering), so
+// — unlike scatter(members) — no member units are lowered; the driver materializes one
+// member per element at run time (mirroring a loop's per-attempt minting) under a
+// `<forEachID>/<index>` node id, with `binder` bound to the element.
+//
+// The body is EITHER a single leaf (bodyIRKind exec/do, bodyRun nil — the FIS shape,
+// fanned via forEachMemberUnit) OR a `run <formula> given {…}` sub-formula call
+// (bodyRun != nil, bodyIRKind NodeRun — the FBR shape): then each element mints the
+// target's whole sub-graph FRESH under `<forEachID>/<index>/` (mintRunBody, the shared
+// RBL helper) and the member aggregate settles transparently at
+// activationFor(<forEachID>/<index>). The embedded runBodyStash carries the re-lowering
+// context (nil/zero for a leaf body). The aggregate drains those dynamic members with
+// the same outcome rule as scatter(members). The decision (the array) is frozen by the
+// over-ref gate (a member-`over` reads the immutable input LAYER and contributes no
+// gate; a bare-ref `over` gates on the node it reads), so genesis, re-Advance, and
+// drop+refold fan the same members.
 type forEachSpec struct {
 	overRaw    json.RawMessage // the `over` array expression
 	overRefs   []string        // node names `over` reads (head-derived; for the DET gate)
 	binder     string          // the per-element binding name (e.g. "item")
-	bodyIRKind ir.NodeKind     // NodeExec | NodeDo
-	body       step            // the decoded single leaf body (fanned per element)
+	bodyIRKind ir.NodeKind     // NodeExec | NodeDo | NodeRun
+	body       step            // the decoded single leaf body (fanned per element; empty when bodyRun != nil)
 	onFail     string          // "continue" | "stop"
+
+	// Run-body fields (fan whose member is `run <formula> given {…}`, the FBR slice):
+	// non-nil bodyRun switches the fan into the run-body member arm, and the embedded
+	// runBodyStash carries the lowering context mintRunBody re-invokes per member.
+	bodyRun *runSpec
+	runBodyStash
 }
 
 // dispatchSpec carries a dispatch node's decoded shape: the subject value expression
@@ -232,6 +245,23 @@ type runEnvField struct {
 	value json.RawMessage
 }
 
+// runBodyStash bundles the lowering context a run BODY's sub-formula is re-lowered
+// against on every materialization — captured at lower time (from the enclosing
+// lowerer) so the runtime mint is byte-identical to the lower-time dry run (single
+// source, no drift). It is embedded in BOTH loopSpec (the repeat run-body arm, RBL)
+// and forEachSpec (the for-each run-body member arm, FBR), and mintRunBody is a FREE
+// FUNCTION over it (Q-B: a struct, not an interface). The switching `bodyRun *runSpec`
+// stays a sibling field on each spec (it also selects the arm), and mintRunBody takes
+// it explicitly. Field names keep the `body` prefix so the promoted accessors match
+// the pre-FBR loopSpec field names (run_loop white-box tests read them unchanged).
+type runBodyStash struct {
+	bodyFormula        *ir.IR            // the target sub-formula (re-lowered per mint)
+	bodyFormulas       map[string]*ir.IR // the bundle (nested-run resolution)
+	bodyTargetStack    []string          // lowering-time targetStack (cycle guard for nested runs)
+	bodyAllowDo        bool              // whether a `do` may lower in the sub-graph
+	bodyAllowCombineDo bool              // whether a combine `do` may lower in the sub-graph
+}
+
 // loopSpec carries a retry/repeat loop node's decoded shape: the body it
 // re-attempts, and the closed exit expression that decides re-runs (retry:
 // attempts count; repeat: the `until` condition + iteration binding). The body is
@@ -254,17 +284,11 @@ type loopSpec struct {
 	iterationName string          // repeat: the 1-based iteration binding name
 
 	// Run-body fields (repeat { run <formula> given {…} }, the RBL slice): non-nil
-	// bodyRun switches the loop into the run-body arm. bodyFormula/bodyFormulas/
-	// bodyTargetStack/bodyAllowDo/bodyAllowCombineDo carry exactly the lowering
-	// context mintRunBodyAttempt re-invokes per attempt — captured at lower time
-	// (from the enclosing lowerer) so the runtime mint is byte-identical to the
-	// lower-time dry run (single source, no drift). All are nil/zero for a leaf body.
-	bodyRun            *runSpec          // the body run's decoded spec (env + target)
-	bodyFormula        *ir.IR            // the target sub-formula (re-lowered per attempt)
-	bodyFormulas       map[string]*ir.IR // the bundle (nested-run resolution)
-	bodyTargetStack    []string          // lowering-time targetStack (cycle guard for nested runs)
-	bodyAllowDo        bool              // whether a `do` may lower in the sub-graph
-	bodyAllowCombineDo bool              // whether a combine `do` may lower in the sub-graph
+	// bodyRun switches the loop into the run-body arm, and the embedded runBodyStash
+	// carries exactly the lowering context mintRunBody re-invokes per attempt. All are
+	// nil/zero for a leaf body.
+	bodyRun *runSpec // the body run's decoded spec (env + target)
+	runBodyStash
 }
 
 // allDeps returns the union of a unit's blocking and drain dependencies, for
@@ -551,9 +575,12 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 // because the qualified for-each id occupies the `<ns>fanout` name in its namespace, which
 // precludes a run `fanout` that would create the `<ns>fanout/` sub-namespace a colliding
 // `<ns>fanout/<index>` authored id needs (the '/'-delimiter argument replaces the former
-// top-level-only rationale). Only a single exec/do body leaf is supported this slice; a
-// multi-member or non-leaf body, a missing binder/over, an unsupported `over` shape, or a
-// delimiter-bearing binder/over ref refuses at LOAD.
+// top-level-only rationale). The single body member is either a leaf (exec/do) OR a `run`
+// sub-formula call (the FBR arm, lowerForEachRunBody — each element mints the target's whole
+// sub-graph under `<forEachID>/<index>/`). There is NO fan-size cap (leaf parity — the
+// element count is the runtime array length). A multi-member or other non-leaf body, a
+// missing binder/over, an unsupported `over` shape, or a delimiter-bearing binder/over ref
+// refuses at LOAD.
 func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 	if l.inAggregate {
 		// A for-each nested as a scatter member / gather combine is deferred this slice
@@ -602,24 +629,45 @@ func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 	if err != nil {
 		return err
 	}
-	var s step
+	onFail := "continue"
+	if raw, ok := n.Raw["on_fail"]; ok {
+		_ = json.Unmarshal(raw, &onFail)
+	}
+	spec := &forEachSpec{
+		overRaw:    over,
+		overRefs:   overRefs,
+		binder:     binder,
+		bodyIRKind: body.Kind,
+		onFail:     onFail,
+	}
 	switch body.Kind {
 	case ir.NodeExec:
-		s, err = decodeExec(body)
+		s, err := decodeExec(body)
+		if err != nil {
+			return err
+		}
+		spec.body = s
 	case ir.NodeDo:
 		if !l.allowDo {
 			return fmt.Errorf("%w: %q (for-each %q body)", ErrUnsupportedNode, body.Kind, n.ID)
 		}
-		s, err = decodeDo(body)
+		s, err := decodeDo(body)
+		if err != nil {
+			return err
+		}
+		spec.body = s
+	case ir.NodeRun:
+		// A run body (fan { run <formula> given {…} }, the FBR slice): each element mints
+		// the target sub-formula fresh under `<fanID>/<index>/` (mintRunBody, the shared RBL
+		// helper), and the member aggregate settles transparently at
+		// activationFor(<fanID>/<index>). decodeRunNode + the ⚑S4 dry-run mint validate the
+		// body HERE at lowering, before any effect. It is fanned like a leaf member (no
+		// aggregate placement — the l.inAggregate fence above still refuses a fan-in-scatter).
+		if err := l.lowerForEachRunBody(n, body, spec); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("%w: for-each %q body member kind %q (only a single exec/do leaf)", ErrUnsupportedNode, n.ID, body.Kind)
-	}
-	if err != nil {
-		return err
-	}
-	onFail := "continue"
-	if raw, ok := n.Raw["on_fail"]; ok {
-		_ = json.Unmarshal(raw, &onFail)
+		return fmt.Errorf("%w: for-each %q body member kind %q (only a single exec/do leaf or a run body)", ErrUnsupportedNode, n.ID, body.Kind)
 	}
 	l.units = append(l.units, planUnit{
 		kind:       unitForEach,
@@ -630,15 +678,38 @@ func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 		ns:         l.prefix,
 		rawAfter:   l.qAfter(n.After),
 		onFail:     onFail,
-		forEach: &forEachSpec{
-			overRaw:    over,
-			overRefs:   overRefs,
-			binder:     binder,
-			bodyIRKind: body.Kind,
-			body:       s,
-			onFail:     onFail,
-		},
+		forEach:    spec,
 	})
+	return nil
+}
+
+// lowerForEachRunBody decodes a for-each's run-body member (fan { run <formula> given {…} },
+// the FBR slice) into spec: it validates the run node via decodeRunNode (inheriting the
+// with-agent / runInput / non-transparent / missing-target / recursive-cycle / env-charset
+// refusals — the same single path lowerRun and the repeat run-body arm use), stashes the
+// re-lowering context, and DRY-RUN mints member 0's sub-graph (⚑S4) so an un-lowerable body
+// — a nested loop refused at the member prefix, an unsupported sub-node — refuses at
+// buildUnits before EnqueueRun seeds run.started. The refusal is wrapped `for-each %q run
+// body does not lower: %w`, which composes UNDER a repeat run-body wrap at depth (a fan
+// inside a repeat run body). Validation is member-invariant (the index enters only via the
+// prefix string), so validating member 0 validates every element.
+func (l *lowerer) lowerForEachRunBody(n, body ir.Node, spec *forEachSpec) error {
+	runSpec, sub, err := l.decodeRunNode(body)
+	if err != nil {
+		return err
+	}
+	spec.bodyRun = runSpec
+	spec.bodyFormula = sub
+	spec.bodyFormulas = l.formulas
+	spec.bodyTargetStack = append([]string(nil), l.targetStack...)
+	spec.bodyAllowDo = l.allowDo
+	spec.bodyAllowCombineDo = l.allowCombineDo
+	member0 := forEachMemberNodeID(l.qid(n.ID), 0)
+	zero := 0
+	if _, _, err := mintRunBody(spec.runBodyStash, spec.bodyRun, member0, member0+"/", activationFor(member0),
+		activationFor(l.qid(n.ID)), l.prefix, nil, nil, &zero); err != nil {
+		return fmt.Errorf("lumen: for-each %q run body does not lower: %w", n.ID, err)
+	}
 	return nil
 }
 
@@ -696,9 +767,10 @@ func forEachOverReason(raw json.RawMessage) string {
 	}
 }
 
-// forEachBodyLeaf unwraps a for-each `body` block and returns its SINGLE leaf member.
-// A body that is not a block, or a block that does not hold exactly one member, is a
-// load error — the multi-statement / nested-aggregate body is deferred this slice.
+// forEachBodyLeaf unwraps a for-each `body` block and returns its SINGLE member (a leaf
+// exec/do OR a run node — the caller's switch classifies the kind). A body that is not a
+// block, or a block that does not hold exactly one member, is a load error — the
+// multi-statement / nested-aggregate body is deferred this slice.
 func forEachBodyLeaf(n ir.Node) (ir.Node, error) {
 	raw, ok := n.Raw["body"]
 	if !ok {
@@ -716,7 +788,7 @@ func forEachBodyLeaf(n ir.Node) (ir.Node, error) {
 		return ir.Node{}, fmt.Errorf("lumen: for-each %q body members: %w", n.ID, err)
 	}
 	if len(members) != 1 {
-		return ir.Node{}, fmt.Errorf("%w: for-each %q body has %d members (only a single exec/do leaf)", ErrUnsupportedNode, n.ID, len(members))
+		return ir.Node{}, fmt.Errorf("%w: for-each %q body has %d members (only a single exec/do leaf or run body)", ErrUnsupportedNode, n.ID, len(members))
 	}
 	return members[0], nil
 }
@@ -1972,6 +2044,31 @@ func (l *lowerer) resolveDeps() error {
 				}
 			}
 		}
+		// ⚑B2: a run-bodied for-each ALSO gates on the parent nodes its BODY RUN's
+		// environment reads (minus the binder) — so the parent scope is frozen before the
+		// first member mints, exactly like a repeat run body gates its loop (⚑S6). These
+		// env refs are contributed as ADDITIONAL gate-only refs, NEVER unioned into overRefs:
+		// they are synth-ban-EXEMPT (the loop/run precedent — a run body legitimately names a
+		// synth sibling via its env, static-run parity) while the over ref keeps the synth-ban
+		// above. The BINDER is EXCLUDED (Q-D): withBinder supplies the element regardless of a
+		// same-named settled node, so a gate would freeze a value the eval never reads. A
+		// silent env-ref node is closure-substituted (nonSilentClosure), not refused.
+		if u.kind == unitForEach && u.forEach != nil && u.forEach.bodyRun != nil {
+			for _, refName := range u.forEach.bodyRun.envRefs {
+				if refName == u.forEach.binder {
+					continue
+				}
+				act, ok := byNodeID[u.ns+refName]
+				if !ok {
+					continue // an input ref (or a synth-body ref — exempt) is not a gate
+				}
+				for _, g := range nonSilentClosure(act, silent, rawDeps) {
+					if g != u.activation {
+						gates = append(gates, g)
+					}
+				}
+			}
+		}
 		if len(gates) == 0 {
 			continue
 		}
@@ -2106,39 +2203,39 @@ func topoSortUnits(units []planUnit) ([]planUnit, error) {
 	return order, nil
 }
 
-// mintRunBodyAttempt lowers a repeat run body's sub-formula for attempt N — the
-// SINGLE lowering path shared by the lower-time dry run (⚑S4, attempt 0, validation
-// only) and the runtime per-attempt mint (advanceRunBodyLoop / runRunBodyLoop), so
-// there is no drift between a validated attempt and a driven one. It builds a fresh
-// lowerer at the attempt prefix `<bodyNodeID>/<N>/`, inlines the sub-formula's nodes
-// under the attempt aggregate activation (activationForAttempt(bodyNodeID, N) =
-// bodyNodeID:N), resolves deps, and topo-sorts (cycle detection lives in topoSort);
-// it then synthesizes the transparent attempt aggregate (kind unitRun, at
-// bodyNodeID:N, parented under the loop activation so the minted units stay OUT of
-// runOutcome — attemptUnit parity) and propagates the loop's own gate onto every
-// minted unit + the aggregate (⚑S6, the attemptUnit / lowerRun H1 rule: fold-edge
-// honesty even though a blocked loop never mints).
+// mintRunBody lowers a run BODY's sub-formula into a fresh sub-graph rooted at a
+// transparent aggregate — the SINGLE lowering path shared by the repeat run-body
+// attempt (RBL: mintRunBodyAttempt) and the for-each run-body member (FBR:
+// forEachRunMember), so there is no drift between a validated materialization and a
+// driven one. It builds a fresh lowerer at `prefix`, inlines the sub-formula's nodes
+// under `aggActivation`, resolves deps, and topo-sorts (cycle detection lives in
+// topoSort); it then synthesizes the transparent aggregate (kind unitRun, at
+// aggActivation/aggNodeID, parented under parentActivation so the minted units stay
+// OUT of the enclosing runOutcome) and propagates the caller's gate (afterDeps) onto
+// every minted unit + the aggregate (⚑S6 / lowerRun H1: fold-edge honesty even though
+// a gated-off materialization never mints).
 //
-// The aggregate is NOT topo-linked into the returned unit list — the caller drives
-// the sub-units first, then the aggregate LAST (⚑S1: its Members edges' from_id are
-// the sub-node ids, whose node rows must already exist under the Tier-A edges.from_id
-// FK; a pre-activated aggregate is a committed poison event). It is attempt-invariant
-// (N enters only via the prefix string), so genesis, re-Advance, and resume mint
-// byte-identically.
-func (spec *loopSpec) mintRunBodyAttempt(attempt int, loopActivation, loopNS string, loopAfterDeps, loopRawAfter []string) ([]planUnit, planUnit, error) {
-	aggAct := activationForAttempt(spec.bodyNodeID, attempt)
-	prefix := spec.bodyNodeID + "/" + strconv.Itoa(attempt) + "/"
+// The differing coordinates are explicit params so the RBL leg stays BYTE-IDENTICAL:
+// loop = bodyNodeID:N / bodyNodeID / `<bodyNodeID>/<N>/` / loopActivation / loopNS,
+// memberIndex nil; fan = `<fan>/<i>:0` / `<fan>/<i>` / `<fan>/<i>/` / the fan aggregate
+// activation / u.ns, memberIndex &i (the leaf-member projection parity, Q-C). The
+// aggregate is NOT topo-linked into the returned unit list — the caller drives the
+// sub-units first, then the aggregate LAST (⚑S1: its Members edges' from_id are the
+// sub-node ids, whose node rows must already exist under the Tier-A edges.from_id FK;
+// a pre-activated aggregate is a committed poison event). It reads N/the index only via
+// the prefix string, so genesis, re-Advance, and resume mint byte-identically.
+func mintRunBody(stash runBodyStash, run *runSpec, aggNodeID, prefix, aggActivation, parentActivation, ns string, afterDeps, rawAfter []string, memberIndex *int) ([]planUnit, planUnit, error) {
 	l := &lowerer{
-		allowDo:        spec.bodyAllowDo,
-		allowCombineDo: spec.bodyAllowCombineDo,
-		formulas:       spec.bodyFormulas,
+		allowDo:        stash.bodyAllowDo,
+		allowCombineDo: stash.bodyAllowCombineDo,
+		formulas:       stash.bodyFormulas,
 		prefix:         prefix,
 		// The sub-graph's nested runs check cycles against the body run's target on top
 		// of the lower-time chain — the exact stack lowerRun pushes for an inlined run.
-		targetStack:    append(append([]string(nil), spec.bodyTargetStack...), spec.bodyRun.target),
+		targetStack:    append(append([]string(nil), stash.bodyTargetStack...), run.target),
 		scatterMembers: map[string][]string{},
 	}
-	if err := l.lowerNodes(spec.bodyFormula.Nodes, aggAct); err != nil {
+	if err := l.lowerNodes(stash.bodyFormula.Nodes, aggActivation); err != nil {
 		return nil, planUnit{}, err
 	}
 	if err := l.resolveDeps(); err != nil {
@@ -2157,29 +2254,41 @@ func (spec *loopSpec) mintRunBodyAttempt(attempt int, loopActivation, loopNS str
 	// run of the same sub-formula — a forward `after` ref makes source ≠ topo.
 	var members []string
 	for i := range l.units {
-		if l.units[i].parent == aggAct && !l.units[i].silent {
+		if l.units[i].parent == aggActivation && !l.units[i].silent {
 			members = append(members, l.units[i].activation)
 		}
 	}
-	// Propagate the loop's gate onto every minted unit (⚑S6 / lowerRun H1): a blocked
-	// loop never mints, but the fold edges stay honest across a drop+refold.
+	// Propagate the caller's gate onto every minted unit (⚑S6 / lowerRun H1): a gated-off
+	// materialization never mints, but the fold edges stay honest across a drop+refold.
 	for i := range ordered {
-		ordered[i].afterDeps = appendMissing(ordered[i].afterDeps, loopAfterDeps)
+		ordered[i].afterDeps = appendMissing(ordered[i].afterDeps, afterDeps)
 	}
 	agg := planUnit{
-		kind:       unitRun,
-		activation: aggAct,
-		nodeID:     spec.bodyNodeID,
-		irKind:     ir.NodeRun,
-		parent:     loopActivation,
-		ns:         loopNS,
-		afterDeps:  append([]string(nil), loopAfterDeps...),
-		rawAfter:   append([]string(nil), loopRawAfter...),
-		members:    members,
-		memberDeps: members,
-		run:        spec.bodyRun,
+		kind:        unitRun,
+		activation:  aggActivation,
+		nodeID:      aggNodeID,
+		irKind:      ir.NodeRun,
+		parent:      parentActivation,
+		memberIndex: memberIndex,
+		ns:          ns,
+		afterDeps:   append([]string(nil), afterDeps...),
+		rawAfter:    append([]string(nil), rawAfter...),
+		members:     members,
+		memberDeps:  members,
+		run:         run,
 	}
 	return ordered, agg, nil
+}
+
+// mintRunBodyAttempt mints a repeat run body's sub-formula for attempt N via mintRunBody
+// (the RBL leg): the attempt aggregate settles at activationForAttempt(bodyNodeID, N)
+// under the loop activation, and the sub-graph lives at `<bodyNodeID>/<N>/`. It carries
+// no member index (a loop attempt is not a fan member). See mintRunBody for the ⚑S1/⚑S6
+// invariants and the dry-run / per-attempt sharing.
+func (spec *loopSpec) mintRunBodyAttempt(attempt int, loopActivation, loopNS string, loopAfterDeps, loopRawAfter []string) ([]planUnit, planUnit, error) {
+	aggAct := activationForAttempt(spec.bodyNodeID, attempt)
+	prefix := spec.bodyNodeID + "/" + strconv.Itoa(attempt) + "/"
+	return mintRunBody(spec.runBodyStash, spec.bodyRun, spec.bodyNodeID, prefix, aggAct, loopActivation, loopNS, loopAfterDeps, loopRawAfter, nil)
 }
 
 func (l *lowerer) addLeaf(n ir.Node, parent string, memberIndex *int, s step, silent bool) {

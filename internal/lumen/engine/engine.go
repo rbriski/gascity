@@ -327,17 +327,23 @@ type driver struct {
 	// bindings evaluated against the parent view + declared defaults). It is
 	// derived purely from the lowered units (runEnvIndex), so it is identical on a
 	// fresh run and a rebuild — keeping the sub-scope deterministic across resume.
-	// A repeat run body's per-attempt namespaces (`<bodyNodeID>/<N>/`) are registered
-	// into it at drive time (registerRunBodyEnv), re-derived identically every pass.
+	// The runtime-minted run-body namespaces are registered into it at drive time,
+	// re-derived identically every pass: a repeat run body's per-attempt namespaces
+	// (`<bodyNodeID>/<N>/`, registerRunBodyEnv) and a run-bodied for-each's per-member
+	// namespaces (`<fanID>/<index>/`, registerForEachRunMemberEnv).
 	runEnvs map[string]*runSpec
 
 	// parentNS overrides the scopeFor parent-namespace derivation for a namespace
 	// whose STRING-derived parent is a phantom (⚑B1): a repeat run attempt namespace
-	// `<bodyNodeID>/<N>/` has string-parent `<bodyNodeID>/` — a namespace with no env
-	// spec, whose view is {} — so every env binding would render "" silently. The
-	// override points scopeFor at the loop's real namespace instead. registerRunBodyEnv
-	// populates it at drive time; a plain run's namespace is absent and derives its
-	// parent structurally exactly as before (nil-map read is a miss).
+	// `<bodyNodeID>/<N>/` has string-parent `<bodyNodeID>/`, and a for-each run
+	// member namespace `<fanID>/<index>/` has string-parent `<fanID>/` — namespaces
+	// with no env spec, whose view is {} — so every env binding would render ""
+	// silently. The override points scopeFor at the loop's / the fan's real namespace
+	// instead. registerRunBodyEnv and registerForEachRunMemberEnv populate it at drive
+	// time, UNCONDITIONALLY including the empty string (⚑S1 — the phantom exists at
+	// EVERY depth, and "" is the load-bearing override for a ROOT loop/fan); a plain
+	// run's namespace is absent and derives its parent structurally exactly as before
+	// (nil-map read is a miss).
 	parentNS map[string]string
 }
 
@@ -691,13 +697,15 @@ func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) str
 }
 
 // runForEach drives a for-each (scatter form:each) inline: it evaluates the `over`
-// array, materializes one member per element with the binder bound into the render
-// scope, runs each through runUnit (so every member gets its own journal fact
-// node.activated/outcome.settled and resume memoization — NOT runLeaf, which would
-// skip both), then settles the aggregate with the shared scatter drain rule. An
-// empty/absent array settles PASS (a vacuous fan — never skipped); a non-array
-// `over` settles failed{invalid_input}. It is reached only when the for-each is not
-// gated off — runUnit handles blocked()/skip-cascade before this switch arm.
+// array and materializes one member per element with the binder bound into the render
+// scope. A LEAF-bodied fan runs each synthesized leaf through runUnit (so every member
+// gets its own journal fact node.activated/outcome.settled and resume memoization — NOT
+// runLeaf, which would skip both); a RUN-bodied fan (spec.bodyRun != nil, the FBR arm)
+// mints and drives each element's sub-formula sub-graph (runForEachRunMember). Either
+// way the aggregate settles with the shared scatter drain rule over the member
+// aggregates. An empty/absent array settles PASS (a vacuous fan — never skipped); a
+// non-array `over` settles failed{invalid_input}. It is reached only when the for-each
+// is not gated off — runUnit handles blocked()/skip-cascade before this switch arm.
 func (d *driver) runForEach(u planUnit, scope, nodeOutputs map[string]string) error {
 	spec := u.forEach
 	elems, ok, err := d.evalForEachArray(u.ns, spec, scope)
@@ -715,9 +723,23 @@ func (d *driver) runForEach(u planUnit, scope, nodeOutputs map[string]string) er
 	}
 	memberActs := make([]string, 0, len(elems))
 	for i, elem := range elems {
+		binderKey := u.ns + spec.binder
+		// A run-bodied member mints the target sub-formula's whole sub-graph per element
+		// (FBR); a leaf member fans a single synthesized leaf (FIS). Both bind the element
+		// into the render scope for the duration of the member drive (withBinder, ⚑S2).
+		if spec.bodyRun != nil {
+			memberActs = append(memberActs, activationFor(forEachMemberNodeID(u.nodeID, i)))
+			idx := i
+			if err := d.withBinder(scope, binderKey, elem, func() error {
+				return d.runForEachRunMember(u, idx, scope, nodeOutputs)
+			}); err != nil {
+				return err
+			}
+			continue
+		}
 		mu := d.forEachMemberUnit(u, i)
 		memberActs = append(memberActs, mu.activation)
-		if err := d.withBinder(scope, u.ns+spec.binder, elem, func() error {
+		if err := d.withBinder(scope, binderKey, elem, func() error {
 			return d.runUnit(mu, scope, nodeOutputs)
 		}); err != nil {
 			return err
@@ -778,6 +800,75 @@ func (d *driver) forEachMemberUnit(u planUnit, index int) planUnit {
 // is preserved in the node id.
 func forEachMemberNodeID(forEachID string, index int) string {
 	return forEachID + "/" + strconv.Itoa(index)
+}
+
+// forEachRunMember mints for-each member `index`'s run sub-graph via the shared
+// mintRunBody helper (the RBL leg's twin): prefix `<fanID>/<index>/`, aggregate
+// `<fanID>/<index>:0` parented under the FAN aggregate, MemberIndex stamped `index`
+// (leaf-member projection parity, Q-C), gates = the fan unit's afterDeps (the ⚑B2
+// env-ref gate + any `after`). It is a pure function of (spec stash, index, fan
+// coordinates), so genesis, re-Advance, and resume mint byte-identically.
+func (d *driver) forEachRunMember(u planUnit, index int) ([]planUnit, planUnit, error) {
+	memberID := forEachMemberNodeID(u.nodeID, index)
+	idx := index
+	return mintRunBody(u.forEach.runBodyStash, u.forEach.bodyRun, memberID, memberID+"/", activationFor(memberID),
+		u.activation, u.ns, u.afterDeps, u.rawAfter, &idx)
+}
+
+// registerForEachRunMemberEnv wires for-each run-member `index`'s env seam into scopeFor
+// (⚑B1), analogous to registerRunBodyEnv: the member namespace `<fanID>/<index>/` → the
+// body run's env spec, PLUS an explicit parent-namespace override = the FAN's namespace
+// (u.ns), registered UNCONDITIONALLY including u.ns == "" (⚑S1 — the structural parent
+// `<fanID>/` is a phantom at EVERY depth, precluded from being a real run namespace; an
+// `if u.ns != ""` guard would silently collapse the ROOT corpus shape to all-"" bindings).
+// Nested runs inside the member sub-graph register too. It is pure — re-derived identically
+// every pass and resume (genesis ≡ resume) — so re-registering is an idempotent map write.
+func (d *driver) registerForEachRunMemberEnv(u planUnit, memberID string, subUnits []planUnit) {
+	if d.runEnvs == nil {
+		d.runEnvs = map[string]*runSpec{}
+	}
+	if d.parentNS == nil {
+		d.parentNS = map[string]string{}
+	}
+	memberNS := memberID + "/"
+	d.runEnvs[memberNS] = u.forEach.bodyRun
+	d.parentNS[memberNS] = u.ns
+	for i := range subUnits {
+		if subUnits[i].kind == unitRun && subUnits[i].run != nil {
+			d.runEnvs[subUnits[i].nodeID+"/"] = subUnits[i].run
+		}
+	}
+}
+
+// runForEachRunMember mints for-each member `index`'s run sub-graph, registers its env
+// seam, and drives every minted sub-unit then the transparent member aggregate through
+// runUnit — the aggregate LAST (⚑S1 Tier-A FK ordering: its Members edges reference the
+// sub-node rows). It re-mints STATELESSLY every pass (no fold-state early-out — the member
+// aggregate `<fanID>/<index>:0` is nil mid-mint since it activates last, so an early-out
+// would misroute the agg-activated-unsettled crash window AND skip re-registration);
+// resume memoization inside runUnit reloads any already-settled sub-unit. NO attempt.minted
+// (Q-C STATELESS events). The binder is bound by the caller's withBinder window (⚑S2).
+func (d *driver) runForEachRunMember(u planUnit, index int, scope, nodeOutputs map[string]string) error {
+	subUnits, agg, err := d.forEachRunMember(u, index)
+	if err != nil {
+		return err
+	}
+	d.registerForEachRunMemberEnv(u, agg.nodeID, subUnits)
+	for i := range subUnits {
+		if err := d.runUnit(subUnits[i], scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+	if err := d.runUnit(agg, scope, nodeOutputs); err != nil {
+		return err
+	}
+	// An engine-inline member always settles its aggregate in-pass; if it did not, the
+	// body lowering or host is broken — surface it loudly (the runLoop invariant) rather
+	// than let scatterDrainOutcome silently skip an unsettled memberAct.
+	if n := d.st().Nodes[agg.activation]; n == nil || !n.Settled {
+		return fmt.Errorf("lumen: for-each %q run member %d aggregate did not settle in-pass", u.nodeID, index)
+	}
+	return nil
 }
 
 // evalForEachArray evaluates a for-each `over` expression to its element strings for the

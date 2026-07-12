@@ -1,0 +1,117 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "for-each-run-body",
+  "input": {
+    "name": "for-each-run-body.input",
+    "fields": [
+      {
+        "name": "reviewers",
+        "type": { "kind": "array", "element": { "kind": "atomic", "name": "string" } },
+        "required": true,
+        "body": false
+      },
+      {
+        "name": "target",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "scatter",
+      "id": "fanout",
+      "name": "fanout",
+      "after": [],
+      "form": "each",
+      "binder": "reviewer",
+      "over": { "kind": "ref", "name": "reviewers" },
+      "body": {
+        "kind": "block",
+        "id": "fanout.body",
+        "after": [],
+        "members": [
+          {
+            "kind": "run",
+            "id": "lane",
+            "name": "lane",
+            "after": [],
+            "target": { "kind": "by-name", "name": "reviewLane" },
+            "environment": {
+              "fields": [
+                {
+                  "name": "reviewer",
+                  "value": { "kind": "expr", "expr": { "kind": "ref", "name": "reviewer" } }
+                },
+                {
+                  "name": "target",
+                  "value": { "kind": "expr", "expr": { "kind": "ref", "name": "target" } }
+                }
+              ]
+            },
+            "outcome": "transparent"
+          }
+        ]
+      },
+      "on_fail": "continue"
+    }
+  ],
+  "formulas": {
+    "reviewLane": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "reviewLane",
+      "input": {
+        "name": "reviewLane.input",
+        "fields": [
+          {
+            "name": "reviewer",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          },
+          {
+            "name": "target",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "review",
+          "name": "review",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": {
+            "raw": "Review {{ reviewer }} for {{ target }}.",
+            "template": {
+              "parts": [
+                { "kind": "text", "value": "Review " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "reviewer" } },
+                { "kind": "text", "value": " for " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "target" } },
+                { "kind": "text", "value": "." }
+              ]
+            },
+            "source": { "kind": "inline" },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare"
+          }
+        }
+      ]
+    }
+  }
+}

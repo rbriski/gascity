@@ -330,10 +330,14 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceDispatch(u, scope, nodeOutputs, opts)
 	}
 
-	// A pool-do for-each fans its body over the runtime array as claimable pool work
-	// and parks on the members. An exec-bodied for-each (or a do-bodied one with a
-	// Host and no PoolRouter) falls through to runUnit -> runForEach, running its
-	// members inline in-pass. A blocked for-each skip-cascades through runUnit below.
+	// A pool for-each fans its body over the runtime array and parks on the members:
+	// a pool-do leaf body dispatches each member as claimable pool work, and a RUN
+	// body (bodyRun != nil) ALWAYS routes here under a PoolRouter regardless of the
+	// sub-graph's kinds (advanceForEachRunBody drives each member's minted sub-graph
+	// as a nested mini-pass — parking sub-dos, settling exec/settle subs in-pass). An
+	// exec-bodied leaf fan (or any fan with no PoolRouter) falls through to runUnit ->
+	// runForEach, running its members inline in-pass. A blocked for-each skip-cascades
+	// through runUnit below.
 	if u.kind == unitForEach && forEachPoolMode(u, opts) && !d.blocked(u) {
 		return d.advanceForEach(u, scope, nodeOutputs, opts)
 	}
@@ -573,12 +577,18 @@ func loopPoolMode(u planUnit, opts Options) bool {
 	return opts.PoolRouter != nil && u.kind == unitLoop && u.loop != nil && u.loop.bodyIRKind == ir.NodeDo
 }
 
-// forEachPoolMode reports whether u is a for-each whose body is a pool-mode do — the
-// case Advance drives through the park-aware advanceForEach fan arm. An exec-bodied
-// for-each (or a do-bodied one with no PoolRouter) runs its members inline through
-// runForEach instead (Advance/Run parity).
+// forEachPoolMode reports whether Advance drives u (a for-each) through the park-aware
+// advanceForEach fan arm rather than inline runForEach. True when a PoolRouter is set AND
+// the body is either a pool-mode do OR a RUN sub-formula call (bodyRun != nil): a
+// run-bodied fan ALWAYS routes here under a PoolRouter regardless of the sub-graph's kinds
+// (the RBL dual-arm precedent, advanceLoop) — its members are minted at runtime, so we
+// cannot know whether they contain pool dos, and driving them via advanceUnit handles both
+// a parking sub-do AND an in-pass exec/settle sub. An exec-bodied leaf fan (or any fan with
+// no PoolRouter) runs its members inline through runForEach instead (Advance/Run parity);
+// an exec-only run-bodied fan still routes here and settles in one pass without stalling.
 func forEachPoolMode(u planUnit, opts Options) bool {
-	return opts.PoolRouter != nil && u.kind == unitForEach && u.forEach != nil && u.forEach.bodyIRKind == ir.NodeDo
+	return opts.PoolRouter != nil && u.kind == unitForEach && u.forEach != nil &&
+		(u.forEach.bodyIRKind == ir.NodeDo || u.forEach.bodyRun != nil)
 }
 
 // cleanupPoolMode reports whether a cleanup has a pool-do guarded OR body — the case
@@ -872,14 +882,16 @@ func (d *driver) advanceDispatch(u planUnit, scope, nodeOutputs map[string]strin
 	return d.settleDecisionFromBody(u, au, scope, nodeOutputs)
 }
 
-// advanceForEach is Advance's park-aware fan arm for a pool-do for-each: it activates
-// the aggregate once, evaluates the `over` array (stable — the over-ref gate froze
-// it), and materializes EVERY not-yet-minted member as claimable pool work in this
-// pass (a concurrent fan-out, unlike a loop's one-at-a-time minting). It then observes
-// the live members and PARKS until all settle, at which point it settles the aggregate
-// with the shared scatter drain rule. An empty array settles PASS in one pass. It is
-// re-entrant: re-mint is write-once (a member already in the fold is skipped) and the
-// array is DET-stable, so a re-Advance with no new settlement converges.
+// advanceForEach is Advance's park-aware fan arm for a pool for-each: it activates the
+// aggregate once, evaluates the `over` array (stable — the over-ref gate froze it), and
+// drives every member in this pass (a concurrent fan-out, unlike a loop's one-at-a-time
+// minting). For a LEAF-do fan it materializes each not-yet-minted member as claimable pool
+// work; for a RUN-bodied fan (bodyRun != nil) it delegates to advanceForEachRunBody, which
+// mints+drives each element's sub-graph mini-pass. Either way it PARKS until all members
+// settle, then settles the aggregate with the shared scatter drain rule. An empty array
+// settles PASS in one pass. It is re-entrant: re-mint is write-once (a member already in the
+// fold is skipped) and the array is DET-stable, so a re-Advance with no new settlement
+// converges.
 func (d *driver) advanceForEach(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
 	spec := u.forEach
 	if err := d.ensureDecisionActivated(u); err != nil {
@@ -896,6 +908,12 @@ func (d *driver) advanceForEach(u planUnit, scope, nodeOutputs map[string]string
 	}
 	if len(elems) == 0 {
 		return d.settleForEach(u, nil, nodeOutputs)
+	}
+	// A run-bodied fan (FBR) mints a whole sub-graph per element rather than a single
+	// pool do — the FIS-shaped concurrent member loop drives EVERY member's mini-pass
+	// before parking (⚑B1), so it stays a concurrent fan, never serialized.
+	if u.forEach.bodyRun != nil {
+		return d.advanceForEachRunBody(u, elems, scope, nodeOutputs, opts)
 	}
 	memberActs := make([]string, len(elems))
 	allSettled := true
@@ -949,6 +967,74 @@ func (d *driver) settleForEachInvalid(u planUnit, nodeOutputs map[string]string)
 	}
 	nodeOutputs[u.nodeID] = ""
 	return nil
+}
+
+// advanceForEachRunBody is Advance's park-aware arm for a RUN-bodied for-each (FBR) — the
+// ⚑B1 concurrent fan. Unlike a repeat run body (one attempt at a time), it drives the FULL
+// member loop EVERY pass: for each element it mints the sub-graph, registers the env seam,
+// and drives every minted sub-unit + the member aggregate through advanceUnit (a nested
+// mini-pass), accumulating whether all members' aggregates have settled. It PARKS only
+// AFTER the loop (never on the first in-flight member — the RBL early-return shape would
+// SERIALIZE the fan, one member per settle-round-trip, diverging from leaf-fan semantics
+// and the corpus marquee), so a 2-member fan dispatches BOTH members' sub-dos in ONE pass.
+// A member whose aggregate settled FAILED does not suppress minting/driving the others
+// (scatter drains everything; on_fail affects only the settle outcome). When every member's
+// aggregate has settled it settles the fan with the shared scatter drain rule.
+//
+// It re-mints STATELESSLY every pass (no fold-state early-out): the member aggregate
+// activates LAST, so a live sub-do leaves no activated-unsettled node at the aggregate id
+// (an `mn != nil` early-out would misroute the agg-activated-unsettled crash window AND skip
+// re-registration). inFlightPoolWork reports a parked member's minted sub-dos from the fold
+// with zero changes, so a re-Advance with no new settlement is a no-op.
+func (d *driver) advanceForEachRunBody(u planUnit, elems []string, scope, nodeOutputs map[string]string, opts Options) error {
+	memberActs := make([]string, len(elems))
+	allSettled := true
+	for i, elem := range elems {
+		memberActs[i] = activationFor(forEachMemberNodeID(u.nodeID, i))
+		settled, err := d.driveForEachRunMember(u, i, elem, scope, nodeOutputs, opts)
+		if err != nil {
+			return err
+		}
+		if !settled {
+			allSettled = false
+		}
+	}
+	if !allSettled {
+		return nil // park — minted sub-dos are in flight (inFlightPoolWork reports them)
+	}
+	return d.settleForEach(u, memberActs, nodeOutputs)
+}
+
+// driveForEachRunMember mints for-each member `index`'s run sub-graph and drives it one
+// nested mini-pass INSIDE the per-member withBinder window (⚑S2 — the binder must be live
+// during every sub-do's render, on EVERY pass, so a sub-do first materialized on a later
+// pass renders elems[index], not a same-named node that settled in between; and it must not
+// leak into member j's mini-pass, so it is saved/restored per member). It mints+registers
+// deterministically every pass, drives each minted sub-unit then the aggregate LAST (⚑S1)
+// through advanceUnit — which inherits defer-on-deps, pool materialize/observe/park, inline
+// exec/settle, and resume memoization — and reports whether the aggregate has settled (it
+// stays unsettled while any sub-do is in flight, so the caller parks).
+func (d *driver) driveForEachRunMember(u planUnit, index int, elem string, scope, nodeOutputs map[string]string, opts Options) (bool, error) {
+	settled := false
+	err := d.withBinder(scope, u.ns+u.forEach.binder, elem, func() error {
+		subUnits, agg, mintErr := d.forEachRunMember(u, index)
+		if mintErr != nil {
+			return mintErr
+		}
+		d.registerForEachRunMemberEnv(u, agg.nodeID, subUnits)
+		for j := range subUnits {
+			if e := d.advanceUnit(subUnits[j], scope, nodeOutputs, opts); e != nil {
+				return e
+			}
+		}
+		if e := d.advanceUnit(agg, scope, nodeOutputs, opts); e != nil {
+			return e
+		}
+		n := d.st().Nodes[agg.activation]
+		settled = n != nil && n.Settled
+		return nil
+	})
+	return settled, err
 }
 
 // advanceCleanup is Advance's park-aware arm for a pool cleanup (try/finally): it drives

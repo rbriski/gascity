@@ -37,9 +37,10 @@ import (
 )
 
 var (
-	errControllerAlreadyRunning = errors.New("controller already running")
-	errControllerUnavailable    = errors.New("controller unavailable")
-	errControllerUnresponsive   = errors.New("controller unresponsive")
+	errControllerAlreadyRunning          = errors.New("controller already running")
+	errControllerUnavailable             = errors.New("controller unavailable")
+	errControllerUnresponsive            = errors.New("controller unresponsive")
+	errControllerStopRequiresTypedClient = errors.New("controller stop requires typed stop client")
 )
 
 type controllerCommandError struct {
@@ -520,6 +521,14 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 }
 
 func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
+	firstLine := command
+	if newline := strings.IndexByte(firstLine, '\n'); newline >= 0 {
+		firstLine = firstLine[:newline]
+	}
+	firstLine = strings.TrimSuffix(firstLine, "\r")
+	if firstLine == "stop" || firstLine == "stop-force" {
+		return nil, errControllerStopRequiresTypedClient
+	}
 	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {

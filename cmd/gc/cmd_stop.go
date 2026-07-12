@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -52,7 +52,10 @@ straight to kill.`,
 	return cmd
 }
 
-var sessionProviderForStopCity = newSessionProviderForCity
+var (
+	sessionProviderForStopCity = newSessionProviderForCity
+	openCityStoreForStop       = openCityStoreAt
+)
 
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
@@ -77,26 +80,54 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 		stopStdout = io.Discard
 	}
 
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
-		if code != 0 {
-			return code
+	unregisterResult := unregisterCityFromSupervisorWithForceResult(cityPath, stopStdout, stderr, "gc stop", force)
+	var stopResult controllerStopResult
+	hasStopResult := false
+	switch unregisterResult.state {
+	case supervisorUnregisterManagedCleanupComplete:
+		if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
+			return 1
 		}
-		if supervisorAliveHook() != 0 {
-			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
-				return 1
-			}
-			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
-			if jsonOut {
-				return writeCityStopSuccess(stdout, stderr, cityPath, force)
-			}
-			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
-			return 0
+		warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
+		if jsonOut {
+			return writeCityStopSuccess(stdout, stderr, cityPath, force)
 		}
+		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+		return 0
+	case supervisorUnregisterNotRegistered:
+		// No managed owner completed the stop. Continue to the characterized
+		// direct fallback; the next P1.0D slice adds continuous lock ownership.
+	case supervisorUnregisterDirectFallbackRequired:
+		if !unregisterResult.hasStopResult {
+			fmt.Fprintln(stderr, "gc stop: supervisor unregister omitted the required standalone stop result") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		stopResult = unregisterResult.stopResult
+		hasStopResult = true
+	case supervisorUnregisterFailed, supervisorUnregisterInvalid:
+		return 1
+	default:
+		fmt.Fprintf(stderr, "gc stop: invalid supervisor unregister result %d\n", unregisterResult.state) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !hasStopResult {
+		stopResult = controllerStopRequestForCommand(cityPath, force)
+	}
+	switch stopResult.outcome {
+	case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+		// The transport is authoritative enough to continue. The controller or
+		// direct-owner path below consumes this exact result without reissuing it.
+	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+		return 1
+	default:
+		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stopStdout, stderr, force); handled {
+		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stopStdout, stderr, stopResult); handled {
 			if code == 0 && jsonOut {
 				return writeCityStopSuccess(stdout, stderr, cityPath, force)
 			}
@@ -116,7 +147,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 	bodyDone := make(chan struct{})
 	go func() {
 		defer close(bodyDone)
-		doneCh <- stopOutcome{code: cmdStopBody(cityPath, cfg, force, stopStdout, stderr)}
+		doneCh <- stopOutcome{code: cmdStopBodyWithResult(cityPath, cfg, force, stopResult, stopStdout, stderr)}
 	}()
 	if h := stopBodyLifecycleHook; h != nil {
 		h(bodyDone)
@@ -153,23 +184,58 @@ func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force bool)
 
 func resolveStopCityPath(args []string) (string, error) {
 	if len(args) == 0 {
-		return resolveCommandCity(nil)
+		return resolveStopCityWithoutArg()
 	}
 	// A name-shaped positional may be a registered city name or a local rig
 	// directory; route it through the shared name resolver so a slashless rig
 	// dir still resolves to its owning city without reopening the bare-name
 	// walk-up footgun. Path-shaped args keep the exact stop path resolver.
 	if classifyCityRef(args[0]) == cityRefName {
-		ctx, err := resolveCityNameContext(args[0], func(name string) (resolvedContext, error) {
+		ctx, err := resolveCityNameContextWithRigResolver(args[0], func(name string) (resolvedContext, error) {
 			cp, perr := stopCityPathFromArg(name)
 			return resolvedContext{CityPath: cp}, perr
-		})
+		}, resolveRigPathToContextReadOnly)
 		if err != nil {
 			return "", err
 		}
 		return ctx.CityPath, nil
 	}
 	return stopCityPathFromArg(args[0])
+}
+
+func resolveStopCityWithoutArg() (string, error) {
+	if cityFlag != "" {
+		return resolveCityFlagValue(cityFlag)
+	}
+	if rigFlag != "" {
+		ctx, err := resolveRigToContextReadOnly(rigFlag)
+		return ctx.CityPath, err
+	}
+	if cityPath, ok := resolveExplicitCityPathEnv(); ok {
+		return cityPath, nil
+	}
+	if rigName := strings.TrimSpace(os.Getenv("GC_RIG")); rigName != "" {
+		ctx, err := resolveRigToContextReadOnly(rigName)
+		return ctx.CityPath, err
+	}
+	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
+		if citylayout.HasRuntimeRoot(gcDir) && !citylayout.HasCityConfig(gcDir) {
+			if ctx, ok := lookupRigFromCwdWithConfigLoader(gcDir, loadCityConfigWithoutBuiltinPackRefresh); ok {
+				return ctx.CityPath, nil
+			}
+		}
+		if cityPath, ok := resolveCityPathFromGCDir(); ok {
+			return cityPath, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if ctx, ok := lookupRigFromCwdWithConfigLoader(cwd, loadCityConfigWithoutBuiltinPackRefresh); ok {
+		return ctx.CityPath, nil
+	}
+	return findCity(cwd)
 }
 
 // stopCityPathFromArg resolves a path-shaped stop argument (or a local city) to
@@ -184,7 +250,7 @@ func stopCityPathFromArg(ref string) (string, error) {
 	if cityPath, err := validateCityPath(abs); err == nil {
 		return cityPath, nil
 	}
-	ctx, ok, rigErr := resolveRigPathToContext(abs)
+	ctx, ok, rigErr := resolveRigPathToContextReadOnly(abs)
 	if rigErr == nil && ok {
 		return ctx.CityPath, nil
 	}
@@ -264,18 +330,12 @@ func ceilDiv(n, d int) int {
 
 // cmdStopBody contains the original cmdStop flow, factored out so cmdStop
 // can apply a wall-clock cap by running it in a goroutine.
-func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
+func cmdStopBodyWithResult(cityPath string, cfg *config.City, force bool, stopResult controllerStopResult, stdout, stderr io.Writer) int {
 	cityName := loadedCityName(cfg, cityPath)
 
-	store, _ := openCityStoreAt(cityPath)
-	// Every store consumer in this stop flow is session-class (sleep-reason marks,
-	// session-name lookups, session-runtime stop, orphan cleanup), so route the
-	// whole flow through the session coordination-class store for relocation-safety.
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	markCityStopSessionSleepReason(sessionFrontDoor(sessStore), stderr)
-
-	// If a controller is running, ask it to shut down (it stops agents).
-	if tryStopControllerWithForce(cityPath, stdout, force) {
+	switch stopResult.outcome {
+	case controllerStopAcknowledged:
+		fmt.Fprintln(stdout, "Controller stopping...") //nolint:errcheck // best-effort stdout
 		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -286,7 +346,23 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		}
 		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 		return 0
+	case controllerStopDefinitePreEntryUnavailable:
+		// The request provably did not enter a controller. Continue to the
+		// characterized direct fallback; the next slice adds lock ownership.
+	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+		return 1
+	default:
+		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+		return 1
 	}
+
+	store, _ := openCityStoreForStop(cityPath)
+	// Every store consumer in this stop flow is session-class (sleep-reason marks,
+	// session-name lookups, session-runtime stop, orphan cleanup), so route the
+	// whole flow through the session coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	markCityStopSessionSleepReason(sessionFrontDoor(sessStore), stderr)
 
 	sp := sessionProviderForStopCity(cfg, cityPath)
 	st := cfg.Workspace.SessionTemplate
@@ -395,8 +471,8 @@ func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 
 var shutdownBeadsProviderForStop = shutdownBeadsProvider
 
-func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
-	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
+func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, stopResult controllerStopResult) (bool, int) {
+	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, stopResult)
 	if controllerErr != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
 		return true, 1
@@ -414,12 +490,20 @@ func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stde
 	return true, 0
 }
 
-func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
-	if tryStopControllerWithForce(cityPath, stdout, force) {
+func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, stopResult controllerStopResult) (bool, error) {
+	switch stopResult.outcome {
+	case controllerStopAcknowledged:
+		fmt.Fprintln(stdout, "Controller stopping...") //nolint:errcheck // best-effort stdout
 		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			return true, err
 		}
 		return true, nil
+	case controllerStopDefinitePreEntryUnavailable:
+		// Continue to the lock probe below; no request entered the controller.
+	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+		return true, stopResult.failClosedError()
+	default:
+		return true, stopResult.failClosedError()
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -469,35 +553,6 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		orphans = append(orphans, name)
 	}
 	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
-}
-
-// tryStopController connects to the controller socket and sends "stop".
-// Returns true if a controller acknowledged the shutdown. If no controller
-// is running (socket doesn't exist or connection refused), returns false.
-func tryStopController(cityPath string, stdout io.Writer) bool {
-	return tryStopControllerWithForce(cityPath, stdout, false)
-}
-
-func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) bool {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		return false
-	}
-	defer conn.Close() //nolint:errcheck // best-effort cleanup
-	command := "stop\n"
-	if force {
-		command = "stop-force\n"
-	}
-	conn.Write([]byte(command))                            //nolint:errcheck // best-effort
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck // best-effort
-	buf := make([]byte, 64)
-	n, readErr := conn.Read(buf)
-	if readErr != nil || !strings.Contains(string(buf[:n]), "ok") {
-		return false // controller did not acknowledge — fall through to direct cleanup
-	}
-	fmt.Fprintln(stdout, "Controller stopping...") //nolint:errcheck // best-effort stdout
-	return true
 }
 
 func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) error {

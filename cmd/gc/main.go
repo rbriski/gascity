@@ -620,11 +620,19 @@ func validateCityPath(p string) (string, error) {
 // is an explicit rig-resolution path, so stale-sibling warnings are emitted
 // to os.Stderr (deduped across the two registry scans below).
 func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
+	return resolveRigToContextWithConfigLoader(nameOrPath, loadCityConfig)
+}
+
+func resolveRigToContextReadOnly(nameOrPath string) (resolvedContext, error) {
+	return resolveRigToContextWithConfigLoader(nameOrPath, loadCityConfigWithoutBuiltinPackRefresh)
+}
+
+func resolveRigToContextWithConfigLoader(nameOrPath string, loader rigBindingConfigLoader) (resolvedContext, error) {
 	var allStale []staleRegisteredCity
 	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
 
 	var deferredRegisteredLoadErr error
-	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false)
+	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadErrorAndLoader(nameOrPath, false, loader)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -638,7 +646,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false)
+	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadErrorAndLoader(abs, false, loader)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -656,7 +664,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	// the resolved city for a site-bound rig of this name. Site binding is
 	// required: legacy city.toml-only paths remain rejected so the existing
 	// legacy_city_toml_path_is_not_registered_binding test continues to pass.
-	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath); err != nil {
+	if ctx, ok, err := lookupRigFromLocalCityWithConfigLoader(nameOrPath, loader); err != nil {
 		return resolvedContext{}, err
 	} else if ok {
 		return ctx, nil
@@ -707,7 +715,7 @@ func isCityDiscoveryNotFound(err error) bool {
 // .gc/site.toml, matching the registered resolver's binding semantics.
 // Legacy city.toml-only paths are still rejected so this fallback preserves
 // the invariant pinned by legacy_city_toml_path_is_not_registered_binding.
-func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
+func lookupRigFromLocalCityWithConfigLoader(nameOrPath string, loader rigBindingConfigLoader) (resolvedContext, bool, error) {
 	cityPath, err := resolveLocalCityForRigFallback()
 	if err != nil {
 		return resolvedContext{}, false, err
@@ -715,7 +723,7 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 	if cityPath == "" {
 		return resolvedContext{}, false, nil
 	}
-	bindings, err := localCityRigBindings(cityPath)
+	bindings, err := localCityRigBindingsWithConfigLoader(cityPath, loader)
 	if err != nil {
 		return resolvedContext{}, false, err
 	}
@@ -747,8 +755,8 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 	return resolvedContext{}, false, nil
 }
 
-func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+func localCityRigBindingsWithConfigLoader(cityPath string, loader rigBindingConfigLoader) ([]registeredRigBinding, error) {
+	cfg, err := loader(cityPath, io.Discard)
 	if err != nil {
 		if _, ok := missingRootCityTOML(err, cityPath); ok {
 			return nil, nil
@@ -797,7 +805,19 @@ func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBindi
 // rig context. Stale-sibling warnings are emitted to os.Stderr because the
 // caller is explicitly depending on the registry.
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
-	matches, stale, err := registeredRigBindingsByPath(dir, true)
+	return resolveRigPathToContextWithConfigLoader(dir, loadCityConfig)
+}
+
+// resolveRigPathToContextReadOnly resolves a stop target without refreshing
+// builtin caches, regenerating provider shims, or pruning retired artifacts.
+// Stop must know whether its socket request was accepted before any such
+// materialization or cleanup is allowed.
+func resolveRigPathToContextReadOnly(dir string) (resolvedContext, bool, error) {
+	return resolveRigPathToContextWithConfigLoader(dir, loadCityConfigWithoutBuiltinPackRefresh)
+}
+
+func resolveRigPathToContextWithConfigLoader(dir string, loader rigBindingConfigLoader) (resolvedContext, bool, error) {
+	matches, stale, err, _ := registeredRigBindingsByPathWithDeferredLoadErrorAndLoader(dir, true, loader)
 	emitStaleRegisteredCityWarnings(os.Stderr, stale)
 	if err != nil {
 		return resolvedContext{}, false, err
@@ -817,7 +837,11 @@ func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
 // This is an opportunistic probe (failOnLoadError=false): stale-sibling
 // warnings are intentionally dropped so unrelated commands stay quiet.
 func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
-	matches, _, err := registeredRigBindingsByPath(cwd, false)
+	return lookupRigFromCwdWithConfigLoader(cwd, loadCityConfig)
+}
+
+func lookupRigFromCwdWithConfigLoader(cwd string, loader rigBindingConfigLoader) (resolvedContext, bool) {
+	matches, _, err, _ := registeredRigBindingsByPathWithDeferredLoadErrorAndLoader(cwd, false, loader)
 	if err != nil || len(matches) != 1 {
 		return resolvedContext{}, false
 	}
@@ -852,13 +876,19 @@ type registeredRigBinding struct {
 	Path string
 }
 
+type rigBindingConfigLoader func(string, ...io.Writer) (*config.City, error)
+
 func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
 	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError)
 	return matches, stale, err
 }
 
 func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
-	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	return registeredRigBindingsByNameWithDeferredLoadErrorAndLoader(name, failOnLoadError, loadCityConfig)
+}
+
+func registeredRigBindingsByNameWithDeferredLoadErrorAndLoader(name string, failOnLoadError bool, loader rigBindingConfigLoader) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
+	return registeredRigBindingsWithConfigLoader(loader, failOnLoadError, func(binding registeredRigBinding) bool {
 		return binding.Rig.Name == name
 	})
 }
@@ -869,8 +899,12 @@ func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []re
 }
 
 func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
+	return registeredRigBindingsByPathWithDeferredLoadErrorAndLoader(dir, failOnLoadError, loadCityConfig)
+}
+
+func registeredRigBindingsByPathWithDeferredLoadErrorAndLoader(dir string, failOnLoadError bool, loader rigBindingConfigLoader) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	matches, stale, err, deferredLoadErr = registeredRigBindingsWithConfigLoader(loader, failOnLoadError, func(binding registeredRigBinding) bool {
 		rigPath := normalizePathForCompare(binding.Path)
 		return pathWithinScope(dir, rigPath)
 	})
@@ -908,7 +942,7 @@ func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
 	}
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
+func registeredRigBindingsWithConfigLoader(loader rigBindingConfigLoader, failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
@@ -917,7 +951,7 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path, io.Discard)
+		cfg, err := loader(c.Path, io.Discard)
 		if err != nil {
 			// Tolerate stale registry entries whose city.toml has been
 			// deleted out from under the registry, but keep missing includes

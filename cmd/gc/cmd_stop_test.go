@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -296,6 +297,183 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	}
 }
 
+func TestCmdStopFailsClosedOnUncertainControllerStopBeforeSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result controllerStopResult
+	}{
+		{
+			name: "request may have entered",
+			result: classifiedControllerStopResult(
+				controllerStopMayHaveEntered,
+				"test acknowledgement loss",
+				errors.New("reply lost"),
+			),
+		},
+		{
+			name:   "invalid result",
+			result: controllerStopResult{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags(t)
+			t.Setenv("GC_HOME", t.TempDir())
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+			cityDir := setupCity(t, "ambiguous-stop")
+			writeRigAnywhereCityToml(t, cityDir, "[workspace]\nname = \"ambiguous-stop\"\n\n[beads]\nprovider = \"file\"\n")
+			eventsPath := filepath.Join(cityDir, ".gc", "events.jsonl")
+			if err := os.Remove(eventsPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			retiredSentinel := filepath.Join(cityDir, ".gc", "system", "packs", "retired", "keep")
+			if err := os.MkdirAll(filepath.Dir(retiredSentinel), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(retiredSentinel, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			shimPath := gcBeadsBdScriptPath(cityDir)
+			if err := os.Remove(shimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+
+			requests := 0
+			oldRequest := controllerStopRequestForCommand
+			controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+				requests++
+				assertSameTestPath(t, path, cityDir)
+				if force {
+					t.Fatal("ordinary stop requested force transport")
+				}
+				return tt.result
+			}
+			t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+			storeOpens := 0
+			oldOpen := openCityStoreForStop
+			openCityStoreForStop = func(string) (beads.Store, error) {
+				storeOpens++
+				return beads.NewMemStore(), nil
+			}
+			t.Cleanup(func() { openCityStoreForStop = oldOpen })
+
+			providerConstructions := 0
+			oldProvider := sessionProviderForStopCity
+			sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+				providerConstructions++
+				return runtime.NewFake()
+			}
+			t.Cleanup(func() { sessionProviderForStopCity = oldProvider })
+
+			storeShutdowns := 0
+			overrideShutdownBeadsProviderForStop(t, func(string) error {
+				storeShutdowns++
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+
+			if code != 1 {
+				t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if requests != 1 {
+				t.Fatalf("controller stop requests = %d, want 1", requests)
+			}
+			if storeOpens != 0 || providerConstructions != 0 || storeShutdowns != 0 {
+				t.Fatalf("post-ambiguity effects = store opens:%d provider constructions:%d store shutdowns:%d, want all zero", storeOpens, providerConstructions, storeShutdowns)
+			}
+			if strings.Contains(stdout.String(), "City stopped") {
+				t.Fatalf("stdout reports false success: %q", stdout.String())
+			}
+			if _, err := os.Stat(eventsPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("events file created after uncertain stop, stat error = %v", err)
+			}
+			if _, err := os.Stat(retiredSentinel); err != nil {
+				t.Fatalf("pre-classification config cleanup removed retired-pack sentinel: %v", err)
+			}
+			if _, err := os.Stat(shimPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pre-classification config load materialized bead shim, stat error = %v", err)
+			}
+			if !strings.Contains(stderr.String(), "controller stop") {
+				t.Fatalf("stderr = %q, want controller-stop diagnostic", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCmdStopNoArgResolutionIsReadOnlyBeforeTransportClassification(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := setupCity(t, "no-arg-read-only")
+	workingDir := filepath.Join(cityDir, "nested", "work")
+	if err := os.MkdirAll(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
+
+	retiredSentinel := filepath.Join(cityDir, ".gc", "system", "packs", "retired", "keep")
+	if err := os.MkdirAll(filepath.Dir(retiredSentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(retiredSentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shimPath := gcBeadsBdScriptPath(cityDir)
+	if err := os.Remove(shimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityDir)
+		if force {
+			t.Fatal("ordinary stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop(nil, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop(no args) = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want 1", requests)
+	}
+	if _, err := os.Stat(retiredSentinel); err != nil {
+		t.Fatalf("no-arg resolution removed retired-pack sentinel before classification: %v", err)
+	}
+	if _, err := os.Stat(shimPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-arg resolution materialized bead shim before classification, stat error = %v", err)
+	}
+}
+
 func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
@@ -432,6 +610,80 @@ func TestCmdStopExplicitRegisteredRigPathUsesSharedResolver(t *testing.T) {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	assertSameTestPath(t, gotCityPath, cityDir)
+}
+
+func TestCmdStopRegisteredRigResolutionIsReadOnlyBeforeTransportClassification(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := setupCity(t, "stop-read-only-rig")
+	rigDir := filepath.Join(t.TempDir(), "registered-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := fmt.Sprintf("[workspace]\nname = \"stop-read-only-rig\"\n\n[beads]\nprovider = \"file\"\n\n[[rigs]]\nname = \"registered-rig\"\npath = %q\n", rigDir)
+	writeRigAnywhereCityToml(t, cityDir, toml)
+	registerCityForRigResolution(t, gcHome, cityDir, "stop-read-only-rig")
+
+	retiredSentinel := filepath.Join(cityDir, ".gc", "system", "packs", "retired", "keep")
+	if err := os.MkdirAll(filepath.Dir(retiredSentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(retiredSentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shimPath := gcBeadsBdScriptPath(cityDir)
+	if err := os.Remove(shimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityDir)
+		if force {
+			t.Fatal("ordinary stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{rigDir}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop(rig) = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want 1", requests)
+	}
+	if _, err := os.Stat(retiredSentinel); err != nil {
+		t.Fatalf("rig resolution removed retired-pack sentinel before classification: %v", err)
+	}
+	if _, err := os.Stat(shimPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rig resolution materialized bead shim before classification, stat error = %v", err)
+	}
 }
 
 func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *testing.T) {
@@ -653,6 +905,68 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 	if !strings.Contains(stderr.String(), "invalid config") {
 		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+}
+
+func TestCmdStopInvalidConfigFailsClosedOnUncertainControllerStop(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result controllerStopResult
+	}{
+		{
+			name: "request may have entered",
+			result: classifiedControllerStopResult(
+				controllerStopMayHaveEntered,
+				"test acknowledgement loss",
+				errors.New("reply lost"),
+			),
+		},
+		{
+			name:   "invalid result",
+			result: controllerStopResult{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags(t)
+			cityDir := setupInvalidConfigManagedRuntime(t)
+
+			requests := 0
+			oldRequest := controllerStopRequestForCommand
+			controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+				requests++
+				assertSameTestPath(t, path, cityDir)
+				if force {
+					t.Fatal("ordinary invalid-config stop requested force transport")
+				}
+				return tt.result
+			}
+			t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+			storeShutdowns := 0
+			overrideShutdownBeadsProviderForStop(t, func(string) error {
+				storeShutdowns++
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+
+			if code != 1 {
+				t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if requests != 1 {
+				t.Fatalf("controller stop requests = %d, want 1", requests)
+			}
+			if storeShutdowns != 0 {
+				t.Fatalf("managed store shutdowns = %d, want 0", storeShutdowns)
+			}
+			if strings.Contains(stdout.String(), "City stopped") {
+				t.Fatalf("stdout reports false success: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "controller stop") {
+				t.Fatalf("stderr = %q, want controller-stop diagnostic", stderr.String())
+			}
+		})
 	}
 }
 

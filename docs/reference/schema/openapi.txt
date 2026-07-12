@@ -35459,7 +35459,7 @@
               }
             }
           },
-          "404": {
+          "default": {
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -35467,37 +35467,7 @@
                 }
               }
             },
-            "description": "Not Found",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Unprocessable Entity",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "500": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Internal Server Error",
+            "description": "Error",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -35920,7 +35890,7 @@
               }
             }
           },
-          "404": {
+          "default": {
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -35928,52 +35898,7 @@
                 }
               }
             },
-            "description": "Not Found",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Unprocessable Entity",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "500": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Internal Server Error",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "503": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Service Unavailable",
+            "description": "Error",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -36011,11 +35936,11 @@
             }
           },
           {
-            "description": "Idempotency key for safe retries.",
+            "description": "Idempotency key for safe retries (synchronous create).",
             "in": "header",
             "name": "Idempotency-Key",
             "schema": {
-              "description": "Idempotency key for safe retries.",
+              "description": "Idempotency key for safe retries (synchronous create).",
               "type": "string"
             }
           }
@@ -36084,112 +36009,7 @@
                 }
               }
             },
-            "description": "Bad Request",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "401": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Unauthorized",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "403": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Forbidden",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "404": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Not Found",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "409": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Conflict",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Unprocessable Entity",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "500": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Internal Server Error",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "501": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Not Implemented",
+            "description": "Error",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

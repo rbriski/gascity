@@ -86,6 +86,25 @@ func cityScopedObjectPath(path string) (city string, ok bool) {
 	return city, true
 }
 
+// cityScopedObjectMutation reports whether path targets an existing city whose
+// config the write-auth gate must cover, returning the city name. It shares the
+// grammar in cityScopedObjectPath; the write gate additionally restricts by
+// method (mutations only). Notes on the write-side carve-outs:
+//   - registry creation (POST /v0/city) carries no path-resident city name, so
+//     creating a city stays governed by the prior supervisor-registry guards,
+//     not this gate. Write-auth covers mutations of cities that already exist
+//     (including unregister, which does carry the city in its path).
+//   - the /svc/ workspace-service pass-through is exempt (shared grammar).
+//
+// The /hook/ webhook receiver is deliberately NOT exempted (the H2 reversal): a
+// /hook/{name} POST dispatches order → sh -c authenticated by a verifier a pack
+// may author, so when write-auth is configured it stays gated on the operator's
+// signed grant. Signature verification (E4) is an ADDITIONAL gate for public
+// webhooks, never a replacement for this one. Do not add a /hook/ exemption here.
+func cityScopedObjectMutation(path string) (city string, ok bool) {
+	return cityScopedObjectPath(path)
+}
+
 // isServiceSubresourcePath reports whether path targets the /svc/* workspace-
 // service pass-through under a city (/v0/city/{name}/svc or /v0/city/{name}/svc/…).
 // It is the G11 companion to cityScopedObjectMutation's /svc exclusion:

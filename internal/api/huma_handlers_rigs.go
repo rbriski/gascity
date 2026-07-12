@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -87,10 +88,16 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 //
 //   - git_url absent: today's synchronous config-append create → 201. Byte-
 //     identical to the pre-C4b path (path required, mapped via mutationError).
+//     Wrapped in withIdempotency so the S2 Idempotency-Key header contract holds
+//     for the sync path: a retried create replays the first response instead of
+//     re-running CreateRig.
 //   - git_url present: async clone+provision. Runs the G13 request_id state
 //     machine under the per-rig-name lock, spawns a detached provisioning
 //     goroutine, and returns 202 (accepted) / 200 (idempotent replay of a
-//     succeeded create) / 409 (request_id or rig_name conflict).
+//     succeeded create) / 409 (request_id or rig_name conflict). Idempotency on
+//     this path is owned by the request_id admission machine (which also tracks
+//     in-flight provisioning and re-clone), so the Idempotency-Key header is not
+//     additionally applied here.
 func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput) (*RigCreateOutput, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
@@ -99,7 +106,13 @@ func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput)
 
 	body := input.Body
 	if strings.TrimSpace(body.GitURL) == "" {
-		return s.rigCreateSync(sm, body)
+		// The cached value is the whole typed output; the sync response carries
+		// no live-state-derived fields, so an Idempotency-Key replay is
+		// byte-identical to the first 201.
+		return withIdempotency(s, "/v0/rigs", input.IdempotencyKey, body,
+			func() (*RigCreateOutput, error) {
+				return s.rigCreateSync(sm, body)
+			})
 	}
 	return s.rigCreateAsync(ctx, sm, body)
 }

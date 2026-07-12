@@ -1596,6 +1596,15 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 	return err
 }
 
+// rigCloneTimeout is the outer wall-clock bound on a git_url clone. The detached
+// provisioning goroutine (C4b) runs the clone under context.Background() so the
+// fetch outlives the request that triggered it; without this deadline a hung or
+// slow-loris git server on an attacker-controlled public host would block the
+// clone subprocess — and keep the idempotency name reservation live — forever.
+// It is generous (a large repo over a slow WAN link is legitimate) and complements
+// the inner http.lowSpeedLimit guard in rigCloneHardeningArgs.
+const rigCloneTimeout = 10 * time.Minute
+
 // ProvisionRigFromGit is the async server-side rig-add path (C4b). It clones
 // gitURL into the rig's working tree OUTSIDE the per-city config lock (a WAN
 // fetch must not freeze config writes), SSRF-fencing the host first, then
@@ -1664,7 +1673,14 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	if onStep != nil {
 		onStep("clone", "  Cloning rig working tree from git", false)
 	}
-	if err := rigCloneGit(ctx, gitURL, r.Path, git.CloneOptions{}); err != nil {
+	// Bound the WAN clone with rigCloneTimeout so a stalled/hung remote cannot
+	// pin the provisioning goroutine and its rig-name reservation indefinitely.
+	// cancel is deferred (not called inline) purely to satisfy vet's lostcancel;
+	// cloneCtx is used only by the clone, so holding the timer until the function
+	// returns is harmless.
+	cloneCtx, cancelClone := context.WithTimeout(ctx, rigCloneTimeout)
+	defer cancelClone()
+	if err := rigCloneGit(cloneCtx, gitURL, r.Path, git.CloneOptions{}); err != nil {
 		// Wrap with rig.ErrCloneFailed so the async failure mapper classifies it
 		// as clone_failed (distinct from provision_failed). git.Clone already
 		// redacted any embedded credential from the error.
@@ -1948,58 +1964,7 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 				}
 			}
 
-			deps := rig.Deps{
-				FS:           fsys.OSFS{},
-				CityPath:     cs.cityPath,
-				Cfg:          editCfg,
-				InitStore:    controllerStateInitRigDirIfReady,
-				InitAndHook:  initAndHookDir,
-				ComposePacks: ensureBundledRigImportsInstalled,
-				WriteRoutes: func(cp string, c *config.City) error {
-					return writeAllRigRoutes(collectRigRoutes(cp, c))
-				},
-				ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
-				NormalizeScopes: func(cp string, c *config.City) error {
-					return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
-				},
-				PrepareAdopt:  prepareRigAdoptProviderState,
-				StoreContract: cityUsesBdStoreContract,
-				DoltSkip:      gcDoltSkip,
-				OnStep:        depOnStep,
-				PostProvision: func(pc rig.ProvisionContext) error {
-					// Rig-local infrastructure the CLI installs. Failures are
-					// warn-and-continue (best-effort), logged rather than printed to
-					// a CLI stderr. Deliberately DROPS the CLI's controller-reload +
-					// store-accessible wait: G17 forbids the controller dialing its
-					// own socket mid-request, and mutateAndPoke's refresh already
-					// makes the controller see the rig.
-					if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
-						log.Printf("api: rig create: writing .gitignore: %v", err)
-					}
-					if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-						resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
-						if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
-							log.Printf("api: rig create: installing agent hooks: %v", err)
-						}
-					}
-					reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
-					if reloadedCfg != nil {
-						layers, ok := reloadedCfg.FormulaLayers.Rigs[r.Name]
-						if !ok || len(layers) == 0 {
-							layers = reloadedCfg.FormulaLayers.City
-						}
-						if len(layers) > 0 {
-							if rfErr := ResolveFormulas(pc.RigPath, layers); rfErr != nil {
-								log.Printf("api: rig create: resolving formulas: %v", rfErr)
-							}
-						}
-					}
-					if err := writeBeadsEnvGTRoot(fsys.OSFS{}, pc.RigPath, cs.cityPath); err != nil {
-						log.Printf("api: rig create: writing .beads/.env: %v", err)
-					}
-					return nil
-				},
-			}
+			deps := cs.buildRigProvisionDeps(editCfg, depOnStep, r.Name)
 
 			resultRig, res, err := rig.Provision(deps, rig.ProvisionRequest{
 				Name:          r.Name,
@@ -2026,6 +1991,71 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 		log.Printf("api: rig create: post-provision: %v", postErr)
 	}
 	return provisionedRig, nil
+}
+
+// buildRigProvisionDeps assembles the rig.Deps the controller injects into
+// rig.Provision for an API-driven rig create. Extracted from provisionRigLocked
+// so that function's control flow stays flat; editCfg is the raw for-edit config
+// (never the composed snapshot), depOnStep bridges progress to the caller, and
+// rigName is threaded into the PostProvision hook.
+func (cs *controllerState) buildRigProvisionDeps(editCfg *config.City, depOnStep func(rig.ProvisionStep), rigName string) rig.Deps {
+	return rig.Deps{
+		FS:           fsys.OSFS{},
+		CityPath:     cs.cityPath,
+		Cfg:          editCfg,
+		InitStore:    controllerStateInitRigDirIfReady,
+		InitAndHook:  initAndHookDir,
+		ComposePacks: ensureBundledRigImportsInstalled,
+		WriteRoutes: func(cp string, c *config.City) error {
+			return writeAllRigRoutes(collectRigRoutes(cp, c))
+		},
+		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		NormalizeScopes: func(cp string, c *config.City) error {
+			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
+		},
+		PrepareAdopt:  prepareRigAdoptProviderState,
+		StoreContract: cityUsesBdStoreContract,
+		DoltSkip:      gcDoltSkip,
+		OnStep:        depOnStep,
+		PostProvision: cs.rigCreatePostProvision(rigName),
+	}
+}
+
+// rigCreatePostProvision returns the PostProvision hook for the API rig-create
+// path: rig-local infrastructure the CLI installs (.gitignore, agent hooks,
+// resolved formulas, .beads/.env). Every step is best-effort and logged, never
+// fatal — the rig is already committed to disk when this runs. It deliberately
+// DROPS the CLI's controller-reload + store-accessible wait: G17 forbids the
+// controller dialing its own socket mid-request, and mutateAndPoke's refresh
+// already makes the controller see the rig.
+func (cs *controllerState) rigCreatePostProvision(rigName string) func(rig.ProvisionContext) error {
+	return func(pc rig.ProvisionContext) error {
+		if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
+			log.Printf("api: rig create: writing .gitignore: %v", err)
+		}
+		if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
+			resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
+			if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
+				log.Printf("api: rig create: installing agent hooks: %v", err)
+			}
+		}
+		reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+		if reloadedCfg != nil {
+			layers, ok := reloadedCfg.FormulaLayers.Rigs[rigName]
+			if !ok || len(layers) == 0 {
+				layers = reloadedCfg.FormulaLayers.City
+			}
+			if len(layers) > 0 {
+				if rfErr := ResolveFormulas(pc.RigPath, layers); rfErr != nil {
+					log.Printf("api: rig create: resolving formulas: %v", rfErr)
+				}
+			}
+		}
+		if err := writeBeadsEnvGTRoot(fsys.OSFS{}, pc.RigPath, cs.cityPath); err != nil {
+			log.Printf("api: rig create: writing .beads/.env: %v", err)
+		}
+		return nil
+	}
 }
 
 // ensurePublicGitHost SSRF-fences the host of a rig-clone git URL before git

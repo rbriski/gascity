@@ -247,6 +247,18 @@ func assembleCloneArgs(url, dst string, opts CloneOptions) []string {
 	return args
 }
 
+// rigCloneStalledLowSpeedLimit / rigCloneStalledLowSpeedTime kill a stalled
+// HTTPS transfer from the inside: git aborts the fetch once the transfer stays
+// under rigCloneStalledLowSpeedLimit bytes/sec for rigCloneStalledLowSpeedTime
+// seconds. This is defense in depth beneath the caller's outer clone deadline —
+// a slow-loris git server that trickles bytes to dodge the wall-clock timeout is
+// still cut off here so the provisioning goroutine and its rig-name reservation
+// cannot be pinned indefinitely.
+const (
+	rigCloneStalledLowSpeedLimit = "1000" // bytes/sec
+	rigCloneStalledLowSpeedTime  = "60"   // seconds below the limit before abort
+)
+
 // rigCloneHardeningArgs returns the leading `git -c` overrides that harden the
 // rig clone. It is the stricter sibling of UntrustedRemoteGitConfigArgs: file
 // and ext transports are DENIED (the pack path allows file:// for CLI-local
@@ -264,6 +276,8 @@ func rigCloneHardeningArgs(opts CloneOptions) []string {
 		"-c", "protocol.ext.allow=never",
 		"-c", "protocol.file.allow=never",
 		"-c", "http.followRedirects=false",
+		"-c", "http.lowSpeedLimit="+rigCloneStalledLowSpeedLimit,
+		"-c", "http.lowSpeedTime="+rigCloneStalledLowSpeedTime,
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
 	)

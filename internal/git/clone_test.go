@@ -152,6 +152,15 @@ func TestClone_HardenedArgvGolden(t *testing.T) {
 	if !contains(args, "core.fsmonitor=false") {
 		t.Errorf("argv missing core.fsmonitor=false: %v", args)
 	}
+	// A stalled/slow-loris HTTPS transfer must be cut off from the inside, so the
+	// low-speed guard is part of the hardened contract (defense in depth beneath
+	// the caller's outer clone deadline).
+	if !contains(args, "http.lowSpeedLimit=1000") {
+		t.Errorf("argv missing http.lowSpeedLimit=1000: %v", args)
+	}
+	if !contains(args, "http.lowSpeedTime=60") {
+		t.Errorf("argv missing http.lowSpeedTime=60: %v", args)
+	}
 
 	// Env (over HermeticEnv) must carry the prompt/askpass/config pins.
 	env := *gotEnv

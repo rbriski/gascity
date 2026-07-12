@@ -406,8 +406,13 @@ func healDuplicateIdemRecords(store beads.Store, city, requestID string, matches
 // exists in config: after `gc rig remove` / DeleteRig the config entry is gone
 // but the succeeded idem record lingers, so cross-checking rigInConfig lets the
 // name be re-added instead of being wedged forever. rigInConfig may be nil (in
-// which case a succeeded record blocks, the pre-fix behavior).
-func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig func(name string) bool) (bool, error) {
+// which case a succeeded record blocks, the pre-fix behavior). excludeBeadID,
+// when non-empty, drops the caller's OWN record from the scan: a re-clone
+// re-checks the name axis before re-registering, and its own in_flight (row 7)
+// or rolled_back (row 6) record would otherwise be seen here — the in_flight one
+// self-reporting a false conflict. Record IDs are unique, so excluding one can
+// never mask a different actor's record.
+func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig func(name string) bool, excludeBeadID string) (bool, error) {
 	matches, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			metaIdemKind:    idemKindRigCreate,
@@ -420,6 +425,9 @@ func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig fun
 		return false, fmt.Errorf("idem rig-name scan %s/%s: %w", city, rigName, err)
 	}
 	for i := range matches {
+		if excludeBeadID != "" && matches[i].ID == excludeBeadID {
+			continue
+		}
 		switch matches[i].Metadata[metaIdemState] {
 		case idemStateInFlight:
 			return true, nil
@@ -430,6 +438,42 @@ func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig fun
 		}
 	}
 	return false, nil
+}
+
+// nameAxisConflict runs the G13 §4.4 name-collision axis (live byName index →
+// config → durable rig-name scan) and returns a *rigNameConflictError when the
+// name is held by a live provision or a live config rig, or nil when the name is
+// free. Both the fresh-admission path and every re-clone admission consult it so
+// the two cannot drift: a re-clone re-executes one request_id's prior attempt
+// and would otherwise re-register byName and pre-drop the PRIOR manifest without
+// ever re-checking the name, letting it overwrite — and RemoveAll — a same-name
+// rig that a different actor created after the prior attempt rolled back. On the
+// re-clone path excludeBeadID is the re-cloning record's own id so its in_flight
+// record does not self-conflict; the fresh path passes "".
+func nameAxisConflict(
+	idx *rigIdemIndex,
+	store beads.Store,
+	rigInConfig func(name string) bool,
+	city, rigName, excludeBeadID string,
+) (*rigNameConflictError, error) {
+	if live, ok := idx.lookupByName(city, rigName); ok {
+		return &rigNameConflictError{
+			Rig:               rigName,
+			InFlightRequestID: live.requestID,
+			InFlightCursor:    live.eventCursor,
+		}, nil
+	}
+	if rigInConfig != nil && rigInConfig(rigName) {
+		return &rigNameConflictError{Rig: rigName}, nil
+	}
+	hit, err := durableRigNameScan(store, city, rigName, rigInConfig, excludeBeadID)
+	if err != nil {
+		return nil, err
+	}
+	if hit {
+		return &rigNameConflictError{Rig: rigName}, nil
+	}
+	return nil, nil
 }
 
 // markIdemSucceeded transitions a record to succeeded and merges the result
@@ -618,6 +662,19 @@ func admitRigCreate(
 			// leaves the debris findable by the boot sweep), then the goroutine
 			// pre-drops that debris before cloning (C4c §3, G13 §6 drop-then-mark).
 			reclone := func() (rigAdmitResult, error) {
+				// Re-check the name axis BEFORE re-registering byName and pre-dropping
+				// the prior manifest. Between this request_id's prior attempt and this
+				// retry, a different actor (another request_id, or a no-id add) may have
+				// created a live rig under the same name — a rolled_back record does not
+				// block a fresh same-name add. Without this check the re-clone would
+				// overwrite byName and RemoveAll that actor's live working tree.
+				// excludeBeadID = rec.ID so this request's own record does not
+				// self-conflict (row 7's in_flight record would otherwise block).
+				if conflict, cErr := nameAxisConflict(idx, store, rigInConfig, city, body.Name, rec.ID); cErr != nil {
+					return rigAdmitResult{}, cErr
+				} else if conflict != nil {
+					return rigAdmitResult{}, conflict
+				}
 				oldManifest := manifestFromRecord(rec)
 				res, rErr := admitFreshLocked(idx, store, cursor, city, body, digest, rec.ID)
 				if rErr != nil {
@@ -680,22 +737,14 @@ func admitRigCreate(
 	}
 
 	// (2) name-collision axis (G13 §4.4): live byName → config → durable scan.
-	if live, ok := idx.lookupByName(city, body.Name); ok {
-		return rigAdmitResult{}, &rigNameConflictError{ // row 8
-			Rig:               body.Name,
-			InFlightRequestID: live.requestID,
-			InFlightCursor:    live.eventCursor,
-		}
-	}
-	if rigInConfig != nil && rigInConfig(body.Name) {
-		return rigAdmitResult{}, &rigNameConflictError{Rig: body.Name} // row 8
-	}
-	hit, err := durableRigNameScan(store, city, body.Name, rigInConfig)
+	// Shared with every re-clone admission via nameAxisConflict so the two paths
+	// cannot drift. No record to exclude on the fresh path (rec == nil here).
+	conflict, err := nameAxisConflict(idx, store, rigInConfig, city, body.Name, "")
 	if err != nil {
 		return rigAdmitResult{}, err
 	}
-	if hit {
-		return rigAdmitResult{}, &rigNameConflictError{Rig: body.Name} // row 8 backstop
+	if conflict != nil {
+		return rigAdmitResult{}, conflict // row 8
 	}
 
 	// (3) admit new (rows 3, 9).

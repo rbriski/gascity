@@ -11,9 +11,11 @@
 //
 // The fence is one layer of defense in depth, not the sole control. It does NOT
 // close the DNS-rebinding TOCTOU window: git re-resolves the host at fetch time,
-// so a name that resolves public here can resolve internal at the fetch. That
-// residual is closed at the git subprocess by refusing redirects and
-// constraining transports; pinning the resolved IP is out of scope.
+// so a name that resolves public here can resolve internal at the fetch.
+// Refusing redirects and constraining transports at the git subprocess close
+// redirect-based SSRF, not this rebinding window; the rebinding residual remains
+// accepted and out of scope (closing it would require pinning the resolved IP
+// through to the connection, which git clone does not expose).
 package ssrf
 
 import (

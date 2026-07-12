@@ -1027,9 +1027,13 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	// default (50) silently truncated the result, so an offline `gc beads list`
 	// in a >50-bead city showed only the first page while the direct-bd lane
 	// returned everything. AgeSeconds comes from the first page.
-	var all []beads.Bead
+	//
+	// Initialize non-nil: an empty city (or an all-filtered-out result) must
+	// serialize as `[]`, not `null`. A nil []beads.Bead marshals to JSON null,
+	// which breaks `--json` consumers (`jq '.beads[]'`) and diverges from the
+	// direct-bd lane, which always emits an empty array.
+	all := []beads.Bead{}
 	var ageSeconds float64
-	var prevCursor string
 	// Cursors are non-snapshot offsets into a created_at-DESC list rebuilt per
 	// request, so a bead created mid-drain can shift the tail and re-appear at a
 	// page boundary. Dedupe by ID so JSON/table output never carries a duplicate
@@ -1037,6 +1041,11 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	// without a snapshot token; the drain is still strictly better than the old
 	// page-1 truncation).
 	seen := make(map[string]bool)
+	// seenCursors records every next_cursor already requested. Cursors must
+	// strictly advance, so any repeat — an immediate A,A or a longer A,B,A,B
+	// cycle — is a buggy or hostile server the drain must not loop on. Tracking
+	// the full set (not just the previous cursor) closes the multi-cursor cycle.
+	seenCursors := make(map[string]bool)
 	for page := 0; ; page++ {
 		pageLimit := maxPaginationLimit
 		if opts.Limit > 0 {
@@ -1058,7 +1067,7 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 		if resp == nil {
 			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
 		}
-		if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 			return CachedRead[[]beads.Bead]{}, err
 		}
 		if page == 0 {
@@ -1079,12 +1088,13 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 		if next == "" {
 			break
 		}
-		// Cursors are strictly-increasing encoded offsets; a repeat means a buggy
-		// server that would loop forever. Fail loudly instead of hanging.
-		if next == prevCursor {
-			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor did not advance (%q); aborting", next)
+		// Cursors are strictly-increasing encoded offsets; any cursor seen before
+		// (an immediate repeat or a multi-cursor cycle) means a server that would
+		// loop forever. Fail loudly instead of hanging.
+		if seenCursors[next] {
+			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor repeated (%q); aborting", next)
 		}
-		prevCursor = next
+		seenCursors[next] = true
 		params.Cursor = &next
 	}
 	return CachedRead[[]beads.Bead]{Body: all, AgeSeconds: ageSeconds}, nil
@@ -1517,7 +1527,7 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 	if resp == nil {
 		return SlingResult{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return SlingResult{}, err
 	}
 	if resp.JSON200 == nil {

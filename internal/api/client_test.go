@@ -606,7 +606,7 @@ func TestClientEnumeratedErrorResponseCarriesProblemDetail(t *testing.T) {
 	// detail from the per-status field.
 	if _, err := c.ListBeads(ListBeadsOpts{}); err == nil {
 		t.Fatal("ListBeads: expected error, got nil")
-	} else if !ShouldFallback(err) {
+	} else if !ShouldFallback(nil, err) {
 		t.Fatalf("ListBeads 503 cache-not-live should be fallbackable (pdOf per-status extraction): %v", err)
 	}
 }
@@ -1665,11 +1665,76 @@ func TestListBeadsNonAdvancingCursorErrors(t *testing.T) {
 
 	c := NewCityScopedClient(ts.URL, "alpha")
 	_, err := c.ListBeads(ListBeadsOpts{})
-	if err == nil || !strings.Contains(err.Error(), "did not advance") {
-		t.Fatalf("err = %v, want 'did not advance'", err)
+	if err == nil || !strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("err = %v, want 'repeated'", err)
 	}
 	if n := atomic.LoadInt32(&reqs); n != 2 {
 		t.Fatalf("requests = %d, want 2 (bounded)", n)
+	}
+}
+
+// TestListBeadsCursorCycleErrors proves the drain also catches a multi-cursor
+// cycle (A,B,A,B,…), not just an immediately-repeated cursor: a server that
+// alternates two cursors forever must still be bounded, not spun indefinitely.
+func TestListBeadsCursorCycleErrors(t *testing.T) {
+	var reqs int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reqs, 1)
+		next := "a"
+		switch r.URL.Query().Get("cursor") {
+		case "a":
+			next = "b" // a -> b
+		case "b":
+			next = "a" // b -> a: closes the cycle, revisiting a
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":       []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}},
+			"next_cursor": next,
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListBeads(ListBeadsOpts{})
+	if err == nil || !strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("err = %v, want 'repeated' (cycle not caught)", err)
+	}
+	// page0 cursor="" -> a (mark a); page1 cursor=a -> b (mark b);
+	// page2 cursor=b -> a, already seen -> abort. Exactly 3 requests.
+	if n := atomic.LoadInt32(&reqs); n != 3 {
+		t.Fatalf("requests = %d, want 3 (cycle bounded)", n)
+	}
+}
+
+// TestListBeadsEmptyResultIsNonNilSlice pins the empty-result contract: an empty
+// city must yield an empty, non-nil slice so `--json` emits `beads: []`, not
+// `beads: null`. A nil []beads.Bead marshals to JSON null, which breaks
+// `jq '.beads[]'` and diverges from the direct-bd lane.
+func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	res, err := c.ListBeads(ListBeadsOpts{})
+	if err != nil {
+		t.Fatalf("ListBeads: %v", err)
+	}
+	if res.Body == nil {
+		t.Fatal("res.Body is nil; empty result must be a non-nil empty slice")
+	}
+	if len(res.Body) != 0 {
+		t.Fatalf("len(res.Body) = %d, want 0", len(res.Body))
+	}
+	j, err := json.Marshal(res.Body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(j) != "[]" {
+		t.Fatalf("json(res.Body) = %s, want []", j)
 	}
 }
 

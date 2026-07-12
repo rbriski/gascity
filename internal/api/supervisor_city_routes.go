@@ -5,6 +5,7 @@ import (
 	"reflect"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -137,7 +138,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Restore it here so it references the same ErrorModel schema Huma emits for
 	// every other cityPost op.
 	errModelRef := sm.humaAPI.OpenAPI().Components.Schemas.Schema(
-		reflect.TypeOf(huma.ErrorModel{}), true, "ErrorModel")
+		reflect.TypeOf(apierr.ErrorModel{}), true, "ErrorModel")
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-rig",
 		Method:        http.MethodPost,

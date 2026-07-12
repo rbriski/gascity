@@ -198,13 +198,27 @@ type dispatchSpec struct {
 	arms        []dispatchArm
 }
 
-// dispatchArm is one discriminated-variant arm: a match value and the single leaf
-// body to run when the subject equals it.
+// dispatchArm is one discriminated-variant arm: a match value and the body to run
+// when the subject equals it. The body is EITHER a single leaf (bodyIRKind exec/do,
+// bodyRun nil — the pre-DAR shape) OR a `run <formula> given {…}` sub-formula call
+// (bodyRun != nil, bodyIRKind NodeRun — the DAR shape): then the MATCHED arm mints
+// the target's whole sub-graph FRESH under `<bodyNodeID>/` (mintRunBody, the shared
+// RBL/FBR helper) and the arm aggregate settles transparently at
+// activationFor(bodyNodeID) = bodyID:0. The embedded runBodyStash carries the
+// re-lowering context (nil/zero for a leaf body) and is PER-ARM (Q-B: each arm targets
+// a different sub-formula, so the stash cannot be shared). unchosen arms mint NOTHING.
 type dispatchArm struct {
 	matchValue string
 	bodyNodeID string
 	bodyIRKind ir.NodeKind
-	body       step
+	body       step // the decoded single leaf body (empty when bodyRun != nil)
+
+	// Run-body fields (a `run <formula> given {…}` arm, the DAR slice): non-nil bodyRun
+	// switches the arm into the run-body arm (it also selects the mint route at run
+	// time), and the embedded runBodyStash carries the lowering context mintRunBody
+	// re-invokes when the arm is matched. All are nil/zero for a leaf body.
+	bodyRun *runSpec
+	runBodyStash
 }
 
 // guardSpec carries a guard node's decoded shape: the closed condition and the
@@ -248,9 +262,11 @@ type runEnvField struct {
 // runBodyStash bundles the lowering context a run BODY's sub-formula is re-lowered
 // against on every materialization — captured at lower time (from the enclosing
 // lowerer) so the runtime mint is byte-identical to the lower-time dry run (single
-// source, no drift). It is embedded in BOTH loopSpec (the repeat run-body arm, RBL)
-// and forEachSpec (the for-each run-body member arm, FBR), and mintRunBody is a FREE
-// FUNCTION over it (Q-B: a struct, not an interface). The switching `bodyRun *runSpec`
+// source, no drift). It is embedded in THREE specs — loopSpec (the repeat run-body
+// arm, RBL), forEachSpec (the for-each run-body member arm, FBR), and dispatchArm (the
+// dispatch run-body arm, DAR) — and mintRunBody is a FREE FUNCTION over it (Q-B: a
+// struct, not an interface); the DAR stash is PER-ARM (arms target distinct
+// sub-formulas). The switching `bodyRun *runSpec`
 // stays a sibling field on each spec (it also selects the arm), and mintRunBody takes
 // it explicitly. Field names keep the `body` prefix so the promoted accessors match
 // the pre-FBR loopSpec field names (run_loop white-box tests read them unchanged).
@@ -1316,9 +1332,11 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 
 // decodeRunNode validates and decodes a run node's transparent, by-name shape into
 // a runSpec plus the resolved target sub-formula. It is the SINGLE run-node
-// validation path (⚑RBL §5): both lowerRun (which then inlines the sub-graph) and
-// lowerLoop's repeat-run-body arm (which stashes the spec for per-attempt minting)
-// call it, so there is no drift between an inlined run and a re-attempted one. It
+// validation path (⚑RBL §5), with FOUR callers so there is no drift between an inlined
+// run and a re-materialized one: lowerRun (which then inlines the sub-graph),
+// lowerLoop's repeat-run-body arm (stashes the spec for per-attempt minting),
+// lowerForEachRunBody (per-element member minting), and lowerDispatchRunArm (per-arm
+// minting when the arm is matched). It
 // refuses the deferred with-agent / runInput / non-transparent forms, a target
 // missing from the bundle, a recursive cycle (vs targetStack), and — via
 // decodeRunEnv — an env binding for an undeclared field, an unbound required input,
@@ -1532,13 +1550,20 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 }
 
 // lowerDispatch lowers a dispatch node — a multi-way branch — to a unitDispatch. The
-// subject is a value expression; each arm has a match literal and a SINGLE leaf body
-// (exec/do). A non-leaf arm body (block/run/scatter) is refused this slice — a
-// dispatch-to-run composition is a follow-on. A dispatch inside a run sub-formula
-// (prefix != "") is refused because its SUBJECT path — matchingArm's evalValue over the
-// flat scope — is still namespace-unaware (unlike guard and for-each, whose condScope /
-// evalForEachArray now take the unit ns); and a subject that reads the dispatch's own id
-// or an arm body id is refused (self-referential).
+// subject is a value expression; each arm has a match literal and a body that is EITHER a
+// single leaf (exec/do) OR a `run <formula> given {…}` sub-formula call (the DAR arm: the
+// MATCHED arm mints the target's whole sub-graph under `<armBodyID>/`, lowerDispatchRunArm,
+// the shared RBL/FBR helper). A block/scatter arm body is refused. A dispatch inside a run
+// sub-formula (prefix != "") is refused because its SUBJECT path — matchingArm's evalValue
+// over the flat scope — is still namespace-unaware (unlike guard and for-each, whose
+// condScope / evalForEachArray now take the unit ns); and a subject that reads the
+// dispatch's own id or an arm body id is refused (self-referential).
+//
+// ⚑B1: subject REFS and arm BODY IDS are held to the '/'+':' charset ban (guard-cond /
+// authored-id parity), at ALL times. It is load-bearing for the STATELESS DAR design: an
+// ungated '/'-forged subject ref would evaluate "" pre-mint then resolve the chosen arm's
+// minted sub-key on a later pass → an arm FLIP mid-mint (dual live beads); a forged arm body
+// id `armA/x` aliases arm A's minted sub-unit activation → chosenArm returns arm B mid-mint.
 func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 	if l.prefix != "" {
 		return fmt.Errorf("%w: %q %q inside a run sub-formula (decision scope is namespace-unaware this slice)", ErrUnsupportedNode, n.Kind, n.ID)
@@ -1561,6 +1586,16 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 	}
 
 	spec := &dispatchSpec{subject: subject, subjectRefs: collectRefs(subject)}
+	// ⚑B1: charset sweep over ALL subject refs (guard-cond parity). A subject ref carrying
+	// '/' or ':' is a forged cross-namespace flat key — idents carry neither delimiter — that
+	// gates via byNodeID AND resolves the flat nodeOutputs qualified key; ungated it would
+	// flip the chosen arm mid-mint (the stateless re-select depends on this purity). Refuse
+	// at ALL levels. The ErrUnsupportedNode wrap is load-bearing (enqueue-gate triage).
+	for _, r := range spec.subjectRefs {
+		if strings.ContainsAny(r, "/:") {
+			return fmt.Errorf("%w: dispatch %q subject ref %q must not contain '/' or ':' (reserved delimiters)", ErrUnsupportedNode, n.ID, r)
+		}
+	}
 	seenMatch := map[string]bool{}
 	seenBody := map[string]bool{}
 	for i := range rawArms {
@@ -1580,6 +1615,13 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 		}
 		if body.ID == "" {
 			return fmt.Errorf("%w: dispatch %q arm %q body missing id", ErrUnsupportedNode, n.ID, matchVal)
+		}
+		// ⚑B1: an arm body id carrying '/' or ':' would let a forged id `armA/x` alias arm
+		// A's minted sub-unit activation (the DAR sub-graph lives under `<armBodyID>/`), so
+		// chosenArm returns the wrong arm mid-mint. Refuse it (decodeLeafSub parity). Authored
+		// arm bodies bypass lowerNode's id check (decoded inline), so this is the ban site.
+		if strings.ContainsAny(body.ID, "/:") {
+			return fmt.Errorf("%w: dispatch %q arm %q body id %q must not contain '/' or ':' (reserved delimiters)", ErrUnsupportedNode, n.ID, matchVal, body.ID)
 		}
 		// Arm body ids must be distinct: their activations (bodyID:0) are the durable
 		// write-once decision records + Tier-A node ids, so a shared id would collide.
@@ -1609,10 +1651,35 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 				return err
 			}
 			arm.body = s
+		case ir.NodeRun:
+			// A run arm (the DAR slice): the matched arm mints the target sub-formula fresh
+			// under `<armBodyID>/` (mintRunBody, the shared RBL/FBR helper), and the arm
+			// aggregate settles transparently at activationFor(<armBodyID>). decodeRunNode +
+			// the DRY-RUN mint validate the body HERE at lowering, before any effect.
+			if err := l.lowerDispatchRunArm(n, body, matchVal, &arm); err != nil {
+				return err
+			}
 		default:
-			return fmt.Errorf("%w: dispatch %q arm %q body kind %q (only exec/do leaf arm bodies)", ErrUnsupportedNode, n.ID, matchVal, body.Kind)
+			return fmt.Errorf("%w: dispatch %q arm %q body kind %q (only exec/do leaf or run arm bodies)", ErrUnsupportedNode, n.ID, matchVal, body.Kind)
 		}
 		spec.arms = append(spec.arms, arm)
+	}
+
+	// ⚑S5 (RBL parity): REFUSE a run arm's env ref that names ANY of the SAME dispatch's arm
+	// body ids. An arm body id is a spec-only synth activation, gate-exempt (never in
+	// byNodeID), so `given { x: <someArmBody> }` would render a stable "" — but the render is
+	// silently meaningless (the arm sub-graph is not a referenceable node from a sibling arm's
+	// env). Refuse it loudly over the stable-"" oddity. Deferred to AFTER the arm loop so a
+	// forward ref (arm i naming arm j > i) is caught. Body ids are bare (root-only dispatch).
+	for i := range spec.arms {
+		if spec.arms[i].bodyRun == nil {
+			continue
+		}
+		for _, ref := range spec.arms[i].bodyRun.envRefs {
+			if seenBody[ref] {
+				return fmt.Errorf("%w: dispatch %q run arm %q binds arm body id %q into the sub-formula environment (a sibling arm's sub-graph is not a referenceable node)", ErrUnsupportedNode, n.ID, spec.arms[i].matchValue, ref)
+			}
+		}
 	}
 
 	l.units = append(l.units, planUnit{
@@ -1625,6 +1692,35 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 		rawAfter:   l.qAfter(n.After),
 		dispatch:   spec,
 	})
+	return nil
+}
+
+// lowerDispatchRunArm decodes a dispatch arm's run body (`run <formula> given {…}`, the DAR
+// slice) into arm: it validates the run node via decodeRunNode (inheriting the with-agent /
+// runInput / non-transparent / missing-target / recursive-cycle / env-charset refusals — the
+// same single path lowerRun and the repeat/for-each run-body arms use), stashes the
+// PER-ARM re-lowering context, and DRY-RUN mints the arm's sub-graph (⚑S4) so an un-lowerable
+// body — an unsupported sub-node, a dispatch inside the arm target (refused by the prefix
+// fence), a nested loop refused at the arm prefix — refuses at buildUnits before any effect.
+// The refusal is wrapped `dispatch %q arm %q run body does not lower: %w`. Every run arm is
+// dry-run minted (Q-B: arms target DIFFERENT formulas, so validating one validates nothing
+// about the others). It reads no index — an arm mints exactly once — so genesis, re-Advance,
+// and resume mint byte-identically.
+func (l *lowerer) lowerDispatchRunArm(n, body ir.Node, matchVal string, arm *dispatchArm) error {
+	runSpec, sub, err := l.decodeRunNode(body)
+	if err != nil {
+		return err
+	}
+	arm.bodyRun = runSpec
+	arm.bodyFormula = sub
+	arm.bodyFormulas = l.formulas
+	arm.bodyTargetStack = append([]string(nil), l.targetStack...)
+	arm.bodyAllowDo = l.allowDo
+	arm.bodyAllowCombineDo = l.allowCombineDo
+	if _, _, err := mintRunBody(arm.runBodyStash, arm.bodyRun, arm.bodyNodeID, arm.bodyNodeID+"/",
+		activationFor(arm.bodyNodeID), activationFor(l.qid(n.ID)), l.prefix, nil, nil, nil); err != nil {
+		return fmt.Errorf("lumen: dispatch %q arm %q run body does not lower: %w", n.ID, matchVal, err)
+	}
 	return nil
 }
 
@@ -2138,6 +2234,35 @@ func (l *lowerer) resolveDeps() error {
 				}
 			}
 		}
+		// ⚑B2 (DAR): a dispatch with RUN arms ALSO gates on the parent nodes EACH arm's body
+		// run's environment reads — so the parent scope is frozen before ANY arm mints (the
+		// LIS separate-contribution mechanism), UNIONED with the subject-ref gate above. These
+		// env refs are gate-only, synth-ban-EXEMPT (the loop/run/for-each precedent — an arm
+		// run body legitimately names a synth sibling via its env, static-run parity) while the
+		// SUBJECT ref keeps the synth-ban. The union is STATIC across ALL arms (a dispatch has
+		// no binder to exclude): an UNCHOSEN arm's env dep still gates, so an unchosen arm's
+		// failed env dep skip-cascades the WHOLE dispatch (fold-edge honesty — sharply
+		// different from a no-match PASS). A silent env-ref node is closure-substituted, not
+		// refused. An arm-env ref to another arm's body id already refused at lowering (⚑S5).
+		if u.kind == unitDispatch && u.dispatch != nil {
+			for ai := range u.dispatch.arms {
+				arm := &u.dispatch.arms[ai]
+				if arm.bodyRun == nil {
+					continue
+				}
+				for _, refName := range arm.bodyRun.envRefs {
+					act, ok := byNodeID[u.ns+refName]
+					if !ok {
+						continue // an input ref (or a synth-body ref — exempt) is not a gate
+					}
+					for _, g := range nonSilentClosure(act, silent, rawDeps) {
+						if g != u.activation {
+							gates = append(gates, g)
+						}
+					}
+				}
+			}
+		}
 		if len(gates) == 0 {
 			continue
 		}
@@ -2284,10 +2409,12 @@ func topoSortUnits(units []planUnit) ([]planUnit, error) {
 // every minted unit + the aggregate (⚑S6 / lowerRun H1: fold-edge honesty even though
 // a gated-off materialization never mints).
 //
-// The differing coordinates are explicit params so the RBL leg stays BYTE-IDENTICAL:
+// The differing coordinates are explicit params so each leg stays BYTE-IDENTICAL:
 // loop = bodyNodeID:N / bodyNodeID / `<bodyNodeID>/<N>/` / loopActivation / loopNS,
 // memberIndex nil; fan = `<fan>/<i>:0` / `<fan>/<i>` / `<fan>/<i>/` / the fan aggregate
-// activation / u.ns, memberIndex &i (the leaf-member projection parity, Q-C). The
+// activation / u.ns, memberIndex &i (the leaf-member projection parity, Q-C); dispatch arm
+// (DAR) = `<armBodyID>:0` / `<armBodyID>` / `<armBodyID>/` / the DISPATCH activation / u.ns,
+// memberIndex nil (an arm is not a fan member; it settles the dispatch transparently). The
 // aggregate is NOT topo-linked into the returned unit list — the caller drives the
 // sub-units first, then the aggregate LAST (⚑S1: its Members edges' from_id are the
 // sub-node ids, whose node rows must already exist under the Tier-A edges.from_id FK;

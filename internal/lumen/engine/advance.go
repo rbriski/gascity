@@ -843,8 +843,16 @@ func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, 
 // an arm body (the durable, write-once decision), it drives THAT arm without
 // re-evaluating the subject; otherwise it evaluates the subject and selects the
 // matching arm (no match settles the dispatch pass). The chosen arm's exec body runs
-// inline; a pool-do body materializes/observes/parks. The subject-ref gate keeps the
-// first selection stable.
+// inline; a pool-do body materializes/observes/parks; a RUN arm mints+drives its whole
+// sub-graph (advanceDispatchRunArm). The subject-ref gate keeps the first selection stable.
+//
+// ⚑B2 kind-route FIRST: the branch on the matched/chosen arm's bodyRun happens BEFORE any
+// leaf/pool-do handling, on BOTH the chosen-arm and matched-arm paths. chosenArm (which fires
+// on node existence) may only SKIP re-matchingArm; a returned RUN arm STILL takes the
+// re-mint/drive route (after an agg-activated-unsettled crash the fast-path returns the run
+// arm and handing it to the leaf machinery is an empty step / loud crash-loop). unitDispatch
+// routes here unconditionally (no dispatchPoolMode-analog: a unit-level gate cannot know the
+// chosen arm and would misroute a MIXED dispatch) — the fork lives INSIDE, per matched arm.
 func (d *driver) advanceDispatch(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
 	if err := d.ensureDecisionActivated(u); err != nil {
 		return err
@@ -860,6 +868,10 @@ func (d *driver) advanceDispatch(u planUnit, scope, nodeOutputs map[string]strin
 		if !ok {
 			return d.settleDecisionSkipped(u, scope, nodeOutputs)
 		}
+	}
+	// ⚑B2: kind-route on the MATCHED/CHOSEN arm's bodyRun BEFORE any leaf/pool-do handling.
+	if arm.bodyRun != nil {
+		return d.advanceDispatchRunArm(u, arm, scope, nodeOutputs, opts)
 	}
 	au := d.dispatchArmUnit(u, arm)
 	if opts.PoolRouter != nil && arm.bodyIRKind == ir.NodeDo {
@@ -884,6 +896,37 @@ func (d *driver) advanceDispatch(u planUnit, scope, nodeOutputs map[string]strin
 		}
 	}
 	return d.settleDecisionFromBody(u, au, scope, nodeOutputs)
+}
+
+// advanceDispatchRunArm is Advance's park-aware arm for a MATCHED run arm (DAR): it re-mints
+// the arm sub-graph STATELESSLY every pass (no fold-state early-out — the arm aggregate
+// `<armBodyID>:0` activates LAST, so a live sub-do leaves no activated-unsettled node at the
+// aggregate id; an early-out would misroute the agg-activated-unsettled crash window AND skip
+// re-registration), registers its env seam, and drives every minted sub-unit + the arm
+// aggregate LAST (⚑S1) through advanceUnit — which inherits defer-on-deps, pool
+// materialize/observe/park, inline exec/settle, and resume memoization. It settles the
+// dispatch ONLY when the aggregate has SETTLED (the ⚑B2 precondition — settleDecisionFromBody
+// silently defaults PASS/"" on an unsettled agg); while any sub-do is in flight the aggregate
+// stays unsettled and the dispatch stays UNSETTLED (park). inFlightPoolWork reports a parked
+// arm's minted sub-dos from the fold, so a re-Advance with no new settlement is a no-op.
+func (d *driver) advanceDispatchRunArm(u planUnit, arm *dispatchArm, scope, nodeOutputs map[string]string, opts Options) error {
+	subUnits, agg, err := d.dispatchArmRunBody(u, arm)
+	if err != nil {
+		return err
+	}
+	d.registerDispatchArmRunEnv(u, arm, subUnits)
+	for i := range subUnits {
+		if err := d.advanceUnit(subUnits[i], scope, nodeOutputs, opts); err != nil {
+			return err
+		}
+	}
+	if err := d.advanceUnit(agg, scope, nodeOutputs, opts); err != nil {
+		return err
+	}
+	if n := d.st().Nodes[agg.activation]; n == nil || !n.Settled {
+		return nil // park — a sub-do is in flight; the dispatch stays UNSETTLED
+	}
+	return d.settleDecisionFromBody(u, agg, scope, nodeOutputs)
 }
 
 // advanceForEach is Advance's park-aware fan arm for a pool for-each: it activates the

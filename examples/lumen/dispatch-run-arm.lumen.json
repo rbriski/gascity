@@ -1,0 +1,186 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "dispatch-run-arm",
+  "input": {
+    "name": "dispatch-run-arm.input",
+    "fields": [
+      {
+        "name": "policy",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      },
+      {
+        "name": "target",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "dispatch",
+      "id": "d",
+      "name": "d",
+      "after": [],
+      "subject": { "kind": "ref", "name": "policy" },
+      "arms": [
+        {
+          "match": { "kind": "literal", "value": "separate" },
+          "body": {
+            "kind": "run",
+            "id": "sepLane",
+            "name": "sepLane",
+            "after": [],
+            "target": { "kind": "by-name", "name": "drainSeparate" },
+            "environment": {
+              "fields": [
+                {
+                  "name": "reviewer",
+                  "value": { "kind": "expr", "expr": { "kind": "literal", "value": "fanout" } }
+                },
+                {
+                  "name": "target",
+                  "value": { "kind": "expr", "expr": { "kind": "ref", "name": "target" } }
+                }
+              ]
+            },
+            "outcome": "transparent"
+          }
+        },
+        {
+          "match": { "kind": "literal", "value": "same-session" },
+          "body": {
+            "kind": "run",
+            "id": "sharedLane",
+            "name": "sharedLane",
+            "after": [],
+            "target": { "kind": "by-name", "name": "drainShared" },
+            "environment": {
+              "fields": [
+                {
+                  "name": "reviewer",
+                  "value": { "kind": "expr", "expr": { "kind": "literal", "value": "shared" } }
+                },
+                {
+                  "name": "target",
+                  "value": { "kind": "expr", "expr": { "kind": "ref", "name": "target" } }
+                }
+              ]
+            },
+            "outcome": "transparent"
+          }
+        }
+      ]
+    }
+  ],
+  "formulas": {
+    "drainSeparate": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "drainSeparate",
+      "input": {
+        "name": "drainSeparate.input",
+        "fields": [
+          {
+            "name": "reviewer",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          },
+          {
+            "name": "target",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "drain",
+          "name": "drain",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": {
+            "raw": "Drain the {{ reviewer }} lane for {{ target }}.",
+            "template": {
+              "parts": [
+                { "kind": "text", "value": "Drain the " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "reviewer" } },
+                { "kind": "text", "value": " lane for " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "target" } },
+                { "kind": "text", "value": "." }
+              ]
+            },
+            "source": { "kind": "inline" },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare"
+          }
+        }
+      ]
+    },
+    "drainShared": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "drainShared",
+      "input": {
+        "name": "drainShared.input",
+        "fields": [
+          {
+            "name": "reviewer",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          },
+          {
+            "name": "target",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "drain",
+          "name": "drain",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": {
+            "raw": "Drain the {{ reviewer }} session for {{ target }}.",
+            "template": {
+              "parts": [
+                { "kind": "text", "value": "Drain the " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "reviewer" } },
+                { "kind": "text", "value": " session for " },
+                { "kind": "interp", "expr": { "kind": "ref", "name": "target" } },
+                { "kind": "text", "value": "." }
+              ]
+            },
+            "source": { "kind": "inline" },
+            "templated": true,
+            "language": "markdown",
+            "syntax": "bare"
+          }
+        }
+      ]
+    }
+  }
+}

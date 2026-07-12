@@ -11,6 +11,7 @@ package engine
 const (
 	CrashAfterRunStarted = string(crashAfterRunStarted)
 	CrashBeforeActivate  = string(crashBeforeActivate)
+	CrashAfterActivate   = string(crashAfterActivate)
 	CrashAfterDispatch   = string(crashAfterDispatch)
 	CrashBeforeAct       = string(crashBeforeAct)
 	CrashAfterAct        = string(crashAfterAct)

@@ -28,6 +28,15 @@ const (
 	// crashBeforeActivate fires after the decide phase picks a unit, before its
 	// node.activated append — the (a) boundary. Nothing for the node is on disk yet.
 	crashBeforeActivate crashBoundary = "before-activate"
+	// crashAfterActivate fires after a unit's node.activated commits, before the
+	// unit acts or settles — the activated-UNSETTLED window. For a transparent run
+	// aggregate (a run/repeat/for-each body, a dispatch run arm) it is the ONLY
+	// injectable point between the aggregate's two appends: activation and settle
+	// are otherwise atomic within one runUnit call, yet a real kill between the two
+	// journal commits leaves exactly this state. The DAR ⚑B2 chosenArm pin depends
+	// on it (an activated-unsettled arm aggregate makes chosenArm fire while the
+	// dispatch is undecidable-by-fast-path — resume MUST take the re-mint route).
+	crashAfterActivate crashBoundary = "after-activate"
 	// crashBeforeAct fires after the pre-act append (node.activated for exec,
 	// effect.scheduled for do) but before the side effect runs — the (b) boundary.
 	// The effect has NOT run; the host is NOT called.

@@ -329,8 +329,9 @@ type driver struct {
 	// fresh run and a rebuild — keeping the sub-scope deterministic across resume.
 	// The runtime-minted run-body namespaces are registered into it at drive time,
 	// re-derived identically every pass: a repeat run body's per-attempt namespaces
-	// (`<bodyNodeID>/<N>/`, registerRunBodyEnv) and a run-bodied for-each's per-member
-	// namespaces (`<fanID>/<index>/`, registerForEachRunMemberEnv).
+	// (`<bodyNodeID>/<N>/`, registerRunBodyEnv), a run-bodied for-each's per-member
+	// namespaces (`<fanID>/<index>/`, registerForEachRunMemberEnv), and a matched
+	// dispatch run arm's namespace (`<armBodyID>/`, registerDispatchArmRunEnv).
 	runEnvs map[string]*runSpec
 
 	// parentNS overrides the scopeFor parent-namespace derivation for a namespace
@@ -339,11 +340,12 @@ type driver struct {
 	// member namespace `<fanID>/<index>/` has string-parent `<fanID>/` — namespaces
 	// with no env spec, whose view is {} — so every env binding would render ""
 	// silently. The override points scopeFor at the loop's / the fan's real namespace
-	// instead. registerRunBodyEnv and registerForEachRunMemberEnv populate it at drive
-	// time, UNCONDITIONALLY including the empty string (⚑S1 — the phantom exists at
-	// EVERY depth, and "" is the load-bearing override for a ROOT loop/fan); a plain
-	// run's namespace is absent and derives its parent structurally exactly as before
-	// (nil-map read is a miss).
+	// instead. registerRunBodyEnv, registerForEachRunMemberEnv, and
+	// registerDispatchArmRunEnv populate it at drive time, UNCONDITIONALLY including the
+	// empty string (⚑S1 — the phantom exists at EVERY depth, and "" is the load-bearing
+	// override for a ROOT loop/fan; a dispatch is root-only, so its arm override is "");
+	// a plain run's namespace is absent and derives its parent structurally exactly as
+	// before (nil-map read is a miss).
 	parentNS map[string]string
 }
 
@@ -388,6 +390,14 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 	}
 
 	if err := d.appendActivated(u); err != nil {
+		return err
+	}
+
+	// Crash boundary: after the unit's node.activated committed, before it acts or
+	// settles — the activated-UNSETTLED window a real kill between the two journal
+	// commits leaves behind (the only injectable point between a transparent
+	// aggregate's two appends). Test-only; inert in production.
+	if err := d.crashAt(crashAfterActivate, u.activation); err != nil {
 		return err
 	}
 
@@ -1265,8 +1275,9 @@ func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) erro
 
 // runDispatch drives a dispatch (multi-way branch) inline: it evaluates the subject
 // to a string and runs the FIRST arm whose match equals it, settling the dispatch
-// transparently from that arm's body; no matching arm settles the dispatch PASS with
-// an empty result (a no-op that does not skip-cascade). The subject is a pure function
+// transparently from that arm's body — a leaf arm runs one synthesized leaf, a RUN arm
+// mints its whole sub-graph (runDispatchRunArm); no matching arm settles the dispatch PASS
+// with an empty result (a no-op that does not skip-cascade). The subject is a pure function
 // of the fold, so a resume re-selects the same arm.
 func (d *driver) runDispatch(u planUnit, scope, nodeOutputs map[string]string) error {
 	arm, ok, err := d.matchingArm(u, scope)
@@ -1276,11 +1287,83 @@ func (d *driver) runDispatch(u planUnit, scope, nodeOutputs map[string]string) e
 	if !ok {
 		return d.settleDecisionSkipped(u, scope, nodeOutputs)
 	}
+	// ⚑B2: kind-route on the MATCHED arm's bodyRun BEFORE the leaf machinery — a run arm
+	// mints its whole sub-graph (runDispatchRunArm), a leaf arm runs one synthesized leaf.
+	if arm.bodyRun != nil {
+		return d.runDispatchRunArm(u, arm, scope, nodeOutputs)
+	}
 	au := d.dispatchArmUnit(u, arm)
 	if err := d.runUnit(au, scope, nodeOutputs); err != nil {
 		return err
 	}
 	return d.settleDecisionFromBody(u, au, scope, nodeOutputs)
+}
+
+// runDispatchRunArm drives a MATCHED run arm inline (Run, and Advance for an exec/settle
+// sub-graph): it mints the arm's sub-graph, registers its env seam, drives every minted
+// sub-unit then the arm aggregate LAST (⚑S1 Tier-A FK ordering: its Members edges reference
+// the sub-node rows) through runUnit, asserts the aggregate settled in-pass (the loud
+// FBR-mirror invariant), then settles the dispatch transparently from it. It re-mints
+// STATELESSLY (resume memoization inside runUnit reloads any already-settled sub-unit); NO
+// attempt.minted / node.decision (Q-C stateless).
+func (d *driver) runDispatchRunArm(u planUnit, arm *dispatchArm, scope, nodeOutputs map[string]string) error {
+	subUnits, agg, err := d.dispatchArmRunBody(u, arm)
+	if err != nil {
+		return err
+	}
+	d.registerDispatchArmRunEnv(u, arm, subUnits)
+	for i := range subUnits {
+		if err := d.runUnit(subUnits[i], scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+	if err := d.runUnit(agg, scope, nodeOutputs); err != nil {
+		return err
+	}
+	// An engine-inline arm always settles its aggregate in-pass; if it did not, the body
+	// lowering or host is broken — surface it loudly (the runLoop/FBR invariant) rather than
+	// let settleDecisionFromBody silently default the dispatch PASS/"" off the unsettled agg.
+	if n := d.st().Nodes[agg.activation]; n == nil || !n.Settled {
+		return fmt.Errorf("lumen: dispatch %q run arm %q aggregate did not settle in-pass", u.nodeID, arm.matchValue)
+	}
+	return d.settleDecisionFromBody(u, agg, scope, nodeOutputs)
+}
+
+// dispatchArmRunBody mints a MATCHED run arm's sub-graph via the shared mintRunBody helper:
+// prefix `<armBodyID>/`, aggregate `<armBodyID>:0` parented under the DISPATCH activation
+// (so the sub-graph stays OUT of any enclosing runOutcome and the dispatch settles
+// transparently from it), NO member index (an arm is not a fan member), gates = the
+// dispatch's afterDeps (the ⚑B2 subject-ref + arm-env gate + any `after`). It is a pure
+// function of (arm stash, arm coordinates), so genesis, re-Advance, and resume mint
+// byte-identically.
+func (d *driver) dispatchArmRunBody(u planUnit, arm *dispatchArm) ([]planUnit, planUnit, error) {
+	return mintRunBody(arm.runBodyStash, arm.bodyRun, arm.bodyNodeID, arm.bodyNodeID+"/", activationFor(arm.bodyNodeID),
+		u.activation, u.ns, u.afterDeps, u.rawAfter, nil)
+}
+
+// registerDispatchArmRunEnv wires a matched run arm's env seam into scopeFor (⚑B1),
+// analogous to registerForEachRunMemberEnv: the arm namespace `<armBodyID>/` → the arm run's
+// env spec, PLUS an explicit parent-namespace override = the dispatch's namespace (u.ns),
+// registered UNCONDITIONALLY including u.ns == "" (⚑S1 parity — a dispatch is root-only, so
+// u.ns is always "" and the structural parent of `<armBodyID>/` is already root, but the
+// unconditional write keeps the FBR/RBL registration shape). Nested runs inside the arm
+// sub-graph register too. It is pure — re-derived identically every pass and resume — so
+// re-registering is an idempotent map write.
+func (d *driver) registerDispatchArmRunEnv(u planUnit, arm *dispatchArm, subUnits []planUnit) {
+	if d.runEnvs == nil {
+		d.runEnvs = map[string]*runSpec{}
+	}
+	if d.parentNS == nil {
+		d.parentNS = map[string]string{}
+	}
+	armNS := arm.bodyNodeID + "/"
+	d.runEnvs[armNS] = arm.bodyRun
+	d.parentNS[armNS] = u.ns
+	for i := range subUnits {
+		if subUnits[i].kind == unitRun && subUnits[i].run != nil {
+			d.runEnvs[subUnits[i].nodeID+"/"] = subUnits[i].run
+		}
+	}
 }
 
 // matchingArm evaluates a dispatch's subject against the scope and returns the first
@@ -1298,8 +1381,13 @@ func (d *driver) matchingArm(u planUnit, scope map[string]string) (*dispatchArm,
 	return nil, false, nil
 }
 
-// chosenArm returns the arm whose body has already been activated — the durable
-// record of which branch a prior Advance pass selected (write-once decision).
+// chosenArm returns the arm whose body has already been activated — the durable record of
+// which branch a prior Advance pass selected. It is no longer the whole write-once truth: for
+// a LEAF arm the body activation IS the leaf, so chosenArm fires as soon as the arm dispatches;
+// but for a RUN arm the body is the arm AGGREGATE, which activates LAST (after its sub-graph),
+// so chosenArm returns not-chosen while the arm is mid-mint (its sub-dos in flight). It may
+// therefore only SKIP re-matchingArm — the caller MUST still kind-route to the re-mint/drive
+// (advanceDispatchRunArm), never fast-settle a returned run arm (⚑B2).
 func (d *driver) chosenArm(u planUnit) (*dispatchArm, bool) {
 	for i := range u.dispatch.arms {
 		if d.st().Nodes[activationFor(u.dispatch.arms[i].bodyNodeID)] != nil {
@@ -1320,8 +1408,12 @@ func (d *driver) settleDecisionSkipped(u planUnit, scope, nodeOutputs map[string
 	return nil
 }
 
-// settleDecisionFromBody settles a decision arm transparently from its (already-
-// settled) chosen body leaf and records the body's output for a downstream {{id}}.
+// settleDecisionFromBody settles a decision arm transparently from its chosen body (a leaf,
+// a guard/dispatch arm, or a run arm's aggregate) and records the body's output for a
+// downstream {{id}}. ⚑B2 PRECONDITION: it silently DEFAULTS PASS/"" when the body node is
+// nil-or-unsettled — so the CALLER must not call it for a run arm until the aggregate is
+// Settled (runDispatchRunArm asserts the loud in-pass invariant; advanceDispatchRunArm parks
+// while unsettled). A leaf/guard arm body always settles before this in the same pass.
 func (d *driver) settleDecisionFromBody(u, bu planUnit, scope, nodeOutputs map[string]string) error {
 	outcome, output := OutcomePass, ""
 	if bn := d.st().Nodes[bu.activation]; bn != nil && bn.Settled {

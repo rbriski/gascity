@@ -10,14 +10,16 @@ package engine_test
 // `go test -race` — no subprocess, no wall clock, no randomness beyond the
 // engine's own stream nonce, which the harness reads back through the hook.
 //
-// COVERAGE: all eight declared crash boundaries (crash_seam.go) are exercised.
-// The six per-node executor boundaries — before/after activate, before/after act,
+// COVERAGE: all declared crash boundaries (crash_seam.go) are exercised.
+// The per-node executor boundaries — before/after activate, before/after act,
 // after-settle, and the snapshot pair — are driven by the DET-T-1 diagonal and the
 // snapshot test. The two RUN-LEVEL boundaries are covered separately, because they
 // have no per-node activation: after-run-started by TestCrashAfterRunStartedConverges,
 // and before-run-closed (in its only on-disk-distinct form, with snapshotting
-// enabled) by TestCrashBeforeRunClosedFromSealSnapshot. No declared boundary is
-// left unexercised.
+// enabled) by TestCrashBeforeRunClosedFromSealSnapshot. The after-activate boundary
+// (the activated-UNSETTLED window between a unit's two appends) is driven by the
+// DAR chosenArm window pins in dispatch_runarm_test.go (inline + pool). No declared
+// boundary is left unexercised.
 
 import (
 	"context"

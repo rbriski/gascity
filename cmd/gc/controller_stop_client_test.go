@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+func TestControllerStopResultZeroValueIsNotAcknowledged(t *testing.T) {
+	t.Parallel()
+
+	var result controllerStopResult
+	if result.outcome == controllerStopAcknowledged {
+		t.Fatal("zero-value controller stop result must not authorize acknowledged cleanup")
+	}
+	if result.outcome != controllerStopOutcomeInvalid {
+		t.Fatalf("zero-value outcome = %v, want invalid", result.outcome)
+	}
+}
+
 func TestControllerStopClientClassifiesPreEntryFailures(t *testing.T) {
 	t.Parallel()
 

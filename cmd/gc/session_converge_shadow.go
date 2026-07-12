@@ -149,6 +149,11 @@ const (
 	// skipEarlyContinue: the legacy loop took an early-continue path (drain-ack,
 	// unknown-state) before the compared region, so there is nothing to compare.
 	skipEarlyContinue convergeSkipReason = "early_continue"
+	// skipHealWriteFailed: a state-heal commit failed or was ambiguous, so the
+	// reconciler deliberately stopped this session's same-pass decision chain.
+	// It is operationally distinct from an ordinary early continue and must not
+	// be counted as a clean shadow comparison.
+	skipHealWriteFailed convergeSkipReason = "heal_write_failed"
 	// skipRecorderContended: a concurrent city tick already owned the process-global
 	// recorder for this window (the supervisor reconciles each city on its own
 	// goroutine), so this tick could not record its own legacy writes. Its sessions

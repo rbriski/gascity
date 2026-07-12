@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -551,6 +552,91 @@ func TestCrashMidLoopConverges(t *testing.T) {
 				t.Fatalf("Verify: %v", err)
 			}
 		})
+	}
+}
+
+// TestAdvanceLoopAttemptCrashAfterDispatchResumes pins ga-yuez9o: a POOL-mode loop
+// body attempt that crashes in the crashAfterDispatch window (node.activated(pool)
+// committed, owned.admitted NOT) must NOT park forever. The re-Advance re-adopts the
+// findable bead (dispatchCount 1→2, ONE distinct bead, exactly ONE owned.admitted)
+// off the FOLDED prompt (no re-render), parks LIVE, then a settle drives loopDecide to
+// seal — the wedge the unamended live-attempt arm leaves is gone. Root (flat-scope) twin.
+func TestAdvanceLoopAttemptCrashAfterDispatchResumes(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-adv-loopcrashafter"
+	fake := newFakeWorkStore()
+	// One-item root marquee: attempt 0 renders "work on alpha", passes, then
+	// `iteration >= length(items)` (1 >= 1) exits and the loop seals pass.
+	doc := decodeIR(t, bundleDoc(
+		arrField("items"),
+		repeatNode(slxDoIndex("lane", "work on ", "items[iteration - 1]"), slxMarqueeCond()),
+		""))
+	input := map[string]any{"items": []any{"alpha"}}
+
+	// Pass 1: crash in the crashAfterDispatch window for the loop body attempt lane:0.
+	restore := engine.SetCrashHookForTest(func(b, _, act string) error {
+		if b == engine.CrashAfterDispatch && act == "lane:0" {
+			return fmt.Errorf("injected crash after dispatch")
+		}
+		return nil
+	})
+	_, err := engine.Advance(ctx, store, doc, streamID, input, fake.opts())
+	restore()
+	if err == nil {
+		t.Fatal("advance did not surface the injected crash")
+	}
+	// The work bead was created; the owned.admitted dispatch fact never committed.
+	if fake.dispatchCount() != 1 {
+		t.Fatalf("DispatchWork calls before crash = %d, want 1 (bead created)", fake.dispatchCount())
+	}
+	if pre := eventTypes(streamStored(t, store, streamID)); contains(pre, engine.EventOwnedAdmitted) {
+		t.Fatalf("owned.admitted committed before the crash boundary; journal = %v", pre)
+	}
+	// The pre-crash render is the FOLDED prompt the re-dispatch must reuse verbatim.
+	foldedPrompt := fake.dispatchPromptFor(t, "lane:0")
+	if foldedPrompt != "work on alpha" {
+		t.Fatalf("pre-crash dispatched prompt = %q, want %q", foldedPrompt, "work on alpha")
+	}
+
+	// Re-Advance: re-adopt the findable bead and land the dispatch fact — this is the
+	// tick the unamended arm wedges on (perpetual nil park, dispatchCount stuck at 1).
+	r2, err := engine.Advance(ctx, store, doc, streamID, input, fake.opts())
+	if err != nil || !r2.Parked {
+		t.Fatalf("re-advance = %+v err %v, want Parked (re-adopt, not forever-park)", r2, err)
+	}
+	if fake.dispatchCount() != 2 {
+		t.Fatalf("DispatchWork total = %d, want 2 (re-looked-up in the crash window)", fake.dispatchCount())
+	}
+	fake.mu.Lock()
+	beadCount := fake.seq
+	fake.mu.Unlock()
+	if beadCount != 1 {
+		t.Fatalf("distinct beads minted = %d, want 1 (lookup-before-create idempotency)", beadCount)
+	}
+	admits := 0
+	for _, tp := range eventTypes(streamStored(t, store, streamID)) {
+		if tp == engine.EventOwnedAdmitted {
+			admits++
+		}
+	}
+	if admits != 1 {
+		t.Fatalf("owned.admitted count = %d, want exactly 1 (write-once dispatch fact)", admits)
+	}
+	// No re-render (HIGH-1): the re-dispatch reused the FOLDED prompt byte-for-byte.
+	if got := fake.dispatchPromptFor(t, "lane:0"); got != foldedPrompt {
+		t.Fatalf("re-dispatched prompt = %q, want the folded %q (no re-render)", got, foldedPrompt)
+	}
+	if len(r2.InFlight) != 1 || r2.InFlight[0].Activation != "lane:0" || r2.InFlight[0].BeadID != "wb-1" {
+		t.Fatalf("InFlight = %+v, want one live lane:0 with BeadID wb-1", r2.InFlight)
+	}
+
+	// Convergence past the wedged tick: settle the re-adopted bead → loopDecide (1 >= 1
+	// exits) → seal pass.
+	fake.settleAct(t, "lane:0", engine.OutcomePass, "ok")
+	r3, err := engine.Advance(ctx, store, doc, streamID, input, fake.opts())
+	if err != nil || !r3.Sealed || r3.Run.Outcome != engine.OutcomePass {
+		t.Fatalf("advance after settle = %+v err %v, want Sealed pass", r3, err)
 	}
 }
 

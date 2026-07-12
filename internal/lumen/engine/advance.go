@@ -710,13 +710,23 @@ func (d *driver) advanceLoop(u planUnit, scope, nodeOutputs map[string]string, o
 			// half-settled index-failure pair (settleIndexRenderFailed's activate committed,
 			// its settle did not). Without this arm the empty BeadID parks the loop FOREVER
 			// (a silent wedge — nothing will ever settle the attempt). Re-derive the settle,
-			// then fall through to the decide logic below. The PRE-EXISTING pool-mode
-			// activated-undispatched wedge (DispatchMode=pool, no bead) is deliberately NOT
-			// routed here — it keeps its documented park behavior.
+			// then fall through to the decide logic below.
 			if err := d.resettleLoopAttemptIndexWindow(u, liveAtt, scope); err != nil {
 				return err
 			}
 			// Re-settled this pass: fall through to the decide logic below.
+		case bn != nil && bn.DispatchMode == DispatchModePool && bn.BeadID == "":
+			// crashAfterDispatch window (ga-yuez9o): a POOL-mode attempt whose node.activated
+			// committed but whose owned.admitted did not — the work bead was created and is
+			// findable, yet the dispatch fact is missing, so without this arm the empty BeadID
+			// parks the loop FOREVER. Re-dispatch off the FOLDED route/prompt via §9.1
+			// (lookup-before-create re-adopts the SAME bead, no re-render, write-once
+			// owned.admitted), then park on the now-live attempt — the re-dispatch
+			// advanceGuard/advanceTimeout/advanceDispatch/advanceForEach already do.
+			if err := d.materializePoolWork(d.attemptUnit(u, liveAtt), scope, opts); err != nil {
+				return err
+			}
+			return nil
 		case opts.ObserveWork == nil || bn == nil || bn.BeadID == "":
 			return nil
 		default:

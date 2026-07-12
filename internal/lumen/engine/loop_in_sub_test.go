@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -393,6 +394,83 @@ func TestAdvanceRetryInSubAttemptsTypedPool(t *testing.T) {
 	r2, err := engine.Advance(ctx, store, doc, streamID, nil, fake.opts())
 	if err != nil || !r2.Sealed || r2.Run.Outcome != engine.OutcomePass {
 		t.Fatalf("advance 2 = %+v err %v, want Sealed pass", r2, err)
+	}
+}
+
+// TestAdvanceLoopAttemptCrashAfterDispatchResumesInSub is the ns twin of the ga-yuez9o
+// crashAfterDispatch pin: the loop lives INSIDE a run sub-formula, so the body attempt is
+// keyed wrap/body:0 (namespace-qualified). The wedge is ns-invariant — the same live-attempt
+// arm re-adopts the findable bead off the folded prompt, parks live, then seals on settle.
+func TestAdvanceLoopAttemptCrashAfterDispatchResumesInSub(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-lis-loopcrashafter"
+	fake := newFakeWorkStore()
+	// One-item ns marquee: attempt 0 dispatches at wrap/body:0 rendering the indexed
+	// element, passes, `iteration >= length(items)` (1 >= 1) exits, seals pass.
+	doc := decodeIR(t, bundleDoc(
+		arrField("work_items"),
+		runNodeRawEnv("wrap", nil, "wrapper", "["+envField("items", "work_items")+"]"),
+		subDoc("wrapper", arrField("items"),
+			repeatNode(slxDoIndex("body", "work on ", "items[iteration - 1]"), slxMarqueeCond()))))
+	input := map[string]any{"work_items": []any{"alpha"}}
+
+	restore := engine.SetCrashHookForTest(func(b, _, act string) error {
+		if b == engine.CrashAfterDispatch && act == "wrap/body:0" {
+			return fmt.Errorf("injected crash after dispatch")
+		}
+		return nil
+	})
+	_, err := engine.Advance(ctx, store, doc, streamID, input, fake.opts())
+	restore()
+	if err == nil {
+		t.Fatal("advance did not surface the injected crash")
+	}
+	if fake.dispatchCount() != 1 {
+		t.Fatalf("DispatchWork calls before crash = %d, want 1 (bead created)", fake.dispatchCount())
+	}
+	if pre := eventTypes(streamStored(t, store, streamID)); contains(pre, engine.EventOwnedAdmitted) {
+		t.Fatalf("owned.admitted committed before the crash boundary; journal = %v", pre)
+	}
+	foldedPrompt := fake.dispatchPromptFor(t, "wrap/body:0")
+	if foldedPrompt != "work on alpha" {
+		t.Fatalf("pre-crash dispatched prompt = %q, want %q (indexed render at depth)", foldedPrompt, "work on alpha")
+	}
+
+	// Re-Advance: re-adopt at depth (the tick the unamended arm wedges on).
+	r2, err := engine.Advance(ctx, store, doc, streamID, input, fake.opts())
+	if err != nil || !r2.Parked {
+		t.Fatalf("re-advance = %+v err %v, want Parked (re-adopt at depth, not forever-park)", r2, err)
+	}
+	if fake.dispatchCount() != 2 {
+		t.Fatalf("DispatchWork total = %d, want 2 (re-looked-up in the crash window)", fake.dispatchCount())
+	}
+	fake.mu.Lock()
+	beadCount := fake.seq
+	fake.mu.Unlock()
+	if beadCount != 1 {
+		t.Fatalf("distinct beads minted = %d, want 1 (lookup-before-create idempotency)", beadCount)
+	}
+	admits := 0
+	for _, tp := range eventTypes(streamStored(t, store, streamID)) {
+		if tp == engine.EventOwnedAdmitted {
+			admits++
+		}
+	}
+	if admits != 1 {
+		t.Fatalf("owned.admitted count = %d, want exactly 1 (write-once dispatch fact)", admits)
+	}
+	if got := fake.dispatchPromptFor(t, "wrap/body:0"); got != foldedPrompt {
+		t.Fatalf("re-dispatched prompt = %q, want the folded %q (no re-render at depth)", got, foldedPrompt)
+	}
+	if len(r2.InFlight) != 1 || r2.InFlight[0].Activation != "wrap/body:0" || r2.InFlight[0].BeadID != "wb-1" {
+		t.Fatalf("InFlight = %+v, want one live wrap/body:0 with BeadID wb-1", r2.InFlight)
+	}
+
+	fake.settleAct(t, "wrap/body:0", engine.OutcomePass, "ok")
+	r3, err := engine.Advance(ctx, store, doc, streamID, input, fake.opts())
+	if err != nil || !r3.Sealed || r3.Run.Outcome != engine.OutcomePass {
+		t.Fatalf("advance after settle = %+v err %v, want Sealed pass", r3, err)
 	}
 }
 

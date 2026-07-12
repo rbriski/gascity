@@ -727,13 +727,23 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 // cleanly incomplete List results: a List that drops an active bead must not
 // synthesize a spurious bead.closed event for it.
 //
-// On ErrNotFound the bead is left absent so the diff path can emit
-// bead.closed as before. When Get confirms a closed bead, the returned map
-// carries that fresh row so the diff path can emit an authoritative close
-// payload instead of a stale cached status flip. On any other error the cached
-// entry is merged back conservatively, deferring the close to a later scan
-// when the backing store's state is unambiguous. Callers must own freshByID
-// and not access it concurrently while recovery is running.
+// The per-id Get path is tier-blind: the split-store Get route does not include
+// the ephemeral/wisp tier, so a live gcg-wisp-* returns a clean ErrNotFound.
+// Trusting that ErrNotFound would evict the wisp and emit a false bead.closed;
+// combined with a transient composite-List omission, the wisp then reappears
+// next pass and flip-flops its membership. So an ErrNotFound is NOT trusted on
+// its own: those ids are re-verified against a tier-consistent full scan (the
+// same TierBoth cacheFullScanQuery the fresh scan uses) that WOULD surface an
+// ephemeral wisp. Only a bead absent from that scan is confirmed gone (the diff
+// path emits bead.closed). A transient managed-Dolt read error on the re-verify
+// defers every uncertain id rather than evicting it.
+//
+// When Get confirms a closed bead, the returned map carries that fresh row so
+// the diff path can emit an authoritative close payload instead of a stale
+// cached status flip. On any other Get error the cached entry is merged back
+// conservatively, deferring the close to a later scan when the backing store's
+// state is unambiguous. Callers must own freshByID and not access it
+// concurrently while recovery is running.
 func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[string]Bead {
 	c.mu.RLock()
 	candidates := make(map[string]Bead)
@@ -753,6 +763,9 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 	var confirmedClosed map[string]Bead
 	var recoveredAlive int64
 	var deferredClose int64
+	// ids whose tier-blind Get reported ErrNotFound, held for a tier-consistent
+	// re-verify before any eviction decision.
+	maybeGone := make(map[string]Bead)
 	for id, cached := range candidates {
 		bead, err := c.backing.Get(id)
 		switch {
@@ -776,7 +789,8 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 			freshByID[id] = cloneBead(bead)
 			recoveredAlive++
 		case errors.Is(err, ErrNotFound):
-			// Confirmed gone; let the diff path emit bead.closed.
+			// Tier-blind: defer the eviction decision to the re-verify below.
+			maybeGone[id] = cached
 		default:
 			c.recordProblem(
 				"verify missing bead before close",
@@ -786,6 +800,38 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 			deferredClose++
 		}
 	}
+
+	if len(maybeGone) > 0 {
+		reverify, err := c.reverifyMissingByList(maybeGone)
+		if err != nil {
+			// A transient managed-Dolt read error must not evict: defer every
+			// uncertain id to a later, unambiguous scan.
+			c.recordProblem("re-verify missing beads before close", err)
+			for id, cached := range maybeGone {
+				freshByID[id] = cached
+				deferredClose++
+			}
+		} else {
+			for id, cached := range maybeGone {
+				bead, alive := reverify[id]
+				if !alive {
+					// Confirmed gone by a tier-consistent scan; let the diff
+					// path emit bead.closed.
+					continue
+				}
+				// The tier-consistent scan still sees it (an ephemeral wisp the
+				// tier-blind Get could not). The scan excludes closed rows, so
+				// anything it returns is active — recover it.
+				if bead.ID != id {
+					freshByID[id] = cached
+				} else {
+					freshByID[id] = cloneBead(bead)
+				}
+				recoveredAlive++
+			}
+		}
+	}
+
 	if recoveredAlive != 0 || deferredClose != 0 {
 		c.mu.Lock()
 		c.stats.ReconcileRecoveries += recoveredAlive
@@ -793,6 +839,26 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 		c.mu.Unlock()
 	}
 	return confirmedClosed
+}
+
+// reverifyMissingByList re-lists the backing store with the same tier-consistent
+// TierBoth full-scan query the reconcile fresh scan uses, and returns the subset
+// of the requested ids that the scan still surfaces (keyed by id). It exists so
+// an ErrNotFound from the tier-blind per-id Get is confirmed against a scan that
+// WOULD see an ephemeral wisp before the reconciler evicts the row. A List error
+// is surfaced to the caller, which defers rather than evicts.
+func (c *CachingStore) reverifyMissingByList(want map[string]Bead) (map[string]Bead, error) {
+	fresh, err := c.backing.List(cacheFullScanQuery())
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]Bead, len(want))
+	for _, b := range fresh {
+		if _, ok := want[b.ID]; ok {
+			found[b.ID] = b
+		}
+	}
+	return found, nil
 }
 
 func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead, depMap map[string][]Dep, useFreshDeps bool) {

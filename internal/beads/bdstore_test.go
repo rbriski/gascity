@@ -2260,18 +2260,59 @@ func TestBdStoreListRetriesOnInvalidConnection(t *testing.T) {
 }
 
 func TestBdStoreListRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
+	defer beads.SetBdTransientReadBudgetForTest(200 * time.Millisecond)()
 	calls := 0
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		calls++
 		return nil, fmt.Errorf("begin read tx: invalid connection")
 	}
 	s := beads.NewBdStore("/city", runner)
+	start := time.Now()
 	_, err := s.ListOpen()
 	if err == nil {
 		t.Fatal("ListOpen() error = nil, want error after retries exhausted")
 	}
 	if calls < 2 {
 		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
+	}
+	// The loop is deadline-bounded: it must stop once the (shrunk) budget
+	// expires rather than looping forever on a never-recovering runner.
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("exhaustion took %s, want the read to give up near the budget", elapsed)
+	}
+}
+
+// TestBdStoreReadRetriesPastMinimumUntilRebindRecovers proves the read path
+// keeps retrying a transient managed-Dolt transport failure beyond the 3-attempt
+// minimum (the fixed loop this replaced would have surfaced the error), so a
+// SIGKILL + port rebind that takes several attempts to become ready recovers
+// transparently.
+func TestBdStoreReadRetriesPastMinimumUntilRebindRecovers(t *testing.T) {
+	goodJSON := []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`)
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		switch {
+		case calls <= 3:
+			// Old port still squatted: mysql handshake stalls out.
+			return nil, fmt.Errorf("begin read tx: invalid connection: i/o timeout")
+		case calls == 4:
+			// Rebound server not yet listening on the new port.
+			return nil, fmt.Errorf("dial tcp 127.0.0.1:9999: connect: connection refused")
+		default:
+			return goodJSON, nil
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() error = %v, want nil after rebind recovered", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListOpen() returned %d beads, want 1", len(got))
+	}
+	if calls != 5 {
+		t.Fatalf("calls = %d, want 5 (4 transient incl. connection refused + 1 success)", calls)
 	}
 }
 

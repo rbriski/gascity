@@ -1,5 +1,17 @@
 package beads
 
+import "time"
+
+// SetBdTransientReadBudgetForTest overrides the managed-Dolt read-retry
+// wall-clock budget and returns a restore func. Tests that exercise the
+// exhaustion path (a runner that never recovers) use this to keep the loop from
+// spinning for the full production budget.
+func SetBdTransientReadBudgetForTest(d time.Duration) func() {
+	prev := bdTransientReadBudget
+	bdTransientReadBudget = d
+	return func() { bdTransientReadBudget = prev }
+}
+
 // NewNativeDoltStoreForConformance returns a NativeDoltStore backed by the
 // in-memory native storage fixture for the external conformance suite.
 func NewNativeDoltStoreForConformance() Store {

@@ -50,6 +50,13 @@ type Order struct {
 	// Timeout is the per-order timeout. Go duration string (e.g., "90s").
 	// Defaults to 60s for exec, 30s for formula.
 	Timeout string `toml:"timeout,omitempty"`
+	// CheckTimeout is the deadline for a condition trigger's `check` command
+	// (distinct from Timeout, which bounds the dispatched exec/formula). Go
+	// duration string. Defaults to 10s when unset. Raise it for checks that
+	// must query a slow backing store (e.g. a managed-Dolt work store at
+	// 1-2s per read): a check killed before it can prove its condition holds
+	// makes the order silently never fire (gastownhall/gascity ga-ocypq2).
+	CheckTimeout string `toml:"check_timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
 	// Idempotent marks an order whose dispatch is safe to repeat (a sweep/
@@ -100,23 +107,24 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string                `toml:"description,omitempty"`
-	Formula     string                `toml:"formula,omitempty"`
-	Exec        string                `toml:"exec,omitempty"`
-	Scope       string                `toml:"scope,omitempty"`
-	Trigger     string                `toml:"trigger,omitempty"`
-	Gate        string                `toml:"gate,omitempty"`
-	Interval    string                `toml:"interval,omitempty"`
-	Schedule    string                `toml:"schedule,omitempty"`
-	Check       string                `toml:"check,omitempty"`
-	On          string                `toml:"on,omitempty"`
-	Pool        string                `toml:"pool,omitempty"`
-	Timeout     string                `toml:"timeout,omitempty"`
-	Enabled     *bool                 `toml:"enabled,omitempty"`
-	Idempotent  bool                  `toml:"idempotent,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	Params      map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases []string              `toml:"skip_aliases,omitempty"`
+	Description  string                `toml:"description,omitempty"`
+	Formula      string                `toml:"formula,omitempty"`
+	Exec         string                `toml:"exec,omitempty"`
+	Scope        string                `toml:"scope,omitempty"`
+	Trigger      string                `toml:"trigger,omitempty"`
+	Gate         string                `toml:"gate,omitempty"`
+	Interval     string                `toml:"interval,omitempty"`
+	Schedule     string                `toml:"schedule,omitempty"`
+	Check        string                `toml:"check,omitempty"`
+	On           string                `toml:"on,omitempty"`
+	Pool         string                `toml:"pool,omitempty"`
+	Timeout      string                `toml:"timeout,omitempty"`
+	CheckTimeout string                `toml:"check_timeout,omitempty"`
+	Enabled      *bool                 `toml:"enabled,omitempty"`
+	Idempotent   bool                  `toml:"idempotent,omitempty"`
+	Env          map[string]string     `toml:"env,omitempty"`
+	Params       map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases  []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -125,22 +133,23 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description: d.Description,
-		Formula:     d.Formula,
-		Exec:        d.Exec,
-		Scope:       d.Scope,
-		Trigger:     trigger,
-		Interval:    d.Interval,
-		Schedule:    d.Schedule,
-		Check:       d.Check,
-		On:          d.On,
-		Pool:        d.Pool,
-		Timeout:     d.Timeout,
-		Enabled:     d.Enabled,
-		Idempotent:  d.Idempotent,
-		Env:         d.Env,
-		Params:      d.Params,
-		skipAliases: d.SkipAliases,
+		Description:  d.Description,
+		Formula:      d.Formula,
+		Exec:         d.Exec,
+		Scope:        d.Scope,
+		Trigger:      trigger,
+		Interval:     d.Interval,
+		Schedule:     d.Schedule,
+		Check:        d.Check,
+		On:           d.On,
+		Pool:         d.Pool,
+		Timeout:      d.Timeout,
+		CheckTimeout: d.CheckTimeout,
+		Enabled:      d.Enabled,
+		Idempotent:   d.Idempotent,
+		Env:          d.Env,
+		Params:       d.Params,
+		skipAliases:  d.SkipAliases,
 	}
 }
 
@@ -182,6 +191,24 @@ func (a *Order) TimeoutOrDefault() time.Duration {
 		return 300 * time.Second
 	}
 	return 30 * time.Second
+}
+
+// defaultConditionCheckTimeout is the condition trigger's check-command
+// deadline when the order does not set check_timeout. It mirrors the
+// fallback in triggers.go's checkCondition so the two agree.
+const defaultConditionCheckTimeout = 10 * time.Second
+
+// CheckTimeoutOrDefault returns the condition trigger's check-command
+// deadline: the parsed check_timeout, or defaultConditionCheckTimeout when
+// unset or unparseable. Used to populate TriggerOptions.ConditionTimeout so
+// a store-backed check gets enough time to prove its condition holds.
+func (a *Order) CheckTimeoutOrDefault() time.Duration {
+	if a.CheckTimeout != "" {
+		if d, err := time.ParseDuration(a.CheckTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultConditionCheckTimeout
 }
 
 // Parse decodes TOML data into an Order.

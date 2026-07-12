@@ -1087,6 +1087,64 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	}
 }
 
+func TestUnregisterCityFromSupervisorChecksSupervisorAfterRegistryMutation(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := setupCity(t, "late-supervisor")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "late-supervisor"); err != nil {
+		t.Fatal(err)
+	}
+
+	aliveCalls := 0
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int {
+			aliveCalls++
+			entries, err := reg.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) == 0 {
+				return 4242
+			}
+			return 0
+		},
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	cityWaits := 0
+	controllerWaits := 0
+	waitForSupervisorCityHook = func(string, bool, time.Duration, io.Writer) error {
+		cityWaits++
+		return nil
+	}
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		controllerWaits++
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr)
+
+	if !handled || code != 0 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
+	}
+	if aliveCalls != 1 {
+		t.Fatalf("supervisor liveness probes = %d, want one post-mutation probe", aliveCalls)
+	}
+	if reloads != 1 || cityWaits != 1 || controllerWaits != 1 {
+		t.Fatalf("late-supervisor effects = reloads:%d city waits:%d controller waits:%d, want 1 each", reloads, cityWaits, controllerWaits)
+	}
+}
+
 func TestUnregisterCityFromSupervisorUsesStopTimeoutForSupervisorCityStopWait(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -1226,6 +1284,365 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")
+	}
+}
+
+func TestCmdStopForceUnregisterFailsClosedOnUncertainControllerStop(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result controllerStopResult
+	}{
+		{
+			name: "request may have entered",
+			result: classifiedControllerStopResult(
+				controllerStopMayHaveEntered,
+				"test acknowledgement loss",
+				errors.New("reply lost"),
+			),
+		},
+		{
+			name:   "invalid result",
+			result: controllerStopResult{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+			cityPath := setupCity(t, "force-ambiguous-city")
+			reg := supervisor.NewRegistry(supervisor.RegistryPath())
+			if err := reg.Register(cityPath, "force-ambiguous-city"); err != nil {
+				t.Fatal(err)
+			}
+
+			aliveCalls := 0
+			reloads := 0
+			withSupervisorTestHooks(
+				t,
+				func(_, _ io.Writer) int { return 0 },
+				func(_, _ io.Writer) int {
+					reloads++
+					return 0
+				},
+				func() int {
+					aliveCalls++
+					return 4242
+				},
+				func(string) (bool, string, bool) { return false, "", false },
+				20*time.Millisecond,
+				time.Millisecond,
+			)
+			cityWaits := 0
+			controllerWaits := 0
+			waitForSupervisorCityHook = func(string, bool, time.Duration, io.Writer) error {
+				cityWaits++
+				return nil
+			}
+			waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+				controllerWaits++
+				return nil
+			}
+
+			requests := 0
+			oldRequest := controllerStopRequestForCommand
+			controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+				requests++
+				assertSameTestPath(t, path, cityPath)
+				if !force {
+					t.Fatal("force unregister sent ordinary stop")
+				}
+				return tt.result
+			}
+			t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+			storeOpens := 0
+			oldOpen := openCityStoreForStop
+			openCityStoreForStop = func(string) (beads.Store, error) {
+				storeOpens++
+				return beads.NewMemStore(), nil
+			}
+			t.Cleanup(func() { openCityStoreForStop = oldOpen })
+
+			providerConstructions := 0
+			oldProvider := sessionProviderForStopCity
+			sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+				providerConstructions++
+				return runtime.NewFake()
+			}
+			t.Cleanup(func() { sessionProviderForStopCity = oldProvider })
+
+			storeShutdowns := 0
+			overrideShutdownBeadsProviderForStop(t, func(string) error {
+				storeShutdowns++
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, true)
+
+			if code != 1 {
+				t.Fatalf("cmdStop(force) = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if requests != 1 {
+				t.Fatalf("controller stop requests = %d, want 1", requests)
+			}
+			if aliveCalls != 1 {
+				t.Fatalf("supervisor liveness probes = %d, want 1", aliveCalls)
+			}
+			if reloads != 0 || cityWaits != 0 || controllerWaits != 0 {
+				t.Fatalf("post-ambiguity supervisor effects = reloads:%d city waits:%d controller waits:%d, want all zero", reloads, cityWaits, controllerWaits)
+			}
+			if storeOpens != 0 || providerConstructions != 0 || storeShutdowns != 0 {
+				t.Fatalf("post-ambiguity cleanup effects = store opens:%d provider constructions:%d store shutdowns:%d, want all zero", storeOpens, providerConstructions, storeShutdowns)
+			}
+			entries, err := reg.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
+				t.Fatalf("registration changed after uncertain stop: %v", entries)
+			}
+			if strings.Contains(stdout.String(), "City stopped") {
+				t.Fatalf("stdout reports false success: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCmdStopRegisteredCityWithAbsentSupervisorClassifiesBeforeUnregister(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := setupCity(t, "registered-standalone")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "registered-standalone"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityPath)
+		if force {
+			t.Fatal("ordinary stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	storeOpens := 0
+	oldOpen := openCityStoreForStop
+	openCityStoreForStop = func(string) (beads.Store, error) {
+		storeOpens++
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() { openCityStoreForStop = oldOpen })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want exactly 1", requests)
+	}
+	if reloads != 0 || storeOpens != 0 {
+		t.Fatalf("post-ambiguity effects = reloads:%d store opens:%d, want zero", reloads, storeOpens)
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
+		t.Fatalf("registration changed before transport became authoritative: %v", entries)
+	}
+	if strings.Contains(stdout.String(), "Unregistered") || strings.Contains(stdout.String(), "City stopped") {
+		t.Fatalf("stdout reports a mutation or false success: %q", stdout.String())
+	}
+}
+
+func TestCmdStopRegisteredInvalidConfigWithAbsentSupervisorClassifiesBeforeUnregister(t *testing.T) {
+	resetFlags(t)
+	cityPath := setupInvalidConfigManagedRuntime(t)
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "registered-invalid-standalone"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityPath)
+		if force {
+			t.Fatal("ordinary invalid-config stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	storeShutdowns := 0
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		storeShutdowns++
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want exactly 1", requests)
+	}
+	if reloads != 0 || storeShutdowns != 0 {
+		t.Fatalf("post-ambiguity effects = reloads:%d store shutdowns:%d, want zero", reloads, storeShutdowns)
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
+		t.Fatalf("registration changed before transport became authoritative: %v", entries)
+	}
+	if strings.Contains(stdout.String(), "Unregistered") || strings.Contains(stdout.String(), "City stopped") {
+		t.Fatalf("stdout reports a mutation or false success: %q", stdout.String())
+	}
+}
+
+func TestCmdStopConsumesManagedUnregisterResultWithoutSupervisorReprobe(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := setupCity(t, "managed-stop")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "managed-stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	aliveCalls := 0
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int {
+			aliveCalls++
+			return 4242
+		},
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	cityWaits := 0
+	controllerWaits := 0
+	waitForSupervisorCityHook = func(string, bool, time.Duration, io.Writer) error {
+		cityWaits++
+		return nil
+	}
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		controllerWaits++
+		return nil
+	}
+
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(string, bool) controllerStopResult {
+		t.Fatal("managed unregister issued an alternate controller stop request")
+		return controllerStopResult{}
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if aliveCalls != 1 {
+		t.Fatalf("supervisor liveness probes = %d, want exactly 1", aliveCalls)
+	}
+	if reloads != 1 || cityWaits != 1 || controllerWaits != 1 {
+		t.Fatalf("managed unregister effects = reloads:%d city waits:%d controller waits:%d, want 1 each", reloads, cityWaits, controllerWaits)
+	}
+}
+
+func TestCmdStopFailsClosedWhenSupervisorRegistryLookupFails(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := setupCity(t, "registry-read-failure")
+
+	oldRegistry := newSupervisorRegistry
+	newSupervisorRegistry = func() supervisorRegistry {
+		return &erroringSupervisorRegistry{err: errors.New("registry read failed")}
+	}
+	t.Cleanup(func() { newSupervisorRegistry = oldRegistry })
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(string, bool) controllerStopResult {
+		requests++
+		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "test", os.ErrNotExist)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 0 {
+		t.Fatalf("controller stop requests after registry lookup failure = %d, want 0", requests)
+	}
+	if !strings.Contains(stderr.String(), "registry read failed") {
+		t.Fatalf("stderr = %q, want registry read error", stderr.String())
 	}
 }
 

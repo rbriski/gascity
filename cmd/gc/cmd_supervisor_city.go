@@ -146,11 +146,14 @@ func normalizeRegisteredCityPath(cityPath string) (string, error) {
 }
 
 func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
+	return registeredCityEntryFrom(newSupervisorRegistry(), cityPath)
+}
+
+func registeredCityEntryFrom(reg supervisorRegistry, cityPath string) (supervisor.CityEntry, bool, error) {
 	normalized, err := normalizeRegisteredCityPath(cityPath)
 	if err != nil {
 		return supervisor.CityEntry{}, false, err
 	}
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	entries, err := reg.List()
 	if err != nil {
 		return supervisor.CityEntry{}, false, err
@@ -620,40 +623,113 @@ func statusDisplayText(status string) string {
 }
 
 type supervisorUnregisterOptions struct {
-	Force bool
+	Force                  bool
+	ClassifyStandaloneStop bool
+}
+
+type supervisorUnregisterState uint8
+
+const (
+	supervisorUnregisterInvalid supervisorUnregisterState = iota
+	supervisorUnregisterNotRegistered
+	supervisorUnregisterManagedCleanupComplete
+	supervisorUnregisterDirectFallbackRequired
+	supervisorUnregisterFailed
+)
+
+type supervisorUnregisterResult struct {
+	state         supervisorUnregisterState
+	registered    bool
+	stopResult    controllerStopResult
+	hasStopResult bool
+}
+
+func (r supervisorUnregisterResult) legacy() (bool, int) {
+	switch r.state {
+	case supervisorUnregisterNotRegistered:
+		return false, 0
+	case supervisorUnregisterManagedCleanupComplete, supervisorUnregisterDirectFallbackRequired:
+		return true, 0
+	case supervisorUnregisterFailed:
+		return r.registered, 1
+	case supervisorUnregisterInvalid:
+		return false, 1
+	default:
+		return false, 1
+	}
 }
 
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
 	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
-func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
-	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
-		Force: force,
+func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
+	return unregisterCityFromSupervisorWithOptionsResult(cityPath, stdout, stderr, commandName, opts).legacy()
+}
+
+func unregisterCityFromSupervisorWithForceResult(cityPath string, stdout, stderr io.Writer, commandName string, force bool) supervisorUnregisterResult {
+	return unregisterCityFromSupervisorWithOptionsResult(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force:                  force,
+		ClassifyStandaloneStop: true,
 	})
 }
 
-func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
+func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) supervisorUnregisterResult {
 	cityPath = normalizePathForCompare(cityPath)
-	entry, registered, err := registeredCityEntry(cityPath)
+	reg := newSupervisorRegistry()
+	entry, registered, err := registeredCityEntryFrom(reg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return false, 1
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed}
 	}
 	if !registered {
-		return false, 0
+		return supervisorUnregisterResult{state: supervisorUnregisterNotRegistered}
 	}
 
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if opts.Force && supervisorAliveHook() != 0 {
-		tryStopControllerWithForce(cityPath, io.Discard, true)
+	supervisorWasAlive := false
+	if opts.ClassifyStandaloneStop || opts.Force {
+		supervisorWasAlive = supervisorAliveHook() != 0
+	}
+	var standaloneStopResult controllerStopResult
+	hasStandaloneStopResult := false
+	if opts.ClassifyStandaloneStop && !supervisorWasAlive {
+		standaloneStopResult = controllerStopRequestForCommand(cityPath, opts.Force)
+		switch standaloneStopResult.outcome {
+		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+			hasStandaloneStopResult = true
+		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, standaloneStopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		default:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, standaloneStopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+	}
+	if opts.Force && supervisorWasAlive {
+		stopResult := controllerStopRequestForCommand(cityPath, true)
+		switch stopResult.outcome {
+		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+			// The supervisor reconcile remains the managed unregister owner.
+		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		default:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
 	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return true, 1
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 	}
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
+	if !opts.ClassifyStandaloneStop {
+		// Plain gc unregister has no prior stop acknowledgement to preserve.
+		// Probe after the registry mutation so a concurrently starting
+		// supervisor that observed the old entry is reloaded and awaited.
+		supervisorWasAlive = supervisorAliveHook() != 0
+	}
 
 	// If the city directory is gone, there's nothing to wait on or restore.
 	// Skip the supervisor-side probes that would otherwise spew
@@ -661,20 +737,28 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	// (the unregister itself already succeeded; the supervisor's next
 	// reconcile will drop the dead city).
 	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
-		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
-			return true, 1
+		if supervisorWasAlive && reloadSupervisorHook(stdout, stderr) != 0 {
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
-		return true, 0
+		if supervisorWasAlive {
+			return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true}
+		}
+		return supervisorUnregisterResult{
+			state:         supervisorUnregisterDirectFallbackRequired,
+			registered:    true,
+			stopResult:    standaloneStopResult,
+			hasStopResult: hasStandaloneStopResult,
+		}
 	}
 
-	if supervisorAliveHook() != 0 {
+	if supervisorWasAlive {
 		if reloadSupervisorHook(stdout, stderr) != 0 {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
 				fmt.Fprintf(stderr, "%s: reconcile failed and restore failed for '%s': %v\n", commandName, entry.EffectiveName(), reErr) //nolint:errcheck
 			} else {
 				fmt.Fprintf(stderr, "%s: reconcile failed; restored registration for '%s'\n", commandName, entry.EffectiveName()) //nolint:errcheck
 			}
-			return true, 1
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
@@ -682,7 +766,7 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			} else {
 				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			}
-			return true, 1
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
@@ -690,10 +774,16 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			} else {
 				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			}
-			return true, 1
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
+		return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true}
 	}
-	return true, 0
+	return supervisorUnregisterResult{
+		state:         supervisorUnregisterDirectFallbackRequired,
+		registered:    true,
+		stopResult:    standaloneStopResult,
+		hasStopResult: hasStandaloneStopResult,
+	}
 }
 
 var waitForSupervisorControllerStopHook = waitForStandaloneControllerStop

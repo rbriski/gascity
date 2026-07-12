@@ -306,8 +306,24 @@ type BdStore struct {
 
 const (
 	bdTransientWriteAttempts = 3
-	bdTransientReadAttempts  = 3
+	// bdTransientReadMinAttempts is the floor on read retries, preserving the
+	// original 3-attempt behavior for a read that fails fast on a genuinely
+	// non-recovering store.
+	bdTransientReadMinAttempts = 3
 )
+
+// bdTransientReadBudget bounds the total wall-clock runBDTransientRead will
+// spend re-issuing a read while a managed-Dolt SIGKILL + port rebind completes.
+// The runner performs only one recover-and-retry per bd call and the recovery's
+// post-restart readiness wait is short, so a hard-killed managed Dolt that takes
+// tens of seconds to restart and accept connections on the new port under CI
+// load (observed ~40-56s) outlasts a fixed 3-attempt loop. Retrying until the
+// budget expires lets the rebind finish transparently. The common success path
+// returns on the first attempt at no extra cost; only transient transport errors
+// extend the loop, and the budget still caps a genuinely-broken read (ga-gellq1).
+// It is a var, not a const, only so tests can shrink it to keep the
+// exhaustion-path assertions fast.
+var bdTransientReadBudget = 90 * time.Second
 
 var (
 	_ ConditionalAssignmentReleaser = (*BdStore)(nil)
@@ -1848,22 +1864,76 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 }
 
 // runBDTransientRead runs a read-only bd command, retrying on transient Dolt
-// connection errors (invalid connection, broken pipe, etc.). Reads are
-// idempotent so retry is unconditional on isBdAmbiguousWriteError, with no
-// stable-ID guard needed.
+// connection errors (invalid connection, i/o timeout, connection refused while
+// a rebound server boots, etc.). Reads are idempotent so retry is unconditional
+// on isBdTransientReadError, with no stable-ID guard needed. It retries at least
+// bdTransientReadMinAttempts times and then keeps retrying transient failures
+// until bdTransientReadBudget elapses, so a managed-Dolt SIGKILL + port rebind
+// under CI load recovers transparently instead of surfacing the transport error.
 func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
 	var (
 		out []byte
 		err error
 	)
-	for attempt := 1; attempt <= bdTransientReadAttempts; attempt++ {
+	deadline := time.Now().Add(bdTransientReadBudget)
+	for attempt := 1; ; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
-		if err == nil || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
+		if err == nil || !isBdTransientReadError(err) {
 			return out, err
 		}
-		time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
+		// Keep re-issuing the read while a managed-Dolt SIGKILL + port rebind
+		// completes: each retry rebuilds the runner env, so it re-resolves the
+		// rebound port and re-triggers recovery until the new server accepts
+		// connections. Always allow the historical minimum attempts, then bound
+		// the remaining retries by the rebind budget so a genuinely-broken store
+		// still fails once the budget expires instead of looping forever.
+		if attempt >= bdTransientReadMinAttempts && !time.Now().Before(deadline) {
+			return out, err
+		}
+		time.Sleep(bdTransientReadBackoff(attempt))
 	}
-	return out, err
+}
+
+// isBdTransientReadError reports whether a bd read failure is a transient
+// transport error worth retrying. Reads are idempotent, so this is deliberately
+// broader than the write-side isBdAmbiguousWriteError: it also treats the
+// connection-establishment failures a restarting managed Dolt server surfaces —
+// connection refused and dial failures while the new port is not yet bound,
+// unexpected EOF / closed-connection while the handshake races shutdown — as
+// retryable. A managed-Dolt SIGKILL + rebind cycles through those before the
+// rebound server is ready, and none of them can leave a half-applied read.
+func isBdTransientReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isBdAmbiguousWriteError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"dial tcp",
+		"server unreachable",
+		"unexpected eof",
+		"use of closed network connection",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdTransientReadBackoff paces retries between failed managed-Dolt reads. The
+// delay is small relative to a bd invocation (its job is only to avoid a hot
+// spin when bd fails fast, e.g. a pooled "invalid connection" that returns
+// immediately) and caps at 1s so a slow rebind still gets many attempts inside
+// bdTransientReadBudget.
+func bdTransientReadBackoff(attempt int) time.Duration {
+	if attempt >= 5 {
+		return time.Second
+	}
+	return time.Duration(1<<(attempt-1)) * 50 * time.Millisecond // 50,100,200,400ms
 }
 
 func (s *BdStore) bdTransientWriteArgs(args []string) []string {

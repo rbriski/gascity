@@ -823,7 +823,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 		return "", nil // empty = no work for idle's custom query
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", t.TempDir(), nil, nil, nil)
 	if !work["worker"] {
 		t.Error("expected worker to have work")
 	}
@@ -979,7 +979,7 @@ func TestComputeWorkSet_NilRunner(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
-	work := computeWorkSet(cfg, nil, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, nil, "test-city", t.TempDir(), nil, nil, nil)
 	if work != nil {
 		t.Errorf("expected nil, got %v", work)
 	}
@@ -994,7 +994,7 @@ func TestComputeWorkSet_CommandError(t *testing.T) {
 		return "", fmt.Errorf("connection refused")
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", t.TempDir(), nil, nil, nil)
 	if work["worker"] {
 		t.Error("command error should not produce work")
 	}
@@ -1009,7 +1009,7 @@ func TestComputeWorkSet_IgnoresNoReadyMessage(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", t.TempDir(), nil, nil, nil)
 	if work["worker"] {
 		t.Error("no-ready message should not produce work")
 	}
@@ -1035,7 +1035,7 @@ func TestComputeWorkSet_SkipsSuspendedAgent(t *testing.T) {
 		return `[{"id":"BL-1"}]`, nil
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", t.TempDir(), nil, nil, nil)
 	if !work["live"] {
 		t.Error("expected live agent to be probed")
 	}
@@ -1076,7 +1076,7 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 		return `[{"id":"BL-1"}]`, nil
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", t.TempDir(), nil, nil, nil)
 	if !work["live-rig/alpha"] {
 		t.Error("agent on live rig should be probed")
 	}
@@ -1089,6 +1089,44 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 		if strings.Contains(c, "gc.routed_to=beta") {
 			t.Errorf("agent on suspended rig was probed: %q", c)
 		}
+	}
+}
+
+// TestComputeWorkSet_NilStderrToleratesProbeEnvError pins the boundary
+// guard: computeWorkSet accepts a nil stderr (reconciler tests and
+// fire-and-forget callers pass nil), so the probe-env error branch must
+// degrade to skipping the agent instead of panicking on
+// fmt.Fprintf(nil, ...). The fixture reproduces a real failure mode:
+// a city scope that resolves to an authoritative postgres backend with
+// no resolvable password makes controllerQueryRuntimeEnv return an error.
+func TestComputeWorkSet_NilStderrToleratesProbeEnvError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "agent"}}}
+
+	// Prove the fixture still errors — otherwise this test silently stops
+	// exercising the guarded branch.
+	if _, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0]); err == nil {
+		t.Fatal("fixture did not produce a probe-env error; the guarded branch is no longer reachable from this test")
+	}
+
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		return `[{"id":"BL-1"}]`, nil
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", cityPath, nil, nil, nil)
+	if len(work) != 0 {
+		t.Errorf("work = %v, want empty when the probe env cannot be built", work)
 	}
 }
 
@@ -1108,7 +1146,7 @@ func TestComputeWorkSet_SkipsAllWhenCitySuspended(t *testing.T) {
 		return `[{"id":"BL-1"}]`, nil
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", t.TempDir(), nil, nil, nil)
 	if probed {
 		t.Error("no agent should be probed when city is suspended")
 	}

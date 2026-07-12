@@ -28187,6 +28187,7 @@ type GetV0CityByCityNameConvoysResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
 	JSON200                   *ListBodyBead
+	ApplicationproblemJSON400 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
@@ -31112,6 +31113,7 @@ type GetV0CityByCityNameSessionsResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
 	JSON200                   *ListBodySessionResponse
+	ApplicationproblemJSON400 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
@@ -35675,6 +35677,13 @@ func ParseGetV0CityByCityNameConvoysResponse(rsp *http.Response) (*GetV0CityByCi
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel
@@ -42454,6 +42463,13 @@ func ParseGetV0CityByCityNameSessionsResponse(rsp *http.Response) (*GetV0CityByC
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

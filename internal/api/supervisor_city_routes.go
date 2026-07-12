@@ -205,7 +205,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Convoys.
-	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// 400: invalid pagination cursor (invalid-cursor problem type).
+	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-convoy",
 		Method:        http.MethodPost,
@@ -320,7 +321,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionCreate)
-	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// 400: invalid pagination cursor (invalid-cursor problem type).
+	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))

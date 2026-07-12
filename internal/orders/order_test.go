@@ -256,6 +256,44 @@ func TestTimeoutOrDefault(t *testing.T) {
 	}
 }
 
+func TestCheckTimeoutOrDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		a    Order
+		want time.Duration
+	}{
+		{"unset preserves 10s default", Order{Trigger: "condition", Check: "true"}, 10 * time.Second},
+		{"custom check timeout", Order{Trigger: "condition", Check: "true", CheckTimeout: "60s"}, 60 * time.Second},
+		{"invalid falls back to default", Order{Trigger: "condition", Check: "true", CheckTimeout: "bad"}, 10 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.a.CheckTimeoutOrDefault()
+			if got != tt.want {
+				t.Errorf("CheckTimeoutOrDefault() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseOrderCheckTimeout(t *testing.T) {
+	a, err := Parse([]byte(`[order]
+trigger = "condition"
+check = "pr_merge queue-pending"
+exec = "drain.sh"
+check_timeout = "60s"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.CheckTimeout != "60s" {
+		t.Errorf("CheckTimeout = %q, want %q", a.CheckTimeout, "60s")
+	}
+	if got := a.CheckTimeoutOrDefault(); got != 60*time.Second {
+		t.Errorf("CheckTimeoutOrDefault() = %v, want %v", got, 60*time.Second)
+	}
+}
+
 func TestParseExecOrder(t *testing.T) {
 	data := []byte(`
 [order]

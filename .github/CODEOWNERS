@@ -20,6 +20,15 @@
 # and Category classification (an agent-authored repo); admin review is required.
 /internal/rollout/registry.go @gastownhall/gascity-admin
 
+# The pre-G0 reconciler candidate is a temporary protected contract. These
+# paths remain admin-owned until P0.16 replaces the candidate mechanism with
+# the ratified manifest and append-only delta lineage.
+/engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md @gastownhall/gascity-admin
+/engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md @gastownhall/gascity-admin
+/engdocs/plans/reconciler-redesign/PRE_G0_CANDIDATE_MANIFEST.json @gastownhall/gascity-admin
+/engdocs/plans/reconciler-redesign/POST_INTEGRATION_REVIEW.md @gastownhall/gascity-admin
+/test/docsync/reconciler_candidate_manifest_test.go @gastownhall/gascity-admin
+
 # Specific docs/ content folders are owned by csells (auto-requests review on
 # matching PRs). Intentionally scoped to authored-content areas, excluding
 # /docs/reference and top-level docs files.

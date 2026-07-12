@@ -454,6 +454,8 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 		runErr = d.runCleanupGuarded(u, nodeOutputs)
 	case unitRecover:
 		runErr = d.runRecover(u, scope, nodeOutputs)
+	case unitTimeout:
+		runErr = d.runTimeout(u, scope, nodeOutputs)
 	default:
 		runErr = fmt.Errorf("%w: unit %q", ErrUnsupportedNode, u.nodeID)
 	}
@@ -1486,6 +1488,31 @@ func (d *driver) guardThenUnit(u planUnit) planUnit {
 	return d.decisionBodyUnit(u, s.thenNodeID, s.thenIRKind, s.then)
 }
 
+// runTimeout drives a timeout (advisory check-with-budget wrapper) inline: it runs the single
+// leaf body ALWAYS (the guard path MINUS the cond — there is no skipped arm) and settles the
+// wrapper transparently from it (settleDecisionFromBody records the body outcome+output at the
+// WRAPPER id). The raw duration is stamped on the wrapper's node.activated by appendActivated
+// (runUnit, before this call); this driver reads NO clock and never fails the body for time.
+// ⚑B1: retryable is DROPPED at the wrapper (settleDecisionFromBody → appendSettled hardcodes
+// retryable=false, guard/dispatch settle parity); the body's own settle keeps its retryable
+// classification. FORBIDDEN to touch settleDecisionFromBody (it would change guard AND dispatch
+// settle bytes) — soundness rests on nodeState: a timeout can never be a retry attempt
+// (lowerLoop admits only exec/do/run bodies), so no consumer reads a dropped wrapper retryable.
+func (d *driver) runTimeout(u planUnit, scope, nodeOutputs map[string]string) error {
+	bu := d.timeoutBodyUnit(u)
+	if err := d.runUnit(bu, scope, nodeOutputs); err != nil {
+		return err
+	}
+	return d.settleDecisionFromBody(u, bu, scope, nodeOutputs)
+}
+
+// timeoutBodyUnit synthesizes the timeout's single leaf body unit (exec/do), the twin of
+// guardThenUnit: activation bodyID:0, parented under the timeout, inheriting its ns + gates.
+func (d *driver) timeoutBodyUnit(u planUnit) planUnit {
+	s := u.timeout
+	return d.decisionBodyUnit(u, s.bodyNodeID, s.bodyIRKind, s.body)
+}
+
 // dispatchArmUnit synthesizes a dispatch arm's body leaf unit.
 func (d *driver) dispatchArmUnit(u planUnit, arm *dispatchArm) planUnit {
 	return d.decisionBodyUnit(u, arm.bodyNodeID, arm.bodyIRKind, arm.body)
@@ -2291,6 +2318,17 @@ func scalarDefaultToString(v any) string {
 // appendActivated emits a node.activated event for a unit, carrying its
 // dependency edges (activation keys) so the reducer folds the DAG.
 func (d *driver) appendActivated(u planUnit) error {
+	// A timeout wrapper carries its raw duration literal as ADVISORY journal metadata (§1.2):
+	// stamped ONLY here — both drivers funnel through appendActivated (runUnit inline,
+	// ensureDecisionActivated on Advance) — from the unit's timeout spec. Empty for every other
+	// kind AND for a timeout's body activation (whose synthesized unit carries no timeout spec),
+	// so a non-timeout node.activated is byte-identical. appendPoolActivated is deliberately
+	// untouched (a pool-do body activation never carries duration). The reducer does NOT fold
+	// this field, so it is snapshot/StateHash-transparent — reducerVersion STAYS 4.
+	duration := ""
+	if u.timeout != nil {
+		duration = u.timeout.duration
+	}
 	return d.append(EventNodeActivated, d.streamID+":"+u.activation+":act", nodeActivatedPayload{
 		NodeID:           u.nodeID,
 		Activation:       u.activation,
@@ -2299,6 +2337,7 @@ func (d *driver) appendActivated(u planUnit) error {
 		After:            u.afterDeps,
 		Members:          u.memberDeps,
 		Kind:             string(u.irKind),
+		Duration:         duration,
 	})
 }
 

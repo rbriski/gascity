@@ -330,6 +330,14 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 		return d.advanceDispatch(u, scope, nodeOutputs, opts)
 	}
 
+	// A timeout is a transparent wrapper: it activates once (stamping the advisory duration),
+	// then ALWAYS runs its single body (the guard path MINUS the cond) — an exec settles inline
+	// in this pass, a pool-do materializes and parks. A blocked timeout skip-cascades through
+	// runUnit below.
+	if u.kind == unitTimeout && !d.blocked(u) {
+		return d.advanceTimeout(u, scope, nodeOutputs, opts)
+	}
+
 	// A pool for-each fans its body over the runtime array and parks on the members:
 	// a pool-do leaf body dispatches each member as claimable pool work, and a RUN
 	// body (bodyRun != nil) ALWAYS routes here under a PoolRouter regardless of the
@@ -933,6 +941,58 @@ func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, 
 		}
 	}
 	return d.settleDecisionFromBody(u, tu, scope, nodeOutputs)
+}
+
+// advanceTimeout is Advance's park-aware arm for a timeout wrapper — the guard path MINUS the
+// cond (the body ALWAYS runs, no write-once decision, no skipped arm). It activates the wrapper
+// once (stamping the advisory duration via appendActivated), then drives the single body: an
+// exec settles inline in this pass, a pool-do materializes/observes/parks. It settles the
+// wrapper transparently from the body (settleDecisionFromBody).
+//
+// The DAR lesson (§1.1.5): it calls crashAt(crashAfterActivate, u.activation) IMMEDIATELY after
+// ensureDecisionActivated — mirroring runUnit's inline placement — so the activated-unsettled
+// wrapper window (the ONLY point between the wrapper's two appends) is injectable on the POOL
+// driver too. Resume re-drives the body and settles, converging. The re-emitted wrapper
+// activation carries the raw duration byte-for-byte (idem token), so no ErrIdemTokenReuse.
+func (d *driver) advanceTimeout(u planUnit, scope, nodeOutputs map[string]string, opts Options) error {
+	spec := u.timeout
+	if err := d.ensureDecisionActivated(u); err != nil {
+		return err
+	}
+	if err := d.crashAt(crashAfterActivate, u.activation); err != nil {
+		return err
+	}
+	bu := d.timeoutBodyUnit(u)
+	if opts.PoolRouter != nil && spec.bodyIRKind == ir.NodeDo {
+		bn := d.st().Nodes[bu.activation]
+		switch {
+		case bn == nil || (!bn.Settled && bn.BeadID == ""):
+			// Not yet materialized (or activated but not dispatched): dispatch it, park.
+			return d.materializePoolWork(bu, scope, opts)
+		case !bn.Settled:
+			// In flight: observe its bead; if still open, park.
+			if opts.ObserveWork == nil {
+				return nil
+			}
+			if err := d.observePoolWork(bu.activation, bu.nodeID, bn.BeadID, scope, nodeOutputs, opts); err != nil {
+				return err
+			}
+			if n := d.st().Nodes[bu.activation]; n == nil || !n.Settled {
+				return nil
+			}
+		}
+		// bn settled: fall through to settle the wrapper.
+	} else if bn := d.st().Nodes[bu.activation]; bn == nil || !bn.Settled {
+		// An exec body (or a do body with a Host) runs inline in this pass. The `!bn.Settled`
+		// disjunct is load-bearing for the BODY-side crash window: a kill between act(body) and
+		// settle(body) leaves an activated-unsettled body node, and resume MUST re-drive it here
+		// (at-least-once) — falling through would hand settleDecisionFromBody its silent PASS/""
+		// default and seal a FALSE-PASS wrapper over a never-settled body (the DAR ⚑B2 class).
+		if err := d.runUnit(bu, scope, nodeOutputs); err != nil {
+			return err
+		}
+	}
+	return d.settleDecisionFromBody(u, bu, scope, nodeOutputs)
 }
 
 // advanceDispatch drives a dispatch's multi-way branch in the parking model: it

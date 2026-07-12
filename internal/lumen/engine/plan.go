@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,6 +12,14 @@ import (
 	"github.com/gastownhall/gascity/internal/lumen/exechost"
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
+
+// lumenDurationRE is the reference compiler's compile-time duration grammar
+// (isParseableLumenDuration, formula-language index.ts): a non-negative integer with no
+// leading zero (or a bare 0) followed by one of ms/s/m/h. A timeout's raw duration literal is
+// validated against this SHAPE at load and then rides the planUnit VERBATIM — the engine reads
+// no clock and never parses it as a time.Duration, so a load-time refusal is stricter than the
+// reference RUNTIME (which never re-checks), parity with its compile-time diagnostic.
+var lumenDurationRE = regexp.MustCompile(`^(?:0|[1-9]\d*)(?:ms|s|m|h)$`)
 
 // ErrUnsupportedNode is returned when the formula body contains a node kind the
 // P4.2 executor does not implement. It is a load-time-style refusal surfaced
@@ -58,6 +67,7 @@ const (
 	unitCleanup                        // cleanup: try/finally — a guarded leaf, then an always-run body leaf
 	unitRecover                        // recover: try/catch — a guarded leaf, then a catch body run only on failure
 	unitCleanupGuarded                 // cleanup(block guarded): a synthetic transparent drain aggregate over the block's inlined leaves
+	unitTimeout                        // timeout: an advisory check-with-budget wrapper over a single-leaf body (the guard path MINUS the cond — the body always runs)
 )
 
 // planUnit is one node of the lowered execution plan. Units are emitted in
@@ -105,6 +115,25 @@ type planUnit struct {
 	cleanup *cleanupSpec // unitCleanup: the try/finally guarded+body spec
 
 	recover *recoverSpec // unitRecover: the try/catch guarded+body spec
+
+	timeout *timeoutSpec // unitTimeout: the advisory check-with-budget wrapper spec
+}
+
+// timeoutSpec carries a timeout node's decoded shape: the RAW literal duration string
+// (VERBATIM — never parsed; advisory journal metadata only, stamped on the wrapper's own
+// node.activated by appendActivated) and the single leaf body (exec/do) that ALWAYS runs. The
+// wrapper is TRANSPARENT: it settles with the body's outcome/output (settleDecisionFromBody
+// records both at the wrapper id), reads no clock, and never fails the body for time —
+// enforcement is gc-side, later, off the JOURNAL wrapper activation (never the bead). It is
+// structurally a guardSpec MINUS the cond: the body is not conditional, so the driver is the
+// guard path with the cond removed (no skipped arm). The body id shares the guard-then
+// synthesis machinery (decisionBodyUnit / addSynth), so a body id colliding with a sibling
+// node or another decision body refuses loudly at lowering.
+type timeoutSpec struct {
+	duration   string      // the raw literal duration string, VERBATIM (e.g. "5m")
+	bodyNodeID string      // the body's node id, QUALIFIED (mint prefix / addSynth / decisionBodyUnit)
+	bodyIRKind ir.NodeKind // NodeExec | NodeDo
+	body       step        // the decoded single leaf body
 }
 
 // recoverSpec carries a recover(try/catch) node's decoded shape: a `guarded` leaf that
@@ -509,13 +538,16 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 	case ir.NodeRecover:
 		return l.lowerRecover(n, parent)
 
+	case ir.NodeTimeout:
+		return l.lowerTimeout(n, parent)
+
 	default:
-		// P4.2-deferred: async, await, cancel, channel, cleanup, close, dispatch,
-		// fail-channel, for-each(scatter form:each), guard, map, quote, raise,
-		// recover, timeout. Vocabulary + reducer transitions exist (total fold);
-		// executor arms land in later slices. Filed follow-up: blueprint §7 P4.2
-		// corpus TODO. (retry/repeat land as the L5 attempt-loop arm above; run as
-		// the R lowerRun arm.)
+		// P4.2-deferred: async, await, cancel, channel, close, fail-channel, map,
+		// quote, raise. Vocabulary + reducer transitions exist (total fold); executor
+		// arms land in later slices. Filed follow-up: blueprint §7 P4.2 corpus TODO.
+		// (retry/repeat land as the L5 attempt-loop arm above; run as the R lowerRun
+		// arm; guard/dispatch/scatter/gather/for-each/cleanup/recover/timeout land as
+		// their own arms above.)
 		return fmt.Errorf("%w: %q (node %q)", ErrUnsupportedNode, n.Kind, n.ID)
 	}
 }
@@ -1565,6 +1597,100 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 	return nil
 }
 
+// lowerTimeout lowers a timeout node — an advisory check-with-budget wrapper — to a
+// unitTimeout. Semantics are option (a), owner-framed: a TRANSPARENT wrapper that lowers its
+// single-leaf body (exec/do) and records the raw duration literal as ADVISORY journal metadata
+// on the wrapper's node.activated (via appendActivated). The engine reads NO clock and NEVER
+// fails the body for time; enforcement is gc-side, later, off the JOURNAL (never the bead). The
+// body ALWAYS runs (unlike a guard's conditional then), so the driver is the guard path MINUS
+// the cond. It admits root top-level, block member, sub-formula top-level (any prefix), and
+// scatter member (root and ns) — the guard positioning table, no inAggregate fence. A
+// gather-combine member, dispatch arm body, retry/repeat body, guard then, and for-each body
+// stay refused by those kinds' own leaf-only sweeps / decision switches.
+//
+// The duration DECODE refuses an absent duration, a non-literal expr (no clock — the raw
+// literal must ride verbatim), and a literal failing the pure regex (§lumenDurationRE). The
+// BODY decode follows the decodeLeafSub precedent — body id non-empty, '/'+':' charset ban, a
+// LOUD refusal of a non-empty body `after` gate — admitting only a single exec/do leaf; a
+// body id colliding with a sibling refuses via the addSynth registry. The raw duration string
+// rides the planUnit VERBATIM (never parsed or normalized) so resume re-emits it byte-for-byte
+// under the :act idem token.
+func (l *lowerer) lowerTimeout(n ir.Node, parent string) error {
+	durRaw, ok := n.Raw["duration"]
+	if !ok {
+		return fmt.Errorf("%w: timeout %q missing duration", ErrUnsupportedNode, n.ID)
+	}
+	var durHead struct {
+		Kind  string          `json:"kind"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(durRaw, &durHead); err != nil {
+		return fmt.Errorf("lumen: timeout %q duration: %w", n.ID, err)
+	}
+	if durHead.Kind != "literal" {
+		return fmt.Errorf("%w: timeout %q duration must be a literal", ErrUnsupportedNode, n.ID)
+	}
+	var durStr string
+	if err := json.Unmarshal(durHead.Value, &durStr); err != nil || !lumenDurationRE.MatchString(durStr) {
+		return fmt.Errorf("%w: timeout %q duration %q", ErrUnsupportedNode, n.ID, canonScalar(durHead.Value))
+	}
+
+	bodyRaw, ok := n.Raw["body"]
+	if !ok {
+		return fmt.Errorf("%w: timeout %q missing body", ErrUnsupportedNode, n.ID)
+	}
+	var body ir.Node
+	if err := json.Unmarshal(bodyRaw, &body); err != nil {
+		return fmt.Errorf("lumen: timeout %q body: %w", n.ID, err)
+	}
+	if body.ID == "" {
+		return fmt.Errorf("%w: timeout %q body missing id", ErrUnsupportedNode, n.ID)
+	}
+	// An authored body bypasses lowerNode's id check (decoded inline here), so this is the
+	// ban site: a '/' or ':' in the body id would forge a cross-namespace activation key
+	// (decodeLeafSub parity). A non-empty body `after` is refused LOUDLY — the body is a
+	// single synthesized leaf (activationFor(bodyID), gates inherited from the wrapper), so a
+	// gate slot on it would silently drop.
+	if strings.ContainsAny(body.ID, "/:") {
+		return fmt.Errorf("%w: timeout %q body id %q must not contain '/' or ':'", ErrUnsupportedNode, n.ID, body.ID)
+	}
+	if len(body.After) > 0 {
+		return fmt.Errorf("%w: timeout %q body %q must not carry an 'after' gate", ErrUnsupportedNode, n.ID, body.ID)
+	}
+	spec := &timeoutSpec{duration: durStr, bodyNodeID: l.qid(body.ID), bodyIRKind: body.Kind}
+	switch body.Kind {
+	case ir.NodeExec:
+		s, err := decodeExec(body)
+		if err != nil {
+			return err
+		}
+		spec.body = s
+	case ir.NodeDo:
+		if !l.allowDo {
+			return fmt.Errorf("%w: timeout %q body %q (node %q)", ErrUnsupportedNode, n.ID, body.Kind, body.ID)
+		}
+		s, err := decodeDo(body)
+		if err != nil {
+			return err
+		}
+		spec.body = s
+	default:
+		return fmt.Errorf("%w: timeout %q body kind %q", ErrUnsupportedNode, n.ID, body.Kind)
+	}
+
+	l.units = append(l.units, planUnit{
+		kind:       unitTimeout,
+		activation: activationFor(l.qid(n.ID)),
+		nodeID:     l.qid(n.ID),
+		irKind:     ir.NodeTimeout,
+		parent:     parent,
+		ns:         l.prefix,
+		rawAfter:   l.qAfter(n.After),
+		timeout:    spec,
+	})
+	return nil
+}
+
 // lowerDispatch lowers a dispatch node — a multi-way branch — to a unitDispatch. The
 // subject is a value expression; each arm has a match literal and a body that is EITHER a
 // single leaf (exec/do) OR a `run <formula> given {…}` sub-formula call (the DAR arm: the
@@ -2096,6 +2222,17 @@ func (l *lowerer) resolveDeps() error {
 				// activationFor(bodyID), byte-identical to a decision/cleanup sub's
 				// activation. Register it so a sub can never alias a loop attempt node.
 				if err := addSynth(u.loop.bodyNodeID, u.nodeID); err != nil {
+					return err
+				}
+			}
+		case unitTimeout:
+			if u.timeout != nil {
+				// A timeout's body activates on activationFor(bodyID) exactly like a guard
+				// then. Register it so a decision/cleanup/loop sub can never alias the
+				// wrapper's body activation — and so a body id colliding with a sibling node
+				// (or another decision body) refuses LOUDLY here (the SILENT sibling-id
+				// aliasing miss, proved by the sibling-collision pin).
+				if err := addSynth(u.timeout.bodyNodeID, u.nodeID); err != nil {
 					return err
 				}
 			}

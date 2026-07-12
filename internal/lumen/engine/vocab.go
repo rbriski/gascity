@@ -262,6 +262,13 @@ type runStartedPayload struct {
 // dispatched bead's Description). Both are carried in the fold so a re-Advance
 // re-dispatches byte-identically. Both additive and omitempty, so an engine-driven
 // node folds byte-identically.
+//
+// Duration is a timeout wrapper's raw duration literal (VERBATIM — "5m"), stamped ONLY on a
+// timeout node's OWN node.activated (appendActivated, from the unit's timeoutSpec); every other
+// activation omits it. It is ADVISORY journal metadata: enforcement is gc-side, off this
+// journal field (never the bead), and the reducer does NOT fold it (applyNodeActivated omits it
+// from nodeState), so it is snapshot/StateHash-transparent and additive/omitempty — a
+// non-timeout node.activated folds byte-identically and reducerVersion STAYS 4.
 type nodeActivatedPayload struct {
 	NodeID           string   `json:"node_id"`
 	Activation       string   `json:"activation"`
@@ -273,6 +280,7 @@ type nodeActivatedPayload struct {
 	DispatchMode     string   `json:"dispatch_mode,omitempty"`
 	Route            string   `json:"route,omitempty"`
 	Prompt           string   `json:"prompt,omitempty"`
+	Duration         string   `json:"duration,omitempty"`
 }
 
 // nodeDecisionPayload is the body of EventNodeDecision.

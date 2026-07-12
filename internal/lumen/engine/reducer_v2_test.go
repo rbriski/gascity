@@ -572,8 +572,9 @@ func TestDeferredKindsRefusedCleanly(t *testing.T) {
 	}{
 		{"dispatch", `{"kind":"dispatch","id":"d","after":[],"origin":{"uri":"t","line":1,"col":0},"subject":{"kind":"ref","name":"x"},"discriminant":"kind","exhaustive":true,"arms":[]}`},
 		// retry/repeat are NO LONGER deferred — they land as the L5 attempt-loop arm
-		// (see loop_test.go). timeout/run/channel/async stay refused.
-		{"timeout", `{"kind":"timeout","id":"to","after":[],"origin":{"uri":"t","line":1,"col":0},"duration":{"kind":"literal","value":"30s"}}`},
+		// (see loop_test.go); timeout now lands as the TNK arm (see timeout_test.go /
+		// timeout_plan_test.go — a bodyless timeout refuses on its MISSING BODY there).
+		// channel/async stay refused.
 		{"channel", `{"kind":"channel","id":"ch","after":[],"origin":{"uri":"t","line":1,"col":0}}`},
 		{"async", `{"kind":"async","id":"as","after":[],"origin":{"uri":"t","line":1,"col":0}}`},
 	} {

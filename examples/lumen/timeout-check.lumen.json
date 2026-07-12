@@ -1,0 +1,123 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "timeout-check",
+  "input": {
+    "name": "timeout-check.input",
+    "fields": [
+      {
+        "name": "who",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "repeat",
+      "id": "loop",
+      "name": "loop",
+      "after": [],
+      "iterationName": "iteration",
+      "body": {
+        "kind": "run",
+        "id": "stage",
+        "name": "stage",
+        "after": [],
+        "target": { "kind": "by-name", "name": "stageFormula" },
+        "environment": {
+          "fields": [
+            {
+              "name": "who",
+              "value": { "kind": "expr", "expr": { "kind": "ref", "name": "who" } }
+            }
+          ]
+        },
+        "outcome": "transparent"
+      },
+      "cond": {
+        "kind": "operator",
+        "op": "||",
+        "operands": [
+          {
+            "kind": "operator",
+            "op": "==",
+            "operands": [
+              { "kind": "ref", "name": "stage", "field": "outcome" },
+              { "kind": "literal", "value": "pass" }
+            ]
+          },
+          {
+            "kind": "operator",
+            "op": ">=",
+            "operands": [
+              { "kind": "ref", "name": "iteration" },
+              { "kind": "literal", "value": 2 }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "formulas": {
+    "stageFormula": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "stageFormula",
+      "input": {
+        "name": "stageFormula.input",
+        "fields": [
+          {
+            "name": "who",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "draft",
+          "name": "draft",
+          "after": [],
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": { "raw": "Draft a plan for {{ who }}, then settle this step." }
+        },
+        {
+          "kind": "timeout",
+          "id": "check",
+          "name": "check",
+          "after": ["draft"],
+          "duration": { "kind": "literal", "value": "5m" },
+          "body": {
+            "kind": "exec",
+            "id": "v",
+            "name": "v",
+            "after": [],
+            "interpreter": { "kind": "shell", "program": { "kind": "exec" } },
+            "body": { "raw": "echo checked", "language": "bash", "source": { "kind": "inline" } },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        },
+        {
+          "kind": "exec",
+          "id": "report",
+          "name": "report",
+          "after": ["check"],
+          "interpreter": { "kind": "shell", "program": { "kind": "exec" } },
+          "body": { "raw": "echo report {{ check }}", "language": "bash", "source": { "kind": "inline" } },
+          "exitMap": { "pass": [0], "retryable": [] }
+        }
+      ]
+    }
+  }
+}

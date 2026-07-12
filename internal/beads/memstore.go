@@ -81,6 +81,13 @@ func cloneBead(b Bead) Bead {
 	return b
 }
 
+// CloneBead returns a deep copy of a bead, including every reference field.
+// Callers that retain or share Store results use this to prevent one consumer
+// from mutating another consumer's snapshot.
+func CloneBead(b Bead) Bead {
+	return cloneBead(b)
+}
+
 // Create persists a new bead in memory with a sequential ID.
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()

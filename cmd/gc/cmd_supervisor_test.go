@@ -4534,7 +4534,7 @@ func TestDoStartRejectsStandaloneOnlyFlagsUnderSupervisor(t *testing.T) {
 	}
 }
 
-func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
+func TestStopManagedCityDoesNotRunCleanupOutsideOwnerAfterTimeout(t *testing.T) {
 	cityPath := t.TempDir()
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
@@ -4579,15 +4579,16 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	if !strings.Contains(stderr.String(), "did not exit within") {
 		t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
 	}
-	if !closer.closed {
-		t.Fatal("expected closer to be closed after forced cleanup")
+	if closer.closed {
+		t.Fatal("recorder closed while managed owner was still running")
 	}
 	if !forceStop.Load() {
 		t.Fatal("expected forced cleanup to request force-stop shutdown")
 	}
 
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
+	if ops := readOpLog(t, logFile); len(ops) != 0 {
+		t.Fatalf("timed-out caller ran provider cleanup outside managed owner: %v", ops)
+	}
 }
 
 func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
@@ -4637,8 +4638,9 @@ func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
 		t.Fatalf("stderr = %q, want no forced-shutdown timeout", stderr.String())
 	}
 
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
+	if ops := readOpLog(t, logFile); len(ops) != 0 {
+		t.Fatalf("caller ran provider cleanup after owner completion: %v", ops)
+	}
 }
 
 func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
@@ -4681,12 +4683,13 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	if !strings.Contains(stderr.String(), "20ms") {
 		t.Fatalf("stderr = %q, want shutdown-timeout warning", stderr.String())
 	}
-	if !closer.closed {
-		t.Fatal("expected closer to be closed after forced cleanup")
+	if closer.closed {
+		t.Fatal("recorder closed while managed owner was still running")
 	}
 
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
+	if ops := readOpLog(t, logFile); len(ops) != 0 {
+		t.Fatalf("timed-out caller ran provider cleanup outside managed owner: %v", ops)
+	}
 }
 
 func TestCityRuntimeShutdownPreservesSessionsWhenRequested(t *testing.T) {
@@ -4796,6 +4799,31 @@ func TestStopManagedCityPreservingSessionsSkipsBeadsProviderShutdown(t *testing.
 	}
 }
 
+func TestStopManagedCityPreservingSessionsZeroTimeoutRequiresOwnerExit(t *testing.T) {
+	closer := &closerSpy{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   make(chan struct{}),
+		closer: closer,
+		cr: &CityRuntime{
+			cfg:    &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "0s"}},
+			sp:     runtime.NewFake(),
+			rec:    events.Discard,
+			stdout: io.Discard,
+			stderr: io.Discard,
+		},
+	}
+
+	err := stopManagedCityPreservingSessions(mc, t.TempDir(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("stopManagedCityPreservingSessions error = %v, want owner-exit failure", err)
+	}
+	if closer.closed {
+		t.Fatal("recorder closed before zero-timeout managed owner exited")
+	}
+}
+
 func TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("proxy process service shutdown uses process groups on linux")
@@ -4861,10 +4889,12 @@ while True:
 		t.Fatalf("service bridge local_state = %q, want ready; status=%#v", status.LocalState, status)
 	}
 
+	closer := &closerSpy{}
 	mc := &managedCity{
 		name:   "bright-lights",
 		cancel: func() {},
 		done:   make(chan struct{}),
+		closer: closer,
 		cr:     cr,
 	}
 
@@ -4881,6 +4911,9 @@ while True:
 	}
 	if !strings.Contains(runtimeStdout.String(), "Preserving agent sessions for supervisor re-adoption.") {
 		t.Fatalf("runtime stdout = %q, want preserve-mode shutdown message", runtimeStdout.String())
+	}
+	if closer.closed {
+		t.Fatal("recorder closed while preserve-mode managed owner was still running")
 	}
 }
 

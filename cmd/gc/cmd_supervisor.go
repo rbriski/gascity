@@ -1080,6 +1080,84 @@ type managedCity struct {
 	done       chan struct{} // closed when the city goroutine exits
 	closer     io.Closer     // FileRecorder (or nil); closed on city stop
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
+
+	// managedShutdownErr is written only by the managed owner while it holds
+	// controller.lock, before closing done. Readers access it only after
+	// receiving from done, whose close establishes the happens-before edge.
+	managedShutdownErr error
+}
+
+type managedCityOwnedPhasesResult struct {
+	recovered  any
+	cleanupErr error
+}
+
+func captureManagedCityPanic(fn func()) (recovered any) {
+	defer func() {
+		recovered = recover()
+	}()
+	fn()
+	return nil
+}
+
+// runManagedCityOwnedPhases keeps every runtime/provider cleanup phase in one
+// recoverable sequence. Its caller retains controller.lock for the entire call
+// and releases it only after the remaining socket/token/state epilogue.
+func runManagedCityOwnedPhases(run, shutdownRuntime func(), shutdownProvider func() error) managedCityOwnedPhasesResult {
+	result := managedCityOwnedPhasesResult{recovered: captureManagedCityPanic(run)}
+	if recovered := captureManagedCityPanic(shutdownRuntime); recovered != nil {
+		result.cleanupErr = errors.Join(result.cleanupErr, fmt.Errorf("runtime shutdown panic: %v", recovered))
+		if result.recovered == nil {
+			result.recovered = recovered
+		}
+	}
+	if shutdownProvider != nil {
+		var providerErr error
+		recovered := captureManagedCityPanic(func() {
+			providerErr = shutdownProvider()
+		})
+		if recovered != nil {
+			providerErr = fmt.Errorf("bead provider shutdown panic: %v", recovered)
+			if result.recovered == nil {
+				result.recovered = recovered
+			}
+		} else if providerErr != nil {
+			providerErr = fmt.Errorf("bead provider shutdown: %w", providerErr)
+		}
+		result.cleanupErr = errors.Join(result.cleanupErr, providerErr)
+	}
+	return result
+}
+
+func appendManagedShutdownError(mc *managedCity, err error) {
+	if err != nil {
+		mc.managedShutdownErr = errors.Join(mc.managedShutdownErr, err)
+	}
+}
+
+// runManagedCityWithLease is the final ownership barrier for a managed city.
+// Regardless of a panic in the runtime epilogue, it records a terminal error,
+// releases the exact transferred controller lease, and closes done last.
+func runManagedCityWithLease(mc *managedCity, lock *controllerLockLease, stderr io.Writer, run func()) {
+	defer close(mc.done)
+	defer func() {
+		var closeErr error
+		if recovered := captureManagedCityPanic(func() { closeErr = lock.Close() }); recovered != nil {
+			closeErr = fmt.Errorf("controller lock close panic: %v", recovered)
+		}
+		if closeErr != nil {
+			appendManagedShutdownError(mc, fmt.Errorf("controller lock close: %w", closeErr))
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock close: %v\n", mc.name, closeErr) //nolint:errcheck
+		}
+	}()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err := fmt.Errorf("managed epilogue panic: %v", recovered)
+			appendManagedShutdownError(mc, err)
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': %v\n", mc.name, err) //nolint:errcheck
+		}
+	}()
+	run()
 }
 
 // deleteManagedCityIfCurrent prevents a stale city goroutine from removing
@@ -1111,33 +1189,46 @@ func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 	return timeout * 5
 }
 
-// stopManagedCity cancels a city's context, waits up to its configured
-// grace period for it to exit, forces shutdown if it doesn't, and then
-// closes the bead provider and file recorder. It returns a non-nil error
-// when the city did not exit cleanly within the budget. Stderr still
-// receives a trace line for operability; the returned error is for
-// callers (runSupervisor) that need to aggregate shutdown status.
+func finishManagedCityStop(mc *managedCity, prior error) error {
+	if mc.closer != nil {
+		mc.closer.Close() //nolint:errcheck
+	}
+	if mc.managedShutdownErr != nil {
+		return errors.Join(prior, fmt.Errorf("city %q managed shutdown: %w", mc.name, mc.managedShutdownErr))
+	}
+	return prior
+}
+
+// stopManagedCity cancels a city's context and waits for the managed owner to
+// finish runtime and provider shutdown while retaining controller.lock. The
+// caller closes only the recorder, and only after done proves the owner has
+// finished. A timeout never starts provider cleanup outside that owner.
 func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if mc == nil {
 		return nil
 	}
+	_ = cityPath // provider shutdown is owned by the managed goroutine
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
 	var stopErr error
+	exited := false
 	if timeout > 0 {
 		select {
 		case <-mc.done:
-			if err := shutdownBeadsProvider(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
-			}
-			if mc.closer != nil {
-				mc.closer.Close() //nolint:errcheck
-			}
-			return nil
+			exited = true
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
+	} else {
+		select {
+		case <-mc.done:
+			exited = true
+		default:
+		}
+	}
+	if exited {
+		return finishManagedCityStop(mc, nil)
 	}
 	if mc.cr != nil {
 		if mc.cr.forceStopShutdown != nil {
@@ -1152,19 +1243,23 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if forceTimeout > 0 {
 		select {
 		case <-mc.done:
-			// Forced shutdown completed before the second timeout — the
-			// city is out. Clear the pending error so we report success.
-			stopErr = nil
+			exited = true
 		case <-time.After(forceTimeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
 		}
+	} else {
+		select {
+		case <-mc.done:
+			exited = true
+		default:
+		}
 	}
-	if err := shutdownBeadsProvider(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
+	if exited {
+		return finishManagedCityStop(mc, nil)
 	}
-	if mc.closer != nil {
-		mc.closer.Close() //nolint:errcheck
+	if stopErr == nil {
+		stopErr = fmt.Errorf("city %q did not exit after forced shutdown", mc.name)
 	}
 	return stopErr
 }
@@ -1179,10 +1274,12 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
 	var stopErr error
+	exited := false
 	waitForRuntimeShutdown := timeout <= 0
 	if timeout > 0 {
 		select {
 		case <-mc.done:
+			exited = true
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode cancel\n", mc.name, timeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode cancel", mc.name, timeout)
@@ -1197,15 +1294,32 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 		if timeout > 0 {
 			select {
 			case <-mc.done:
+				exited = true
 				stopErr = nil
 			case <-time.After(timeout):
 				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, timeout) //nolint:errcheck
 				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, timeout)
 			}
+		} else {
+			select {
+			case <-mc.done:
+				exited = true
+			default:
+			}
 		}
 	}
-	if mc.closer != nil {
-		mc.closer.Close() //nolint:errcheck
+	if !exited {
+		select {
+		case <-mc.done:
+			exited = true
+		default:
+		}
+	}
+	if exited {
+		return finishManagedCityStop(mc, stopErr)
+	}
+	if stopErr == nil {
+		stopErr = fmt.Errorf("city %q did not exit after preserve-mode shutdown", mc.name)
 	}
 	return stopErr
 }
@@ -1614,6 +1728,21 @@ func reconcileCities(
 	publication supervisor.PublicationConfig,
 	stdout, stderr io.Writer,
 ) {
+	reconcileCitiesWithControllerLock(reg, cr, publication, stdout, stderr, acquireControllerLock, shutdownBeadsProvider)
+}
+
+// reconcileCitiesWithControllerLock is the testable managed-city reconciler.
+// The injected acquisition remains the existing .gc/controller.lock lease; it
+// lets ownership-transfer tests observe the exact descriptor without adding a
+// second production lock or lifecycle owner.
+func reconcileCitiesWithControllerLock(
+	reg *supervisor.Registry,
+	cr *cityRegistry,
+	publication supervisor.PublicationConfig,
+	stdout, stderr io.Writer,
+	acquireLock func(string) (*controllerLockLease, error),
+	shutdownProvider func(string) error,
+) {
 	entries, err := reg.List()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: registry: %v\n", err) //nolint:errcheck
@@ -1887,468 +2016,484 @@ func reconcileCities(
 			})
 		}
 
-		if err := ensureLegacyNamedPacksCached(path); err != nil {
-			emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
-			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
-			continue
-		}
+		startManagedCity(
+			path, name, tomlPath, cr, publication, stdout, stderr,
+			acquireLock, shutdownProvider, recordInitFailure,
+		)
+	}
+}
 
-		// Load city config with provenance so WatchTargets covers included files.
-		// System packs are appended as extra includes for normal pack expansion.
-		cfg, prov, loadErr := loadSupervisorCityConfig(path)
-		if loadErr != nil {
-			emitPendingCityCreateFailure(cr, path, name, "city_config_failed", loadErr, stderr)
-			recordInitFailure(name, loadErr.Error())
-			continue
-		}
-		emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
+func startManagedCity(
+	path, name, tomlPath string,
+	cr *cityRegistry,
+	publication supervisor.PublicationConfig,
+	stdout, stderr io.Writer,
+	acquireLock func(string) (*controllerLockLease, error),
+	shutdownProvider func(string) error,
+	recordInitFailure func(string, string),
+) {
+	// Take the existing same-path controller lease before the first
+	// materialization or provider/store/runtime effect. The source is
+	// closed on every pre-launch return and becomes a no-op owner after
+	// its single transfer to the managed runtime.
+	sourceLock, lockErr := acquireLock(path)
+	if lockErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", name, lockErr) //nolint:errcheck
+		emitPendingCityCreateFailure(cr, path, name, "controller_lock_failed", lockErr, stderr)
+		recordInitFailure(name, fmt.Sprintf("controller lock: %v", lockErr))
+		return
+	}
+	defer sourceLock.Close() //nolint:errcheck // no-op after the exact lease is transferred
 
-		// Use registered name as authoritative identity. city.toml may keep a
-		// different workspace.name because registration aliases are machine-local.
-		cityName := name // from entry.EffectiveName()
-		if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
-				cityName, liveName)
-		}
-		applyRuntimeCityIdentity(cfg, cityName)
+	if err := ensureLegacyNamedPacksCached(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
+		recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
+		return
+	}
 
-		// Track initialization progress for the API.
+	// Load city config with provenance so WatchTargets covers included files.
+	// System packs are appended as extra includes for normal pack expansion.
+	cfg, prov, loadErr := loadSupervisorCityConfig(path)
+	if loadErr != nil {
+		emitPendingCityCreateFailure(cr, path, name, "city_config_failed", loadErr, stderr)
+		recordInitFailure(name, loadErr.Error())
+		return
+	}
+	emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
+
+	// Use registered name as authoritative identity. city.toml may keep a
+	// different workspace.name because registration aliases are machine-local.
+	cityName := name // from entry.EffectiveName()
+	if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
+			cityName, liveName)
+	}
+	applyRuntimeCityIdentity(cfg, cityName)
+
+	// Track initialization progress for the API.
+	cr.BatchUpdate(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		_ map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initStatus[path] = cityInitProgress{name: cityName, status: "loading_config"}
+	})
+
+	// Run critical city initialization (same steps as cmd_start.go).
+	if err := prepareCityForSupervisor(path, cityName, cfg, stderr, func(status string) {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
 			initStatus map[string]cityInitProgress,
 			_ map[string]*initFailRecord,
 			_ map[string]*panicRecord,
 		) {
-			initStatus[path] = cityInitProgress{name: cityName, status: "loading_config"}
+			initStatus[path] = cityInitProgress{name: cityName, status: status}
 		})
+	}); err != nil {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
+		return
+	}
 
-		// Run critical city initialization (same steps as cmd_start.go).
-		if err := prepareCityForSupervisor(path, cityName, cfg, stderr, func(status string) {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				initStatus[path] = cityInitProgress{name: cityName, status: status}
-			})
-		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
-			continue
+	runPostPrepareStep := func(status string, fn func() error) error {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			initStatus[path] = cityInitProgress{name: cityName, status: status}
+		})
+		started := time.Now()
+		err := fn()
+		if dur := time.Since(started); dur > time.Second {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
 		}
+		return err
+	}
 
-		runPostPrepareStep := func(status string, fn func() error) error {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				initStatus[path] = cityInitProgress{name: cityName, status: status}
-			})
-			started := time.Now()
-			err := fn()
-			if dur := time.Since(started); dur > time.Second {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
-			}
+	// Warn if city has its own API port.
+	if cfg.API.Port > 0 {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s' has [api] port=%d which is ignored under supervisor mode\n", //nolint:errcheck
+			cityName, cfg.API.Port)
+	}
+
+	var sp runtime.Provider
+	spErr := runPostPrepareStep("creating_session_provider", func() error {
+		providerName := effectiveProviderName(cfg.Session.Provider)
+		ctx := sessionProviderContextForCity(cfg, path, providerName)
+		snapshot := loadProviderSessionSnapshot(ctx)
+		resolvedSP, err := newSessionProviderFromContextWithError(ctx, snapshot)
+		if err != nil {
 			return err
 		}
-
-		// Warn if city has its own API port.
-		if cfg.API.Port > 0 {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' has [api] port=%d which is ignored under supervisor mode\n", //nolint:errcheck
-				cityName, cfg.API.Port)
-		}
-
-		var sp runtime.Provider
-		spErr := runPostPrepareStep("creating_session_provider", func() error {
-			providerName := effectiveProviderName(cfg.Session.Provider)
-			ctx := sessionProviderContextForCity(cfg, path, providerName)
-			snapshot := loadProviderSessionSnapshot(ctx)
-			resolvedSP, err := newSessionProviderFromContextWithError(ctx, snapshot)
-			if err != nil {
-				return err
-			}
-			sp = resolvedSP
-			return nil
+		sp = resolvedSP
+		return nil
+	})
+	if spErr != nil {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
 		})
-		if spErr != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
-			continue
-		}
-
-		// Fail-fast image pre-check for container providers (same as doStart).
-		if err := runPostPrepareStep("checking_agent_images", func() error {
-			return checkAgentImages(sp, cfg.Agents, stderr)
-		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
-			recordInitFailure(cityName, err.Error())
-			continue
-		}
-
-		rec := events.Discard
-		var eventProv events.Provider
-		evPath := filepath.Join(path, ".gc", "events.jsonl")
-		fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
-		if frErr == nil {
-			rec = fr
-			eventProv = fr
-		}
-
-		dops := newDrainOps(sp)
-		poolSessions := computePoolSessions(cfg, cityName, path, sp)
-		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
-		watchTargets := config.WatchTargets(prov, cfg, path)
-		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
-		pokeCh := make(chan struct{}, 1)
-		configDirty := &atomic.Bool{}
-		forceShutdown := &atomic.Bool{}
-		reloadReqCh := make(chan reloadRequest)
-		cityCtx, cityCancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
-		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
-
-		convergenceReqCh := make(chan convergenceRequest, 16)
-		controlDispatcherCh := make(chan struct{}, 1)
-
-		var cityRuntime *CityRuntime
-		if err := runPostPrepareStep("building_city_runtime", func() error {
-			cityRuntime = newCityRuntime(CityRuntimeParams{
-				CityPath:                path,
-				CityName:                cityName,
-				TomlPath:                tomlPath,
-				WatchTargets:            watchTargets,
-				ConfigRev:               configRev,
-				ConfigDirty:             configDirty,
-				Cfg:                     cfg,
-				SP:                      sp,
-				Publication:             publication,
-				BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
-				BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
-				Dops:                    dops,
-				Rec:                     rec,
-				PoolSessions:            poolSessions,
-				PoolDeathHandlers:       poolDeathHandlers,
-				ForceStopShutdown:       forceShutdown,
-				ReloadReqCh:             reloadReqCh,
-				ConvergenceReqCh:        convergenceReqCh,
-				PokeCh:                  pokeCh,
-				ControlDispatcherCh:     controlDispatcherCh,
-				OnStarted: func() {
-					cr.UpdateCallback(path, func(m *managedCity) {
-						m.started = true
-					})
-					emitPendingCityCreateResult(cr, path, cityName, stderr)
-				},
-				OnStatus: func(status string) {
-					cr.UpdateCallback(path, func(m *managedCity) {
-						m.status = status
-					})
-				},
-				LogPrefix: "gc supervisor",
-				Stdout:    stdout,
-				Stderr:    stderr,
-			})
-			return nil
-		}); err != nil {
-			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
-			continue
-		}
-		mc.cr = cityRuntime
-
-		// Wire API state.
-		var cs *controllerState
-		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
-			return nil
-		}); err != nil {
-			emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
-			continue
-		}
-		cs.ct = cityRuntime.crashTrack()
-		cs.pokeCh = pokeCh
-		cs.configDirty = configDirty
-		cs.services = cityRuntime.svc
-		cityRuntime.setControllerState(cs)
-		cs.startBeadEventWatcher(cityCtx)
-		cs.startMaintenanceLoop(cityCtx)
-
-		// Run pool on_boot hooks (same as runController does).
-		if err := runPostPrepareStep("running_pool_on_boot", func() error {
-			runPoolOnBoot(cfg, path, shellRunHook, stderr)
-			return nil
-		}); err != nil {
-			emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
-			continue
-		}
-
-		// Insert into map BEFORE launching goroutine to prevent races
-		// where an early panic deletes a non-existent entry, leaving a
-		// zombie after the post-launch insertion.
-		alreadyRunning := publishManagedCity(cr, path, mc)
-		if alreadyRunning {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			continue
-		}
-
-		// Acquire controller lock to prevent split-brain with standalone
-		// controllers (mirrors runController in controller.go).
-		lock, lockErr := acquireControllerLock(path)
-		if lockErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", cityName, lockErr) //nolint:errcheck
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "controller_lock_failed", lockErr, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
-			continue
-		}
-
-		// Start controller socket AFTER the alreadyRunning check so we
-		// never destroy a live city's socket or leak a listener.
-		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
-		if lisErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
-			lock.Close()                                                                               //nolint:errcheck // no socket to race with
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "controller_socket_failed", lisErr, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("controller socket: %v", lisErr))
-			continue
-		}
-
-		// Generate controller token for convergence ACL
-		// (mirrors runController in controller.go).
-		controllerToken, tokenErr := convergence.GenerateToken()
-		if tokenErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller token: %v\n", cityName, tokenErr) //nolint:errcheck
-			lis.Close()                                                                                 //nolint:errcheck
-			os.Remove(sockPath)                                                                         //nolint:errcheck
-			lock.Close()                                                                                //nolint:errcheck // lock released last
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "controller_token_failed", tokenErr, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("controller token: %v", tokenErr))
-			continue
-		}
-		_ = controllerToken // available for future waves via function parameters
-		if err := convergence.WriteToken(path, controllerToken); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': writing controller token: %v\n", cityName, err) //nolint:errcheck
-			lis.Close()                                                                                    //nolint:errcheck
-			os.Remove(sockPath)                                                                            //nolint:errcheck
-			lock.Close()                                                                                   //nolint:errcheck // lock released last
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			emitPendingCityCreateFailure(cr, path, cityName, "controller_token_write_failed", err, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("controller token write: %v", err))
-			continue
-		}
-
-		// Capture the socket's os.FileInfo so the goroutine can perform
-		// ownership-safe socket removal on exit via os.SameFile — a
-		// replacement city that re-bound the same path won't have its
-		// socket unlinked. Uses os.SameFile for cross-platform safety.
-		sockInfo, _ := os.Stat(sockPath)
-
-		// Disable automatic socket unlinking on listener close so our
-		// ownership-safe removal logic is the sole path for cleanup.
-		// Without this, l.Close() unconditionally unlinks the socket
-		// file, defeating the SameFile check.
-		if ul, ok := lis.(*net.UnixListener); ok {
-			ul.SetUnlinkOnClose(false)
-		}
-
-		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *controllerLockLease) {
-			// Recovery and close(done) defer is pushed FIRST so it
-			// executes LAST (Go LIFO), preserving the invariant that
-			// completion is signaled only after all resource cleanup.
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
-					reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(p)
-					if consumeErr != nil {
-						fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create panic event failed (path=%s): %v\n", n, p, consumeErr) //nolint:errcheck
-					}
-					if hasReqID {
-						if supRec := cr.SupervisorEventRecorder(); supRec != nil {
-							api.EmitTypedEvent(supRec, events.RequestFailed, n, api.RequestFailedPayload{
-								RequestID:    reqID,
-								Operation:    api.RequestOperationCityCreate,
-								ErrorCode:    "internal_error",
-								ErrorMessage: fmt.Sprintf("panic: %v", r),
-							})
-						}
-					}
-					// Gracefully stop agents so they aren't orphaned.
-					// Wrap in recovery to prevent nested panic from crashing
-					// the entire supervisor.
-					func() {
-						defer func() { recover() }() //nolint:errcheck
-						cityRuntime.shutdown()
-					}()
-					if err := shutdownBeadsProvider(p); err != nil {
-						fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
-					}
-					// Close the file recorder (only on panic — normal exit
-					// leaves it for the external caller via mc.closer).
-					if cityFr != nil {
-						cityFr.Close() //nolint:errcheck
-					}
-					// Record panic for crash-loop backoff and remove from
-					// cities map in a single batch update.
-					cr.BatchUpdate(func(
-						cities map[string]*managedCity,
-						_ map[string]cityInitProgress,
-						_ map[string]*initFailRecord,
-						panicHistory map[string]*panicRecord,
-					) {
-						pr := panicHistory[p]
-						if pr == nil {
-							pr = &panicRecord{}
-							panicHistory[p] = pr
-						}
-						pr.count++
-						// Exponential backoff: 10s, 20s, 40s, ... capped at 5 min.
-						exp := pr.count - 1
-						if exp > 5 {
-							exp = 5 // prevent int overflow at high panic counts
-						}
-						delay := time.Duration(10<<exp) * time.Second
-						if delay > 5*time.Minute {
-							delay = 5 * time.Minute
-						}
-						pr.backoff = time.Now().Add(delay)
-						fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", n, pr.count, delay) //nolint:errcheck
-						deleteManagedCityIfCurrent(cities, p, mc)
-					})
-				} else {
-					// Normal exit (context canceled) — reset panic counter
-					// and remove from map in a single critical section.
-					cr.BatchUpdate(func(
-						cities map[string]*managedCity,
-						_ map[string]cityInitProgress,
-						_ map[string]*initFailRecord,
-						panicHistory map[string]*panicRecord,
-					) {
-						delete(panicHistory, p)
-						deleteManagedCityIfCurrent(cities, p, mc)
-					})
-				}
-				// Signal completion last — ensures all cleanup is done before
-				// waiters (shutdown/unregister paths) proceed.
-				close(done)
-			}()
-			// Resource cleanup defers pushed AFTER recovery/done so they
-			// execute BEFORE it in LIFO order: resources are released,
-			// then done is closed.
-			defer lk.Close()                 //nolint:errcheck // release controller lock (last released)
-			defer convergence.RemoveToken(p) //nolint:errcheck // best-effort cleanup
-			defer func() {
-				// Ownership-safe socket removal: only unlink if the
-				// on-disk file is the same one we created, so a
-				// replacement city's socket is never destroyed.
-				if origSockInfo != nil {
-					if cur, err := os.Stat(sock); err == nil {
-						if os.SameFile(origSockInfo, cur) {
-							os.Remove(sock) //nolint:errcheck
-						}
-					}
-				}
-			}()
-			defer l.Close() //nolint:errcheck // close listener (after socket removal)
-			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
-			cityRuntime.run(cityCtx)
-		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
-
-		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-		telemetry.RecordControllerLifecycle(context.Background(), "started")
-		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+		emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
+		return
 	}
+
+	// Fail-fast image pre-check for container providers (same as doStart).
+	if err := runPostPrepareStep("checking_agent_images", func() error {
+		return checkAgentImages(sp, cfg.Agents, stderr)
+	}); err != nil {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
+		recordInitFailure(cityName, err.Error())
+		return
+	}
+
+	rec := events.Discard
+	var eventProv events.Provider
+	evPath := filepath.Join(path, ".gc", "events.jsonl")
+	fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
+	if frErr == nil {
+		rec = fr
+		eventProv = fr
+	}
+
+	dops := newDrainOps(sp)
+	poolSessions := computePoolSessions(cfg, cityName, path, sp)
+	poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
+	watchTargets := config.WatchTargets(prov, cfg, path)
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
+	pokeCh := make(chan struct{}, 1)
+	configDirty := &atomic.Bool{}
+	forceShutdown := &atomic.Bool{}
+	reloadReqCh := make(chan reloadRequest)
+	cityCtx, cityCancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
+
+	convergenceReqCh := make(chan convergenceRequest, 16)
+	controlDispatcherCh := make(chan struct{}, 1)
+
+	var cityRuntime *CityRuntime
+	if err := runPostPrepareStep("building_city_runtime", func() error {
+		cityRuntime = newCityRuntime(CityRuntimeParams{
+			CityPath:                path,
+			CityName:                cityName,
+			TomlPath:                tomlPath,
+			WatchTargets:            watchTargets,
+			ConfigRev:               configRev,
+			ConfigDirty:             configDirty,
+			Cfg:                     cfg,
+			SP:                      sp,
+			Publication:             publication,
+			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
+			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+			Dops:                    dops,
+			Rec:                     rec,
+			PoolSessions:            poolSessions,
+			PoolDeathHandlers:       poolDeathHandlers,
+			ForceStopShutdown:       forceShutdown,
+			ReloadReqCh:             reloadReqCh,
+			ConvergenceReqCh:        convergenceReqCh,
+			PokeCh:                  pokeCh,
+			ControlDispatcherCh:     controlDispatcherCh,
+			OnStarted: func() {
+				cr.UpdateCallback(path, func(m *managedCity) {
+					m.started = true
+				})
+				emitPendingCityCreateResult(cr, path, cityName, stderr)
+			},
+			OnStatus: func(status string) {
+				cr.UpdateCallback(path, func(m *managedCity) {
+					m.status = status
+				})
+			},
+			LogPrefix: "gc supervisor",
+			Stdout:    stdout,
+			Stderr:    stderr,
+		})
+		return nil
+	}); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
+		return
+	}
+	mc.cr = cityRuntime
+
+	// Wire API state.
+	var cs *controllerState
+	if err := runPostPrepareStep("opening_controller_state", func() error {
+		cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
+		return nil
+	}); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
+		return
+	}
+	cs.ct = cityRuntime.crashTrack()
+	cs.pokeCh = pokeCh
+	cs.configDirty = configDirty
+	cs.services = cityRuntime.svc
+	cityRuntime.setControllerState(cs)
+	cs.startBeadEventWatcher(cityCtx)
+	cs.startMaintenanceLoop(cityCtx)
+
+	// Run pool on_boot hooks (same as runController does).
+	if err := runPostPrepareStep("running_pool_on_boot", func() error {
+		runPoolOnBoot(cfg, path, shellRunHook, stderr)
+		return nil
+	}); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
+		return
+	}
+
+	// Insert into the map before publishing the controller socket or
+	// launching its goroutine. The held source lease prevents another
+	// same-path controller from entering while this publication is built.
+	alreadyRunning := publishManagedCity(cr, path, mc)
+	if alreadyRunning {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
+		})
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		return
+	}
+
+	// Start controller socket AFTER the alreadyRunning check so we
+	// never destroy a live city's socket or leak a listener.
+	sockPath := filepath.Join(path, ".gc", "controller.sock")
+	lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	if lisErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_socket_failed", lisErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller socket: %v", lisErr))
+		return
+	}
+
+	// Generate controller token for convergence ACL
+	// (mirrors runController in controller.go).
+	controllerToken, tokenErr := convergence.GenerateToken()
+	if tokenErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller token: %v\n", cityName, tokenErr) //nolint:errcheck
+		lis.Close()                                                                                 //nolint:errcheck
+		os.Remove(sockPath)                                                                         //nolint:errcheck
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_token_failed", tokenErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller token: %v", tokenErr))
+		return
+	}
+	_ = controllerToken // available for future waves via function parameters
+	if err := convergence.WriteToken(path, controllerToken); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': writing controller token: %v\n", cityName, err) //nolint:errcheck
+		lis.Close()                                                                                    //nolint:errcheck
+		os.Remove(sockPath)                                                                            //nolint:errcheck
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_token_write_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller token write: %v", err))
+		return
+	}
+
+	// Capture the socket's os.FileInfo so the goroutine can perform
+	// ownership-safe socket removal on exit via os.SameFile — a
+	// replacement city that re-bound the same path won't have its
+	// socket unlinked. Uses os.SameFile for cross-platform safety.
+	sockInfo, _ := os.Stat(sockPath)
+
+	// Disable automatic socket unlinking on listener close so our
+	// ownership-safe removal logic is the sole path for cleanup.
+	// Without this, l.Close() unconditionally unlinks the socket
+	// file, defeating the SameFile check.
+	if ul, ok := lis.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+
+	runtimeLock, transferErr := sourceLock.Transfer()
+	if transferErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': transferring controller lock: %v\n", cityName, transferErr) //nolint:errcheck
+		lis.Close()                                                                                                //nolint:errcheck
+		os.Remove(sockPath)                                                                                        //nolint:errcheck
+		convergence.RemoveToken(path)                                                                              //nolint:errcheck
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			deleteManagedCityIfCurrent(cities, path, mc)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_lock_transfer_failed", transferErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller lock transfer: %v", transferErr))
+		return
+	}
+
+	go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *controllerLockLease) {
+		runManagedCityWithLease(mc, lk, stderr, func() {
+			result := runManagedCityOwnedPhases(
+				func() { cityRuntime.run(cityCtx) },
+				cityRuntime.shutdown,
+				func() error {
+					if cityRuntime.preserveSessionsShutdown.Load() {
+						return nil
+					}
+					return shutdownProvider(p)
+				},
+			)
+			appendManagedShutdownError(mc, result.cleanupErr)
+			if result.cleanupErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': cleanup: %v\n", n, result.cleanupErr) //nolint:errcheck
+			}
+
+			telemetry.RecordControllerLifecycle(context.Background(), "stopped")
+			l.Close() //nolint:errcheck
+			// Ownership-safe socket removal: only unlink if the on-disk
+			// file is the same one this managed owner created.
+			if origSockInfo != nil {
+				if cur, err := os.Stat(sock); err == nil && os.SameFile(origSockInfo, cur) {
+					os.Remove(sock) //nolint:errcheck
+				}
+			}
+			convergence.RemoveToken(p) //nolint:errcheck
+
+			if r := result.recovered; r != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
+				reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(p)
+				if consumeErr != nil {
+					fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create panic event failed (path=%s): %v\n", n, p, consumeErr) //nolint:errcheck
+				}
+				if hasReqID {
+					if supRec := cr.SupervisorEventRecorder(); supRec != nil {
+						api.EmitTypedEvent(supRec, events.RequestFailed, n, api.RequestFailedPayload{
+							RequestID:    reqID,
+							Operation:    api.RequestOperationCityCreate,
+							ErrorCode:    "internal_error",
+							ErrorMessage: fmt.Sprintf("panic: %v", r),
+						})
+					}
+				}
+				// Close the file recorder (only on panic — normal exit
+				// leaves it for the external caller via mc.closer).
+				if cityFr != nil {
+					cityFr.Close() //nolint:errcheck
+				}
+				// Record panic for crash-loop backoff and remove from
+				// cities map in a single batch update.
+				cr.BatchUpdate(func(
+					cities map[string]*managedCity,
+					_ map[string]cityInitProgress,
+					_ map[string]*initFailRecord,
+					panicHistory map[string]*panicRecord,
+				) {
+					pr := panicHistory[p]
+					if pr == nil {
+						pr = &panicRecord{}
+						panicHistory[p] = pr
+					}
+					pr.count++
+					// Exponential backoff: 10s, 20s, 40s, ... capped at 5 min.
+					exp := pr.count - 1
+					if exp > 5 {
+						exp = 5 // prevent int overflow at high panic counts
+					}
+					delay := time.Duration(10<<exp) * time.Second
+					if delay > 5*time.Minute {
+						delay = 5 * time.Minute
+					}
+					pr.backoff = time.Now().Add(delay)
+					fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", n, pr.count, delay) //nolint:errcheck
+					deleteManagedCityIfCurrent(cities, p, mc)
+				})
+			} else {
+				// Normal exit (context canceled) — reset panic counter
+				// and remove from map in a single critical section.
+				cr.BatchUpdate(func(
+					cities map[string]*managedCity,
+					_ map[string]cityInitProgress,
+					_ map[string]*initFailRecord,
+					panicHistory map[string]*panicRecord,
+				) {
+					delete(panicHistory, p)
+					deleteManagedCityIfCurrent(cities, p, mc)
+				})
+			}
+		})
+	}(cityName, path, fr, lis, sockPath, sockInfo, runtimeLock)
+
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 }
 
 func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {

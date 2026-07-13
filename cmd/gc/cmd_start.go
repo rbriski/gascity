@@ -585,7 +585,7 @@ func resolveStartDir(args []string) (string, error) {
 // requireBootstrappedCity.
 func resolveStartDirRef(ref string) (string, error) {
 	if classifyCityRef(ref) == cityRefName {
-		ctx, err := resolveCityNameContext(ref, resolveContextFromPath)
+		ctx, err := resolveCityNameContextWithRigResolver(ref, resolveStartContextFromPath, resolveStartRigPathToContext)
 		if err != nil {
 			return "", err
 		}
@@ -595,7 +595,7 @@ func resolveStartDirRef(ref string) (string, error) {
 }
 
 func requireBootstrappedCity(dir string) (string, error) {
-	ctx, err := resolveContextFromPath(dir)
+	ctx, err := resolveStartContextFromPath(dir)
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
@@ -608,6 +608,40 @@ func requireBootstrappedCity(dir string) (string, error) {
 		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
 	}
 	return cityPath, nil
+}
+
+// resolveStartContextFromPath resolves only the owning city needed by start.
+// It deliberately composes registered rig bindings through the read-only
+// supervisor intent loader: controller.lock has not been acquired yet, so path
+// discovery may not hydrate packs or mutate process-global feature flags.
+func resolveStartContextFromPath(path string) (resolvedContext, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	ctx, ok, err := resolveStartRigPathToContext(abs)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ok {
+		return ctx, nil
+	}
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return resolvedContext{CityPath: cityPath}, nil
+	}
+	cityPath, err := findCity(abs)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	return resolvedContext{CityPath: cityPath}, nil
+}
+
+func resolveStartRigPathToContext(dir string) (resolvedContext, bool, error) {
+	return resolveRigPathToContextWithConfigLoader(dir, loadStartIntentConfig)
+}
+
+func loadStartIntentConfig(cityPath string, _ ...io.Writer) (*config.City, error) {
+	return loadSupervisorIntentConfig(cityPath)
 }
 
 // doStartStandalone boots an existing city in the legacy per-city mode.

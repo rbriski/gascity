@@ -1213,6 +1213,44 @@ func TestFinalizeManagedCityRunRecordsOnlyCurrentOwner(t *testing.T) {
 		})
 	})
 
+	t.Run("name-drift runtime panic records backoff after deliberate publication removal", func(t *testing.T) {
+		cityPath := t.TempDir()
+		current := &managedCity{name: "old-name"}
+		registry := newCityRegistry()
+		registry.Add(cityPath, current)
+		registry.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			panicHistory[cityPath] = &panicRecord{count: 2}
+			delete(cities, cityPath) // reconcileCities name-drift removal before stopManagedCity
+		})
+		started := time.Now()
+		var stderr bytes.Buffer
+
+		finalizeManagedCityRun(registry, cityPath, current.name, current, "runtime panic", &stderr)
+
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			if _, exists := cities[cityPath]; exists {
+				t.Fatal("name-drifted owner was republished after runtime panic")
+			}
+			record := panicHistory[cityPath]
+			if record == nil || record.count != 3 || record.backoff.Before(started) {
+				t.Fatalf("name-drift panic history = %#v, want count 3 with future backoff", record)
+			}
+		})
+		if !strings.Contains(stderr.String(), "panic #3") {
+			t.Fatalf("stderr = %q, want name-drift runtime panic backoff", stderr.String())
+		}
+	})
+
 	t.Run("stale owner cannot alter replacement or its backoff", func(t *testing.T) {
 		cityPath := t.TempDir()
 		stale := &managedCity{name: "stale"}

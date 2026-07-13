@@ -976,7 +976,7 @@ func gracefulStopAll(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	_ = gracefulStopAllWithOwnership(names, sp, timeout, rec, cfg, store, stdout, stderr, nil, false, nil)
 }
 
 func gracefulStopAllWithForceSignal(
@@ -989,12 +989,37 @@ func gracefulStopAllWithForceSignal(
 	stdout, stderr io.Writer,
 	forceStopRequested func() bool,
 ) {
+	_ = gracefulStopAllWithOwnership(names, sp, timeout, rec, cfg, store, stdout, stderr, forceStopRequested, false, nil)
+}
+
+func gracefulStopAllWithOwnership(
+	names []string,
+	sp runtime.Provider,
+	timeout time.Duration,
+	rec events.Recorder,
+	cfg *config.City,
+	store beads.SessionStore,
+	stdout, stderr io.Writer,
+	forceStopRequested func() bool,
+	retainEntered bool,
+	budget *stopCompletionBudget,
+) error {
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
 	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
 		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store.Store, stderr), cfg, store.Store, sp, rec, "gc", stdout, stderr)
-		return
+		targets, err := stopTargetsForNamesWithBudget(names, cfg, store.Store, stderr, budget)
+		if err != nil {
+			return err
+		}
+		_, err = stopTargetsBoundedWithOwnershipAndBudget(targets, cfg, store.Store, sp, rec, "gc", stdout, stderr, retainEntered, budget)
+		return err
 	}
-	targets := stopTargetsForNames(names, cfg, store.Store, stderr)
+	targets, err := stopTargetsForNamesWithBudget(names, cfg, store.Store, stderr, budget)
+	if err != nil {
+		return err
+	}
 	targetByName := make(map[string]stopTarget, len(targets))
 	for _, target := range targets {
 		targetByName[target.name] = target
@@ -1006,9 +1031,17 @@ func gracefulStopAllWithForceSignal(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
+	var sent int
+	if retainEntered {
+		sent = interruptTargetsBoundedRetainingEnteredWithBudget(targets, cfg, store.Store, sp, stderr, budget)
+	} else {
+		sent = interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
+	}
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
 	pollInterval := 500 * time.Millisecond
@@ -1017,15 +1050,27 @@ func gracefulStopAllWithForceSignal(
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if !stopEffectAdmitted(budget) {
+			return errStopCompletionDeadline
+		}
 		if stopForceRequested(forceStopRequested) {
 			break
 		}
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
+			if !stopEffectAdmitted(budget) {
+				return errStopCompletionDeadline
+			}
 			allExited = len(runningSet) == 0
 		} else {
 			for _, name := range names {
+				if !stopEffectAdmitted(budget) {
+					return errStopCompletionDeadline
+				}
 				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+				if !stopEffectAdmitted(budget) {
+					return errStopCompletionDeadline
+				}
 				if err == nil && running {
 					allExited = false
 					break
@@ -1036,6 +1081,9 @@ func gracefulStopAllWithForceSignal(
 			break
 		}
 		remaining := time.Until(deadline)
+		if budget != nil && budget.remaining() < remaining {
+			remaining = budget.remaining()
+		}
 		if remaining <= 0 {
 			break
 		}
@@ -1047,18 +1095,38 @@ func gracefulStopAllWithForceSignal(
 	}
 
 	// Pass 2: kill survivors.
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
 	var survivors []string
+	var cleanupErr error
 	runningSet, listed := runningSessionSet(sp, names)
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
 	for _, name := range names {
+		if !stopEffectAdmitted(budget) {
+			return errors.Join(cleanupErr, errStopCompletionDeadline)
+		}
 		running := false
 		if listed {
 			running = runningSet[name]
 		} else {
 			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
+			}
 		}
 		if !running {
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
+			}
 			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 				fmt.Fprintf(stderr, "cleaning exited agent '%s': %v\n", name, err) //nolint:errcheck // best-effort stderr
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
 			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
@@ -1078,20 +1146,36 @@ func gracefulStopAllWithForceSignal(
 				}
 				template = target.template
 				agentIdentity = target.agentName
-				if cityStopSessionMarked(store.Store, target.sessionID) {
-					markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+				if budget == nil {
+					if cityStopSessionMarked(store.Store, target.sessionID) {
+						markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+					}
+				} else {
+					marked, markerErr := cityStopSessionMarkedWithBudget(store.Store, target.sessionID, budget)
+					if markerErr != nil {
+						cleanupErr = errors.Join(cleanupErr, markerErr)
+					} else if marked {
+						cleanupErr = errors.Join(cleanupErr, markCityStopSessionAsAsleepWithBudget(sessionFrontDoor(store.Store), target.sessionID, stderr, budget))
+					}
 				}
+			}
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
 			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
+			}
 			telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(agentIdentity, template), "graceful-exit", nil)
 			continue
 		}
 		survivors = append(survivors, name)
 	}
-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr)
+	_, stopErr := stopTargetsBoundedWithOwnershipAndBudget(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr, retainEntered, budget)
+	return errors.Join(cleanupErr, stopErr)
 }
 
 func stopForceRequested(forceStopRequested func() bool) bool {

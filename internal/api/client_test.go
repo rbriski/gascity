@@ -718,6 +718,21 @@ func TestClientListCities(t *testing.T) {
 	}
 }
 
+func TestClientListCitiesContextHonorsCallerCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("canceled ListCitiesContext reached the HTTP handler")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewClient(ts.URL).ListCitiesContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListCitiesContext error = %v, want context cancellation", err)
+	}
+}
+
 func TestCityScopedClientRewritesPaths(t *testing.T) {
 	var gotPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

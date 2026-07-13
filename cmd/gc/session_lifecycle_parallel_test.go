@@ -7004,6 +7004,74 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 	}
 }
 
+type legacyStopErrorStore struct {
+	beads.Store
+	getErr error
+	setErr error
+}
+
+func (s *legacyStopErrorStore) Get(id string) (beads.Bead, error) {
+	if s.getErr != nil {
+		return beads.Bead{}, s.getErr
+	}
+	return s.Store.Get(id)
+}
+
+func (s *legacyStopErrorStore) SetMetadataBatch(id string, values map[string]string) error {
+	if s.setErr != nil {
+		return s.setErr
+	}
+	return s.Store.SetMetadataBatch(id, values)
+}
+
+func TestStopTargetThroughWorkerBoundaryLegacyGetErrorFallsThroughToStop(t *testing.T) {
+	wantErr := errors.New("marker read failed")
+	store := &legacyStopErrorStore{Store: beads.NewMemStore(), getErr: wantErr}
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "session-1", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := stopTargetThroughWorkerBoundary(stopTarget{sessionID: "session-1", name: "worker"}, store, provider, &config.City{})
+	if err != nil {
+		t.Fatalf("legacy stop returned marker read error %v; want best-effort fallthrough", err)
+	}
+	if provider.IsRunning("session-1") {
+		t.Fatalf("worker remains running after legacy Get-error fallthrough; calls=%+v", provider.SnapshotCalls())
+	}
+}
+
+func TestStopTargetThroughWorkerBoundaryLegacySleepErrorRemainsBestEffort(t *testing.T) {
+	base := beads.NewMemStore()
+	sessionBead, err := base.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"state":        "active",
+			"sleep_reason": string(sessionpkg.SleepReasonCityStop),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("sleep write failed")
+	store := &legacyStopErrorStore{Store: base, setErr: wantErr}
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = stopTargetThroughWorkerBoundary(stopTarget{sessionID: sessionBead.ID, name: "worker", resolved: true}, store, provider, &config.City{})
+	if err != nil {
+		t.Fatalf("legacy stop returned best-effort sleep error %v", err)
+	}
+	if provider.IsRunning("worker") {
+		t.Fatalf("worker remains running after legacy marked-session kill; calls=%+v", provider.SnapshotCalls())
+	}
+}
+
 func TestClearStaleResumeKeyMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	seed := beads.Bead{

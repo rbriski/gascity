@@ -21,21 +21,33 @@ type hangingProvider struct {
 	mu       sync.Mutex
 	released bool
 	releaseC chan struct{}
+	stopIn   chan string
+	intIn    chan string
 }
 
 func newHangingProvider() *hangingProvider {
 	return &hangingProvider{
 		Fake:     runtime.NewFake(),
 		releaseC: make(chan struct{}),
+		stopIn:   make(chan string, 1),
+		intIn:    make(chan string, 1),
 	}
 }
 
 func (p *hangingProvider) Stop(name string) error {
+	select {
+	case p.stopIn <- name:
+	default:
+	}
 	<-p.releaseC
 	return p.Fake.Stop(name)
 }
 
 func (p *hangingProvider) Interrupt(name string) error {
+	select {
+	case p.intIn <- name:
+	default:
+	}
 	<-p.releaseC
 	return p.Fake.Interrupt(name)
 }

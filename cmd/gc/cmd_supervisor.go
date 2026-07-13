@@ -736,7 +736,11 @@ func supervisorAliveAtPath(sockPath string) int {
 // deadline so a wedged socket cannot stretch the probe beyond the caller's
 // wait budget.
 func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
-	remaining := time.Until(deadline)
+	return supervisorAliveAtPathUntilWithDial(sockPath, deadline, time.Now, net.DialTimeout)
+}
+
+func supervisorAliveAtPathUntilWithDial(sockPath string, deadline time.Time, now func() time.Time, dial func(string, string, time.Duration) (net.Conn, error)) int {
+	remaining := deadline.Sub(now())
 	if remaining <= 0 {
 		return 0
 	}
@@ -744,19 +748,31 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	if dialTimeout > remaining {
 		dialTimeout = remaining
 	}
-	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
+	conn, err := dial("unix", sockPath, dialTimeout)
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()           //nolint:errcheck
-	conn.Write([]byte("ping\n")) //nolint:errcheck
-	readDeadline := time.Now().Add(2 * time.Second)
+	defer conn.Close() //nolint:errcheck
+	if !now().Before(deadline) {
+		return 0
+	}
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return 0
+	}
+	command := []byte("ping\n")
+	n, err := conn.Write(command)
+	if err != nil || n != len(command) {
+		return 0
+	}
+	readDeadline := now().Add(2 * time.Second)
 	if readDeadline.After(deadline) {
 		readDeadline = deadline
 	}
-	conn.SetReadDeadline(readDeadline) //nolint:errcheck
+	if err := conn.SetReadDeadline(readDeadline); err != nil {
+		return 0
+	}
 	buf := make([]byte, 64)
-	n, err := conn.Read(buf)
+	n, err = conn.Read(buf)
 	if err != nil || n == 0 {
 		return 0
 	}

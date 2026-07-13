@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type recordingStopProvider struct {
@@ -43,6 +45,22 @@ func (p *recordingStopProvider) Stop(name string) error {
 func (p *recordingStopProvider) Interrupt(name string) error {
 	p.interrupts <- name
 	return p.Fake.Interrupt(name)
+}
+
+func TestStopCommandTimeoutHelpDescribesCompletionDeadlineAndRetainedOwnership(t *testing.T) {
+	cmd := newStopCmd(io.Discard, io.Discard)
+	for _, want := range []string{"completion deadline/SLO", "not a hard wall-clock cap", "keeps lifecycle ownership"} {
+		if !strings.Contains(cmd.Long, want) {
+			t.Fatalf("Long = %q, want %q", cmd.Long, want)
+		}
+	}
+	if strings.Contains(cmd.Long, "cap the wall-clock time") {
+		t.Fatalf("Long = %q, must not promise a hard wall-clock cap", cmd.Long)
+	}
+	timeoutFlag := cmd.Flags().Lookup("timeout")
+	if timeoutFlag == nil || !strings.Contains(timeoutFlag.Usage, "completion deadline/SLO") {
+		t.Fatalf("--timeout usage = %v, want completion deadline/SLO contract", timeoutFlag)
+	}
 }
 
 func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
@@ -154,7 +172,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 }
 
-func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
+func TestCmdStopCompletionDeadlineRetainsEnteredStop(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
 	cityDir := shortSocketTempDir(t, "gc-stop-timeout-")
@@ -183,44 +201,163 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// cmdStop's wall-clock cap returns 1 while cmdStopBody is still blocked
-	// in hangingProvider.Stop. The body goroutine eventually calls back into
-	// shutdownBeadsProviderForStop; if it does so after another test has
-	// installed its own override, the global state races. Capture the body's
-	// done channel via stopBodyLifecycleHook and wait for it to close in
-	// teardown so the leaked goroutine cannot outlive this test.
 	oldFactory := sessionProviderForStopCity
-	oldHook := stopBodyLifecycleHook
-	var bodyDone <-chan struct{}
-	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
+	oldNow := stopCompletionNow
+	oldPerTargetTimeout := stopPerTargetTimeoutDefault
+	started := time.Date(2026, 7, 13, 7, 0, 0, 0, time.UTC)
+	deadlineExpired := atomic.Bool{}
+	stopCompletionNow = func() time.Time {
+		if deadlineExpired.Load() {
+			return started.Add(101 * time.Millisecond)
+		}
+		return started
+	}
+	stopPerTargetTimeoutDefault = 50 * time.Millisecond
 	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
 		return sp, nil
 	}
 	t.Cleanup(func() {
 		sp.release()
-		if bodyDone != nil {
-			select {
-			case <-bodyDone:
-			case <-time.After(10 * time.Second):
-				t.Errorf("cmdStopBody goroutine did not exit after hangingProvider release")
-			}
-		}
 		sessionProviderForStopCity = oldFactory
-		stopBodyLifecycleHook = oldHook
+		stopCompletionNow = oldNow
+		stopPerTargetTimeoutDefault = oldPerTargetTimeout
 	})
 
 	var stdout, stderr lockedBuffer
-	started := time.Now()
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	stopDone := make(chan int, 1)
+	go func() {
+		stopDone <- cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	}()
+	select {
+	case stopped := <-sp.stopIn:
+		if stopped != sessionName {
+			t.Fatalf("entered Stop(%q), want %q", stopped, sessionName)
+		}
+		deadlineExpired.Store(true)
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop never entered the provider Stop call")
+	}
+	select {
+	case code := <-stopDone:
+		t.Fatalf("cmdStop detached from an entered provider call with code %d", code)
+	case <-time.After(200 * time.Millisecond):
+		// The 100ms completion deadline is expired, but lifecycle ownership stays
+		// joined until the already-entered native call returns.
+	}
+	contender, err := acquireControllerLock(cityDir)
+	if contender != nil {
+		_ = contender.Close()
+	}
+	if !errors.Is(err, errControllerAlreadyRunning) {
+		t.Fatalf("concurrent starter acquired during entered Stop: %v", err)
+	}
+	sp.release()
+	var code int
+	select {
+	case code = <-stopDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop did not return after the entered provider call completed")
+	}
 	if code != 1 {
-		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdStop() = %d, want deadline code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("cmdStop returned after %s, want wall-clock cap near 100ms", elapsed)
+	if !strings.Contains(stderr.String(), "completion deadline") {
+		t.Fatalf("stderr = %q, want completion deadline message", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "timed out after 100ms") {
-		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
+	reacquired, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatalf("stop lease not released after joined Stop returned: %v", err)
 	}
+	_ = reacquired.Close()
+}
+
+func TestCmdStopCompletionDeadlineRetainsEnteredInterrupt(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	cityDir := shortSocketTempDir(t, "gc-stop-interrupt-deadline-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "interrupt-deadline-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "50ms"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newHangingProvider()
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	oldNow := stopCompletionNow
+	oldMargin := interruptPerTargetTimeoutMargin
+	started := time.Date(2026, 7, 13, 7, 30, 0, 0, time.UTC)
+	deadlineExpired := atomic.Bool{}
+	stopCompletionNow = func() time.Time {
+		if deadlineExpired.Load() {
+			return started.Add(101 * time.Millisecond)
+		}
+		return started
+	}
+	interruptPerTargetTimeoutMargin = 0
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	t.Cleanup(func() {
+		sp.release()
+		sessionProviderForStopCity = oldFactory
+		stopCompletionNow = oldNow
+		interruptPerTargetTimeoutMargin = oldMargin
+	})
+
+	var stdout, stderr lockedBuffer
+	stopDone := make(chan int, 1)
+	go func() { stopDone <- cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false) }()
+	select {
+	case interrupted := <-sp.intIn:
+		if interrupted != sessionName {
+			t.Fatalf("entered Interrupt(%q), want %q", interrupted, sessionName)
+		}
+		deadlineExpired.Store(true)
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop never entered the provider Interrupt call")
+	}
+	select {
+	case code := <-stopDone:
+		t.Fatalf("cmdStop detached from an entered Interrupt with code %d", code)
+	case <-time.After(100 * time.Millisecond):
+		// Past both the fake outer deadline and the 50ms per-target cap.
+	}
+	contender, err := acquireControllerLock(cityDir)
+	if contender != nil {
+		_ = contender.Close()
+	}
+	if !errors.Is(err, errControllerAlreadyRunning) {
+		t.Fatalf("concurrent starter acquired during entered Interrupt: %v", err)
+	}
+	sp.release()
+	select {
+	case code := <-stopDone:
+		if code != 1 {
+			t.Fatalf("cmdStop = %d, want deadline failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop did not return after the entered Interrupt completed")
+	}
+	if !strings.Contains(stderr.String(), "completion deadline") {
+		t.Fatalf("stderr = %q, want completion deadline message", stderr.String())
+	}
+	reacquired, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatalf("stop lease not released after joined Interrupt returned: %v", err)
+	}
+	_ = reacquired.Close()
 }
 
 func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
@@ -805,7 +942,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 }
 
-func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testing.T) {
+func TestCmdStopSupervisorManagedInvalidCityTomlDoesNotRepeatManagedShutdown(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	gcHome := os.Getenv("GC_HOME")
@@ -826,21 +963,23 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
 		return nil
 	}
+	shutdownCalls := 0
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		shutdownCalls++
 		assertSameTestPath(t, path, cityDir)
-		return fmt.Errorf("provider-stop-failed")
+		return errors.New("CLI must not repeat managed provider shutdown")
 	})
 
 	var stdout, stderr lockedBuffer
 	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
-	if code != 1 {
-		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout = %q, did not want success message", stdout.String())
+	if shutdownCalls != 0 {
+		t.Fatalf("CLI-side provider shutdown calls = %d, want zero after managed cleanup", shutdownCalls)
 	}
-	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
-		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, want managed stop success", stdout.String())
 	}
 }
 
@@ -1010,12 +1149,12 @@ func TestStopCityManagedBeadsProviderUsesProviderStateWhenPublishedStateIsMissin
 		return nil
 	})
 
-	stopped, err := stopCityManagedBeadsProvider(cityDir)
+	stopped, err := stopCityManagedBeadsProviderWithHeldOwnership(cityDir)
 	if err != nil {
-		t.Fatalf("stopCityManagedBeadsProvider() error = %v", err)
+		t.Fatalf("stopCityManagedBeadsProviderWithHeldOwnership() error = %v", err)
 	}
 	if !stopped {
-		t.Fatal("stopCityManagedBeadsProvider() stopped = false, want true")
+		t.Fatal("stopCityManagedBeadsProviderWithHeldOwnership() stopped = false, want true")
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
@@ -1147,7 +1286,7 @@ func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T
 	}
 }
 
-func TestStopCityManagedBeadsProviderAfterSuccessfulStopStopsDefaultBD(t *testing.T) {
+func TestStopCityManagedBeadsProviderWithHeldOwnershipStopsDefaultBD(t *testing.T) {
 	skipSlowCmdGCTest(t, "exercises managed bd provider shutdown; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
@@ -1189,12 +1328,12 @@ func TestStopCityManagedBeadsProviderAfterSuccessfulStopStopsDefaultBD(t *testin
 		t.Fatal(err)
 	}
 
-	var stderr lockedBuffer
-	if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityDir, &stderr) {
-		t.Fatalf("stopCityManagedBeadsProviderAfterSuccessfulStop returned false; stderr=%q", stderr.String())
+	stopped, err := stopCityManagedBeadsProviderWithHeldOwnership(cityDir)
+	if err != nil {
+		t.Fatalf("stopCityManagedBeadsProviderWithHeldOwnership: %v", err)
 	}
-	if stderr.String() != "" {
-		t.Fatalf("unexpected stderr: %q", stderr.String())
+	if !stopped {
+		t.Fatal("stopCityManagedBeadsProviderWithHeldOwnership stopped = false, want true")
 	}
 	ops := readOpLog(t, logFile)
 	if len(ops) != 1 || ops[0] != "stop" {

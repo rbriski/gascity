@@ -2425,6 +2425,9 @@
           },
           {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/WorktreeDriftStalledPayload"
           }
         ]
       },
@@ -8697,7 +8700,8 @@
             "supervisor.started": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected",
-            "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
+            "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation",
+            "worktree.drift_stalled": "#/components/schemas/TypedEventStreamEnvelopeWorktreeDriftStalled"
           },
           "propertyName": "type"
         },
@@ -8923,6 +8927,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorktreeDriftStalled"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCustom"
@@ -9853,7 +9860,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "worktree.drift_stalled"
               ]
             },
             "type": "string"
@@ -12830,6 +12838,57 @@
         "title": "TypedEventStreamEnvelope worker.operation",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWorktreeDriftStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorktreeDriftStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "worktree.drift_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope worktree.drift_stalled",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelope": {
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
@@ -12907,7 +12966,8 @@
             "supervisor.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected",
-            "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
+            "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation",
+            "worktree.drift_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorktreeDriftStalled"
           },
           "propertyName": "type"
         },
@@ -13133,6 +13193,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorktreeDriftStalled"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCustom"
@@ -14130,7 +14193,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "worktree.drift_stalled"
               ]
             },
             "type": "string"
@@ -17340,6 +17404,61 @@
         "title": "TypedTaggedEventStreamEnvelope worker.operation",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeWorktreeDriftStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorktreeDriftStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "worktree.drift_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope worktree.drift_stalled",
+        "type": "object"
+      },
       "UnboundEventPayload": {
         "additionalProperties": false,
         "properties": {
@@ -18051,6 +18170,48 @@
         "required": [
           "name",
           "suspended"
+        ],
+        "type": "object"
+      },
+      "WorktreeDriftStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "ahead_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "behind_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "detached": {
+            "type": "boolean"
+          },
+          "elapsed_s": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "first_observed_at": {
+            "type": "string"
+          },
+          "identity": {
+            "type": "string"
+          },
+          "worktree_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "worktree_path",
+          "detached",
+          "ahead_count",
+          "behind_count",
+          "first_observed_at",
+          "elapsed_s"
         ],
         "type": "object"
       }

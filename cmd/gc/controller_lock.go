@@ -138,21 +138,52 @@ func acquireControllerLockForStop(cityPath string, result controllerStopResult) 
 }
 
 func acquireControllerLockForStopWithOps(cityPath string, result controllerStopResult, ops controllerLockWaitOps) (*controllerLockLease, error) {
+	return acquireControllerLockForStopUntilWithOps(cityPath, result, time.Time{}, ops)
+}
+
+func acquireControllerLockForStopUntilWithOps(cityPath string, result controllerStopResult, deadline time.Time, ops controllerLockWaitOps) (*controllerLockLease, error) {
 	if result.outcome != controllerStopDefinitePreEntryUnavailable {
 		return nil, fmt.Errorf("%w: direct acquire requires definite pre-entry result, got %s", errControllerStopOwnershipUnproven, result.outcome)
 	}
+	checkDeadline := func() error {
+		if !deadline.IsZero() && !ops.now().Before(deadline) {
+			return errControllerLockWaitTimeout
+		}
+		return nil
+	}
+	if err := checkDeadline(); err != nil {
+		return nil, err
+	}
 	if err := validateControllerStopSocketWitness(cityPath, result, ops.stat); err != nil {
+		return nil, err
+	}
+	if err := checkDeadline(); err != nil {
 		return nil, err
 	}
 	lease, err := ops.acquire(cityPath)
 	if err != nil {
 		return nil, err
 	}
+	if lease == nil {
+		return nil, fmt.Errorf("%w: controller lock acquisition returned no lease", errControllerStopOwnershipUnproven)
+	}
+	if err := checkDeadline(); err != nil {
+		_ = lease.Close()
+		return nil, err
+	}
 	if err := validateControllerStopSocketWitness(cityPath, result, ops.stat); err != nil {
 		_ = lease.Close()
 		return nil, err
 	}
+	if err := checkDeadline(); err != nil {
+		_ = lease.Close()
+		return nil, err
+	}
 	if err := removeControllerSocketIfSame(result.socketPath, result.socketInfo); err != nil {
+		_ = lease.Close()
+		return nil, err
+	}
+	if err := checkDeadline(); err != nil {
 		_ = lease.Close()
 		return nil, err
 	}
@@ -170,29 +201,65 @@ func waitForControllerExitAndAcquireWithOps(cityPath string, result controllerSt
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	deadline := ops.now().Add(timeout)
+	return waitForControllerExitAndAcquireUntilWithOps(cityPath, result, ops.now().Add(timeout), timeout, ops)
+}
+
+func waitForControllerExitAndAcquireUntilWithOps(cityPath string, result controllerStopResult, deadline time.Time, timeoutLabel time.Duration, ops controllerLockWaitOps) (*controllerLockLease, error) {
+	if result.outcome != controllerStopAcknowledged || result.err != nil {
+		return nil, fmt.Errorf("%w: acknowledged wait requires an error-free acknowledgement", errControllerStopOwnershipUnproven)
+	}
+	if deadline.IsZero() || !ops.now().Before(deadline) {
+		return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
+	}
 	for {
+		if !ops.now().Before(deadline) {
+			return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
+		}
 		if err := validateControllerStopSocketWitness(cityPath, result, ops.stat); err != nil {
 			return nil, err
+		}
+		if !ops.now().Before(deadline) {
+			return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
 		}
 		lease, err := ops.acquire(cityPath)
 		switch {
 		case err == nil:
+			if lease == nil {
+				return nil, fmt.Errorf("%w: controller lock acquisition returned no lease", errControllerStopOwnershipUnproven)
+			}
+			if !ops.now().Before(deadline) {
+				_ = lease.Close()
+				return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
+			}
 			if err := validateControllerStopSocketWitness(cityPath, result, ops.stat); err != nil {
 				_ = lease.Close()
 				return nil, err
+			}
+			if !ops.now().Before(deadline) {
+				_ = lease.Close()
+				return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
 			}
 			if err := removeControllerSocketIfSame(result.socketPath, result.socketInfo); err != nil {
 				_ = lease.Close()
 				return nil, err
 			}
+			if !ops.now().Before(deadline) {
+				_ = lease.Close()
+				return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
+			}
 			return lease, nil
 		case !errors.Is(err, errControllerAlreadyRunning):
 			return nil, fmt.Errorf("acquiring controller ownership: %w", err)
-		case !ops.now().Before(deadline):
-			return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeout)
 		default:
-			ops.retry(ops.interval)
+			remaining := deadline.Sub(ops.now())
+			if remaining <= 0 {
+				return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
+			}
+			retry := ops.interval
+			if retry <= 0 || retry > remaining {
+				retry = remaining
+			}
+			ops.retry(retry)
 		}
 	}
 }
@@ -205,17 +272,41 @@ func waitForSupervisorControllerOwnershipWithOps(cityPath string, timeout time.D
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	deadline := ops.now().Add(timeout)
+	return waitForSupervisorControllerOwnershipUntilWithOps(cityPath, ops.now().Add(timeout), timeout, ops)
+}
+
+func waitForSupervisorControllerOwnershipUntil(cityPath string, deadline time.Time, timeoutLabel time.Duration) (*controllerLockLease, error) {
+	return waitForSupervisorControllerOwnershipUntilWithOps(cityPath, deadline, timeoutLabel, defaultControllerLockWaitOps())
+}
+
+func waitForSupervisorControllerOwnershipUntilWithOps(cityPath string, deadline time.Time, timeoutLabel time.Duration, ops controllerLockWaitOps) (*controllerLockLease, error) {
+	timedOut := func() error {
+		return fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeoutLabel)
+	}
+	if deadline.IsZero() || !ops.now().Before(deadline) {
+		return nil, timedOut()
+	}
 	for {
+		if !ops.now().Before(deadline) {
+			return nil, timedOut()
+		}
 		lease, err := ops.acquire(cityPath)
 		switch {
 		case err == nil:
 			if lease == nil {
 				return nil, fmt.Errorf("%w: lock acquisition returned no lease", errControllerStopOwnershipUnproven)
 			}
+			if !ops.now().Before(deadline) {
+				_ = lease.Close()
+				return nil, timedOut()
+			}
 			_, statErr := ops.stat(controllerSocketPath(cityPath))
 			switch {
 			case errors.Is(statErr, os.ErrNotExist):
+				if !ops.now().Before(deadline) {
+					_ = lease.Close()
+					return nil, timedOut()
+				}
 				return lease, nil
 			case statErr != nil:
 				_ = lease.Close()
@@ -227,9 +318,17 @@ func waitForSupervisorControllerOwnershipWithOps(cityPath string, timeout time.D
 		case !errors.Is(err, errControllerAlreadyRunning):
 			return nil, fmt.Errorf("acquiring supervisor controller ownership: %w", err)
 		case !ops.now().Before(deadline):
-			return nil, fmt.Errorf("%w after %s", errControllerLockWaitTimeout, timeout)
+			return nil, timedOut()
 		default:
-			ops.retry(ops.interval)
+			remaining := deadline.Sub(ops.now())
+			if remaining <= 0 {
+				return nil, timedOut()
+			}
+			retry := ops.interval
+			if retry <= 0 || retry > remaining {
+				retry = remaining
+			}
+			ops.retry(retry)
 		}
 	}
 }

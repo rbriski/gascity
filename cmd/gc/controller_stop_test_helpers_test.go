@@ -9,8 +9,15 @@ import (
 
 // cmdStopBody keeps focused direct-stop tests concise while ensuring the
 // production entry point always classifies before loading full config.
+//
+//nolint:unparam // force remains explicit so this helper mirrors both production stop request variants.
 func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
-	return cmdStopBodyWithResult(cityPath, cfg, force, controllerStopRequestForCommand(cityPath, force), stdout, stderr)
+	result := controllerStopRequestForCommand(cityPath, force)
+	code := cmdStopBodyWithHeldOwnership(cityPath, cfg, force, result, stdout, stderr, nil)
+	if code == 0 {
+		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // test-only legacy projection
+	}
+	return code
 }
 
 func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {

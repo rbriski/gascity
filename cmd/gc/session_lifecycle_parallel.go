@@ -2790,7 +2790,7 @@ func executeTargetWave(
 	perTargetTimeout time.Duration,
 	run func(stopTarget) error,
 ) []stopResult {
-	return executeTargetWaveUntil(targets, maxParallel, perTargetTimeout, nil, run)
+	return executeTargetWaveWithOwnership(targets, maxParallel, perTargetTimeout, nil, false, run)
 }
 
 func executeTargetWaveUntil(
@@ -2798,6 +2798,26 @@ func executeTargetWaveUntil(
 	maxParallel int,
 	perTargetTimeout time.Duration,
 	shouldStop func() bool,
+	run func(stopTarget) error,
+) []stopResult {
+	return executeTargetWaveWithOwnership(targets, maxParallel, perTargetTimeout, shouldStop, false, run)
+}
+
+func executeTargetWaveRetainingEntered(
+	targets []stopTarget,
+	maxParallel int,
+	perTargetTimeout time.Duration,
+	run func(stopTarget) error,
+) []stopResult {
+	return executeTargetWaveWithOwnership(targets, maxParallel, perTargetTimeout, nil, true, run)
+}
+
+func executeTargetWaveWithOwnership(
+	targets []stopTarget,
+	maxParallel int,
+	perTargetTimeout time.Duration,
+	shouldStop func() bool,
+	retainEntered bool,
 	run func(stopTarget) error,
 ) []stopResult {
 	if len(targets) == 0 {
@@ -2884,26 +2904,32 @@ launchLoop:
 				select {
 				case rr = <-inner:
 				case <-time.After(perTargetTimeout):
-					rr = runResult{
-						err:      fmt.Errorf("target lifecycle op did not return within %s", perTargetTimeout),
-						finished: time.Now(),
-						outcome:  "timed_out",
+					timeoutErr := fmt.Errorf("target lifecycle op did not return within %s", perTargetTimeout)
+					if retainEntered {
+						actual := <-inner
+						rr = runResult{err: errors.Join(timeoutErr, actual.err), finished: actual.finished, outcome: "timed_out"}
+					} else {
+						rr = runResult{err: timeoutErr, finished: time.Now(), outcome: "timed_out"}
 					}
 				case <-stopCh:
-					rr = runResult{
-						err:      errors.New("target lifecycle op abandoned after force request"),
-						finished: time.Now(),
-						outcome:  "force_requested",
+					forceErr := errors.New("target lifecycle op abandoned after force request")
+					if retainEntered {
+						actual := <-inner
+						rr = runResult{err: errors.Join(forceErr, actual.err), finished: actual.finished, outcome: "force_requested"}
+					} else {
+						rr = runResult{err: forceErr, finished: time.Now(), outcome: "force_requested"}
 					}
 				}
 			} else {
 				select {
 				case rr = <-inner:
 				case <-stopCh:
-					rr = runResult{
-						err:      errors.New("target lifecycle op abandoned after force request"),
-						finished: time.Now(),
-						outcome:  "force_requested",
+					forceErr := errors.New("target lifecycle op abandoned after force request")
+					if retainEntered {
+						actual := <-inner
+						rr = runResult{err: errors.Join(forceErr, actual.err), finished: actual.finished, outcome: "force_requested"}
+					} else {
+						rr = runResult{err: forceErr, finished: time.Now(), outcome: "force_requested"}
 					}
 				}
 			}
@@ -3044,6 +3070,37 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 	return targets
 }
 
+type stopCompletionListStore struct {
+	beads.Store
+	budget *stopCompletionBudget
+}
+
+func (s stopCompletionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !stopEffectAdmitted(s.budget) {
+		return nil, errStopCompletionDeadline
+	}
+	rows, err := s.Store.List(query)
+	if !stopEffectAdmitted(s.budget) {
+		return rows, errors.Join(err, errStopCompletionDeadline)
+	}
+	return rows, err
+}
+
+func stopTargetsForNamesWithBudget(names []string, cfg *config.City, store beads.Store, stderr io.Writer, budget *stopCompletionBudget) ([]stopTarget, error) {
+	if !stopEffectAdmitted(budget) {
+		return nil, errStopCompletionDeadline
+	}
+	readStore := store
+	if store != nil && budget != nil {
+		readStore = stopCompletionListStore{Store: store, budget: budget}
+	}
+	targets := stopTargetsForNames(names, cfg, readStore, stderr)
+	if !stopEffectAdmitted(budget) {
+		return targets, errStopCompletionDeadline
+	}
+	return targets, nil
+}
+
 func shouldLogStopOutcome(target stopTarget, cfg *config.City) bool {
 	if cfg != nil {
 		return true
@@ -3114,6 +3171,21 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 	return merged
 }
 
+func hydrateStopTargetsWithBudget(targets []stopTarget, cfg *config.City, store beads.Store, stderr io.Writer, budget *stopCompletionBudget) ([]stopTarget, error) {
+	if !stopEffectAdmitted(budget) {
+		return targets, errStopCompletionDeadline
+	}
+	readStore := store
+	if store != nil && budget != nil {
+		readStore = stopCompletionListStore{Store: store, budget: budget}
+	}
+	targets = hydrateStopTargets(targets, cfg, readStore, stderr)
+	if !stopEffectAdmitted(budget) {
+		return targets, errStopCompletionDeadline
+	}
+	return targets, nil
+}
+
 func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
 	targetID := strings.TrimSpace(target.sessionID)
 	if targetID == "" {
@@ -3129,24 +3201,92 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
 }
 
+func stopTargetThroughWorkerBoundaryWithBudget(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City, budget *stopCompletionBudget) error {
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
+	targetID := strings.TrimSpace(target.sessionID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(target.name)
+	}
+	marked, err := cityStopSessionMarkedWithBudget(store, target.sessionID, budget)
+	if err != nil {
+		return err
+	}
+	if marked {
+		if !stopEffectAdmitted(budget) {
+			return errStopCompletionDeadline
+		}
+		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+			return err
+		}
+		if !stopEffectAdmitted(budget) {
+			return errStopCompletionDeadline
+		}
+		return markCityStopSessionAsAsleepWithBudget(sessionFrontDoor(store), target.sessionID, nil, budget)
+	}
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
+	if err := workerStopSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+		return err
+	}
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
+	return nil
+}
+
+func stopTargetThroughWorkerBoundaryForBudget(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City, budget *stopCompletionBudget) error {
+	if budget == nil {
+		return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+	}
+	return stopTargetThroughWorkerBoundaryWithBudget(target, store, sp, cfg, budget)
+}
+
 func cityStopSessionMarked(store beads.Store, sessionID string) bool {
+	marked, _ := cityStopSessionMarkedWithBudget(store, sessionID, nil)
+	return marked
+}
+
+func cityStopSessionMarkedWithBudget(store beads.Store, sessionID string, budget *stopCompletionBudget) (bool, error) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
-		return false
+		return false, nil
+	}
+	if !stopEffectAdmitted(budget) {
+		return false, errStopCompletionDeadline
 	}
 	b, err := store.Get(sessionID)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return strings.TrimSpace(b.Metadata["sleep_reason"]) == string(sessionpkg.SleepReasonCityStop)
+	if !stopEffectAdmitted(budget) {
+		return false, errStopCompletionDeadline
+	}
+	return strings.TrimSpace(b.Metadata["sleep_reason"]) == string(sessionpkg.SleepReasonCityStop), nil
 }
 
 func markCityStopSessionAsAsleep(sessFront *sessionpkg.Store, sessionID string, stderr io.Writer) {
+	_ = markCityStopSessionAsAsleepWithBudget(sessFront, sessionID, stderr, nil)
+}
+
+func markCityStopSessionAsAsleepWithBudget(sessFront *sessionpkg.Store, sessionID string, stderr io.Writer, budget *stopCompletionBudget) error {
 	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
-		return
+		return nil
 	}
-	if err := sessFront.Sleep(sessionID, string(sessionpkg.SleepReasonCityStop), time.Now().UTC()); err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
 	}
+	if err := sessFront.Sleep(sessionID, string(sessionpkg.SleepReasonCityStop), time.Now().UTC()); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
+		}
+		return err
+	}
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
+	return nil
 }
 
 // interruptPerTargetTimeout returns the wall-clock cap an interrupt-wave
@@ -3165,11 +3305,30 @@ func interruptPerTargetTimeout(cfg *config.City) time.Duration {
 }
 
 func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
-	return interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, nil)
+	return interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, nil, false, nil)
 }
 
 func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
-	targets = hydrateStopTargets(targets, cfg, store, stderr)
+	return interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, shouldStop, false, nil)
+}
+
+func interruptTargetsBoundedRetainingEnteredWithBudget(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, budget *stopCompletionBudget) int {
+	return interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, nil, true, budget)
+}
+
+func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool, retainEntered bool, budget *stopCompletionBudget) int {
+	if !stopEffectAdmitted(budget) {
+		return 0
+	}
+	var err error
+	targets, err = hydrateStopTargetsWithBudget(targets, cfg, store, stderr, budget)
+	if err != nil {
+		return 0
+	}
+	execute := executeTargetWave
+	if retainEntered {
+		execute = executeTargetWaveRetainingEntered
+	}
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
 	// them forever. Stop them immediately instead of interrupting —
@@ -3186,8 +3345,8 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 
 	if len(poolManaged) > 0 {
 		waveStarted := time.Now()
-		results := executeTargetWave(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
-			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+		results := execute(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+			return stopTargetThroughWorkerBoundaryForBudget(target, store, sp, cfg, budget)
 		})
 		for _, result := range results {
 			outcome := result.outcome
@@ -3204,13 +3363,28 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 		return sent
 	}
 	waveStarted := time.Now()
-	results := executeTargetWaveUntil(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), shouldStop, func(target stopTarget) error {
+	runInterrupt := func(target stopTarget) error {
+		if !stopEffectAdmitted(budget) {
+			return errStopCompletionDeadline
+		}
 		targetID := strings.TrimSpace(target.sessionID)
 		if targetID == "" {
 			targetID = strings.TrimSpace(target.name)
 		}
-		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID)
-	})
+		if err := workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+			return err
+		}
+		if !stopEffectAdmitted(budget) {
+			return errStopCompletionDeadline
+		}
+		return nil
+	}
+	var results []stopResult
+	if retainEntered {
+		results = executeTargetWaveRetainingEntered(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), runInterrupt)
+	} else {
+		results = executeTargetWaveUntil(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), shouldStop, runInterrupt)
+	}
 	for _, result := range results {
 		logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 		if result.err == nil {
@@ -3234,7 +3408,34 @@ func stopTargetsBounded(
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
-	targets = hydrateStopTargets(targets, cfg, store, stderr)
+	stopped, _ := stopTargetsBoundedWithOwnershipAndBudget(targets, cfg, store, sp, rec, actor, stdout, stderr, false, nil)
+	return stopped
+}
+
+func stopTargetsBoundedWithOwnershipAndBudget(
+	targets []stopTarget,
+	cfg *config.City,
+	store beads.Store,
+	sp runtime.Provider,
+	rec events.Recorder,
+	actor string,
+	stdout, stderr io.Writer,
+	retainEntered bool,
+	budget *stopCompletionBudget,
+) (int, error) {
+	if !stopEffectAdmitted(budget) {
+		return 0, errStopCompletionDeadline
+	}
+	var err error
+	targets, err = hydrateStopTargetsWithBudget(targets, cfg, store, stderr, budget)
+	if err != nil {
+		return 0, err
+	}
+	execute := executeTargetWave
+	if retainEntered {
+		execute = executeTargetWaveRetainingEntered
+	}
+	var stopErr error
 	for _, target := range targets {
 		if !target.resolved {
 			if cfg != nil {
@@ -3242,30 +3443,46 @@ func stopTargetsBounded(
 			}
 			stopped := 0
 			for wave, target := range targets {
+				if !stopEffectAdmitted(budget) {
+					return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+				}
 				waveStarted := time.Now()
-				results := executeTargetWave([]stopTarget{target}, 1, stopPerTargetTimeoutDefault, func(target stopTarget) error {
-					return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+				results := execute([]stopTarget{target}, 1, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+					return stopTargetThroughWorkerBoundaryForBudget(target, store, sp, cfg, budget)
 				})
 				for _, result := range results {
+					if result.err == nil && !stopEffectAdmitted(budget) {
+						result.err = errStopCompletionDeadline
+					}
 					if shouldLogStopOutcome(result.target, cfg) {
 						logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 					}
 					if result.err != nil {
 						fmt.Fprintf(stderr, "gc stop: stopping %s: %s\n", result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
+						stopErr = errors.Join(stopErr, result.err)
 						continue
 					}
+					if !stopEffectAdmitted(budget) {
+						return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+					}
 					fmt.Fprintf(stdout, "Stopped agent '%s'\n", result.target.name) //nolint:errcheck
-					stopped++
+					if !stopEffectAdmitted(budget) {
+						return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+					}
 					rec.Record(events.Event{
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 						SessionID: result.target.lifecycleCorrelationID(),
 						Payload:   api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
+					if !stopEffectAdmitted(budget) {
+						return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+					}
 					telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
+					stopped++
 				}
 				logLifecycleWave(stderr, "stop", wave, waveStarted, 1)
 			}
-			return stopped
+			return stopped, stopErr
 		}
 	}
 
@@ -3281,6 +3498,9 @@ func stopTargetsBounded(
 	}
 	stopped := 0
 	for wave := 0; wave <= maxWave; wave++ {
+		if !stopEffectAdmitted(budget) {
+			return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+		}
 		waveStarted := time.Now()
 		var waveTargets []stopTarget
 		for idx, target := range targets {
@@ -3288,29 +3508,42 @@ func stopTargetsBounded(
 				waveTargets = append(waveTargets, target)
 			}
 		}
-		results := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
-			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+		results := execute(waveTargets, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+			return stopTargetThroughWorkerBoundaryForBudget(target, store, sp, cfg, budget)
 		})
 		for _, result := range results {
+			if result.err == nil && !stopEffectAdmitted(budget) {
+				result.err = errStopCompletionDeadline
+			}
 			if shouldLogStopOutcome(result.target, cfg) {
 				logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 			}
 			if result.err != nil {
 				fmt.Fprintf(stderr, "gc stop: stopping %s: %s\n", result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
+				stopErr = errors.Join(stopErr, result.err)
 				continue
 			}
+			if !stopEffectAdmitted(budget) {
+				return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+			}
 			fmt.Fprintf(stdout, "Stopped agent '%s'\n", result.target.name) //nolint:errcheck
-			stopped++
+			if !stopEffectAdmitted(budget) {
+				return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 				SessionID: result.target.lifecycleCorrelationID(),
 				Payload:   api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
+			if !stopEffectAdmitted(budget) {
+				return stopped, errors.Join(stopErr, errStopCompletionDeadline)
+			}
 			telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
+			stopped++
 		}
 		logLifecycleWave(stderr, "stop", wave, waveStarted, len(waveTargets))
 	}
-	return stopped
+	return stopped, stopErr
 }
 
 func stopSessionsBounded(

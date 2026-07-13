@@ -188,6 +188,49 @@ func TestControllerLocksRemainScopedToCityPath(t *testing.T) {
 	defer leaseB.Close() //nolint:errcheck
 }
 
+func TestWaitForControllerExitAndAcquireUntilUsesOriginalDeadline(t *testing.T) {
+	cityPath := t.TempDir()
+	started := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	now := started
+	deadline := started.Add(75 * time.Millisecond)
+	result := controllerStopResult{
+		outcome:    controllerStopAcknowledged,
+		socketPath: controllerSocketPath(cityPath),
+		socketInfo: statFixtureInfo(t, "absolute-lock-deadline"),
+	}
+	var retries []time.Duration
+	acquireCalls := 0
+	ops := defaultControllerLockWaitOps()
+	ops.now = func() time.Time { return now }
+	ops.stat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	ops.acquire = func(string) (*controllerLockLease, error) {
+		acquireCalls++
+		return nil, errControllerAlreadyRunning
+	}
+	ops.retry = func(delay time.Duration) {
+		retries = append(retries, delay)
+		now = now.Add(delay)
+	}
+	ops.interval = 50 * time.Millisecond
+
+	lease, err := waitForControllerExitAndAcquireUntilWithOps(cityPath, result, deadline, 75*time.Millisecond, ops)
+	if lease != nil || !errors.Is(err, errControllerLockWaitTimeout) {
+		t.Fatalf("wait result = (%v, %v), want absolute-deadline timeout", lease, err)
+	}
+	if acquireCalls != 2 {
+		t.Fatalf("acquire calls = %d, want two attempts before the deadline", acquireCalls)
+	}
+	wantRetries := []time.Duration{50 * time.Millisecond, 25 * time.Millisecond}
+	if len(retries) != len(wantRetries) {
+		t.Fatalf("retry delays = %v, want %v", retries, wantRetries)
+	}
+	for i := range wantRetries {
+		if retries[i] != wantRetries[i] {
+			t.Fatalf("retry delays = %v, want %v", retries, wantRetries)
+		}
+	}
+}
+
 func TestAcquireControllerLockForStopRequiresFreeValidatedOwnership(t *testing.T) {
 	cityPath := t.TempDir()
 	result := controllerStopResult{
@@ -628,6 +671,43 @@ func TestWaitForSupervisorControllerOwnershipWaitsThenReturnsHeldLease(t *testin
 		t.Fatalf("wait returned without retaining lease: %v", err)
 	}
 	_ = lease.Close()
+}
+
+func TestWaitForSupervisorControllerOwnershipUntilUsesOriginalDeadline(t *testing.T) {
+	cityPath := t.TempDir()
+	started := time.Date(2026, 7, 13, 14, 0, 0, 0, time.UTC)
+	now := started
+	deadline := started.Add(75 * time.Millisecond)
+	var retries []time.Duration
+	acquireCalls := 0
+	ops := defaultControllerLockWaitOps()
+	ops.now = func() time.Time { return now }
+	ops.acquire = func(string) (*controllerLockLease, error) {
+		acquireCalls++
+		return nil, errControllerAlreadyRunning
+	}
+	ops.retry = func(delay time.Duration) {
+		retries = append(retries, delay)
+		now = now.Add(delay)
+	}
+	ops.interval = 50 * time.Millisecond
+
+	lease, err := waitForSupervisorControllerOwnershipUntilWithOps(cityPath, deadline, 75*time.Millisecond, ops)
+	if lease != nil || !errors.Is(err, errControllerLockWaitTimeout) {
+		t.Fatalf("wait result = (%v, %v), want absolute-deadline timeout", lease, err)
+	}
+	if acquireCalls != 2 {
+		t.Fatalf("acquire calls = %d, want two attempts before the deadline", acquireCalls)
+	}
+	wantRetries := []time.Duration{50 * time.Millisecond, 25 * time.Millisecond}
+	if len(retries) != len(wantRetries) {
+		t.Fatalf("retry delays = %v, want %v", retries, wantRetries)
+	}
+	for i := range wantRetries {
+		if retries[i] != wantRetries[i] {
+			t.Fatalf("retry delays = %v, want %v", retries, wantRetries)
+		}
+	}
 }
 
 func TestWaitForSupervisorControllerOwnershipRejectsUnwitnessedSocket(t *testing.T) {

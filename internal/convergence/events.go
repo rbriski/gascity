@@ -21,8 +21,15 @@ const (
 
 // Event delivery tiers.
 const (
-	// TierCritical events use at-least-once delivery (emitted before commit
-	// point, re-emitted on replay). Iteration and Terminated events.
+	// TierCritical marks replay-important iteration and termination events.
+	// Nonterminal iteration attempts may be emitted before their trailing dedup
+	// marker so a discoverable replay can re-attempt them. Terminal iteration
+	// and Terminated events are emitted only after state, root close, and the
+	// applicable marker are durable. This package derives stable logical event
+	// IDs for deterministic re-emission, but the current cmd/gc recorder adapter
+	// does not persist those IDs on the event wire, so this pre-G0 slice makes no
+	// consumer-deduplication claim. Delivery remains bounded by the recorder's
+	// real best-effort contract; this package does not imply an outbox.
 	TierCritical = "critical"
 
 	// TierRecoverable events use best-effort with reconciliation.
@@ -123,7 +130,7 @@ type IterationPayload struct {
 // TerminatedPayload is the structured payload for ConvergenceTerminated events.
 type TerminatedPayload struct {
 	Rig                  string `json:"rig,omitempty"`
-	TerminalReason       string `json:"terminal_reason"` // approved|no_convergence|stopped
+	TerminalReason       string `json:"terminal_reason"` // approved|no_convergence|stopped|partial_creation
 	TotalIterations      int    `json:"total_iterations"`
 	FinalStatus          string `json:"final_status"` // always "closed"
 	Actor                string `json:"actor"`        // controller or operator:<username>

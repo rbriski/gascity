@@ -2,6 +2,7 @@ package convergence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -98,8 +99,12 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		closeReason = CloseReasonRetryRollback
 	}
 	closeBead := func(cause error) error {
-		_ = h.Store.SetMetadata(beadID, FieldState, StateTerminated)
-		_ = h.Store.CloseBead(beadID, closeReason)
+		if err := h.Store.SetMetadata(beadID, FieldState, StateTerminated); err != nil {
+			return errors.Join(cause, fmt.Errorf("setting state to terminated during rollback: %w", err))
+		}
+		if err := h.Store.CloseBead(beadID, closeReason); err != nil {
+			return errors.Join(cause, fmt.Errorf("closing bead during rollback: %w", err))
+		}
 		return cause
 	}
 

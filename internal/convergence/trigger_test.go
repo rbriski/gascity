@@ -260,6 +260,51 @@ func TestHandleTrigger_IterationGateAdvance(t *testing.T) {
 	}
 }
 
+func TestHandleTrigger_ClosedExistingSuccessorUsesExistingTickOwner(t *testing.T) {
+	handler, store, emitter := setupTriggerHandler(t, writeTriggerScript(t, 0), map[string]string{
+		FieldIteration:         "1",
+		FieldLastProcessedWisp: "wisp-iter-1",
+		FieldGateOutcomeWisp:   "wisp-iter-2",
+		FieldGateOutcome:       GatePass,
+	})
+	store.addBead("wisp-iter-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+	store.addBead("wisp-iter-2", "closed", "root-1", IdempotencyKey("root-1", 2), nil)
+	store.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+		return "", fmt.Errorf("ambiguous trigger pour")
+	}
+	store.FindByIdempotencyKeyFunc = func(key string) (string, bool, error) {
+		if key == IdempotencyKey("root-1", 2) {
+			return "wisp-iter-2", true, nil
+		}
+		return "", false, nil
+	}
+	store.ActivateWispFunc = func(id string) error {
+		t.Fatalf("closed trigger successor %q must never be activated", id)
+		return nil
+	}
+
+	result, err := handler.HandleTrigger(context.Background(), "root-1")
+	if err != nil {
+		t.Fatalf("HandleTrigger: %v", err)
+	}
+	if result.Action != ActionIterate || result.NextWispID != "wisp-iter-2" {
+		t.Fatalf("result = %+v, want closed trigger successor adopted", result)
+	}
+	meta, err := store.GetMetadata("root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta[FieldState] != StateActive || meta[FieldActiveWisp] != "wisp-iter-2" || meta[FieldLastProcessedWisp] != "wisp-iter-1" {
+		t.Fatalf("metadata after trigger closed-successor adoption = %#v", meta)
+	}
+	if _, ok := emitter.findEvent(EventTriggerAdvance); !ok {
+		t.Fatal("trigger advance did not record the durable adoption")
+	}
+	if _, ok := emitter.findEvent(EventTerminated); ok {
+		t.Fatal("closed trigger successor was synchronously replayed")
+	}
+}
+
 func TestHandleTrigger_SkipsWhenNotWaiting(t *testing.T) {
 	handler, _, _ := setupTriggerHandler(t, writeTriggerScript(t, 0), map[string]string{
 		FieldState: StateActive,

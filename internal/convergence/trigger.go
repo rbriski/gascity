@@ -74,13 +74,16 @@ func (h *Handler) HandleTrigger(ctx context.Context, rootBeadID string) (Handler
 	if err != nil {
 		return HandlerResult{}, fmt.Errorf("parsing gate config: %w", err)
 	}
-	closedIterations, err := h.deriveIterationCount(rootBeadID)
+	children, err := h.Store.Children(rootBeadID)
 	if err != nil {
-		return HandlerResult{}, fmt.Errorf("deriving iteration count: %w", err)
+		return HandlerResult{}, fmt.Errorf("listing children for trigger advance: %w", err)
 	}
 
 	cityPath := meta[FieldCityPath]
-	nextIteration := closedIterations + 1
+	nextIteration, err := nextIterationAfterLastProcessed(rootBeadID, meta[FieldLastProcessedWisp], children)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("deriving next trigger iteration: %w", err)
+	}
 
 	// Defense in depth: a healthy loop only enters waiting_trigger when the
 	// gate already confirmed iteration < max_iterations, so this is
@@ -141,8 +144,14 @@ func (h *Handler) advanceFromTrigger(rootBeadID string, meta map[string]string, 
 			return HandlerResult{}, fmt.Errorf("pouring wisp for iteration %d: %w", nextIteration, err)
 		}
 	}
-	if err := h.Store.ActivateWisp(nextWispID); err != nil {
-		return HandlerResult{}, fmt.Errorf("activating wisp %q: %w", nextWispID, err)
+	nextInfo, err := h.exactWispEvidence(rootBeadID, nextKey, nextWispID)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("validating trigger successor: %w", err)
+	}
+	if nextInfo.Status != "closed" {
+		if err := h.Store.ActivateWisp(nextWispID); err != nil {
+			return HandlerResult{}, fmt.Errorf("activating wisp %q: %w", nextWispID, err)
+		}
 	}
 
 	if err := h.Store.SetMetadata(rootBeadID, FieldIteration, EncodeInt(nextIteration)); err != nil {
@@ -154,7 +163,6 @@ func (h *Handler) advanceFromTrigger(rootBeadID string, meta map[string]string, 
 	if err := h.Store.SetMetadata(rootBeadID, FieldState, StateActive); err != nil {
 		return HandlerResult{}, fmt.Errorf("setting state to active: %w", err)
 	}
-
 	// Emit a ConvergenceTriggerAdvance event recording the trigger-driven
 	// waiting_trigger -> active transition. This mirrors the manual_iterate
 	// event for the waiting_manual -> active transition (manual.go): a distinct

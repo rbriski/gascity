@@ -440,14 +440,19 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	resolveNamedPacks(root, cityRoot)
 	rootIncludes = root.Workspace.LegacyIncludes()
 
-	existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
-	for _, inc := range packIncludes {
-		name := readPackNameFromDir(inc)
-		if name != "" && existingPacks[name] {
-			continue
+	// Reachability is needed only to deduplicate caller-supplied pack
+	// directories. Keeping it lazy also prevents read-only config consumers
+	// from resolving unrelated, absent imports solely to build an unused set.
+	if len(packIncludes) > 0 {
+		existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
+		for _, inc := range packIncludes {
+			name := readPackNameFromDir(inc)
+			if name != "" && existingPacks[name] {
+				continue
+			}
+			rootIncludes = append(rootIncludes, inc)
+			root.Workspace.SetLegacyIncludes(rootIncludes)
 		}
-		rootIncludes = append(rootIncludes, inc)
-		root.Workspace.SetLegacyIncludes(rootIncludes)
 	}
 
 	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)

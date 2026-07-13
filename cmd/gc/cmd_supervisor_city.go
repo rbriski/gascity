@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"golang.org/x/term"
 )
@@ -82,7 +83,7 @@ var newSupervisorRegistry = func() supervisorRegistry {
 
 func supervisorCityStartTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadSupervisorIntentConfig(cityPath)
 	if err != nil {
 		return timeout
 	}
@@ -104,7 +105,7 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 
 func supervisorCityStopTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityStopTimeoutFloor
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadSupervisorIntentConfig(cityPath)
 	if err != nil {
 		return timeout
 	}
@@ -115,11 +116,32 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 }
 
 func effectiveCityName(cityPath string) (string, error) {
-	cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
+	cfg, err := loadSupervisorIntentConfig(cityPath)
 	if err != nil {
 		return "", err
 	}
 	return config.EffectiveCityName(cfg, filepath.Base(filepath.Clean(cityPath))), nil
+}
+
+// existingConfigComposeFS delegates reads to the host filesystem but is
+// deliberately not the concrete fsys.OSFS type. Config composition can expand
+// already-present local and cached includes through this facade without
+// entering the OSFS-only builtin cache hydration path.
+type existingConfigComposeFS struct{ fsys.FS }
+
+// loadSupervisorIntentConfig composes registration and timeout intent from
+// already-present files. It intentionally does not hydrate caches or apply
+// process-global runtime feature flags; those effects belong to the managed
+// controller after it acquires controller.lock.
+func loadSupervisorIntentConfig(cityPath string) (*config.City, error) {
+	cfg, _, err := config.LoadWithIncludes(
+		existingConfigComposeFS{FS: fsys.OSFS{}},
+		filepath.Join(cityPath, "city.toml"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func registeredCityName(cityPath, nameOverride string) (string, error) {
@@ -352,14 +374,6 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 			}
 			return 1
 		}
-	}
-	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := EnsureBuiltinRuntimeAssets(cityPath, os.Stderr); err != nil {
-		fmt.Fprintf(stderr, "%s: materializing builtin packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 	name, err := registeredCityName(cityPath, nameOverride)
 	if err != nil {

@@ -478,6 +478,7 @@ func TestCmdStopRegisteredMissingCityNeedsNoCleanupOwnership(t *testing.T) {
 	stopCompletionNow = func() time.Time { return started }
 	t.Cleanup(func() { stopCompletionNow = oldNow })
 
+	terminalCalls := 0
 	oldOps := stopSupervisorUnregisterDeadlineOps
 	stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
 		now:             func() time.Time { return started },
@@ -495,8 +496,11 @@ func TestCmdStopRegisteredMissingCityNeedsNoCleanupOwnership(t *testing.T) {
 			t.Fatal("controller ownership requested for an absent city directory")
 			return nil, nil
 		},
-		waitTerminal: func(string, time.Time) error {
-			t.Fatal("managed cleanup terminal event requested when no runtime can exist")
+		waitTerminal: func(requestID string, _ time.Time) error {
+			terminalCalls++
+			if requestID == "" {
+				t.Fatal("managed cleanup terminal wait received an empty request ID")
+			}
 			return nil
 		},
 	}
@@ -512,12 +516,68 @@ func TestCmdStopRegisteredMissingCityNeedsNoCleanupOwnership(t *testing.T) {
 	if strings.Contains(stderr.String(), "without returning controller ownership") {
 		t.Fatalf("stderr reports impossible ownership requirement: %q", stderr.String())
 	}
+	if terminalCalls != 1 {
+		t.Fatalf("managed terminal witness checks = %d, want 1", terminalCalls)
+	}
 	entries, err := reg.List()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("registry entries = %v, want absent city unregistered", entries)
+	}
+}
+
+func TestCmdStopRegisteredMissingCityFailsWithoutManagedTerminalWitness(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "gone-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "gone-city"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(cityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Date(2026, 7, 13, 15, 31, 0, 0, time.UTC)
+	oldNow := stopCompletionNow
+	stopCompletionNow = func() time.Time { return started }
+	t.Cleanup(func() { stopCompletionNow = oldNow })
+
+	wantErr := errors.New("managed provider cleanup failed")
+	oldOps := stopSupervisorUnregisterDeadlineOps
+	stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
+		now:             func() time.Time { return started },
+		supervisorAlive: func(time.Time) int { return 42 },
+		requestStop: func(string, bool, time.Time) controllerStopResult {
+			t.Fatal("standalone stop request issued while supervisor is alive")
+			return controllerStopResult{}
+		},
+		reload: func(io.Writer, io.Writer, time.Time) int { return 0 },
+		waitCity: func(string, bool, time.Time, time.Duration, io.Writer) error {
+			t.Fatal("city-status wait issued for an absent city directory")
+			return nil
+		},
+		acquireOwnership: func(string, time.Time, time.Duration) (*controllerLockLease, error) {
+			t.Fatal("controller ownership requested for an absent city directory")
+			return nil, nil
+		},
+		waitTerminal: func(string, time.Time) error { return wantErr },
+	}
+	t.Cleanup(func() { stopSupervisorUnregisterDeadlineOps = oldOps })
+
+	var stdout, stderr strings.Builder
+	if code := cmdStopJSON([]string{"gone-city"}, &stdout, &stderr, time.Second, false, false); code != 1 {
+		t.Fatalf("cmdStopJSON = %d, want failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout claimed success without terminal proof: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), wantErr.Error()) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
 	}
 }
 
@@ -977,6 +1037,171 @@ func TestStopCompletionDeadlineAdmitsEachExistingNativeEffect(t *testing.T) {
 		}}
 		return &deadlineEffectStore{Store: beads.NewMemStoreFrom(len(corpus), corpus, nil)}
 	}
+	unmarkedStore := func(t *testing.T, sessionName string) *deadlineEffectStore {
+		t.Helper()
+		corpus := []beads.Bead{{
+			ID:     "session-1",
+			Type:   "session",
+			Status: "open",
+			Labels: []string{"gc:session"},
+			Metadata: map[string]string{
+				"session_name": sessionName,
+				"state":        "active",
+			},
+		}}
+		return &deadlineEffectStore{Store: beads.NewMemStoreFrom(len(corpus), corpus, nil)}
+	}
+
+	t.Run("resolution expiry denies stop before native entry", func(t *testing.T) {
+		now := started
+		budget := newStopCompletionBudget(started, completionTimeout, func() time.Time { return now })
+		store := unmarkedStore(t, "worker")
+		store.afterGet = func(call int) {
+			if call == 1 {
+				now = started.Add(completionTimeout + time.Millisecond)
+			}
+		}
+		provider := &deadlineEffectProvider{Fake: runtime.NewFake()}
+		if err := provider.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+
+		err := stopTargetThroughWorkerBoundaryWithBudget(
+			stopTarget{name: "session-1"}, store, provider, nil, &budget,
+		)
+		if !errors.Is(err, errStopCompletionDeadline) {
+			t.Fatalf("stop error = %v, want completion deadline", err)
+		}
+		if provider.CountCalls("Stop", "worker") != 0 {
+			t.Fatalf("native Stop entries = %d, want zero", provider.CountCalls("Stop", "worker"))
+		}
+	})
+
+	t.Run("resolution expiry denies marked pool kill before native entry", func(t *testing.T) {
+		now := started
+		budget := newStopCompletionBudget(started, completionTimeout, func() time.Time { return now })
+		store := markedStore(t, "pool-1")
+		store.afterGet = func(call int) {
+			if call == 2 {
+				now = started.Add(completionTimeout + time.Millisecond)
+			}
+		}
+		provider := &deadlineEffectProvider{Fake: runtime.NewFake()}
+		if err := provider.Start(context.Background(), "pool-1", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+
+		err := stopTargetThroughWorkerBoundaryWithBudget(
+			stopTarget{sessionID: "session-1", name: "pool-1", poolManaged: true}, store, provider, nil, &budget,
+		)
+		if !errors.Is(err, errStopCompletionDeadline) {
+			t.Fatalf("kill error = %v, want completion deadline", err)
+		}
+		if provider.CountCalls("Stop", "pool-1") != 0 {
+			t.Fatalf("native pool Kill/Stop entries = %d, want zero", provider.CountCalls("Stop", "pool-1"))
+		}
+	})
+
+	t.Run("resolution expiry denies interrupt before native entry", func(t *testing.T) {
+		now := started
+		budget := newStopCompletionBudget(started, completionTimeout, func() time.Time { return now })
+		store := unmarkedStore(t, "worker")
+		store.afterGet = func(call int) {
+			if call == 1 {
+				now = started.Add(completionTimeout + time.Millisecond)
+			}
+		}
+		provider := &deadlineEffectProvider{Fake: runtime.NewFake()}
+		if err := provider.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+
+		sent := interruptTargetsBoundedRetainingEnteredWithBudget(
+			[]stopTarget{{sessionID: "session-1", name: "worker", resolved: true}}, nil, store, provider, io.Discard, &budget,
+		)
+		if sent != 0 {
+			t.Fatalf("interrupts reported sent = %d, want zero", sent)
+		}
+		if provider.CountCalls("Interrupt", "worker") != 0 {
+			t.Fatalf("native Interrupt entries = %d, want zero", provider.CountCalls("Interrupt", "worker"))
+		}
+	})
+
+	t.Run("native stop admission rechecks after liveness probe", func(t *testing.T) {
+		now := started
+		budget := newStopCompletionBudget(started, completionTimeout, func() time.Time { return now })
+		store := unmarkedStore(t, "worker")
+		provider := &deadlineEffectProvider{Fake: runtime.NewFake()}
+		if err := provider.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		provider.afterIsRunning = func(string) {
+			now = started.Add(completionTimeout + time.Millisecond)
+		}
+
+		err := stopTargetThroughWorkerBoundaryWithBudget(
+			stopTarget{name: "session-1"}, store, provider, nil, &budget,
+		)
+		if !errors.Is(err, errStopCompletionDeadline) {
+			t.Fatalf("stop error = %v, want completion deadline", err)
+		}
+		if provider.CountCalls("Stop", "worker") != 0 {
+			t.Fatalf("native Stop entries = %d, want zero", provider.CountCalls("Stop", "worker"))
+		}
+	})
+
+	t.Run("late native stop cannot begin post-provider state write", func(t *testing.T) {
+		now := started
+		budget := newStopCompletionBudget(started, completionTimeout, func() time.Time { return now })
+		store := unmarkedStore(t, "worker")
+		provider := &deadlineEffectProvider{Fake: runtime.NewFake()}
+		if err := provider.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		provider.afterStop = func(string) {
+			now = started.Add(completionTimeout + time.Millisecond)
+		}
+
+		err := stopTargetThroughWorkerBoundaryWithBudget(
+			stopTarget{name: "session-1"}, store, provider, nil, &budget,
+		)
+		if !errors.Is(err, errStopCompletionDeadline) {
+			t.Fatalf("stop error = %v, want completion deadline", err)
+		}
+		if provider.CountCalls("Stop", "worker") != 1 {
+			t.Fatalf("native Stop entries = %d, want one joined call", provider.CountCalls("Stop", "worker"))
+		}
+		row, getErr := store.Store.Get("session-1")
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if row.Metadata["state"] != "active" {
+			t.Fatalf("post-deadline state = %q, want active", row.Metadata["state"])
+		}
+	})
+
+	t.Run("native interrupt admission rechecks after liveness probe", func(t *testing.T) {
+		now := started
+		budget := newStopCompletionBudget(started, completionTimeout, func() time.Time { return now })
+		store := unmarkedStore(t, "worker")
+		provider := &deadlineEffectProvider{Fake: runtime.NewFake()}
+		if err := provider.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		provider.afterIsRunning = func(string) {
+			now = started.Add(completionTimeout + time.Millisecond)
+		}
+
+		sent := interruptTargetsBoundedRetainingEnteredWithBudget(
+			[]stopTarget{{sessionID: "session-1", name: "worker", resolved: true}}, nil, store, provider, io.Discard, &budget,
+		)
+		if sent != 0 {
+			t.Fatalf("interrupts reported sent = %d, want zero", sent)
+		}
+		if provider.CountCalls("Interrupt", "worker") != 0 {
+			t.Fatalf("native Interrupt entries = %d, want zero", provider.CountCalls("Interrupt", "worker"))
+		}
+	})
 
 	t.Run("late stop blocks event and later target", func(t *testing.T) {
 		now := started

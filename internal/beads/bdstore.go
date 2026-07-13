@@ -2369,6 +2369,9 @@ func (s *BdStore) listEphemeral(query ListQuery, boundedExactLookup bool) ([]Bea
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
+			if boundedExactLookup {
+				return nil, fmt.Errorf("bd query unsupported for bounded exact lookup: %w", err)
+			}
 			return nil, nil
 		}
 		return nil, fmt.Errorf("bd query (wisps): %w", err)

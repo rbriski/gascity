@@ -78,6 +78,9 @@ type CachingStore struct {
 	latencyDriverActive bool
 
 	applyEventBeforeCommitForTest func()
+	// statsWorkForTest observes aggregate-stat row visits while c.mu is held.
+	// Tests install it only around a synchronous operation.
+	statsWorkForTest func(rows int)
 }
 
 var (
@@ -1206,12 +1209,46 @@ func (c *CachingStore) problemLogMessageLocked(msg string, now time.Time) (strin
 func (c *CachingStore) updateStatsLocked() {
 	c.stats.TotalBeads = len(c.beads)
 	totalDeps := 0
+	statsWork := 0
 	for _, deps := range c.deps {
+		statsWork++
 		totalDeps += len(deps)
 	}
 	c.stats.TotalDeps = totalDeps
 	c.stats.SyncFailures = c.syncFailures
 	c.updateCadenceStatsLocked()
+	if c.statsWorkForTest != nil {
+		c.statsWorkForTest(statsWork)
+	}
+}
+
+type cacheStatsContribution struct {
+	beads int
+	deps  int
+}
+
+func (c *CachingStore) statsContributionForIDsLocked(ids map[string]struct{}) (cacheStatsContribution, int) {
+	var contribution cacheStatsContribution
+	work := 0
+	for id := range ids {
+		work++
+		if _, ok := c.beads[id]; ok {
+			contribution.beads++
+		}
+		contribution.deps += len(c.deps[id])
+	}
+	return contribution, work
+}
+
+func (c *CachingStore) updateStatsForIDsLocked(before cacheStatsContribution, beforeWork int, ids map[string]struct{}) {
+	after, afterWork := c.statsContributionForIDsLocked(ids)
+	c.stats.TotalBeads += after.beads - before.beads
+	c.stats.TotalDeps += after.deps - before.deps
+	c.stats.SyncFailures = c.syncFailures
+	c.updateCadenceStatsLocked()
+	if c.statsWorkForTest != nil {
+		c.statsWorkForTest(beforeWork + afterWork)
+	}
 }
 
 func beadIDs(beadMap map[string]Bead) []string {

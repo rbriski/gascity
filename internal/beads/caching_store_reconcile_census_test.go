@@ -96,7 +96,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
-		"applyEventBeforeCommitForTest": true,
+		"applyEventBeforeCommitForTest": true, "statsWorkForTest": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

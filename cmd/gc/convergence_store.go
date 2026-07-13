@@ -147,8 +147,10 @@ func (a *convergenceStoreAdapter) DeleteBead(id string) error {
 
 func (a *convergenceStoreAdapter) Children(parentID string) ([]convergence.BeadInfo, error) {
 	children, err := a.store.List(beads.ListQuery{
-		ParentID: parentID,
-		Sort:     beads.SortCreatedAsc,
+		ParentID:      parentID,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -254,22 +256,38 @@ func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool
 	// Extract parent bead ID from key format "converge:<bead-id>:iter:<N>".
 	parentID := extractParentIDFromKey(key)
 	if parentID == "" {
-		// Fall back to scanning all beads.
+		if strings.HasPrefix(key, "converge:") {
+			return "", false, fmt.Errorf("malformed convergence idempotency key %q", key)
+		}
+		// Preserve the legacy fallback for pre-canonical keys. It intentionally
+		// retains its former open, durable-tier scope rather than expanding into
+		// an unbounded scan of closed history across both policy tiers.
 		return a.findByKeyScan(key)
 	}
 	children, err := a.store.List(beads.ListQuery{
-		ParentID: parentID,
-		Sort:     beads.SortCreatedAsc,
+		ParentID:      parentID,
+		Metadata:      map[string]string{"idempotency_key": key},
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+		Limit:         2,
 	})
 	if err != nil {
 		// Children returns empty list (not error) when parent has no children,
 		// so any error here is a real store failure — propagate it.
 		return "", false, fmt.Errorf("listing children of %s: %w", parentID, err)
 	}
+	matchID := ""
 	for _, b := range children {
 		if b.Metadata != nil && b.Metadata["idempotency_key"] == key {
-			return b.ID, true, nil
+			if matchID != "" && matchID != b.ID {
+				return "", false, fmt.Errorf("idempotency key %q is ambiguous between beads %q and %q", key, matchID, b.ID)
+			}
+			matchID = b.ID
 		}
+	}
+	if matchID != "" {
+		return matchID, true, nil
 	}
 	return "", false, nil
 }
@@ -363,11 +381,16 @@ func extractParentIDFromKey(key string) string {
 		return ""
 	}
 	rest := key[len("converge:"):]
-	idx := strings.Index(rest, ":iter:")
+	idx := strings.LastIndex(rest, ":iter:")
 	if idx < 0 {
 		return ""
 	}
-	return rest[:idx]
+	parentID := rest[:idx]
+	iteration, ok := convergence.ParseIterationFromKey(key)
+	if parentID == "" || !ok || iteration < 1 || key != convergence.IdempotencyKey(parentID, iteration) {
+		return ""
+	}
+	return parentID
 }
 
 // convergenceEventEmitter wraps events.Recorder to implement convergence.EventEmitter.
@@ -384,5 +407,5 @@ func (e *convergenceEventEmitter) Emit(eventType, eventID, beadID string, payloa
 		Subject: beadID,
 		Message: string(payload),
 	})
-	_ = eventID // used for deduplication by consumers, not the recorder
+	_ = eventID // logical only: the current events.Event wire has no event-ID field
 }

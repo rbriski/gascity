@@ -3,6 +3,7 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type fakeStore struct {
 	FindByIdempotencyKeyFunc func(key string) (string, bool, error)
 	ActivateWispFunc         func(id string) error
 	GetBeadFunc              func(id string) (BeadInfo, error)
+	ChildrenFunc             func(parentID string) ([]BeadInfo, error)
 
 	pourCounter int // auto-increment for wisp IDs
 
@@ -41,6 +43,10 @@ type fakeStore struct {
 	// SetMetadataErrFunc, when non-nil, is consulted before each SetMetadata
 	// write; a non-nil return fails the write (nothing is recorded or stored).
 	SetMetadataErrFunc func(key string) error
+
+	// CloseBeadFunc, when non-nil, is consulted before the default close;
+	// a non-nil return fails the close without mutating the bead.
+	CloseBeadFunc func(id, reason string) error
 
 	ActivatedWispIDs []string
 }
@@ -120,6 +126,11 @@ func (s *fakeStore) SetMetadata(id, key, value string) error {
 }
 
 func (s *fakeStore) CloseBead(id, reason string) error {
+	if s.CloseBeadFunc != nil {
+		if err := s.CloseBeadFunc(id, reason); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
@@ -160,6 +171,9 @@ func (s *fakeStore) DeleteBead(id string) error {
 }
 
 func (s *fakeStore) Children(parentID string) ([]BeadInfo, error) {
+	if s.ChildrenFunc != nil {
+		return s.ChildrenFunc(parentID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.beads[parentID]
@@ -442,6 +456,34 @@ func TestHandleWispClosed_GuardCheck_Terminated(t *testing.T) {
 	}
 }
 
+func TestHandleWispClosed_GuardCheck_TerminatedCloseFailureReturns(t *testing.T) {
+	handler, store, emitter := setupBasicHandler(t, map[string]string{
+		FieldState: StateTerminated,
+	})
+	closeErr := errors.New("terminal root close unavailable")
+	store.CloseBeadFunc = func(id, _ string) error {
+		if id != "root-1" {
+			t.Fatalf("CloseBead(%q), want root-1", id)
+		}
+		return closeErr
+	}
+
+	_, err := handler.HandleWispClosed(context.Background(), "root-1", "wisp-iter-1")
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("HandleWispClosed error = %v, want terminal cleanup failure", err)
+	}
+	info, getErr := store.GetBead("root-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if info.Status == "closed" {
+		t.Fatal("failed terminal cleanup unexpectedly closed the root")
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("terminal cleanup failure emitted events: %v", emitter.events)
+	}
+}
+
 func TestHandleWispClosed_DedupCheck_AlreadyProcessed(t *testing.T) {
 	handler, store, _ := setupBasicHandler(t, map[string]string{
 		FieldLastProcessedWisp: "wisp-iter-1",
@@ -460,25 +502,72 @@ func TestHandleWispClosed_DedupCheck_AlreadyProcessed(t *testing.T) {
 	}
 }
 
-func TestHandleWispClosed_CorruptedLastProcessedWisp_GracefulDegradation(t *testing.T) {
-	handler, store, _ := setupBasicHandler(t, map[string]string{
+func TestHandleWispClosed_CorruptedLastProcessedWispFailsClosed(t *testing.T) {
+	handler, store, emitter := setupBasicHandler(t, map[string]string{
 		FieldLastProcessedWisp: "deleted-wisp",
 		FieldGateMode:          GateModeManual,
 	})
 
-	// The last processed wisp reference points to a bead that doesn't
-	// exist. The handler should degrade gracefully (treat as iteration 0)
-	// instead of permanently blocking the loop.
-	_ = store
-
-	result, err := handler.HandleWispClosed(context.Background(), "root-1", "wisp-iter-1")
-	if err != nil {
-		t.Fatalf("expected graceful degradation, got error: %v", err)
+	_, err := handler.HandleWispClosed(context.Background(), "root-1", "wisp-iter-1")
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("HandleWispClosed error = %v, want missing dedup evidence", err)
 	}
-	// Should process normally (not skip), since the corrupted reference
-	// is treated as "no previous iteration".
-	if result.Action == ActionSkipped {
-		t.Error("should not skip when last_processed_wisp is corrupted")
+	meta, getErr := store.GetMetadata("root-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if meta[FieldState] != StateActive || meta[FieldLastProcessedWisp] != "deleted-wisp" {
+		t.Fatalf("metadata after missing dedup evidence = %#v, want unchanged", meta)
+	}
+	if len(store.WriteLog) != 0 || len(emitter.events) != 0 {
+		t.Fatalf("effects after missing dedup evidence: writes=%v events=%v, want none", store.WriteLog, emitter.events)
+	}
+}
+
+func TestHandleWispClosed_TransientLastProcessedReadFailsClosed(t *testing.T) {
+	handler, store, emitter := setupBasicHandler(t, map[string]string{
+		FieldLastProcessedWisp: "wisp-iter-2",
+		FieldGateOutcomeWisp:   "wisp-iter-1",
+		FieldGateOutcome:       GateFail,
+	})
+	store.addBead("wisp-iter-2", "in_progress", "root-1", IdempotencyKey("root-1", 2), nil)
+	wisp1, getErr := store.GetBead("wisp-iter-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	transientErr := errors.New("dedup evidence temporarily unavailable")
+	store.GetBeadFunc = func(id string) (BeadInfo, error) {
+		switch id {
+		case "wisp-iter-1":
+			return wisp1, nil
+		case "wisp-iter-2":
+			return BeadInfo{}, transientErr
+		default:
+			return BeadInfo{}, fmt.Errorf("unexpected GetBead(%q)", id)
+		}
+	}
+	store.PourSpeculativeWispFunc = func(_, _, key string, _ map[string]string, _ string) (string, error) {
+		t.Fatalf("transient dedup evidence must not pour %q", key)
+		return "", nil
+	}
+	store.ActivateWispFunc = func(id string) error {
+		t.Fatalf("transient dedup evidence must not activate %q", id)
+		return nil
+	}
+
+	_, err := handler.HandleWispClosed(context.Background(), "root-1", "wisp-iter-1")
+	if !errors.Is(err, transientErr) {
+		t.Fatalf("HandleWispClosed error = %v, want transient dedup evidence error", err)
+	}
+	meta, getErr := store.GetMetadata("root-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if meta[FieldState] != StateActive || meta[FieldLastProcessedWisp] != "wisp-iter-2" || meta[FieldPendingNextWisp] != "" {
+		t.Fatalf("metadata after transient dedup evidence = %#v, want unchanged", meta)
+	}
+	if len(store.WriteLog) != 0 || len(emitter.events) != 0 {
+		t.Fatalf("effects after transient dedup evidence: writes=%v events=%v, want none", store.WriteLog, emitter.events)
 	}
 }
 
@@ -884,7 +973,7 @@ func TestHandleWispClosed_WriteOrdering_TerminalReasonBeforeState(t *testing.T) 
 
 func TestHandleWispClosed_WriteOrdering_IterateLastProcessedBeforePendingCleanup(t *testing.T) {
 	// Verify last_processed_wisp remains the final load-bearing write in the
-	// iterate path; pending_next_wisp cleanup is best-effort after commit.
+	// iterate path; checked pending_next_wisp cleanup follows the commit.
 	store := newFakeStore()
 	emitter := &fakeEmitter{}
 
@@ -1642,6 +1731,10 @@ func TestCrashAfterSpeculativePour_ReconcilerUsesPendingNextWispBeforeLookup(t *
 	store.FindByIdempotencyKeyFunc = func(key string) (string, bool, error) {
 		return "", false, fmt.Errorf("FindByIdempotencyKey should not be called for valid pending %q", key)
 	}
+	store.PourWispFunc = func(_, _, key string, _ map[string]string, _ string) (string, error) {
+		t.Fatalf("PourWisp should not be called for valid pending %q", key)
+		return "", nil
+	}
 
 	handler := &Handler{Store: store, Emitter: emitter}
 	reconciler := &Reconciler{Handler: handler}
@@ -1657,6 +1750,9 @@ func TestCrashAfterSpeculativePour_ReconcilerUsesPendingNextWispBeforeLookup(t *
 	meta, _ := store.GetMetadata("root-1")
 	if meta[FieldActiveWisp] != "wisp-iter-2" {
 		t.Fatalf("active_wisp = %q, want wisp-iter-2", meta[FieldActiveWisp])
+	}
+	if meta[FieldPendingNextWisp] != "" {
+		t.Fatalf("pending_next_wisp = %q, want checked cleanup", meta[FieldPendingNextWisp])
 	}
 	if len(store.ActivatedWispIDs) != 1 || store.ActivatedWispIDs[0] != "wisp-iter-2" {
 		t.Fatalf("activated wisps = %v, want [wisp-iter-2]", store.ActivatedWispIDs)

@@ -57,6 +57,42 @@ func TestDoltliteReadStoreSkipLabels(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreFiltersByIDs(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	// An ids-only query is a valid filter (HasFilter true, no AllowScan needed);
+	// the `id IN (...)` predicate must return exactly the requested ids and
+	// nothing else — not the whole active set filtered in Go.
+	rows, err := store.List(ListQuery{
+		IDs:        []string{"gc-ready", "gc-session"},
+		TierMode:   TierBoth,
+		SkipLabels: true,
+	})
+	if err != nil {
+		t.Fatalf("List by ids: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("List(IDs) rows = %d, want 2 (scoped to the requested ids): %#v", len(rows), rows)
+	}
+	got := map[string]bool{}
+	for _, b := range rows {
+		got[b.ID] = true
+	}
+	if !got["gc-ready"] || !got["gc-session"] {
+		t.Fatalf("List(IDs) = %v, want exactly {gc-ready, gc-session}", got)
+	}
+
+	// A single unknown id returns nothing (the predicate is authoritative).
+	none, err := store.List(ListQuery{IDs: []string{"gc-does-not-exist"}, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List by unknown id: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("List(IDs=unknown) rows = %d, want 0: %#v", len(none), none)
+	}
+}
+
 func TestDoltliteReadStoreHydratesParent(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

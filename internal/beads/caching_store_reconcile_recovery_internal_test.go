@@ -4,43 +4,48 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"testing"
 )
 
 // droppingListStore wraps a Store and silently omits selected bead IDs from
 // List results, simulating a cleanly parsed but incomplete List under backend
-// stress.
+// stress. It distinguishes the reconcile fresh scan (unscoped) from the recovery
+// batch lookup (scoped by ListQuery.IDs): dropFromList omits ids only from the
+// unscoped fresh scan (making them recovery candidates), dropFromScoped also
+// omits them from the scoped batch lookup (modeling a genuinely-gone bead), and
+// scopedListErr fails the batch lookup outright (modeling a transient backing
+// error that must defer rather than evict).
 type droppingListStore struct {
 	Store
-	dropFromList map[string]struct{}
-	getOverride  map[string]Bead
-	getErr       map[string]error
+	dropFromList   map[string]struct{}
+	dropFromScoped map[string]struct{}
+	scopedListErr  error
 }
 
 func (s *droppingListStore) List(query ListQuery) ([]Bead, error) {
+	scoped := len(query.IDs) > 0
+	if scoped && s.scopedListErr != nil {
+		return nil, s.scopedListErr
+	}
 	all, err := s.Store.List(query)
-	if err != nil || len(s.dropFromList) == 0 {
+	if err != nil {
 		return all, err
+	}
+	drop := s.dropFromList
+	if scoped {
+		drop = s.dropFromScoped
+	}
+	if len(drop) == 0 {
+		return all, nil
 	}
 	filtered := make([]Bead, 0, len(all))
 	for _, b := range all {
-		if _, drop := s.dropFromList[b.ID]; drop {
+		if _, d := drop[b.ID]; d {
 			continue
 		}
 		filtered = append(filtered, b)
 	}
 	return filtered, nil
-}
-
-func (s *droppingListStore) Get(id string) (Bead, error) {
-	if err, ok := s.getErr[id]; ok {
-		return Bead{}, err
-	}
-	if b, ok := s.getOverride[id]; ok {
-		return cloneBead(b), nil
-	}
-	return s.Store.Get(id)
 }
 
 func assertNotCached(t *testing.T, cache *CachingStore, id string) {
@@ -110,8 +115,8 @@ func TestReconcileSkipsCloseWhenListDropsAliveBead(t *testing.T) {
 }
 
 // TestReconcileEmitsCloseWhenBackingConfirmsNotFound verifies that a genuine
-// closure (List omits the bead AND backing.Get reports ErrNotFound) still
-// produces a bead.closed event.
+// closure (the bead is absent from BOTH the fresh scan and the scoped recovery
+// batch lookup) still produces a bead.closed event.
 func TestReconcileEmitsCloseWhenBackingConfirmsNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -130,9 +135,10 @@ func TestReconcileEmitsCloseWhenBackingConfirmsNotFound(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
-	backing.dropFromList = map[string]struct{}{gone.ID: {}}
-	backing.getErr = map[string]error{
-		gone.ID: fmt.Errorf("getting bead %q: %w", gone.ID, ErrNotFound),
+	// Genuinely gone from the backing after prime: absent from the fresh scan
+	// (candidate) and from the scoped batch lookup (confirmed gone).
+	if err := mem.Delete(gone.ID); err != nil {
+		t.Fatalf("Delete gone: %v", err)
 	}
 	events = events[:0]
 
@@ -246,8 +252,9 @@ func TestReconcileEmitsFreshClosePayloadWhenGetReturnsClosed(t *testing.T) {
 }
 
 // TestReconcileDefersCloseOnBackingError verifies that a transient backing
-// failure (List omits the bead, Get returns a non-NotFound error) does NOT
-// produce a bead.closed event — the close is deferred until a later scan.
+// failure (the fresh scan omits the bead, and the scoped recovery batch lookup
+// errors) does NOT produce a bead.closed event — the close is deferred until a
+// later, unambiguous scan.
 func TestReconcileDefersCloseOnBackingError(t *testing.T) {
 	t.Parallel()
 
@@ -267,7 +274,7 @@ func TestReconcileDefersCloseOnBackingError(t *testing.T) {
 	}
 
 	backing.dropFromList = map[string]struct{}{uncertain.ID: {}}
-	backing.getErr = map[string]error{uncertain.ID: errors.New("dolt: connection reset")}
+	backing.scopedListErr = errors.New("dolt: connection reset")
 	events = events[:0]
 
 	cache.runReconciliation()
@@ -289,51 +296,7 @@ func TestReconcileDefersCloseOnBackingError(t *testing.T) {
 	}
 }
 
-// TestReconcileDefersCloseWhenGetReturnsWrongID verifies recovery does not
-// merge a successful but invalid Get result under the requested ID.
-func TestReconcileDefersCloseWhenGetReturnsWrongID(t *testing.T) {
-	t.Parallel()
-
-	mem := NewMemStore()
-	uncertain, err := mem.Create(Bead{Title: "Uncertain"})
-	if err != nil {
-		t.Fatalf("Create uncertain: %v", err)
-	}
-
-	backing := &droppingListStore{Store: mem}
-	var events []string
-	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
-		events = append(events, eventType+":"+beadID)
-	})
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	backing.dropFromList = map[string]struct{}{uncertain.ID: {}}
-	backing.getOverride = map[string]Bead{
-		uncertain.ID: {ID: "wrong-id", Title: "Wrong bead", Status: "open"},
-	}
-	events = events[:0]
-
-	cache.runReconciliation()
-
-	for _, e := range events {
-		if e == "bead.closed:"+uncertain.ID {
-			t.Fatalf("emitted bead.closed despite wrong backing.Get ID; events = %v", events)
-		}
-	}
-	got, err := cache.Get(uncertain.ID)
-	if err != nil {
-		t.Fatalf("Get(uncertain) after reconcile: %v", err)
-	}
-	if got.ID != uncertain.ID || got.Title != uncertain.Title {
-		t.Fatalf("Get(uncertain) = %#v, want cached bead %#v", got, uncertain)
-	}
-	stats := cache.Stats()
-	if stats.ReconcileRecoveries != 0 {
-		t.Fatalf("ReconcileRecoveries = %d, want 0", stats.ReconcileRecoveries)
-	}
-	if stats.ReconcileCloseDeferrals != 1 {
-		t.Fatalf("ReconcileCloseDeferrals = %d, want 1", stats.ReconcileCloseDeferrals)
-	}
-}
+// (The former TestReconcileDefersCloseWhenGetReturnsWrongID is obsolete: the
+// recovery batch lookup uses List(ListQuery.IDs), whose exact id predicate can
+// never return a row under a different id, so the wrong-id-from-fuzzy-Get case
+// it guarded no longer exists.)

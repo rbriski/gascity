@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -763,8 +764,17 @@ func metadataEqual(a, b map[string]string) bool {
 // and drops insignificant whitespace. Reports false when the input is not
 // decodable JSON so callers fall back to an exact compare.
 func canonicalJSON(s string) (string, bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	// UseNumber decodes JSON numbers as json.Number (their exact source text)
+	// rather than float64, so integers beyond 2^53 stay distinct instead of
+	// collapsing to the same float. A float round-trip made e.g.
+	// 9007199254740992 and 9007199254740993 canonicalize identically, so
+	// metadataEqual reported two genuinely different values as equal and the
+	// reconcile dropped the real change — a missed write, worse than a spurious
+	// one. Preserving the source text keeps that comparison exact.
+	dec.UseNumber()
 	var v interface{}
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return "", false
 	}
 	out, err := json.Marshal(v)

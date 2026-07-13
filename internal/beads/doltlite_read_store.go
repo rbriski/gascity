@@ -846,6 +846,7 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 		orderBy == "" &&
 		extraWhere == "" &&
 		query.ParentID == "" &&
+		len(query.IDs) == 0 &&
 		len(query.Metadata) == 0 &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero()
@@ -1175,6 +1176,22 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 		where = append(where, "i.assignee IN ("+placeholders+")")
 		for _, assignee := range assignees {
 			args = append(args, assignee)
+		}
+	}
+	if len(query.IDs) > 0 {
+		// Push the id-set to an `id IN (...)` predicate. Without this DoltLite
+		// ignored ListQuery.IDs entirely: HasFilter() accepts an ids-only query
+		// (no AllowScan), so a scoped re-verify would otherwise scan the whole
+		// active set and filter in Go. Match compactStrings' empty-id trim used
+		// by the Assignees filter above.
+		ids := compactStrings(query.IDs)
+		if len(ids) == 0 {
+			return doltliteTableQuery{skipTable: true}, nil
+		}
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+		where = append(where, "i.id IN ("+placeholders+")")
+		for _, id := range ids {
+			args = append(args, id)
 		}
 	}
 	if query.ParentID != "" {

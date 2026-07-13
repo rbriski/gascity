@@ -19,17 +19,33 @@ func TestBeadChangedIgnoresMetadataJSONKeyOrder(t *testing.T) {
 	}
 }
 
-// TestBeadChangedIgnoresMetadataNumericReserialize pins the numeric
-// re-serialize case (1 vs 1.0): a JSON number value that re-serializes to the
-// same canonical form is NOT a change.
-func TestBeadChangedIgnoresMetadataNumericReserialize(t *testing.T) {
+// TestBeadChangedDetectsLargeIntegerMetadataChange pins the >2^53 precision fix:
+// two metadata JSON integers that differ only past the float53 boundary
+// (9007199254740992 vs 9007199254740993) MUST be seen as a change. Canonicalizing
+// via a float round-trip collapsed both to the same float and silently dropped
+// the write; the json.Number path keeps them distinct.
+func TestBeadChangedDetectsLargeIntegerMetadataChange(t *testing.T) {
 	t.Parallel()
 
-	old := Bead{ID: "gc-1", Metadata: map[string]string{"count": `{"n":1}`}}
-	fresh := Bead{ID: "gc-1", Metadata: map[string]string{"count": `{"n":1.0}`}}
+	old := Bead{ID: "gc-1", Metadata: map[string]string{"count": `{"n":9007199254740992}`}}
+	fresh := Bead{ID: "gc-1", Metadata: map[string]string{"count": `{"n":9007199254740993}`}}
+
+	if !beadChanged(old, fresh, false) {
+		t.Fatalf("beadChanged missed a >2^53 metadata integer change (float round-trip conflated the two values)")
+	}
+}
+
+// TestBeadChangedIgnoresLargeIntegerMetadataKeyOrder verifies the canonical
+// compare still collapses key-order/whitespace artifacts while preserving a
+// >2^53 integer exactly: same big-int value, reordered keys, is NOT a change.
+func TestBeadChangedIgnoresLargeIntegerMetadataKeyOrder(t *testing.T) {
+	t.Parallel()
+
+	old := Bead{ID: "gc-1", Metadata: map[string]string{"payload": `{"a":9007199254740993,"b":2}`}}
+	fresh := Bead{ID: "gc-1", Metadata: map[string]string{"payload": `{"b":2,"a":9007199254740993}`}}
 
 	if beadChanged(old, fresh, false) {
-		t.Fatalf("beadChanged reported a change for a metadata JSON number that only differs by 1 vs 1.0")
+		t.Fatalf("beadChanged reported a change for a big-int metadata value that only differs by key order")
 	}
 }
 

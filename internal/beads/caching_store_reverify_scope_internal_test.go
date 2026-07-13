@@ -49,11 +49,11 @@ func (s *reverifyListCaptureStore) List(q ListQuery) ([]Bead, error) {
 	return s.Store.List(q)
 }
 
-// TestReverifyMissingByListScopesToMissingIDs pins prong A: the re-verify issues
-// a List scoped to exactly the missing ids (ListQuery.IDs), tier-consistent
-// (TierBoth), instead of re-scanning the whole active universe, and still
-// surfaces a live wisp among the missing set.
-func TestReverifyMissingByListScopesToMissingIDs(t *testing.T) {
+// TestFetchBeadsByIDsScopesToMissingIDs pins the recovery batch lookup: it
+// issues ONE List scoped to exactly the missing ids (ListQuery.IDs),
+// tier-consistent (TierBoth) and IncludeClosed, instead of re-scanning the whole
+// active universe, and surfaces the requested bead among the missing set.
+func TestFetchBeadsByIDsScopesToMissingIDs(t *testing.T) {
 	t.Parallel()
 
 	mem := NewMemStore()
@@ -61,7 +61,7 @@ func TestReverifyMissingByListScopesToMissingIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create alive: %v", err)
 	}
-	// An unrelated active bead the re-verify must NOT fetch.
+	// An unrelated active bead the batch lookup must NOT fetch.
 	if _, err := mem.Create(Bead{Title: "unrelated"}); err != nil {
 		t.Fatalf("Create unrelated: %v", err)
 	}
@@ -70,22 +70,25 @@ func TestReverifyMissingByListScopesToMissingIDs(t *testing.T) {
 	cache := NewCachingStoreForTest(backing, nil)
 
 	want := map[string]Bead{alive.ID: {ID: alive.ID}}
-	found, err := cache.reverifyMissingByList(want)
+	found, err := cache.fetchBeadsByIDs(want)
 	if err != nil {
-		t.Fatalf("reverifyMissingByList: %v", err)
+		t.Fatalf("fetchBeadsByIDs: %v", err)
 	}
 
 	if len(backing.listQueries) != 1 {
-		t.Fatalf("re-verify issued %d List calls, want 1", len(backing.listQueries))
+		t.Fatalf("batch lookup issued %d List calls, want 1", len(backing.listQueries))
 	}
 	q := backing.listQueries[0]
 	if len(q.IDs) != 1 || q.IDs[0] != alive.ID {
-		t.Fatalf("re-verify List query IDs = %v, want scoped to [%s]", q.IDs, alive.ID)
+		t.Fatalf("batch lookup List query IDs = %v, want scoped to [%s]", q.IDs, alive.ID)
 	}
 	if q.TierMode != TierBoth {
-		t.Fatalf("re-verify List query TierMode = %v, want TierBoth (tier-consistent)", q.TierMode)
+		t.Fatalf("batch lookup List query TierMode = %v, want TierBoth (tier-consistent)", q.TierMode)
+	}
+	if !q.IncludeClosed {
+		t.Fatalf("batch lookup List query IncludeClosed = false, want true (distinguish closed from gone)")
 	}
 	if _, ok := found[alive.ID]; !ok {
-		t.Fatalf("re-verify did not surface the alive wisp %s: %v", alive.ID, found)
+		t.Fatalf("batch lookup did not surface the alive wisp %s: %v", alive.ID, found)
 	}
 }

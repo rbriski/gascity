@@ -2197,7 +2197,7 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
-	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
+	if !query.isBoundedExactParentMetadataLookup() && bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
 		limit = 0
 	}
 	args := []string{"list", "--json"}
@@ -2315,7 +2315,7 @@ func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ, false)
 
 	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
 }
@@ -2323,7 +2323,7 @@ func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 // listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
 // <filters>"`. The installed bd list surface does not expose ephemeral rows, so
 // TierWisps and TierBoth must union this path with bd list results.
-func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+func (s *BdStore) listEphemeral(query ListQuery, boundedExactLookup bool) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	clauses := []string{"ephemeral=true"}
 	serverFilteredOnly := !clientFilteredAssignees
@@ -2332,13 +2332,32 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
+	if boundedExactLookup {
+		keys := make([]string, 0, len(serverQuery.Metadata))
+		for key := range serverQuery.Metadata {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if !isBareBdQueryValue(key) {
+				serverFilteredOnly = false
+				continue
+			}
+			clauses, serverFilteredOnly = appendBdQueryClause(
+				clauses,
+				serverFilteredOnly,
+				"metadata."+key,
+				serverQuery.Metadata[key],
+			)
+		}
+	}
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
 		args = append(args, "--all")
 	}
 	wispsLimit := 0
-	if query.Limit > 0 && serverFilteredOnly && canApplyWispsServerLimit(query) {
+	if query.Limit > 0 && ((serverFilteredOnly && canApplyWispsServerLimit(query)) || boundedExactLookup) {
 		wispsLimit = query.Limit
 	}
 	args = append(args, "--limit", strconv.Itoa(wispsLimit))
@@ -2362,6 +2381,9 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		result[i].NoHistory = false
 	}
 	filtered := applyListQuery(result, query)
+	if boundedExactLookup && len(result) >= query.Limit && len(filtered) < query.Limit {
+		return filtered, fmt.Errorf("bd query: physical limit %d reached before exact parent/metadata lookup was complete", query.Limit)
+	}
 	if parseErr != nil {
 		if len(filtered) > 0 {
 			return filtered, &PartialResultError{Op: "bd query", Err: parseErr}
@@ -2429,7 +2451,7 @@ func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ, query.isBoundedExactParentMetadataLookup())
 
 	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
 }

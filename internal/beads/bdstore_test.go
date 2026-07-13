@@ -4413,6 +4413,58 @@ func TestBdStoreListIssuesTierDoesNotIssueQuery(t *testing.T) {
 	}
 }
 
+func TestBdStoreBoundedParentMetadataLookupKeepsBothBackendReadsFinite(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		calls = append(calls, command)
+		switch {
+		case strings.HasPrefix(command, "bd list "):
+			return []byte(`[]`), nil
+		case strings.Contains(command, "metadata.idempotency_key=converge:root-1:iter:2"):
+			return []byte(`[
+				{"id":"exact-a","title":"a","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:03Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:2"}},
+				{"id":"exact-b","title":"b","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:04Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:2"}}
+			]`), nil
+		case strings.HasPrefix(command, "bd query "):
+			// Without the server-side metadata clause, the physical limit would
+			// consume earlier nonmatching siblings and never reach the exact key.
+			return []byte(`[
+				{"id":"sibling-0","title":"zero","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:00Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:0"}},
+				{"id":"sibling-1","title":"one","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:01Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:1"}}
+			]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command %q", command)
+		}
+	}
+	store := beads.NewBdStore("/city", runner)
+	query := beads.ListQuery{
+		ParentID:      "root-1",
+		Metadata:      map[string]string{"idempotency_key": "converge:root-1:iter:2"},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Limit:         2,
+	}
+	got, err := store.List(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIDs := beadIDs(got); fmt.Sprint(gotIDs) != fmt.Sprint([]string{"exact-a", "exact-b"}) {
+		t.Fatalf("bounded exact lookup ids = %v, want [exact-a exact-b]", gotIDs)
+	}
+	listCommand := firstCommandWithPrefix(calls, "bd list ")
+	queryCommand := firstCommandWithPrefix(calls, "bd query ")
+	if !strings.Contains(listCommand, "--limit 2") {
+		t.Fatalf("bd list command = %q, want physical limit 2", listCommand)
+	}
+	if !strings.Contains(queryCommand, "--limit 2") {
+		t.Fatalf("bd query command = %q, want physical limit 2", queryCommand)
+	}
+	if !strings.Contains(queryCommand, "metadata.idempotency_key=converge:root-1:iter:2") {
+		t.Fatalf("bd query command = %q, want server-side exact metadata clause", queryCommand)
+	}
+}
+
 func firstCommandWithPrefix(calls []string, prefix string) string {
 	for _, call := range calls {
 		if strings.HasPrefix(call, prefix) {

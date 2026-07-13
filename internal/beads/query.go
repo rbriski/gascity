@@ -169,6 +169,31 @@ func (q ListQuery) IncludesClosed() bool {
 	return q.IncludeClosed || q.Status == "closed"
 }
 
+// isBoundedExactParentMetadataLookup identifies order-independent ambiguity
+// probes whose parent and metadata predicates are exact and whose positive
+// limit must therefore remain a physical backend work bound. These lookups do
+// not ask for a chronological prefix: any Limit matching rows are sufficient
+// to prove absence, uniqueness, or ambiguity.
+func (q ListQuery) isBoundedExactParentMetadataLookup() bool {
+	return q.Limit == 2 &&
+		q.Status == "" &&
+		q.Type == "" &&
+		q.Label == "" &&
+		q.Assignee == "" &&
+		q.ParentID != "" &&
+		len(q.ParentIDs) == 0 &&
+		len(q.Metadata) == 1 &&
+		len(q.Assignees) == 0 &&
+		q.IncludeClosed &&
+		!q.AllowScan &&
+		!q.Live &&
+		q.Sort == SortDefault &&
+		q.TierMode == TierBoth &&
+		q.CreatedBefore.IsZero() &&
+		q.UpdatedBefore.IsZero() &&
+		q.SeekAfter == nil
+}
+
 // matchesTier reports whether the bead is in the storage tier(s) the query
 // selects. TierIssues (the zero value) excludes ephemeral wisps; TierWisps
 // keeps only ephemeral or no-history rows; TierBoth applies no tier filter.

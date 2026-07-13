@@ -479,13 +479,19 @@ func (c *Client) requireCityScope() error {
 
 // ListCities fetches the current set of cities managed by the supervisor.
 func (c *Client) ListCities() ([]CityInfo, error) {
+	return c.ListCitiesContext(context.Background())
+}
+
+// ListCitiesContext fetches the current set of supervisor-managed cities while
+// honoring the caller's cancellation and deadline.
+func (c *Client) ListCitiesContext(ctx context.Context) ([]CityInfo, error) {
 	if c.initErr != nil {
 		return nil, c.initErr
 	}
 	if c.cw == nil {
 		return nil, errClientUninitialized
 	}
-	resp, err := c.cw.GetV0CitiesWithResponse(context.Background())
+	resp, err := c.cw.GetV0CitiesWithResponse(ctx)
 	if err != nil {
 		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -191,10 +192,9 @@ func TestCmdStopBodySkipsTeardownForNonLifecycleProvider(t *testing.T) {
 	}
 }
 
-// TestCmdStopBodyReportsTeardownErrorWithoutFailing verifies that tmux server
-// teardown is best-effort: a provider error is visible to the operator but does
-// not change the stop exit code.
-func TestCmdStopBodyReportsTeardownErrorWithoutFailing(t *testing.T) {
+// TestCmdStopBodyTeardownErrorIsFatal verifies that a runtime server which
+// remains alive prevents gc stop from claiming terminal success.
+func TestCmdStopBodyTeardownErrorIsFatal(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -219,14 +219,85 @@ func TestCmdStopBodyReportsTeardownErrorWithoutFailing(t *testing.T) {
 
 	var stdout, stderr lockedBuffer
 	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code != 1 {
+		t.Fatalf("cmdStopBody() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout = %q, want City stopped.", stdout.String())
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout claims success after teardown failure: %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "gc stop: teardown server: provider-stop-failed") {
-		t.Fatalf("stderr = %q, want teardown server warning", stderr.String())
+		t.Fatalf("stderr = %q, want teardown server error", stderr.String())
+	}
+}
+
+func TestCmdStopBodyClosesEventRecorderBeforeBeadsShutdown(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "recorder-close-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+
+	oldCloseRecorder := closeEventRecorderForStop
+	recorderClosed := false
+	closeEventRecorderForStop = func(events.Recorder) error {
+		recorderClosed = true
+		return nil
+	}
+	t.Cleanup(func() { closeEventRecorderForStop = oldCloseRecorder })
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		if !recorderClosed {
+			t.Error("bead provider shutdown began before the event recorder closed")
+		}
+		return nil
+	})
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return runtime.NewFake() }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !recorderClosed {
+		t.Fatal("event recorder was not closed")
+	}
+}
+
+func TestCmdStopBodyRecorderCloseErrorIsFatal(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "recorder-close-error-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+
+	wantErr := errors.New("recorder-close-failed")
+	oldCloseRecorder := closeEventRecorderForStop
+	closeEventRecorderForStop = func(events.Recorder) error { return wantErr }
+	t.Cleanup(func() { closeEventRecorderForStop = oldCloseRecorder })
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return runtime.NewFake() }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdStopBody() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout claims success after recorder close failure: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), wantErr.Error()) {
+		t.Fatalf("stderr = %q, want recorder close error", stderr.String())
 	}
 }
 

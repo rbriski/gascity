@@ -83,11 +83,13 @@ func (e controllerStopTransportError) Is(target error) bool {
 }
 
 type controllerStopClient struct {
-	stat         func(string) (os.FileInfo, error)
-	dial         func(network, address string, timeout time.Duration) (net.Conn, error)
-	dialTimeout  time.Duration
-	writeTimeout time.Duration
-	readTimeout  time.Duration
+	stat               func(string) (os.FileInfo, error)
+	dial               func(network, address string, timeout time.Duration) (net.Conn, error)
+	dialTimeout        time.Duration
+	writeTimeout       time.Duration
+	readTimeout        time.Duration
+	completionDeadline time.Time
+	now                func() time.Time
 }
 
 func sendControllerStop(cityPath string, force bool) controllerStopResult {
@@ -103,8 +105,54 @@ func sendControllerStop(cityPath string, force bool) controllerStopResult {
 
 var controllerStopRequestForCommand = sendControllerStop
 
+func sendControllerStopUntil(cityPath string, force bool, deadline time.Time) controllerStopResult {
+	client := controllerStopClient{
+		stat:               os.Stat,
+		dial:               net.DialTimeout,
+		dialTimeout:        controllerStopDialTimeout,
+		writeTimeout:       controllerStopWriteTimeout,
+		readTimeout:        controllerStopReadTimeout,
+		completionDeadline: deadline,
+		now:                time.Now,
+	}
+	return client.stop(cityPath, force)
+}
+
+var controllerStopRequestUntilForCommand = sendControllerStopUntil
+
 func (c controllerStopClient) stop(cityPath string, force bool) controllerStopResult {
 	sockPath := controllerSocketPath(cityPath)
+	now := c.now
+	if now == nil {
+		now = time.Now
+	}
+	boundedDuration := func(local time.Duration) (time.Duration, bool) {
+		if c.completionDeadline.IsZero() {
+			return local, true
+		}
+		remaining := c.completionDeadline.Sub(now())
+		if remaining <= 0 {
+			return 0, false
+		}
+		if local <= 0 || local > remaining {
+			return remaining, true
+		}
+		return local, true
+	}
+	boundedDeadline := func(local time.Duration) (time.Time, bool) {
+		current := now()
+		if c.completionDeadline.IsZero() {
+			return current.Add(local), true
+		}
+		remaining := c.completionDeadline.Sub(current)
+		if remaining <= 0 {
+			return time.Time{}, false
+		}
+		if local > 0 && local < remaining {
+			return current.Add(local), true
+		}
+		return c.completionDeadline, true
+	}
 	var before os.FileInfo
 	classified := func(outcome controllerStopOutcome, op string, err error) controllerStopResult {
 		result := classifiedControllerStopResult(outcome, op, err)
@@ -114,6 +162,9 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 	}
 
 	var err error
+	if _, ok := boundedDuration(0); !ok {
+		return classified(controllerStopDefinitePreEntryUnavailable, "completion deadline before stating socket", os.ErrDeadlineExceeded)
+	}
 	before, err = c.stat(sockPath)
 	if err != nil {
 		return classified(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", err)
@@ -122,11 +173,18 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 		return classified(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", errors.New("socket stat returned no identity"))
 	}
 
-	conn, err := c.dial("unix", sockPath, c.dialTimeout)
+	dialTimeout, ok := boundedDuration(c.dialTimeout)
+	if !ok {
+		return classified(controllerStopDefinitePreEntryUnavailable, "completion deadline before dialing socket", os.ErrDeadlineExceeded)
+	}
+	conn, err := c.dial("unix", sockPath, dialTimeout)
 	if err != nil {
 		return classified(controllerStopDefinitePreEntryUnavailable, "dialing socket", err)
 	}
 	defer conn.Close() //nolint:errcheck // the classified exchange result is authoritative
+	if _, ok := boundedDuration(0); !ok {
+		return classified(controllerStopMayHaveEntered, "completion deadline after dialing socket", os.ErrDeadlineExceeded)
+	}
 
 	after, err := c.stat(sockPath)
 	if err != nil {
@@ -139,7 +197,11 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 		return classified(controllerStopMayHaveEntered, "verifying socket identity", errors.New("controller socket changed during dial"))
 	}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
+	writeDeadline, ok := boundedDeadline(c.writeTimeout)
+	if !ok {
+		return classified(controllerStopMayHaveEntered, "completion deadline before writing command", os.ErrDeadlineExceeded)
+	}
+	if err := conn.SetWriteDeadline(writeDeadline); err != nil {
 		return classified(controllerStopMayHaveEntered, "setting write deadline", err)
 	}
 	command := []byte("stop\n")
@@ -154,7 +216,11 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 		return classified(controllerStopMayHaveEntered, "writing command", fmt.Errorf("short write: wrote %d of %d bytes", n, len(command)))
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(c.readTimeout)); err != nil {
+	readDeadline, ok := boundedDeadline(c.readTimeout)
+	if !ok {
+		return classified(controllerStopMayHaveEntered, "completion deadline before reading acknowledgement", os.ErrDeadlineExceeded)
+	}
+	if err := conn.SetReadDeadline(readDeadline); err != nil {
 		return classified(controllerStopMayHaveEntered, "setting read deadline", err)
 	}
 	reply, err := readControllerStopReply(conn)

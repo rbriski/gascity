@@ -109,6 +109,28 @@ func configureSupervisorHooksForTests() {
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
 	supervisorAliveHook = func() int { return 0 }
+	controllerStopRequestUntilForCommand = func(cityPath string, force bool, _ time.Time) controllerStopResult {
+		return controllerStopRequestForCommand(cityPath, force)
+	}
+	stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
+		now:             func() time.Time { return stopCompletionNow() },
+		supervisorAlive: func(time.Time) int { return supervisorAliveHook() },
+		requestStop: func(cityPath string, force bool, deadline time.Time) controllerStopResult {
+			return controllerStopRequestUntilForCommand(cityPath, force, deadline)
+		},
+		reload: func(stdout, stderr io.Writer, _ time.Time) int {
+			return reloadSupervisorHook(stdout, stderr)
+		},
+		waitCity: func(cityPath string, wantRunning bool, _ time.Time, timeoutLabel time.Duration, stdout io.Writer) error {
+			return waitForSupervisorCityHook(cityPath, wantRunning, timeoutLabel, stdout)
+		},
+		acquireOwnership: func(cityPath string, _ time.Time, timeoutLabel time.Duration) (*controllerLockLease, error) {
+			if err := waitForSupervisorControllerStopHook(cityPath, timeoutLabel); err != nil {
+				return nil, err
+			}
+			return acquireControllerLock(cityPath)
+		},
+	}
 	// Neutralize systemd lingering so install tests never spawn loginctl
 	// or mutate the test runner's real linger state. Reporting linger as
 	// already enabled makes ensureSupervisorLinger a silent no-op, keeping

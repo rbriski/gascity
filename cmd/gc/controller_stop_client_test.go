@@ -416,6 +416,51 @@ func TestControllerStopClientRealUnixReplacementAfterDialIsAmbiguous(t *testing.
 	}
 }
 
+func TestControllerStopClientCarriesCallerDeadlineAcrossLegacyWirePhases(t *testing.T) {
+	started := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	now := started
+	wantDeadline := started.Add(100 * time.Millisecond)
+	conn := &scriptedStopConn{
+		reads:   []scriptedStopRead{{data: []byte("ok\n")}, {err: io.EOF}},
+		onWrite: func() { now = now.Add(20 * time.Millisecond) },
+		onRead:  func() { now = now.Add(20 * time.Millisecond) },
+	}
+	info := statFixtureInfo(t, "absolute-deadline")
+	var dialTimeout time.Duration
+	dialCalls := 0
+	client := controllerStopClient{
+		stat: func(string) (os.FileInfo, error) { return info, nil },
+		dial: func(_ string, _ string, timeout time.Duration) (net.Conn, error) {
+			dialCalls++
+			dialTimeout = timeout
+			now = now.Add(10 * time.Millisecond)
+			return conn, nil
+		},
+		dialTimeout:        time.Second,
+		writeTimeout:       time.Second,
+		readTimeout:        time.Second,
+		completionDeadline: wantDeadline,
+		now:                func() time.Time { return now },
+	}
+
+	result := client.stop(t.TempDir(), false)
+	if result.outcome != controllerStopAcknowledged || result.err != nil {
+		t.Fatalf("stop result = %+v, want acknowledgement", result)
+	}
+	if dialTimeout <= 0 {
+		t.Fatalf("dial timeout = %s, want positive bounded budget", dialTimeout)
+	}
+	if dialCalls != 1 {
+		t.Fatalf("dial calls = %d, want one transport entry", dialCalls)
+	}
+	if len(conn.writeDeadlineValues) != 1 || conn.writeDeadlineValues[0] != wantDeadline {
+		t.Fatalf("write deadlines = %v, want [%v]", conn.writeDeadlineValues, wantDeadline)
+	}
+	if len(conn.readDeadlineValues) != 1 || conn.readDeadlineValues[0] != wantDeadline {
+		t.Fatalf("read deadlines = %v, want [%v]", conn.readDeadlineValues, wantDeadline)
+	}
+}
+
 func sameIdentityStopClient(t *testing.T, conn net.Conn) (controllerStopClient, os.FileInfo) {
 	t.Helper()
 	info := statFixtureInfo(t, "same-identity")
@@ -455,10 +500,17 @@ type scriptedStopConn struct {
 	setReadDeadlineErr  error
 	writeDeadlines      int
 	readDeadlines       int
+	writeDeadlineValues []time.Time
+	readDeadlineValues  []time.Time
+	onWrite             func()
+	onRead              func()
 	closed              bool
 }
 
 func (c *scriptedStopConn) Read(p []byte) (int, error) {
+	if c.onRead != nil {
+		c.onRead()
+	}
 	if len(c.reads) == 0 {
 		return 0, io.EOF
 	}
@@ -469,6 +521,9 @@ func (c *scriptedStopConn) Read(p []byte) (int, error) {
 }
 
 func (c *scriptedStopConn) Write(p []byte) (int, error) {
+	if c.onWrite != nil {
+		c.onWrite()
+	}
 	n := len(p)
 	if c.writeLimit > 0 && c.writeLimit < n {
 		n = c.writeLimit
@@ -488,13 +543,15 @@ func (c *scriptedStopConn) SetDeadline(time.Time) error {
 	return errors.New("unexpected SetDeadline call")
 }
 
-func (c *scriptedStopConn) SetWriteDeadline(time.Time) error {
+func (c *scriptedStopConn) SetWriteDeadline(deadline time.Time) error {
 	c.writeDeadlines++
+	c.writeDeadlineValues = append(c.writeDeadlineValues, deadline)
 	return c.setWriteDeadlineErr
 }
 
-func (c *scriptedStopConn) SetReadDeadline(time.Time) error {
+func (c *scriptedStopConn) SetReadDeadline(deadline time.Time) error {
 	c.readDeadlines++
+	c.readDeadlineValues = append(c.readDeadlineValues, deadline)
 	return c.setReadDeadlineErr
 }
 

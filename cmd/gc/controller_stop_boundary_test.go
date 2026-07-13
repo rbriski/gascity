@@ -41,7 +41,7 @@ func TestControllerStopWireStaysConfinedToTypedClientAndServer(t *testing.T) {
 				switch n := node.(type) {
 				case *ast.CallExpr:
 					callee := controllerStopCalledIdent(n.Fun)
-					if callee == "controllerSocketPath" && name != "controller.go" && name != "controller_stop_client.go" {
+					if callee == "controllerSocketPath" && name != "controller.go" && name != "controller_stop_client.go" && name != "controller_lock.go" {
 						t.Errorf("%s:%s calls controllerSocketPath outside the server/typed client boundary", name, fn.Name.Name)
 					}
 					if strings.HasPrefix(callee, "sendControllerCommand") && len(n.Args) >= 2 {
@@ -78,8 +78,7 @@ func TestControllerStopProductionCallSitesStayTriState(t *testing.T) {
 	}
 	wantConsumers := map[string]bool{
 		"cmd_stop.go:cmdStopJSON":                                              true,
-		"cmd_stop.go:cmdStopBodyWithResult":                                    true,
-		"cmd_stop.go:stopStandaloneControllerWithoutConfig":                    true,
+		"cmd_stop.go:cmdStopBodyWithHeldOwnership":                             true,
 		"cmd_supervisor_city.go:unregisterCityFromSupervisorWithOptionsResult": true,
 	}
 	gotRequests := make(map[string]int)
@@ -104,7 +103,7 @@ func TestControllerStopProductionCallSitesStayTriState(t *testing.T) {
 				switch n := node.(type) {
 				case *ast.CallExpr:
 					callee := controllerStopCalledIdent(n.Fun)
-					if callee == "controllerStopRequestForCommand" || callee == "sendControllerStop" {
+					if callee == "controllerStopRequestForCommand" || callee == "controllerStopRequestUntilForCommand" || callee == "sendControllerStop" {
 						gotRequests[key]++
 					}
 				case *ast.Ident:

@@ -789,7 +789,10 @@ func newStopSupervisorRequestID() (string, error) {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("generating stop request ID: %w", err)
 	}
-	return "req-" + hex.EncodeToString(raw[:]), nil
+	// The operation prefix lets the supervisor distinguish this interim
+	// stop-only witness from the pre-existing generic city-create request IDs
+	// without adding a durable command schema before G0.
+	return "req-stop-" + hex.EncodeToString(raw[:]), nil
 }
 
 func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Time) error {
@@ -1071,6 +1074,24 @@ func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stde
 			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
 		if supervisorWasAlive {
+			if opts.DeadlineOps != nil {
+				var terminalErr error
+				switch {
+				case pendingRequestID == "":
+					terminalErr = errors.New("supervisor cleanup returned no durable terminal-result witness")
+				case opts.DeadlineOps.waitTerminal == nil:
+					terminalErr = errors.New("supervisor cleanup cannot validate its terminal-result witness")
+				default:
+					terminalErr = opts.DeadlineOps.waitTerminal(pendingRequestID, opts.Deadline)
+				}
+				if terminalErr == nil && deadlineExpired() {
+					terminalErr = errStopCompletionDeadline
+				}
+				if terminalErr != nil {
+					fmt.Fprintf(stderr, "%s: %v\n", commandName, terminalErr) //nolint:errcheck
+					return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+				}
+			}
 			return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true}
 		}
 		return supervisorUnregisterResult{

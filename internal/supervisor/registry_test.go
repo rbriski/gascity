@@ -183,6 +183,53 @@ func TestRegistryStorePendingCityRequestIDRejectsDuplicatePath(t *testing.T) {
 	}
 }
 
+func TestRegistryListPendingCityRequestsReturnsPersistentSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "cities.toml")
+	r := NewRegistry(registryPath)
+
+	alpha := filepath.Join(dir, "cities", "alpha")
+	beta := filepath.Join(dir, "cities", "beta")
+	for _, path := range []string{alpha, beta} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.StorePendingCityRequestID(alpha, "req-alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.StorePendingCityRequestID(beta, "req-beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := NewRegistry(registryPath).ListPendingCityRequests()
+	if err != nil {
+		t.Fatalf("ListPendingCityRequests: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("pending requests = %#v, want two entries", got)
+	}
+	byPath := make(map[string]string, len(got))
+	for _, entry := range got {
+		byPath[entry.Path] = entry.RequestID
+	}
+	if byPath[alpha] != "req-alpha" || byPath[beta] != "req-beta" {
+		t.Fatalf("pending requests = %#v, want alpha and beta", got)
+	}
+
+	// The returned slice is a snapshot, not an alias into registry state.
+	got[0].RequestID = "mutated"
+	again, err := NewRegistry(registryPath).ListPendingCityRequests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range again {
+		if entry.RequestID == "mutated" {
+			t.Fatalf("caller mutation leaked into persistent registry: %#v", again)
+		}
+	}
+}
+
 func TestRegistryUnregisterNotFound(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry(filepath.Join(dir, "cities.toml"))

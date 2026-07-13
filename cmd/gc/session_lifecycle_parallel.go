@@ -3075,6 +3075,137 @@ type stopCompletionListStore struct {
 	budget *stopCompletionBudget
 }
 
+// stopAdmissionProvider preserves the existing runtime provider while placing
+// the command's absolute completion deadline at the final native mutation
+// boundary. Handle resolution and session-bead reads can block; every provider
+// mutation therefore rechecks admission after those reads complete. Once a
+// native call enters, it remains synchronous and joined through return.
+type stopAdmissionProvider struct {
+	runtime.Provider
+	budget *stopCompletionBudget
+}
+
+// stopAdmissionStore keeps session-handle persistence on the same absolute
+// admission budget as its provider call. In particular, Suspend must not begin
+// its post-provider state update when an entered Stop returns after expiry.
+type stopAdmissionStore struct {
+	beads.Store
+	budget *stopCompletionBudget
+}
+
+func (s stopAdmissionStore) admit() error {
+	if !stopEffectAdmitted(s.budget) {
+		return errStopCompletionDeadline
+	}
+	return nil
+}
+
+func (s stopAdmissionStore) Get(id string) (beads.Bead, error) {
+	if err := s.admit(); err != nil {
+		return beads.Bead{}, err
+	}
+	row, err := s.Store.Get(id)
+	if deadlineErr := s.admit(); deadlineErr != nil {
+		return row, errors.Join(err, deadlineErr)
+	}
+	return row, err
+}
+
+func (s stopAdmissionStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if err := s.admit(); err != nil {
+		return nil, err
+	}
+	rows, err := s.Store.List(query)
+	if deadlineErr := s.admit(); deadlineErr != nil {
+		return rows, errors.Join(err, deadlineErr)
+	}
+	return rows, err
+}
+
+func (s stopAdmissionStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.admit(); err != nil {
+		return err
+	}
+	err := s.Store.Update(id, opts)
+	if deadlineErr := s.admit(); deadlineErr != nil {
+		return errors.Join(err, deadlineErr)
+	}
+	return err
+}
+
+func (p stopAdmissionProvider) admit() error {
+	if !stopEffectAdmitted(p.budget) {
+		return errStopCompletionDeadline
+	}
+	return nil
+}
+
+func (p stopAdmissionProvider) Stop(name string) error {
+	if err := p.admit(); err != nil {
+		return err
+	}
+	return p.Provider.Stop(name)
+}
+
+func (p stopAdmissionProvider) Interrupt(name string) error {
+	if err := p.admit(); err != nil {
+		return err
+	}
+	return p.Provider.Interrupt(name)
+}
+
+func (p stopAdmissionProvider) SendKeys(name string, keys ...string) error {
+	if err := p.admit(); err != nil {
+		return err
+	}
+	return p.Provider.SendKeys(name, keys...)
+}
+
+func (p stopAdmissionProvider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	if err := p.admit(); err != nil {
+		return err
+	}
+	waiter, ok := p.Provider.(runtime.IdleWaitProvider)
+	if !ok {
+		return runtime.ErrInteractionUnsupported
+	}
+	return waiter.WaitForIdle(ctx, name, timeout)
+}
+
+func (p stopAdmissionProvider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
+	if err := p.admit(); err != nil {
+		return err
+	}
+	waiter, ok := p.Provider.(runtime.InterruptBoundaryWaitProvider)
+	if !ok {
+		return runtime.ErrInteractionUnsupported
+	}
+	return waiter.WaitForInterruptBoundary(ctx, name, since, timeout)
+}
+
+func stopWorkerAdmission(budget *stopCompletionBudget) func() error {
+	return func() error {
+		if !stopEffectAdmitted(budget) {
+			return errStopCompletionDeadline
+		}
+		return nil
+	}
+}
+
+func stopWorkerProvider(sp runtime.Provider, budget *stopCompletionBudget) runtime.Provider {
+	if sp == nil || budget == nil {
+		return sp
+	}
+	return stopAdmissionProvider{Provider: sp, budget: budget}
+}
+
+func stopWorkerStore(store beads.Store, budget *stopCompletionBudget) beads.Store {
+	if store == nil || budget == nil {
+		return store
+	}
+	return stopAdmissionStore{Store: store, budget: budget}
+}
+
 func (s stopCompletionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if !stopEffectAdmitted(s.budget) {
 		return nil, errStopCompletionDeadline
@@ -3217,7 +3348,7 @@ func stopTargetThroughWorkerBoundaryWithBudget(target stopTarget, store beads.St
 		if !stopEffectAdmitted(budget) {
 			return errStopCompletionDeadline
 		}
-		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+		if err := workerKillSessionTargetWithConfigAndAdmission("", stopWorkerStore(store, budget), stopWorkerProvider(sp, budget), cfg, targetID, stopWorkerAdmission(budget)); err != nil {
 			return err
 		}
 		if !stopEffectAdmitted(budget) {
@@ -3228,7 +3359,7 @@ func stopTargetThroughWorkerBoundaryWithBudget(target stopTarget, store beads.St
 	if !stopEffectAdmitted(budget) {
 		return errStopCompletionDeadline
 	}
-	if err := workerStopSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+	if err := workerStopSessionTargetWithConfigAndAdmission("", stopWorkerStore(store, budget), stopWorkerProvider(sp, budget), cfg, targetID, stopWorkerAdmission(budget)); err != nil {
 		return err
 	}
 	if !stopEffectAdmitted(budget) {
@@ -3371,7 +3502,7 @@ func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City
 		if targetID == "" {
 			targetID = strings.TrimSpace(target.name)
 		}
-		if err := workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+		if err := workerInterruptSessionTargetWithConfigAndAdmission("", stopWorkerStore(store, budget), stopWorkerProvider(sp, budget), cfg, targetID, stopWorkerAdmission(budget)); err != nil {
 			return err
 		}
 		if !stopEffectAdmitted(budget) {

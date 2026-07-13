@@ -1913,6 +1913,121 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	}
 }
 
+func TestReconcileCitiesEmitsUnregisterSuccessWithoutManagedRuntime(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "already-gone")
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-stop-test-unregister-empty"); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	if len(supRec.Events) != 1 {
+		t.Fatalf("recorded %d supervisor events, want terminal no-runtime result; stderr=%q", len(supRec.Events), stderr.String())
+	}
+	got := supRec.Events[0]
+	if got.Type != events.RequestResultCityUnregister {
+		t.Fatalf("event.Type = %q, want %q", got.Type, events.RequestResultCityUnregister)
+	}
+	var payload api.CityUnregisterSucceededPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.RequestID != "req-stop-test-unregister-empty" || payload.Path != cityPath {
+		t.Fatalf("payload = %#v, want correlated no-runtime result", payload)
+	}
+	if _, ok, err := registry.ConsumePendingRequestID(cityPath); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("pending unregister witness survived terminal no-runtime result")
+	}
+}
+
+func TestReconcileCitiesDoesNotMisclassifyGenericPendingRequestWithoutRuntime(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "create-never-started")
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-generic-create"); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, io.Discard, io.Discard)
+
+	if len(supRec.Events) != 0 {
+		t.Fatalf("generic pending request was misclassified as unregister: %#v", supRec.Events)
+	}
+	if got, ok, err := registry.ConsumePendingRequestID(cityPath); err != nil {
+		t.Fatal(err)
+	} else if !ok || got != "req-generic-create" {
+		t.Fatalf("generic pending request = (%q, %t), want preserved", got, ok)
+	}
+}
+
+func TestReconcileCitiesDeletedPathPreservesManagedStopFailure(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := t.TempDir()
+	if err := os.RemoveAll(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-test-unregister-running"); err != nil {
+		t.Fatal(err)
+	}
+	registry.Add(cityPath, &managedCity{
+		name:    "managed-before-delete",
+		started: true,
+		cancel:  func() {},
+		done:    make(chan struct{}),
+		cr: &CityRuntime{
+			cfg:    &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "0s"}},
+			sp:     runtime.NewFake(),
+			rec:    events.Discard,
+			stdout: io.Discard,
+			stderr: io.Discard,
+		},
+	})
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	if len(supRec.Events) != 1 {
+		t.Fatalf("recorded %d events, want one failed terminal result; stdout=%q stderr=%q", len(supRec.Events), stdout.String(), stderr.String())
+	}
+	got := supRec.Events[0]
+	if got.Type != events.RequestFailed {
+		t.Fatalf("event.Type = %q, want %q; event=%#v", got.Type, events.RequestFailed, got)
+	}
+	var payload api.RequestFailedPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.RequestID != "req-test-unregister-running" || payload.Operation != api.RequestOperationCityUnregister {
+		t.Fatalf("payload = %#v, want correlated unregister failure", payload)
+	}
+	if !strings.Contains(payload.ErrorMessage, "did not exit") {
+		t.Fatalf("failure detail = %q, want owner-exit failure", payload.ErrorMessage)
+	}
+	for _, event := range supRec.Events {
+		if event.Type == events.RequestResultCityUnregister {
+			t.Fatalf("managed cleanup failure was overwritten by success: %#v", supRec.Events)
+		}
+	}
+}
+
 func TestEmitCityUnregisterFailureEventUsesManagedCityName(t *testing.T) {
 	supRec := events.NewFake()
 	emitCityUnregisterTerminalEvent(

@@ -3,6 +3,7 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -262,7 +263,7 @@ func TestStopHandler_MissingActiveWisp_StopsGracefully(t *testing.T) {
 	}
 }
 
-func TestStopHandler_ActiveWispMissingBeforeForceClose_StopsGracefully(t *testing.T) {
+func TestStopHandler_ActiveWispDisappearsDuringRecoveryFailsClosed(t *testing.T) {
 	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
 
 	calls := 0
@@ -291,16 +292,16 @@ func TestStopHandler_ActiveWispMissingBeforeForceClose_StopsGracefully(t *testin
 	}
 
 	result, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("error = %v, want missing replacement evidence", err)
 	}
-	if result.Action != ActionStopped {
-		t.Fatalf("Action = %q, want %q", result.Action, ActionStopped)
+	if result.Action != "" {
+		t.Fatalf("Action = %q, want no successful stop", result.Action)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
-	if meta[FieldState] != StateTerminated {
-		t.Fatalf("state = %q, want %q", meta[FieldState], StateTerminated)
+	if meta[FieldState] != StateActive || meta[FieldTerminalReason] != "" {
+		t.Fatalf("metadata = %#v, want active root preserved", meta)
 	}
 }
 

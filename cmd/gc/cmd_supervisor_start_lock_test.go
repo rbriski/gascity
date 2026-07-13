@@ -703,6 +703,22 @@ func TestRunManagedCityOwnedPhasesRetainsLeaseThroughCleanupAfterRunPanic(t *tes
 	_ = reacquired.Close()
 }
 
+func TestRunManagedCityOwnedPhasesDoesNotClassifyCleanupPanicAsRuntimePanic(t *testing.T) {
+	result := runManagedCityOwnedPhases(
+		func() {},
+		func() { panic("runtime shutdown failed") },
+		func() error { panic("provider shutdown failed") },
+	)
+
+	if result.recovered != nil {
+		t.Fatalf("runtime panic classification = %v, want nil for cleanup-only panics", result.recovered)
+	}
+	if result.cleanupErr == nil || !strings.Contains(result.cleanupErr.Error(), "runtime shutdown panic") ||
+		!strings.Contains(result.cleanupErr.Error(), "bead provider shutdown panic") {
+		t.Fatalf("cleanup error = %v, want both cleanup panics", result.cleanupErr)
+	}
+}
+
 func TestRunManagedCityWithLeaseReleasesLeaseAndSignalsDoneAfterEpiloguePanic(t *testing.T) {
 	cityPath := t.TempDir()
 	lease, err := acquireControllerLock(cityPath)

@@ -784,6 +784,8 @@ func statusDisplayText(status string) string {
 	}
 }
 
+const stopSupervisorRequestIDPrefix = "req-stop-"
+
 func newStopSupervisorRequestID() (string, error) {
 	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -792,7 +794,7 @@ func newStopSupervisorRequestID() (string, error) {
 	// The operation prefix lets the supervisor distinguish this interim
 	// stop-only witness from the pre-existing generic city-create request IDs
 	// without adding a durable command schema before G0.
-	return "req-stop-" + hex.EncodeToString(raw[:]), nil
+	return stopSupervisorRequestIDPrefix + hex.EncodeToString(raw[:]), nil
 }
 
 func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Time) error {

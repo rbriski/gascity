@@ -1874,7 +1874,7 @@ func reconcileCitiesWithControllerLock(
 		// Generic pending IDs can belong to city.create. Only the operation-
 		// scoped interim witness minted by gc stop is safe to classify from an
 		// absent desired/runtime row without adding a new persistent schema.
-		if !strings.HasPrefix(pending.RequestID, "req-stop-") {
+		if !strings.HasPrefix(pending.RequestID, stopSupervisorRequestIDPrefix) {
 			continue
 		}
 		if _, wanted := desired[path]; wanted {

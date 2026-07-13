@@ -144,9 +144,10 @@ type existingConfigComposeFS struct{ fsys.FS }
 // process-global runtime feature flags; those effects belong to the managed
 // controller after it acquires controller.lock.
 func loadSupervisorIntentConfig(cityPath string) (*config.City, error) {
-	cfg, _, err := config.LoadWithIncludes(
+	cfg, _, err := config.LoadWithIncludesOptions(
 		existingConfigComposeFS{FS: fsys.OSFS{}},
 		filepath.Join(cityPath, "city.toml"),
+		config.LoadOptions{AllowMissingProviderReferences: true},
 	)
 	if err != nil {
 		return nil, err

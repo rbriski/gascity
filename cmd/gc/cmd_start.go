@@ -615,15 +615,15 @@ func resolveStartContextFromPath(path string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return resolvedContext{CityPath: cityPath}, nil
+	}
 	ctx, ok, err := resolveStartRigPathToContext(abs)
 	if err != nil {
 		return resolvedContext{}, err
 	}
 	if ok {
 		return ctx, nil
-	}
-	if cityPath, err := validateCityPath(abs); err == nil {
-		return resolvedContext{CityPath: cityPath}, nil
 	}
 	cityPath, err := findCity(abs)
 	if err != nil {

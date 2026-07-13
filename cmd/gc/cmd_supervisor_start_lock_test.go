@@ -152,6 +152,96 @@ formula_v2 = false
 	}
 }
 
+func TestRegisteredCityNameDefersUncachedLegacyPackProviderValidation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath, cacheDir := writeUncachedLegacyProviderCity(t, "provider-city")
+	name, err := registeredCityName(cityPath, "")
+	if err != nil {
+		t.Fatalf("read-only registration intent rejected provider from an uncached pack: %v", err)
+	}
+	if name != "provider-city" {
+		t.Fatalf("registered city name = %q, want provider-city", name)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration intent materialized legacy pack cache at %s: %v", cacheDir, err)
+	}
+}
+
+func TestRequireBootstrappedDirectCityDoesNotComposeRegisteredSibling(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+
+	targetPath := filepath.Join(t.TempDir(), "target-city")
+	if err := os.MkdirAll(filepath.Join(targetPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetPath, "city.toml"), []byte("[workspace]\nname = \"target-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	siblingPath, cacheDir := writeUncachedLegacyProviderCity(t, "broken-sibling")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(siblingPath, "broken-sibling"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := requireBootstrappedCity(targetPath)
+	if err != nil {
+		t.Fatalf("direct city resolution depended on registered sibling composition: %v", err)
+	}
+	if !samePath(resolved, targetPath) {
+		t.Fatalf("resolved city = %q, want %q", resolved, targetPath)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("direct city resolution materialized sibling pack cache at %s: %v", cacheDir, err)
+	}
+}
+
+func writeUncachedLegacyProviderCity(t *testing.T, cityName string) (string, string) {
+	t.Helper()
+
+	repoRoot := t.TempDir()
+	workDir := filepath.Join(repoRoot, "work")
+	bareDir := filepath.Join(repoRoot, "provider-pack.git")
+	mustGit(t, "", "init", workDir)
+	packToml := `[pack]
+name = "provider-pack"
+version = "1.0.0"
+schema = 1
+
+[providers.remote-provider]
+command = "/bin/true"
+`
+	if err := os.WriteFile(filepath.Join(workDir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, workDir, "add", "pack.toml")
+	mustGit(t, workDir, "commit", "-m", "add provider pack")
+	mustGit(t, "", "clone", "--bare", workDir, bareDir)
+
+	cityPath := filepath.Join(t.TempDir(), cityName)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = %q
+includes = ["provider-pack"]
+
+[packs.provider-pack]
+source = %q
+
+[[agent]]
+name = "worker"
+provider = "remote-provider"
+`, cityName, bareDir)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath, config.PackCachePath(cityPath, "provider-pack", config.PackSource{Source: bareDir})
+}
+
 func TestReconcileCitiesHeldControllerLockRunsNoStartupEffects(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GC_HOME", t.TempDir())

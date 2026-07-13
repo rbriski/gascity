@@ -134,6 +134,16 @@ func (cr *CityRuntime) advanceLumenRun(ctx context.Context, gs *graphstore.Store
 		fmt.Fprintf(cr.stderr, "%s: lumen runs: reading manifest %q: %v\n", cr.logPrefix, r.StreamID, err) //nolint:errcheck // best-effort stderr
 		return
 	}
+	// A v1 agent-driven run (Driver=="self") is owned by its claimed run-bead agent, which
+	// drives the journal turn-by-turn via `gc lumen step`/`settle`. The controller pool
+	// loop must NOT touch it: pool-dispatching a v1 run would wedge on ErrNoPoolRoute (its
+	// default route is empty) and contend the agent's writer lease. Record the head so the
+	// level trigger stays quiet and leave the run to its agent (SDK self-sufficiency: the
+	// run completes with no controller drive).
+	if m.Driver == lumenDriverSelf {
+		lr.heads[r.StreamID] = head
+		return
+	}
 	doc, input, err := loadLumenRunInputs(cr.cityPath, m)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: lumen runs: loading inputs for %q: %v\n", cr.logPrefix, r.StreamID, err) //nolint:errcheck // best-effort stderr

@@ -118,13 +118,13 @@ func TestLumenEnqueueWritesBothBlobsBeforeRunStarted(t *testing.T) {
 
 	var irDurable, inputDurable bool
 	orig := lumenEngineEnqueueRun
-	lumenEngineEnqueueRun = func(ctx context.Context, gs *graphstore.Store, doc *ir.IR, in map[string]any, formulaRef, defaultRoute string) (string, error) {
+	lumenEngineEnqueueRun = func(ctx context.Context, gs *graphstore.Store, doc *ir.IR, in map[string]any, formulaRef, defaultRoute, driverKind string) (string, error) {
 		// At the moment run.started is appended, both blobs MUST already be on disk.
 		_, irErr := os.Stat(lumenIRBlobPath(cityPath, engine.IRHash(doc)))
 		_, inErr := os.Stat(lumenInputBlobPath(cityPath, engine.InputHash(in)))
 		irDurable = irErr == nil
 		inputDurable = inErr == nil
-		return orig(ctx, gs, doc, in, formulaRef, defaultRoute)
+		return orig(ctx, gs, doc, in, formulaRef, defaultRoute, driverKind)
 	}
 	defer func() { lumenEngineEnqueueRun = orig }()
 

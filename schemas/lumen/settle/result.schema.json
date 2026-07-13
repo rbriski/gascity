@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc lumen settle --json result",
+  "description": "One JSON record reporting a v1 Lumen stepper turn after recording a do's self-reported outcome: the next ready do (node id + rendered prompt) or the sealed run's aggregated outcome.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "done"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "command": {
+      "const": "lumen settle"
+    },
+    "done": {
+      "type": "boolean"
+    },
+    "node": {
+      "type": "string"
+    },
+    "activation": {
+      "type": "string"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string"
+    }
+  }
+}

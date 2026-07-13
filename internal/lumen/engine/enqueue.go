@@ -32,6 +32,18 @@ import (
 // keyed by the returned/stamped hashes) BEFORE relying on the run being drivable:
 // the journal pins the hashes but Advance takes the doc and input as arguments.
 func EnqueueRun(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[string]any, formulaRef, defaultRoute string) (string, error) {
+	return EnqueueRunWithDriver(ctx, store, doc, input, formulaRef, defaultRoute, "")
+}
+
+// EnqueueRunWithDriver is EnqueueRun plus the v1 dispatch discriminator: driver
+// stamps run.started's payload-only Driver field ("self" = the agent-driven stepper
+// owns the run, so the controller's pool loop skips it; "" = the ordinary pool
+// controller drives it). Everything else — the lowering pre-validation, the CAS-hash
+// stamps, the fresh-nonce stream, the LIVE fencing epoch — is identical to EnqueueRun,
+// so a v1 run is discoverable and loadable exactly like a pool run; only who drives it
+// differs. The discriminator is payload-only (no reducer arm folds it), so a v1 and a
+// pool run of the same formula fold byte-identically.
+func EnqueueRunWithDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, input map[string]any, formulaRef, defaultRoute, driverKind string) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("lumen: enqueue: nil store")
 	}
@@ -102,6 +114,7 @@ func EnqueueRun(ctx context.Context, store *graphstore.Store, doc *ir.IR, input 
 		InputHash:    inputHash(input),
 		FormulaRef:   formulaRef,
 		DefaultRoute: defaultRoute,
+		Driver:       driverKind,
 		CreatedAt:    createdAt,
 	}); err != nil {
 		return "", fmt.Errorf("lumen: enqueue: seed run.started %q: %w", streamID, err)
@@ -132,7 +145,10 @@ type RunManifest struct {
 	InputHash    string
 	FormulaRef   string
 	DefaultRoute string
-	CreatedAt    string
+	// Driver is the run's dispatch discriminator ("" = pool controller, "self" = the
+	// v1 agent-driven stepper). lumenRunsTick reads it and skips a "self" run.
+	Driver    string
+	CreatedAt string
 }
 
 // ReadRunManifest decodes the run.started at seq 1 of streamID into a RunManifest.
@@ -167,6 +183,7 @@ func ReadRunManifest(ctx context.Context, store *graphstore.Store, streamID stri
 		InputHash:    p.InputHash,
 		FormulaRef:   p.FormulaRef,
 		DefaultRoute: p.DefaultRoute,
+		Driver:       p.Driver,
 		CreatedAt:    p.CreatedAt,
 	}, nil
 }

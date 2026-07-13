@@ -259,7 +259,17 @@ type runStartedPayload struct {
 	FormulaRef   string `json:"formula_ref,omitempty"`
 	InputHash    string `json:"input_hash,omitempty"`
 	DefaultRoute string `json:"default_route,omitempty"`
-	CreatedAt    string `json:"created_at"`
+	// Driver is the run's dispatch discriminator (default "" = the controller's pool
+	// loop drives it; "self" = the v1 agent-driven stepper drives it turn-by-turn in
+	// its own session). It rides ALONGSIDE DefaultRoute as a payload-only field: NO
+	// reducer arm folds it (applyRunStarted ignores it), so an old journal without it
+	// folds identically (decodes to "") and drop+refold stays byte-identical — the
+	// same additive-omitempty precedent as DefaultRoute, needing no reducerVersion
+	// bump. Its sole consumer is the controller's lumenRunsTick, which reads it off
+	// the manifest and SKIPS a Driver=="self" run so the pool loop never wedges a v1
+	// run on ErrNoPoolRoute.
+	Driver    string `json:"driver,omitempty"`
+	CreatedAt string `json:"created_at"`
 }
 
 // nodeActivatedPayload is the body of EventNodeActivated. After carries the

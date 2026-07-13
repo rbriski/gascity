@@ -461,9 +461,9 @@ func TestLumenSlingInputConvoyUnresolvedHardFailsNoRun(t *testing.T) {
 	// Wrap the engine seam to prove it is NEVER called on a broken convoy.
 	called := false
 	origSeam := lumenEngineEnqueueRun
-	lumenEngineEnqueueRun = func(ctx context.Context, gs *graphstore.Store, doc *ir.IR, in map[string]any, formulaRef, defaultRoute string) (string, error) {
+	lumenEngineEnqueueRun = func(ctx context.Context, gs *graphstore.Store, doc *ir.IR, in map[string]any, formulaRef, defaultRoute, driverKind string) (string, error) {
 		called = true
-		return origSeam(ctx, gs, doc, in, formulaRef, defaultRoute)
+		return origSeam(ctx, gs, doc, in, formulaRef, defaultRoute, driverKind)
 	}
 	t.Cleanup(func() { lumenEngineEnqueueRun = origSeam })
 

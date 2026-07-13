@@ -1,0 +1,135 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "linear-three-do",
+  "input": {
+    "name": "linear-three-do.input",
+    "fields": [],
+    "origin": {
+      "uri": "examples/lumen/linear-three-do.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "do",
+      "id": "produce",
+      "name": "produce",
+      "after": [],
+      "origin": {
+        "uri": "examples/lumen/linear-three-do.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/linear-three-do.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "EMIT=v1 produce the seed value",
+        "language": "markdown",
+        "source": {
+          "kind": "inline"
+        },
+        "origin": {
+          "uri": "examples/lumen/linear-three-do.lumen",
+          "line": 1,
+          "col": 0
+        }
+      }
+    },
+    {
+      "kind": "do",
+      "id": "transform",
+      "name": "transform",
+      "after": ["produce"],
+      "origin": {
+        "uri": "examples/lumen/linear-three-do.lumen",
+        "line": 2,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/linear-three-do.lumen",
+          "line": 2,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "EMIT=v2 transform {{produce}}",
+        "language": "markdown",
+        "source": {
+          "kind": "inline"
+        },
+        "origin": {
+          "uri": "examples/lumen/linear-three-do.lumen",
+          "line": 2,
+          "col": 0
+        }
+      }
+    },
+    {
+      "kind": "do",
+      "id": "summarize",
+      "name": "summarize",
+      "after": ["transform"],
+      "origin": {
+        "uri": "examples/lumen/linear-three-do.lumen",
+        "line": 3,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/linear-three-do.lumen",
+          "line": 3,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "EMIT=v3 summarize {{transform}}",
+        "language": "markdown",
+        "source": {
+          "kind": "inline"
+        },
+        "origin": {
+          "uri": "examples/lumen/linear-three-do.lumen",
+          "line": 3,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "examples/lumen/linear-three-do.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

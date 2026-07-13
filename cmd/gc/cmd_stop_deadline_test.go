@@ -1157,7 +1157,7 @@ func TestStopCompletionDeadlineAdmitsEachExistingNativeEffect(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		sent := interruptTargetsBoundedRetainingEnteredWithBudget(
+		sent, _ := interruptTargetsBoundedRetainingEnteredWithBudget(
 			[]stopTarget{{sessionID: "session-1", name: "worker", resolved: true}}, nil, store, provider, io.Discard, &budget,
 		)
 		if sent != 0 {
@@ -1233,7 +1233,7 @@ func TestStopCompletionDeadlineAdmitsEachExistingNativeEffect(t *testing.T) {
 			now = started.Add(completionTimeout + time.Millisecond)
 		}
 
-		sent := interruptTargetsBoundedRetainingEnteredWithBudget(
+		sent, _ := interruptTargetsBoundedRetainingEnteredWithBudget(
 			[]stopTarget{{sessionID: "session-1", name: "worker", resolved: true}}, nil, store, provider, io.Discard, &budget,
 		)
 		if sent != 0 {
@@ -1340,7 +1340,7 @@ func TestStopCompletionDeadlineAdmitsEachExistingNativeEffect(t *testing.T) {
 		}
 		provider.afterStop = func(string) { now = started.Add(completionTimeout + time.Millisecond) }
 
-		_ = interruptTargetsBoundedRetainingEnteredWithBudget(
+		_, _ = interruptTargetsBoundedRetainingEnteredWithBudget(
 			[]stopTarget{
 				{sessionID: "session-1", name: "pool-1", poolManaged: true},
 				{name: "later"},

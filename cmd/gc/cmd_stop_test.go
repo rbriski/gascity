@@ -360,6 +360,140 @@ func TestCmdStopCompletionDeadlineRetainsEnteredInterrupt(t *testing.T) {
 	_ = reacquired.Close()
 }
 
+func TestCmdStopRetainedInterruptTimeoutRemainsFailureBeforeOuterDeadline(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	cityDir := shortSocketTempDir(t, "gc-stop-interrupt-inner-timeout-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "interrupt-inner-timeout-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "20ms"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newHangingProvider()
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	oldMargin := interruptPerTargetTimeoutMargin
+	interruptPerTargetTimeoutMargin = 0
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	t.Cleanup(func() {
+		sp.release()
+		sessionProviderForStopCity = oldFactory
+		interruptPerTargetTimeoutMargin = oldMargin
+	})
+
+	var stdout, stderr lockedBuffer
+	stopDone := make(chan int, 1)
+	go func() { stopDone <- cmdStop([]string{cityDir}, &stdout, &stderr, 10*time.Second, false) }()
+	select {
+	case interrupted := <-sp.intIn:
+		if interrupted != sessionName {
+			t.Fatalf("entered Interrupt(%q), want %q", interrupted, sessionName)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop never entered the provider Interrupt call")
+	}
+
+	// Let the 20ms per-target cap elapse while the outer ten-second command
+	// budget remains live. The retained owner still joins the provider call.
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case code := <-stopDone:
+		t.Fatalf("cmdStop detached from retained Interrupt with code %d", code)
+	default:
+	}
+	sp.release()
+
+	select {
+	case code := <-stopDone:
+		if code != 1 {
+			t.Fatalf("cmdStop = %d, want sticky inner-timeout failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop did not return after retained Interrupt completed")
+	}
+	if !strings.Contains(stderr.String(), "did not return within") {
+		t.Fatalf("stderr = %q, want retained per-target timeout", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after retained Interrupt timeout: %q", stdout.String())
+	}
+}
+
+func TestGracefulStopRetainedPoolStopTimeoutRemainsFailureBeforeOuterDeadline(t *testing.T) {
+	oldStopTimeout := stopPerTargetTimeoutDefault
+	stopPerTargetTimeoutDefault = 20 * time.Millisecond
+	t.Cleanup(func() { stopPerTargetTimeoutDefault = oldStopTimeout })
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "session-1",
+		Type:   "session",
+		Status: "open",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name":         "pool-1",
+			"state":                "active",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}, nil)
+	sp := newHangingProvider()
+	if err := sp.Start(context.Background(), "pool-1", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sp.release)
+	started := time.Now()
+	budget := newStopCompletionBudget(started, 10*time.Second, time.Now)
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- gracefulStopAllWithOwnership(
+			[]string{"pool-1"}, sp, 20*time.Millisecond, events.Discard, nil,
+			beads.SessionStore{Store: store}, io.Discard, io.Discard, nil, true, &budget,
+		)
+	}()
+	select {
+	case stopped := <-sp.stopIn:
+		if stopped != "pool-1" {
+			t.Fatalf("entered Stop(%q), want pool-1", stopped)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("graceful stop never entered the pool-managed Stop call")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case err := <-stopDone:
+		t.Fatalf("graceful stop detached from retained pool Stop: %v", err)
+	default:
+	}
+	sp.release()
+
+	select {
+	case err := <-stopDone:
+		if err == nil || !strings.Contains(err.Error(), "did not return within") {
+			t.Fatalf("graceful stop error = %v, want sticky pool Stop timeout", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("graceful stop did not return after retained pool Stop completed")
+	}
+	if budget.expired() {
+		t.Fatal("outer command budget expired; test must isolate the inner timeout")
+	}
+}
+
 func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 

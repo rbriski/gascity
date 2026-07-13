@@ -3436,25 +3436,27 @@ func interruptPerTargetTimeout(cfg *config.City) time.Duration {
 }
 
 func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
-	return interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, nil, false, nil)
+	sent, _ := interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, nil, false, nil)
+	return sent
 }
 
 func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
-	return interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, shouldStop, false, nil)
+	sent, _ := interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, shouldStop, false, nil)
+	return sent
 }
 
-func interruptTargetsBoundedRetainingEnteredWithBudget(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, budget *stopCompletionBudget) int {
+func interruptTargetsBoundedRetainingEnteredWithBudget(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, budget *stopCompletionBudget) (int, error) {
 	return interruptTargetsBoundedWithOwnership(targets, cfg, store, sp, stderr, nil, true, budget)
 }
 
-func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool, retainEntered bool, budget *stopCompletionBudget) int {
+func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool, retainEntered bool, budget *stopCompletionBudget) (int, error) {
 	if !stopEffectAdmitted(budget) {
-		return 0
+		return 0, errStopCompletionDeadline
 	}
 	var err error
 	targets, err = hydrateStopTargetsWithBudget(targets, cfg, store, stderr, budget)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	execute := executeTargetWave
 	if retainEntered {
@@ -3474,6 +3476,7 @@ func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City
 		interruptable = append(interruptable, t)
 	}
 
+	var retainedTimeoutErr error
 	if len(poolManaged) > 0 {
 		waveStarted := time.Now()
 		results := execute(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
@@ -3485,13 +3488,16 @@ func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City
 				outcome = "stopped_pool_managed"
 			}
 			logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, outcome, result.started, result.finished, result.err)
+			if retainEntered && result.outcome == "timed_out" {
+				retainedTimeoutErr = errors.Join(retainedTimeoutErr, fmt.Errorf("retained pool stop for %q exceeded its per-target deadline: %w", result.target.name, result.err))
+			}
 		}
 		logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(poolManaged))
 	}
 
 	sent := 0
 	if len(interruptable) == 0 {
-		return sent
+		return sent, retainedTimeoutErr
 	}
 	waveStarted := time.Now()
 	runInterrupt := func(target stopTarget) error {
@@ -3521,9 +3527,12 @@ func interruptTargetsBoundedWithOwnership(targets []stopTarget, cfg *config.City
 		if result.err == nil {
 			sent++
 		}
+		if retainEntered && result.outcome == "timed_out" {
+			retainedTimeoutErr = errors.Join(retainedTimeoutErr, fmt.Errorf("retained interrupt for %q exceeded its per-target deadline: %w", result.target.name, result.err))
+		}
 	}
 	logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(interruptable))
-	return sent
+	return sent, retainedTimeoutErr
 }
 
 func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {

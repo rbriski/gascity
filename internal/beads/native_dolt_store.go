@@ -1561,6 +1561,12 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	if query.ParentID != "" {
 		filter.ParentID = &query.ParentID
 	}
+	if len(query.IDs) > 0 {
+		// Push the id-set down to an `id IN (...)` filter so a scoped re-verify
+		// (reconcile recoverMissingFromList) touches only the missing ids instead
+		// of scanning the whole active universe.
+		filter.IDs = query.IDs
+	}
 	return filter
 }
 

@@ -732,11 +732,12 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 // Trusting that ErrNotFound would evict the wisp and emit a false bead.closed;
 // combined with a transient composite-List omission, the wisp then reappears
 // next pass and flip-flops its membership. So an ErrNotFound is NOT trusted on
-// its own: those ids are re-verified against a tier-consistent full scan (the
-// same TierBoth cacheFullScanQuery the fresh scan uses) that WOULD surface an
-// ephemeral wisp. Only a bead absent from that scan is confirmed gone (the diff
-// path emits bead.closed). A transient managed-Dolt read error on the re-verify
-// defers every uncertain id rather than evicting it.
+// its own: those ids are re-verified against a tier-consistent scan scoped to
+// exactly the missing ids (the TierBoth cacheFullScanQuery shape plus
+// ListQuery.IDs) that WOULD surface an ephemeral wisp. Only a bead absent from
+// that scan is confirmed gone (the diff path emits bead.closed). A transient
+// managed-Dolt read error on the re-verify defers every uncertain id rather than
+// evicting it.
 //
 // When Get confirms a closed bead, the returned map carries that fresh row so
 // the diff path can emit an authoritative close payload instead of a stale
@@ -841,14 +842,28 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 	return confirmedClosed
 }
 
-// reverifyMissingByList re-lists the backing store with the same tier-consistent
-// TierBoth full-scan query the reconcile fresh scan uses, and returns the subset
-// of the requested ids that the scan still surfaces (keyed by id). It exists so
-// an ErrNotFound from the tier-blind per-id Get is confirmed against a scan that
-// WOULD see an ephemeral wisp before the reconciler evicts the row. A List error
-// is surfaced to the caller, which defers rather than evicts.
+// reverifyMissingByList re-lists the backing store — scoped to just the missing
+// ids via ListQuery.IDs, at the same tier-consistent TierBoth cacheFullScanQuery
+// shape the reconcile fresh scan uses — and returns the subset of those ids the
+// scan still surfaces (keyed by id). It exists so an ErrNotFound from the
+// tier-blind per-id Get is confirmed against a scan that WOULD see an ephemeral
+// wisp before the reconciler evicts the row. A List error is surfaced to the
+// caller, which defers rather than evicts.
+//
+// The id-scope is load-bearing, not cosmetic: an unscoped re-list re-scanned the
+// entire active universe on every ErrNotFound, and on a large rig (~1622 wisps)
+// that doubled every reconcile pass into a multi-hundred-ms full scan that
+// starved the reconciler (poolDesired collapsed to 0). ListQuery.IDs pushes an
+// `id IN (...)` filter to the native store, so the re-verify now costs O(missing),
+// not O(active). Stores that cannot push it down still return a correct result:
+// Matches filters the ids, and the want-map filter below is the final guard.
 func (c *CachingStore) reverifyMissingByList(want map[string]Bead) (map[string]Bead, error) {
-	fresh, err := c.backing.List(cacheFullScanQuery())
+	q := cacheFullScanQuery()
+	q.IDs = make([]string, 0, len(want))
+	for id := range want {
+		q.IDs = append(q.IDs, id)
+	}
+	fresh, err := c.backing.List(q)
 	if err != nil {
 		return nil, err
 	}

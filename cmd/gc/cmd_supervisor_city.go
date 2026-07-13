@@ -802,6 +802,7 @@ func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Ti
 		return fmt.Errorf("%w before reading supervisor unregister result", errStopCompletionDeadline)
 	}
 	eventPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	var corruptCandidates error
 	failed, err := events.ReadFilteredWithInFlight(eventPath, events.Filter{Type: events.RequestFailed})
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("reading supervisor unregister failure result: %w", err)
@@ -809,7 +810,8 @@ func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Ti
 	for i := len(failed) - 1; i >= 0; i-- {
 		var payload api.RequestFailedPayload
 		if err := json.Unmarshal(failed[i].Payload, &payload); err != nil {
-			return fmt.Errorf("decoding supervisor unregister failure result: %w", err)
+			corruptCandidates = errors.Join(corruptCandidates, fmt.Errorf("decoding supervisor unregister failure result: %w", err))
+			continue
 		}
 		if payload.RequestID != requestID || payload.Operation != api.RequestOperationCityUnregister {
 			continue
@@ -831,7 +833,8 @@ func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Ti
 	for i := len(succeeded) - 1; i >= 0; i-- {
 		var payload api.CityUnregisterSucceededPayload
 		if err := json.Unmarshal(succeeded[i].Payload, &payload); err != nil {
-			return fmt.Errorf("decoding supervisor unregister success result: %w", err)
+			corruptCandidates = errors.Join(corruptCandidates, fmt.Errorf("decoding supervisor unregister success result: %w", err))
+			continue
 		}
 		if payload.RequestID == requestID {
 			if !time.Now().Before(deadline) {
@@ -839,6 +842,9 @@ func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Ti
 			}
 			return nil
 		}
+	}
+	if corruptCandidates != nil {
+		return fmt.Errorf("supervisor unregister terminal result %q was not recorded; corrupt candidates were ignored: %w", requestID, corruptCandidates)
 	}
 	return fmt.Errorf("supervisor unregister terminal result %q was not recorded", requestID)
 }

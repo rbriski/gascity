@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -700,6 +701,46 @@ func TestWaitForSupervisorUnregisterTerminalUntilConsumesTypedResult(t *testing.
 				t.Fatalf("terminal wait error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestWaitForSupervisorUnregisterTerminalUntilIgnoresUnrelatedCorruption(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	path := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	recorder, err := events.NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.EmitTypedEvent(recorder, events.RequestResultCityUnregister, "managed-city", api.CityUnregisterSucceededPayload{
+		RequestID: "req-terminal",
+		Name:      "managed-city",
+		Path:      "/tmp/managed-city",
+	})
+	recorder.Record(events.Event{Type: events.RequestFailed, Payload: json.RawMessage(`"corrupt"`)})
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := waitForSupervisorUnregisterTerminalUntil("req-terminal", time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("valid correlated terminal result was denied by unrelated corruption: %v", err)
+	}
+}
+
+func TestWaitForSupervisorUnregisterTerminalUntilFailsClosedOnOnlyCorruption(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	path := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	recorder, err := events.NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.Record(events.Event{Type: events.RequestResultCityUnregister, Payload: json.RawMessage(`"corrupt"`)})
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = waitForSupervisorUnregisterTerminalUntil("req-terminal", time.Now().Add(time.Second))
+	if err == nil || !strings.Contains(err.Error(), "corrupt candidates were ignored") {
+		t.Fatalf("terminal wait error = %v, want explicit fail-closed corruption detail", err)
 	}
 }
 

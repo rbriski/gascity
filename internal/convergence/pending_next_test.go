@@ -212,13 +212,14 @@ func TestReconcile_PendingNextInapplicableClearFailureReturns(t *testing.T) {
 		{
 			name: "key mismatch",
 			prepare: func(store *fakeStore) {
+				store.addBead("actual-wisp-iter-2", "in_progress", "root-1", IdempotencyKey("root-1", 2), nil)
 				store.addBead("wisp-iter-2", "in_progress", "root-1", IdempotencyKey("root-1", 3), nil)
 			},
 		},
 		{
 			name: "closed",
 			prepare: func(store *fakeStore) {
-				store.addBead("wisp-iter-2", "closed", "root-1", IdempotencyKey("root-1", 3), nil)
+				store.addBead("wisp-iter-2", "closed", "root-1", IdempotencyKey("root-1", 2), nil)
 			},
 		},
 	}

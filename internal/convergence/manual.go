@@ -463,9 +463,6 @@ func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (Be
 	if err != nil {
 		return BeadInfo{}, false, fmt.Errorf("listing children for stale active wisp recovery: %w", err)
 	}
-	if _, err := childStats(children, beadID); err != nil {
-		return BeadInfo{}, false, fmt.Errorf("validating child evidence for stale active wisp recovery: %w", err)
-	}
 
 	if lastProcessedWisp != "" {
 		lastProcessedInfo, err := h.Store.GetBead(lastProcessedWisp)
@@ -485,6 +482,12 @@ func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (Be
 		nextIter, err := nextIterationAfterLastProcessed(beadID, lastProcessedWisp, children)
 		if err != nil {
 			return BeadInfo{}, false, fmt.Errorf("deriving replacement active iteration: %w", err)
+		}
+		if nextIter != processedIter+1 {
+			return BeadInfo{}, false, fmt.Errorf(
+				"last processed wisp %q point read at iteration %d disagrees with checked child snapshot iteration %d",
+				lastProcessedWisp, processedIter, nextIter-1,
+			)
 		}
 		nextKey := IdempotencyKey(beadID, nextIter)
 		candidateID, found, err := h.Store.FindByIdempotencyKey(nextKey)

@@ -888,57 +888,49 @@ func (h *Handler) persistGateOutcome(rootBeadID, wispID string, result GateResul
 // names the preceding iteration; counting that successor as processed would
 // skip it and pour duplicate work.
 func nextIterationAfterLastProcessed(beadID, lastProcessedID string, children []BeadInfo) (int, error) {
+	if _, err := childStats(children, beadID); err != nil {
+		return 0, fmt.Errorf("validating child evidence: %w", err)
+	}
+
+	byIteration := make(map[int]BeadInfo)
+	iterationByID := make(map[string]int)
+	highestIteration := 0
+	for _, child := range children {
+		if !strings.HasPrefix(child.IdempotencyKey, "converge:") {
+			continue
+		}
+		iteration, ok := ParseIterationFromKey(child.IdempotencyKey)
+		if !ok {
+			return 0, fmt.Errorf("child wisp %q has invalid idempotency key %q", child.ID, child.IdempotencyKey)
+		}
+		byIteration[iteration] = child
+		iterationByID[child.ID] = iteration
+		if iteration > highestIteration {
+			highestIteration = iteration
+		}
+	}
+	// Iterations are positive and unique after childStats validation, so max=N
+	// proves the observed sequence is exactly 1..N without walking to a corrupt,
+	// attacker-sized iteration number.
+	if highestIteration != len(byIteration) {
+		missing := 1
+		for ; missing <= len(byIteration); missing++ {
+			if _, ok := byIteration[missing]; !ok {
+				break
+			}
+		}
+		return 0, fmt.Errorf("iteration gap: missing child iteration %d before observed iteration %d", missing, highestIteration)
+	}
+
 	if lastProcessedID == "" {
-		prefix := IdempotencyKeyPrefix(beadID)
-		earliestIteration := 0
-		seenIterations := make(map[int]string)
-		for _, child := range children {
-			if !strings.HasPrefix(child.IdempotencyKey, prefix) {
-				continue
-			}
-			iteration, ok := ParseIterationFromKey(child.IdempotencyKey)
-			if !ok || iteration < 1 || child.IdempotencyKey != IdempotencyKey(beadID, iteration) {
-				return 0, fmt.Errorf("child wisp %q has invalid idempotency key %q", child.ID, child.IdempotencyKey)
-			}
-			if err := validateExactWispEvidence(beadID, child.IdempotencyKey, child.ID, child); err != nil {
-				return 0, fmt.Errorf("validating unprocessed child wisp: %w", err)
-			}
-			if priorID, duplicate := seenIterations[iteration]; duplicate && priorID != child.ID {
-				return 0, fmt.Errorf("iteration %d has ambiguous child wisps %q and %q", iteration, priorID, child.ID)
-			}
-			seenIterations[iteration] = child.ID
-			if earliestIteration == 0 || iteration < earliestIteration {
-				earliestIteration = iteration
-			}
-		}
-		if earliestIteration != 0 {
-			if earliestIteration != 1 {
-				return 0, fmt.Errorf("marker-less recovery has iteration gap: earliest child iteration is %d, want 1", earliestIteration)
-			}
-			return earliestIteration, nil
-		}
 		return 1, nil
 	}
 
-	var lastProcessedInfo BeadInfo
-	found := false
-	for _, child := range children {
-		if child.ID == lastProcessedID {
-			lastProcessedInfo = child
-			found = true
-			break
-		}
-	}
+	processedIter, found := iterationByID[lastProcessedID]
 	if !found {
 		return 0, fmt.Errorf("last processed wisp %q is absent from the checked child snapshot", lastProcessedID)
 	}
-	processedIter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey)
-	if !ok || processedIter < 1 || lastProcessedInfo.IdempotencyKey != IdempotencyKey(beadID, processedIter) {
-		return 0, fmt.Errorf("last processed wisp %q has invalid idempotency key %q", lastProcessedID, lastProcessedInfo.IdempotencyKey)
-	}
-	if err := validateExactWispEvidence(beadID, lastProcessedInfo.IdempotencyKey, lastProcessedID, lastProcessedInfo); err != nil {
-		return 0, fmt.Errorf("validating last processed wisp: %w", err)
-	}
+	lastProcessedInfo := byIteration[processedIter]
 	if lastProcessedInfo.Status != "closed" {
 		return 0, fmt.Errorf("last processed wisp %q has status %q, want closed", lastProcessedID, lastProcessedInfo.Status)
 	}

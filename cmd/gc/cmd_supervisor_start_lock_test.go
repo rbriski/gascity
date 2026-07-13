@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,78 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestManagedCLIStartHeldControllerLockDoesNotScaffoldOrTouchProviders(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := filepath.Join(t.TempDir(), "locked-city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"locked-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	beadsLog := filepath.Join(t.TempDir(), "beads-ops.log")
+	t.Setenv("GC_BEADS", "exec:"+writeSpyScript(t, beadsLog))
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	tmuxLog := filepath.Join(t.TempDir(), "tmux-ops.log")
+	binDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(binDir, "tmux"),
+		[]byte(fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 99\n", tmuxLog)),
+		0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	held, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("hold controller lock: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		testutil.GoroutineRaceTimeout,
+		10*time.Millisecond,
+	)
+	oldExtraConfigFiles, oldNoStrictMode := extraConfigFiles, noStrictMode
+	oldDryRunMode, oldNoAutoRestartMode := dryRunMode, noAutoRestartMode
+	extraConfigFiles, noStrictMode = nil, false
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() {
+		extraConfigFiles, noStrictMode = oldExtraConfigFiles, oldNoStrictMode
+		dryRunMode, noAutoRestartMode = oldDryRunMode, oldNoAutoRestartMode
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doStart([]string{cityPath}, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("managed start code = 0, want held-lock failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	for _, rel := range []string{"cache", "system", "runtime", "events.jsonl"} {
+		path := filepath.Join(cityPath, ".gc", rel)
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("managed start materialized %s before controller ownership: %v", path, err)
+		}
+	}
+	if ops := readOpLog(t, beadsLog); len(ops) != 0 {
+		t.Fatalf("managed start reached bead provider before controller ownership: %v", ops)
+	}
+	if ops := readOpLog(t, tmuxLog); len(ops) != 0 {
+		t.Fatalf("managed start reached tmux before controller ownership: %v", ops)
+	}
+}
 
 func TestRequireBootstrappedCityHeldTargetDoesNotMaterializeRegisteredSibling(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

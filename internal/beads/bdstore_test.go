@@ -4465,6 +4465,44 @@ func TestBdStoreBoundedParentMetadataLookupKeepsBothBackendReadsFinite(t *testin
 	}
 }
 
+func TestBdStoreBoundedParentMetadataLookupRejectsUnsupportedEphemeralQuery(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		calls = append(calls, command)
+		switch {
+		case strings.HasPrefix(command, "bd list "):
+			return []byte(`[]`), nil
+		case strings.HasPrefix(command, "bd query "):
+			return nil, fmt.Errorf(`unknown subcommand "query"`)
+		default:
+			return nil, fmt.Errorf("unexpected command %q", command)
+		}
+	}
+	store := beads.NewBdStore("/city", runner)
+	query := beads.ListQuery{
+		ParentID:      "root-1",
+		Metadata:      map[string]string{"idempotency_key": "converge:root-1:iter:2"},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Limit:         2,
+	}
+
+	got, err := store.List(query)
+	if err == nil {
+		t.Fatalf("List(bounded exact TierBoth) = %+v, nil; want unsupported bd query error", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List(bounded exact TierBoth) rows = %+v, want none", got)
+	}
+	if !strings.Contains(err.Error(), "query") || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("List(bounded exact TierBoth) error = %v, want unsupported bd query context", err)
+	}
+	if firstCommandWithPrefix(calls, "bd list ") == "" || firstCommandWithPrefix(calls, "bd query ") == "" {
+		t.Fatalf("calls = %#v, want both bounded tier reads", calls)
+	}
+}
+
 func firstCommandWithPrefix(calls []string, prefix string) string {
 	for _, call := range calls {
 		if strings.HasPrefix(call, prefix) {

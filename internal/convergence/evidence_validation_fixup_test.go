@@ -181,6 +181,10 @@ func TestRecoverCurrentActiveWispRejectsCorruptFallbackEvidence(t *testing.T) {
 	}{
 		{name: "wrong parent", children: []BeadInfo{{ID: "candidate", Status: "open", ParentID: "other-root", IdempotencyKey: IdempotencyKey("root-1", 1)}}},
 		{name: "iteration gap", children: []BeadInfo{{ID: "candidate", Status: "open", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}}},
+		{name: "internal iteration gap", children: []BeadInfo{
+			{ID: "wisp-iter-1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+			{ID: "candidate", Status: "open", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)},
+		}},
 		{name: "invalid status", children: []BeadInfo{{ID: "candidate", Status: "queued", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)}}},
 		{name: "malformed key", children: []BeadInfo{{ID: "candidate", Status: "closed", ParentID: "root-1", IdempotencyKey: "converge:root-1:iter:x"}}},
 		{name: "empty id", children: []BeadInfo{{Status: "open", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)}}},
@@ -199,6 +203,52 @@ func TestRecoverCurrentActiveWispRejectsCorruptFallbackEvidence(t *testing.T) {
 				t.Fatalf("recoverCurrentActiveWisp found=%v, want corruption error", found)
 			}
 		})
+	}
+}
+
+func TestRecoverCurrentActiveWispRejectsGapAfterMarker(t *testing.T) {
+	handler, store, _ := setupBasicHandler(t, nil)
+	store.ChildrenFunc = func(string) ([]BeadInfo, error) {
+		return []BeadInfo{
+			{ID: "wisp-iter-1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+			{ID: "wisp-iter-3", Status: "open", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)},
+		}, nil
+	}
+	store.FindByIdempotencyKeyFunc = func(key string) (string, bool, error) {
+		t.Fatalf("gap recovery must fail before looking up %q", key)
+		return "", false, nil
+	}
+
+	_, found, err := handler.recoverCurrentActiveWisp("root-1", "wisp-iter-1")
+	if err == nil || found || !strings.Contains(err.Error(), "iteration gap") {
+		t.Fatalf("recoverCurrentActiveWisp = (found=%t, err=%v), want iteration-gap error", found, err)
+	}
+	if len(store.WriteLog) != 0 {
+		t.Fatalf("gap recovery writes = %v, want none", store.WriteLog)
+	}
+}
+
+func TestRecoverCurrentActiveWispRejectsMarkerSnapshotDisagreement(t *testing.T) {
+	handler, store, _ := setupBasicHandler(t, nil)
+	store.ChildrenFunc = func(string) ([]BeadInfo, error) {
+		return []BeadInfo{
+			{ID: "snapshot-iter-1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+			// The point read for wisp-iter-1 says iteration 1, while this independently
+			// checked child snapshot says the same ID is iteration 2.
+			{ID: "wisp-iter-1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)},
+		}, nil
+	}
+	store.FindByIdempotencyKeyFunc = func(key string) (string, bool, error) {
+		t.Fatalf("disagreeing marker evidence must fail before looking up %q", key)
+		return "", false, nil
+	}
+
+	_, found, err := handler.recoverCurrentActiveWisp("root-1", "wisp-iter-1")
+	if err == nil || found || !strings.Contains(err.Error(), "disagrees") {
+		t.Fatalf("recoverCurrentActiveWisp = (found=%t, err=%v), want marker-disagreement error", found, err)
+	}
+	if len(store.WriteLog) != 0 {
+		t.Fatalf("marker-disagreement recovery writes = %v, want none", store.WriteLog)
 	}
 }
 

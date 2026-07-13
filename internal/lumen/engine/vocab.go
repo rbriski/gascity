@@ -126,12 +126,29 @@ const (
 
 // Outcome vocabulary. pass and degraded are non-blocking (a dependent may run);
 // failed, canceled, and skipped are blocking (a dependent skip-cascades).
+//
+// OutcomePending is a repeat-scoped, NON-CONSUMING settle: it means "the check is not
+// finished yet (CI still running) — re-poll WITHOUT burning the author's repeat budget."
+// It is a new VALUE in the already-folded nodeState.Outcome string, NOT a new folded
+// field, so the reducer is UNCHANGED (reducerVersion STAYS 4): applyOutcomeSettled stores
+// it verbatim, and every reducer predicate hits its existing DEFAULT arm for "pending" —
+// isBlocking → false (non-blocking), ranOutcome → false (excluded from loopScope's outcome
+// scan and record(), so a poll never pollutes nodeOutputs), didNotRun → false, and
+// statusForOutcome → "done". An old v4 reducer folds a pending journal identically. The
+// author-visible iteration is derived by consumingCountBefore (a pure fold-scan that skips
+// pending settles), decoupled from the physical attempt index which advances every pass.
+// Pending is signaled two ways: a pool do's gc.outcome=pending close (LumenOutcomeForGCOutcome)
+// and an engine-inline exec's exitMap.pending exit code (step.pendingCodes). It is scoped to
+// a REPEAT LEAF body at lowering (exitMap.pending on a retry body, a run body, or outside a
+// loop is refused); a pool do that mis-closes gc.outcome=pending outside a repeat has no
+// static signal and settles a top-level non-failing OutcomePending (documented residual).
 const (
 	OutcomePass     = "pass"
 	OutcomeFailed   = "failed"
 	OutcomeDegraded = "degraded"
 	OutcomeSkipped  = "skipped"
 	OutcomeCanceled = "canceled"
+	OutcomePending  = "pending"
 )
 
 // node.decision decision kinds.

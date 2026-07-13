@@ -67,11 +67,27 @@ func resolveLeaseHolder(opts Options) string {
 	return leaseHolder
 }
 
-// lumenRepeatLoopCap is the mandatory hard bound on a repeat loop's iterations
-// (mirroring the reference runner). A cond that never turns truthy terminates
-// after this many attempts, settling the loop failed{reason:"loop_cap"} — no
-// unbounded loop is expressible.
+// lumenRepeatLoopCap is the mandatory hard bound on a repeat loop's CONSUMING
+// iterations (mirroring the reference runner). A cond that never turns truthy
+// terminates after this many consuming attempts, settling the loop
+// failed{reason:"loop_cap"} — no unbounded loop is expressible.
 const lumenRepeatLoopCap = 32
+
+// lumenLoopPhysicalCap bounds a repeat loop's PHYSICAL attempt index, independent of
+// the consuming iteration cap. Once a pending re-poll advances the physical namespace
+// (bodyID:N) WITHOUT incrementing the consuming iteration (consumingCountBefore skips
+// pending settles), a forever-pending check would never trip lumenRepeatLoopCap and
+// would spin minting fresh attempt namespaces. This SEPARATE cap fails such a run loudly
+// (settleLoop failed{reason:"poll_cap"}). It is a constant comparison over the
+// fold-derived physical index, so it is deterministic. For a NON-pending loop
+// consuming == physical, so lumenRepeatLoopCap (32) always fires first and this cap is
+// inert — existing loops stay byte-identical (journal, renders, StateHash).
+//
+// OPEN RISK (owner sizing — flag for review): 512 is a guess with no corpus data on real
+// poll counts. Too low starves legitimate CI polling; too high delays a stuck-pending
+// failure. It is a package var (not a const) solely so a focused test can shrink it and
+// exercise the cap without 512 iterations; production never reassigns it.
+var lumenLoopPhysicalCap = 512
 
 // leaseTTL bounds how long a run holds the writer lease without renewal.
 const leaseTTL = 30 * time.Second
@@ -546,6 +562,16 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 		}
 		output := strings.TrimRight(stdout, "\n")
 		outcome := outcomeForExit(exitCode, u.leaf.passCodes)
+		// A pending exit code (exitMap.pending) overrides the pass/fail classification:
+		// the check is not done yet (CI still running). Pending WINS over the exit-code
+		// pass/fail. It is scoped to a repeat leaf body at lowering (decodeExec refuses
+		// exitMap.pending anywhere else), and it is non-retryable, so it settles inert
+		// through the existing retryable=false path and drives a NON-CONSUMING re-poll in
+		// loopDecide. An exec with no pending set never reaches this, so the settle is
+		// byte-identical to pre-pending.
+		if intInSlice(exitCode, u.leaf.pendingCodes) {
+			outcome = OutcomePending
+		}
 		// Stamp the retry classification DATA: a failed exec whose exit code is in
 		// exitMap.retryable is infrastructure-retryable (the retry arm reads this from
 		// the fold, never from a driver-side inference). A non-loop exec (empty
@@ -554,7 +580,15 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 		if err := d.appendSettledRetryable(u.activation, outcome, output, "", retryable); err != nil {
 			return err
 		}
-		d.record(u.nodeID, output, scope, nodeOutputs)
+		// Record into scope ONLY for a RAN outcome, matching every other path
+		// (observePoolWork, resumeMemoized, reconstructOutputs). A pending poll did NOT
+		// run — recording it would (a) pollute the next attempt's render in the SAME pass
+		// and (b) diverge genesis from resume, since resume's reconstructOutputs skips
+		// pending → a different re-render → a split journal/StateHash. Gating here keeps
+		// genesis == resume. Byte-identical for pass/failed/degraded (ranOutcome=true).
+		if ranOutcome(outcome) {
+			d.record(u.nodeID, output, scope, nodeOutputs)
+		}
 		return nil
 
 	case ir.NodeSettle:
@@ -1989,7 +2023,11 @@ func (d *driver) runAttempt(u planUnit, attempt, maxAttempts int, scope, nodeOut
 	restore, had := "", false
 	if spec.irKind == ir.NodeRepeat {
 		restore, had = scope[iterKey]
-		scope[iterKey] = strconv.Itoa(attempt + 1)
+		// The 1-based iteration is the CONSUMING count (pending re-polls excluded), not
+		// the physical attempt index. At genesis attempts 0..N-1 are all settled, so
+		// consumingCountBefore(bodyID, attempt) counts the non-pending ones; for a
+		// non-pending loop that is `attempt`, so the render is byte-identical.
+		scope[iterKey] = strconv.Itoa(d.consumingCountBefore(spec.bodyNodeID, attempt) + 1)
 	}
 	err := d.runUnit(au, scope, nodeOutputs)
 	if spec.irKind == ir.NodeRepeat {
@@ -2060,7 +2098,14 @@ func (d *driver) runRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs m
 }
 
 // repeatRemaining is the remaining-budget bookkeeping a repeat attempt stamps on
-// attempt.minted: the loop cap minus the 1-based attempt number, floored at zero.
+// attempt.minted: the loop cap minus the 1-based PHYSICAL attempt number, floored at
+// zero. NOTE: this is deliberately physical-attempt-index bookkeeping (like the
+// attempt.minted idem token, which keys on the physical N), NOT the consuming iteration.
+// For a long-polling pending loop it therefore understates the consuming budget still
+// available — it is a fold no-op and observability-only (no reducer reads it and nothing
+// gates on it), so the imprecision is cosmetic. The authoritative bounds are the consuming
+// cap (lumenRepeatLoopCap, via the loopDecide iteration) and the physical cap
+// (lumenLoopPhysicalCap).
 func repeatRemaining(attempt int) int {
 	remaining := lumenRepeatLoopCap - (attempt + 1)
 	if remaining < 0 {
@@ -2090,6 +2135,41 @@ func (d *driver) attemptUnit(u planUnit, attempt int) planUnit {
 	}
 }
 
+// consumingCountBefore returns the number of SETTLED attempts of bodyNodeID whose
+// physical index is < k and whose outcome CONSUMED the author's repeat budget (every
+// settled outcome except OutcomePending). It is the author-visible "iteration" — a
+// consuming count decoupled from the physical attempt index, so a pending re-poll
+// advances the physical namespace (bodyID:N, already idempotent-safe) WITHOUT burning
+// the budget N. It is a pure fold-scan over d.st().Nodes (the same pattern as
+// lastSettledAttempt / liveAttempt), so genesis (runLoop) and resume / re-Advance
+// (advanceLoop) derive it identically (DET). A pending outside a loop never reaches
+// here; a non-pending loop has consumingCountBefore(bodyID, k) == k (every settled
+// attempt < k consumes), so iteration == attempt+1 byte-identically to before.
+func (d *driver) consumingCountBefore(bodyNodeID string, k int) int {
+	return consumingCountBeforeIn(d.st().Nodes, bodyNodeID, k)
+}
+
+// consumingCountBeforeIn is the pure core of consumingCountBefore, factored out of the
+// driver so the consuming-vs-physical semantics are unit-testable over a constructed
+// nodes map (and the "non-pending ⇒ count == k" byte-identity claim is directly
+// assertable).
+func consumingCountBeforeIn(nodes map[string]*nodeState, bodyNodeID string, k int) int {
+	count := 0
+	for act, n := range nodes {
+		if activationNodeID(act) != bodyNodeID || !n.Settled {
+			continue
+		}
+		if activationAttempt(act) >= k {
+			continue
+		}
+		if n.Outcome == OutcomePending {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 // loopDecide evaluates the exit predicate after attempt N settled: it either
 // settles the loop (returns continueLoop=false) or decides to re-attempt (returns
 // continueLoop=true, so the next runAttempt mints attempt N+1). The whole decision
@@ -2099,7 +2179,12 @@ func (d *driver) loopDecide(u planUnit, attempt, maxAttempts int, bn *nodeState,
 	spec := u.loop
 	switch spec.irKind {
 	case ir.NodeRepeat:
-		iteration := attempt + 1
+		// The author-visible iteration is a CONSUMING count (pending re-polls excluded),
+		// decoupled from the physical attempt index. Attempt N is settled by now, so
+		// consumingCountBefore(bodyID, attempt+1) includes it iff it consumed (a pending
+		// body leaves the count non-incremented, so the author's `iteration >= N` clause
+		// reads the pre-poll value → the until stays false → re-poll without burning N).
+		iteration := d.consumingCountBefore(spec.bodyNodeID, attempt+1)
 		cs, err := d.loopEvalScope(u, iteration, bn, scope, nodeOutputs)
 		if err != nil {
 			return false, fmt.Errorf("lumen: loop %q cond: %w", u.nodeID, err)
@@ -2111,6 +2196,13 @@ func (d *driver) loopDecide(u planUnit, attempt, maxAttempts int, bn *nodeState,
 		if truthy {
 			// Exit returning the last body result (reference: returns lastResult).
 			return false, d.settleLoop(u, bn.Outcome, bn.Output, "", nil, scope, nodeOutputs)
+		}
+		// Physical spin bound (poll_cap): a forever-pending check never trips the
+		// consuming cap below (consuming stays flat), so bound the physical attempt index
+		// separately. Checked BEFORE the consuming cap; for a non-pending loop
+		// consuming == physical so the consuming cap fires first and this is inert.
+		if attempt+1 >= lumenLoopPhysicalCap {
+			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "poll_cap", nil, scope, nodeOutputs)
 		}
 		if iteration >= lumenRepeatLoopCap {
 			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "loop_cap", nil, scope, nodeOutputs)

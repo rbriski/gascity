@@ -52,8 +52,14 @@ type step struct {
 	script         string
 	passCodes      []int
 	retryableCodes []int // exec exitMap.retryable: exit codes a retry re-attempts
-	cwd            string
-	env            []string
+	// pendingCodes is exec exitMap.pending: exit codes that settle OutcomePending (the
+	// check is not done yet — re-poll WITHOUT consuming the repeat budget). It is
+	// decoded ONLY on a repeat leaf body (decodeExec's allowPending arm); on any other
+	// exec it is refused at lowering, so a non-repeat exec never carries it and settles
+	// byte-identically to before.
+	pendingCodes []int
+	cwd          string
+	env          []string
 
 	// settle fields.
 	outcome string
@@ -501,7 +507,7 @@ func (l *lowerer) lowerNode(n ir.Node, parent string, memberIndex *int) error {
 		return l.lowerNodes(members, parent)
 
 	case ir.NodeExec:
-		s, err := decodeExec(n)
+		s, err := decodeExec(n, false)
 		if err != nil {
 			return err
 		}
@@ -724,7 +730,7 @@ func (l *lowerer) lowerForEach(n ir.Node, parent string) error {
 	}
 	switch body.Kind {
 	case ir.NodeExec:
-		s, err := decodeExec(body)
+		s, err := decodeExec(body, false)
 		if err != nil {
 			return err
 		}
@@ -1068,7 +1074,7 @@ func decodeLeafSub(n ir.Node, allowDo bool, owner string) (step, ir.NodeKind, er
 	}
 	switch n.Kind {
 	case ir.NodeExec:
-		s, err := decodeExec(n)
+		s, err := decodeExec(n, false)
 		return s, n.Kind, err
 	case ir.NodeSettle:
 		return decodeSettle(n), n.Kind, nil
@@ -1220,7 +1226,9 @@ func (l *lowerer) lowerLoop(n ir.Node, parent string) error {
 	}
 	switch body.Kind {
 	case ir.NodeExec:
-		s, err := decodeExec(body)
+		// allowPending only on a REPEAT leaf body: a retry body settles a pending inert
+		// (the retry arm branches on != OutcomeFailed), so exitMap.pending is refused there.
+		s, err := decodeExec(body, n.Kind == ir.NodeRepeat)
 		if err != nil {
 			return err
 		}
@@ -1602,7 +1610,7 @@ func (l *lowerer) lowerGuard(n ir.Node, parent string) error {
 	spec := &guardSpec{cond: cond, condRefs: condRefs, thenNodeID: l.qid(then.ID), thenIRKind: then.Kind}
 	switch then.Kind {
 	case ir.NodeExec:
-		s, err := decodeExec(then)
+		s, err := decodeExec(then, false)
 		if err != nil {
 			return err
 		}
@@ -1696,7 +1704,7 @@ func (l *lowerer) lowerTimeout(n ir.Node, parent string) error {
 	spec := &timeoutSpec{duration: durStr, bodyNodeID: l.qid(body.ID), bodyIRKind: body.Kind}
 	switch body.Kind {
 	case ir.NodeExec:
-		s, err := decodeExec(body)
+		s, err := decodeExec(body, false)
 		if err != nil {
 			return err
 		}
@@ -1820,7 +1828,7 @@ func (l *lowerer) lowerDispatch(n ir.Node, parent string) error {
 		arm := dispatchArm{matchValue: matchVal, bodyNodeID: l.qid(body.ID), bodyIRKind: body.Kind}
 		switch body.Kind {
 		case ir.NodeExec:
-			s, err := decodeExec(body)
+			s, err := decodeExec(body, false)
 			if err != nil {
 				return err
 			}
@@ -2870,8 +2878,15 @@ func childNodes(raw json.RawMessage) ([]ir.Node, error) {
 	return nodes, nil
 }
 
-// decodeExec lifts an exec node's interpreter/body/exitMap into a step.
-func decodeExec(n ir.Node) (step, error) {
+// decodeExec lifts an exec node's interpreter/body/exitMap into a step. allowPending
+// gates the exitMap.pending set: it is true ONLY when the exec is a repeat loop LEAF
+// body (lowerLoop's NodeRepeat arm). Every other decode site passes false, so an
+// exitMap.pending on a retry body, a run body's inner exec, a scatter member, a guard/
+// dispatch/timeout/cleanup body, or a top-level exec (outside any loop) is refused
+// LOUDLY at lowering (ErrUnsupportedNode) — pending is repeat-scoped and would otherwise
+// settle inert. The refusal runs inside buildUnits, which the enqueue gate pre-executes
+// before any journal event, so it surfaces at enqueue.
+func decodeExec(n ir.Node, allowPending bool) (step, error) {
 	// Loud wall (§1.2.5): an exec renders via interpolate(body.raw) ONLY and CANNOT index,
 	// so ANY index interpolation in its template parts is refused here (no strict carve-out)
 	// — a strict-passing part would sweep clean then misrender verbatim on the exec path.
@@ -2913,6 +2928,7 @@ func decodeExec(n ir.Node) (step, error) {
 		var em struct {
 			Pass      []int `json:"pass"`
 			Retryable []int `json:"retryable"`
+			Pending   []int `json:"pending"`
 		}
 		if err := json.Unmarshal(raw, &em); err != nil {
 			return step{}, fmt.Errorf("lumen: exec %q exitMap: %w", n.ID, err)
@@ -2923,6 +2939,16 @@ func decodeExec(n ir.Node) (step, error) {
 		// attempt infrastructure-retryable, carried per-settle so the fold — not a
 		// driver-side memory — is the source on re-Advance (§3.3).
 		s.retryableCodes = em.Retryable
+		// The pending exit-code set settles OutcomePending (a non-consuming re-poll). It
+		// is REPEAT-scoped: only a repeat leaf body may declare it. Refuse it anywhere
+		// else at lowering (before any effect) rather than letting a pending settle inert
+		// on a retry body / non-loop node.
+		if len(em.Pending) > 0 {
+			if !allowPending {
+				return step{}, fmt.Errorf("%w: exec %q declares exitMap.pending but is not a repeat loop leaf body (pending is a repeat check-poll concept)", ErrUnsupportedNode, n.ID)
+			}
+			s.pendingCodes = em.Pending
+		}
 	}
 
 	if raw, ok := n.Raw["cwd"]; ok {

@@ -804,7 +804,9 @@ func (d *driver) resettleLoopAttemptIndexWindow(u planUnit, attempt int, scope m
 	restore, had := "", false
 	if spec.irKind == ir.NodeRepeat {
 		restore, had = scope[iterKey]
-		scope[iterKey] = strconv.Itoa(attempt + 1)
+		// Match materializeLoopAttempt's bind (the CONSUMING count) so the re-derived
+		// half-settled render is byte-identical to the original. Non-pending: == attempt+1.
+		scope[iterKey] = strconv.Itoa(d.consumingCountBefore(spec.bodyNodeID, attempt) + 1)
 	}
 	err := d.resettleIndexWindow(au, scope)
 	if spec.irKind == ir.NodeRepeat {
@@ -1422,7 +1424,10 @@ func (d *driver) materializeLoopAttempt(u planUnit, attempt, maxAttempts int, sc
 	restore, had := "", false
 	if spec.irKind == ir.NodeRepeat {
 		restore, had = scope[iterKey]
-		scope[iterKey] = strconv.Itoa(attempt + 1)
+		// The 1-based iteration is the CONSUMING count (pending re-polls excluded), not
+		// the physical attempt index — kept in lockstep with runAttempt's genesis bind so
+		// genesis and resume render {{iteration}} identically. Non-pending: == attempt+1.
+		scope[iterKey] = strconv.Itoa(d.consumingCountBefore(spec.bodyNodeID, attempt) + 1)
 	}
 	err := d.materializePoolWork(au, scope, opts)
 	if spec.irKind == ir.NodeRepeat {

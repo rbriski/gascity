@@ -24,10 +24,17 @@ func LumenOutcomeForGCOutcome(gcOutcome string) string {
 	switch gcOutcome {
 	case beadmeta.OutcomePass:
 		return OutcomePass
-	case beadmeta.OutcomeFail:
-		return OutcomeFailed
 	case beadmeta.OutcomeDegraded:
 		return OutcomeDegraded
+	case beadmeta.OutcomePending:
+		// A repeat-scoped NON-CONSUMING poll close: the check's CI is still running.
+		// It settles OutcomePending, which the loop's consumingCountBefore skips (the
+		// author's budget is not burned) and observePoolWork's ranOutcome guard excludes
+		// from nodeOutputs. It is NOT a failure (LumenFailRetryableForGCOutcome stays
+		// false), so it never triggers a retry re-attempt.
+		return OutcomePending
+	case beadmeta.OutcomeFail:
+		return OutcomeFailed
 	default:
 		return OutcomeFailed
 	}

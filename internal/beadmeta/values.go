@@ -59,6 +59,15 @@ const (
 	// the engine's degraded outcome. Declared here for discoverability; it is a
 	// value, never a metadata key.
 	OutcomeDegraded = "degraded"
+
+	// OutcomePending is a Lumen-native gc.outcome value: a repeat-scoped NON-CONSUMING
+	// close a pool worker writes when a check's CI is still running ("re-poll, do not
+	// burn the repeat budget"). Like OutcomeDegraded it is NOT part of the control-plane
+	// dispatcher vocabulary (pass/fail/skipped) — it is recognized only by the Lumen
+	// do-outcome map (engine.LumenOutcomeForGCOutcome), which passes it through to the
+	// engine's pending outcome (engine.OutcomePending). Declared here for discoverability;
+	// it is a value, never a metadata key.
+	OutcomePending = "pending"
 )
 
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record

@@ -174,7 +174,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
 	removedLiveMissing := make(map[string]struct{})
-	for _, id := range c.staleParentCacheIDs(query.ParentID, items) {
+	for _, id := range c.staleParentCacheIDs(query, items) {
 		fresh, err := c.backing.Get(id)
 		switch {
 		case err == nil:
@@ -288,8 +288,8 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 	return refreshed
 }
 
-func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []string {
-	if parentID == "" {
+func (c *CachingStore) staleParentCacheIDs(query ListQuery, fresh []Bead) []string {
+	if !isExhaustiveParentQuery(query) {
 		return nil
 	}
 
@@ -306,7 +306,7 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 
 	var stale []string
 	for id, bead := range c.beads {
-		if bead.ParentID != parentID {
+		if !query.Matches(bead) {
 			continue
 		}
 		if _, ok := freshIDs[id]; ok {
@@ -315,6 +315,16 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 		stale = append(stale, id)
 	}
 	return stale
+}
+
+func isExhaustiveParentQuery(query ListQuery) bool {
+	if query.ParentID == "" || len(query.ParentIDs) > 0 || query.Limit != 0 {
+		return false
+	}
+	// Only an unbounded parent census makes omission evidence that a cached
+	// child may have moved or disappeared. Narrowed results omit rows by design.
+	query.ParentID = ""
+	return !query.HasFilter()
 }
 
 func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string {

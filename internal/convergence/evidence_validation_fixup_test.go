@@ -26,6 +26,7 @@ func TestApproveHandlerRejectsCorruptChildEvidenceBeforeTerminalProof(t *testing
 		{name: "empty id", corrupt: BeadInfo{Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}},
 		{name: "duplicate id", corrupt: BeadInfo{ID: valid.ID, Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}},
 		{name: "duplicate iteration", corrupt: BeadInfo{ID: "duplicate", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)}},
+		{name: "iteration gap", corrupt: BeadInfo{ID: "gap", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)}},
 		{name: "invalid status", corrupt: BeadInfo{ID: "bad", Status: "queued", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}},
 	}
 
@@ -74,6 +75,7 @@ func TestReconcileTerminalRejectsCorruptChildEvidenceBeforeProof(t *testing.T) {
 		{name: "empty id", corrupt: BeadInfo{Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}},
 		{name: "duplicate id", corrupt: BeadInfo{ID: valid.ID, Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}},
 		{name: "duplicate iteration", corrupt: BeadInfo{ID: "duplicate", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)}},
+		{name: "iteration gap", corrupt: BeadInfo{ID: "gap", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)}},
 		{name: "invalid status", corrupt: BeadInfo{ID: "bad", Status: "queued", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)}},
 	}
 
@@ -171,6 +173,81 @@ func TestReconcileStaleActiveRecoveryRejectsMismatchedCandidateIDBeforeMutation(
 	meta, _ := store.GetMetadata("root-1")
 	if meta[FieldActiveWisp] != "missing-active" || len(store.WriteLog) != 0 {
 		t.Fatalf("mismatched candidate mutated root: metadata=%#v writes=%v", meta, store.WriteLog)
+	}
+}
+
+func TestReconcileActiveRejectsForeignLiveWispBeforeMutation(t *testing.T) {
+	reconciler, store, emitter := setupReconciler(t)
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:      StateActive,
+		FieldActiveWisp: "foreign-wisp",
+	})
+	store.addBead("other-root", "in_progress", "", "", nil)
+	store.addBead("foreign-wisp", "in_progress", "other-root", IdempotencyKey("other-root", 1), nil)
+
+	report, err := reconciler.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Errors != 1 || report.Details[0].Error == nil || !strings.Contains(report.Details[0].Error.Error(), "active wisp") {
+		t.Fatalf("report = %+v, want foreign active-wisp evidence error", report)
+	}
+	if len(store.WriteLog) != 0 || len(emitter.events) != 0 {
+		t.Fatalf("foreign live wisp caused effects: writes=%v events=%v", store.WriteLog, emitter.events)
+	}
+	foreign, getErr := store.GetBead("foreign-wisp")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if foreign.Status != "in_progress" {
+		t.Fatalf("foreign wisp status = %q, want in_progress", foreign.Status)
+	}
+}
+
+func TestStopHandlerRejectsForeignActiveWispBeforeEffects(t *testing.T) {
+	handler, store, emitter := setupBasicHandler(t, map[string]string{
+		FieldState:             StateActive,
+		FieldActiveWisp:        "foreign-wisp",
+		FieldLastProcessedWisp: "wisp-iter-1",
+	})
+	store.addBead("other-root", "in_progress", "", "", nil)
+	store.addBead("foreign-wisp", "in_progress", "other-root", IdempotencyKey("other-root", 1), nil)
+
+	_, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err == nil || !strings.Contains(err.Error(), "active wisp") {
+		t.Fatalf("StopHandler error = %v, want foreign active-wisp evidence error", err)
+	}
+	if len(store.WriteLog) != 0 || len(emitter.events) != 0 {
+		t.Fatalf("foreign active wisp caused root effects: writes=%v events=%v", store.WriteLog, emitter.events)
+	}
+	foreign, getErr := store.GetBead("foreign-wisp")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if foreign.Status != "in_progress" {
+		t.Fatalf("foreign wisp status = %q, want in_progress", foreign.Status)
+	}
+	root, getErr := store.GetBead("root-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if root.Status == "closed" {
+		t.Fatal("foreign active-wisp evidence closed the root")
+	}
+}
+
+func TestHandleWispClosedRejectsIterationGapBeforeMutation(t *testing.T) {
+	handler, store, emitter := setupBasicHandler(t, map[string]string{
+		FieldLastProcessedWisp: "wisp-iter-1",
+	})
+	store.addBead("wisp-iter-3", "closed", "root-1", IdempotencyKey("root-1", 3), nil)
+
+	_, err := handler.HandleWispClosed(context.Background(), "root-1", "wisp-iter-3")
+	if err == nil || !strings.Contains(err.Error(), "iteration gap") {
+		t.Fatalf("HandleWispClosed error = %v, want iteration-gap evidence error", err)
+	}
+	if len(store.WriteLog) != 0 || len(emitter.events) != 0 {
+		t.Fatalf("iteration gap caused effects: writes=%v events=%v", store.WriteLog, emitter.events)
 	}
 }
 

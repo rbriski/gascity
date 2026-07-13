@@ -74,16 +74,24 @@ func TestChildStats(t *testing.T) {
 		{
 			name: "highest open picks max across open and in_progress",
 			in: []BeadInfo{
-				{ID: "o1", Status: "open", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 5)},
-				{ID: "o2", Status: "in_progress", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 7)},
-				{ID: "o3", Status: "open", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 6)},
+				{ID: "o1", Status: "open", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 1)},
+				{ID: "o2", Status: "in_progress", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 3)},
+				{ID: "o3", Status: "open", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 2)},
 			},
 			want: ChildStats{
 				HighestClosedIter: -1,
-				HighestOpen:       BeadInfo{ID: "o2", Status: "in_progress", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 7)},
-				HighestOpenIter:   7,
+				HighestOpen:       BeadInfo{ID: "o2", Status: "in_progress", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 3)},
+				HighestOpenIter:   3,
 				HighestOpenFound:  true,
 			},
+		},
+		{
+			name: "iteration gap is rejected",
+			in: []BeadInfo{
+				{ID: "w1", Status: "closed", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 1)},
+				{ID: "w3", Status: "open", ParentID: bead, IdempotencyKey: IdempotencyKey(bead, 3)},
+			},
+			wantErr: true,
 		},
 	}
 

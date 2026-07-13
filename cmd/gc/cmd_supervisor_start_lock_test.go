@@ -1181,6 +1181,38 @@ func TestFinalizeManagedCityRunRecordsOnlyCurrentOwner(t *testing.T) {
 		})
 	})
 
+	t.Run("normal name-drift exit clears backoff after deliberate publication removal", func(t *testing.T) {
+		cityPath := t.TempDir()
+		current := &managedCity{name: "old-name"}
+		registry := newCityRegistry()
+		registry.Add(cityPath, current)
+		registry.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			panicHistory[cityPath] = &panicRecord{count: 2, backoff: time.Now().Add(time.Minute)}
+			delete(cities, cityPath) // reconcileCities name-drift removal before stopManagedCity
+		})
+
+		finalizeManagedCityRun(registry, cityPath, current.name, current, nil, io.Discard)
+
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			if _, exists := cities[cityPath]; exists {
+				t.Fatal("name-drifted owner was republished during finalization")
+			}
+			if _, exists := panicHistory[cityPath]; exists {
+				t.Fatal("normal name-drift exit retained old owner's panic history")
+			}
+		})
+	})
+
 	t.Run("stale owner cannot alter replacement or its backoff", func(t *testing.T) {
 		cityPath := t.TempDir()
 		stale := &managedCity{name: "stale"}

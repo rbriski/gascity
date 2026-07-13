@@ -17,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -388,7 +390,7 @@ func TestRegisterCityWithSupervisorWaitsForConfiguredStartupTimeout(t *testing.T
 	}
 }
 
-func TestRegisterCityWithSupervisorFetchesRemotePacksBeforeLoadingIncludes(t *testing.T) {
+func TestRegisterCityWithSupervisorDoesNotFetchRemotePacks(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
@@ -438,8 +440,8 @@ func TestRegisterCityWithSupervisorFetchesRemotePacksBeforeLoadingIncludes(t *te
 	}
 
 	cacheDir := config.PackCachePath(cityPath, "remote-pack", config.PackSource{Source: remote})
-	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
-		t.Fatalf("expected fetched pack cache at %s: %v", cacheDir, err)
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration materialized remote pack cache at %s: %v", cacheDir, err)
 	}
 }
 
@@ -511,7 +513,17 @@ func assertPublicGastownSyntheticCache(t *testing.T, gcHome string) {
 	}
 }
 
-func TestEffectiveCityNameHydratesLockedImportCacheBeforeLoad(t *testing.T) {
+func assertPublicGastownSyntheticCacheAbsent(t *testing.T, gcHome string) {
+	t.Helper()
+
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	cacheDir := filepath.Join(gcHome, "cache", "repos", packman.RepoCacheKey(config.PublicGastownPackSource, commit), "gastown")
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration materialized public gastown cache at %s: %v", cacheDir, err)
+	}
+}
+
+func TestEffectiveCityNameDoesNotHydrateLockedImportCache(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
@@ -524,7 +536,76 @@ func TestEffectiveCityNameHydratesLockedImportCacheBeforeLoad(t *testing.T) {
 	if name != "bright-lights" {
 		t.Fatalf("effectiveCityName = %q, want %q", name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
+}
+
+func TestSupervisorCityTimeoutReadsAreSideEffectFree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("\n[daemon]\nstart_ready_timeout = \"9m\"\nshutdown_timeout = \"4m\"\nformula_v2 = false\n\n[session]\nstartup_timeout = \"12m\"\n")...)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	previousFormulaV2 := formula.IsFormulaV2Enabled()
+	previousGraphApply := molecule.IsGraphApplyEnabled()
+	formula.SetFormulaV2Enabled(true)
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() {
+		formula.SetFormulaV2Enabled(previousFormulaV2)
+		molecule.SetGraphApplyEnabled(previousGraphApply)
+	})
+
+	if got := supervisorCityStartTimeout(cityPath); got != 12*time.Minute {
+		t.Fatalf("supervisorCityStartTimeout = %v, want 12m", got)
+	}
+	if got := supervisorCityStopTimeout(cityPath); got != 4*time.Minute+5*time.Second {
+		t.Fatalf("supervisorCityStopTimeout = %v, want 4m5s", got)
+	}
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
+	if !formula.IsFormulaV2Enabled() {
+		t.Fatal("supervisor timeout read changed the process-global formula v2 flag")
+	}
+	if !molecule.IsGraphApplyEnabled() {
+		t.Fatal("supervisor timeout read changed the process-global graph apply flag")
+	}
+}
+
+func TestRegisteredCityNameDefersUncachedPackRuntimeRegistrationValidation(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := writeRuntimeCityFixture(t, "subprocess")
+	// This pack exists only at its declared source path; registration has not
+	// materialized any managed cache. Intent reads must not turn the partial
+	// composition into a full runtime-registry validation boundary.
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime pack unexpectedly cached before intent read: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("\n[session]\nprovider = \"subprocess\"\n")...)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	name, err := registeredCityName(cityPath, "")
+	if err != nil {
+		t.Fatalf("read-only supervisor intent rejected pack-defined selected runtime: %v", err)
+	}
+	if name != "demo" {
+		t.Fatalf("effective city name = %q, want demo", name)
+	}
+
+	if _, _, err := loadSupervisorCityConfig(cityPath); err == nil {
+		t.Fatal("locked full config load accepted a pack runtime that collides with a builtin")
+	}
 }
 
 func TestLoadSupervisorCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
@@ -643,7 +724,7 @@ func TestLoadConfigCommandCityConfigHydratesLockedImportCacheBeforeLoad(t *testi
 	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
-func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLoad(t *testing.T) {
+func TestRegisterCityWithSupervisorDoesNotInstallLockedBundledRemoteImport(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
@@ -664,10 +745,10 @@ func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLo
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 0: %s", code, stderr.String())
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
 }
 
-func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *testing.T) {
+func TestRegisterCityWithSupervisorNameOverrideDoesNotHydrateLockedImportCache(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
@@ -688,7 +769,7 @@ func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *test
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
 }
 
 func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {

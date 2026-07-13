@@ -2,6 +2,16 @@
 title: "Formula Migration"
 ---
 
+> **SUPERSEDED (2026-07-13).** This proposal targets a native-Go molecule +
+> control-bead endpoint — porting the beads `internal/formula` compiler into
+> Gas City and keeping molecules/control beads, just compiled in Go instead of
+> via `bd`. That endpoint is superseded by the formula-unification work, which
+> migrates formula v1 and v2 onto the append-only journal+fold substrate and
+> **deletes** the molecule/control-bead machinery entirely (the fold is the
+> orchestrator; zero control beads). See
+> `.scratch/lumen-integration/substrate/plan/FORMULA-UNIFICATION-PROPOSAL.md`.
+> Retained for historical context only; do not execute the plan below.
+
 ## Context
 
 Gas City's mechanism #7 (Formulas & Molecules) is currently split across two

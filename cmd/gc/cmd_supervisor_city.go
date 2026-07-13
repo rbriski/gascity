@@ -3,9 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +15,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"golang.org/x/term"
@@ -80,11 +76,6 @@ type supervisorRegistry interface {
 	List() ([]supervisor.CityEntry, error)
 	Register(cityPath, effectiveName string) error
 	Unregister(cityPath string) error
-}
-
-type supervisorPendingRequestRegistry interface {
-	StorePendingCityRequestID(cityPath, requestID string) error
-	ConsumePendingCityRequestID(cityPath string) (string, bool, error)
 }
 
 var newSupervisorRegistry = func() supervisorRegistry {
@@ -785,71 +776,6 @@ func statusDisplayText(status string) string {
 	}
 }
 
-const stopSupervisorRequestIDPrefix = "req-stop-"
-
-func newStopSupervisorRequestID() (string, error) {
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("generating stop request ID: %w", err)
-	}
-	// The operation prefix lets the supervisor distinguish this interim
-	// stop-only witness from the pre-existing generic city-create request IDs
-	// without adding a durable command schema before G0.
-	return stopSupervisorRequestIDPrefix + hex.EncodeToString(raw[:]), nil
-}
-
-func waitForSupervisorUnregisterTerminalUntil(requestID string, deadline time.Time) error {
-	if !time.Now().Before(deadline) {
-		return fmt.Errorf("%w before reading supervisor unregister result", errStopCompletionDeadline)
-	}
-	eventPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	var corruptCandidates error
-	failed, err := events.ReadFilteredWithInFlight(eventPath, events.Filter{Type: events.RequestFailed})
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("reading supervisor unregister failure result: %w", err)
-	}
-	for i := len(failed) - 1; i >= 0; i-- {
-		var payload api.RequestFailedPayload
-		if err := json.Unmarshal(failed[i].Payload, &payload); err != nil {
-			corruptCandidates = errors.Join(corruptCandidates, fmt.Errorf("decoding supervisor unregister failure result: %w", err))
-			continue
-		}
-		if payload.RequestID != requestID || payload.Operation != api.RequestOperationCityUnregister {
-			continue
-		}
-		detail := strings.TrimSpace(payload.ErrorMessage)
-		if detail == "" {
-			detail = strings.TrimSpace(payload.ErrorCode)
-		}
-		if detail == "" {
-			detail = "managed city cleanup failed"
-		}
-		return fmt.Errorf("supervisor managed cleanup: %s", detail)
-	}
-
-	succeeded, err := events.ReadFilteredWithInFlight(eventPath, events.Filter{Type: events.RequestResultCityUnregister})
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("reading supervisor unregister success result: %w", err)
-	}
-	for i := len(succeeded) - 1; i >= 0; i-- {
-		var payload api.CityUnregisterSucceededPayload
-		if err := json.Unmarshal(succeeded[i].Payload, &payload); err != nil {
-			corruptCandidates = errors.Join(corruptCandidates, fmt.Errorf("decoding supervisor unregister success result: %w", err))
-			continue
-		}
-		if payload.RequestID == requestID {
-			if !time.Now().Before(deadline) {
-				return fmt.Errorf("%w after reading supervisor unregister result", errStopCompletionDeadline)
-			}
-			return nil
-		}
-	}
-	if corruptCandidates != nil {
-		return fmt.Errorf("supervisor unregister terminal result %q was not recorded; corrupt candidates were ignored: %w", requestID, corruptCandidates)
-	}
-	return fmt.Errorf("supervisor unregister terminal result %q was not recorded", requestID)
-}
-
 type supervisorUnregisterOptions struct {
 	Force                  bool
 	ClassifyStandaloneStop bool
@@ -865,7 +791,6 @@ type supervisorUnregisterDeadlineOps struct {
 	reload           func(io.Writer, io.Writer, time.Time) int
 	waitCity         func(string, bool, time.Time, time.Duration, io.Writer) error
 	acquireOwnership func(string, time.Time, time.Duration) (*controllerLockLease, error)
-	waitTerminal     func(string, time.Time) error
 }
 
 var stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
@@ -877,7 +802,6 @@ var stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
 	reload:           reloadSupervisorUntil,
 	waitCity:         waitForSupervisorCityUntil,
 	acquireOwnership: waitForSupervisorControllerOwnershipUntil,
-	waitTerminal:     waitForSupervisorUnregisterTerminalUntil,
 }
 
 type supervisorUnregisterState uint8
@@ -938,22 +862,7 @@ func unregisterCityFromSupervisorWithForceResultUntil(cityPath string, stdout, s
 	})
 }
 
-func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (result supervisorUnregisterResult) {
-	var pendingRegistry supervisorPendingRequestRegistry
-	var pendingRequestID string
-	defer func() {
-		if pendingRegistry == nil || pendingRequestID == "" {
-			return
-		}
-		if _, _, err := pendingRegistry.ConsumePendingCityRequestID(cityPath); err != nil {
-			fmt.Fprintf(stderr, "%s: clearing pending supervisor unregister result: %v\n", commandName, err) //nolint:errcheck
-			if result.ownership != nil {
-				_ = result.ownership.Close()
-				result.ownership = nil
-			}
-			result = supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
-		}
-	}()
+func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) supervisorUnregisterResult {
 	deadlineExpired := func() bool {
 		return opts.DeadlineOps != nil && (opts.Deadline.IsZero() || !opts.DeadlineOps.now().Before(opts.Deadline))
 	}
@@ -1028,24 +937,6 @@ func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stde
 			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
 	}
-	if opts.DeadlineOps != nil && supervisorWasAlive {
-		var ok bool
-		pendingRegistry, ok = reg.(supervisorPendingRequestRegistry)
-		if !ok {
-			fmt.Fprintf(stderr, "%s: supervisor registry cannot persist an unregister result witness\n", commandName) //nolint:errcheck
-			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
-		}
-		pendingRequestID, err = newStopSupervisorRequestID()
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck
-			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
-		}
-		if err := pendingRegistry.StorePendingCityRequestID(cityPath, pendingRequestID); err != nil {
-			fmt.Fprintf(stderr, "%s: storing pending supervisor unregister result: %v\n", commandName, err) //nolint:errcheck
-			pendingRequestID = ""
-			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
-		}
-	}
 	if deadlineExpired() {
 		return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 	}
@@ -1083,24 +974,6 @@ func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stde
 			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
 		if supervisorWasAlive {
-			if opts.DeadlineOps != nil {
-				var terminalErr error
-				switch {
-				case pendingRequestID == "":
-					terminalErr = errors.New("supervisor cleanup returned no durable terminal-result witness")
-				case opts.DeadlineOps.waitTerminal == nil:
-					terminalErr = errors.New("supervisor cleanup cannot validate its terminal-result witness")
-				default:
-					terminalErr = opts.DeadlineOps.waitTerminal(pendingRequestID, opts.Deadline)
-				}
-				if terminalErr == nil && deadlineExpired() {
-					terminalErr = errStopCompletionDeadline
-				}
-				if terminalErr != nil {
-					fmt.Fprintf(stderr, "%s: %v\n", commandName, terminalErr) //nolint:errcheck
-					return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
-				}
-			}
 			return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true}
 		}
 		return supervisorUnregisterResult{
@@ -1160,23 +1033,6 @@ func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stde
 			}
 			if ownership == nil {
 				fmt.Fprintf(stderr, "%s: supervisor cleanup returned no controller ownership\n", commandName) //nolint:errcheck
-				return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
-			}
-			var terminalErr error
-			if pendingRequestID == "" {
-				terminalErr = errors.New("supervisor cleanup returned no durable terminal-result witness")
-			} else if opts.DeadlineOps.waitTerminal != nil {
-				terminalErr = opts.DeadlineOps.waitTerminal(pendingRequestID, opts.Deadline)
-			}
-			if terminalErr == nil && deadlineExpired() {
-				terminalErr = errStopCompletionDeadline
-			}
-			if terminalErr != nil {
-				closeErr := ownership.Close()
-				fmt.Fprintf(stderr, "%s: %v\n", commandName, terminalErr) //nolint:errcheck
-				if closeErr != nil {
-					fmt.Fprintf(stderr, "%s: releasing controller ownership after failed managed cleanup: %v\n", commandName, closeErr) //nolint:errcheck
-				}
 				return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 			}
 			return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true, ownership: ownership}

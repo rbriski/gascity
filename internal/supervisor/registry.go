@@ -269,21 +269,6 @@ func (r *Registry) StorePendingCityRequestID(cityPath, requestID string) error {
 	return r.saveAllLocked(rf)
 }
 
-// ListPendingCityRequests returns an immutable snapshot of the persisted
-// city-operation correlation records. The supervisor reconciler uses this to
-// finish unregister requests for paths that never had a managed runtime; it
-// must not infer terminal success merely from an empty running-city map.
-func (r *Registry) ListPendingCityRequests() ([]PendingCityRequestEntry, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	rf, err := r.loadAllLocked()
-	if err != nil {
-		return nil, err
-	}
-	return append([]PendingCityRequestEntry(nil), rf.PendingCityRequests...), nil
-}
-
 // ConsumePendingCityRequestID returns and removes the pending request_id for a
 // city path from the persisted supervisor registry.
 func (r *Registry) ConsumePendingCityRequestID(cityPath string) (string, bool, error) {

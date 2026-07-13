@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -13,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -24,6 +22,162 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+type trackingStopSupervisorRegistry struct {
+	entries      []supervisor.CityEntry
+	pendingID    string
+	storeCalls   int
+	consumeCalls int
+}
+
+func (r *trackingStopSupervisorRegistry) List() ([]supervisor.CityEntry, error) {
+	return append([]supervisor.CityEntry(nil), r.entries...), nil
+}
+
+func (r *trackingStopSupervisorRegistry) Register(cityPath, effectiveName string) error {
+	r.entries = append(r.entries, supervisor.CityEntry{Path: cityPath, Name: effectiveName})
+	return nil
+}
+
+func (r *trackingStopSupervisorRegistry) Unregister(cityPath string) error {
+	for i, entry := range r.entries {
+		if samePath(entry.Path, cityPath) {
+			r.entries = append(r.entries[:i], r.entries[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (r *trackingStopSupervisorRegistry) StorePendingCityRequestID(_ string, requestID string) error {
+	r.storeCalls++
+	if r.pendingID != "" {
+		return supervisor.ErrPendingCityRequestExists
+	}
+	r.pendingID = requestID
+	return nil
+}
+
+//nolint:unparam // error result matches the production pending-request method shape.
+func (r *trackingStopSupervisorRegistry) ConsumePendingCityRequestID(_ string) (string, bool, error) {
+	r.consumeCalls++
+	if r.pendingID == "" {
+		return "", false, nil
+	}
+	requestID := r.pendingID
+	r.pendingID = ""
+	return requestID, true, nil
+}
+
+func TestManagedStopUsesCityAbsenceAndExactLeaseWithoutPendingRequestMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		pendingID string
+	}{
+		{name: "no pending API request"},
+		{name: "pre-existing generic API request", pendingID: "req-api-unregister"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			cityPath := setupCity(t, "managed-stop-no-witness")
+			registry := &trackingStopSupervisorRegistry{
+				entries:   []supervisor.CityEntry{{Path: cityPath, Name: "managed-stop-no-witness"}},
+				pendingID: tt.pendingID,
+			}
+			oldRegistry := newSupervisorRegistry
+			newSupervisorRegistry = func() supervisorRegistry { return registry }
+			t.Cleanup(func() { newSupervisorRegistry = oldRegistry })
+
+			started := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)
+			deadline := started.Add(time.Second)
+			var acquired *controllerLockLease
+			oldOps := stopSupervisorUnregisterDeadlineOps
+			stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
+				now:             func() time.Time { return started },
+				supervisorAlive: func(time.Time) int { return 4242 },
+				requestStop: func(string, bool, time.Time) controllerStopResult {
+					t.Fatal("acknowledged managed stop issued an alternate controller request")
+					return controllerStopResult{}
+				},
+				reload: func(io.Writer, io.Writer, time.Time) int { return 0 },
+				waitCity: func(string, bool, time.Time, time.Duration, io.Writer) error {
+					return nil
+				},
+				acquireOwnership: func(path string, _ time.Time, _ time.Duration) (*controllerLockLease, error) {
+					lease, err := acquireControllerLock(path)
+					acquired = lease
+					return lease, err
+				},
+			}
+			t.Cleanup(func() {
+				stopSupervisorUnregisterDeadlineOps = oldOps
+				if acquired != nil {
+					_ = acquired.Close()
+				}
+			})
+
+			result := unregisterCityFromSupervisorWithForceResultUntil(
+				cityPath,
+				io.Discard,
+				io.Discard,
+				"gc stop",
+				false,
+				deadline,
+				time.Second,
+			)
+
+			if result.state != supervisorUnregisterManagedCleanupComplete {
+				t.Fatalf("managed stop state = %v, want cleanup complete", result.state)
+			}
+			if acquired == nil || result.ownership != acquired {
+				t.Fatalf("managed stop ownership = %p, want exact acquired lease %p", result.ownership, acquired)
+			}
+			if registry.storeCalls != 0 || registry.consumeCalls != 0 {
+				t.Fatalf("pending request mutations = store:%d consume:%d, want zero", registry.storeCalls, registry.consumeCalls)
+			}
+			if registry.pendingID != tt.pendingID {
+				t.Fatalf("pending API request = %q, want preserved %q", registry.pendingID, tt.pendingID)
+			}
+			if len(registry.entries) != 0 {
+				t.Fatalf("registered cities after managed stop = %#v, want none", registry.entries)
+			}
+		})
+	}
+}
+
+func TestManagedStopBespokeWitnessSymbolsStayRemoved(t *testing.T) {
+	files := map[string][]string{
+		"cmd_supervisor_city.go": {
+			"supervisorPendingRequestRegistry",
+			"stopSupervisorRequestIDPrefix",
+			"newStopSupervisorRequestID",
+			"waitForSupervisorUnregisterTerminalUntil",
+			"waitTerminal",
+			"StorePendingCityRequestID",
+			"ConsumePendingCityRequestID",
+			"ReadFilteredWithInFlight",
+		},
+		"cmd_supervisor.go": {
+			"ListPendingCityRequests",
+			"stopSupervisorRequestIDPrefix",
+		},
+		filepath.Join("..", "..", "internal", "supervisor", "registry.go"): {
+			"ListPendingCityRequests",
+		},
+	}
+	for path, forbidden := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, symbol := range forbidden {
+			if strings.Contains(string(data), symbol) {
+				t.Errorf("%s still contains bespoke stop witness symbol %q", path, symbol)
+			}
+		}
+	}
+}
 
 func TestStopCompletionTimeoutAtEntryIsReadOnlyBeforeOwnership(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -479,7 +633,6 @@ func TestCmdStopRegisteredMissingCityNeedsNoCleanupOwnership(t *testing.T) {
 	stopCompletionNow = func() time.Time { return started }
 	t.Cleanup(func() { stopCompletionNow = oldNow })
 
-	terminalCalls := 0
 	oldOps := stopSupervisorUnregisterDeadlineOps
 	stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
 		now:             func() time.Time { return started },
@@ -496,13 +649,6 @@ func TestCmdStopRegisteredMissingCityNeedsNoCleanupOwnership(t *testing.T) {
 		acquireOwnership: func(string, time.Time, time.Duration) (*controllerLockLease, error) {
 			t.Fatal("controller ownership requested for an absent city directory")
 			return nil, nil
-		},
-		waitTerminal: func(requestID string, _ time.Time) error {
-			terminalCalls++
-			if requestID == "" {
-				t.Fatal("managed cleanup terminal wait received an empty request ID")
-			}
-			return nil
 		},
 	}
 	t.Cleanup(func() { stopSupervisorUnregisterDeadlineOps = oldOps })
@@ -517,230 +663,12 @@ func TestCmdStopRegisteredMissingCityNeedsNoCleanupOwnership(t *testing.T) {
 	if strings.Contains(stderr.String(), "without returning controller ownership") {
 		t.Fatalf("stderr reports impossible ownership requirement: %q", stderr.String())
 	}
-	if terminalCalls != 1 {
-		t.Fatalf("managed terminal witness checks = %d, want 1", terminalCalls)
-	}
 	entries, err := reg.List()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("registry entries = %v, want absent city unregistered", entries)
-	}
-}
-
-func TestCmdStopRegisteredMissingCityFailsWithoutManagedTerminalWitness(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	cityPath := filepath.Join(t.TempDir(), "gone-city")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if err := reg.Register(cityPath, "gone-city"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(cityPath); err != nil {
-		t.Fatal(err)
-	}
-
-	started := time.Date(2026, 7, 13, 15, 31, 0, 0, time.UTC)
-	oldNow := stopCompletionNow
-	stopCompletionNow = func() time.Time { return started }
-	t.Cleanup(func() { stopCompletionNow = oldNow })
-
-	wantErr := errors.New("managed provider cleanup failed")
-	oldOps := stopSupervisorUnregisterDeadlineOps
-	stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
-		now:             func() time.Time { return started },
-		supervisorAlive: func(time.Time) int { return 42 },
-		requestStop: func(string, bool, time.Time) controllerStopResult {
-			t.Fatal("standalone stop request issued while supervisor is alive")
-			return controllerStopResult{}
-		},
-		reload: func(io.Writer, io.Writer, time.Time) int { return 0 },
-		waitCity: func(string, bool, time.Time, time.Duration, io.Writer) error {
-			t.Fatal("city-status wait issued for an absent city directory")
-			return nil
-		},
-		acquireOwnership: func(string, time.Time, time.Duration) (*controllerLockLease, error) {
-			t.Fatal("controller ownership requested for an absent city directory")
-			return nil, nil
-		},
-		waitTerminal: func(string, time.Time) error { return wantErr },
-	}
-	t.Cleanup(func() { stopSupervisorUnregisterDeadlineOps = oldOps })
-
-	var stdout, stderr strings.Builder
-	if code := cmdStopJSON([]string{"gone-city"}, &stdout, &stderr, time.Second, false, false); code != 1 {
-		t.Fatalf("cmdStopJSON = %d, want failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout claimed success without terminal proof: %q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), wantErr.Error()) {
-		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
-	}
-}
-
-func TestCmdStopSupervisorTerminalFailureSuppressesSuccessWithoutRestartingCity(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	cityPath := setupCity(t, "managed-terminal-failure")
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if err := reg.Register(cityPath, "managed-terminal-failure"); err != nil {
-		t.Fatal(err)
-	}
-
-	started := time.Date(2026, 7, 13, 15, 15, 0, 0, time.UTC)
-	deadline := started.Add(time.Second)
-	oldNow := stopCompletionNow
-	stopCompletionNow = func() time.Time { return started }
-	t.Cleanup(func() { stopCompletionNow = oldNow })
-
-	oldOps := stopSupervisorUnregisterDeadlineOps
-	stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
-		now:             func() time.Time { return started },
-		supervisorAlive: func(time.Time) int { return 4242 },
-		requestStop: func(string, bool, time.Time) controllerStopResult {
-			t.Fatal("managed ordinary stop issued an alternate controller request")
-			return controllerStopResult{}
-		},
-		reload: func(io.Writer, io.Writer, time.Time) int { return 0 },
-		waitCity: func(string, bool, time.Time, time.Duration, io.Writer) error {
-			return nil
-		},
-		acquireOwnership: func(path string, _ time.Time, _ time.Duration) (*controllerLockLease, error) {
-			return acquireControllerLock(path)
-		},
-		waitTerminal: func(requestID string, got time.Time) error {
-			if !strings.HasPrefix(requestID, "req-") || got != deadline {
-				t.Fatalf("terminal witness = (%q, %v), want generated request ID and %v", requestID, got, deadline)
-			}
-			return errors.New("bead provider shutdown: disk failure")
-		},
-	}
-	t.Cleanup(func() { stopSupervisorUnregisterDeadlineOps = oldOps })
-
-	shutdownCalls := 0
-	oldShutdown := shutdownBeadsProviderForStop
-	shutdownBeadsProviderForStop = func(string) error { shutdownCalls++; return nil }
-	t.Cleanup(func() { shutdownBeadsProviderForStop = oldShutdown })
-
-	var stdout, stderr strings.Builder
-	if code := cmdStopJSON([]string{cityPath}, &stdout, &stderr, time.Second, false, false); code != 1 {
-		t.Fatalf("cmdStopJSON = %d, want terminal failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout claimed success after managed cleanup failure: %q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "bead provider shutdown: disk failure") {
-		t.Fatalf("stderr = %q, want exact managed cleanup failure", stderr.String())
-	}
-	if shutdownCalls != 0 {
-		t.Fatalf("CLI provider shutdown calls = %d, want zero", shutdownCalls)
-	}
-	entries, err := reg.List()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("terminal managed cleanup failure re-registered the stopped city: %v", entries)
-	}
-	probe, err := acquireControllerLock(cityPath)
-	if err != nil {
-		t.Fatalf("terminal failure leaked returned ownership: %v", err)
-	}
-	_ = probe.Close()
-}
-
-func TestWaitForSupervisorUnregisterTerminalUntilConsumesTypedResult(t *testing.T) {
-	tests := []struct {
-		name    string
-		typ     string
-		payload events.Payload
-		wantErr string
-	}{
-		{
-			name: "success",
-			typ:  events.RequestResultCityUnregister,
-			payload: api.CityUnregisterSucceededPayload{
-				RequestID: "req-terminal",
-				Name:      "managed-city",
-				Path:      "/tmp/managed-city",
-			},
-		},
-		{
-			name: "managed cleanup failure",
-			typ:  events.RequestFailed,
-			payload: api.RequestFailedPayload{
-				RequestID:    "req-terminal",
-				Operation:    api.RequestOperationCityUnregister,
-				ErrorCode:    "city_unregister_failed",
-				ErrorMessage: "bead provider shutdown failed",
-			},
-			wantErr: "bead provider shutdown failed",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GC_HOME", t.TempDir())
-			path := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-			recorder, err := events.NewFileRecorder(path, io.Discard)
-			if err != nil {
-				t.Fatal(err)
-			}
-			api.EmitTypedEvent(recorder, tt.typ, "managed-city", tt.payload)
-			if err := recorder.Close(); err != nil {
-				t.Fatal(err)
-			}
-
-			err = waitForSupervisorUnregisterTerminalUntil("req-terminal", time.Now().Add(time.Second))
-			if tt.wantErr == "" && err != nil {
-				t.Fatalf("terminal wait error = %v, want success", err)
-			}
-			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
-				t.Fatalf("terminal wait error = %v, want %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestWaitForSupervisorUnregisterTerminalUntilIgnoresUnrelatedCorruption(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	path := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	recorder, err := events.NewFileRecorder(path, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	api.EmitTypedEvent(recorder, events.RequestResultCityUnregister, "managed-city", api.CityUnregisterSucceededPayload{
-		RequestID: "req-terminal",
-		Name:      "managed-city",
-		Path:      "/tmp/managed-city",
-	})
-	recorder.Record(events.Event{Type: events.RequestFailed, Payload: json.RawMessage(`"corrupt"`)})
-	if err := recorder.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := waitForSupervisorUnregisterTerminalUntil("req-terminal", time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("valid correlated terminal result was denied by unrelated corruption: %v", err)
-	}
-}
-
-func TestWaitForSupervisorUnregisterTerminalUntilFailsClosedOnOnlyCorruption(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	path := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	recorder, err := events.NewFileRecorder(path, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recorder.Record(events.Event{Type: events.RequestResultCityUnregister, Payload: json.RawMessage(`"corrupt"`)})
-	if err := recorder.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	err = waitForSupervisorUnregisterTerminalUntil("req-terminal", time.Now().Add(time.Second))
-	if err == nil || !strings.Contains(err.Error(), "corrupt candidates were ignored") {
-		t.Fatalf("terminal wait error = %v, want explicit fail-closed corruption detail", err)
 	}
 }
 

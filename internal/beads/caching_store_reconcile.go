@@ -6,11 +6,27 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"sort"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
+
+// reconcileEvictDiag reports whether GC_RECONCILE_EVICT_DIAG is set. When on, the
+// reconcile re-verify logs a rate-limited, per-candidate classification of every
+// cached-but-missing bead — recovered-alive, confirmed-closed, EVICT-notfound, or
+// defer-transient — so an operator can see which live beads the reconciler is
+// evicting (EVICT-notfound) versus recovering. Off by default; read per call so
+// it can be toggled by restarting a process with the env set. Diagnostic only —
+// it changes no reconcile behavior.
+func reconcileEvictDiag() bool {
+	return os.Getenv("GC_RECONCILE_EVICT_DIAG") == "1"
+}
+
+// reconcileEvictDiagPerPassCap bounds how many per-candidate diag lines one
+// reconcile pass emits, so a large divergence can't flood the log.
+const reconcileEvictDiagPerPassCap = 40
 
 // cacheLatencyWindowSize is the size of the rolling window of bd-list
 // durations the reconciler uses for adaptive cadence decisions. Doubles
@@ -753,6 +769,22 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 	var confirmedClosed map[string]Bead
 	var recoveredAlive int64
 	var deferredClose int64
+	diag := reconcileEvictDiag()
+	diagLogged := 0
+	var diagEvict, diagRecovered, diagClosed, diagDefer int
+	logDiag := func(kind, id, status string) {
+		if !diag {
+			return
+		}
+		if kind == "EVICT-notfound" {
+			diagEvict++
+		}
+		if diagLogged >= reconcileEvictDiagPerPassCap {
+			return
+		}
+		diagLogged++
+		log.Printf("beads reconcile-evict-diag: %s id=%s cached_status=%s", kind, id, status)
+	}
 	for id, cached := range candidates {
 		bead, err := c.backing.Get(id)
 		switch {
@@ -764,6 +796,8 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 				)
 				freshByID[id] = cached
 				deferredClose++
+				diagDefer++
+				logDiag("defer-id-mismatch", id, cached.Status)
 				continue
 			}
 			if bead.Status == "closed" {
@@ -771,12 +805,17 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 					confirmedClosed = make(map[string]Bead)
 				}
 				confirmedClosed[id] = cloneBead(bead)
+				diagClosed++
+				logDiag("confirmed-closed", id, cached.Status)
 				continue
 			}
 			freshByID[id] = cloneBead(bead)
 			recoveredAlive++
+			diagRecovered++
+			logDiag("recovered-alive", id, cached.Status)
 		case errors.Is(err, ErrNotFound):
 			// Confirmed gone; let the diff path emit bead.closed.
+			logDiag("EVICT-notfound", id, cached.Status)
 		default:
 			c.recordProblem(
 				"verify missing bead before close",
@@ -784,7 +823,13 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 			)
 			freshByID[id] = cached
 			deferredClose++
+			diagDefer++
+			logDiag("defer-transient", id, cached.Status)
 		}
+	}
+	if diag {
+		log.Printf("beads reconcile-evict-diag SUMMARY: candidates=%d evict_notfound=%d recovered_alive=%d confirmed_closed=%d deferred=%d",
+			len(candidates), diagEvict, diagRecovered, diagClosed, diagDefer)
 	}
 	if recoveredAlive != 0 || deferredClose != 0 {
 		c.mu.Lock()

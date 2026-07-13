@@ -10,15 +10,40 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+type managedCloserSpy struct {
+	calls int
+	close func() error
+}
+
+func (c *managedCloserSpy) Close() error {
+	c.calls++
+	if c.close == nil {
+		return nil
+	}
+	return c.close()
+}
+
+type managedRecorderSpy struct {
+	record func(events.Event)
+}
+
+func (r managedRecorderSpy) Record(event events.Event) {
+	if r.record != nil {
+		r.record(event)
+	}
+}
 
 func TestManagedCLIStartHeldControllerLockDoesNotScaffoldOrTouchProviders(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -738,7 +763,7 @@ func TestRunManagedCityOwnedPhasesRetainsLeaseThroughCleanupAfterRunPanic(t *tes
 		}
 		order = append(order, "finalize")
 		assertLeaseHeld("state finalization")
-	})
+	}, nil)
 
 	if got, want := strings.Join(order, ","), "run,runtime-shutdown,provider-shutdown,finalize"; got != want {
 		t.Fatalf("managed phase order = %q, want %q", got, want)
@@ -750,6 +775,100 @@ func TestRunManagedCityOwnedPhasesRetainsLeaseThroughCleanupAfterRunPanic(t *tes
 	case <-done:
 	default:
 		t.Fatal("managed completion was not signaled")
+	}
+	reacquired, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("reacquire after managed completion: %v", err)
+	}
+	_ = reacquired.Close()
+}
+
+func TestManagedControllerStartedPanicEntersRuntimeBeforeSingleNormalCleanup(t *testing.T) {
+	cityPath := t.TempDir()
+	lease, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("acquire controller lock: %v", err)
+	}
+	runtimeEntered := make(chan struct{})
+	releaseRuntime := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseRuntime:
+		default:
+			close(releaseRuntime)
+		}
+	})
+	done := make(chan struct{})
+	mc := &managedCity{name: "publication-panic-city", done: done}
+	recorded := make(chan events.Event, 1)
+	recorder := managedRecorderSpy{record: func(event events.Event) {
+		recorded <- event
+		panic("controller-started panic")
+	}}
+	var runtimeEntries atomic.Int32
+	var runtimeShutdownCalls atomic.Int32
+	var providerShutdownCalls atomic.Int32
+	var result managedCityOwnedPhasesResult
+	var stderr bytes.Buffer
+
+	go runManagedCityWithLease(mc, lease, &stderr, func() {
+		result = runManagedCityOwnedPhases(
+			func() {
+				recordManagedControllerStarted(mc, recorder, &stderr)
+				runtimeEntries.Add(1)
+				close(runtimeEntered)
+				<-releaseRuntime
+			},
+			func() { runtimeShutdownCalls.Add(1) },
+			func() error {
+				providerShutdownCalls.Add(1)
+				return nil
+			},
+		)
+	}, nil)
+
+	select {
+	case <-runtimeEntered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("managed runtime did not enter after ControllerStarted recorder panic")
+	}
+	event := <-recorded
+	if event.Type != events.ControllerStarted {
+		t.Fatalf("recorded event type = %q, want %q", event.Type, events.ControllerStarted)
+	}
+	if got := runtimeEntries.Load(); got != 1 {
+		t.Fatalf("runtime entries = %d, want exactly 1", got)
+	}
+	if got := runtimeShutdownCalls.Load(); got != 0 {
+		t.Fatalf("runtime shutdown calls while runtime is blocked = %d, want 0", got)
+	}
+	if got := providerShutdownCalls.Load(); got != 0 {
+		t.Fatalf("provider shutdown calls while runtime is blocked = %d, want 0", got)
+	}
+
+	close(releaseRuntime)
+	select {
+	case <-done:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("managed owner did not finish after runtime release")
+	}
+	if result.recovered != nil {
+		t.Fatalf("runtime panic classification = %v, want nil", result.recovered)
+	}
+	if result.cleanupErr != nil {
+		t.Fatalf("cleanup error = %v, want nil", result.cleanupErr)
+	}
+	if got := runtimeShutdownCalls.Load(); got != 1 {
+		t.Fatalf("runtime shutdown calls after runtime exit = %d, want exactly 1", got)
+	}
+	if got := providerShutdownCalls.Load(); got != 1 {
+		t.Fatalf("provider shutdown calls after runtime exit = %d, want exactly 1", got)
+	}
+	if mc.managedShutdownErr == nil || !strings.Contains(mc.managedShutdownErr.Error(), "controller-started event publication panic") {
+		t.Fatalf("managed shutdown error after done = %v, want sticky publication panic", mc.managedShutdownErr)
+	}
+	if !strings.Contains(stderr.String(), "controller-started event publication panic") {
+		t.Fatalf("stderr = %q, want publication panic", stderr.String())
 	}
 	reacquired, err := acquireControllerLock(cityPath)
 	if err != nil {
@@ -774,33 +893,331 @@ func TestRunManagedCityOwnedPhasesDoesNotClassifyCleanupPanicAsRuntimePanic(t *t
 	}
 }
 
-func TestRunManagedCityWithLeaseReleasesLeaseAndSignalsDoneAfterEpiloguePanic(t *testing.T) {
+func TestRunManagedCityWithLeaseFinalizesAndClosesRecorderBeforeLeaseAndDoneAfterEpiloguePanic(t *testing.T) {
 	cityPath := t.TempDir()
-	lease, err := acquireControllerLock(cityPath)
+	source, err := acquireControllerLock(cityPath)
 	if err != nil {
-		t.Fatalf("acquire controller lock: %v", err)
+		t.Fatalf("acquire source controller lock: %v", err)
 	}
+	lease, err := source.Transfer()
+	if err != nil {
+		t.Fatalf("transfer controller lock: %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("close transferred source wrapper: %v", err)
+	}
+	originalFile := lease.file
 	done := make(chan struct{})
-	mc := &managedCity{name: "panic-city", done: done}
+	registry := newCityRegistry()
+	var order []string
+	closer := &managedCloserSpy{close: func() error {
+		order = append(order, "recorder")
+		if registry.Has(cityPath) {
+			t.Fatal("recorder closed before managed publication was finalized")
+		}
+		if _, statErr := originalFile.Stat(); statErr != nil {
+			t.Fatalf("transferred controller lease during recorder close: %v", statErr)
+		}
+		contender, acquireErr := acquireControllerLock(cityPath)
+		if contender != nil {
+			_ = contender.Close()
+		}
+		if contender != nil || !errors.Is(acquireErr, errControllerAlreadyRunning) {
+			t.Fatalf("controller lock during recorder close = (%v, %v), want transferred lease held", contender, acquireErr)
+		}
+		select {
+		case <-done:
+			t.Fatal("managed completion signaled before recorder close")
+		default:
+		}
+		return nil
+	}}
+	mc := &managedCity{name: "panic-city", done: done, closer: closer}
+	registry.Add(cityPath, mc)
 	var stderr bytes.Buffer
 
 	runManagedCityWithLease(mc, lease, &stderr, func() {
+		order = append(order, "run")
 		panic("deterministic epilogue panic")
+	}, func() {
+		order = append(order, "finalizer")
+		if closer.calls != 0 {
+			t.Fatal("managed publication finalized after recorder close")
+		}
+		if _, statErr := originalFile.Stat(); statErr != nil {
+			t.Fatalf("transferred controller lease during finalizer: %v", statErr)
+		}
+		select {
+		case <-done:
+			t.Fatal("managed completion signaled before publication finalizer")
+		default:
+		}
+		finalizeManagedCityRun(registry, cityPath, mc.name, mc, nil, &stderr)
 	})
 
+	if got, want := strings.Join(order, ","), "run,finalizer,recorder"; got != want {
+		t.Fatalf("managed ownership tail order = %q, want %q", got, want)
+	}
 	select {
 	case <-done:
 	default:
 		t.Fatal("managed completion was not signaled after epilogue panic")
 	}
+	if closer.calls != 1 {
+		t.Fatalf("recorder close calls = %d, want exactly 1", closer.calls)
+	}
+	if registry.Has(cityPath) {
+		t.Fatal("epilogue panic left dead managed publication in registry")
+	}
 	if mc.managedShutdownErr == nil || !strings.Contains(mc.managedShutdownErr.Error(), "epilogue panic") {
 		t.Fatalf("managed shutdown error = %v, want epilogue panic", mc.managedShutdownErr)
+	}
+	if _, statErr := originalFile.Stat(); !errors.Is(statErr, os.ErrClosed) {
+		t.Fatalf("transferred descriptor after managed completion = %v, want closed", statErr)
 	}
 	reacquired, err := acquireControllerLock(cityPath)
 	if err != nil {
 		t.Fatalf("reacquire after epilogue panic: %v", err)
 	}
 	_ = reacquired.Close()
+}
+
+func TestRunManagedCityWithLeaseRecorderFailureIsStickyAfterDone(t *testing.T) {
+	wantCloseErr := errors.New("recorder close failed")
+	tests := []struct {
+		name     string
+		close    func() error
+		wantIs   error
+		wantText string
+	}{
+		{
+			name:     "error",
+			close:    func() error { return wantCloseErr },
+			wantIs:   wantCloseErr,
+			wantText: wantCloseErr.Error(),
+		},
+		{
+			name: "panic",
+			close: func() error {
+				panic("recorder close panic")
+			},
+			wantText: "recorder close panic",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			source, err := acquireControllerLock(cityPath)
+			if err != nil {
+				t.Fatalf("acquire source controller lock: %v", err)
+			}
+			lease, err := source.Transfer()
+			if err != nil {
+				t.Fatalf("transfer controller lock: %v", err)
+			}
+			if err := source.Close(); err != nil {
+				t.Fatalf("close transferred source wrapper: %v", err)
+			}
+			originalFile := lease.file
+			done := make(chan struct{})
+			closer := &managedCloserSpy{close: func() error {
+				if _, statErr := originalFile.Stat(); statErr != nil {
+					t.Fatalf("transferred controller lease during recorder close: %v", statErr)
+				}
+				contender, acquireErr := acquireControllerLock(cityPath)
+				if contender != nil {
+					_ = contender.Close()
+				}
+				if contender != nil || !errors.Is(acquireErr, errControllerAlreadyRunning) {
+					t.Fatalf("controller lock during recorder close = (%v, %v), want transferred lease held", contender, acquireErr)
+				}
+				select {
+				case <-done:
+					t.Fatal("managed completion signaled before recorder close")
+				default:
+				}
+				return tt.close()
+			}}
+			mc := &managedCity{name: "recorder-failure-city", done: done, closer: closer}
+			var stderr bytes.Buffer
+
+			runManagedCityWithLease(mc, lease, &stderr, func() {}, nil)
+
+			select {
+			case <-done:
+			default:
+				t.Fatal("managed completion was not signaled after recorder failure")
+			}
+			for attempt := 1; attempt <= 2; attempt++ {
+				stopErr := finishManagedCityStop(mc, nil)
+				if tt.wantIs != nil && !errors.Is(stopErr, tt.wantIs) {
+					t.Fatalf("finishManagedCityStop attempt %d error = %v, want %v", attempt, stopErr, tt.wantIs)
+				}
+				if stopErr == nil || !strings.Contains(stopErr.Error(), tt.wantText) {
+					t.Fatalf("finishManagedCityStop attempt %d error = %v, want %q", attempt, stopErr, tt.wantText)
+				}
+			}
+			if closer.calls != 1 {
+				t.Fatalf("recorder close calls = %d, want exactly 1 after repeated waiter reads", closer.calls)
+			}
+			if !strings.Contains(stderr.String(), "event recorder close") || !strings.Contains(stderr.String(), tt.wantText) {
+				t.Fatalf("stderr = %q, want recorder close failure %q", stderr.String(), tt.wantText)
+			}
+			if _, statErr := originalFile.Stat(); !errors.Is(statErr, os.ErrClosed) {
+				t.Fatalf("transferred descriptor after managed completion = %v, want closed", statErr)
+			}
+			reacquired, err := acquireControllerLock(cityPath)
+			if err != nil {
+				t.Fatalf("reacquire after recorder failure: %v", err)
+			}
+			_ = reacquired.Close()
+		})
+	}
+}
+
+func TestRunManagedCityWithLeaseFinalizerPanicStillClosesRecorderLeaseAndDone(t *testing.T) {
+	cityPath := t.TempDir()
+	lease, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("acquire controller lock: %v", err)
+	}
+	originalFile := lease.file
+	done := make(chan struct{})
+	closer := &managedCloserSpy{}
+	mc := &managedCity{name: "finalizer-panic-city", done: done, closer: closer}
+	var stderr bytes.Buffer
+
+	runManagedCityWithLease(mc, lease, &stderr, func() {}, func() {
+		panic("deterministic finalizer panic")
+	})
+
+	select {
+	case <-done:
+	default:
+		t.Fatal("managed completion was not signaled after finalizer panic")
+	}
+	if closer.calls != 1 {
+		t.Fatalf("recorder close calls = %d, want exactly 1", closer.calls)
+	}
+	if mc.managedShutdownErr == nil || !strings.Contains(mc.managedShutdownErr.Error(), "managed finalizer panic") {
+		t.Fatalf("managed shutdown error = %v, want finalizer panic", mc.managedShutdownErr)
+	}
+	if _, statErr := originalFile.Stat(); !errors.Is(statErr, os.ErrClosed) {
+		t.Fatalf("controller descriptor after managed completion = %v, want closed", statErr)
+	}
+	reacquired, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("reacquire after finalizer panic: %v", err)
+	}
+	_ = reacquired.Close()
+}
+
+func TestFinalizeManagedCityRunRecordsOnlyCurrentOwner(t *testing.T) {
+	t.Run("runtime panic records backoff and removes current owner", func(t *testing.T) {
+		cityPath := t.TempDir()
+		current := &managedCity{name: "current"}
+		registry := newCityRegistry()
+		registry.Add(cityPath, current)
+		registry.BatchUpdate(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			panicHistory[cityPath] = &panicRecord{count: 2}
+		})
+		started := time.Now()
+		var stderr bytes.Buffer
+
+		finalizeManagedCityRun(registry, cityPath, current.name, current, "runtime panic", &stderr)
+
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			if _, exists := cities[cityPath]; exists {
+				t.Fatal("current owner remained published after runtime panic")
+			}
+			record := panicHistory[cityPath]
+			if record == nil || record.count != 3 || record.backoff.Before(started) {
+				t.Fatalf("panic history = %#v, want count 3 with future backoff", record)
+			}
+		})
+		if !strings.Contains(stderr.String(), "panic #3") {
+			t.Fatalf("stderr = %q, want current-owner panic backoff", stderr.String())
+		}
+	})
+
+	t.Run("normal exit clears backoff and removes current owner", func(t *testing.T) {
+		cityPath := t.TempDir()
+		current := &managedCity{name: "current"}
+		registry := newCityRegistry()
+		registry.Add(cityPath, current)
+		registry.BatchUpdate(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			panicHistory[cityPath] = &panicRecord{count: 2}
+		})
+
+		finalizeManagedCityRun(registry, cityPath, current.name, current, nil, io.Discard)
+
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			if _, exists := cities[cityPath]; exists {
+				t.Fatal("current owner remained published after normal exit")
+			}
+			if _, exists := panicHistory[cityPath]; exists {
+				t.Fatal("normal current-owner exit retained panic history")
+			}
+		})
+	})
+
+	t.Run("stale owner cannot alter replacement or its backoff", func(t *testing.T) {
+		cityPath := t.TempDir()
+		stale := &managedCity{name: "stale"}
+		replacement := &managedCity{name: "replacement"}
+		registry := newCityRegistry()
+		registry.Add(cityPath, replacement)
+		wantBackoff := time.Now().Add(time.Minute)
+		registry.BatchUpdate(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			panicHistory[cityPath] = &panicRecord{count: 3, backoff: wantBackoff}
+		})
+		var stderr bytes.Buffer
+
+		finalizeManagedCityRun(registry, cityPath, stale.name, stale, "stale runtime panic", &stderr)
+
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			if cities[cityPath] != replacement {
+				t.Fatalf("published city = %p, want replacement %p", cities[cityPath], replacement)
+			}
+			record := panicHistory[cityPath]
+			if record == nil || record.count != 3 || !record.backoff.Equal(wantBackoff) {
+				t.Fatalf("replacement panic history = %#v, want existing record unchanged", record)
+			}
+		})
+		if stderr.Len() != 0 {
+			t.Fatalf("stale finalizer stderr = %q, want no replacement-facing panic log", stderr.String())
+		}
+	})
 }
 
 func TestStopManagedCityProviderShutdownPanicIsFatalAndReleasesLease(t *testing.T) {
@@ -878,8 +1295,11 @@ func TestSupervisorManagedStartAcquiresBeforeEffectsAndTransfersOnce(t *testing.
 		"runPoolOnBoot":                          true,
 		"startControllerSocket":                  true,
 	}
-	var acquirePos, publishPos, transferPos, launchPos token.Pos
+	var acquirePos, publishPos, transferPos, launchPos, startedPublicationPos, runtimeRunPos token.Pos
 	transferCalls := 0
+	startedPublicationCalls := 0
+	shutdownProviderCalls := 0
+	controllerStartedFirst := false
 	seenEffects := make(map[string]token.Pos, len(firstEffects))
 	ast.Inspect(start.Body, func(node ast.Node) bool {
 		switch n := node.(type) {
@@ -894,6 +1314,27 @@ func TestSupervisorManagedStartAcquiresBeforeEffectsAndTransfersOnce(t *testing.
 			if callee == "Transfer" {
 				transferCalls++
 				transferPos = n.Pos()
+			}
+			if callee == "recordManagedControllerStarted" {
+				startedPublicationCalls++
+				startedPublicationPos = n.Pos()
+			}
+			if selector, ok := n.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "run" {
+				if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == "cityRuntime" {
+					runtimeRunPos = n.Pos()
+				}
+			}
+			if callee == "shutdownProvider" {
+				shutdownProviderCalls++
+			}
+			if callee == "runManagedCityOwnedPhases" && len(n.Args) > 0 {
+				if callback, ok := n.Args[0].(*ast.FuncLit); ok && len(callback.Body.List) > 0 {
+					if statement, ok := callback.Body.List[0].(*ast.ExprStmt); ok {
+						if call, ok := statement.X.(*ast.CallExpr); ok {
+							controllerStartedFirst = controllerStopCalledIdent(call.Fun) == "recordManagedControllerStarted"
+						}
+					}
+				}
 			}
 			if firstEffects[callee] {
 				if _, exists := seenEffects[callee]; !exists {
@@ -921,7 +1362,18 @@ func TestSupervisorManagedStartAcquiresBeforeEffectsAndTransfersOnce(t *testing.
 	if transferCalls != 1 {
 		t.Fatalf("managed start Transfer calls = %d, want exactly 1", transferCalls)
 	}
-	if publishPos == token.NoPos || transferPos == token.NoPos || launchPos == token.NoPos || (publishPos >= transferPos || transferPos >= launchPos) {
-		t.Fatalf("managed start publish/transfer/launch order = %d/%d/%d, want publish < transfer < launch", publishPos, transferPos, launchPos)
+	if startedPublicationCalls != 1 || !controllerStartedFirst {
+		t.Fatalf("managed ControllerStarted publications = %d, first-owned-operation=%v; want exactly one owned-first publication", startedPublicationCalls, controllerStartedFirst)
+	}
+	if shutdownProviderCalls != 1 {
+		t.Fatalf("managed shutdownProvider calls = %d, want the existing owned cleanup path only", shutdownProviderCalls)
+	}
+	if publishPos == token.NoPos || transferPos == token.NoPos || launchPos == token.NoPos ||
+		startedPublicationPos == token.NoPos || runtimeRunPos == token.NoPos ||
+		publishPos >= transferPos || transferPos >= launchPos || launchPos >= startedPublicationPos || startedPublicationPos >= runtimeRunPos {
+		t.Fatalf(
+			"managed start publish/transfer/launch/controller-started/runtime order = %d/%d/%d/%d/%d, want publish < transfer < launch < controller-started < runtime",
+			publishPos, transferPos, launchPos, startedPublicationPos, runtimeRunPos,
+		)
 	}
 }

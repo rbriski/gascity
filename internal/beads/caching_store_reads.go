@@ -200,11 +200,28 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		len(refreshedLiveMissing) == 0 && len(removedLiveMissing) == 0 {
 		return items
 	}
+	statsIDs := make(map[string]struct{}, len(items)+len(refreshedParents)+len(removedParents)+len(refreshedLiveMissing)+len(removedLiveMissing))
+	for _, item := range items {
+		statsIDs[item.ID] = struct{}{}
+	}
+	for id := range refreshedParents {
+		statsIDs[id] = struct{}{}
+	}
+	for id := range removedParents {
+		statsIDs[id] = struct{}{}
+	}
+	for id := range refreshedLiveMissing {
+		statsIDs[id] = struct{}{}
+	}
+	for id := range removedLiveMissing {
+		statsIDs[id] = struct{}{}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
+	statsBefore, statsWorkBefore := c.statsContributionForIDsLocked(statsIDs)
 	now := time.Now()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
@@ -284,7 +301,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.evictLocked(id)
 	}
 	c.markFreshLocked(time.Now())
-	c.updateStatsLocked()
+	c.updateStatsForIDsLocked(statsBefore, statsWorkBefore, statsIDs)
 	return refreshed
 }
 

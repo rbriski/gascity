@@ -460,18 +460,14 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 			}
 		}
 		if activeWispID != "" {
+			if err := validateCanonicalWispEvidence(beadID, activeWispID, wispInfo); err != nil {
+				return ActionNoAction, fmt.Errorf("validating active wisp %q: %w", activeWispID, err)
+			}
 			if recoveredActiveWisp {
 				if err := r.Handler.Store.SetMetadata(beadID, FieldActiveWisp, activeWispID); err != nil {
 					return ActionRepairedState, fmt.Errorf("setting recovered active wisp %q: %w", activeWispID, err)
 				}
 			}
-			switch wispInfo.Status {
-			case "open", "in_progress", "closed":
-				// Supported lifecycle evidence.
-			default:
-				return ActionNoAction, fmt.Errorf("active wisp %q has unexpected status %q", activeWispID, wispInfo.Status)
-			}
-
 			clearedPending := false
 			if meta[FieldPendingNextWisp] == activeWispID {
 				lastProcessedID := meta[FieldLastProcessedWisp]

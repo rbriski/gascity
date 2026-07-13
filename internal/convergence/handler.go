@@ -1133,6 +1133,18 @@ func validateExactWispEvidence(rootBeadID, key, wispID string, info BeadInfo) er
 	}
 }
 
+// validateCanonicalWispEvidence verifies a point-read wisp whose iteration is
+// not known independently. It derives the iteration only after proving the key
+// is the root's canonical convergence key, then applies the exact ID, parent,
+// key, and lifecycle checks shared with idempotency lookups.
+func validateCanonicalWispEvidence(rootBeadID, wispID string, info BeadInfo) error {
+	iteration, ok := ParseIterationFromKey(info.IdempotencyKey)
+	if !ok || iteration < 1 || info.IdempotencyKey != IdempotencyKey(rootBeadID, iteration) {
+		return fmt.Errorf("wisp %q has noncanonical idempotency key %q for root %q", wispID, info.IdempotencyKey, rootBeadID)
+	}
+	return validateExactWispEvidence(rootBeadID, info.IdempotencyKey, wispID, info)
+}
+
 // CheckNestedConvergence validates that creating a new convergence loop
 // from callingAgent targeting targetAgent would not cause a self-deadlock.
 // Returns an error only if callingAgent == targetAgent AND the agent already

@@ -39,6 +39,7 @@ func childStats(children []BeadInfo, beadID string) (ChildStats, error) {
 	stats := ChildStats{HighestClosedIter: -1, HighestOpenIter: -1}
 	seenIDs := make(map[string]int)
 	seenIterations := make(map[int]string)
+	highestIteration := 0
 
 	for _, child := range children {
 		if !strings.HasPrefix(child.IdempotencyKey, "converge:") {
@@ -62,6 +63,9 @@ func childStats(children []BeadInfo, beadID string) (ChildStats, error) {
 		}
 		seenIDs[child.ID] = iter
 		seenIterations[iter] = child.ID
+		if iter > highestIteration {
+			highestIteration = iter
+		}
 
 		switch child.Status {
 		case "closed":
@@ -83,6 +87,19 @@ func childStats(children []BeadInfo, beadID string) (ChildStats, error) {
 		default:
 			return ChildStats{}, fmt.Errorf("child wisp %q has unsupported status %q", child.ID, child.Status)
 		}
+	}
+	// Positive, unique iterations form a complete 1..N chain exactly when the
+	// highest observed iteration equals the number of observed iterations. A
+	// gap is corrupt evidence: counts and highest-wisp markers must never skip
+	// missing work.
+	if highestIteration != len(seenIterations) {
+		missing := 1
+		for ; missing <= len(seenIterations); missing++ {
+			if _, ok := seenIterations[missing]; !ok {
+				break
+			}
+		}
+		return ChildStats{}, fmt.Errorf("iteration gap: missing child iteration %d before observed iteration %d", missing, highestIteration)
 	}
 
 	return stats, nil

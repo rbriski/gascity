@@ -288,6 +288,11 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 				wispInfo = recoveredWisp
 			}
 		}
+		if activeWisp != "" {
+			if err := validateCanonicalWispEvidence(beadID, activeWisp, wispInfo); err != nil {
+				return HandlerResult{}, fmt.Errorf("validating active wisp %q before stop: %w", activeWisp, err)
+			}
+		}
 
 		if activeWisp != "" && wispInfo.Status == "closed" {
 			// Drain: process the completed wisp through the normal handler.
@@ -317,6 +322,9 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 				if err != nil {
 					return HandlerResult{}, fmt.Errorf("reading adopted successor %q after drain: %w", activeWisp, err)
 				}
+				if err := validateCanonicalWispEvidence(beadID, activeWisp, successor); err != nil {
+					return HandlerResult{}, fmt.Errorf("validating adopted successor %q after drain: %w", activeWisp, err)
+				}
 				if successor.Status == "closed" {
 					return HandlerResult{
 						Action:     ActionSkipped,
@@ -343,6 +351,11 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			} else {
 				activeWisp = recoveredWisp.ID
 				wispInfo = recoveredWisp
+			}
+		}
+		if activeWisp != "" {
+			if err := validateCanonicalWispEvidence(beadID, activeWisp, wispInfo); err != nil {
+				return HandlerResult{}, fmt.Errorf("validating active wisp %q before force-close: %w", activeWisp, err)
 			}
 		}
 		if activeWisp != "" && wispInfo.Status != "closed" {

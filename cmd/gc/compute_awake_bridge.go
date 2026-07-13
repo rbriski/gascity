@@ -111,11 +111,18 @@ func buildAwakeInputFromReconciler(
 			// agent judgment. The grace window keeps the write that records
 			// backoff_last_set from immediately defeating its own
 			// suppression (that write's UpdatedAt lands at ~backoff_last_set,
-			// not strictly before it).
+			// not strictly before it). A backoff with no valid backoff_last_set
+			// anchor has no invalidation net at all, so it fails open: without a
+			// trustworthy anchor the bridge cannot tell a stale window from a
+			// fresh one, and suppressing would risk hiding genuinely-ready work
+			// until backoff_until elapsed. Clearing WakeBackoffUntil keeps the
+			// worst case at extra wake activity, never hidden work.
 			if lastSet, err := time.Parse(time.RFC3339, strings.TrimSpace(wb.Metadata["backoff_last_set"])); err == nil && !lastSet.IsZero() {
 				if wb.UpdatedAt.After(lastSet.Add(wakeBackoffInvalidationGrace)) {
 					awakeWB.WakeBackoffUntil = time.Time{}
 				}
+			} else {
+				awakeWB.WakeBackoffUntil = time.Time{}
 			}
 			input.WorkBeads = append(input.WorkBeads, awakeWB)
 		}

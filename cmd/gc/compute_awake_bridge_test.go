@@ -423,19 +423,21 @@ func TestBuildAwakeInputFromReconciler_BackoffMetadataSuppressesWake(t *testing.
 		},
 	}
 	backedOffWork := beads.Bead{
-		ID:       "ga-backed-off",
-		Status:   "in_progress",
-		Assignee: "gc__run-operator-mc-1",
+		ID:        "ga-backed-off",
+		Status:    "in_progress",
+		Assignee:  "gc__run-operator-mc-1",
+		UpdatedAt: now,
 		Metadata: map[string]string{
-			"backoff_until": now.Add(10 * time.Minute).Format(time.RFC3339),
-			"backoff_count": "2",
+			"backoff_until":    now.Add(10 * time.Minute).Format(time.RFC3339),
+			"backoff_count":    "2",
+			"backoff_last_set": now.Add(-1 * time.Minute).Format(time.RFC3339),
 		},
 	}
 
 	input := buildAwakeInputFromReconciler(
 		cfg,
 		"",
-		[]beads.Bead{sessionBead},
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
 		nil,
 		nil,
 		nil,
@@ -493,7 +495,7 @@ func TestBuildAwakeInputFromReconciler_BackoffInvalidatedByExternalUpdate(t *tes
 	input := buildAwakeInputFromReconciler(
 		cfg,
 		"",
-		[]beads.Bead{sessionBead},
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
 		nil,
 		nil,
 		nil,
@@ -547,7 +549,7 @@ func TestBuildAwakeInputFromReconciler_BackoffNotSelfInvalidatedWithinGraceWindo
 	input := buildAwakeInputFromReconciler(
 		cfg,
 		"",
-		[]beads.Bead{sessionBead},
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
 		nil,
 		nil,
 		nil,
@@ -567,6 +569,60 @@ func TestBuildAwakeInputFromReconciler_BackoffNotSelfInvalidatedWithinGraceWindo
 	got := decisions["gc__run-operator-mc-1"]
 	if got.ShouldWake {
 		t.Fatalf("backoff must still suppress wake immediately after being set; got decision = %+v", got)
+	}
+}
+
+// TestBuildAwakeInputFromReconciler_BackoffWithoutLastSetWakesFailOpen pins the
+// fail-open gate: a future backoff_until with no backoff_last_set anchor has no
+// invalidation net, so the bridge must clear WakeBackoffUntil rather than
+// suppress. Suppressing without a trustworthy anchor could hide genuinely-ready
+// work until backoff_until elapsed; failing open keeps the worst case at extra
+// wake activity, never hidden work. See ga-7fldxz.2 (NFR2a).
+func TestBuildAwakeInputFromReconciler_BackoffWithoutLastSetWakesFailOpen(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "gc__run-operator-mc-1",
+			"template":     "gc.run-operator",
+		},
+	}
+	backedOffWork := beads.Bead{
+		ID:       "ga-backed-off",
+		Status:   "in_progress",
+		Assignee: "gc__run-operator-mc-1",
+		Metadata: map[string]string{
+			"backoff_until": now.Add(10 * time.Minute).Format(time.RFC3339),
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil,
+		nil,
+		nil,
+		nil,
+		[]beads.Bead{backedOffWork},
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if !input.WorkBeads[0].WakeBackoffUntil.IsZero() {
+		t.Fatalf("backoff_until with no backoff_last_set anchor must fail open (WakeBackoffUntil cleared), got %+v", input.WorkBeads[0])
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got := decisions["gc__run-operator-mc-1"]
+	if !got.ShouldWake {
+		t.Fatalf("fail-open backoff must wake session; got decision = %+v", got)
 	}
 }
 

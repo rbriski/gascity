@@ -15,12 +15,14 @@ import (
 
 // lumenEnqueueRequest is the input to the plain-Go enqueue entry: a compiled IR
 // file, the default pool route for its do nodes (a pool TEMPLATE name — it must
-// match gc.routed_to route matching for both claim and demand), and an optional
-// JSON-object input.
+// match gc.routed_to route matching for both claim and demand), an optional
+// JSON-object input, and zero or more convoy bindings that seed input fields from a
+// pre-existing convoy's live membership at enqueue.
 type lumenEnqueueRequest struct {
-	IRPath    string
-	Route     string
-	InputJSON string
+	IRPath       string
+	Route        string
+	InputJSON    string
+	InputConvoys []inputConvoyBinding
 }
 
 // lumenEnqueueResult reports the opened run's stream id and the content hash of
@@ -78,6 +80,16 @@ func lumenEnqueue(ctx context.Context, cityPath string, req lumenEnqueueRequest,
 		return lumenEnqueueResult{}, fmt.Errorf("decoding IR %q: %w", req.IRPath, err)
 	}
 	input, err := parseLumenInput(req.InputJSON)
+	if err != nil {
+		return lumenEnqueueResult{}, err
+	}
+	// Resolve any --input-convoy bindings into seeded input fields BEFORE the blobs
+	// are written (the durable-before-seed order is preserved: the seed feeds the
+	// input hash the blob is keyed by). A resolution failure — an unresolvable convoy
+	// or an inter-member ordering edge — returns here, so no blob and no run.started
+	// are written: a broken convoy never becomes a discoverable (or silently-empty)
+	// run.
+	input, err = seedInputConvoys(cityPath, input, req.InputConvoys, stderr)
 	if err != nil {
 		return lumenEnqueueResult{}, err
 	}
@@ -140,6 +152,7 @@ func newLumenCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newLumenSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inputJSON string
+	var inputConvoySpecs []string
 	c := &cobra.Command{
 		Use:   "sling <route> <formula.lumen.json>",
 		Short: "Enqueue a Lumen run: the controller loop drives it, dispatching do work as ordinary pool beads",
@@ -151,7 +164,12 @@ func newLumenSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 			"The compiled IR and input are copied into the content-addressed run dir " +
 			"(.gc/graph/ir, .gc/graph/runs) so the run survives a controller restart; " +
 			"deleting a blob afterward is a loud per-tick refusal until it is re-placed " +
-			"(any byte-identical copy works — the IR blob is content-addressed).",
+			"(any byte-identical copy works — the IR blob is content-addressed).\n\n" +
+			"Use --input-convoy <field>=<convoyID> to seed a run input field from a " +
+			"pre-existing convoy's live membership: the convoy is resolved to a " +
+			"canonically-sorted member-id array at enqueue and the formula fans one " +
+			"sub-graph per id via `for-each over: input.<field>`. The membership is " +
+			"frozen into the run's input at enqueue (the fold never re-reads the convoy).",
 		Hidden: true,
 		Args:   cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -160,10 +178,20 @@ func newLumenSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc lumen sling: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			bindings := make([]inputConvoyBinding, 0, len(inputConvoySpecs))
+			for _, spec := range inputConvoySpecs {
+				b, err := parseInputConvoyFlag(spec)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc lumen sling: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				bindings = append(bindings, b)
+			}
 			res, err := lumenEnqueue(context.Background(), cityPath, lumenEnqueueRequest{
-				Route:     args[0],
-				IRPath:    args[1],
-				InputJSON: inputJSON,
+				Route:        args[0],
+				IRPath:       args[1],
+				InputJSON:    inputJSON,
+				InputConvoys: bindings,
 			}, stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc lumen sling: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -174,5 +202,6 @@ func newLumenSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&inputJSON, "input", "", "run input as a JSON object")
+	c.Flags().StringArrayVar(&inputConvoySpecs, "input-convoy", nil, "seed a run input field from a pre-existing convoy's members: <field>=<convoyID> (repeatable)")
 	return c
 }

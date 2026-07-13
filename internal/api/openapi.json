@@ -4916,6 +4916,13 @@
           "check": {
             "type": "string"
           },
+          "check_timeout": {
+            "type": "string"
+          },
+          "check_timeout_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
           "description": {
             "type": "string"
           },

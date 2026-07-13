@@ -150,6 +150,35 @@ func TestCheckTriggerConditionUsesOptions(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerConditionHonorsOrderCheckTimeoutWithoutOptions(t *testing.T) {
+	// Regression (PR #4190 iter-3 N1): check_timeout must be honored on every
+	// trigger-evaluation entry point, not only the callers (controller dispatch
+	// and the store-aware CLI check) that populate TriggerOptions.ConditionTimeout.
+	// Bare CheckTrigger callers — the API GET /v0/orders/check evaluator and the
+	// storeless CLI check — pass an empty TriggerOptions, so before the fix
+	// checkCondition fell back to the fixed 10s defaultConditionCheckTimeout and
+	// silently ignored the order's own check_timeout. A slow condition could then
+	// be reported timed-out at 10s by the dashboard/API while controller dispatch
+	// waited the configured duration. Prove the order-configured deadline now
+	// applies through the empty-opts path: a check that outlives a small
+	// check_timeout (but would finish within the 10s default) must be killed and
+	// reported timed out, not allowed to run to the default and pass.
+	a := Order{
+		Name:         "check",
+		Trigger:      "condition",
+		Check:        "sleep 2",
+		CheckTimeout: "200ms",
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if result.Due {
+		t.Fatalf("Due = true, want false: bare CheckTrigger must honor the order's 200ms check_timeout, not the 10s default")
+	}
+	if !strings.Contains(result.Reason, ConditionCheckTimedOutMarker) {
+		t.Fatalf("Reason = %q, want it to contain %q", result.Reason, ConditionCheckTimedOutMarker)
+	}
+}
+
 func TestCheckTriggerConditionFails(t *testing.T) {
 	a := Order{Name: "check", Trigger: "condition", Check: "false"}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)

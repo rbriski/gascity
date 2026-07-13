@@ -194,8 +194,9 @@ func (a *Order) TimeoutOrDefault() time.Duration {
 }
 
 // defaultConditionCheckTimeout is the condition trigger's check-command
-// deadline when the order does not set check_timeout. It mirrors the
-// fallback in triggers.go's checkCondition so the two agree.
+// deadline when the order does not set check_timeout. It is the single source
+// for that fallback: checkCondition uses it when ConditionTimeout is unset and
+// CheckTimeoutOrDefault returns it for an unset or invalid check_timeout.
 const defaultConditionCheckTimeout = 10 * time.Second
 
 // CheckTimeoutOrDefault returns the condition trigger's check-command
@@ -259,6 +260,21 @@ func Validate(a Order) error {
 	if a.Timeout != "" {
 		if _, err := time.ParseDuration(a.Timeout); err != nil {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
+		}
+	}
+	// Validate check_timeout if set. Unlike timeout, a non-positive value is
+	// also rejected: CheckTimeoutOrDefault silently reverts a zero or negative
+	// check_timeout to defaultConditionCheckTimeout, which would re-create the
+	// fixed-deadline condition starvation this field exists to prevent, so a
+	// typo like "60" (missing unit) or "0s" must fail at load instead of
+	// passing silently.
+	if a.CheckTimeout != "" {
+		d, err := time.ParseDuration(a.CheckTimeout)
+		if err != nil {
+			return fmt.Errorf("order %q: invalid check_timeout %q: %w", a.Name, a.CheckTimeout, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("order %q: check_timeout %q must be a positive duration", a.Name, a.CheckTimeout)
 		}
 	}
 	switch a.Trigger {

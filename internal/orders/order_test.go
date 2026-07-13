@@ -224,6 +224,33 @@ func TestValidateTimeoutInvalid(t *testing.T) {
 	}
 }
 
+func TestValidateCheckTimeout(t *testing.T) {
+	a := Order{Name: "t", Formula: "mol-t", Trigger: "condition", Check: "true", CheckTimeout: "60s"}
+	if err := Validate(a); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestValidateCheckTimeoutInvalid(t *testing.T) {
+	// A missing-unit typo like "60" must fail at load, not silently revert to
+	// the 10s default at dispatch (the exact starvation check_timeout prevents).
+	a := Order{Name: "t", Formula: "mol-t", Trigger: "condition", Check: "true", CheckTimeout: "60"}
+	if err := Validate(a); err == nil {
+		t.Error("Validate should fail: invalid check_timeout")
+	}
+}
+
+func TestValidateCheckTimeoutNonPositive(t *testing.T) {
+	// A zero or negative check_timeout parses cleanly but CheckTimeoutOrDefault
+	// reverts it to the default, so it must be rejected at load.
+	for _, v := range []string{"0s", "-5s"} {
+		a := Order{Name: "t", Formula: "mol-t", Trigger: "condition", Check: "true", CheckTimeout: v}
+		if err := Validate(a); err == nil {
+			t.Errorf("Validate should fail for non-positive check_timeout %q", v)
+		}
+	}
+}
+
 func TestIsExec(t *testing.T) {
 	exec := Order{Name: "e", Exec: "scripts/x.sh"}
 	if !exec.IsExec() {

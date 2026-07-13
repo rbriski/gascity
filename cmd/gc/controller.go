@@ -1308,6 +1308,8 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 // opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
 // paths to watch for config changes (from initial provenance).
+//
+//nolint:unparam // compatibility/test callers retain the owned runner's complete signature
 func runController(
 	cityPath string,
 	tomlPath string,
@@ -1329,7 +1331,35 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	defer lock.Close() //nolint:errcheck // best-effort cleanup
+	return runControllerWithLease(lock, cityPath, tomlPath, cfg, configRev, buildFn, buildFnWithSessionBeads, sp,
+		dops, poolSessions, poolDeathHandlers, initialWatchTargets, rec, eventProv, stdout, stderr)
+}
+
+// runControllerWithLease runs the persistent controller under an already-held
+// same-path lease. The caller must transfer or acquire that exact lease before
+// any startup materialization; this function never closes and reacquires it.
+func runControllerWithLease(
+	lock *controllerLockLease,
+	cityPath string,
+	tomlPath string,
+	cfg *config.City,
+	configRev string,
+	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
+	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult,
+	sp runtime.Provider,
+	dops drainOps,
+	poolSessions map[string]time.Duration,
+	poolDeathHandlers map[string]poolDeathInfo,
+	initialWatchTargets []config.WatchTarget,
+	rec events.Recorder,
+	eventProv events.Provider,
+	stdout, stderr io.Writer,
+) int {
+	defer lock.Close() //nolint:errcheck // ownership must unwind on every return, including validation failure
+	if err := validateControllerRuntimeLease(lock, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1477,6 +1507,22 @@ func runController(
 	telemetry.RecordControllerLifecycle(context.Background(), "stopped")
 	fmt.Fprintln(stdout, "Controller stopped.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func validateControllerRuntimeLease(lock *controllerLockLease, cityPath string) error {
+	if lock == nil {
+		return fmt.Errorf("controller ownership: %w", errControllerLockLeaseClosed)
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	wantPath := filepath.Clean(controllerLockPath(cityPath))
+	if lock.closed || lock.transferred || lock.file == nil {
+		return fmt.Errorf("controller ownership for %q: %w", wantPath, errControllerLockLeaseClosed)
+	}
+	if gotPath := filepath.Clean(lock.path); gotPath != wantPath {
+		return fmt.Errorf("controller ownership path %q does not match %q", gotPath, wantPath)
+	}
+	return nil
 }
 
 // singleCityStateResolver adapts a single api.State into an api.CityResolver

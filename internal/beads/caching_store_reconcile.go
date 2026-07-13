@@ -28,6 +28,150 @@ func reconcileEvictDiag() bool {
 // reconcile pass emits, so a large divergence can't flood the log.
 const reconcileEvictDiagPerPassCap = 40
 
+// diagSliceDiffKind classifies how two string slices differ, for the reconcile
+// update diagnostic: "" (equal), "order-only" (same multiset, different order —
+// a beadChanged false-positive), or "set" (genuinely different members).
+func diagSliceDiffKind(old, fresh []string) string {
+	if len(old) == len(fresh) {
+		same := true
+		for i := range old {
+			if old[i] != fresh[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return ""
+		}
+	}
+	count := make(map[string]int, len(old))
+	for _, v := range old {
+		count[v]++
+	}
+	for _, v := range fresh {
+		count[v]--
+	}
+	for _, n := range count {
+		if n != 0 {
+			return "set"
+		}
+	}
+	return "order-only"
+}
+
+// diagDepsDiffKind is diagSliceDiffKind for dependency edges.
+func diagDepsDiffKind(old, fresh []Dep) string {
+	key := func(d Dep) string { return d.IssueID + "|" + d.DependsOnID + "|" + d.Type }
+	if len(old) == len(fresh) {
+		same := true
+		for i := range old {
+			if old[i] != fresh[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return ""
+		}
+	}
+	count := make(map[string]int, len(old))
+	for _, d := range old {
+		count[key(d)]++
+	}
+	for _, d := range fresh {
+		count[key(d)]--
+	}
+	for _, n := range count {
+		if n != 0 {
+			return "set"
+		}
+	}
+	return "order-only"
+}
+
+// diagMetadataDiffKind classifies a metadata-map difference: "" (equal),
+// "metadata-keys" (key set differs), or "metadata-value:<key>" (a value
+// re-serialized/changed under a shared key — the facet-2 false-positive shape).
+func diagMetadataDiffKind(old, fresh map[string]string) string {
+	if len(old) != len(fresh) {
+		return "metadata-keys"
+	}
+	for k, ov := range old {
+		fv, ok := fresh[k]
+		if !ok {
+			return "metadata-keys"
+		}
+		if fv != ov {
+			return "metadata-value:" + k
+		}
+	}
+	return ""
+}
+
+// reconcileUpdateDiffFields names the fields that differ between a cached bead
+// and the fresh-scan bead that made beadChanged fire a bead.updated. Slice
+// fields are tagged order-only vs set so an operator can tell an ordering
+// false-positive from a real change; "none-visible" means beadChanged fired on
+// a field this diagnostic does not enumerate. Diagnostic only.
+func reconcileUpdateDiffFields(old, fresh Bead) []string {
+	var d []string
+	if old.Status != fresh.Status {
+		d = append(d, "status")
+	}
+	if old.Title != fresh.Title {
+		d = append(d, "title")
+	}
+	if old.Type != fresh.Type {
+		d = append(d, "type")
+	}
+	if old.ParentID != fresh.ParentID {
+		d = append(d, "parent")
+	}
+	if old.Assignee != fresh.Assignee {
+		d = append(d, "assignee")
+	}
+	if old.From != fresh.From {
+		d = append(d, "from")
+	}
+	if old.Ref != fresh.Ref {
+		d = append(d, "ref")
+	}
+	if old.Description != fresh.Description {
+		d = append(d, "description")
+	}
+	if old.Ephemeral != fresh.Ephemeral {
+		d = append(d, "ephemeral")
+	}
+	if !boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
+		d = append(d, "is_blocked")
+	}
+	if !intPtrEqual(old.Priority, fresh.Priority) {
+		d = append(d, "priority")
+	}
+	if !timePtrEqual(old.DeferUntil, fresh.DeferUntil) {
+		d = append(d, "defer_until")
+	}
+	if !old.CreatedAt.Equal(fresh.CreatedAt) {
+		d = append(d, "created_at")
+	}
+	if k := diagMetadataDiffKind(old.Metadata, fresh.Metadata); k != "" {
+		d = append(d, k)
+	}
+	if k := diagSliceDiffKind(old.Labels, fresh.Labels); k != "" {
+		d = append(d, "labels-"+k)
+	}
+	if k := diagSliceDiffKind(old.Needs, fresh.Needs); k != "" {
+		d = append(d, "needs-"+k)
+	}
+	if k := diagDepsDiffKind(old.Dependencies, fresh.Dependencies); k != "" {
+		d = append(d, "deps-"+k)
+	}
+	if len(d) == 0 {
+		d = append(d, "none-visible")
+	}
+	return d
+}
+
 // cacheLatencyWindowSize is the size of the rolling window of bd-list
 // durations the reconciler uses for adaptive cadence decisions. Doubles
 // as the hysteresis count for demotion.
@@ -520,6 +664,17 @@ func (c *CachingStore) mergeSnapshotLocked(
 	res := mergeSectionResult{notifications: make([]cacheNotification, 0, len(freshByID))}
 	nextDepsComplete := useFreshDeps
 
+	diag := reconcileEvictDiag()
+	diagLogged := 0
+	diagUpdateKinds := map[string]int{}
+	diagLog := func(format string, args ...any) {
+		if !diag || diagLogged >= reconcileEvictDiagPerPassCap {
+			return
+		}
+		diagLogged++
+		log.Printf("beads reconcile-diff-diag: "+format, args...)
+	}
+
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
@@ -553,12 +708,20 @@ func (c *CachingStore) mergeSnapshotLocked(
 				eventType: "bead.created",
 				bead:      cloneBead(freshBead),
 			})
+			diagLog("ADD id=%s status=%s", id, freshBead.Status)
 		case "bead.updated":
 			res.updates++
 			res.notifications = append(res.notifications, cacheNotification{
 				eventType: "bead.updated",
 				bead:      cloneBead(freshBead),
 			})
+			if diag {
+				fields := reconcileUpdateDiffFields(cached, freshBead)
+				for _, f := range fields {
+					diagUpdateKinds[f]++
+				}
+				diagLog("UPDATE id=%s status=%s fields=%v", id, freshBead.Status, fields)
+			}
 		}
 		c.absorbFreshLocked(id, freshBead, now, absorbOpts{
 			depsMode:   depsExplicit,
@@ -589,6 +752,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 			continue
 		}
 		res.removes++
+		diagLog("REMOVE id=%s status=%s notif=%s", id, cached.Status, d.notification)
 		if d.notification == "bead.closed" {
 			closed := cloneBead(cached)
 			closed.Status = "closed"
@@ -601,6 +765,10 @@ func (c *CachingStore) mergeSnapshotLocked(
 			})
 		}
 		c.evictLocked(id)
+	}
+	if diag {
+		log.Printf("beads reconcile-diff-diag SUMMARY: adds=%d removes=%d updates=%d update_field_kinds=%v",
+			res.adds, res.removes, res.updates, diagUpdateKinds)
 	}
 
 	// 3. Fence/deps-GC sweep — over orphan ids (a fence or deps entry with no

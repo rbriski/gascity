@@ -3,11 +3,47 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+type createMetadataCall struct {
+	id    string
+	key   string
+	value string
+}
+
+type createCloseCall struct {
+	id     string
+	reason string
+}
+
+// createRollbackStore records rollback side effects and injects failures at
+// the exact rollback operation under test. Embedding fakeStore keeps the
+// ConvergenceStore implementation local to these create-path tests.
+type createRollbackStore struct {
+	*fakeStore
+
+	terminatedStateErr error
+	metadataCalls      []createMetadataCall
+	closeCalls         []createCloseCall
+}
+
+func (s *createRollbackStore) SetMetadata(id, key, value string) error {
+	s.metadataCalls = append(s.metadataCalls, createMetadataCall{id: id, key: key, value: value})
+	if key == FieldState && value == StateTerminated && s.terminatedStateErr != nil {
+		return s.terminatedStateErr
+	}
+	return s.fakeStore.SetMetadata(id, key, value)
+}
+
+func (s *createRollbackStore) CloseBead(id, reason string) error {
+	s.closeCalls = append(s.closeCalls, createCloseCall{id: id, reason: reason})
+	return s.fakeStore.CloseBead(id, reason)
+}
 
 func TestCreateHandler_Basic(t *testing.T) {
 	store := newFakeStore()
@@ -183,6 +219,135 @@ func TestCreateHandler_PartialCreateCleanup(t *testing.T) {
 		}
 	}
 	t.Error("orphan bead was not terminated+closed after partial create failure")
+}
+
+func TestCreateHandler_PartialCreateRollbackStateFailureDoesNotCloseRoot(t *testing.T) {
+	originalErr := errors.New("simulated create failure")
+	rollbackStateErr := errors.New("simulated rollback state failure")
+	baseStore := newFakeStore()
+	baseStore.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+		return "", originalErr
+	}
+	store := &createRollbackStore{
+		fakeStore:          baseStore,
+		terminatedStateErr: rollbackStateErr,
+	}
+	emitter := &fakeEmitter{}
+	handler := &Handler{Store: store, Emitter: emitter, Clock: time.Now}
+
+	_, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 5,
+		GateMode:      GateModeManual,
+	})
+	if err == nil {
+		t.Fatal("expected partial-create error, got nil")
+	}
+	if !errors.Is(err, originalErr) {
+		t.Errorf("error = %v, want original create failure reachable with errors.Is", err)
+	}
+	if !errors.Is(err, rollbackStateErr) {
+		t.Errorf("error = %v, want rollback state failure reachable with errors.Is", err)
+	}
+
+	terminatedCalls := 0
+	for _, call := range store.metadataCalls {
+		if call.key == FieldState && call.value == StateTerminated {
+			terminatedCalls++
+			if call.id != "conv-1" {
+				t.Errorf("terminated-state write bead = %q, want %q", call.id, "conv-1")
+			}
+		}
+	}
+	if terminatedCalls != 1 {
+		t.Errorf("terminated-state write attempts = %d, want 1", terminatedCalls)
+	}
+	if len(store.closeCalls) != 0 {
+		t.Errorf("close attempts = %+v, want none after rollback state failure", store.closeCalls)
+	}
+	info, getErr := store.GetBead("conv-1")
+	if getErr != nil {
+		t.Fatalf("GetBead(conv-1): %v", getErr)
+	}
+	if info.Status != "in_progress" {
+		t.Errorf("root status = %q, want in_progress", info.Status)
+	}
+	meta, getErr := store.GetMetadata("conv-1")
+	if getErr != nil {
+		t.Fatalf("GetMetadata(conv-1): %v", getErr)
+	}
+	if meta[FieldState] != StateActive {
+		t.Errorf("root state = %q, want prior state %q after failed rollback write", meta[FieldState], StateActive)
+	}
+	if len(emitter.events) != 0 {
+		t.Errorf("emitted events = %+v, want none for failed partial create", emitter.events)
+	}
+}
+
+func TestCreateHandler_PartialCreateRollbackCloseFailureReturnsBothErrors(t *testing.T) {
+	originalErr := errors.New("simulated create failure")
+	rollbackCloseErr := errors.New("simulated rollback close failure")
+	baseStore := newFakeStore()
+	baseStore.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+		return "", originalErr
+	}
+	baseStore.CloseBeadFunc = func(_, _ string) error {
+		return rollbackCloseErr
+	}
+	store := &createRollbackStore{fakeStore: baseStore}
+	emitter := &fakeEmitter{}
+	handler := &Handler{Store: store, Emitter: emitter, Clock: time.Now}
+
+	_, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 5,
+		GateMode:      GateModeManual,
+	})
+	if err == nil {
+		t.Fatal("expected partial-create error, got nil")
+	}
+	if !errors.Is(err, originalErr) {
+		t.Errorf("error = %v, want original create failure reachable with errors.Is", err)
+	}
+	if !errors.Is(err, rollbackCloseErr) {
+		t.Errorf("error = %v, want rollback close failure reachable with errors.Is", err)
+	}
+
+	terminatedCalls := 0
+	for _, call := range store.metadataCalls {
+		if call.key == FieldState && call.value == StateTerminated {
+			terminatedCalls++
+			if call.id != "conv-1" {
+				t.Errorf("terminated-state write bead = %q, want %q", call.id, "conv-1")
+			}
+		}
+	}
+	if terminatedCalls != 1 {
+		t.Errorf("terminated-state write attempts = %d, want 1", terminatedCalls)
+	}
+	wantCloseCalls := []createCloseCall{{id: "conv-1", reason: CloseReasonCreateRollback}}
+	if len(store.closeCalls) != len(wantCloseCalls) || store.closeCalls[0] != wantCloseCalls[0] {
+		t.Errorf("close attempts = %+v, want %+v", store.closeCalls, wantCloseCalls)
+	}
+	info, getErr := store.GetBead("conv-1")
+	if getErr != nil {
+		t.Fatalf("GetBead(conv-1): %v", getErr)
+	}
+	if info.Status != "in_progress" {
+		t.Errorf("root status = %q, want in_progress after failed close", info.Status)
+	}
+	meta, getErr := store.GetMetadata("conv-1")
+	if getErr != nil {
+		t.Fatalf("GetMetadata(conv-1): %v", getErr)
+	}
+	if meta[FieldState] != StateTerminated {
+		t.Errorf("root state = %q, want %q before close attempt", meta[FieldState], StateTerminated)
+	}
+	if len(emitter.events) != 0 {
+		t.Errorf("emitted events = %+v, want none for failed partial create", emitter.events)
+	}
 }
 
 func TestCreateHandler_InvalidGateConfig(t *testing.T) {

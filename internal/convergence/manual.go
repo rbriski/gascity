@@ -47,7 +47,10 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 	if err != nil {
 		return HandlerResult{}, fmt.Errorf("listing children for terminal proof on bead %q: %w", beadID, err)
 	}
-	stats := childStats(children, beadID)
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("validating child evidence for terminal proof on bead %q: %w", beadID, err)
+	}
 	iterationCount := stats.ClosedCount
 
 	// Read the last active wisp for event payload.
@@ -309,6 +312,18 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			state = meta[FieldState]
 			activeWisp = meta[FieldActiveWisp]
 			lastProcessedWisp = meta[FieldLastProcessedWisp]
+			if activeWisp != "" && activeWisp != lastProcessedWisp {
+				successor, err := h.Store.GetBead(activeWisp)
+				if err != nil {
+					return HandlerResult{}, fmt.Errorf("reading adopted successor %q after drain: %w", activeWisp, err)
+				}
+				if successor.Status == "closed" {
+					return HandlerResult{
+						Action:     ActionSkipped,
+						NextWispID: activeWisp,
+					}, fmt.Errorf("closed successor %q awaits convergence tick owner before stop can continue", activeWisp)
+				}
+			}
 		}
 	}
 
@@ -345,7 +360,10 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 	if err != nil {
 		return HandlerResult{}, fmt.Errorf("listing children for terminal proof on bead %q: %w", beadID, err)
 	}
-	stats := childStats(children, beadID)
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("validating child evidence for terminal proof on bead %q: %w", beadID, err)
+	}
 	iterationCount := stats.ClosedCount
 
 	// Step 5: Clear stale verdicts — prevent an interrupted wisp's verdict
@@ -445,48 +463,64 @@ func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (Be
 	if err != nil {
 		return BeadInfo{}, false, fmt.Errorf("listing children for stale active wisp recovery: %w", err)
 	}
+	if _, err := childStats(children, beadID); err != nil {
+		return BeadInfo{}, false, fmt.Errorf("validating child evidence for stale active wisp recovery: %w", err)
+	}
 
-	nextIter := 0
-	haveNextIter := false
 	if lastProcessedWisp != "" {
 		lastProcessedInfo, err := h.Store.GetBead(lastProcessedWisp)
 		if err != nil {
-			if !errors.Is(err, beads.ErrNotFound) {
-				return BeadInfo{}, false, fmt.Errorf("reading last processed wisp %q: %w", lastProcessedWisp, err)
-			}
-		} else if iter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey); ok {
-			nextIter = iter + 1
-			haveNextIter = true
+			return BeadInfo{}, false, fmt.Errorf("reading last processed wisp %q: %w", lastProcessedWisp, err)
 		}
-	}
-
-	if haveNextIter {
+		processedIter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey)
+		if !ok || processedIter < 1 {
+			return BeadInfo{}, false, fmt.Errorf("last processed wisp %q has invalid idempotency key %q", lastProcessedWisp, lastProcessedInfo.IdempotencyKey)
+		}
+		if err := validateExactWispEvidence(beadID, IdempotencyKey(beadID, processedIter), lastProcessedWisp, lastProcessedInfo); err != nil {
+			return BeadInfo{}, false, fmt.Errorf("validating last processed wisp: %w", err)
+		}
+		if lastProcessedInfo.Status != "closed" {
+			return BeadInfo{}, false, fmt.Errorf("last processed wisp %q has status %q, want closed", lastProcessedWisp, lastProcessedInfo.Status)
+		}
+		nextIter, err := nextIterationAfterLastProcessed(beadID, lastProcessedWisp, children)
+		if err != nil {
+			return BeadInfo{}, false, fmt.Errorf("deriving replacement active iteration: %w", err)
+		}
 		nextKey := IdempotencyKey(beadID, nextIter)
 		candidateID, found, err := h.Store.FindByIdempotencyKey(nextKey)
 		if err != nil {
 			return BeadInfo{}, false, fmt.Errorf("looking up replacement active wisp %q: %w", nextKey, err)
 		}
-		if found {
-			wispInfo, err := h.Store.GetBead(candidateID)
-			if err != nil {
-				if errors.Is(err, beads.ErrNotFound) {
-					return BeadInfo{}, false, nil
-				}
-				return BeadInfo{}, false, fmt.Errorf("reading replacement active wisp %q: %w", candidateID, err)
+		if !found {
+			if candidateID != "" {
+				return BeadInfo{}, false, fmt.Errorf("replacement lookup for %q returned bead ID %q without found evidence", nextKey, candidateID)
 			}
-			return wispInfo, true, nil
+			return BeadInfo{}, false, nil
 		}
-		return BeadInfo{}, false, nil
+		if candidateID == "" {
+			return BeadInfo{}, false, fmt.Errorf("replacement lookup for %q returned found with an empty bead ID", nextKey)
+		}
+		wispInfo, err := h.Store.GetBead(candidateID)
+		if err != nil {
+			return BeadInfo{}, false, fmt.Errorf("reading replacement active wisp %q: %w", candidateID, err)
+		}
+		if err := validateExactWispEvidence(beadID, nextKey, candidateID, wispInfo); err != nil {
+			return BeadInfo{}, false, fmt.Errorf("validating replacement active wisp: %w", err)
+		}
+		return wispInfo, true, nil
 	}
 
-	// Fall back to the highest-iteration open wisp, then the highest-iteration
-	// closed wisp, among the convergence children.
-	stats := childStats(children, beadID)
-	if stats.HighestOpenFound {
-		return stats.HighestOpen, true, nil
+	// With no marker, only canonical iteration 1 is actionable. Selecting a
+	// later child would silently skip the missing prefix of the chain.
+	nextIter, err := nextIterationAfterLastProcessed(beadID, "", children)
+	if err != nil {
+		return BeadInfo{}, false, fmt.Errorf("deriving marker-less replacement iteration: %w", err)
 	}
-	if stats.HighestClosedFound {
-		return stats.HighestClosed, true, nil
+	nextKey := IdempotencyKey(beadID, nextIter)
+	for _, child := range children {
+		if child.IdempotencyKey == nextKey {
+			return child, true, nil
+		}
 	}
 	return BeadInfo{}, false, nil
 }

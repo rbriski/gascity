@@ -268,7 +268,6 @@ func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool
 		ParentID:      parentID,
 		Metadata:      map[string]string{"idempotency_key": key},
 		IncludeClosed: true,
-		Sort:          beads.SortCreatedAsc,
 		TierMode:      beads.TierBoth,
 		Limit:         2,
 	})

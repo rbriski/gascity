@@ -123,7 +123,7 @@ func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQue
 	if tierWhere != "" {
 		where = append(where, tierWhere)
 	}
-	antiJoin, antiArgs := doltliteMatchingIssuesAntiJoin(dedupeWhere, dedupeArgs)
+	antiJoin, antiArgs := doltliteMatchingIssuesAntiJoin("", dedupeWhere, dedupeArgs)
 	where = append(where, antiJoin)
 	args = append(args, antiArgs...)
 	sqlText := "SELECT COUNT(*) FROM " + tables.issues + " i WHERE " + strings.Join(where, " AND ")

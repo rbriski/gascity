@@ -1004,6 +1004,57 @@ func TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreBoundsCanonicalParentMetadataLookupBeforeHydration(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	const (
+		parent = "root-1"
+		key    = "converge:root-1:iter:2"
+	)
+	rows := []struct {
+		tables doltliteTableSet
+		issue  testDoltliteIssue
+	}{
+		{tables: doltliteIssueTables, issue: testDoltliteIssue{ID: "dup-a", CreatedAt: time.Now().Add(-3 * time.Second)}},
+		{tables: doltliteWispTables, issue: testDoltliteIssue{ID: "dup-b", CreatedAt: time.Now().Add(-2 * time.Second), Ephemeral: true}},
+		{tables: doltliteWispTables, issue: testDoltliteIssue{ID: "dup-c", CreatedAt: time.Now().Add(-time.Second), NoHistory: true}},
+	}
+	for _, row := range rows {
+		row.issue.Metadata = map[string]string{"idempotency_key": key}
+		row.issue.Dependencies = []testDoltliteDependency{{DependsOnID: parent, Type: "parent-child"}}
+		insertTestDoltliteIssue(t, writer, row.tables.issues, row.tables.labels, row.tables.deps, row.issue)
+	}
+
+	query := ListQuery{
+		ParentID:      parent,
+		Metadata:      map[string]string{"idempotency_key": key},
+		IncludeClosed: true,
+		TierMode:      TierBoth,
+		Limit:         2,
+	}
+	sets := doltliteTableSetsForMode(query.TierMode)
+	if !doltliteCanSelectBoundedTopN(query, sets, "", query.Limit, "") {
+		t.Fatal("canonical parent+metadata lookup did not select the bounded multi-table path")
+	}
+	ids, err := store.selectBoundedTopNIDs(query, sets, query.Limit)
+	if err != nil {
+		t.Fatalf("selectBoundedTopNIDs: %v", err)
+	}
+	if len(ids) != query.Limit {
+		t.Fatalf("selected ids = %v, want exactly physical bound %d", ids, query.Limit)
+	}
+	got, err := store.List(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != query.Limit {
+		t.Fatalf("List returned ids %v, want two rows so duplicate detection remains possible", testBeadIDs(got))
+	}
+}
+
 // TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded pins the #3449
 // review fix for sub-second precision: scanBead truncates CreatedAt to whole
 // seconds, so the Go merge orders same-second rows by id. A bounded read's SQL

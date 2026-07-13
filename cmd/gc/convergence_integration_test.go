@@ -1239,7 +1239,7 @@ func TestConvergenceStoreFindByIdempotencyKeyUsesBoundedExactParentQuery(t *test
 		t.Fatalf("list queries = %d, want exactly one", len(capture.queries))
 	}
 	query := capture.queries[0]
-	if query.ParentID != root.ID || !query.IncludeClosed || query.TierMode != beads.TierBoth || query.Limit != 2 || query.Metadata["idempotency_key"] != key {
+	if query.ParentID != root.ID || !query.IncludeClosed || query.TierMode != beads.TierBoth || query.Limit != 2 || query.Sort != beads.SortDefault || query.Metadata["idempotency_key"] != key {
 		t.Fatalf("idempotency query = %+v, want exact parent/key, both tiers, closed rows, limit 2", query)
 	}
 }
@@ -1265,6 +1265,47 @@ func TestConvergenceStoreFindByIdempotencyKeyRejectsDuplicateExactMatches(t *tes
 	gotID, found, err := adapter.FindByIdempotencyKey(key)
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("FindByIdempotencyKey = (%q, %t, %v), want ambiguous duplicate error", gotID, found, err)
+	}
+}
+
+func TestConvergenceStoreBdLookupBoundsWorkAndDetectsDuplicateExactMatches(t *testing.T) {
+	const (
+		parentID = "root-1"
+		key      = "converge:root-1:iter:2"
+	)
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		calls = append(calls, command)
+		switch {
+		case strings.HasPrefix(command, "bd list "):
+			return []byte(`[
+				{"id":"dup-a","title":"a","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:00Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:2"}},
+				{"id":"dup-b","title":"b","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:01Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:2"}}
+			]`), nil
+		case strings.HasPrefix(command, "bd query "):
+			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected bd command: " + command)
+		}
+	}
+	adapter := newConvergenceStoreAdapter(beads.NewBdStore("/city", runner), nil)
+
+	_, found, err := adapter.FindByIdempotencyKey(key)
+	if err == nil || found || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("FindByIdempotencyKey = (found=%t, err=%v), want bounded ambiguity error", found, err)
+	}
+	for _, prefix := range []string{"bd list ", "bd query "} {
+		command := ""
+		for _, call := range calls {
+			if strings.HasPrefix(call, prefix) {
+				command = call
+				break
+			}
+		}
+		if !strings.Contains(command, "--limit 2") {
+			t.Fatalf("%s command = %q, want physical limit 2; calls=%v", strings.TrimSpace(prefix), command, calls)
+		}
 	}
 }
 

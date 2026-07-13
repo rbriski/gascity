@@ -222,7 +222,10 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	if err != nil {
 		return HandlerResult{}, fmt.Errorf("deriving iteration count: %w", err)
 	}
-	stats := childStats(children, rootBeadID)
+	stats, err := childStats(children, rootBeadID)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("validating child evidence: %w", err)
+	}
 	globalIteration := stats.ClosedCount
 	iterationDuration := time.Duration(0)
 	if !wispInfo.ClosedAt.IsZero() && !wispInfo.CreatedAt.IsZero() {
@@ -957,7 +960,11 @@ func (h *Handler) computeDurations(rootBeadID, wispID string) (iterDur, cumDur t
 	if err != nil {
 		return iterDur, 0
 	}
-	return iterDur, childStats(children, rootBeadID).CumulativeDur
+	stats, err := childStats(children, rootBeadID)
+	if err != nil {
+		return iterDur, 0
+	}
+	return iterDur, stats.CumulativeDur
 }
 
 // emitEvent emits a convergence event through the EventEmitter.

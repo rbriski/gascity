@@ -792,17 +792,17 @@ func TestReconcile_WaitingManual_GenuineHold_NoStateChange(t *testing.T) {
 func TestReconcile_WaitingManual_GenuineHold_RepairsLastProcessedWisp(t *testing.T) {
 	rec, store, _ := setupReconciler(t)
 
-	// last_processed_wisp is stale (points to wisp-0, but wisp-1 is the
+	// last_processed_wisp is stale (points to wisp-1, but wisp-2 is the
 	// highest closed wisp).
 	store.addBead("root-1", "in_progress", "", "", map[string]string{
 		FieldState:             StateWaitingManual,
 		FieldWaitingReason:     WaitManual,
-		FieldLastProcessedWisp: "wisp-0",
+		FieldLastProcessedWisp: "wisp-1",
 		FieldFormula:           "test-formula",
 	})
 
-	store.addBead("wisp-0", "closed", "root-1", IdempotencyKey("root-1", 0), nil)
 	store.addBead("wisp-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+	store.addBead("wisp-2", "closed", "root-1", IdempotencyKey("root-1", 2), nil)
 
 	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
 	if err != nil {
@@ -815,8 +815,8 @@ func TestReconcile_WaitingManual_GenuineHold_RepairsLastProcessedWisp(t *testing
 	}
 
 	meta, _ := store.GetMetadata("root-1")
-	if meta[FieldLastProcessedWisp] != "wisp-1" {
-		t.Errorf("last_processed_wisp = %q, want %q", meta[FieldLastProcessedWisp], "wisp-1")
+	if meta[FieldLastProcessedWisp] != "wisp-2" {
+		t.Errorf("last_processed_wisp = %q, want %q", meta[FieldLastProcessedWisp], "wisp-2")
 	}
 }
 
@@ -1281,13 +1281,16 @@ func TestReconcile_RecoveryEventsHaveRecoveryFlag(t *testing.T) {
 
 func TestDeriveIterationFromChildren(t *testing.T) {
 	children := []BeadInfo{
-		{ID: "w1", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 1)},
-		{ID: "w2", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 2)},
-		{ID: "w3", Status: "in_progress", IdempotencyKey: IdempotencyKey("root-1", 3)},
+		{ID: "w1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+		{ID: "w2", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)},
+		{ID: "w3", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)},
 		{ID: "other", Status: "closed", IdempotencyKey: "unrelated-key"},
 	}
 
-	got := deriveIterationFromChildren(children, "root-1")
+	got, err := deriveIterationFromChildren(children, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != 2 {
 		t.Errorf("deriveIterationFromChildren = %d, want 2", got)
 	}
@@ -1295,13 +1298,16 @@ func TestDeriveIterationFromChildren(t *testing.T) {
 
 func TestHighestClosedWisp(t *testing.T) {
 	children := []BeadInfo{
-		{ID: "w1", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 1)},
-		{ID: "w3", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 3)},
-		{ID: "w2", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 2)},
-		{ID: "w4", Status: "in_progress", IdempotencyKey: IdempotencyKey("root-1", 4)},
+		{ID: "w1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+		{ID: "w3", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)},
+		{ID: "w2", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)},
+		{ID: "w4", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 4)},
 	}
 
-	best, iter, found := highestClosedWisp(children, "root-1")
+	best, iter, found, err := highestClosedWisp(children, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !found {
 		t.Fatal("expected to find a closed wisp")
 	}
@@ -1315,10 +1321,13 @@ func TestHighestClosedWisp(t *testing.T) {
 
 func TestHighestClosedWisp_NoneFound(t *testing.T) {
 	children := []BeadInfo{
-		{ID: "w1", Status: "in_progress", IdempotencyKey: IdempotencyKey("root-1", 1)},
+		{ID: "w1", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
 	}
 
-	_, _, found := highestClosedWisp(children, "root-1")
+	_, _, found, err := highestClosedWisp(children, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if found {
 		t.Error("expected not to find a closed wisp")
 	}

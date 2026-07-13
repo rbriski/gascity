@@ -1827,62 +1827,6 @@ func reconcileCitiesWithControllerLock(
 		}
 	}
 
-	// A correlated unregister may target a registered city that never reached
-	// a managed runtime (for example, its directory was removed while it was in
-	// init backoff). The absence of a managedCity is not, by itself, a terminal
-	// witness: the requester cannot distinguish that case from a runtime that
-	// was removed from the projection before cleanup completed. Resolve that
-	// ambiguity here, inside the serial supervisor reconcile that owns the
-	// running-city map. Paths handled above are excluded so a failed stop can
-	// never be overwritten by a synthetic success.
-	handledStopPaths := make(map[string]struct{}, len(toStopPaths))
-	for _, path := range toStopPaths {
-		handledStopPaths[normalizePathForCompare(path)] = struct{}{}
-	}
-	pendingRequests, pendingErr := reg.ListPendingCityRequests()
-	if pendingErr != nil {
-		fmt.Fprintf(stderr, "gc supervisor: reading pending city requests: %v\n", pendingErr) //nolint:errcheck
-	}
-	for _, pending := range pendingRequests {
-		path := normalizePathForCompare(pending.Path)
-		// Generic pending IDs can belong to city.create. Only the operation-
-		// scoped interim witness minted by gc stop is safe to classify from an
-		// absent desired/runtime row without adding a new persistent schema.
-		if !strings.HasPrefix(pending.RequestID, stopSupervisorRequestIDPrefix) {
-			continue
-		}
-		if _, wanted := desired[path]; wanted {
-			continue
-		}
-		if _, handled := handledStopPaths[path]; handled {
-			continue
-		}
-		supRec := cr.SupervisorEventRecorder()
-		if supRec == nil {
-			fmt.Fprintf(stderr, "gc supervisor: no event recorder for no-runtime unregister result (path=%s)\n", path) //nolint:errcheck
-			continue
-		}
-		requestID, found, consumeErr := cr.ConsumePendingRequestID(path)
-		if consumeErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: consume no-runtime unregister request (path=%s): %v\n", path, consumeErr) //nolint:errcheck
-			continue
-		}
-		if !found {
-			fmt.Fprintf(stderr, "gc supervisor: pending no-runtime unregister disappeared (path=%s)\n", path) //nolint:errcheck
-			continue
-		}
-		if requestID != pending.RequestID {
-			fmt.Fprintf(stderr, "gc supervisor: pending no-runtime unregister changed identity (path=%s, listed=%s, consumed=%s)\n", path, pending.RequestID, requestID) //nolint:errcheck
-			continue
-		}
-		cityName := filepath.Base(path)
-		if view := cr.Snapshot().byPath[path]; view != nil && view.Name != "" {
-			cityName = view.Name
-		}
-		emitCityUnregisterTerminalEvent(supRec, requestID, cityName, path, nil)
-		fmt.Fprintf(stdout, "City '%s' had no managed runtime; unregister complete.\n", cityName) //nolint:errcheck
-	}
-
 	// Clear panicHistory and initFailures for any path no longer in the
 	// desired set. This handles the case where a city panicked or failed
 	// init (self-removed from cities + recorded backoff) and was then

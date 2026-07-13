@@ -1397,6 +1397,10 @@ func TestCmdStopForceUnregisterFailsClosedOnUncertainControllerStop(t *testing.T
 			if err := reg.Register(cityPath, "force-ambiguous-city"); err != nil {
 				t.Fatal(err)
 			}
+			const pendingRequestID = "req-existing-api-operation"
+			if err := reg.StorePendingCityRequestID(cityPath, pendingRequestID); err != nil {
+				t.Fatal(err)
+			}
 
 			aliveCalls := 0
 			reloads := 0
@@ -1484,6 +1488,11 @@ func TestCmdStopForceUnregisterFailsClosedOnUncertainControllerStop(t *testing.T
 			}
 			if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
 				t.Fatalf("registration changed after uncertain stop: %v", entries)
+			}
+			if got, ok, err := reg.ConsumePendingCityRequestID(cityPath); err != nil {
+				t.Fatal(err)
+			} else if !ok || got != pendingRequestID {
+				t.Fatalf("pending API request after uncertain stop = (%q, %t), want (%q, true)", got, ok, pendingRequestID)
 			}
 			if strings.Contains(stdout.String(), "City stopped") {
 				t.Fatalf("stdout reports false success: %q", stdout.String())
@@ -1910,42 +1919,6 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	}
 	if payload.RequestID != "req-test-unregister" {
 		t.Fatalf("payload.RequestID = %q, want req-test-unregister", payload.RequestID)
-	}
-}
-
-func TestReconcileCitiesEmitsUnregisterSuccessWithoutManagedRuntime(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-
-	cityPath := filepath.Join(t.TempDir(), "already-gone")
-	supRec := events.NewFake()
-	registry := newCityRegistry()
-	registry.SetSupervisorRecorder(supRec)
-	if err := registry.StorePendingRequestID(cityPath, "req-stop-test-unregister-empty"); err != nil {
-		t.Fatal(err)
-	}
-
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
-
-	if len(supRec.Events) != 1 {
-		t.Fatalf("recorded %d supervisor events, want terminal no-runtime result; stderr=%q", len(supRec.Events), stderr.String())
-	}
-	got := supRec.Events[0]
-	if got.Type != events.RequestResultCityUnregister {
-		t.Fatalf("event.Type = %q, want %q", got.Type, events.RequestResultCityUnregister)
-	}
-	var payload api.CityUnregisterSucceededPayload
-	if err := json.Unmarshal(got.Payload, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.RequestID != "req-stop-test-unregister-empty" || payload.Path != cityPath {
-		t.Fatalf("payload = %#v, want correlated no-runtime result", payload)
-	}
-	if _, ok, err := registry.ConsumePendingRequestID(cityPath); err != nil {
-		t.Fatal(err)
-	} else if ok {
-		t.Fatal("pending unregister witness survived terminal no-runtime result")
 	}
 }
 

@@ -1223,7 +1223,10 @@ func finalizeManagedCityRun(cr *cityRegistry, path, name string, current *manage
 		_ map[string]*initFailRecord,
 		panicHistory map[string]*panicRecord,
 	) {
-		if cities[path] != current {
+		published, exists := cities[path]
+		// Name drift removes the current publication before waiting for its
+		// owner. Only a different published pointer proves replacement ownership.
+		if exists && published != current {
 			return
 		}
 		if runtimePanic == nil {

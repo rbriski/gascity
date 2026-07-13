@@ -66,8 +66,14 @@ else
   if [[ -w "$prefix" ]] || [[ -w "$bin_dir" ]]; then
     npm install -g "$package"
   elif command -v sudo >/dev/null 2>&1; then
+    # sudo resets PATH to its secure_path, so npm's `#!/usr/bin/env node` shim
+    # would resolve node from secure_path instead of the node next to the
+    # selected npm. Resolve the intended npm and pass an explicit PATH through
+    # env so the sudo'd install runs under that same node/npm.
+    npm_bin="$(command -v npm)"
+    npm_bin_dir="$(dirname "$npm_bin")"
     sudo --preserve-env=npm_config_fund,npm_config_audit,npm_config_update_notifier \
-      npm install -g "$package"
+      env "PATH=${npm_bin_dir}:${PATH}" "$npm_bin" install -g "$package"
   else
     echo "Cannot write ${prefix} and sudo is unavailable" >&2
     exit 1

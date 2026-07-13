@@ -116,6 +116,12 @@ install_tree_with_sudo_fallback() {
 if $use_cache; then
   cache_root="${RUNNER_TOOL_CACHE:-$HOME/.local}"
   prefix="${cache_root}/gascity-node/${version_no_v}/${platform}"
+  # Create the cache prefix up front, under the writable cache root, so the
+  # install writes there directly. A fresh RUNNER_TOOL_CACHE has none of the
+  # nested gascity-node/<version>/<platform> parents yet, and without this the
+  # sudo-fallback below sees a non-existent immediate parent and wrongly takes
+  # the sudo path. Mirrors install-pi-npm.sh.
+  mkdir -p "$prefix"
 else
   prefix="${NODE_INSTALL_PREFIX:-/usr/local}"
 fi
@@ -142,6 +148,12 @@ fi
 
 if [[ -n "$npm_version" ]]; then
   npm_bin="${bin_dir}/npm"
+  # npm launches through its `#!/usr/bin/env node` shim, so the freshly
+  # installed node must be first on PATH; otherwise a host node (or none) runs
+  # the npm upgrade and it fails (e.g. EBADENGINE) or uses the wrong runtime.
+  # bin_dir is appended to GITHUB_PATH below for later steps, but this process
+  # needs it on PATH now.
+  export PATH="${bin_dir}:${PATH}"
   if [[ "$("$npm_bin" --version 2>/dev/null)" == "$npm_version" ]]; then
     echo "Reusing npm ${npm_version} at ${npm_bin}"
   else
@@ -151,8 +163,12 @@ if [[ -n "$npm_version" ]]; then
     if [[ -w "${prefix}/lib/node_modules" ]]; then
       "$npm_bin" install -g "npm@${npm_version}"
     elif command -v sudo >/dev/null 2>&1; then
+      # sudo resets PATH to its secure_path, so npm's `#!/usr/bin/env node`
+      # shim would resolve node from secure_path instead of the bin_dir just
+      # prepended above. Pass an explicit PATH through env so the sudo'd npm
+      # still runs under the freshly installed node.
       sudo --preserve-env=npm_config_fund,npm_config_audit,npm_config_update_notifier \
-        "$npm_bin" install -g "npm@${npm_version}"
+        env "PATH=${bin_dir}:${PATH}" "$npm_bin" install -g "npm@${npm_version}"
     else
       echo "Cannot write ${prefix}/lib/node_modules and sudo is unavailable" >&2
       exit 1

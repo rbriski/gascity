@@ -11,6 +11,7 @@ on:
       - ".github/requirements/mcp-agent-mail.overrides.txt"
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
+      - ".github/scripts/smoke-*.sh"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -35,6 +36,7 @@ on:
       - ".github/requirements/mcp-agent-mail.overrides.txt"
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
+      - ".github/scripts/smoke-*.sh"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -138,6 +140,25 @@ jobs:
             --exit-code 1 \
             --format table \
             contrib/k8s
+
+  node-cache-smoke:
+    name: Node cache-mode smoke
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: install-node-archive.sh --cache smoke
+        run: |
+          set -euo pipefail
+          . ./deps.env
+          .github/scripts/smoke-install-node-cache.sh "$NODE_VERSION" "$NPM_VERSION"
 
   image-vulnerabilities:
     name: Image vulnerabilities

@@ -515,10 +515,6 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
 
-	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {

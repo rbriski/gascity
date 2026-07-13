@@ -2117,6 +2117,12 @@ func startManagedCity(
 	}
 	defer sourceLock.Close() //nolint:errcheck // no-op after the exact lease is transferred
 
+	if err := ensureCityScaffold(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, name, "city_scaffold_failed", err, stderr)
+		recordInitFailure(name, fmt.Sprintf("runtime scaffold: %v", err))
+		return
+	}
+
 	if err := ensureLegacyNamedPacksCached(path); err != nil {
 		emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
 		recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))

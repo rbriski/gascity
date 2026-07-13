@@ -598,6 +598,61 @@ func TestStopManagedCityRetainsTransferredLockThroughProviderShutdown(t *testing
 	_ = reacquired.Close()
 }
 
+func TestStopManagedCityPreservingSessionsOwnerSkipsProviderAndReleasesLease(t *testing.T) {
+	cityPath, reg, registry := newSupervisorManagedStartFixture(t)
+	var originalFile *os.File
+	acquire := func(path string) (*controllerLockLease, error) {
+		lease, err := acquireControllerLock(path)
+		if err == nil {
+			originalFile = lease.file
+		}
+		return lease, err
+	}
+	providerCalls := 0
+	var stdout bytes.Buffer
+	var stderr lockedBuffer
+	reconcileCitiesWithControllerLock(
+		reg,
+		registry,
+		supervisor.PublicationConfig{},
+		&stdout,
+		&stderr,
+		acquire,
+		func(string) error {
+			providerCalls++
+			return nil
+		},
+	)
+	mc := managedCityForPath(t, registry, cityPath)
+
+	if err := stopManagedCityPreservingSessions(mc, cityPath, &stderr); err != nil {
+		t.Fatalf("stopManagedCityPreservingSessions: %v; stderr=%q", err, stderr.String())
+	}
+
+	if providerCalls != 0 {
+		t.Fatalf("managed provider shutdown calls = %d, want zero in preserve mode", providerCalls)
+	}
+	select {
+	case <-mc.done:
+	default:
+		t.Fatal("preserve-mode managed owner did not signal completion")
+	}
+	if originalFile == nil {
+		t.Fatal("managed start never acquired the source controller lease")
+	}
+	if _, statErr := originalFile.Stat(); !errors.Is(statErr, os.ErrClosed) {
+		t.Fatalf("transferred descriptor after preserve-mode completion = %v, want closed", statErr)
+	}
+	if mc.managedShutdownErr != nil {
+		t.Fatalf("preserve-mode managed shutdown error = %v, want nil", mc.managedShutdownErr)
+	}
+	reacquired, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("reacquire after preserve-mode completion: %v", err)
+	}
+	_ = reacquired.Close()
+}
+
 func TestStopManagedCityReturnsManagedProviderShutdownError(t *testing.T) {
 	cityPath, reg, registry := newSupervisorManagedStartFixture(t)
 	wantErr := errors.New("fatal bead provider shutdown")

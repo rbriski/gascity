@@ -1068,7 +1068,8 @@ export const zAgentPatch = z.object({
     TmuxAlias: z.string().nullable(),
     Upstream: z.string().nullable(),
     WakeMode: z.string().nullable(),
-    WorkDir: z.string().nullable()
+    WorkDir: z.string().nullable(),
+    WorkQueryUnfiltered: z.boolean().nullable()
 });
 
 export const zListBodyAgentPatch = z.object({

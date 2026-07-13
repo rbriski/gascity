@@ -632,7 +632,11 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]SessionView]{}, err
 	}
-	params := &genclient.GetV0CityByCityNameSessionsParams{}
+	// Ask for the server cap explicitly: this call powers gc session list,
+	// which means "all sessions" — the unified server default (100) would
+	// silently truncate a large fleet.
+	capLimit := int64(1000)
+	params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &capLimit}
 	if stateFilter != "" {
 		params.State = &stateFilter
 	}

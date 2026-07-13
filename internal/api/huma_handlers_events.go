@@ -42,7 +42,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		filter.Since = time.Now().Add(-d)
 	}
 
-	limit := 100
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
 		limit = input.Limit
 	}

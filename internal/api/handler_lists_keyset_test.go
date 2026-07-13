@@ -229,3 +229,19 @@ func TestSessionListInvalidCursorReturns400(t *testing.T) {
 		t.Fatalf("status = %d body = %s, want 400 invalid-cursor", rec.Code, rec.Body.String())
 	}
 }
+
+// TestListLimitAboveMaxRejected422 pins the S4 hard ceiling: limit above
+// maxPaginationLimit is a Huma validation error (422), not a silent clamp.
+func TestListLimitAboveMaxRejected422(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	for _, url := range []string{
+		cityURL(state, "/mail?limit=1001"),
+		cityURL(state, "/events?limit=1001"),
+	} {
+		rec := getList(t, h, url)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: status = %d body = %s, want 422", url, rec.Code, rec.Body.String())
+		}
+	}
+}

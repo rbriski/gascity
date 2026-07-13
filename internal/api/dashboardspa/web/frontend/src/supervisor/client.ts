@@ -408,10 +408,14 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
       );
     },
     listSessions(cityName) {
+      // limit=1000 = the server cap: the dashboard session views want every
+      // session, and the unified server default (100) would silently drop
+      // rows on a large fleet.
       return unwrapSupervisorResult<ListBodySessionResponse>(
         getV0CityByCityNameSessions({
           client,
           path: { cityName },
+          query: { limit: 1000 },
         }) as Promise<SupervisorResult<ListBodySessionResponse>>,
         'gc supervisor sessions response was empty',
       );

@@ -645,7 +645,9 @@ func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name strin
 	if base == "" {
 		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/city/"+name+"/sessions", nil)
+	// limit=1000 = the server cap: this enrichment wants every session, and
+	// the unified default (100) would silently drop rows on a large fleet.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/city/"+name+"/sessions?limit=1000", nil)
 	if err != nil {
 		return nil, false
 	}

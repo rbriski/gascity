@@ -6452,10 +6452,10 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Status Filter by bead status.
@@ -6527,10 +6527,10 @@ type GetV0CityByCityNameConvoysParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -6551,10 +6551,10 @@ type GetV0CityByCityNameEventsParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Type Filter by event type.
@@ -6797,10 +6797,10 @@ type GetV0CityByCityNameMailParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Agent Filter by agent name.
@@ -7208,10 +7208,10 @@ type PostV0CityByCityNameSessionByIdWakeParams struct {
 
 // GetV0CityByCityNameSessionsParams defines parameters for GetV0CityByCityNameSessions.
 type GetV0CityByCityNameSessionsParams struct {
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// State Filter by session state (e.g. active, closed).

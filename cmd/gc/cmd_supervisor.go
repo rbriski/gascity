@@ -1123,9 +1123,6 @@ func runManagedCityOwnedPhases(run, shutdownRuntime func(), shutdownProvider fun
 	result := managedCityOwnedPhasesResult{recovered: captureManagedCityPanic(run)}
 	if recovered := captureManagedCityPanic(shutdownRuntime); recovered != nil {
 		result.cleanupErr = errors.Join(result.cleanupErr, fmt.Errorf("runtime shutdown panic: %v", recovered))
-		if result.recovered == nil {
-			result.recovered = recovered
-		}
 	}
 	if shutdownProvider != nil {
 		var providerErr error
@@ -1134,9 +1131,6 @@ func runManagedCityOwnedPhases(run, shutdownRuntime func(), shutdownProvider fun
 		})
 		if recovered != nil {
 			providerErr = fmt.Errorf("bead provider shutdown panic: %v", recovered)
-			if result.recovered == nil {
-				result.recovered = recovered
-			}
 		} else if providerErr != nil {
 			providerErr = fmt.Errorf("bead provider shutdown: %w", providerErr)
 		}

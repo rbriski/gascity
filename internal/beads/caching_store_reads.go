@@ -321,10 +321,12 @@ func isExhaustiveParentQuery(query ListQuery) bool {
 	if query.ParentID == "" || len(query.ParentIDs) > 0 || query.Limit != 0 {
 		return false
 	}
-	// Only an unbounded parent census makes omission evidence that a cached
-	// child may have moved or disappeared. Narrowed results omit rows by design.
-	query.ParentID = ""
-	return !query.HasFilter()
+	// An unbounded parent query is exhaustive for cached rows that currently
+	// match its complete predicate. staleParentCacheIDs applies query.Matches
+	// before treating omission as evidence, so additional exact filters do not
+	// make unrelated siblings stale. A positive limit does, and is rejected
+	// above.
+	return query.Validate() == nil
 }
 
 func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string {

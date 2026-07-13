@@ -76,7 +76,13 @@ type ListQuery struct {
 	// batched form of ParentID for graph/subtree walks. Backends that do not
 	// recognize it should ignore it (returning a superset); callers that need
 	// exact results must filter the returned beads by parent in memory.
-	ParentIDs     []string
+	ParentIDs []string
+	// IDs matches beads whose id is any of the listed ids — the exact-set
+	// lookup the reconcile re-verify uses to confirm a small set of missing
+	// beads without a full active-universe scan. Backends that can push it down
+	// (native Dolt via IssueFilter.IDs → `id IN (...)`) do; Matches enforces it
+	// in memory so every store honors it regardless.
+	IDs           []string
 	Metadata      map[string]string
 	CreatedBefore time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
@@ -136,6 +142,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Label != "" ||
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
+		len(q.IDs) > 0 ||
 		q.ParentID != "" ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
@@ -158,6 +165,18 @@ func (q ListQuery) Matches(b Bead) bool {
 		// no tier filter
 	default: // TierIssues
 		if b.Ephemeral {
+			return false
+		}
+	}
+	if len(q.IDs) > 0 {
+		matched := false
+		for _, id := range q.IDs {
+			if b.ID == id {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}

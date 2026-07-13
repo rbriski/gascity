@@ -1026,21 +1026,25 @@ func gracefulStopAllWithOwnership(
 	}
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
-	// This is intentionally flat: interrupts are a best-effort graceful hint,
-	// while pass 2 keeps reverse dependency ordering for any survivors.
+	// This is intentionally flat: interrupts remain a best-effort graceful hint
+	// for controller-owned shutdown, while pass 2 keeps reverse dependency
+	// ordering for survivors. A direct owner that retains entered calls keeps a
+	// per-target timeout as a sticky command failure even if pass 2 later stops
+	// the target; exceeding the inner cap cannot be rewritten into exit zero.
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
 	var sent int
+	var interruptErr error
 	if retainEntered {
-		sent = interruptTargetsBoundedRetainingEnteredWithBudget(targets, cfg, store.Store, sp, stderr, budget)
+		sent, interruptErr = interruptTargetsBoundedRetainingEnteredWithBudget(targets, cfg, store.Store, sp, stderr, budget)
 	} else {
 		sent = interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
 	}
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 	if !stopEffectAdmitted(budget) {
-		return errStopCompletionDeadline
+		return errors.Join(interruptErr, errStopCompletionDeadline)
 	}
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
@@ -1051,7 +1055,7 @@ func gracefulStopAllWithOwnership(
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !stopEffectAdmitted(budget) {
-			return errStopCompletionDeadline
+			return errors.Join(interruptErr, errStopCompletionDeadline)
 		}
 		if stopForceRequested(forceStopRequested) {
 			break
@@ -1059,17 +1063,17 @@ func gracefulStopAllWithOwnership(
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
 			if !stopEffectAdmitted(budget) {
-				return errStopCompletionDeadline
+				return errors.Join(interruptErr, errStopCompletionDeadline)
 			}
 			allExited = len(runningSet) == 0
 		} else {
 			for _, name := range names {
 				if !stopEffectAdmitted(budget) {
-					return errStopCompletionDeadline
+					return errors.Join(interruptErr, errStopCompletionDeadline)
 				}
 				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 				if !stopEffectAdmitted(budget) {
-					return errStopCompletionDeadline
+					return errors.Join(interruptErr, errStopCompletionDeadline)
 				}
 				if err == nil && running {
 					allExited = false
@@ -1096,13 +1100,13 @@ func gracefulStopAllWithOwnership(
 
 	// Pass 2: kill survivors.
 	if !stopEffectAdmitted(budget) {
-		return errStopCompletionDeadline
+		return errors.Join(interruptErr, errStopCompletionDeadline)
 	}
 	var survivors []string
-	var cleanupErr error
+	cleanupErr := interruptErr
 	runningSet, listed := runningSessionSet(sp, names)
 	if !stopEffectAdmitted(budget) {
-		return errStopCompletionDeadline
+		return errors.Join(cleanupErr, errStopCompletionDeadline)
 	}
 	for _, name := range names {
 		if !stopEffectAdmitted(budget) {

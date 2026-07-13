@@ -4598,11 +4598,12 @@ func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
+	closer := &closerSpy{}
 	done := make(chan struct{})
 	time.AfterFunc(60*time.Millisecond, func() {
+		_ = closer.Close()
 		close(done)
 	})
-	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
 	mc := &managedCity{
 		name:   "bright-lights",
@@ -4770,6 +4771,7 @@ func TestStopManagedCityPreservingSessionsSkipsBeadsProviderShutdown(t *testing.
 		name: "bright-lights",
 		cancel: func() {
 			canceled = true
+			_ = closer.Close()
 			close(done)
 		},
 		done:   done,

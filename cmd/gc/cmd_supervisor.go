@@ -1145,10 +1145,21 @@ func appendManagedShutdownError(mc *managedCity, err error) {
 	}
 }
 
+func recordManagedControllerStarted(mc *managedCity, rec events.Recorder, stderr io.Writer) {
+	if recovered := captureManagedCityPanic(func() {
+		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	}); recovered != nil {
+		err := fmt.Errorf("controller-started event publication panic: %v", recovered)
+		appendManagedShutdownError(mc, err)
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': %v\n", mc.name, err) //nolint:errcheck
+	}
+}
+
 // runManagedCityWithLease is the final ownership barrier for a managed city.
-// Regardless of a panic in the runtime epilogue, it records a terminal error,
-// releases the exact transferred controller lease, and closes done last.
-func runManagedCityWithLease(mc *managedCity, lock *controllerLockLease, stderr io.Writer, run func()) {
+// Regardless of a panic in the runtime epilogue, it runs the publication
+// finalizer, closes the event recorder, releases the exact transferred
+// controller lease, and closes done last.
+func runManagedCityWithLease(mc *managedCity, lock *controllerLockLease, stderr io.Writer, run, finalize func()) {
 	defer close(mc.done)
 	defer func() {
 		var closeErr error
@@ -1158,6 +1169,29 @@ func runManagedCityWithLease(mc *managedCity, lock *controllerLockLease, stderr 
 		if closeErr != nil {
 			appendManagedShutdownError(mc, fmt.Errorf("controller lock close: %w", closeErr))
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock close: %v\n", mc.name, closeErr) //nolint:errcheck
+		}
+	}()
+	defer func() {
+		if mc.closer == nil {
+			return
+		}
+		var closeErr error
+		if recovered := captureManagedCityPanic(func() { closeErr = mc.closer.Close() }); recovered != nil {
+			closeErr = fmt.Errorf("panic: %v", recovered)
+		}
+		if closeErr != nil {
+			appendManagedShutdownError(mc, fmt.Errorf("event recorder close: %w", closeErr))
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': event recorder close: %v\n", mc.name, closeErr) //nolint:errcheck
+		}
+	}()
+	defer func() {
+		if finalize == nil {
+			return
+		}
+		if recovered := captureManagedCityPanic(finalize); recovered != nil {
+			err := fmt.Errorf("managed finalizer panic: %v", recovered)
+			appendManagedShutdownError(mc, err)
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': %v\n", mc.name, err) //nolint:errcheck
 		}
 	}()
 	defer func() {
@@ -1180,6 +1214,47 @@ func deleteManagedCityIfCurrent(cities map[string]*managedCity, path string, cur
 	return false
 }
 
+func finalizeManagedCityRun(cr *cityRegistry, path, name string, current *managedCity, runtimePanic any, stderr io.Writer) {
+	var panicCount int
+	var retryDelay time.Duration
+	cr.BatchUpdate(func(
+		cities map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		_ map[string]*initFailRecord,
+		panicHistory map[string]*panicRecord,
+	) {
+		if cities[path] != current {
+			return
+		}
+		if runtimePanic == nil {
+			delete(panicHistory, path)
+			deleteManagedCityIfCurrent(cities, path, current)
+			return
+		}
+
+		pr := panicHistory[path]
+		if pr == nil {
+			pr = &panicRecord{}
+			panicHistory[path] = pr
+		}
+		pr.count++
+		exp := pr.count - 1
+		if exp > 5 {
+			exp = 5
+		}
+		retryDelay = time.Duration(10<<exp) * time.Second
+		if retryDelay > 5*time.Minute {
+			retryDelay = 5 * time.Minute
+		}
+		pr.backoff = time.Now().Add(retryDelay)
+		panicCount = pr.count
+		deleteManagedCityIfCurrent(cities, path, current)
+	})
+	if panicCount > 0 {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", name, panicCount, retryDelay) //nolint:errcheck
+	}
+}
+
 // managedCityStopTimeout returns the grace period for a city stop.
 // Only ShutdownTimeoutDuration is used — startup and drift-drain timeouts
 // are intentionally excluded because they govern unrelated lifecycle phases.
@@ -1200,9 +1275,6 @@ func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 }
 
 func finishManagedCityStop(mc *managedCity, prior error) error {
-	if mc.closer != nil {
-		mc.closer.Close() //nolint:errcheck
-	}
 	if mc.managedShutdownErr != nil {
 		return errors.Join(prior, fmt.Errorf("city %q managed shutdown: %w", mc.name, mc.managedShutdownErr))
 	}
@@ -1211,8 +1283,8 @@ func finishManagedCityStop(mc *managedCity, prior error) error {
 
 // stopManagedCity cancels a city's context and waits for the managed owner to
 // finish runtime and provider shutdown while retaining controller.lock. The
-// caller closes only the recorder, and only after done proves the owner has
-// finished. A timeout never starts provider cleanup outside that owner.
+// caller only waits for done and reports the owner's terminal error. A timeout
+// never starts recorder or provider cleanup outside that owner.
 func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if mc == nil {
 		return nil
@@ -2435,10 +2507,14 @@ func startManagedCity(
 		return
 	}
 
-	go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *controllerLockLease) {
+	go func(n, p string, l net.Listener, sock string, origSockInfo os.FileInfo, lk *controllerLockLease) {
+		var result managedCityOwnedPhasesResult
 		runManagedCityWithLease(mc, lk, stderr, func() {
-			result := runManagedCityOwnedPhases(
-				func() { cityRuntime.run(cityCtx) },
+			result = runManagedCityOwnedPhases(
+				func() {
+					recordManagedControllerStarted(mc, rec, stderr)
+					cityRuntime.run(cityCtx)
+				},
 				cityRuntime.shutdown,
 				func() error {
 					if cityRuntime.preserveSessionsShutdown.Load() {
@@ -2479,55 +2555,12 @@ func startManagedCity(
 						})
 					}
 				}
-				// Close the file recorder (only on panic — normal exit
-				// leaves it for the external caller via mc.closer).
-				if cityFr != nil {
-					cityFr.Close() //nolint:errcheck
-				}
-				// Record panic for crash-loop backoff and remove from
-				// cities map in a single batch update.
-				cr.BatchUpdate(func(
-					cities map[string]*managedCity,
-					_ map[string]cityInitProgress,
-					_ map[string]*initFailRecord,
-					panicHistory map[string]*panicRecord,
-				) {
-					pr := panicHistory[p]
-					if pr == nil {
-						pr = &panicRecord{}
-						panicHistory[p] = pr
-					}
-					pr.count++
-					// Exponential backoff: 10s, 20s, 40s, ... capped at 5 min.
-					exp := pr.count - 1
-					if exp > 5 {
-						exp = 5 // prevent int overflow at high panic counts
-					}
-					delay := time.Duration(10<<exp) * time.Second
-					if delay > 5*time.Minute {
-						delay = 5 * time.Minute
-					}
-					pr.backoff = time.Now().Add(delay)
-					fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", n, pr.count, delay) //nolint:errcheck
-					deleteManagedCityIfCurrent(cities, p, mc)
-				})
-			} else {
-				// Normal exit (context canceled) — reset panic counter
-				// and remove from map in a single critical section.
-				cr.BatchUpdate(func(
-					cities map[string]*managedCity,
-					_ map[string]cityInitProgress,
-					_ map[string]*initFailRecord,
-					panicHistory map[string]*panicRecord,
-				) {
-					delete(panicHistory, p)
-					deleteManagedCityIfCurrent(cities, p, mc)
-				})
 			}
+		}, func() {
+			finalizeManagedCityRun(cr, p, n, mc, result.recovered, stderr)
 		})
-	}(cityName, path, fr, lis, sockPath, sockInfo, runtimeLock)
+	}(cityName, path, lis, sockPath, sockInfo, runtimeLock)
 
-	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 }

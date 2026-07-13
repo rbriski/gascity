@@ -673,6 +673,15 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			return 1
 		}
 	}
+	var controllerLockSource *controllerLockLease
+	if controllerMode {
+		controllerLockSource, err = acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLockSource.Close() //nolint:errcheck // no-op after exact ownership transfer
+	}
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -894,7 +903,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+		controllerLock, transferErr := controllerLockSource.Transfer()
+		if transferErr != nil {
+			fmt.Fprintf(stderr, "gc start: transferring controller ownership: %v\n", transferErr) //nolint:errcheck
+			return 1
+		}
+		return runControllerWithLease(controllerLock, cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
 			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
 	}
 

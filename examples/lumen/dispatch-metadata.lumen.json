@@ -1,0 +1,74 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "dispatch-metadata",
+  "input": {
+    "name": "dispatch-metadata.input",
+    "fields": [],
+    "origin": {
+      "uri": "examples/lumen/dispatch-metadata.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "do",
+      "id": "greet",
+      "name": "greet",
+      "after": [],
+      "origin": {
+        "uri": "examples/lumen/dispatch-metadata.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "source": {
+        "kind": "prompt"
+      },
+      "metadata": {
+        "gc.continuation_group": "main"
+      },
+      "interpreter": {
+        "kind": "agent",
+        "mode": {
+          "kind": "do"
+        },
+        "origin": {
+          "uri": "examples/lumen/dispatch-metadata.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "Say hello to Gas City, then settle this step.",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "Say hello to Gas City, then settle this step."
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "markdown",
+        "syntax": "bare",
+        "origin": {
+          "uri": "examples/lumen/dispatch-metadata.lumen",
+          "line": 1,
+          "col": 0
+        }
+      }
+    }
+  ],
+  "origin": {
+    "uri": "examples/lumen/dispatch-metadata.lumen",
+    "line": 0,
+    "col": 0
+  }
+}

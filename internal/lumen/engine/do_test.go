@@ -26,6 +26,23 @@ func doNode(id, prompt string, after []string) string {
     }`
 }
 
+// doNodeWithMetadata renders a do node (like doNode) carrying an additional top-level
+// "metadata" object (raw JSON) of static gc.* routing/affinity keys — the ITEM B
+// passthrough source. It shares doNode's shape so a fixture differs only by the seam
+// under test.
+func doNodeWithMetadata(id, prompt string, after []string, metadataJSON string) string {
+	afterJSON, _ := json.Marshal(after)
+	promptJSON, _ := json.Marshal(prompt)
+	return `{
+      "kind": "do", "id": "` + id + `", "name": "` + id + `", "after": ` + string(afterJSON) + `,
+      "origin": {"uri": "t", "line": 1, "col": 0},
+      "source": {"kind": "prompt"},
+      "metadata": ` + metadataJSON + `,
+      "interpreter": {"kind": "agent", "mode": {"kind": "do"}, "origin": {"uri": "t", "line": 1, "col": 0}},
+      "body": {"raw": ` + string(promptJSON) + `, "language": "markdown", "source": {"kind": "inline"}, "origin": {"uri": "t", "line": 1, "col": 0}}
+    }`
+}
+
 // effectPrompts returns, in seq order, the rendered prompt from each
 // effect.scheduled event.
 func effectPrompts(t *testing.T, events []graphstore.StoredEvent) []string {

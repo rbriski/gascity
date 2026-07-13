@@ -442,7 +442,7 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 		if n.DispatchMode != DispatchModePool {
 			return d.resettleIndexWindow(u, scope)
 		}
-		return d.dispatchPoolWork(u.activation, u.nodeID, n.Route, n.Prompt, opts)
+		return d.dispatchPoolWork(u.activation, u.nodeID, n.Route, n.Prompt, u.leaf.metadata, opts)
 	}
 	route, ok := opts.PoolRouter(u.leaf.agentRef)
 	if !ok {
@@ -478,17 +478,20 @@ func (d *driver) materializePoolWork(u planUnit, scope map[string]string, opts O
 	if err := d.appendPoolActivated(u, route, prompt); err != nil {
 		return err
 	}
-	return d.dispatchPoolWork(u.activation, u.nodeID, route, prompt, opts)
+	return d.dispatchPoolWork(u.activation, u.nodeID, route, prompt, u.leaf.metadata, opts)
 }
 
 // dispatchPoolWork is the real-bead path's create+journal step (REDESIGN §1.4/§2.3):
 // it calls the DispatchWork seam (lookup-then-create — a durable, metadata-findable
 // side effect FIRST, the CAS-blob-before-append discipline), then appends the
 // write-once owned.admitted{kind:work_bead, bead_id} dispatch fact. It passes the
-// FOLD-recorded route/prompt so a re-Advance re-dispatches byte-identically. A crash
-// between the create and the fact (crashAfterDispatch) leaves a findable bead the
-// next Advance re-adopts (§9.1) — never an orphan, never a duplicate.
-func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, opts Options) error {
+// FOLD-recorded route/prompt so a re-Advance re-dispatches byte-identically; metadata
+// is the IR-derived static routing/affinity map (u.leaf.metadata), likewise
+// byte-identical on every pass because the decode-time static-literal wall makes it a
+// pure function of the IR (no scope dependency, so no fold needed). A crash between the
+// create and the fact (crashAfterDispatch) leaves a findable bead the next Advance
+// re-adopts (§9.1) — never an orphan, never a duplicate.
+func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, metadata map[string]string, opts Options) error {
 	if opts.DispatchWork == nil {
 		// A pool-mode do (PoolRouter set) with no DispatchWork seam is a composition
 		// error — there is nowhere to create the work bead. Loud, never a silent park.
@@ -501,6 +504,7 @@ func (d *driver) dispatchPoolWork(activation, nodeID, route, prompt string, opts
 		Route:      route,
 		Prompt:     prompt,
 		Attempt:    activationAttempt(activation),
+		Metadata:   metadata,
 	})
 	if err != nil {
 		return fmt.Errorf("lumen: advance: dispatch do %q work bead: %w", nodeID, err)
@@ -579,7 +583,9 @@ func (d *driver) observePoolWork(activation, nodeID, beadID string, scope, nodeO
 
 // appendPoolActivated emits a pool-mode node.activated: the plain engine
 // activation payload (node id, DAG edges, kind) plus the pool-dispatch fields
-// (dispatch_mode=pool, route, prompt). Its idem token matches the
+// (dispatch_mode=pool, route, prompt) and the static do metadata
+// (u.leaf.metadata) — payload-only observability parity that the reducer never
+// folds (the Duration precedent). Its idem token matches the
 // engine-mode appendActivated (streamID:activation:act), and a given activation
 // is either pool OR engine — never both — so there is no collision. This is
 // reached only for the FIRST materialization of an activation: an already
@@ -597,6 +603,7 @@ func (d *driver) appendPoolActivated(u planUnit, route, prompt string) error {
 		DispatchMode:     DispatchModePool,
 		Route:            route,
 		Prompt:           prompt,
+		Metadata:         u.leaf.metadata,
 	})
 }
 

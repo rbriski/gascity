@@ -269,18 +269,27 @@ type runStartedPayload struct {
 // journal field (never the bead), and the reducer does NOT fold it (applyNodeActivated omits it
 // from nodeState), so it is snapshot/StateHash-transparent and additive/omitempty — a
 // non-timeout node.activated folds byte-identically and reducerVersion STAYS 4.
+//
+// Metadata is a pool-mode do's static routing/affinity map (chiefly gc.continuation_group),
+// stamped ONLY on a pool node's node.activated by appendPoolActivated (from u.leaf.metadata);
+// the engine-mode appendActivated omits it, so a non-pool activation folds byte-identically.
+// It follows the Duration precedent EXACTLY — payload-only observability parity, the reducer
+// does NOT fold it (applyNodeActivated ignores it), so it is snapshot/StateHash-transparent and
+// additive/omitempty, and reducerVersion STAYS 4. The authoritative copy rides onto the minted
+// work bead via WorkDispatch.Metadata; both derive from the same static IR unit in one pass.
 type nodeActivatedPayload struct {
-	NodeID           string   `json:"node_id"`
-	Activation       string   `json:"activation"`
-	ParentActivation string   `json:"parent_activation,omitempty"`
-	MemberIndex      *int     `json:"member_index,omitempty"`
-	After            []string `json:"after,omitempty"`
-	Members          []string `json:"members,omitempty"`
-	Kind             string   `json:"kind"`
-	DispatchMode     string   `json:"dispatch_mode,omitempty"`
-	Route            string   `json:"route,omitempty"`
-	Prompt           string   `json:"prompt,omitempty"`
-	Duration         string   `json:"duration,omitempty"`
+	NodeID           string            `json:"node_id"`
+	Activation       string            `json:"activation"`
+	ParentActivation string            `json:"parent_activation,omitempty"`
+	MemberIndex      *int              `json:"member_index,omitempty"`
+	After            []string          `json:"after,omitempty"`
+	Members          []string          `json:"members,omitempty"`
+	Kind             string            `json:"kind"`
+	DispatchMode     string            `json:"dispatch_mode,omitempty"`
+	Route            string            `json:"route,omitempty"`
+	Prompt           string            `json:"prompt,omitempty"`
+	Duration         string            `json:"duration,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
 // nodeDecisionPayload is the body of EventNodeDecision.

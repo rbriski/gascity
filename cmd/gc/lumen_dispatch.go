@@ -62,17 +62,25 @@ func lumenDispatchWork(store beads.Store, cfg *config.City) func(context.Context
 		}
 
 		// 3. Create the ordinary, born-claimable work bead. Readiness gating already
-		// happened in the fold (only READY do's dispatch), so it needs no deps.
+		// happened in the fold (only READY do's dispatch), so it needs no deps. The pack's
+		// static passthrough metadata (chiefly gc.continuation_group, read at claim by
+		// preassignHookContinuationGroup) is written FIRST; the four engine-owned routing
+		// keys are stamped LAST so they always win a collision — belt-and-suspenders with
+		// the decode-time reserved-key refusal, and it never perturbs the idempotency
+		// lookup above (keyed on the engine-owned run/activation pair).
+		meta := make(map[string]string, len(w.Metadata)+4)
+		for k, v := range w.Metadata {
+			meta[k] = v
+		}
+		meta[beadmeta.RoutedToMetadataKey] = w.Route
+		meta[beadmeta.LumenRunMetadataKey] = w.StreamID
+		meta[beadmeta.LumenActivationMetadataKey] = w.Activation
+		meta[beadmeta.LumenAttemptMetadataKey] = strconv.Itoa(w.Attempt)
 		created, err := store.Create(beads.Bead{
 			Type:        "task",
 			Title:       w.NodeID,
 			Description: w.Prompt,
-			Metadata: map[string]string{
-				beadmeta.RoutedToMetadataKey:        w.Route,
-				beadmeta.LumenRunMetadataKey:        w.StreamID,
-				beadmeta.LumenActivationMetadataKey: w.Activation,
-				beadmeta.LumenAttemptMetadataKey:    strconv.Itoa(w.Attempt),
-			},
+			Metadata:    meta,
 		})
 		if err != nil {
 			return "", fmt.Errorf("lumen dispatch: creating work bead for %s/%s: %w", w.StreamID, w.Activation, err)

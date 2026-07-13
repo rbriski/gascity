@@ -167,6 +167,13 @@ type WorkDispatch struct {
 	Route      string
 	Prompt     string
 	Attempt    int
+	// Metadata is the do node's optional static routing/affinity metadata (chiefly
+	// gc.continuation_group), decoded once from the IR behind the static-literal and
+	// reserved-key walls (decodeDoMetadata). The DispatchWork seam writes it onto the
+	// minted work bead FIRST, then stamps the engine-owned routing keys LAST (they
+	// win). Because it is IR-derived and static, it is byte-identical on genesis and
+	// every crash re-adopt — no fold needed, the Duration payload-only precedent.
+	Metadata map[string]string
 }
 
 // WorkObservation is a dispatched work bead's terminal state as ObserveWork reports

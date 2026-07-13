@@ -49,6 +49,36 @@ func TestEnqueueRefusesUnlowerableIR(t *testing.T) {
 	}
 }
 
+// TestEnqueueRefusesInterpolatedDoMetadata pins the ITEM B static-literal wall at the
+// enqueue gate: a do whose static metadata carries an interpolated value is refused
+// LOUD (wrapping ErrUnsupportedNode, "does not lower") before run.started — buildUnits
+// runs decodeDoMetadata inside the pre-validation, so the determinism wall surfaces at
+// enqueue, never as a wedged run. Mutation (ii) — dropping the wall — turns this RED.
+func TestEnqueueRefusesInterpolatedDoMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	doc := decodeIR(t, blockDoc("meta",
+		doNodeWithMetadata("hello", "Say hello.", nil, `{"gc.continuation_group":"{{who}}"}`)))
+
+	streamID, err := engine.EnqueueRun(ctx, store, doc, nil, "packs/x@v1", "workers")
+	if err == nil {
+		t.Fatalf("enqueue accepted interpolated do metadata (stream %q); want a loud refusal", streamID)
+	}
+	if !errors.Is(err, engine.ErrUnsupportedNode) {
+		t.Fatalf("enqueue error = %v, want wrapped ErrUnsupportedNode", err)
+	}
+	if !strings.Contains(err.Error(), "does not lower") {
+		t.Errorf("enqueue error = %q, want it to name the lowering failure", err.Error())
+	}
+	runs, lerr := engine.ListOpenRuns(ctx, store)
+	if lerr != nil {
+		t.Fatalf("list open runs: %v", lerr)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("open runs = %d, want 0 (the refusal left no run behind)", len(runs))
+	}
+}
+
 // containsRun reports whether the discovered open-run set includes streamID.
 func containsRun(runs []engine.OpenRun, streamID string) bool {
 	for _, r := range runs {

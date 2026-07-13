@@ -9,9 +9,22 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/lumen/exechost"
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
+
+// reservedDoMetadataKeys are the engine-owned routing keys lumenDispatchWork stamps
+// LAST onto every minted work bead. A translated pack may not carry them as static
+// do metadata: refusing them at decode is a belt-and-suspenders guard beside the
+// dispatch seam's stamp-last ordering, so a clobber attempt of the authoritative
+// routing keys fails LOUD at enqueue rather than being silently overwritten.
+var reservedDoMetadataKeys = map[string]bool{
+	beadmeta.RoutedToMetadataKey:        true,
+	beadmeta.LumenRunMetadataKey:        true,
+	beadmeta.LumenActivationMetadataKey: true,
+	beadmeta.LumenAttemptMetadataKey:    true,
+}
 
 // lumenDurationRE is the reference compiler's compile-time duration grammar
 // (isParseableLumenDuration, formula-language index.ts): a non-negative integer with no
@@ -47,6 +60,13 @@ type step struct {
 
 	// do fields.
 	agentRef string
+	// metadata is a do node's optional STATIC routing/affinity metadata (chiefly
+	// gc.continuation_group) that rides VERBATIM onto the minted work bead — the
+	// TNK Duration payload-only precedent for a map[string]string. It is decoded
+	// once in decodeDo (the single decode point) behind two decode-time walls
+	// (static-literal + reserved-key), so it is a pure function of the IR and folds
+	// byte-identically on every Advance pass with no scope dependency.
+	metadata map[string]string
 
 	// settle/lit/interp/do value evaluation.
 	raw map[string]json.RawMessage
@@ -2767,7 +2787,55 @@ func decodeDo(n ir.Node) (step, error) {
 		}
 		s.agentRef = interp.Agent.Name
 	}
+	meta, err := decodeDoMetadata(n)
+	if err != nil {
+		return step{}, err
+	}
+	s.metadata = meta
 	return s, nil
+}
+
+// decodeDoMetadata decodes a do node's optional static routing/affinity metadata
+// (n.Raw["metadata"]) into a string map that rides VERBATIM onto the minted work
+// bead. Two decode-time walls run here — inside buildUnits, which the enqueue gate
+// pre-executes before any journal event, so both surface LOUD at enqueue:
+//
+//  1. Every value must be a STATIC LITERAL: a value carrying a `{{…}}` template
+//     (plain, indexed, or call form) is refused. This is the load-bearing
+//     determinism wall — static metadata is a pure function of the IR, so it is
+//     byte-identical on every Advance pass with no scope dependency, sidestepping
+//     the folded-prompt re-render hazard entirely.
+//  2. An engine-reserved routing key (reservedDoMetadataKeys) is refused so a pack
+//     cannot clobber the authoritative keys the dispatch seam stamps.
+//
+// An absent metadata object is a nil map (no field on the wire). Refusals wrap
+// ErrUnsupportedNode so the enqueue gate triages them in house style.
+func decodeDoMetadata(n ir.Node) (map[string]string, error) {
+	raw, ok := n.Raw["metadata"]
+	if !ok {
+		return nil, nil
+	}
+	var meta map[string]string
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil, fmt.Errorf("%w: do %q metadata must be a static string map: %w", ErrUnsupportedNode, n.ID, err)
+	}
+	if len(meta) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic refusal order
+	for _, k := range keys {
+		if reservedDoMetadataKeys[k] {
+			return nil, fmt.Errorf("%w: do %q metadata key %q is engine-reserved (routing keys are stamped by the dispatch seam)", ErrUnsupportedNode, n.ID, k)
+		}
+		if strings.Contains(meta[k], "{{") {
+			return nil, fmt.Errorf("%w: do %q metadata value for %q is interpolated (%q); metadata must be a static literal", ErrUnsupportedNode, n.ID, k, meta[k])
+		}
+	}
+	return meta, nil
 }
 
 // renderPrompt renders a do node's body to the prompt string against scope. It

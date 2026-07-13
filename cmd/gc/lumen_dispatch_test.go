@@ -53,6 +53,86 @@ func TestLumenDispatchSeamLookupBeforeCreate(t *testing.T) {
 	}
 }
 
+// TestLumenDispatchStampsPassthroughMetadata proves the ITEM B passthrough: a
+// WorkDispatch carrying static routing/affinity metadata (gc.continuation_group) stamps
+// it onto the minted work bead ALONGSIDE the four engine-owned routing keys — so a
+// translated pack's affinity vector rides onto the real claim surface.
+func TestLumenDispatchStampsPassthroughMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	dispatch := lumenDispatchWork(store, lumenPoolCfg())
+	w := engine.WorkDispatch{
+		StreamID: "gcg-run-m", Activation: "draft:0", NodeID: "draft", Route: "workers", Prompt: "do it", Attempt: 0,
+		Metadata: map[string]string{"gc.continuation_group": "main", "gc.scope_ref": "release-7"},
+	}
+
+	id, err := dispatch(ctx, w)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.LumenRunMetadataKey: "gcg-run-m"}, IncludeClosed: true, AllowScan: true})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("list = (%d beads, %v), want exactly 1", len(all), err)
+	}
+	b := all[0]
+	if b.ID != id {
+		t.Fatalf("listed bead id %q != dispatched id %q", b.ID, id)
+	}
+	// The passthrough keys landed.
+	if got := b.Metadata["gc.continuation_group"]; got != "main" {
+		t.Errorf("bead gc.continuation_group = %q, want main", got)
+	}
+	if got := b.Metadata["gc.scope_ref"]; got != "release-7" {
+		t.Errorf("bead gc.scope_ref = %q, want release-7", got)
+	}
+	// The engine-owned keys are still present and correct alongside them.
+	if b.Metadata[beadmeta.RoutedToMetadataKey] != "workers" ||
+		b.Metadata[beadmeta.LumenActivationMetadataKey] != "draft:0" ||
+		b.Metadata[beadmeta.LumenAttemptMetadataKey] != "0" {
+		t.Fatalf("engine-owned keys wrong on %+v", b.Metadata)
+	}
+}
+
+// TestLumenDispatchEngineKeysWinOverPassthrough proves the stamp-LAST ordering: even if
+// a WorkDispatch's passthrough map carries an engine-reserved key (which decodeDoMetadata
+// already refuses upstream), the dispatch seam overwrites it with the authoritative value
+// — so the routing keys can never be clobbered. Dropping the stamp-last ordering turns
+// this RED (the clobber mutation).
+func TestLumenDispatchEngineKeysWinOverPassthrough(t *testing.T) {
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	dispatch := lumenDispatchWork(store, lumenPoolCfg())
+	w := engine.WorkDispatch{
+		StreamID: "gcg-run-c", Activation: "draft:0", NodeID: "draft", Route: "workers", Prompt: "p", Attempt: 3,
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:     "evil-pool",
+			beadmeta.LumenAttemptMetadataKey: "999",
+			"gc.continuation_group":          "main",
+		},
+	}
+
+	id, err := dispatch(ctx, w)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	all, _ := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.LumenRunMetadataKey: "gcg-run-c"}, IncludeClosed: true, AllowScan: true})
+	if len(all) != 1 || all[0].ID != id {
+		t.Fatalf("list = %d beads, want 1 matching %q", len(all), id)
+	}
+	b := all[0]
+	// Engine values win the collision.
+	if got := b.Metadata[beadmeta.RoutedToMetadataKey]; got != "workers" {
+		t.Fatalf("gc.routed_to = %q, want workers (engine key must win over a passthrough clobber)", got)
+	}
+	if got := b.Metadata[beadmeta.LumenAttemptMetadataKey]; got != "3" {
+		t.Fatalf("gc.lumen_attempt = %q, want 3 (engine key must win)", got)
+	}
+	// The non-colliding passthrough key still rides.
+	if got := b.Metadata["gc.continuation_group"]; got != "main" {
+		t.Errorf("gc.continuation_group = %q, want main", got)
+	}
+}
+
 // TestLumenDispatchSeamValidatesRoute proves a route that resolves to no pool-capable
 // agent template is refused LOUD, with NO bead created (REDESIGN §3 GAP mitigation).
 func TestLumenDispatchSeamValidatesRoute(t *testing.T) {

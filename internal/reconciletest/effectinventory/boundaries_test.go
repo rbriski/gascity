@@ -94,11 +94,7 @@ func TestCanonicalBoundariesReturnIndependentSlices(t *testing.T) {
 
 func TestCanonicalBoundariesResolveInEveryAnalysisProfile(t *testing.T) {
 	config := fixtureAnalysisConfig(t, nil)
-	patterns, err := canonicalSourcePatterns(canonicalAnalysisRoots())
-	if err != nil {
-		t.Fatalf("canonicalSourcePatterns() error: %v", err)
-	}
-	config.Patterns = patterns
+	config.Patterns = canonicalProductionAnalysisPatterns()
 
 	for _, profile := range canonicalAnalysisProfiles() {
 		t.Run(string(profile.ID), func(t *testing.T) {

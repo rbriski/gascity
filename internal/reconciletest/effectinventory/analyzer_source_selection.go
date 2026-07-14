@@ -28,7 +28,10 @@ type sourceSelectionProblem struct {
 	detail string
 }
 
-func canonicalAnalysisRoots() []string {
+// canonicalSourceAuditRoots returns the directory union whose production Go
+// files must be selected by at least one canonical build profile. This
+// filesystem audit is deliberately independent of analyzer reachability.
+func canonicalSourceAuditRoots() []string {
 	return []string{
 		"cmd/gc",
 		"internal/api",
@@ -135,7 +138,7 @@ func sourceCandidates(repoRoot string, roots []string) ([]string, error) {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("source file %s is not regular", diagnosticPath)
 			}
-			if canonicalNonProductionSourceFile(diagnosticPath) {
+			if canonicalSourceAuditExclusion(diagnosticPath) {
 				return nil
 			}
 			candidates[diagnosticPath] = true
@@ -154,7 +157,7 @@ func sourceCandidates(repoRoot string, roots []string) ([]string, error) {
 	return result, nil
 }
 
-func canonicalNonProductionSourceFile(filename string) bool {
+func canonicalSourceAuditExclusion(filename string) bool {
 	// This integration-only composition seam is imported by the dashboard
 	// end-to-end harness and is deliberately absent from production builds.
 	// If its constraint is removed, selectedCanonicalSources reports it as a

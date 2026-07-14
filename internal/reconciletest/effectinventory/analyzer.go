@@ -42,18 +42,19 @@ type ObservedSite struct {
 }
 
 type loadedAnalysis struct {
-	config        analysisConfig
-	profile       analysisProfile
-	roots         []*packages.Package
-	ssaRoots      []*ssa.Package
-	program       *ssa.Program
-	packages      map[string]*packages.Package
-	sourceFuncs   map[*ssa.Function]bool
-	callGraph     *callgraph.Graph
-	selectOps     map[token.Pos]OperationKind
-	receivers     map[token.Pos]types.Type
-	initReachable map[*ssa.Function]bool
-	channelInputs map[ssa.Value]map[string]bool
+	config            analysisConfig
+	profile           analysisProfile
+	roots             []*packages.Package
+	sourcePackages    []*packages.Package
+	ssaSourcePackages []*ssa.Package
+	program           *ssa.Program
+	packages          map[string]*packages.Package
+	sourceFuncs       map[*ssa.Function]bool
+	callGraph         *callgraph.Graph
+	selectOps         map[token.Pos]OperationKind
+	receivers         map[token.Pos]types.Type
+	initReachable     map[*ssa.Function]bool
+	channelInputs     map[ssa.Value]map[string]bool
 }
 
 type resolvedBoundary struct {
@@ -134,7 +135,7 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	fset := token.NewFileSet()
 	roots, loadErr := packages.Load(&packages.Config{
 		Context:    ctx,
-		Mode:       packages.LoadSyntax | packages.NeedModule,
+		Mode:       packages.LoadAllSyntax | packages.NeedModule,
 		Dir:        repoRoot,
 		Env:        profileEnvironment(profile),
 		BuildFlags: profileBuildFlags(profile),
@@ -149,6 +150,7 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	}
 
 	packageIndex := make(map[string]*packages.Package)
+	var sourcePackages []*packages.Package
 	var problems []string
 	packages.Visit(roots, nil, func(pkg *packages.Package) {
 		if pkg == nil {
@@ -167,6 +169,17 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 			} else {
 				packageIndex[pkg.Types.Path()] = pkg
 			}
+		}
+		if pkg.Module != nil && pkg.Module.Path == config.ModulePath {
+			if pkg.PkgPath != config.ModulePath && !strings.HasPrefix(pkg.PkgPath, config.ModulePath+"/") {
+				problems = append(problems, fmt.Sprintf("module package %s escapes module %s", pkg.PkgPath, config.ModulePath))
+				return
+			}
+			if pkg.Types == nil || pkg.TypesInfo == nil || pkg.Fset == nil || pkg.TypesSizes == nil {
+				problems = append(problems, fmt.Sprintf("module package %s has incomplete typed syntax", pkg.PkgPath))
+				return
+			}
+			sourcePackages = append(sourcePackages, pkg)
 		}
 	})
 	for _, root := range roots {
@@ -189,15 +202,21 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 		problems = compactStrings(problems)
 		return nil, fmt.Errorf("effect discovery could not type-check profile %q:\n- %s", profile.ID, strings.Join(problems, "\n- "))
 	}
+	sort.Slice(sourcePackages, func(i, j int) bool {
+		return sourcePackages[i].PkgPath < sourcePackages[j].PkgPath
+	})
+	if len(sourcePackages) == 0 {
+		return nil, fmt.Errorf("effect discovery: profile %q selected no source packages in module %q", profile.ID, config.ModulePath)
+	}
 
-	program, ssaRoots := ssautil.Packages(roots, ssa.InstantiateGenerics|ssa.SanityCheckFunctions|ssa.BuildSerially)
+	program, ssaSourcePackages := ssautil.Packages(sourcePackages, ssa.InstantiateGenerics|ssa.SanityCheckFunctions|ssa.BuildSerially)
 	program.Build()
-	for index, root := range ssaRoots {
-		if root == nil {
-			return nil, fmt.Errorf("effect discovery: package %s has no SSA package", roots[index].PkgPath)
+	for index, sourcePackage := range ssaSourcePackages {
+		if sourcePackage == nil {
+			return nil, fmt.Errorf("effect discovery: module package %s has no SSA package", sourcePackages[index].PkgPath)
 		}
 	}
-	sourceFuncs, err := collectSourceFunctions(program, roots, ssaRoots)
+	sourceFuncs, err := collectSourceFunctions(program, sourcePackages, ssaSourcePackages)
 	if err != nil {
 		return nil, err
 	}
@@ -214,17 +233,18 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 
 	resolvedGraph := vta.CallGraph(graphFunctions, chaGraph)
 	return &loadedAnalysis{
-		config:        analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...)},
-		profile:       profile,
-		roots:         roots,
-		ssaRoots:      ssaRoots,
-		program:       program,
-		packages:      packageIndex,
-		sourceFuncs:   sourceFuncs,
-		callGraph:     resolvedGraph,
-		selectOps:     collectSelectOperations(roots),
-		receivers:     collectSelectionReceivers(roots),
-		initReachable: functionsReachableFromInitializers(ssaRoots, resolvedGraph),
+		config:            analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...)},
+		profile:           profile,
+		roots:             roots,
+		sourcePackages:    sourcePackages,
+		ssaSourcePackages: ssaSourcePackages,
+		program:           program,
+		packages:          packageIndex,
+		sourceFuncs:       sourceFuncs,
+		callGraph:         resolvedGraph,
+		selectOps:         collectSelectOperations(sourcePackages),
+		receivers:         collectSelectionReceivers(sourcePackages),
+		initReachable:     functionsReachableFromInitializers(ssaSourcePackages, resolvedGraph),
 	}, nil
 }
 

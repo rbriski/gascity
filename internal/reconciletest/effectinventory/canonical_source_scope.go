@@ -70,11 +70,16 @@ func runCanonicalProfile(ctx context.Context, config analysisConfig, profile ana
 	if err := validateCanonicalRawProcessGuard(analysis); err != nil {
 		return canonicalProfileRun{}, err
 	}
-	sites, err := discoverLoadedProfile(analysis, registry.Boundaries)
-	if err != nil {
+	// Bind authored SSA claims before the expensive effect scan so stale
+	// catalog evidence fails without producing partial discovery output.
+	if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
 		return canonicalProfileRun{}, err
 	}
-	if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
+	if err := validateTargetGateEvidenceForProfile(analysis, registry); err != nil {
+		return canonicalProfileRun{}, err
+	}
+	sites, err := discoverLoadedProfile(analysis, registry.Boundaries)
+	if err != nil {
 		return canonicalProfileRun{}, err
 	}
 	after, err := fingerprintSourcePaths(config.RepoRoot, paths)

@@ -265,3 +265,82 @@ func TestComputePoolTriggerBindingPatchMatchesRaw(t *testing.T) {
 		}
 	}
 }
+
+func TestComputePoolTriggerBindingPatchPreservesRecordedWorkDirForSameTrigger(t *testing.T) {
+	tests := []struct {
+		name      string
+		metadata  map[string]string
+		request   SessionRequest
+		derived   string
+		wantPatch map[string]string
+	}{
+		{
+			name: "canonical path heals missing legacy twin",
+			metadata: map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey: "wb-same",
+				beadmeta.WorkDirMetadataKey:       "/work/wb-same-with-title",
+			},
+			request: SessionRequest{WorkBeadID: "wb-same"},
+			derived: "/work/wb-same",
+			wantPatch: map[string]string{
+				beadmeta.LegacyWorkDirMetadataKey: "/work/wb-same-with-title",
+			},
+		},
+		{
+			name: "legacy path heals missing canonical twin",
+			metadata: map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey: "wb-same",
+				beadmeta.LegacyWorkDirMetadataKey: "/work/wb-same-with-title",
+			},
+			request: SessionRequest{WorkBeadID: "wb-same"},
+			derived: "/work/wb-same",
+			wantPatch: map[string]string{
+				beadmeta.WorkDirMetadataKey: "/work/wb-same-with-title",
+			},
+		},
+		{
+			name: "canonical path wins over divergent legacy twin",
+			metadata: map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey: "wb-same",
+				beadmeta.WorkDirMetadataKey:       "/work/wb-same-with-title",
+				beadmeta.LegacyWorkDirMetadataKey: "/work/wb-same",
+			},
+			request: SessionRequest{WorkBeadID: "wb-same"},
+			derived: "/work/wb-same",
+			wantPatch: map[string]string{
+				beadmeta.LegacyWorkDirMetadataKey: "/work/wb-same-with-title",
+			},
+		},
+		{
+			name: "different trigger receives newly derived path",
+			metadata: map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey: "wb-old",
+				beadmeta.WorkDirMetadataKey:       "/work/wb-old-with-title",
+				beadmeta.LegacyWorkDirMetadataKey: "/work/wb-old-with-title",
+			},
+			request: SessionRequest{WorkBeadID: "wb-new"},
+			derived: "/work/wb-new-with-title",
+			wantPatch: map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey: "wb-new",
+				beadmeta.WorkDirMetadataKey:       "/work/wb-new-with-title",
+				beadmeta.LegacyWorkDirMetadataKey: "/work/wb-new-with-title",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := sessiontest.SeedBead(t, beads.Bead{
+				ID:       "session-1",
+				Type:     session.BeadType,
+				Status:   "open",
+				Labels:   []string{session.LabelSession},
+				Metadata: tt.metadata,
+			})
+			got := computePoolTriggerBindingPatch(info, tt.request, tt.derived)
+			if !reflect.DeepEqual(map[string]string(got), tt.wantPatch) {
+				t.Fatalf("patch = %#v, want %#v", got, tt.wantPatch)
+			}
+		})
+	}
+}

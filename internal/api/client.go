@@ -1590,7 +1590,7 @@ func (c *Client) ExtMsgOutbound(ctx context.Context, sessionID string, conv genc
 	if err != nil {
 		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil {

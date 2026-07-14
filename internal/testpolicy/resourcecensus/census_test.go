@@ -1559,7 +1559,7 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 	ledger := cloneLedger(bootstrapPolicy)
 	ledger.Debt[0].OwnerBead = "ga-rewritten"
 	err := Validate(ledger, Census{}, fixedNow())
-	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-80po0c.2"`)
+	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-cp3hwi"`)
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before code-owned policy drift was rejected: %v", err)
 	}
@@ -1570,8 +1570,8 @@ func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceHTTPTestServer)
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("HTTP test server owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1584,8 +1584,8 @@ func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
 		if row.BaselineCalls != 92 || row.BaselineFiles != 34 {
 			t.Fatalf("net.Listen baseline = %d/%d, want 92/34", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("net.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.Listen owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1598,8 +1598,8 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
 			t.Fatalf("net.ListenConfig.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("net.ListenConfig.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.ListenConfig.Listen owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1612,8 +1612,8 @@ func TestBootstrapPolicyOwnsNetListenUnixgramDebt(t *testing.T) {
 		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
 			t.Fatalf("net.ListenUnixgram baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("net.ListenUnixgram owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.ListenUnixgram owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1626,8 +1626,8 @@ func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
 			t.Fatalf("syscall.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("syscall.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("syscall.Listen owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }

@@ -82,6 +82,7 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-session-by-id-wake":             true,
 	"post-v0-city-by-city-name-sling":                          true,
 	"post-v0-city-by-city-name-unregister":                     true,
+	"register-extmsg-client":                                   true, // 200; identity-idempotent — keyed by credential hash, retries return Created=false (extmsg.RegisterClient)
 	"rotate-events":                                            true,
 	"trigger-maintenance-dolt-gc":                              true,
 }

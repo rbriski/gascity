@@ -22,13 +22,7 @@ const ManagedProcessReapGrace = 3 * time.Second
 // falls back to the direct process signal for older sessions or platforms that
 // cannot signal by group.
 func SignalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil {
-		return nil
-	}
-	return cmd.Process.Signal(sig)
+	return signalProcessGroup(cmd, sig)
 }
 
 // TerminateManagedProcess sends SIGTERM, waits for done, then escalates to

@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -169,7 +170,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	cmd := exec.Command("sh", "-c", command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}
@@ -236,7 +237,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	processDone := make(chan struct{})
 	lis, err := p.startControlSocket(name, cmd, processDone)
 	if err != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearSentinel()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
@@ -274,7 +275,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		// Include stderr tail in the error for diagnostics.
@@ -289,7 +290,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// and clean up — the caller of Stop expects the session to be gone.
 	if err := hsCtx.Err(); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
@@ -416,7 +417,7 @@ func (p *Provider) Interrupt(name string) error {
 		if sc.cmd == nil {
 			return nil
 		}
-		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
+		return runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
 	}
 
 	// Fall back to socket (cross-process case).

@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v1.1.0 so a stock `brew install` pairs matching versions again. The default
   `bd_compatibility = "bd-1.0.4"` semantics are unchanged and run correctly on
   bd 1.1.0, matching what main has exercised in CI since July 6.
+- **Recover fresh server-mode beads initialization with v1.1.0.** Fresh city
+  and rig creation could fail after beads partially created the target Dolt
+  schema and then returned `pending schema migrations alter pre-existing dirty
+  tables` ([beads#4566](https://github.com/gastownhall/beads/issues/4566)). Gas
+  City now recognizes that exact failure only for a database created by the
+  current managed-local initialization, stages the known migration artifacts,
+  and retries with `bd init --reinit-local`. Pre-existing databases and
+  unexpected dirty tables still fail closed.
 
 ## [1.3.4] - 2026-07-10
 

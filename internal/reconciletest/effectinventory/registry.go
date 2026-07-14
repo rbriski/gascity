@@ -126,6 +126,7 @@ const (
 	FamilyRuntimeTeardown           ActionFamily = "runtime-teardown"
 	FamilyServerTeardown            ActionFamily = "server-teardown"
 	FamilyProcessSignal             ActionFamily = "process-signal"
+	FamilyOperatorAttach            ActionFamily = "operator-terminal-attach"
 )
 
 // AccessPath distinguishes canonical boundaries from legacy bypasses.
@@ -138,6 +139,7 @@ const (
 	AccessManagerBypass         AccessPath = "manager-bypass"
 	AccessProviderBypass        AccessPath = "provider-bypass"
 	AccessRawStoreBypass        AccessPath = "raw-store-bypass"
+	AccessStoreAdapter          AccessPath = "store-adapter"
 	AccessProviderNative        AccessPath = "provider-native-internal"
 	AccessProcessBoundary       AccessPath = "process-boundary"
 	AccessDirectProcessBypass   AccessPath = "direct-process-bypass"
@@ -150,13 +152,76 @@ type TargetKind string
 
 // TargetKind values enumerate affected identity classes.
 const (
-	TargetDurableRecord     TargetKind = "durable-record"
-	TargetSessionIdentity   TargetKind = "session-identity"
-	TargetRuntimeIdentity   TargetKind = "runtime-identity"
-	TargetProcessIdentity   TargetKind = "process-identity"
-	TargetProviderServer    TargetKind = "provider-server"
-	TargetEventLog          TargetKind = "event-log"
-	TargetControllerChannel TargetKind = "controller-channel"
+	TargetDurableRecord         TargetKind = "durable-record"
+	TargetDurableGraph          TargetKind = "durable-graph"
+	TargetDurableDependencyEdge TargetKind = "durable-dependency-edge"
+	TargetSessionIdentity       TargetKind = "session-identity"
+	TargetRuntimeIdentity       TargetKind = "runtime-identity"
+	TargetProcessIdentity       TargetKind = "process-identity"
+	TargetProviderServer        TargetKind = "provider-server"
+	TargetEventLog              TargetKind = "event-log"
+	TargetControllerChannel     TargetKind = "controller-channel"
+	TargetOperatorTerminal      TargetKind = "operator-terminal"
+)
+
+// TargetCardinality records how many independently identified targets one
+// physical boundary crossing may affect.
+type TargetCardinality string
+
+// TargetCardinality values distinguish one target, an explicit set, and a
+// graph whose target count is defined by the plan.
+const (
+	TargetCardinalityOne  TargetCardinality = "one"
+	TargetCardinalitySet  TargetCardinality = "set"
+	TargetCardinalityPlan TargetCardinality = "plan"
+)
+
+// TargetIdentityKind records how target identity comes into existence.
+type TargetIdentityKind string
+
+// TargetIdentityKind values distinguish pre-existing, generated, composite,
+// singleton, and append-only identities.
+const (
+	TargetIdentityExisting          TargetIdentityKind = "existing"
+	TargetIdentityGenerated         TargetIdentityKind = "generated"
+	TargetIdentitySymbolicGenerated TargetIdentityKind = "symbolic-to-generated"
+	TargetIdentityComposite         TargetIdentityKind = "composite"
+	TargetIdentitySingleton         TargetIdentityKind = "singleton"
+	TargetIdentityAppendRecord      TargetIdentityKind = "append-record"
+)
+
+// TargetSignatureKind names the bounded argument/result shape of an effect.
+type TargetSignatureKind string
+
+// TargetSignatureKind values cover every current reconciler effect shape
+// without relying on prose to distinguish generated IDs, collections, or
+// composite identities.
+const (
+	TargetSignatureDirect         TargetSignatureKind = "direct"
+	TargetSignatureCreate         TargetSignatureKind = "single-create"
+	TargetSignatureBatch          TargetSignatureKind = "batch"
+	TargetSignatureGraphPlan      TargetSignatureKind = "graph-plan"
+	TargetSignatureDependencyEdge TargetSignatureKind = "dependency-edge"
+	TargetSignatureChannel        TargetSignatureKind = "channel"
+	TargetSignatureProcess        TargetSignatureKind = "process"
+	TargetSignatureEventAppend    TargetSignatureKind = "event-append"
+	TargetSignatureOperatorAttach TargetSignatureKind = "operator-terminal-attach"
+)
+
+// TargetIdentityRole gives each identity component a semantic position in a
+// target signature.
+type TargetIdentityRole string
+
+// TargetIdentityRole values enumerate the bounded signature components.
+const (
+	TargetRolePrimary          TargetIdentityRole = "primary"
+	TargetRoleInput            TargetIdentityRole = "input"
+	TargetRoleGenerated        TargetIdentityRole = "generated"
+	TargetRolePlan             TargetIdentityRole = "plan"
+	TargetRoleFrom             TargetIdentityRole = "from"
+	TargetRoleTo               TargetIdentityRole = "to"
+	TargetRoleOperatorTerminal TargetIdentityRole = "operator-terminal"
+	TargetRoleDestination      TargetIdentityRole = "destination"
 )
 
 // TargetSourceKind identifies a mechanically inspectable target provenance.
@@ -172,6 +237,7 @@ const (
 	TargetSourceChannelPayload  TargetSourceKind = "channel-payload"
 	TargetSourceConfigValue     TargetSourceKind = "config-value"
 	TargetSourceConstant        TargetSourceKind = "constant"
+	TargetSourceAmbientTerminal TargetSourceKind = "ambient-terminal"
 )
 
 // ValueSlotKind identifies a receiver, parameter, result, or channel value.
@@ -179,10 +245,12 @@ type ValueSlotKind string
 
 // ValueSlotKind values enumerate typed value positions.
 const (
-	SlotReceiver       ValueSlotKind = "receiver"
-	SlotParameter      ValueSlotKind = "parameter"
-	SlotResult         ValueSlotKind = "result"
-	SlotChannelElement ValueSlotKind = "channel-element"
+	SlotReceiver        ValueSlotKind = "receiver"
+	SlotParameter       ValueSlotKind = "parameter"
+	SlotResult          ValueSlotKind = "result"
+	SlotChannelElement  ValueSlotKind = "channel-element"
+	SlotBoundaryObject  ValueSlotKind = "boundary-object"
+	SlotAmbientTerminal ValueSlotKind = "ambient-terminal"
 )
 
 // FenceKind names a current exclusion or stale-owner mechanism. Scope and
@@ -350,14 +418,26 @@ type ValueSlot struct {
 	Index int
 }
 
-// TargetRef records both the affected identity and its typed provenance.
-type TargetRef struct {
-	Kind         TargetKind
-	Sink         ValueSlot
+// TargetIdentityRef records one semantically named identity component, its
+// exact boundary slot, optional field projection, and route provenance.
+type TargetIdentityRef struct {
+	Role         TargetIdentityRole
+	BoundarySlot ValueSlot
+	Projection   ObjectRef
 	Source       TargetSourceKind
 	SourceObject ObjectRef
 	SourceSlot   ValueSlot
-	Detail       string
+}
+
+// TargetRef records the affected identity, cardinality, bounded call
+// signature, and typed provenance of every identity component.
+type TargetRef struct {
+	Kind        TargetKind
+	Cardinality TargetCardinality
+	Identity    TargetIdentityKind
+	Signature   TargetSignatureKind
+	Identities  []TargetIdentityRef
+	Detail      string
 }
 
 // Fence records exact source/token objects for one fence mechanism.
@@ -506,6 +586,14 @@ type fencePolicy struct {
 	SuppressesDuplicate    bool
 	RequiresSource         bool
 	RequiresToken          bool
+}
+
+type targetSignaturePolicy struct {
+	Cardinalities []TargetCardinality
+	Identity      TargetIdentityKind
+	Kinds         []TargetKind
+	Effects       []EffectKind
+	Roles         []TargetIdentityRole
 }
 
 type validatedRegistration struct {
@@ -697,7 +785,8 @@ func validateRoute(route Route, matcher OperationSite, boundary BoundaryDefiniti
 		addProblem(problems, scope, "unknown executing process %q", route.ExecutingProcess)
 	}
 	validateFunction(route.LogicalOwner, scope+" logical owner", problems)
-	validateTarget(route.Target, scope, problems)
+	validateTarget(route.Target, boundaryKind, scope, problems)
+	validateTargetActionFamily(route.Target, route.ActionFamily, scope, problems)
 	validateFences(route.Fences, scope, problems)
 	validateGate(route.CurrentGate, scope, problems)
 	validateDisposition(route.Disposition, scope, problems)
@@ -711,6 +800,15 @@ func validateRoute(route Route, matcher OperationSite, boundary BoundaryDefiniti
 		validateAccessKind(route.AccessPath, boundaryKind, scope, problems)
 	}
 	validateException(route, boundaryKind, scope, asOf, validDate, problems)
+}
+
+func validateTargetActionFamily(target TargetRef, family ActionFamily, scope string, problems *[]string) {
+	if target.Signature == TargetSignatureOperatorAttach && family != FamilyOperatorAttach {
+		addProblem(problems, scope, "operator-terminal-attach target requires action family %q", FamilyOperatorAttach)
+	}
+	if family == FamilyOperatorAttach && target.Signature != TargetSignatureOperatorAttach {
+		addProblem(problems, scope, "action family %q requires an operator-terminal-attach target", FamilyOperatorAttach)
+	}
 }
 
 func validateStoreDomain(domain StoreDomain, boundaryKind EffectKind, scope string, problems *[]string) {
@@ -874,6 +972,10 @@ func compileValidatedRegistry(boundaries []BoundaryDefinition, registrations []v
 func cloneRoute(route Route) Route {
 	clone := route
 	clone.LogicalOwner.ClosurePath = append([]int(nil), route.LogicalOwner.ClosurePath...)
+	clone.Target.Identities = append([]TargetIdentityRef(nil), route.Target.Identities...)
+	sort.Slice(clone.Target.Identities, func(i, j int) bool {
+		return canonicalTargetIdentityRef(clone.Target.Identities[i]) < canonicalTargetIdentityRef(clone.Target.Identities[j])
+	})
 	clone.Fences = append([]Fence(nil), route.Fences...)
 	clone.Disposition.Gates = append([]TaskRef(nil), route.Disposition.Gates...)
 	clone.Hops = append([]RouteHop(nil), route.Hops...)
@@ -902,12 +1004,12 @@ func deriveSiteRegistrationID(boundaryID string, matcher OperationSite) SiteRegi
 
 func deriveRouteID(registrationID SiteRegistrationID, profiles []BuildProfileID, route Route) RouteID {
 	content := canonicalFields(
-		"compiled-route-v1",
+		"compiled-route-v2",
 		string(registrationID),
 		canonicalBuildProfiles(profiles),
 		canonicalRoute(route),
 	)
-	return RouteID(deriveContentID("route-v1-", content))
+	return RouteID(deriveContentID("route-v2-", content))
 }
 
 func deriveContentID(prefix, canonical string) string {
@@ -988,7 +1090,7 @@ func canonicalRoute(route Route) string {
 	sort.Strings(tests)
 
 	return canonicalFields(
-		"route-classification-v1",
+		"route-classification-v2",
 		string(route.StoreDomain),
 		string(route.ActionFamily),
 		string(route.ExecutingProcess),
@@ -1006,14 +1108,31 @@ func canonicalRoute(route Route) string {
 }
 
 func canonicalTargetRef(target TargetRef) string {
+	identities := make([]string, len(target.Identities))
+	for index, identity := range target.Identities {
+		identities[index] = canonicalTargetIdentityRef(identity)
+	}
+	sort.Strings(identities)
 	return canonicalFields(
-		"target-v1",
+		"target-v2",
 		string(target.Kind),
-		canonicalValueSlot(target.Sink),
-		string(target.Source),
-		canonicalObjectRef(target.SourceObject),
-		canonicalValueSlot(target.SourceSlot),
+		string(target.Cardinality),
+		string(target.Identity),
+		string(target.Signature),
+		canonicalStringList("target-identities-v1", identities),
 		target.Detail,
+	)
+}
+
+func canonicalTargetIdentityRef(identity TargetIdentityRef) string {
+	return canonicalFields(
+		"target-identity-v1",
+		string(identity.Role),
+		canonicalValueSlot(identity.BoundarySlot),
+		canonicalObjectRef(identity.Projection),
+		string(identity.Source),
+		canonicalObjectRef(identity.SourceObject),
+		canonicalValueSlot(identity.SourceSlot),
 	)
 }
 
@@ -1154,30 +1273,212 @@ func canonicalFields(values ...string) string {
 	return result.String()
 }
 
-func validateTarget(target TargetRef, scope string, problems *[]string) {
-	if !oneOf(target.Kind, TargetDurableRecord, TargetSessionIdentity, TargetRuntimeIdentity, TargetProcessIdentity, TargetProviderServer, TargetEventLog, TargetControllerChannel) {
+func validateTarget(target TargetRef, effect EffectKind, scope string, problems *[]string) {
+	if !knownTargetKind(target.Kind) {
 		addProblem(problems, scope, "unknown target kind %q", target.Kind)
 	}
-	validateSinkSlot(target.Sink, scope+" target sink", problems)
-	if !oneOf(target.Source, TargetSourceBoundaryValue, TargetSourceObjectField, TargetSourceFunctionResult, TargetSourceStoreLiveReread, TargetSourceProcessScan, TargetSourceChannelPayload, TargetSourceConfigValue, TargetSourceConstant) {
-		addProblem(problems, scope, "unknown target source %q", target.Source)
+	if !knownTargetCardinality(target.Cardinality) {
+		addProblem(problems, scope, "unknown target cardinality %q", target.Cardinality)
+	}
+	if !knownTargetIdentity(target.Identity) {
+		addProblem(problems, scope, "unknown target identity %q", target.Identity)
+	}
+	policy, knownSignature := targetPolicyFor(target.Signature)
+	if !knownSignature {
+		addProblem(problems, scope, "unknown target signature %q", target.Signature)
+	} else {
+		if !contains(policy.Cardinalities, target.Cardinality) {
+			addProblem(problems, scope, "signature %q does not allow target cardinality %q", target.Signature, target.Cardinality)
+		}
+		if target.Identity != policy.Identity {
+			addProblem(problems, scope, "signature %q requires target identity %q", target.Signature, policy.Identity)
+		}
+		if !contains(policy.Kinds, target.Kind) {
+			addProblem(problems, scope, "signature %q does not allow target kind %q", target.Signature, target.Kind)
+		}
+		if effect != "" && !contains(policy.Effects, effect) {
+			addProblem(problems, scope, "signature %q does not allow effect kind %q", target.Signature, effect)
+		}
+	}
+	if strings.TrimSpace(target.Detail) == "" {
+		addProblem(problems, scope, "target detail is required")
+	}
+	if len(target.Identities) == 0 {
+		addProblem(problems, scope, "target identities are required")
+		if knownSignature && len(policy.Roles) != 0 {
+			addProblem(problems, scope, "signature %q requires target identity roles %v", target.Signature, policy.Roles)
+		}
 		return
 	}
-	requiresObject := target.Source != TargetSourceBoundaryValue
-	if requiresObject {
-		validateObject(target.SourceObject, scope+" target source object", problems)
-	} else if !target.SourceObject.zero() {
-		addProblem(problems, scope, "boundary-value target source cannot name an object")
+
+	identities := append([]TargetIdentityRef(nil), target.Identities...)
+	sort.Slice(identities, func(i, j int) bool {
+		return canonicalTargetIdentityRef(identities[i]) < canonicalTargetIdentityRef(identities[j])
+	})
+	roles := make([]TargetIdentityRole, 0, len(identities))
+	roleCounts := make(map[TargetIdentityRole]int, len(identities))
+	for _, identity := range identities {
+		roleCounts[identity.Role]++
+		if roleCounts[identity.Role] == 2 {
+			addProblem(problems, scope, "duplicate target identity role %q", identity.Role)
+		}
+		roles = append(roles, identity.Role)
+		validateTargetIdentityRef(identity, target.Signature, scope, problems)
 	}
-	switch target.Source {
-	case TargetSourceBoundaryValue, TargetSourceObjectField, TargetSourceConfigValue, TargetSourceConstant:
-		if !target.SourceSlot.zero() {
-			addProblem(problems, scope, "target source %q cannot name a source slot", target.Source)
+	if knownSignature && !equalTargetRoleSets(roles, policy.Roles) {
+		addProblem(problems, scope, "signature %q requires target identity roles %v", target.Signature, policy.Roles)
+	}
+}
+
+func validateTargetIdentityRef(identity TargetIdentityRef, signature TargetSignatureKind, scope string, problems *[]string) {
+	identityScope := fmt.Sprintf("%s target identity %q", scope, identity.Role)
+	if !knownTargetIdentityRole(identity.Role) {
+		addProblem(problems, identityScope, "unknown target identity role %q", identity.Role)
+	}
+	validateTargetBoundarySlot(identity.BoundarySlot, identityScope+" boundary", problems)
+	if !identity.Projection.zero() {
+		validateObject(identity.Projection, identityScope+" projection", problems)
+	}
+	if !knownTargetSource(identity.Source) {
+		addProblem(problems, identityScope, "unknown target source %q", identity.Source)
+		return
+	}
+	requiresObject := !oneOf(identity.Source, TargetSourceBoundaryValue, TargetSourceAmbientTerminal)
+	if requiresObject {
+		validateObject(identity.SourceObject, identityScope+" source object", problems)
+	} else if !identity.SourceObject.zero() {
+		addProblem(problems, identityScope, "target source %q cannot name an object", identity.Source)
+	}
+	switch identity.Source {
+	case TargetSourceBoundaryValue, TargetSourceObjectField, TargetSourceConfigValue, TargetSourceConstant, TargetSourceAmbientTerminal:
+		if !identity.SourceSlot.zero() {
+			addProblem(problems, identityScope, "target source %q cannot name a source slot", identity.Source)
 		}
 	case TargetSourceFunctionResult, TargetSourceStoreLiveReread, TargetSourceProcessScan:
-		validateExactSlot(target.SourceSlot, SlotResult, scope+" target source", problems)
+		validateExactSlot(identity.SourceSlot, SlotResult, identityScope+" source", problems)
 	case TargetSourceChannelPayload:
-		validateExactSlot(target.SourceSlot, SlotChannelElement, scope+" target source", problems)
+		validateExactSlot(identity.SourceSlot, SlotChannelElement, identityScope+" source", problems)
+	}
+
+	switch identity.Role {
+	case TargetRoleGenerated:
+		if identity.BoundarySlot.Kind != SlotResult {
+			addProblem(problems, identityScope, "generated target identity must use a result slot")
+		}
+		if identity.Projection.zero() {
+			addProblem(problems, identityScope, "generated target identity projection is required")
+		}
+		if identity.Source != TargetSourceBoundaryValue {
+			addProblem(problems, identityScope, "generated target identity must use boundary-value provenance")
+		}
+	case TargetRoleInput, TargetRolePlan, TargetRoleFrom, TargetRoleTo, TargetRoleDestination:
+		if identity.BoundarySlot.Kind != SlotParameter {
+			addProblem(problems, identityScope, "%s target identity must use a parameter slot", identity.Role)
+		}
+	case TargetRoleOperatorTerminal:
+		if identity.BoundarySlot.Kind != SlotAmbientTerminal {
+			addProblem(problems, identityScope, "operator-terminal identity must use the ambient terminal slot")
+		}
+		if identity.Source != TargetSourceAmbientTerminal {
+			addProblem(problems, identityScope, "operator-terminal identity must use ambient-terminal provenance")
+		}
+		if !identity.Projection.zero() {
+			addProblem(problems, identityScope, "operator-terminal identity cannot name a projection")
+		}
+	}
+
+	switch signature {
+	case TargetSignatureChannel:
+		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotBoundaryObject {
+			addProblem(problems, identityScope, "channel target identity must use the registered boundary object")
+		}
+	case TargetSignatureProcess:
+		if identity.Role == TargetRolePrimary && !oneOf(identity.BoundarySlot.Kind, SlotReceiver, SlotParameter) {
+			addProblem(problems, identityScope, "process target identity must use a receiver or parameter slot")
+		}
+	case TargetSignatureEventAppend:
+		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotReceiver {
+			addProblem(problems, identityScope, "event append target must identify the recorder receiver")
+		}
+	}
+}
+
+func targetPolicyFor(signature TargetSignatureKind) (targetSignaturePolicy, bool) {
+	switch signature {
+	case TargetSignatureDirect:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentityExisting,
+			Kinds:         []TargetKind{TargetDurableRecord, TargetSessionIdentity, TargetRuntimeIdentity, TargetProviderServer},
+			Effects:       []EffectKind{KindStoreMutation, KindProviderMutation},
+			Roles:         []TargetIdentityRole{TargetRolePrimary},
+		}, true
+	case TargetSignatureCreate:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentityGenerated,
+			Kinds:         []TargetKind{TargetDurableRecord},
+			Effects:       []EffectKind{KindStoreMutation},
+			Roles:         []TargetIdentityRole{TargetRoleInput, TargetRoleGenerated},
+		}, true
+	case TargetSignatureBatch:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne, TargetCardinalitySet},
+			Identity:      TargetIdentityExisting,
+			Kinds:         []TargetKind{TargetDurableRecord},
+			Effects:       []EffectKind{KindStoreMutation},
+			Roles:         []TargetIdentityRole{TargetRolePrimary},
+		}, true
+	case TargetSignatureGraphPlan:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityPlan},
+			Identity:      TargetIdentitySymbolicGenerated,
+			Kinds:         []TargetKind{TargetDurableGraph},
+			Effects:       []EffectKind{KindStoreMutation},
+			Roles:         []TargetIdentityRole{TargetRolePlan, TargetRoleGenerated},
+		}, true
+	case TargetSignatureDependencyEdge:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentityComposite,
+			Kinds:         []TargetKind{TargetDurableDependencyEdge},
+			Effects:       []EffectKind{KindStoreMutation},
+			Roles:         []TargetIdentityRole{TargetRoleFrom, TargetRoleTo},
+		}, true
+	case TargetSignatureChannel:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentitySingleton,
+			Kinds:         []TargetKind{TargetControllerChannel},
+			Effects:       []EffectKind{KindWakeSource},
+			Roles:         []TargetIdentityRole{TargetRolePrimary},
+		}, true
+	case TargetSignatureProcess:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne, TargetCardinalitySet},
+			Identity:      TargetIdentityExisting,
+			Kinds:         []TargetKind{TargetProcessIdentity, TargetProviderServer},
+			Effects:       []EffectKind{KindProcessMutation},
+			Roles:         []TargetIdentityRole{TargetRolePrimary},
+		}, true
+	case TargetSignatureEventAppend:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentityAppendRecord,
+			Kinds:         []TargetKind{TargetEventLog},
+			Effects:       []EffectKind{KindEventEmission},
+			Roles:         []TargetIdentityRole{TargetRolePrimary},
+		}, true
+	case TargetSignatureOperatorAttach:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentityComposite,
+			Kinds:         []TargetKind{TargetOperatorTerminal},
+			Effects:       []EffectKind{KindProviderMutation},
+			Roles:         []TargetIdentityRole{TargetRoleOperatorTerminal, TargetRoleDestination},
+		}, true
+	default:
+		return targetSignaturePolicy{}, false
 	}
 }
 
@@ -1437,7 +1738,7 @@ func validateAnchor(anchor VersionAnchor, scope string, problems *[]string) {
 
 func validateAccessKind(access AccessPath, kind EffectKind, scope string, problems *[]string) {
 	switch access {
-	case AccessSessionStoreFrontDoor, AccessRawStoreBypass:
+	case AccessSessionStoreFrontDoor, AccessRawStoreBypass, AccessStoreAdapter:
 		if kind != KindStoreMutation {
 			addProblem(problems, scope, "%s requires a store-mutation boundary", access)
 		}
@@ -1528,9 +1829,9 @@ func validateObject(object ObjectRef, scope string, problems *[]string) {
 	}
 }
 
-func validateSinkSlot(slot ValueSlot, scope string, problems *[]string) {
-	if !oneOf(slot.Kind, SlotReceiver, SlotParameter, SlotChannelElement) {
-		addProblem(problems, scope, "invalid target sink slot %q", slot.Kind)
+func validateTargetBoundarySlot(slot ValueSlot, scope string, problems *[]string) {
+	if !oneOf(slot.Kind, SlotReceiver, SlotParameter, SlotResult, SlotChannelElement, SlotBoundaryObject, SlotAmbientTerminal) {
+		addProblem(problems, scope, "invalid target boundary slot %q", slot.Kind)
 		return
 	}
 	validateSlotIndex(slot, scope, problems)
@@ -1550,7 +1851,7 @@ func validateSlotIndex(slot ValueSlot, scope string, problems *[]string) {
 		if slot.Index <= 0 {
 			addProblem(problems, scope, "%s slot index must be positive", slot.Kind)
 		}
-	case SlotReceiver, SlotChannelElement:
+	case SlotReceiver, SlotChannelElement, SlotBoundaryObject, SlotAmbientTerminal:
 		if slot.Index != 0 {
 			addProblem(problems, scope, "%s slot cannot have an index", slot.Kind)
 		}
@@ -1625,6 +1926,45 @@ func knownStoreDomain(value StoreDomain) bool {
 	return oneOf(value, StoreDomainSessionLifecycle, StoreDomainWaitIntent, StoreDomainNudgeIntent, StoreDomainRouteRecovery, StoreDomainPoolRouting, StoreDomainControlDispatch, StoreDomainOrderDispatch, StoreDomainMaintenance)
 }
 
+func knownTargetKind(value TargetKind) bool {
+	return oneOf(value,
+		TargetDurableRecord, TargetDurableGraph, TargetDurableDependencyEdge,
+		TargetSessionIdentity, TargetRuntimeIdentity, TargetProcessIdentity,
+		TargetProviderServer, TargetEventLog, TargetControllerChannel,
+		TargetOperatorTerminal,
+	)
+}
+
+func knownTargetCardinality(value TargetCardinality) bool {
+	return oneOf(value, TargetCardinalityOne, TargetCardinalitySet, TargetCardinalityPlan)
+}
+
+func knownTargetIdentity(value TargetIdentityKind) bool {
+	return oneOf(value,
+		TargetIdentityExisting, TargetIdentityGenerated,
+		TargetIdentitySymbolicGenerated, TargetIdentityComposite,
+		TargetIdentitySingleton, TargetIdentityAppendRecord,
+	)
+}
+
+func knownTargetIdentityRole(value TargetIdentityRole) bool {
+	return oneOf(value,
+		TargetRolePrimary, TargetRoleInput, TargetRoleGenerated, TargetRolePlan,
+		TargetRoleFrom, TargetRoleTo, TargetRoleOperatorTerminal,
+		TargetRoleDestination,
+	)
+}
+
+func knownTargetSource(value TargetSourceKind) bool {
+	return oneOf(value,
+		TargetSourceBoundaryValue, TargetSourceObjectField,
+		TargetSourceFunctionResult, TargetSourceStoreLiveReread,
+		TargetSourceProcessScan, TargetSourceChannelPayload,
+		TargetSourceConfigValue, TargetSourceConstant,
+		TargetSourceAmbientTerminal,
+	)
+}
+
 func knownBuildProfile(value BuildProfileID) bool {
 	_, ok := canonicalAnalysisProfile(value)
 	return ok
@@ -1640,12 +1980,12 @@ func knownActionFamily(value ActionFamily) bool {
 		FamilyRouteRecovery, FamilyControlDispatch, FamilyOrderDispatch,
 		FamilyMaintenance, FamilyObservation, FamilyControllerWake,
 		FamilyRuntimeProvision, FamilyRuntimeLaunch, FamilyRuntimeTeardown,
-		FamilyServerTeardown, FamilyProcessSignal,
+		FamilyServerTeardown, FamilyProcessSignal, FamilyOperatorAttach,
 	)
 }
 
 func knownAccessPath(value AccessPath) bool {
-	return oneOf(value, AccessWorkerBoundary, AccessSessionStoreFrontDoor, AccessManagerBypass, AccessProviderBypass, AccessRawStoreBypass, AccessProviderNative, AccessProcessBoundary, AccessDirectProcessBypass, AccessDirectEvent, AccessDirectWake)
+	return oneOf(value, AccessWorkerBoundary, AccessSessionStoreFrontDoor, AccessManagerBypass, AccessProviderBypass, AccessRawStoreBypass, AccessStoreAdapter, AccessProviderNative, AccessProcessBoundary, AccessDirectProcessBypass, AccessDirectEvent, AccessDirectWake)
 }
 
 func accessRequiresException(access AccessPath) bool {
@@ -1672,6 +2012,23 @@ func equalTaskSets(left, right []TaskRef) bool {
 	for _, task := range right {
 		want[task]--
 		if want[task] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func equalTargetRoleSets(left, right []TargetIdentityRole) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	want := make(map[TargetIdentityRole]int, len(left))
+	for _, role := range left {
+		want[role]++
+	}
+	for _, role := range right {
+		want[role]--
+		if want[role] < 0 {
 			return false
 		}
 	}
@@ -1719,6 +2076,15 @@ func dayUTC(value time.Time) time.Time {
 func oneOf[T comparable](value T, candidates ...T) bool {
 	for _, candidate := range candidates {
 		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func contains[T comparable](values []T, want T) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}

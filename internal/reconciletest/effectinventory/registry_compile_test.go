@@ -198,8 +198,8 @@ func TestCompileRegistryAcceptsDisjointProfileCasesAndCanonicalizesOutput(t *tes
 func TestCompileRegistryRouteIDsCoverProfileAndSafetyClassification(t *testing.T) {
 	base := compileRegistryFixture()
 	baseID := compiledFixtureRouteID(t, base)
-	if value := string(baseID); !strings.HasPrefix(value, "route-v1-") || len(value) != len("route-v1-")+64 {
-		t.Fatalf("derived route ID = %q, want route-v1- plus a full SHA-256 digest", value)
+	if value := string(baseID); !strings.HasPrefix(value, "route-v2-") || len(value) != len("route-v2-")+64 {
+		t.Fatalf("derived route ID = %q, want route-v2- plus a full SHA-256 digest", value)
 	}
 
 	tests := []struct {
@@ -207,6 +207,10 @@ func TestCompileRegistryRouteIDsCoverProfileAndSafetyClassification(t *testing.T
 		mutate func(*ProfileCase, *Route)
 	}{
 		{"target detail", func(_ *ProfileCase, route *Route) { route.Target.Detail += " with exact cardinality" }},
+		{"target safety signature", func(_ *ProfileCase, route *Route) { route.Target = batchTarget(TargetCardinalitySet) }},
+		{"target identity projection", func(_ *ProfileCase, route *Route) {
+			route.Target.Identities[0].Projection = objectRef(beadsPackage, "Bead", "ID")
+		}},
 		{"gate", func(_ *ProfileCase, route *Route) {
 			route.CurrentGate = GateRef{
 				Kind:      GatePredicate,
@@ -275,10 +279,63 @@ func TestCanonicalRouteCoversEveryAuthoredRouteField(t *testing.T) {
 	}
 }
 
+func TestCanonicalTargetCoversEveryAuthoredTargetField(t *testing.T) {
+	base := compileFixtureTarget()
+	wantDifferent := []struct {
+		name   string
+		mutate func(*TargetRef)
+	}{
+		{"Kind", func(target *TargetRef) { target.Kind = TargetSessionIdentity }},
+		{"Cardinality", func(target *TargetRef) { target.Cardinality = TargetCardinalitySet }},
+		{"Identity", func(target *TargetRef) { target.Identity = TargetIdentityGenerated }},
+		{"Signature", func(target *TargetRef) { target.Signature = TargetSignatureBatch }},
+		{"Identities", func(target *TargetRef) { target.Identities[0].Projection = objectRef(beadsPackage, "Bead", "ID") }},
+		{"Detail", func(target *TargetRef) { target.Detail += " changed" }},
+	}
+
+	baseline := canonicalTargetRef(base)
+	for _, tt := range wantDifferent {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := cloneRoute(Route{Target: base}).Target
+			tt.mutate(&candidate)
+			if got := canonicalTargetRef(candidate); got == baseline {
+				t.Fatalf("canonicalTargetRef() did not cover TargetRef.%s", tt.name)
+			}
+		})
+	}
+}
+
+func TestCanonicalTargetIdentityCoversEveryAuthoredField(t *testing.T) {
+	base := compileFixtureTarget().Identities[0]
+	wantDifferent := []struct {
+		name   string
+		mutate func(*TargetIdentityRef)
+	}{
+		{"Role", func(identity *TargetIdentityRef) { identity.Role = TargetRoleInput }},
+		{"BoundarySlot", func(identity *TargetIdentityRef) { identity.BoundarySlot.Index++ }},
+		{"Projection", func(identity *TargetIdentityRef) { identity.Projection = objectRef(beadsPackage, "Bead", "ID") }},
+		{"Source", func(identity *TargetIdentityRef) { identity.Source = TargetSourceFunctionResult }},
+		{"SourceObject", func(identity *TargetIdentityRef) { identity.SourceObject.Name = "OtherGet" }},
+		{"SourceSlot", func(identity *TargetIdentityRef) { identity.SourceSlot.Index++ }},
+	}
+
+	baseline := canonicalTargetIdentityRef(base)
+	for _, tt := range wantDifferent {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := base
+			tt.mutate(&candidate)
+			if got := canonicalTargetIdentityRef(candidate); got == baseline {
+				t.Fatalf("canonicalTargetIdentityRef() did not cover TargetIdentityRef.%s", tt.name)
+			}
+		})
+	}
+}
+
 func TestCanonicalIdentityStructFieldsArePinned(t *testing.T) {
 	assertStructFields(t, reflect.TypeOf(BoundaryDefinition{}), "ID", "Kind", "Object", "Match", "Input", "Output")
 	assertStructFields(t, reflect.TypeOf(Route{}), "StoreDomain", "ActionFamily", "ExecutingProcess", "LogicalOwner", "Target", "Fences", "CurrentGate", "Disposition", "AccessPath", "Continuation", "Hops", "OwningTests", "Exception")
-	assertStructFields(t, reflect.TypeOf(TargetRef{}), "Kind", "Sink", "Source", "SourceObject", "SourceSlot", "Detail")
+	assertStructFields(t, reflect.TypeOf(TargetRef{}), "Kind", "Cardinality", "Identity", "Signature", "Identities", "Detail")
+	assertStructFields(t, reflect.TypeOf(TargetIdentityRef{}), "Role", "BoundarySlot", "Projection", "Source", "SourceObject", "SourceSlot")
 	assertStructFields(t, reflect.TypeOf(Fence{}), "Kind", "Source", "Token")
 	assertStructFields(t, reflect.TypeOf(GateRef{}), "Kind", "Predicate", "Expected")
 	assertStructFields(t, reflect.TypeOf(Disposition{}), "Kind", "Gates", "Reason")
@@ -532,16 +589,22 @@ func compileRegistryFixture() Registry {
 
 func compileFixtureTarget() TargetRef {
 	return TargetRef{
-		Kind:   TargetDurableRecord,
-		Sink:   ValueSlot{Kind: SlotParameter, Index: 1},
-		Source: TargetSourceStoreLiveReread,
-		SourceObject: ObjectRef{
-			Package:  "github.com/gastownhall/gascity/internal/beads",
-			Receiver: "Store",
-			Name:     "Get",
-		},
-		SourceSlot: ValueSlot{Kind: SlotResult, Index: 1},
-		Detail:     "snapshot bead ID revalidated by cache-bypassing live read",
+		Kind:        TargetDurableRecord,
+		Cardinality: TargetCardinalityOne,
+		Identity:    TargetIdentityExisting,
+		Signature:   TargetSignatureDirect,
+		Identities: []TargetIdentityRef{{
+			Role:         TargetRolePrimary,
+			BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 1},
+			Source:       TargetSourceStoreLiveReread,
+			SourceObject: ObjectRef{
+				Package:  "github.com/gastownhall/gascity/internal/beads",
+				Receiver: "Store",
+				Name:     "Get",
+			},
+			SourceSlot: ValueSlot{Kind: SlotResult, Index: 1},
+		}},
+		Detail: "snapshot bead ID revalidated by cache-bypassing live read",
 	}
 }
 

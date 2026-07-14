@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2309,63 +2310,115 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
-func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+func TestReconcileCitiesNameDriftStopsManagedProviderBeforeReplacement(t *testing.T) {
+	cityPath, reg, registry := newSupervisorManagedStartFixture(t)
 
-	root, err := os.MkdirTemp("", "gc-drift-")
-	if err != nil {
-		t.Fatal(err)
+	type lifecycleObservation struct {
+		operation string
+		path      string
+		published bool
 	}
-	t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
-
-	cityPath := filepath.Join(root, "city")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
+	var observationsMu sync.Mutex
+	var observations []lifecycleObservation
+	record := func(observation lifecycleObservation) {
+		observationsMu.Lock()
+		observations = append(observations, observation)
+		observationsMu.Unlock()
+	}
+	acquire := func(path string) (*controllerLockLease, error) {
+		record(lifecycleObservation{operation: "acquire", path: path})
+		return acquireControllerLock(path)
+	}
+	shutdownProvider := func(path string) error {
+		published := false
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			_, published = cities[canonicalTestPath(path)]
+		})
+		record(lifecycleObservation{operation: "provider-shutdown", path: path, published: published})
+		return nil
 	}
 
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	var stdout bytes.Buffer
+	var stderr lockedBuffer
+	reconcileCitiesWithControllerLock(
+		reg,
+		registry,
+		supervisor.PublicationConfig{},
+		&stdout,
+		&stderr,
+		acquire,
+		shutdownProvider,
+	)
+	oldOwner := managedCityForPath(t, registry, cityPath)
+	if oldOwner.name != "test-city" {
+		t.Fatalf("initial managed city name = %q, want test-city", oldOwner.name)
+	}
+	t.Cleanup(func() {
+		var current *managedCity
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			current = cities[canonicalTestPath(cityPath)]
+		})
+		if current != nil {
+			_ = stopManagedCity(current, cityPath, io.Discard)
+		}
+	})
 
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	observationsMu.Lock()
+	observations = nil
+	observationsMu.Unlock()
 	if err := reg.Register(cityPath, "new-name"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("rename registered city: %v", err)
 	}
 
-	cfg := config.DefaultCity("old-name")
-	sp := runtime.NewFake()
-	var cityOut, cityErr bytes.Buffer
-	cr := newTestCityRuntime(t, CityRuntimeParams{
-		CityPath: cityPath,
-		CityName: "old-name",
-		Cfg:      &cfg,
-		SP:       sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
-			return DesiredStateResult{}
-		},
-		Rec:    events.Discard,
-		Stdout: &cityOut,
-		Stderr: &cityErr,
-	})
+	reconcileCitiesWithControllerLock(
+		reg,
+		registry,
+		supervisor.PublicationConfig{},
+		&stdout,
+		&stderr,
+		acquire,
+		shutdownProvider,
+	)
 
-	done := make(chan struct{})
-	close(done)
-	registry := newCityRegistry()
-	registry.Add(cityPath, &managedCity{
-		cr:      cr,
-		name:    "old-name",
-		started: true,
-		cancel:  func() {},
-		done:    done,
-	})
-	var stdout, stderr bytes.Buffer
+	select {
+	case <-oldOwner.done:
+	default:
+		t.Fatal("name-drifted managed owner did not finish cleanup")
+	}
+	observationsMu.Lock()
+	driftObservations := append([]lifecycleObservation(nil), observations...)
+	observationsMu.Unlock()
+	if len(driftObservations) != 2 {
+		t.Fatalf("name-drift lifecycle observations = %#v, want provider shutdown then replacement acquire", driftObservations)
+	}
+	if got := driftObservations[0]; got.operation != "provider-shutdown" ||
+		!samePath(got.path, cityPath) || got.published {
+		t.Fatalf("first name-drift lifecycle observation = %#v, want unpublished provider shutdown for %s", got, cityPath)
+	}
+	if got := driftObservations[1]; got.operation != "acquire" || !samePath(got.path, cityPath) {
+		t.Fatalf("second name-drift lifecycle observation = %#v, want replacement acquire for %s", got, cityPath)
+	}
 
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
-
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
+	replacement := managedCityForPath(t, registry, cityPath)
+	if replacement == oldOwner {
+		t.Fatal("name drift republished the old managed owner")
+	}
+	if replacement.name != "new-name" {
+		t.Fatalf("replacement managed city name = %q, want new-name", replacement.name)
+	}
+	if err := stopManagedCity(replacement, cityPath, &stderr); err != nil {
+		t.Fatalf("stop replacement managed city: %v; stderr=%q", err, stderr.String())
+	}
 }
 
 func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {

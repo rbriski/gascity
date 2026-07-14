@@ -6,8 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/filelock"
 )
 
 var (
@@ -78,14 +79,16 @@ func controllerLockPath(cityPath string) string {
 type controllerLockOps struct {
 	mkdir    func(string, os.FileMode) error
 	openFile func(string, int, os.FileMode) (*os.File, error)
-	flock    func(int, int) error
+	tryLock  func(*os.File) (bool, error)
 }
 
 func defaultControllerLockOps() controllerLockOps {
 	return controllerLockOps{
 		mkdir:    os.Mkdir,
 		openFile: os.OpenFile,
-		flock:    syscall.Flock,
+		tryLock: func(file *os.File) (bool, error) {
+			return filelock.TryLock(file, filelock.Exclusive)
+		},
 	}
 }
 
@@ -105,12 +108,14 @@ func acquireControllerLockWithOps(cityPath string, ops controllerLockOps) (*cont
 	if err != nil {
 		return nil, fmt.Errorf("opening controller lock: %w", err)
 	}
-	if err := ops.flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	acquired, err := ops.tryLock(file)
+	if err != nil {
 		_ = file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, errControllerAlreadyRunning
-		}
 		return nil, fmt.Errorf("locking controller lock: %w", err)
+	}
+	if !acquired {
+		_ = file.Close()
+		return nil, errControllerAlreadyRunning
 	}
 	return &controllerLockLease{path: lockPath, file: file}, nil
 }

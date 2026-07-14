@@ -56,6 +56,7 @@ type loadedAnalysis struct {
 	initReachable     map[*ssa.Function]bool
 	channelInputs     map[ssa.Value]map[string]bool
 	channelTracer     *channelTracer
+	globalUses        map[*ssa.Global][]ssa.Instruction
 }
 
 type resolvedBoundary struct {
@@ -248,6 +249,7 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 		program:           program,
 		packages:          packageIndex,
 		sourceFuncs:       sourceFuncs,
+		globalUses:        collectSourceGlobalUses(sourceFuncs),
 		callGraph:         resolvedGraph,
 		selectOps:         collectSelectOperations(sourcePackages),
 		receivers:         collectSelectionReceivers(sourcePackages),

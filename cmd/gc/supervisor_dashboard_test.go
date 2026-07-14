@@ -49,6 +49,9 @@ func TestDashboardDepsWiresSupervisorBaseURL(t *testing.T) {
 	if deps.Resolver == nil {
 		t.Error("Resolver not wired")
 	}
+	if deps.LumenRuns == nil {
+		t.Fatal("dashboardDeps left LumenRuns nil; Lumen runs would silently never appear in the dashboard")
+	}
 }
 
 // TestDashboardDepsModulesCoreOnly records that core-only dashboard modules are

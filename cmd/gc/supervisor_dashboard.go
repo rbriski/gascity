@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/dashboardbff"
 	"github.com/gastownhall/gascity/internal/api/dashboardspa"
+	"github.com/gastownhall/gascity/internal/lumenrunproj"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -78,10 +79,15 @@ func dashboardDeps(resolver api.CityResolver, readOnly bool, bind string, port i
 		ReadOnly:           readOnly,
 		SupervisorBaseURL:  dashboardLoopbackBaseURL(bind, port),
 		RunCwdAllowedRoots: runCwdAllowedRootsFromEnv(),
-		OperatorAlias:      os.Getenv("DASHBOARD_OPERATOR_ALIAS"),
-		OperatorWireAlias:  os.Getenv("DASHBOARD_OPERATOR_WIRE_ALIAS"),
-		DecisionLabel:      os.Getenv("DASHBOARD_DECISION_LABEL"),
-		DefaultView:        os.Getenv("DEFAULT_VIEW"),
+		// Fold each city's Lumen runs (journal-fed) into the run views. The
+		// projector opens read-only graph-store handles lazily per city and
+		// leaks them until process exit (the supervisor is long-lived); Plane.Stop
+		// closes it best-effort via io.Closer.
+		LumenRuns:         lumenrunproj.New(),
+		OperatorAlias:     os.Getenv("DASHBOARD_OPERATOR_ALIAS"),
+		OperatorWireAlias: os.Getenv("DASHBOARD_OPERATOR_WIRE_ALIAS"),
+		DecisionLabel:     os.Getenv("DASHBOARD_DECISION_LABEL"),
+		DefaultView:       os.Getenv("DEFAULT_VIEW"),
 		// EnabledModules is intentionally left unset: every shipped dashboard view
 		// module is core (always on), and no first-party (gated) module exists yet,
 		// so the config projection emits an empty enabledModules list by design.

@@ -509,7 +509,12 @@ func (t *cityRunTailer) enrichedSummary(ctx context.Context) runproj.RunSummary 
 	base := t.summary
 	marks := t.marks
 	ready := t.ready
+	folded := t.beads
 	t.mu.RUnlock()
+
+	// Merge the city's Lumen runs (journal-fed) BEFORE enrichment, so the shared
+	// health/census pass covers them. No-op when the LumenRuns seam is unset.
+	base = t.mergeLumenLanes(ctx, base, folded)
 
 	sessions, sessionsAvailable := t.mgr.fetchSessions(ctx, t.name)
 	enriched := runproj.EnrichRunSummary(base, sessions, sessionsAvailable, time.Now().UnixMilli(), marks)
@@ -770,6 +775,13 @@ func (p *Plane) registerRunDetail() {
 					Error:  unsupported.Message,
 					Reason: string(unsupported.Reason),
 				})
+				return
+			}
+			// The run root is absent from the bead-derived fold — it may be a
+			// Lumen run (journal-fed). Try that projector BEFORE the warming 503,
+			// since the journal is fully readable regardless of events-fold warmth.
+			if body, ok := t.lumenDetail(r.Context(), r.PathValue("runId")); ok {
+				writeJSONBytes(w, http.StatusOK, body)
 				return
 			}
 			// The run root is absent from the warm projection. While the cold replay

@@ -16,6 +16,7 @@ package dashboardbff
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -57,6 +58,10 @@ type Deps struct {
 	// API (e.g. "http://127.0.0.1:8372"), used by the host-side samplers to
 	// read /v0/city/{name}/status. Empty disables the samplers' status reads.
 	SupervisorBaseURL string
+	// LumenRuns is the optional fork seam that folds a city's Lumen runs into
+	// the run summary/detail. Nil (the upstream default) leaves the plane with
+	// zero Lumen awareness. See LumenRunProjector.
+	LumenRuns LumenRunProjector
 
 	// Runtime-config projection inputs. Neutral defaults are supplied by the
 	// caller from gc config/env (ZERO hardcoded roles).
@@ -111,12 +116,16 @@ func (p *Plane) Start(ctx context.Context) {
 	p.eagerWarmTailers()
 }
 
-// Stop signals the samplers to halt and waits for them to drain.
+// Stop signals the samplers to halt and waits for them to drain. It also closes
+// the optional Lumen projector's graph-store handles when it is an io.Closer.
 func (p *Plane) Stop() {
 	if p.stop != nil {
 		p.stop()
 	}
 	p.wg.Wait()
+	if c, ok := p.deps.LumenRuns.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 // readOnlySafePostRE matches the run-diff endpoint — the one POST on the plane

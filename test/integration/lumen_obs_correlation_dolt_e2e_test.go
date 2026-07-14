@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
+	"github.com/gastownhall/gascity/internal/lumenrunproj"
+	"github.com/gastownhall/gascity/internal/runproj"
 )
 
 // TestLumenObsCorrelationDoltE2E_RunAndStepEnvelope (P5-OBS.1 seal) proves the
@@ -129,11 +132,98 @@ func TestLumenObsCorrelationDoltE2E_RunAndStepEnvelope(t *testing.T) {
 	}
 	t.Logf("PROOF events.jsonl run.resolved for %s carries root_id=%s outcome=%s", streamID, rootID, outcome)
 
+	// (4) THE DASHBOARD-TIMELINE PROOF (P5-OBS.4): the sealed run's REAL Dolt
+	// journal + REAL do beads project into a dashboard run lane and a detail graph
+	// via internal/lumenrunproj — the gc dashboard timeline, with zero frontend
+	// change. This exercises the real FoldRunView → synthetic beads → runproj
+	// path on a live sealed journal (what unit tests with hand-built views cannot).
+	doBeads := lumenDoBeadsForProjection(byActivation)
+	proj := lumenrunproj.New()
+	defer func() { _ = proj.Close() }()
+
+	lanes, err := proj.SummaryLanes(ctx, "lumene2e", cityDir, doBeads)
+	if err != nil {
+		t.Fatalf("lumenrunproj SummaryLanes: %v", err)
+	}
+	var lane *runproj.RunLane
+	for i := range lanes {
+		if lanes[i].ID == streamID {
+			lane = &lanes[i]
+		}
+	}
+	if lane == nil {
+		ids := make([]string, len(lanes))
+		for i := range lanes {
+			ids[i] = lanes[i].ID
+		}
+		t.Fatalf("no Lumen lane for stream %s; got %v", streamID, ids)
+	}
+	if lane.Formula.Status != "known" {
+		t.Fatalf("Lumen lane formula = %+v, want a known formula", lane.Formula)
+	}
+	t.Logf("PROOF lumenrunproj SummaryLanes surfaced lane %s (formula %s, phase %s)", lane.ID, lane.Formula.Name, lane.Phase)
+
+	detail, isLumen, err := proj.Detail(ctx, "lumene2e", cityDir, streamID, doBeads)
+	if err != nil {
+		t.Fatalf("lumenrunproj Detail: %v", err)
+	}
+	if !isLumen {
+		t.Fatalf("Detail(%s) reported not-a-Lumen-run for a real sealed Lumen stream", streamID)
+	}
+	if detail.RunID != streamID {
+		t.Fatalf("detail.RunID = %q, want %q", detail.RunID, streamID)
+	}
+	var greet *runproj.RunDisplayNode
+	for i := range detail.Nodes {
+		if detail.Nodes[i].SemanticNodeID == lumenDoNodeID {
+			greet = &detail.Nodes[i]
+		}
+	}
+	if greet == nil {
+		ids := make([]string, len(detail.Nodes))
+		for i := range detail.Nodes {
+			ids[i] = detail.Nodes[i].SemanticNodeID
+		}
+		t.Fatalf("no display node %q in detail; got %v", lumenDoNodeID, ids)
+	}
+	if len(greet.ExecutionInstances) == 0 {
+		t.Fatalf("display node %q has no execution instances (the do-bead join is dark)", lumenDoNodeID)
+	}
+	t.Logf("PROOF lumenrunproj Detail(%s): node %q with %d execution instance(s), %d edge(s)",
+		streamID, lumenDoNodeID, len(greet.ExecutionInstances), len(detail.Edges))
+
 	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
 	if err := gs.Verify(ctx, streamID); err != nil {
 		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
 	}
 	t.Logf("PROOF graphstore.Verify(%s) clean; sequence %v", streamID, lumenStreamTypes(events))
+}
+
+// lumenDoBeadsForProjection converts the e2e's queried run beads into the
+// beads.Bead shape lumenrunproj joins against (the do-bead status/session
+// overlay), flattening the string-valued metadata the fold projection reads.
+func lumenDoBeadsForProjection(m map[string]graphBead) []beads.Bead {
+	out := make([]beads.Bead, 0, len(m))
+	for _, gb := range m {
+		md := beads.StringMap{}
+		for k, v := range gb.Metadata {
+			if s, ok := v.(string); ok {
+				md[k] = s
+			}
+		}
+		typ := gb.Type
+		if typ == "" {
+			typ = gb.IssueType
+		}
+		out = append(out, beads.Bead{
+			ID:       gb.ID,
+			Title:    gb.Title,
+			Status:   gb.Status,
+			Type:     typ,
+			Metadata: md,
+		})
+	}
+	return out
 }
 
 // waitForLumenRunResolvedOrDiag polls .gc/events.jsonl until a run.resolved event

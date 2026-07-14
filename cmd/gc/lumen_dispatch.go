@@ -64,11 +64,20 @@ func lumenDispatchWork(store beads.Store, cfg *config.City) func(context.Context
 		// 3. Create the ordinary, born-claimable work bead. Readiness gating already
 		// happened in the fold (only READY do's dispatch), so it needs no deps. The pack's
 		// static passthrough metadata (chiefly gc.continuation_group, read at claim by
-		// preassignHookContinuationGroup) is written FIRST; the four engine-owned routing
-		// keys are stamped LAST so they always win a collision — belt-and-suspenders with
-		// the decode-time reserved-key refusal, and it never perturbs the idempotency
-		// lookup above (keyed on the engine-owned run/activation pair).
-		meta := make(map[string]string, len(w.Metadata)+4)
+		// preassignHookContinuationGroup) is written FIRST; the engine-owned keys are stamped
+		// LAST so they always win a collision — belt-and-suspenders with the decode-time
+		// reserved-key refusal, and it never perturbs the idempotency lookup above (keyed on
+		// the engine-owned run/activation pair). The keys split into two roles: the four
+		// ROUTING/identity keys (routed_to + the lumen run/activation/attempt triple) the
+		// claim, demand, orphan-release, and attempt-history paths honor; and the two
+		// OBSERVABILITY-CORRELATION keys (P5-OBS.1) — gc.root_bead_id = the run streamID and
+		// gc.step_id = the bare node id — that make this bead's already-firing bead.* events
+		// carry the run/step envelope (notifyChange → ResolveRunID/StepID) and make the claim
+		// hook stamp gc.current_run_id/gc.active_work_bead on the session bead, so the
+		// cost/session correlation lights up through the existing emitters with no new event
+		// type. gc.step_id is the BARE node id: the attempt axis stays on gc.lumen_attempt, so
+		// a step's identity is stable across retries (mirrors the v1 driver bead's stamp).
+		meta := make(map[string]string, len(w.Metadata)+6)
 		for k, v := range w.Metadata {
 			meta[k] = v
 		}
@@ -76,6 +85,8 @@ func lumenDispatchWork(store beads.Store, cfg *config.City) func(context.Context
 		meta[beadmeta.LumenRunMetadataKey] = w.StreamID
 		meta[beadmeta.LumenActivationMetadataKey] = w.Activation
 		meta[beadmeta.LumenAttemptMetadataKey] = strconv.Itoa(w.Attempt)
+		meta[beadmeta.RootBeadIDMetadataKey] = w.StreamID
+		meta[beadmeta.StepIDMetadataKey] = w.NodeID
 		created, err := store.Create(beads.Bead{
 			Type:        "task",
 			Title:       w.NodeID,

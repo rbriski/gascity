@@ -14,16 +14,20 @@ import (
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
 
-// reservedDoMetadataKeys are the engine-owned routing keys lumenDispatchWork stamps
-// LAST onto every minted work bead. A translated pack may not carry them as static
-// do metadata: refusing them at decode is a belt-and-suspenders guard beside the
-// dispatch seam's stamp-last ordering, so a clobber attempt of the authoritative
-// routing keys fails LOUD at enqueue rather than being silently overwritten.
+// reservedDoMetadataKeys are the engine-owned routing and observability-correlation
+// keys lumenDispatchWork stamps LAST onto every minted work bead. A translated pack may
+// not carry them as static do metadata: refusing them at decode is a belt-and-suspenders
+// guard beside the dispatch seam's stamp-last ordering, so a clobber attempt of the
+// authoritative routing keys — or of the run-id/step-id correlation keys the cost and
+// event planes join on (P5-OBS.1) — fails LOUD at enqueue rather than being silently
+// overwritten.
 var reservedDoMetadataKeys = map[string]bool{
 	beadmeta.RoutedToMetadataKey:        true,
 	beadmeta.LumenRunMetadataKey:        true,
 	beadmeta.LumenActivationMetadataKey: true,
 	beadmeta.LumenAttemptMetadataKey:    true,
+	beadmeta.RootBeadIDMetadataKey:      true,
+	beadmeta.StepIDMetadataKey:          true,
 }
 
 // lumenDurationRE is the reference compiler's compile-time duration grammar

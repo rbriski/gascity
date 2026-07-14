@@ -112,6 +112,10 @@ func TestDecodeDoMetadataRefusesReservedKey(t *testing.T) {
 		beadmeta.LumenRunMetadataKey,
 		beadmeta.LumenActivationMetadataKey,
 		beadmeta.LumenAttemptMetadataKey,
+		// P5-OBS.1 observability-correlation keys: the dispatch seam stamps these too,
+		// so a pack may not fake the run-id / step-id as static do metadata.
+		beadmeta.RootBeadIDMetadataKey,
+		beadmeta.StepIDMetadataKey,
 	} {
 		k, _ := json.Marshal(key)
 		_, err := decodeDo(doMetaNodeIR(t, `{`+string(k)+`:"x"}`))

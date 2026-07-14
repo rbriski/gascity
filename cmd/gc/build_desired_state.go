@@ -4061,6 +4061,15 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 	if rootID == "" || rootID == step.ID {
 		return
 	}
+	// A Lumen do work bead stamps gc.root_bead_id = its gc.lumen_run (the run STREAM
+	// id) so its events/cost resolve to the run. That "root" is a Tier-A journal node,
+	// NOT a facade-visible bead — store.Get(streamID) is a guaranteed miss (fold_owned=1),
+	// and there is no root bead to back-fill session identity onto. Skip cheaply, rather
+	// than re-miss once per in-flight do per reconcile pass. v2 steps carry no gc.lumen_run,
+	// so this never fires for them (rootID != "" != the empty lumen-run value).
+	if rootID == strings.TrimSpace(step.Metadata[beadmeta.LumenRunMetadataKey]) {
+		return
+	}
 	if _, done := stampedRoots[rootID]; done {
 		return
 	}

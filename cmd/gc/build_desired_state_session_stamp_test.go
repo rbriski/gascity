@@ -13,11 +13,19 @@ import (
 type countingStore struct {
 	beads.Store
 	writes int
+	gets   int
 }
 
 func (c *countingStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	c.writes++
 	return c.Store.SetMetadataBatch(id, kvs)
+}
+
+// Get counts root-resolution lookups so a test can assert stampRunRootFromStep does
+// NOT miss-Get a Lumen run root (a Tier-A journal node, not a facade-visible bead).
+func (c *countingStore) Get(id string) (beads.Bead, error) {
+	c.gets++
+	return c.Store.Get(id)
 }
 
 func stampTestSession(name, workDir string) beads.Bead {
@@ -95,6 +103,43 @@ func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	stampRunSessionIdentity([]beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (step+root already stamped)", store.writes)
+	}
+}
+
+// TestStampRunSessionIdentitySkipsLumenRunRoot pins the P5-OBS.1 guard: a Lumen do work
+// bead carries gc.root_bead_id = its gc.lumen_run (the run STREAM id) so its events/cost
+// resolve to the run — but that "root" is a Tier-A journal node, NOT a facade-visible
+// bead. stampRunRootFromStep must skip it (no store.Get): the facade always misses
+// (fold_owned=1), and without the guard a run with K in-flight dos would issue K
+// guaranteed-miss Gets per reconcile pass. The do's OWN session identity still stamps.
+// Dropping the guard turns this RED (the Get count becomes 1).
+func TestStampRunSessionIdentitySkipsLumenRunRoot(t *testing.T) {
+	const sn = "workers-gc-1"
+	const wd = "/home/ds/city/workers-1"
+	const streamID = "gcg-run-abc-def"
+	// A Lumen do work bead: gc.root_bead_id == gc.lumen_run == the run stream id.
+	step := beads.Bead{ID: "wb-do", Type: "task", Status: "in_progress", Assignee: sn, Metadata: map[string]string{
+		"gc.root_bead_id":     streamID,
+		"gc.lumen_run":        streamID,
+		"gc.lumen_activation": "draft:0",
+		"gc.step_id":          "draft",
+	}}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{step}, nil)
+	store := &countingStore{Store: mem}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sn, wd)})
+
+	store.gets = 0
+	stampRunSessionIdentity([]beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	// The run root was NOT Get-resolved: rootID == the step's gc.lumen_run means the root
+	// is a journal node, so the guard skips the guaranteed facade miss.
+	if store.gets != 0 {
+		t.Fatalf("stampRunRootFromStep issued %d store.Get calls for a Lumen do; want 0 (the run root is a journal node, never a bead)", store.gets)
+	}
+	// The do's own session identity IS still stamped (SetMetadataBatch on the step).
+	gotStep, _ := mem.Get("wb-do")
+	if gotStep.Metadata["gc.session_name"] != sn || gotStep.Metadata["gc.work_dir"] != wd {
+		t.Errorf("do not stamped: session_name=%q work_dir=%q, want %q/%q (the guard must skip only the ROOT Get, not the step's own stamp)", gotStep.Metadata["gc.session_name"], gotStep.Metadata["gc.work_dir"], sn, wd)
 	}
 }
 

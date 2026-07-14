@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -90,6 +91,80 @@ func TestLumenDispatchStampsPassthroughMetadata(t *testing.T) {
 		b.Metadata[beadmeta.LumenActivationMetadataKey] != "draft:0" ||
 		b.Metadata[beadmeta.LumenAttemptMetadataKey] != "0" {
 		t.Fatalf("engine-owned keys wrong on %+v", b.Metadata)
+	}
+}
+
+// TestLumenDispatchStampsCorrelationKeys proves the P5-OBS.1 observability spine: the
+// dispatch seam stamps gc.root_bead_id = the run streamID and gc.step_id = the BARE node
+// id onto the minted work bead. These make the bead's already-firing bead.* events carry
+// the run/step envelope (notifyChange → ResolveRunID/StepID) and make the claim hook stamp
+// gc.current_run_id/gc.active_work_bead on the session bead — lighting the cost/session
+// correlation through the existing emitters with zero new event types. gc.step_id is the
+// BARE node id (the attempt axis stays gc.lumen_attempt), never the nodeID:attempt activation.
+// Dropping either stamp turns this RED.
+func TestLumenDispatchStampsCorrelationKeys(t *testing.T) {
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	dispatch := lumenDispatchWork(store, lumenPoolCfg())
+	w := engine.WorkDispatch{StreamID: "gcg-run-obs", Activation: "draft:2", NodeID: "draft", Route: "workers", Prompt: "do it", Attempt: 2}
+
+	id, err := dispatch(ctx, w)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	all, _ := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.LumenRunMetadataKey: "gcg-run-obs"}, IncludeClosed: true, AllowScan: true})
+	if len(all) != 1 || all[0].ID != id {
+		t.Fatalf("list = %d beads, want 1 matching %q", len(all), id)
+	}
+	b := all[0]
+	if got := b.Metadata[beadmeta.RootBeadIDMetadataKey]; got != "gcg-run-obs" {
+		t.Errorf("gc.root_bead_id = %q, want the run streamID gcg-run-obs (run-id correlation spine)", got)
+	}
+	if got := b.Metadata[beadmeta.StepIDMetadataKey]; got != "draft" {
+		t.Errorf("gc.step_id = %q, want the BARE node id draft (NOT the activation draft:2)", got)
+	}
+	// The activation axis is unchanged — attempt still lives on gc.lumen_activation/gc.lumen_attempt.
+	if b.Metadata[beadmeta.LumenActivationMetadataKey] != "draft:2" || b.Metadata[beadmeta.LumenAttemptMetadataKey] != "2" {
+		t.Fatalf("activation axis perturbed: %+v", b.Metadata)
+	}
+}
+
+// TestLumenDispatchToSessionPointerComposition proves the P5-OBS.1 "match up the sessions"
+// flow end to end at the claim seam: a bead minted by lumenDispatchWork, fed to the claim's
+// session-pointer recorder (recordHookClaimSessionPointers), yields gc.current_run_id = the
+// run streamID (ResolveRunID over the do's gc.root_bead_id) and gc.active_work_bead = the
+// bare node id (the do's gc.step_id). These are the two pointers the cost/session plane
+// joins a pooled session to its run+step on. Dropping either dispatch stamp turns this RED.
+func TestLumenDispatchToSessionPointerComposition(t *testing.T) {
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	dispatch := lumenDispatchWork(store, lumenPoolCfg())
+	if _, err := dispatch(ctx, engine.WorkDispatch{StreamID: "gcg-run-z", Activation: "draft:0", NodeID: "draft", Route: "workers", Prompt: "p", Attempt: 0}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	all, _ := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.LumenRunMetadataKey: "gcg-run-z"}, IncludeClosed: true, AllowScan: true})
+	if len(all) != 1 {
+		t.Fatalf("minted beads = %d, want 1", len(all))
+	}
+	doBead := all[0]
+
+	// Drive the real claim session-pointer recorder with the minted do bead. The spy
+	// captures the (runID, stepID) it would stamp on the session bead.
+	spy := &recordRunIDSpy{}
+	recordHookClaimSessionPointers(
+		doBead,
+		hookClaimOptions{Assignee: "workers-1", Env: []string{"GC_SESSION_ID=sess-1"}},
+		hookClaimOps{RecordSessionPointers: spy.fn},
+		"/tmp/work", io.Discard,
+	)
+	if spy.calls != 1 {
+		t.Fatalf("recordHookClaimSessionPointers calls = %d, want 1 (run+step in ONE session update)", spy.calls)
+	}
+	if spy.runID != "gcg-run-z" {
+		t.Fatalf("session gc.current_run_id = %q, want the run streamID gcg-run-z (resolved from the do's gc.root_bead_id)", spy.runID)
+	}
+	if spy.stepID != "draft" {
+		t.Fatalf("session gc.active_work_bead = %q, want the bare node id draft (from the do's gc.step_id)", spy.stepID)
 	}
 }
 

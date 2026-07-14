@@ -77,6 +77,10 @@ func discoverProfile(ctx context.Context, config analysisConfig, profile analysi
 	if err != nil {
 		return nil, err
 	}
+	return discoverLoadedProfile(analysis, definitions)
+}
+
+func discoverLoadedProfile(analysis *loadedAnalysis, definitions []BoundaryDefinition) ([]ObservedSite, error) {
 	boundaries, err := resolveBoundaries(analysis.packages, definitions)
 	if err != nil {
 		return nil, err
@@ -105,10 +109,10 @@ func discoverProfile(ctx context.Context, config analysisConfig, profile analysi
 	if len(problems) != 0 {
 		sort.Strings(problems)
 		problems = compactStrings(problems)
-		return nil, fmt.Errorf("effect discovery failed for profile %q:\n- %s", profile.ID, strings.Join(problems, "\n- "))
+		return nil, fmt.Errorf("effect discovery failed for profile %q:\n- %s", analysis.profile.ID, strings.Join(problems, "\n- "))
 	}
 
-	return numberObservedCalls(observed, profile.ID), nil
+	return numberObservedCalls(observed, analysis.profile.ID), nil
 }
 
 func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisProfile) (*loadedAnalysis, error) {

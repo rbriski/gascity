@@ -131,6 +131,13 @@ func TestCompileRegistryRejectsIncompleteOrTamperedDiscoveryEvidence(t *testing.
 			want: "git HEAD identity is required",
 		},
 		{
+			name: "head identity names another revision",
+			mutate: func(discovery *DiscoveryResult) {
+				discovery.gitHeadIdentity = "detached@a1597432ce9b44d6dbc0a6530b198df1d6d1f113"
+			},
+			want: "does not bind the observed git revision",
+		},
+		{
 			name: "tampered evidence digest",
 			mutate: func(discovery *DiscoveryResult) {
 				discovery.evidenceDigest = strings.Repeat("0", len(discovery.evidenceDigest))
@@ -146,6 +153,16 @@ func TestCompileRegistryRejectsIncompleteOrTamperedDiscoveryEvidence(t *testing.
 			_, err := CompileRegistry(registry, discovery, validationDate())
 			assertErrorContains(t, err, tt.want)
 		})
+	}
+}
+
+func TestDiscoveryResultExposesNoFabricatableEvidenceFields(t *testing.T) {
+	typeOf := reflect.TypeOf(DiscoveryResult{})
+	for index := 0; index < typeOf.NumField(); index++ {
+		field := typeOf.Field(index)
+		if field.IsExported() {
+			t.Errorf("DiscoveryResult.%s is exported; production evidence must remain opaque", field.Name)
+		}
 	}
 }
 

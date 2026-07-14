@@ -1,10 +1,19 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -22,15 +31,145 @@ func structuredTranscriptWireAllowedKeys() map[string]struct{} {
 // yet name.
 func assertNoStructuredWireLeak(t *testing.T, wire []byte, extraForbidden ...string) {
 	t.Helper()
-	if leaked := worker.ScanForbiddenTokens(wire, extraForbidden...); len(leaked) > 0 {
-		t.Fatalf("structured response leaked provider-native token(s) %v: %s", leaked, wire)
-	}
-	unexpected, err := worker.UnexpectedWireKeys(wire, structuredTranscriptWireAllowedKeys())
+	leaked, err := structuredWireLeakage(wire, extraForbidden...)
 	if err != nil {
 		t.Fatalf("scan structured wire keys: %v", err)
 	}
-	if len(unexpected) > 0 {
-		t.Fatalf("structured response carried non-schema key(s) %v: %s", unexpected, wire)
+	if len(leaked) > 0 {
+		t.Fatalf("structured response leaked provider-native data %v: %s", leaked, wire)
+	}
+}
+
+func structuredWireLeakage(wire []byte, extraForbidden ...string) ([]string, error) {
+	leaked := make(map[string]struct{})
+	for _, token := range extraForbidden {
+		if token != "" && bytes.Contains(wire, []byte(token)) {
+			leaked["forbidden:"+token] = struct{}{}
+		}
+	}
+	unexpected, err := worker.UnexpectedWireKeys(wire, structuredTranscriptWireAllowedKeys())
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range unexpected {
+		leaked["key:"+key] = struct{}{}
+	}
+	var decoded any
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		return nil, err
+	}
+	collectStructuredArgumentLeakage(decoded, "", leaked)
+	if len(leaked) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(leaked))
+	for item := range leaked {
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+var neutralStructuredInputArgumentNames = map[string]struct{}{
+	"path": {},
+}
+
+func collectStructuredArgumentLeakage(value any, path string, leaked map[string]struct{}) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			switch key {
+			case "arguments":
+				scanStructuredArguments(child, childPath, true, leaked)
+			case "answers", "counts":
+				scanStructuredArguments(child, childPath, false, leaked)
+			}
+			collectStructuredArgumentLeakage(child, childPath, leaked)
+		}
+	case []any:
+		for i, child := range typed {
+			collectStructuredArgumentLeakage(child, path+"["+strconv.Itoa(i)+"]", leaked)
+		}
+	}
+}
+
+func scanStructuredArguments(value any, path string, restrictNames bool, leaked map[string]struct{}) {
+	items, ok := value.([]any)
+	if !ok {
+		leaked[path+":not_array"] = struct{}{}
+		return
+	}
+	for i, item := range items {
+		itemPath := path + "[" + strconv.Itoa(i) + "]"
+		argument, ok := item.(map[string]any)
+		if !ok {
+			leaked[itemPath+":not_object"] = struct{}{}
+			continue
+		}
+		name, nameOK := argument["name"].(string)
+		if !nameOK || strings.TrimSpace(name) == "" {
+			leaked[itemPath+".name:missing"] = struct{}{}
+		} else {
+			if restrictNames {
+				if _, allowed := neutralStructuredInputArgumentNames[name]; !allowed {
+					leaked[itemPath+".name:"+name] = struct{}{}
+				}
+			}
+			scanStructuredArgumentTokens(name, itemPath+".name", leaked)
+		}
+
+		argumentValue, exists := argument["value"]
+		if !exists {
+			leaked[itemPath+".value:missing"] = struct{}{}
+			continue
+		}
+		valueText, valueOK := argumentValue.(string)
+		if !valueOK {
+			switch argumentValue.(type) {
+			case map[string]any:
+				leaked[itemPath+".value:json_object"] = struct{}{}
+			case []any:
+				leaked[itemPath+".value:json_array"] = struct{}{}
+			default:
+				leaked[itemPath+".value:not_string"] = struct{}{}
+			}
+			continue
+		}
+		scanStructuredArgumentTokens(valueText, itemPath+".value", leaked)
+		if kind := jsonStringContainerKind(valueText); kind != "" {
+			leaked[itemPath+".value:"+kind] = struct{}{}
+		}
+	}
+}
+
+func scanStructuredArgumentTokens(value, path string, leaked map[string]struct{}) {
+	for _, token := range worker.ProviderNativeForbiddenTokens() {
+		if token != "" && strings.Contains(value, token) {
+			leaked[path+":provider_token="+token] = struct{}{}
+		}
+	}
+}
+
+func jsonStringContainerKind(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+		return ""
+	}
+	switch decoded.(type) {
+	case map[string]any:
+		return "json_object"
+	case []any:
+		return "json_array"
+	default:
+		return ""
 	}
 }
 
@@ -81,18 +220,16 @@ func firstMapField(t reflect.Type, seen map[reflect.Type]struct{}, path string) 
 	return ""
 }
 
-// TestStructuredSubagentLineageInliningPending is a skip-marker for a known,
-// spec'd-but-unimplemented gap, so the drift stays visible rather than silent:
-// SessionStructuredMessage reserves IsSubagent and ParentToolCallID for inline
-// subagent nesting, but the structured stream does not yet nest or reference
-// subagent messages in the primary payload (engdocs/design/structured-stream-format.md,
-// "inline subagent nesting"). Remove the skip and assert the lineage fields are
-// populated once inlining lands.
-func TestStructuredSubagentLineageInliningPending(t *testing.T) {
-	// Compile-time anchor: fail loudly if the reserved lineage carriers are
-	// renamed or removed before the feature is implemented.
-	_ = SessionStructuredMessage{IsSubagent: true, ParentToolCallID: "parent-call"}
-	t.Skip("inline subagent nesting not implemented: SessionStructuredMessage.{IsSubagent,ParentToolCallID} are reserved but never populated; see engdocs/design/structured-stream-format.md")
+// Inline-subagent lineage is intentionally outside session.structured.v1.
+// Keep the reserved fields off the v1 wire until the versioned follow-up has
+// real provider evidence and end-to-end coverage (ga-mb46n3).
+func TestStructuredV1ExcludesInlineSubagentLineage(t *testing.T) {
+	typ := reflect.TypeOf(SessionStructuredMessage{})
+	for _, field := range []string{"IsSubagent", "ParentToolCallID"} {
+		if _, ok := typ.FieldByName(field); ok {
+			t.Fatalf("SessionStructuredMessage still exposes v1 lineage field %s", field)
+		}
+	}
 }
 
 func TestStructuredLeakageGateCatchesInjectedNativeKey(t *testing.T) {
@@ -102,7 +239,7 @@ func TestStructuredLeakageGateCatchesInjectedNativeKey(t *testing.T) {
 		Provider:      "claude",
 		Format:        "structured",
 		SchemaVersion: sessionStructuredSchemaVersion,
-		StructuredMessages: []SessionStructuredMessage{{
+		StructuredMessages: structuredMessagesField([]SessionStructuredMessage{{
 			ID:     "m1",
 			Role:   "assistant",
 			Status: "final",
@@ -111,7 +248,7 @@ func TestStructuredLeakageGateCatchesInjectedNativeKey(t *testing.T) {
 				ToolCallID: "call-1",
 				Structured: &SessionStructuredToolResult{Kind: "edit", FilePath: "a.go", Patch: "@@ -1 +1 @@"},
 			}},
-		}},
+		}}),
 	}
 	wire, err := json.Marshal(clean)
 	if err != nil {
@@ -142,6 +279,225 @@ func TestStructuredLeakageGateCatchesInjectedNativeKey(t *testing.T) {
 	if len(unexpected) != 1 || unexpected[0] != "someBrandNewProviderKey" {
 		t.Fatalf("allowlist gate must catch a novel non-schema key, got %v", unexpected)
 	}
+}
+
+func TestStructuredLeakageScanRejectsGenericArgumentCarriers(t *testing.T) {
+	tests := []struct {
+		name     string
+		argument SessionStructuredArgument
+		wantLeak string
+	}{
+		{
+			name:     "unknown input argument name",
+			argument: SessionStructuredArgument{Name: "scope", Value: "web"},
+			wantLeak: "arguments[0].name",
+		},
+		{
+			name:     "encoded object value",
+			argument: SessionStructuredArgument{Name: "path", Value: `{"query":"provider-owned"}`},
+			wantLeak: "arguments[0].value:json_object",
+		},
+		{
+			name:     "encoded array value",
+			argument: SessionStructuredArgument{Name: "path", Value: `["provider-owned"]`},
+			wantLeak: "arguments[0].value:json_array",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := structuredLeakageTestResponse(SessionStructuredBlock{
+				Type: "tool_use",
+				ID:   "call-1",
+				Input: &SessionStructuredToolInput{
+					Kind:      "arguments",
+					Arguments: []SessionStructuredArgument{tt.argument},
+				},
+			})
+			wire, err := json.Marshal(response)
+			if err != nil {
+				t.Fatalf("marshal structured response: %v", err)
+			}
+			leaked, err := structuredWireLeakage(wire)
+			if err != nil {
+				t.Fatalf("scan structured response: %v", err)
+			}
+			if !stringSliceContainsSubstring(leaked, tt.wantLeak) {
+				t.Fatalf("structuredWireLeakage() = %v, want leak containing %q", leaked, tt.wantLeak)
+			}
+		})
+	}
+}
+
+func TestStructuredLeakageScanAllowsTypedJSONText(t *testing.T) {
+	providerLookingText := `{"toolUseResult":{"source":"user-authored","type":"example"}}`
+	response := structuredLeakageTestResponse(
+		SessionStructuredBlock{Type: "text", Text: providerLookingText},
+		SessionStructuredBlock{
+			Type: "tool_use",
+			ID:   "call-1",
+			Input: &SessionStructuredToolInput{
+				Kind:    "code",
+				Code:    providerLookingText,
+				Command: providerLookingText,
+				Text:    providerLookingText,
+			},
+		},
+		SessionStructuredBlock{
+			Type:       "tool_result",
+			ToolCallID: "call-1",
+			Content:    providerLookingText,
+			Structured: &SessionStructuredToolResult{
+				Kind:   "bash",
+				Text:   providerLookingText,
+				Stdout: providerLookingText,
+			},
+		},
+	)
+	wire, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal structured response: %v", err)
+	}
+	leaked, err := structuredWireLeakage(wire)
+	if err != nil {
+		t.Fatalf("scan structured response: %v", err)
+	}
+	if leaked != nil {
+		t.Fatalf("legitimate typed JSON text flagged as provider leakage: %v", leaked)
+	}
+}
+
+func TestStructuredRawResponsePreservesProviderNativeFrame(t *testing.T) {
+	raw := json.RawMessage(`{"timestamp":9007199254740993,"type":"response_item","payload":{"action":{"type":"search","source":"web"},"scope":"web"}}`)
+	response := sessionTranscriptGetResponse{
+		ID:       "s1",
+		Template: "Chat",
+		Provider: "codex",
+		Format:   "raw",
+		Messages: []SessionRawMessageFrame{{Raw: raw}},
+	}
+	wire, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal raw response: %v", err)
+	}
+	var envelope struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(wire, &envelope); err != nil {
+		t.Fatalf("decode raw response envelope: %v", err)
+	}
+	if len(envelope.Messages) != 1 || !bytes.Equal(envelope.Messages[0], raw) {
+		t.Fatalf("raw frame = %s, want exact provider frame %s", envelope.Messages, raw)
+	}
+}
+
+func TestStructuredCodexWebSearchOmitsNativeInputAndRawPreservesIt(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "codex",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	writeStructuredCodexWebSearchFixture(t, searchBase, info.WorkDir, info.SessionKey)
+
+	structuredRecorder := httptest.NewRecorder()
+	structuredRequest := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+	h.ServeHTTP(structuredRecorder, structuredRequest)
+	if structuredRecorder.Code != http.StatusOK {
+		t.Fatalf("structured status = %d, want %d; body: %s", structuredRecorder.Code, http.StatusOK, structuredRecorder.Body.String())
+	}
+	var structured sessionTranscriptGetResponse
+	if err := json.Unmarshal(structuredRecorder.Body.Bytes(), &structured); err != nil {
+		t.Fatalf("decode structured response: %v", err)
+	}
+	toolUse, _ := findStructuredToolPair(structuredTranscriptMessages(structured), "call-codex-web-search")
+	if toolUse == nil || toolUse.Input == nil {
+		t.Fatalf("structured response missing web-search input: %+v", structuredTranscriptMessages(structured))
+	}
+	if toolUse.Input.Kind != "search" || toolUse.Input.Query != "structured tool result formats" {
+		t.Fatalf("structured input = %+v, want neutral search query", toolUse.Input)
+	}
+	if toolUse.Input.Text != "" || len(toolUse.Input.Arguments) != 0 {
+		t.Fatalf("structured input leaked fallback carriers: %+v", toolUse.Input)
+	}
+	assertNoStructuredWireLeak(t, structuredRecorder.Body.Bytes())
+	for _, native := range []string{`"action"`, `"scope"`, `"source"`} {
+		if bytes.Contains(structuredRecorder.Body.Bytes(), []byte(native)) {
+			t.Fatalf("structured response leaked native field %s: %s", native, structuredRecorder.Body.Bytes())
+		}
+	}
+
+	rawRecorder := httptest.NewRecorder()
+	rawRequest := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=raw&tail=0", nil)
+	h.ServeHTTP(rawRecorder, rawRequest)
+	if rawRecorder.Code != http.StatusOK {
+		t.Fatalf("raw status = %d, want %d; body: %s", rawRecorder.Code, http.StatusOK, rawRecorder.Body.String())
+	}
+	var rawResponse sessionTranscriptGetResponse
+	if err := json.Unmarshal(rawRecorder.Body.Bytes(), &rawResponse); err != nil {
+		t.Fatalf("decode raw response: %v", err)
+	}
+	wantRaw := []byte(`{"timestamp":"2026-06-01T00:04:01Z","type":"response_item","payload":{"type":"web_search_call","id":"call-codex-web-search","query":"structured tool result formats","input":{"query":"ignored fallback","scope":"web"},"action":{"type":"search","source":"web"}}}`)
+	foundExact := false
+	for _, frame := range rawResponse.Messages {
+		if bytes.Equal(frame.Raw, wantRaw) {
+			foundExact = true
+			break
+		}
+	}
+	if !foundExact {
+		t.Fatalf("raw response did not preserve exact provider web-search frame: %s", rawRecorder.Body.Bytes())
+	}
+}
+
+func structuredLeakageTestResponse(blocks ...SessionStructuredBlock) sessionTranscriptGetResponse {
+	return sessionTranscriptGetResponse{
+		ID:                 "s1",
+		Template:           "Chat",
+		Provider:           "codex",
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		Operation:          "snapshot",
+		StructuredMessages: structuredMessagesField([]SessionStructuredMessage{representativeStructuredMessage(blocks...)}),
+	}
+}
+
+func representativeStructuredMessage(blocks ...SessionStructuredBlock) SessionStructuredMessage {
+	return SessionStructuredMessage{
+		ID:     "m1",
+		Role:   "assistant",
+		Status: "final",
+		Blocks: blocks,
+	}
+}
+
+func stringSliceContainsSubstring(values []string, want string) bool {
+	for _, value := range values {
+		if strings.Contains(value, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // injectWireKey decodes the wire, adds key (with a sentinel value) to the first

@@ -76,7 +76,7 @@ function StructuredPeekBody({ state }: { state: StructuredStreamState }) {
       <div className="space-y-6">
         <p className="text-label uppercase tracking-wider text-warn">▲ {PROMPT_INJECTION_NOTICE}</p>
         {result.history !== null && <StructuredHistory history={result.history} />}
-        <ol className="space-y-5">
+        <ol className="space-y-5" aria-live="polite" aria-relevant="additions text">
           {result.items.map((item) =>
             // StructuredMessage renders its own <li>; only the pending view (a
             // <div>) needs wrapping so every <ol> child is an <li>.

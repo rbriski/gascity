@@ -43,8 +43,9 @@ func ReadGeminiFile(path string, _ int) (*Session, error) {
 	}
 
 	var messages []*Entry
-	for idx, rawMessage := range raw.Messages {
-		entry := parseGeminiMessage(rawMessage, idx)
+	syntheticIDs := newStableSyntheticEntryIDSequence("gemini")
+	for _, rawMessage := range raw.Messages {
+		entry := parseGeminiMessage(rawMessage, syntheticIDs.ForRecord(rawMessage))
 		if entry == nil {
 			continue
 		}
@@ -72,11 +73,10 @@ func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
 	sessionID := ""
 	messages := make([]*Entry, 0)
 	messageIndex := make(map[string]int)
-	nextIndex := 0
+	syntheticIDs := newStableSyntheticEntryIDSequence("gemini")
 
 	appendEntry := func(rawMessage json.RawMessage) {
-		entry := parseGeminiMessage(rawMessage, nextIndex)
-		nextIndex++
+		entry := parseGeminiMessage(rawMessage, syntheticIDs.ForRecord(rawMessage))
 		if entry == nil {
 			return
 		}
@@ -90,6 +90,7 @@ func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
 	resetMessages := func(rawMessages []json.RawMessage) {
 		messages = messages[:0]
 		clear(messageIndex)
+		syntheticIDs = newStableSyntheticEntryIDSequence("gemini")
 		for _, rawMessage := range rawMessages {
 			appendEntry(rawMessage)
 		}
@@ -132,7 +133,7 @@ func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
 	}, nil
 }
 
-func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
+func parseGeminiMessage(rawMessage json.RawMessage, syntheticID stableSyntheticEntryIDSource) *Entry {
 	var message struct {
 		ID           string              `json:"id"`
 		Timestamp    string              `json:"timestamp"`
@@ -150,7 +151,7 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 	ts, _ := time.Parse(time.RFC3339Nano, message.Timestamp)
 	uuid := strings.TrimSpace(message.ID)
 	if uuid == "" {
-		uuid = deterministicGeminiID(rawMessage, idx)
+		uuid = syntheticID.ID("")
 	}
 
 	switch message.Type {
@@ -560,10 +561,6 @@ func geminiSessionID(path string) string {
 		base = base[:len(base)-len(ext)]
 	}
 	return base
-}
-
-func deterministicGeminiID(_ json.RawMessage, idx int) string {
-	return fmt.Sprintf("gemini-%d", idx)
 }
 
 func firstNonEmpty(values ...string) string {

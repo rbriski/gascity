@@ -102,7 +102,11 @@ export function SystemEventMetadata({ event }: { event: SessionStructuredSystemE
 }
 
 /** `tool_use` block: a `tool` chip with the tool name plus the input `<pre>`. Spec §7. */
-export function ToolUseBlock({ block }: { block: SessionStructuredBlock }) {
+export function ToolUseBlock({
+  block,
+}: {
+  block: Extract<SessionStructuredBlock, { type: 'tool_use' }>;
+}) {
   const rows = block.input !== undefined ? toolInputRows(block.input) : [];
   return (
     <ToolBlock kind="tool" label={block.name !== undefined && block.name !== '' ? block.name : 'tool'} body={rows.join('\n')} />
@@ -110,19 +114,32 @@ export function ToolUseBlock({ block }: { block: SessionStructuredBlock }) {
 }
 
 /** `tool_result` block: a `{kind} result` chip, the body `<pre>`, and a diff when present. Spec §8. */
-export function ToolResultBlock({ block }: { block: SessionStructuredBlock }) {
+export function ToolResultBlock({
+  block,
+}: {
+  block: Extract<SessionStructuredBlock, { type: 'tool_result' }>;
+}) {
   const { kind, body, diff } = toolResultSections(block);
   return (
-    <ToolBlock kind={kind} label="result" body={body} isError={block.is_error === true}>
+    <ToolBlock
+      kind={kind}
+      label={block.is_error === true ? 'error result' : 'result'}
+      body={body}
+      isError={block.is_error === true}
+    >
       {diff !== '' && <DiffView text={diff} />}
     </ToolBlock>
   );
 }
 
 /** `image` block: file/url/mime rows plus the inline `<img>` when an image_url is present. Spec §6. */
-export function ImageBlock({ block }: { block: SessionStructuredBlock }) {
+export function ImageBlock({
+  block,
+}: {
+  block: Extract<SessionStructuredBlock, { type: 'image' }>;
+}) {
   const rows = imageRows(block);
-  const imageUrl = block.image_url;
+  const imageUrl = renderableImageUrl(block.image_url);
   return (
     <ToolBlock kind="image" label="block" body={rows.join('\n') || 'image'}>
       {typeof imageUrl === 'string' && imageUrl !== '' && (
@@ -136,8 +153,25 @@ export function ImageBlock({ block }: { block: SessionStructuredBlock }) {
   );
 }
 
+function renderableImageUrl(imageUrl: string | undefined): string | undefined {
+  if (imageUrl === undefined || imageUrl === '') return undefined;
+  if (imageUrl.startsWith('data:image/')) return imageUrl;
+  if (!imageUrl.startsWith('/')) return undefined;
+
+  try {
+    const resolved = new URL(imageUrl, document.baseURI);
+    return resolved.origin === location.origin ? imageUrl : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** `interaction` block: the single summary line from `formatInteraction`. Spec §9. */
-export function InteractionBlock({ block }: { block: SessionStructuredBlock }) {
+export function InteractionBlock({
+  block,
+}: {
+  block: Extract<SessionStructuredBlock, { type: 'interaction' }>;
+}) {
   return <pre className="text-body whitespace-pre-wrap leading-relaxed overflow-x-auto">{formatInteraction(block)}</pre>;
 }
 
@@ -186,25 +220,31 @@ export function StructuredBlock({ block }: { block: SessionStructuredBlock }) {
 
 /**
  * A single structured message: a metadata header (role, provider, time, model,
- * usage, status, stop_reason, subagent, parent — in spec §1 order, empties
- * omitted) followed by the body. The body renders user-prompt and system-event
+ * usage, status, and stop_reason — in spec §1 order, empties omitted) followed
+ * by the body. The body renders user-prompt and system-event
  * metadata first, then each block; the first `text` block is suppressed when
  * either metadata kind is present (spec §1.3), since the metadata already
  * structures that raw prompt/system text.
  */
 export function StructuredMessage({ message }: { message: SessionStructuredMessage }) {
-  const role = message.role !== '' ? message.role : 'agent';
-  const usage = formatUsage(message.usage);
+  const role = message.role;
+  const assistantMetadata =
+    message.role === 'assistant' || message.role === 'unknown' ? message : undefined;
+  const userPrompt =
+    message.role === 'user' || message.role === 'unknown' ? message.user_prompt : undefined;
+  const systemEvent =
+    message.role === 'system' || message.role === 'unknown' ? message.system_event : undefined;
+  const usage = formatUsage(assistantMetadata?.usage);
 
   // Suppression gates on whether the metadata actually RENDERED (non-empty
   // rows), mirroring the old renderer that keyed off the returned element, not
   // mere field presence. When either metadata block renders, every `text` block
   // is dropped — the metadata already structures that raw prompt/system text.
-  const promptRendered = message.user_prompt !== undefined && userPromptRows(message.user_prompt).length > 0;
-  const systemRendered = message.system_event !== undefined && systemEventRows(message.system_event).length > 0;
+  const promptRendered = userPrompt !== undefined && userPromptRows(userPrompt).length > 0;
+  const systemRendered = systemEvent !== undefined && systemEventRows(systemEvent).length > 0;
   const suppressText = promptRendered || systemRendered;
 
-  const blocks = message.blocks ?? [];
+  const blocks = message.blocks;
 
   return (
     <li className="space-y-2">
@@ -214,18 +254,18 @@ export function StructuredMessage({ message }: { message: SessionStructuredMessa
         <span className="text-body text-fg tnum" title={message.timestamp ?? undefined}>
           {formatClockTime(message.timestamp)}
         </span>
-        {message.model !== undefined && message.model !== '' && <HeaderMeta>{message.model}</HeaderMeta>}
+        {assistantMetadata?.model !== undefined && assistantMetadata.model !== '' && (
+          <HeaderMeta>{assistantMetadata.model}</HeaderMeta>
+        )}
         {usage !== '' && <HeaderMeta>{usage}</HeaderMeta>}
-        {message.status !== undefined && message.status !== '' && <HeaderMeta>{message.status}</HeaderMeta>}
-        {message.stop_reason !== undefined && message.stop_reason !== '' && <HeaderMeta>{message.stop_reason}</HeaderMeta>}
-        {message.is_subagent === true && <HeaderMeta>subagent</HeaderMeta>}
-        {message.parent_tool_call_id !== undefined && message.parent_tool_call_id !== '' && (
-          <HeaderMeta>{`parent ${message.parent_tool_call_id}`}</HeaderMeta>
+		<HeaderMeta>{message.status}</HeaderMeta>
+        {assistantMetadata?.stop_reason !== undefined && assistantMetadata.stop_reason !== '' && (
+          <HeaderMeta>{assistantMetadata.stop_reason}</HeaderMeta>
         )}
       </header>
       <div className="space-y-3">
-        {message.user_prompt !== undefined && <UserPromptMetadata prompt={message.user_prompt} />}
-        {message.system_event !== undefined && <SystemEventMetadata event={message.system_event} />}
+        {userPrompt !== undefined && <UserPromptMetadata prompt={userPrompt} />}
+        {systemEvent !== undefined && <SystemEventMetadata event={systemEvent} />}
         {blocks.map((block, index) => {
           if (suppressText && block.type === 'text') return null;
           return <StructuredBlock key={index} block={block} />;

@@ -14,18 +14,8 @@ import (
 )
 
 func readCapturedACPFile(path string, tailCompactions int, syntheticPrefix string) (*Session, error) {
-	session, err := ReadKiroFile(path, tailCompactions)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range session.Messages {
-		if entry == nil {
-			continue
-		}
-		entry.UUID = capturedACPSyntheticID(entry.UUID, syntheticPrefix)
-		entry.ParentUUID = capturedACPSyntheticID(entry.ParentUUID, syntheticPrefix)
-	}
-	return session, nil
+	_ = tailCompactions
+	return readKiroFile(path, syntheticPrefix)
 }
 
 func findCapturedACPSessionFileByID(searchPaths, defaultSearchPaths []string, workDir, sessionID string) string {
@@ -157,11 +147,4 @@ func capturedACPCWDFromRawJSON(raw json.RawMessage) string {
 		}
 	}
 	return ""
-}
-
-func capturedACPSyntheticID(id, prefix string) string {
-	if strings.HasPrefix(id, "kiro-") {
-		return strings.TrimSpace(prefix) + "-" + strings.TrimPrefix(id, "kiro-")
-	}
-	return id
 }

@@ -11,7 +11,8 @@
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "pretest": "npm --workspace gas-city-dashboard-shared run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e:structured": "tsc --noEmit -p e2e/tsconfig.json && playwright test e2e/structured-transcript.spec.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
@@ -25,6 +26,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@testing-library/react": "^16.0.1",
     "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",

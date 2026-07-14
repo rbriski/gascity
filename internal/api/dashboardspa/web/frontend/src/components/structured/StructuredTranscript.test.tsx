@@ -33,11 +33,15 @@ describe('StructuredMessage header', () => {
           provider: 'claude',
           timestamp: '2026-06-01T00:00:00Z',
           model: 'opus',
-          usage: { input_tokens: 100, output_tokens: 20, context_used_tokens: 108, context_window_tokens: 200000, context_percent: 1 },
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            context_used_tokens: 108,
+            context_window_tokens: 200000,
+            context_percent: 1,
+          },
           status: 'final',
           stop_reason: 'end_turn',
-          is_subagent: true,
-          parent_tool_call_id: 'call-9',
         })}
       />,
     );
@@ -51,17 +55,14 @@ describe('StructuredMessage header', () => {
     expect(text).toContain('tokens in 100 out 20 108/200000 1%');
     expect(text).toContain('final');
     expect(text).toContain('end_turn');
-    expect(text).toContain('subagent');
-    expect(text).toContain('parent call-9');
   });
 
-  it('omits provider, model, usage, stop_reason, subagent, and parent when absent', () => {
+  it('omits provider, model, usage, and stop_reason when absent', () => {
     const { container } = render(
       <StructuredMessage message={message({ role: 'user', status: 'final' })} />,
     );
     const text = container.querySelector('header')!.textContent ?? '';
     expect(text).toContain('user');
-    expect(text).not.toContain('subagent');
     expect(text).not.toContain('parent ');
     expect(text).not.toContain('tokens ');
   });
@@ -77,7 +78,7 @@ describe('StructuredMessage body', () => {
           blocks: [
             { type: 'text', text: 'raw prompt with duplicated content' },
             { type: 'text', text: 'also raw text' },
-            { type: 'tool_use', name: 'Read', input: { file_path: 'x.ts' } },
+            { type: 'tool_use', name: 'Read', input: { kind: 'file', file_path: 'x.ts' } },
           ],
         })}
       />,
@@ -99,7 +100,11 @@ describe('StructuredMessage body', () => {
     // element-presence gate stays false and text blocks are NOT dropped.
     const { container } = render(
       <StructuredMessage
-        message={message({ role: 'user', user_prompt: {}, blocks: [{ type: 'text', text: 'kept text' }] })}
+        message={message({
+          role: 'user',
+          user_prompt: {},
+          blocks: [{ type: 'text', text: 'kept text' }],
+        })}
       />,
     );
     expect(container.textContent).toContain('kept text');
@@ -107,7 +112,9 @@ describe('StructuredMessage body', () => {
 
   it('does NOT suppress a leading text block when no metadata is present', () => {
     const { container } = render(
-      <StructuredMessage message={message({ role: 'assistant', blocks: [{ type: 'text', text: 'visible text' }] })} />,
+      <StructuredMessage
+        message={message({ role: 'assistant', blocks: [{ type: 'text', text: 'visible text' }] })}
+      />,
     );
     expect(container.textContent).toContain('visible text');
   });
@@ -117,7 +124,12 @@ describe('StructuredMessage body', () => {
       <StructuredMessage
         message={message({
           role: 'system',
-          system_event: { kind: 'error', category: 'usage_limit', code: 'usage_limit_exceeded', message: "You've hit your usage limit." },
+          system_event: {
+            kind: 'error',
+            category: 'usage_limit',
+            code: 'usage_limit_exceeded',
+            message: "You've hit your usage limit.",
+          },
           blocks: [],
         })}
       />,
@@ -138,7 +150,9 @@ describe('StructuredBlock dispatch', () => {
   });
 
   it('renders a thinking block with the [thinking] prefix', () => {
-    const { container } = render(<StructuredBlock block={{ type: 'thinking', thinking: 'pondering' }} />);
+    const { container } = render(
+      <StructuredBlock block={{ type: 'thinking', thinking: 'pondering' }} />,
+    );
     expect(container.textContent).toBe('[thinking] pondering');
   });
 
@@ -161,7 +175,9 @@ describe('StructuredBlock dispatch', () => {
   });
 
   it('falls back to a "tool" label when the tool_use block has no name', () => {
-    const { container } = render(<StructuredBlock block={{ type: 'tool_use', input: { command: 'ls' } }} />);
+    const { container } = render(
+      <StructuredBlock block={{ type: 'tool_use', input: { kind: 'command', command: 'ls' } }} />,
+    );
     expect(container.textContent).toContain('tool');
     expect(container.textContent).toContain('command: ls');
   });
@@ -169,7 +185,13 @@ describe('StructuredBlock dispatch', () => {
   it('renders an interaction block as the formatInteraction summary line', () => {
     const block: SessionStructuredBlock = {
       type: 'interaction',
-      interaction: { kind: 'approval', state: 'awaiting_user', request_id: 'approval-1', action: 'Approve', prompt: 'Proceed?' },
+      interaction: {
+        kind: 'approval',
+        state: 'awaiting_user',
+        request_id: 'approval-1',
+        action: 'Approve',
+        prompt: 'Proceed?',
+      },
     };
     const { container } = render(<StructuredBlock block={block} />);
     const text = container.textContent ?? '';
@@ -180,10 +202,12 @@ describe('StructuredBlock dispatch', () => {
     expect(text).toContain('Proceed?');
   });
 
-  it('renders an unknown block type via the inline-value fallback', () => {
-    const { container } = render(<StructuredBlock block={{ type: 'mystery', content: 'opaque' } as SessionStructuredBlock} />);
+  it('renders the closed unknown block variant via the inline-value fallback', () => {
+    const { container } = render(
+      <StructuredBlock block={{ type: 'unknown', content: 'opaque' }} />,
+    );
     // formatInlineValue(block) JSON-stringifies the whole block.
-    expect(container.textContent).toContain('mystery');
+    expect(container.textContent).toContain('unknown');
     expect(container.textContent).toContain('opaque');
   });
 });
@@ -223,23 +247,32 @@ describe('ToolResultBlock', () => {
     const spans = Array.from(container.querySelectorAll('span'));
     expect(spans.find((s) => s.textContent === '-old line')?.className).toContain('text-warn');
     expect(spans.find((s) => s.textContent === '+new line')?.className).toContain('text-ok');
-    expect(spans.find((s) => s.textContent === '*** Update File: src/app.ts')?.className).toContain('text-fg-faint');
+    expect(spans.find((s) => s.textContent === '*** Update File: src/app.ts')?.className).toContain(
+      'text-fg-faint',
+    );
   });
 
   it('applies error styling when is_error is set', () => {
     const block: SessionStructuredBlock = {
       type: 'tool_result',
       is_error: true,
-      structured: { kind: 'bash', error: { category: 'command_failure', message: 'boom' }, exit_code: 1 },
+      structured: {
+        kind: 'bash',
+        error: { category: 'command_failure', message: 'boom' },
+        exit_code: 1,
+      },
     };
     const { container } = render(<StructuredBlock block={block} />);
     // The wrapping block carries the warn tone.
     expect(container.querySelector('.text-warn')).not.toBeNull();
+    expect(container.textContent).toContain('error result');
     expect(container.textContent).toContain('error: boom');
   });
 
   it('renders a generic result body when the block has no structured payload', () => {
-    const { container } = render(<StructuredBlock block={{ type: 'tool_result', content: 'plain content' }} />);
+    const { container } = render(
+      <StructuredBlock block={{ type: 'tool_result', content: 'plain content' }} />,
+    );
     const text = container.textContent ?? '';
     expect(text).toContain('result');
     expect(text).toContain('plain content');
@@ -247,23 +280,62 @@ describe('ToolResultBlock', () => {
 });
 
 describe('ImageBlock', () => {
-  it('renders metadata rows and an <img> with the image_url src', () => {
+  it('renders metadata rows and an <img> for a CSP-allowed data URL', () => {
     const block: SessionStructuredBlock = {
       type: 'image',
       file_path: 'screens/shot.png',
-      image_url: 'https://example.com/shot.png',
+      image_url: 'data:image/png;base64,c2hvdA==',
       mime_type: 'image/png',
     };
     const { container } = render(<StructuredBlock block={block} />);
     const text = container.textContent ?? '';
     expect(text).toContain('file: screens/shot.png');
-    expect(text).toContain('url: https://example.com/shot.png');
+    expect(text).toContain('url: data:image/png;base64,c2hvdA==');
     expect(text).toContain('mime: image/png');
 
     const img = container.querySelector('img');
     expect(img).not.toBeNull();
-    expect(img!.getAttribute('src')).toBe('https://example.com/shot.png');
+    expect(img!.getAttribute('src')).toBe('data:image/png;base64,c2hvdA==');
     expect(img!.getAttribute('alt')).toBe('screens/shot.png');
+  });
+
+  it('does not fetch a provider-authored remote image URL blocked by the dashboard CSP', () => {
+    const block: SessionStructuredBlock = {
+      type: 'image',
+      image_url: 'https://attacker.example/tracker.png',
+      mime_type: 'image/png',
+    };
+    const { container } = render(<StructuredBlock block={block} />);
+
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).toContain('url: https://attacker.example/tracker.png');
+  });
+
+  it.each([
+    '/\\attacker.example/pixel.png',
+    '/\\\\attacker.example/pixel.png',
+    '/\\dashboard.example:secret@attacker.example/pixel.png',
+  ])('does not render a provider-authored URL that parses as cross-origin: %s', (imageUrl) => {
+    const block: SessionStructuredBlock = {
+      type: 'image',
+      image_url: imageUrl,
+      mime_type: 'image/png',
+    };
+    const { container } = render(<StructuredBlock block={block} />);
+
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).toContain(`url: ${imageUrl}`);
+  });
+
+  it('renders a same-origin root-relative image URL', () => {
+    const block: SessionStructuredBlock = {
+      type: 'image',
+      image_url: '/screens/shot.png',
+      mime_type: 'image/png',
+    };
+    const { container } = render(<StructuredBlock block={block} />);
+
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('/screens/shot.png');
   });
 
   it('omits the <img> when there is no image_url', () => {
@@ -277,7 +349,12 @@ describe('PendingInteractionView', () => {
   it('renders the pending interaction rows', () => {
     const { container } = render(
       <PendingInteractionView
-        pending={{ request_id: 'approval-stream', kind: 'approval', prompt: 'Approve streamed write?', options: ['Approve', 'Deny'] }}
+        pending={{
+          request_id: 'approval-stream',
+          kind: 'approval',
+          prompt: 'Approve streamed write?',
+          options: ['Approve', 'Deny'],
+        }}
       />,
     );
     const text = container.textContent ?? '';
@@ -294,7 +371,7 @@ describe('StructuredTranscript', () => {
   const history: SessionStructuredHistory = {
     transcript_stream_id: 'stream-1',
     generation: { id: 'gen-1', observed_at: '2026-06-01T00:00:00Z' },
-    cursor: { after_entry_id: 'entry-9' },
+    cursor: { after_entry_id: 'entry-9', resume_token: 'st1.transcript' },
     continuity: { status: 'continuous', compaction_count: 0 },
     tail_state: { activity: 'idle' },
   };
@@ -303,7 +380,13 @@ describe('StructuredTranscript', () => {
     const { container } = render(
       <StructuredTranscript
         history={history}
-        messages={[message({ id: 'm1', role: 'assistant', blocks: [{ type: 'text', text: 'first message' }] })]}
+        messages={[
+          message({
+            id: 'm1',
+            role: 'assistant',
+            blocks: [{ type: 'text', text: 'first message' }],
+          }),
+        ]}
       />,
     );
     const text = container.textContent ?? '';
@@ -338,17 +421,21 @@ describe('StructuredTranscript', () => {
     const blocks: SessionStructuredBlock[] = [
       { type: 'text', text: 'narration' },
       { type: 'thinking', thinking: 'reasoning' },
-      { type: 'tool_use', name: 'Read', input: { file_path: 'x.ts' } },
+      { type: 'tool_use', name: 'Read', input: { kind: 'file', file_path: 'x.ts' } },
       { type: 'tool_result', structured: { kind: 'read', content: 'file body' } },
-      { type: 'image', image_url: 'https://example.com/i.png' },
+      { type: 'image', image_url: 'data:image/png;base64,aW1hZ2U=' },
     ];
-    const { container } = render(<StructuredTranscript messages={[message({ id: 'm1', role: 'assistant', blocks })]} />);
+    const { container } = render(
+      <StructuredTranscript messages={[message({ id: 'm1', role: 'assistant', blocks })]} />,
+    );
     const text = container.textContent ?? '';
     expect(text).toContain('narration');
     expect(text).toContain('[thinking] reasoning');
     expect(text).toContain('Read');
     expect(text).toContain('file: x.ts');
     expect(text).toContain('file body');
-    expect(container.querySelector('img')?.getAttribute('src')).toBe('https://example.com/i.png');
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(
+      'data:image/png;base64,aW1hZ2U=',
+    );
   });
 });

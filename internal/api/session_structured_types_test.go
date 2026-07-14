@@ -127,8 +127,11 @@ func TestHistorySnapshotStructuredMessagesPreferWorkerCarriedStructuredData(t *t
 	if input == nil {
 		t.Fatal("tool-use input = nil")
 	}
-	if input.Command != "go test ./internal/api" || input.FilePath != "typed-input.txt" || input.Language != "text" {
-		t.Fatalf("tool-use input = %+v, want worker-carried structured input", input)
+	if input.Command != "go test ./internal/api" {
+		t.Fatalf("tool-use command = %q, want worker-carried command", input.Command)
+	}
+	if input.FilePath != "" || input.Language != "" {
+		t.Fatalf("command input leaked cross-variant fields: %+v", input)
 	}
 	if len(input.Arguments) != 1 || input.Arguments[0].Name != "cwd" || input.Arguments[0].Value != "/tmp/project" {
 		t.Fatalf("tool-use arguments = %#v, want converted worker arguments", input.Arguments)
@@ -156,38 +159,14 @@ func TestHistorySnapshotStructuredMessagesPreferWorkerCarriedStructuredData(t *t
 	if result.Error.Category != "command_failure" || result.Error.Message != "npm ERR! test failed" || result.Error.UserReason != "asked to stop" {
 		t.Fatalf("tool result error = %+v, want worker-carried error classification", result.Error)
 	}
-	if len(result.FilePaths) != 1 || result.FilePaths[0] != "typed-output.txt" {
-		t.Fatalf("tool result file paths = %#v, want typed-output.txt", result.FilePaths)
+	if len(result.FilePaths) != 0 || result.Language != "" || result.OldString != "" || result.NewString != "" || result.OriginalFile != "" {
+		t.Fatalf("bash result leaked file/edit fields: %+v", result)
 	}
-	if result.Language != "text" {
-		t.Fatalf("tool result language = %q, want text", result.Language)
+	if result.ReplaceAll != nil || result.UserModified != nil || len(result.Counts) != 0 || len(result.ResultItems) != 0 || len(result.Questions) != 0 {
+		t.Fatalf("bash result leaked cross-variant collections or flags: %+v", result)
 	}
-	if result.OldString != "old typed text" || result.NewString != "new typed text" || result.OriginalFile != "old typed text\n" {
-		t.Fatalf("tool result edit metadata = old %q new %q original %q, want worker-carried edit context", result.OldString, result.NewString, result.OriginalFile)
-	}
-	if result.ReplaceAll == nil || *result.ReplaceAll != replaceAll {
-		t.Fatalf("tool result replace_all = %v, want explicit false", result.ReplaceAll)
-	}
-	if result.UserModified == nil || *result.UserModified != userModified {
-		t.Fatalf("tool result user_modified = %v, want explicit false", result.UserModified)
-	}
-	if len(result.Counts) != 1 || result.Counts[0].Name != "typed-output.txt" || result.Counts[0].Value != "2" {
-		t.Fatalf("tool result counts = %#v, want typed-output.txt:2", result.Counts)
-	}
-	if len(result.ResultItems) != 1 || result.ResultItems[0].Title != "Typed result item" || result.ResultItems[0].URL != "https://example.com/typed" || result.ResultItems[0].Snippet != "Provider-neutral item." {
-		t.Fatalf("tool result items = %#v, want typed title/url/snippet", result.ResultItems)
-	}
-	if result.AppliedLimit != 100 {
-		t.Fatalf("tool result applied_limit = %d, want 100", result.AppliedLimit)
-	}
-	if result.TotalDurationMs != 1234 || result.TotalTokens != 321 || result.TotalToolUseCount != 4 {
-		t.Fatalf("tool result aggregate metrics = duration %d tokens %d tools %d, want 1234/321/4", result.TotalDurationMs, result.TotalTokens, result.TotalToolUseCount)
-	}
-	if len(result.Questions) != 1 || result.Questions[0].Question != "Select rollout scope" || result.Questions[0].Header != "Scope" || !result.Questions[0].MultiSelect {
-		t.Fatalf("tool result questions = %#v, want typed multi-select question", result.Questions)
-	}
-	if len(result.Questions[0].Options) != 1 || result.Questions[0].Options[0].Label != "All providers" || result.Questions[0].Options[0].Description != "Validate first-class and graceful providers" {
-		t.Fatalf("tool result question options = %#v, want typed label/description", result.Questions[0].Options)
+	if result.AppliedLimit != 0 || result.TotalDurationMs != 0 || result.TotalTokens != 0 || result.TotalToolUseCount != 0 {
+		t.Fatalf("bash result leaked cross-variant metrics: %+v", result)
 	}
 }
 
@@ -240,7 +219,7 @@ func TestHistorySnapshotStructuredMessagesCarriesUserPromptMetadata(t *testing.T
 	}
 }
 
-func TestHistorySnapshotStructuredMessagesCarriesThinkingSignature(t *testing.T) {
+func TestHistorySnapshotStructuredMessagesRedactsThinkingSignatureUnlessIncluded(t *testing.T) {
 	snapshot := &worker.HistorySnapshot{
 		Entries: []worker.HistoryEntry{{
 			ID:     "assistant-thinking",
@@ -262,8 +241,8 @@ func TestHistorySnapshotStructuredMessagesCarriesThinkingSignature(t *testing.T)
 	if redacted[0].Blocks[0].Thinking != "" || redacted[0].Blocks[0].Text != "" {
 		t.Fatalf("redacted block leaked thinking text: %+v", redacted[0].Blocks[0])
 	}
-	if redacted[0].Blocks[0].Signature != "encrypted" {
-		t.Fatalf("redacted signature = %q, want encrypted", redacted[0].Blocks[0].Signature)
+	if redacted[0].Blocks[0].Signature != "" {
+		t.Fatalf("redacted signature = %q, want empty", redacted[0].Blocks[0].Signature)
 	}
 
 	included, _ := historySnapshotStructuredMessages(snapshot, true)
@@ -272,6 +251,49 @@ func TestHistorySnapshotStructuredMessagesCarriesThinkingSignature(t *testing.T)
 	}
 	if included[0].Blocks[0].Signature != "encrypted" {
 		t.Fatalf("included signature = %q, want encrypted", included[0].Blocks[0].Signature)
+	}
+}
+
+func TestHistorySnapshotStructuredMessagesRedactsUnknownBlockSignatureUnlessIncluded(t *testing.T) {
+	snapshot := &worker.HistorySnapshot{
+		Entries: []worker.HistoryEntry{{
+			ID:     "assistant-unknown",
+			Kind:   "assistant",
+			Actor:  worker.ActorAssistant,
+			Status: worker.ResultStatusFinal,
+			Blocks: []worker.HistoryBlock{{
+				Kind:      worker.BlockKindUnknown,
+				Text:      "opaque block",
+				Signature: "encrypted",
+			}},
+		}},
+	}
+
+	redacted, _ := historySnapshotStructuredMessages(snapshot, false)
+	if len(redacted) != 1 || len(redacted[0].Blocks) != 1 {
+		t.Fatalf("redacted messages = %+v, want one unknown block", redacted)
+	}
+	if redacted[0].Blocks[0].Signature != "" {
+		t.Fatalf("redacted unknown signature = %q, want empty", redacted[0].Blocks[0].Signature)
+	}
+
+	included, _ := historySnapshotStructuredMessages(snapshot, true)
+	if included[0].Blocks[0].Signature != "encrypted" {
+		t.Fatalf("included unknown signature = %q, want encrypted", included[0].Blocks[0].Signature)
+	}
+}
+
+func TestHistoryEntryToStructuredMessageUsesActorAsRole(t *testing.T) {
+	message := historyEntryToStructuredMessage(worker.HistoryEntry{
+		ID:     "tool-result",
+		Kind:   "tool_result",
+		Actor:  worker.ActorTool,
+		Status: worker.ResultStatusFinal,
+		Blocks: []worker.HistoryBlock{{Kind: worker.BlockKindToolResult, ContentText: "done"}},
+	}, false)
+
+	if message.Role != string(worker.ActorTool) {
+		t.Fatalf("role = %q, want actor role %q", message.Role, worker.ActorTool)
 	}
 }
 

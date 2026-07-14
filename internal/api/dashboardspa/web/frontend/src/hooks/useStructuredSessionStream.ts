@@ -20,13 +20,12 @@ import type { SessionStreamProgress } from './useSessionStream';
 
 // Live structured-transcript reader, ported from the old dashboard's
 // connectAgentOutput (PR #3718). It seeds from the REST structured snapshot,
-// then consumes the four structured-mode SSE frames — structured, activity,
-// pending, heartbeat. Structured message IDs are stable within one transcript
-// generation, so replayed frames are idempotent and same-ID lifecycle updates
-// replace their prior value. A generation or transcript-stream change replaces
-// the message set. Raw conversation frames are rejected. A non-structured
-// snapshot yields the `unavailable` state so the caller can fall back to
-// conversation rendering.
+// then consumes the five structured-mode SSE frames — structured, activity,
+// pending, pending_cleared, heartbeat. Snapshot and reset frames replace the
+// current projection; upserts merge by stable message ID so same-ID lifecycle
+// updates replace their prior value. Raw conversation frames are rejected. A
+// non-structured snapshot yields the `unavailable` state so the caller can fall
+// back to conversation rendering.
 
 /** One rendered item in arrival order: a structured message or a pending interaction. */
 export type StructuredStreamItem =
@@ -84,13 +83,15 @@ export function useStructuredSessionStream(
       );
     };
 
-    const appendItems = (items: StructuredStreamItem[]): void => {
-      if (items.length === 0) return;
+    const upsertPending = (pending: PendingInteraction): void => {
       setState((current) =>
         current.status === 'ready'
           ? {
               status: 'ready',
-              result: { ...current.result, items: [...current.result.items, ...items] },
+              result: {
+                ...current.result,
+                items: upsertPendingItem(current.result.items, pending),
+              },
               stream: { status: 'open' },
             }
           : current,
@@ -104,18 +105,16 @@ export function useStructuredSessionStream(
       current: StructuredTranscriptResult,
       envelope: Parameters<typeof structuredMessagesFromEnvelope>[0],
     ): StructuredTranscriptResult => {
-      const history = envelope.history ?? current.history;
-      const reset = structuredGenerationChanged(current.history, envelope.history ?? null);
+      const messages = structuredMessagesFromEnvelope(envelope);
       return {
         provider: envelope.provider,
         template: envelope.template,
-        history,
-        items: mergeStructuredItems(
-          current.items,
-          structuredMessagesFromEnvelope(envelope),
-          reset,
-        ),
-        activity: envelope.history?.tail_state.activity ?? current.activity,
+        history: envelope.history,
+        items:
+          envelope.operation === 'upsert'
+            ? mergeStructuredItems(current.items, messages)
+            : replaceStructuredMessages(current.items, messages),
+        activity: envelope.history.tail_state.activity,
       };
     };
 
@@ -131,9 +130,9 @@ export function useStructuredSessionStream(
           result: {
             provider: envelope.provider,
             template: envelope.template,
-            history: envelope.history ?? null,
+            history: envelope.history,
             items: messageItems(structuredMessagesFromEnvelope(envelope)),
-            activity: envelope.history?.tail_state.activity ?? 'unknown',
+            activity: envelope.history.tail_state.activity,
           },
           stream: { status: canStream ? 'connecting' : 'idle' },
         });
@@ -143,7 +142,7 @@ export function useStructuredSessionStream(
           supervisorApi().sessionStreamUrl(
             activeCityOrThrow('open structured session stream'),
             sessionId,
-            undefined,
+            envelope.history.cursor.resume_token,
             'structured',
           ),
           { withCredentials: true },
@@ -151,7 +150,16 @@ export function useStructuredSessionStream(
         source.onopen = () => {
           if (cancelled) return;
           setState((current) =>
-            current.status === 'ready' ? { ...current, stream: { status: 'open' } } : current,
+            current.status === 'ready'
+              ? {
+                  ...current,
+                  result: {
+                    ...current.result,
+                    items: current.result.items.filter((item) => item.kind !== 'pending'),
+                  },
+                  stream: { status: 'open' },
+                }
+              : current,
           );
         };
         source.addEventListener('structured', (event) => {
@@ -175,7 +183,11 @@ export function useStructuredSessionStream(
           const activity = parsed.activity;
           setState((current) =>
             current.status === 'ready'
-              ? { status: 'ready', result: { ...current.result, activity }, stream: { status: 'open' } }
+              ? {
+                  status: 'ready',
+                  result: { ...current.result, activity },
+                  stream: { status: 'open' },
+                }
               : current,
           );
         });
@@ -184,7 +196,27 @@ export function useStructuredSessionStream(
           const parsed = parseFrame((event as MessageEvent<string>).data);
           const pending = parsed === null ? null : parsePendingInteraction(parsed);
           if (pending === null) return degrade();
-          appendItems([{ kind: 'pending', pending }]);
+          upsertPending(pending);
+        });
+        source.addEventListener('pending_cleared', (event) => {
+          if (cancelled) return;
+          const parsed = parseFrame((event as MessageEvent<string>).data);
+          const requestID = pendingClearedRequestID(parsed);
+          if (requestID === null) return degrade();
+          setState((current) =>
+            current.status === 'ready'
+              ? {
+                  status: 'ready',
+                  result: {
+                    ...current.result,
+                    items: current.result.items.filter(
+                      (item) => item.kind !== 'pending' || item.pending.request_id !== requestID,
+                    ),
+                  },
+                  stream: { status: 'open' },
+                }
+              : current,
+          );
         });
         source.addEventListener('heartbeat', (event) => {
           if (cancelled) return;
@@ -192,7 +224,8 @@ export function useStructuredSessionStream(
           if (parsed === null || !isSessionHeartbeatEvent(parsed)) return degrade();
           // Liveness only: mark the stream open, leave the transcript untouched.
           setState((current) =>
-            current.status === 'ready' && current.stream.status !== 'open'
+            current.status === 'ready' &&
+            (current.stream.status === 'connecting' || current.stream.status === 'closed')
               ? { ...current, stream: { status: 'open' } }
               : current,
           );
@@ -230,26 +263,10 @@ export function useStructuredSessionStream(
   return state;
 }
 
-function structuredGenerationChanged(
-  current: SessionStructuredHistory | null,
-  next: SessionStructuredHistory | null,
-): boolean {
-  if (current === null || next === null) return false;
-  return (
-    current.transcript_stream_id !== next.transcript_stream_id ||
-    current.generation.id !== next.generation.id
-  );
-}
-
 function mergeStructuredItems(
   current: StructuredStreamItem[],
   incomingMessages: SessionStructuredMessage[],
-  reset: boolean,
 ): StructuredStreamItem[] {
-  if (reset) {
-    return incomingMessages.map((message) => ({ kind: 'message', message }));
-  }
-
   const incomingByID = new Map(incomingMessages.map((message) => [message.id, message]));
   const existingMessageIDs = new Set<string>();
   const merged = current.map((item) => {
@@ -260,10 +277,28 @@ function mergeStructuredItems(
   });
   for (const message of incomingMessages) {
     if (!existingMessageIDs.has(message.id)) {
-      merged.push({ kind: 'message', message });
+      merged.push({ kind: 'message', message: incomingByID.get(message.id) ?? message });
+      existingMessageIDs.add(message.id);
     }
   }
   return merged;
+}
+
+function replaceStructuredMessages(
+  current: StructuredStreamItem[],
+  messages: SessionStructuredMessage[],
+): StructuredStreamItem[] {
+  return [
+    ...messages.map((message) => ({ kind: 'message' as const, message })),
+    ...current.filter((item) => item.kind === 'pending'),
+  ];
+}
+
+function upsertPendingItem(
+  current: StructuredStreamItem[],
+  pending: PendingInteraction,
+): StructuredStreamItem[] {
+  return [...current.filter((item) => item.kind !== 'pending'), { kind: 'pending', pending }];
 }
 
 function parseFrame(data: string): unknown {
@@ -272,6 +307,12 @@ function parseFrame(data: string): unknown {
   } catch {
     return null;
   }
+}
+
+function pendingClearedRequestID(data: unknown): string | null {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
+  const requestID = (data as Record<string, unknown>).request_id;
+  return typeof requestID === 'string' && requestID !== '' ? requestID : null;
 }
 
 function reportStructuredStreamError(operation: string, sessionId: string, err: unknown): void {

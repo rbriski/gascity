@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1847,6 +1848,81 @@ func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *tes
 	}
 	if got := len(repeat.Entries); got != 4 {
 		t.Fatalf("len(History(repeat).Entries) = %d, want stable stitched length 4", got)
+	}
+}
+
+func TestSessionHandleHistoryTreatsSameGeminiTranscriptRewriteAsReplacement(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
+		t.Fatalf("mkdir chatsDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	transcriptPath := filepath.Join(chatsDir, "session-2026-04-17T03-12.json")
+	writeGeminiHistoryFixture(t, transcriptPath, "provider-conversation", []string{
+		`{"id":"a","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"cached a"}`,
+		`{"id":"b","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"cached b"}`,
+	})
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(transcriptPath, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(initial transcript): %v", err)
+	}
+
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileGeminiTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "gemini",
+		WorkDir:  workDir,
+		Provider: "gemini",
+	})
+	handle.adapter.SearchPaths = []string{searchRoot}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	before, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(before rewrite): %v", err)
+	}
+	if got := historyEntryIDs(before); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("History(before rewrite) IDs = %v, want [a b]", got)
+	}
+
+	writeGeminiHistoryFixture(t, transcriptPath, "provider-conversation", []string{
+		`{"id":"x","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"replacement x"}`,
+		`{"id":"y","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"replacement y"}`,
+	})
+	secondTime := firstTime.Add(time.Minute)
+	if err := os.Chtimes(transcriptPath, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(rewritten transcript): %v", err)
+	}
+
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after rewrite): %v", err)
+	}
+	if after.TranscriptStreamID != before.TranscriptStreamID {
+		t.Fatalf("TranscriptStreamID changed across same-path rewrite: before %q after %q", before.TranscriptStreamID, after.TranscriptStreamID)
+	}
+	if after.LogicalConversationID != before.LogicalConversationID {
+		t.Fatalf("LogicalConversationID changed across rewrite: before %q after %q", before.LogicalConversationID, after.LogicalConversationID)
+	}
+	if after.Generation.ID == before.Generation.ID {
+		t.Fatalf("Generation.ID = %q before and after rewrite, want changed generation", after.Generation.ID)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"x", "y"}) {
+		t.Fatalf("History(after rewrite) IDs = %v, want authoritative replacement [x y]", got)
 	}
 }
 

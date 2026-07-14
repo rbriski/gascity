@@ -903,6 +903,9 @@ func TestSliceAtCompactBoundariesBeforeCursor(t *testing.T) {
 	if info.HasOlderMessages {
 		t.Error("should not have older messages (only 1 boundary in working set)")
 	}
+	if !info.HasNewerMessages {
+		t.Error("expected newer messages beyond the before cursor")
+	}
 }
 
 func TestSliceAtCompactBoundariesBeforeCursorWithSlicing(t *testing.T) {
@@ -928,6 +931,9 @@ func TestSliceAtCompactBoundariesBeforeCursorWithSlicing(t *testing.T) {
 	if !info.HasOlderMessages {
 		t.Error("expected HasOlderMessages")
 	}
+	if !info.HasNewerMessages {
+		t.Error("expected HasNewerMessages beyond the before cursor")
+	}
 }
 
 func TestSliceAtCompactBoundariesAfterCursor(t *testing.T) {
@@ -949,6 +955,12 @@ func TestSliceAtCompactBoundariesAfterCursor(t *testing.T) {
 	}
 	if info.ReturnedMessageCount != 3 {
 		t.Errorf("ReturnedMessageCount = %d, want 3", info.ReturnedMessageCount)
+	}
+	if !info.HasOlderMessages {
+		t.Error("expected older messages at or before the after cursor")
+	}
+	if info.HasNewerMessages {
+		t.Error("should not have newer messages when the page reaches the transcript end")
 	}
 }
 
@@ -975,6 +987,9 @@ func TestSliceAtCompactBoundariesAfterCursorWithSlicing(t *testing.T) {
 	if !info.HasOlderMessages {
 		t.Error("expected HasOlderMessages after compaction slicing")
 	}
+	if info.HasNewerMessages {
+		t.Error("should not have newer messages when the page reaches the transcript end")
+	}
 }
 
 func TestSliceAtCompactBoundariesAfterCursorLastEntry(t *testing.T) {
@@ -987,6 +1002,12 @@ func TestSliceAtCompactBoundariesAfterCursorLastEntry(t *testing.T) {
 	}
 	if info.ReturnedMessageCount != 0 {
 		t.Errorf("ReturnedMessageCount = %d, want 0", info.ReturnedMessageCount)
+	}
+	if !info.HasOlderMessages {
+		t.Error("expected older messages at or before the last-entry cursor")
+	}
+	if info.HasNewerMessages {
+		t.Error("should not have newer messages after the last entry")
 	}
 }
 
@@ -1541,6 +1562,9 @@ func TestSliceAtCompactBoundariesCursorAtFirstMessage(t *testing.T) {
 	if info.HasOlderMessages {
 		t.Error("should not have older messages when working set is empty")
 	}
+	if !info.HasNewerMessages {
+		t.Error("expected newer messages beginning at the first-entry cursor")
+	}
 }
 
 func TestSliceAtCompactBoundariesTailCompactionsZero(t *testing.T) {
@@ -1575,6 +1599,12 @@ func TestSliceAtCompactBoundariesTailZeroWithCursor(t *testing.T) {
 	}
 	if info.ReturnedMessageCount != 1 {
 		t.Errorf("returned count = %d, want 1", info.ReturnedMessageCount)
+	}
+	if info.HasOlderMessages {
+		t.Error("should not have older messages before the returned prefix")
+	}
+	if !info.HasNewerMessages {
+		t.Error("expected newer messages beginning at the before cursor")
 	}
 }
 
@@ -1692,9 +1722,8 @@ func TestReadCodexFileMalformedTailDiagnostics(t *testing.T) {
 }
 
 func TestReadCodexFileInteractionResponseItem(t *testing.T) {
-	path := writeJSONL(t,
-		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","id":"legacy-1","kind":"approval","state":"blocked","prompt":"Proceed?","options":["approve","reject"],"action":"respond","metadata":{"source":"codex"}}}`,
-	)
+	line := `{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","id":"legacy-1","kind":"approval","state":"blocked","prompt":"Proceed?","options":["approve","reject"],"action":"respond","metadata":{"source":"codex"}}}`
+	path := writeJSONL(t, line)
 
 	sess, err := ReadCodexFile(path, 0)
 	if err != nil {
@@ -1707,8 +1736,9 @@ func TestReadCodexFileInteractionResponseItem(t *testing.T) {
 	if msg.Type != "assistant" {
 		t.Fatalf("message type = %q, want assistant", msg.Type)
 	}
-	if msg.UUID != "codex-0" {
-		t.Fatalf("message UUID = %q, want sequence-stable codex ID", msg.UUID)
+	wantUUID := stableSyntheticEntryID("codex", []byte(line), "response_item:interaction")
+	if msg.UUID != wantUUID {
+		t.Fatalf("message UUID = %q, want content-derived ID %q", msg.UUID, wantUUID)
 	}
 	blocks := msg.ContentBlocks()
 	if len(blocks) != 1 {
@@ -1759,10 +1789,9 @@ func TestReadCodexFileReasoningContentFallbackAndSignature(t *testing.T) {
 }
 
 func TestReadCodexFileInteractionLifecycleUsesDistinctEntryIDs(t *testing.T) {
-	path := writeJSONL(t,
-		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","kind":"approval","state":"pending","prompt":"Proceed?"}}`,
-		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","kind":"approval","state":"resolved","action":"approve"}}`,
-	)
+	pendingLine := `{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","kind":"approval","state":"pending","prompt":"Proceed?"}}`
+	resolvedLine := `{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","kind":"approval","state":"resolved","action":"approve"}}`
+	path := writeJSONL(t, pendingLine, resolvedLine)
 
 	sess, err := ReadCodexFile(path, 0)
 	if err != nil {
@@ -1774,8 +1803,10 @@ func TestReadCodexFileInteractionLifecycleUsesDistinctEntryIDs(t *testing.T) {
 	if sess.Messages[0].UUID == sess.Messages[1].UUID {
 		t.Fatalf("codex interaction entry IDs reused %q for lifecycle transition", sess.Messages[0].UUID)
 	}
-	if sess.Messages[0].UUID != "codex-0" || sess.Messages[1].UUID != "codex-1" {
-		t.Fatalf("codex interaction entry IDs = %q, %q; want codex-0, codex-1", sess.Messages[0].UUID, sess.Messages[1].UUID)
+	wantPendingID := stableSyntheticEntryID("codex", []byte(pendingLine), "response_item:interaction")
+	wantResolvedID := stableSyntheticEntryID("codex", []byte(resolvedLine), "response_item:interaction")
+	if sess.Messages[0].UUID != wantPendingID || sess.Messages[1].UUID != wantResolvedID {
+		t.Fatalf("codex interaction entry IDs = %q, %q; want %q, %q", sess.Messages[0].UUID, sess.Messages[1].UUID, wantPendingID, wantResolvedID)
 	}
 	if sess.Messages[1].ParentUUID != sess.Messages[0].UUID {
 		t.Fatalf("resolved interaction parent = %q, want %q", sess.Messages[1].ParentUUID, sess.Messages[0].UUID)
@@ -1804,18 +1835,19 @@ func TestReadCodexFileErrorEventMsgTypes(t *testing.T) {
 
 	// Verify the three error-category entries.
 	for i, want := range []struct {
-		idx      int
-		entType  string
-		subtype  string
-		rawLine  string
-		kind     string
-		category string
-		code     string
-		message  string
+		idx       int
+		eventType string
+		entType   string
+		subtype   string
+		rawLine   string
+		kind      string
+		category  string
+		code      string
+		message   string
 	}{
-		{2, "system", "error", errorLine, "error", "usage_limit", "usage_limit_exceeded", "You've hit your usage limit."},
-		{3, "system", "error", streamErrorLine, "error", "stream_error", "", "stream interrupted"},
-		{4, "system", "turn_aborted", turnAbortedLine, "turn_aborted", "turn_aborted", "", "turn was aborted"},
+		{2, "error", "system", "error", errorLine, "error", "usage_limit", "usage_limit_exceeded", "You've hit your usage limit."},
+		{3, "stream_error", "system", "error", streamErrorLine, "error", "stream_error", "", "stream interrupted"},
+		{4, "turn_aborted", "system", "turn_aborted", turnAbortedLine, "turn_aborted", "turn_aborted", "", "turn was aborted"},
 	} {
 		msg := sess.Messages[want.idx]
 		if msg.Type != want.entType {
@@ -1827,8 +1859,9 @@ func TestReadCodexFileErrorEventMsgTypes(t *testing.T) {
 		if string(msg.Raw) != want.rawLine {
 			t.Errorf("[%d] Raw mismatch:\n got: %s\nwant: %s", i, msg.Raw, want.rawLine)
 		}
-		if msg.UUID != fmt.Sprintf("codex-event-%d", want.idx) {
-			t.Errorf("[%d] UUID = %q, want codex-event-%d", i, msg.UUID, want.idx)
+		wantUUID := stableSyntheticEntryID("codex-event", []byte(want.rawLine), "event_msg:"+want.eventType)
+		if msg.UUID != wantUUID {
+			t.Errorf("[%d] UUID = %q, want content-derived ID %q", i, msg.UUID, wantUUID)
 		}
 		if msg.TextContent() == "" && len(msg.ContentBlocks()) == 0 {
 			t.Errorf("[%d] error entry has no visible message content", i)
@@ -2421,6 +2454,46 @@ func TestReadGeminiJSONLFileConvertsMessages(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(blocks[3].Content)); got != `"diff --git a/src/app.ts b/src/app.ts\n-old\n+new"` {
 		t.Fatalf("tool result content = %s, want diff output", got)
+	}
+}
+
+func TestReadGeminiJSONLFilePreservesRepeatedIdlessMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	repeated := `{"timestamp":"2026-06-21T17:08:00Z","type":"user","content":"repeat"}`
+	writeSnapshot := func(count int) {
+		t.Helper()
+		messages := strings.TrimSuffix(strings.Repeat(repeated+",", count), ",")
+		content := `{"sessionId":"session-1","kind":"main"}` + "\n" +
+			`{"$set":{"messages":[` + messages + `]}}` + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write Gemini JSONL fixture: %v", err)
+		}
+	}
+
+	writeSnapshot(2)
+	before, err := ReadProviderFile("gemini/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("read two repeated id-less messages: %v", err)
+	}
+	beforeIDs := paginationEntryIDs(before.Messages)
+	if len(beforeIDs) != 2 || beforeIDs[0] == beforeIDs[1] {
+		t.Fatalf("entry IDs = %v, want two unique IDs", beforeIDs)
+	}
+
+	writeSnapshot(3)
+	after, err := ReadProviderFile("gemini/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("read after growing Gemini snapshot: %v", err)
+	}
+	afterIDs := paginationEntryIDs(after.Messages)
+	if len(afterIDs) != 3 {
+		t.Fatalf("entry IDs after snapshot growth = %v, want three entries", afterIDs)
+	}
+	if afterIDs[0] != beforeIDs[0] || afterIDs[1] != beforeIDs[1] {
+		t.Fatalf("retained IDs changed after snapshot growth: got %v, want prefix %v", afterIDs, beforeIDs)
+	}
+	if afterIDs[2] == afterIDs[0] || afterIDs[2] == afterIDs[1] {
+		t.Fatalf("new repeated message reused an existing ID: %v", afterIDs)
 	}
 }
 

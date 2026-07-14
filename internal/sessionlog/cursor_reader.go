@@ -28,9 +28,9 @@ func ReadCursorFile(path string, _ int) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	sessionID := ""
 	lastUUID := ""
-	idx := 0
 	toolNames := make(map[string]string)
 	sawPartialAssistant := false
+	syntheticIDs := newStableSyntheticEntryIDSequence("cursor")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -52,15 +52,17 @@ func ReadCursorFile(path string, _ int) (*Session, error) {
 			continue
 		}
 
-		entries := cursorEntriesFromEvent(event, rawLine, idx, toolNames)
+		recordIDs := syntheticIDs.ForRecord(rawLine)
+		entries := cursorEntriesFromEvent(event, rawLine, toolNames)
+		assignCursorRecordSyntheticEntryIDs(event, rawLine, recordIDs, entries)
 		for _, entry := range entries {
 			if entry == nil {
 				continue
 			}
+			entry.RawRecordID = recordIDs.RawRecordID()
 			entry.ParentUUID = lastUUID
 			lastUUID = entry.UUID
 			messages = append(messages, entry)
-			idx++
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -140,20 +142,20 @@ type cursorEvent struct {
 	Success           *bool           `json:"success"`
 }
 
-func cursorEntriesFromEvent(event cursorEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
+func cursorEntriesFromEvent(event cursorEvent, rawLine json.RawMessage, toolNames map[string]string) []*Entry {
 	switch cursorFrameType(event) {
 	case "user":
-		if entry := cursorMessageEntry(event, rawLine, idx, "user"); entry != nil {
+		if entry := cursorMessageEntry(event, rawLine, "user"); entry != nil {
 			return []*Entry{entry}
 		}
 	case "assistant":
-		if entry := cursorMessageEntry(event, rawLine, idx, "assistant"); entry != nil {
+		if entry := cursorMessageEntry(event, rawLine, "assistant"); entry != nil {
 			return []*Entry{entry}
 		}
 	case "toolcall":
-		return cursorToolCallEntries(event, rawLine, idx, toolNames)
+		return cursorToolCallEntries(event, rawLine, toolNames)
 	case "result":
-		if entry := cursorResultEntry(event, rawLine, idx); entry != nil {
+		if entry := cursorResultEntry(event, rawLine); entry != nil {
 			return []*Entry{entry}
 		}
 	case "system":
@@ -163,40 +165,40 @@ func cursorEntriesFromEvent(event cursorEvent, rawLine json.RawMessage, idx int,
 	switch cursorEventKind(event) {
 	case "beforesubmitprompt", "promptsubmit", "userprompt":
 		if text := strings.TrimSpace(event.Prompt); text != "" {
-			return []*Entry{cursorTextEntry(event, rawLine, idx, "user", text)}
+			return []*Entry{cursorTextEntry(event, rawLine, "user", text)}
 		}
 	case "afteragentresponse", "agentresponse", "assistantmessage":
 		if text := cursorEventText(event); text != "" {
-			return []*Entry{cursorTextEntry(event, rawLine, idx, "assistant", text)}
+			return []*Entry{cursorTextEntry(event, rawLine, "assistant", text)}
 		}
 	case "beforeshellexecution":
-		callID := cursorToolCallID(event, idx)
+		callID := cursorToolCallID(event, rawLine)
 		toolNames[callID] = "shell"
-		return []*Entry{cursorToolUseEntry(event, rawLine, idx, callID, "shell", cursorShellInput(event))}
+		return []*Entry{cursorToolUseEntry(event, rawLine, callID, "shell", cursorShellInput(event))}
 	case "aftershellexecution":
-		callID := cursorToolCallID(event, idx)
-		return []*Entry{cursorToolResultEntry(event, rawLine, idx, callID, firstNonEmpty(toolNames[callID], "shell"), cursorShellResult(event), cursorEventIsError(event))}
+		callID := cursorToolCallID(event, rawLine)
+		return []*Entry{cursorToolResultEntry(event, rawLine, callID, firstNonEmpty(toolNames[callID], "shell"), cursorShellResult(event), cursorEventIsError(event))}
 	case "afterfileedit":
-		callID := cursorToolCallID(event, idx)
+		callID := cursorToolCallID(event, rawLine)
 		toolNames[callID] = "edit"
 		return []*Entry{
-			cursorToolUseEntry(event, rawLine, idx, callID, "edit", cursorEditInput(event)),
-			cursorToolResultEntry(event, rawLine, idx, callID, "edit", cursorEditResult(event), cursorEventIsError(event)),
+			cursorToolUseEntry(event, rawLine, callID, "edit", cursorEditInput(event)),
+			cursorToolResultEntry(event, rawLine, callID, "edit", cursorEditResult(event), cursorEventIsError(event)),
 		}
 	case "pretooluse", "beforetooluse", "beforemcpexecution":
-		callID := cursorToolCallID(event, idx)
+		callID := cursorToolCallID(event, rawLine)
 		name := cursorToolName(event)
 		toolNames[callID] = name
-		return []*Entry{cursorToolUseEntry(event, rawLine, idx, callID, name, cursorGenericToolInput(event))}
+		return []*Entry{cursorToolUseEntry(event, rawLine, callID, name, cursorGenericToolInput(event))}
 	case "posttooluse", "aftertooluse", "posttoolusefailure", "aftermcpexecution":
-		callID := cursorToolCallID(event, idx)
+		callID := cursorToolCallID(event, rawLine)
 		name := firstNonEmpty(cursorToolName(event), toolNames[callID], "tool")
-		return []*Entry{cursorToolResultEntry(event, rawLine, idx, callID, name, cursorGenericToolResult(event), cursorEventIsError(event))}
+		return []*Entry{cursorToolResultEntry(event, rawLine, callID, name, cursorGenericToolResult(event), cursorEventIsError(event))}
 	}
 	return nil
 }
 
-func cursorMessageEntry(event cursorEvent, rawLine json.RawMessage, idx int, role string) *Entry {
+func cursorMessageEntry(event cursorEvent, rawLine json.RawMessage, role string) *Entry {
 	message := cloneRawJSON(event.Message)
 	if len(message) == 0 || string(message) == "null" {
 		if text := cursorEventText(event); text != "" {
@@ -207,7 +209,7 @@ func cursorMessageEntry(event cursorEvent, rawLine json.RawMessage, idx int, rol
 		return nil
 	}
 	return &Entry{
-		UUID:      cursorEntryID(event, idx, ""),
+		UUID:      cursorEntryID(event, rawLine, ""),
 		Type:      role,
 		Timestamp: cursorEventTimestamp(event),
 		SessionID: cursorSessionIDFromEvent(event),
@@ -216,9 +218,9 @@ func cursorMessageEntry(event cursorEvent, rawLine json.RawMessage, idx int, rol
 	}
 }
 
-func cursorTextEntry(event cursorEvent, rawLine json.RawMessage, idx int, role, text string) *Entry {
+func cursorTextEntry(event cursorEvent, rawLine json.RawMessage, role, text string) *Entry {
 	return &Entry{
-		UUID:      cursorEntryID(event, idx, ""),
+		UUID:      cursorEntryID(event, rawLine, ""),
 		Type:      role,
 		Timestamp: cursorEventTimestamp(event),
 		SessionID: cursorSessionIDFromEvent(event),
@@ -234,31 +236,31 @@ type cursorToolCall struct {
 	Result json.RawMessage
 }
 
-func cursorToolCallEntries(event cursorEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
-	call, ok := cursorToolCallFromEvent(event)
+func cursorToolCallEntries(event cursorEvent, rawLine json.RawMessage, toolNames map[string]string) []*Entry {
+	call, ok := cursorToolCallFromEvent(event, rawLine)
 	if !ok {
 		return nil
 	}
 	switch cursorFrameSubtype(event) {
 	case "started", "start", "pending":
 		toolNames[call.ID] = call.Name
-		return []*Entry{cursorToolUseEntry(event, rawLine, idx, call.ID, call.Name, cursorToolCallInput(call))}
+		return []*Entry{cursorToolUseEntry(event, rawLine, call.ID, call.Name, cursorToolCallInput(call))}
 	case "completed", "complete", "success", "failed", "error":
 		name := firstNonEmpty(call.Name, toolNames[call.ID], "tool")
 		content := cursorToolCallResult(call)
-		return []*Entry{cursorToolResultEntry(event, rawLine, idx, call.ID, name, content, cursorEventIsError(event) || cursorToolCallResultIsError(call, content))}
+		return []*Entry{cursorToolResultEntry(event, rawLine, call.ID, name, content, cursorEventIsError(event) || cursorToolCallResultIsError(call, content))}
 	default:
 		if len(call.Result) > 0 {
 			name := firstNonEmpty(call.Name, toolNames[call.ID], "tool")
 			content := cursorToolCallResult(call)
-			return []*Entry{cursorToolResultEntry(event, rawLine, idx, call.ID, name, content, cursorEventIsError(event) || cursorToolCallResultIsError(call, content))}
+			return []*Entry{cursorToolResultEntry(event, rawLine, call.ID, name, content, cursorEventIsError(event) || cursorToolCallResultIsError(call, content))}
 		}
 		toolNames[call.ID] = call.Name
-		return []*Entry{cursorToolUseEntry(event, rawLine, idx, call.ID, call.Name, cursorToolCallInput(call))}
+		return []*Entry{cursorToolUseEntry(event, rawLine, call.ID, call.Name, cursorToolCallInput(call))}
 	}
 }
 
-func cursorToolCallFromEvent(event cursorEvent) (cursorToolCall, bool) {
+func cursorToolCallFromEvent(event cursorEvent, rawLine json.RawMessage) (cursorToolCall, bool) {
 	raw := firstNonNilRaw(event.ToolCall, event.ToolCallCamel)
 	object := kiroRawObject(raw)
 	if len(object) == 0 {
@@ -274,12 +276,14 @@ func cursorToolCallFromEvent(event cursorEvent) (cursorToolCall, bool) {
 		{key: "deleteToolCall", name: "Delete"},
 	} {
 		if call := kiroRawObject(firstKiroRawField(object, candidate.key)); len(call) > 0 {
-			id := firstNonEmpty(
+			nativeID := firstNonEmpty(
 				kiroStringField(call, "toolCallId", "tool_call_id", "callId", "call_id", "id"),
-				event.CallID,
-				event.CallIDCamel,
-				cursorToolCallID(event, 0),
+				cursorNativeEntryID(event),
 			)
+			id := nativeID
+			if id == "" {
+				id = cursorToolCallID(event, rawLine)
+			}
 			return cursorToolCall{
 				ID:     id,
 				Name:   candidate.name,
@@ -289,12 +293,14 @@ func cursorToolCallFromEvent(event cursorEvent) (cursorToolCall, bool) {
 		}
 	}
 	if call := kiroRawObject(firstKiroRawField(object, "function")); len(call) > 0 {
-		id := firstNonEmpty(
+		nativeID := firstNonEmpty(
 			kiroStringField(call, "toolCallId", "tool_call_id", "callId", "call_id", "id"),
-			event.CallID,
-			event.CallIDCamel,
-			cursorToolCallID(event, 0),
+			cursorNativeEntryID(event),
 		)
+		id := nativeID
+		if id == "" {
+			id = cursorToolCallID(event, rawLine)
+		}
 		return cursorToolCall{
 			ID:     id,
 			Name:   firstNonEmpty(kiroStringField(call, "name"), "tool"),
@@ -433,13 +439,13 @@ func cursorSuccessPayload(raw json.RawMessage) json.RawMessage {
 	return cloneRawJSON(raw)
 }
 
-func cursorResultEntry(event cursorEvent, rawLine json.RawMessage, idx int) *Entry {
+func cursorResultEntry(event cursorEvent, rawLine json.RawMessage) *Entry {
 	message := firstNonEmpty(jsonStringValue(event.Result), cursorEventText(event))
 	if message == "" && event.Subtype == "" {
 		return nil
 	}
 	return &Entry{
-		UUID:      cursorEntryID(event, idx, "result"),
+		UUID:      cursorEntryID(event, rawLine, "result"),
 		Type:      "system",
 		Subtype:   "result",
 		Timestamp: cursorEventTimestamp(event),
@@ -454,9 +460,9 @@ func cursorResultEntry(event cursorEvent, rawLine json.RawMessage, idx int) *Ent
 	}
 }
 
-func cursorToolUseEntry(event cursorEvent, rawLine json.RawMessage, idx int, callID, name string, input json.RawMessage) *Entry {
+func cursorToolUseEntry(event cursorEvent, rawLine json.RawMessage, callID, name string, input json.RawMessage) *Entry {
 	return &Entry{
-		UUID:      cursorEntryID(event, idx, "use"),
+		UUID:      cursorEntryID(event, rawLine, "use"),
 		Type:      "assistant",
 		Timestamp: cursorEventTimestamp(event),
 		SessionID: cursorSessionIDFromEvent(event),
@@ -470,9 +476,9 @@ func cursorToolUseEntry(event cursorEvent, rawLine json.RawMessage, idx int, cal
 	}
 }
 
-func cursorToolResultEntry(event cursorEvent, rawLine json.RawMessage, idx int, callID, name string, content json.RawMessage, isError bool) *Entry {
+func cursorToolResultEntry(event cursorEvent, rawLine json.RawMessage, callID, name string, content json.RawMessage, isError bool) *Entry {
 	return &Entry{
-		UUID:      cursorEntryID(event, idx, "result"),
+		UUID:      cursorEntryID(event, rawLine, "result"),
 		Type:      "tool_result",
 		Timestamp: cursorEventTimestamp(event),
 		SessionID: cursorSessionIDFromEvent(event),
@@ -631,31 +637,54 @@ func cursorEventText(event cursorEvent) string {
 	return kiroTextFromRaw(event.Message)
 }
 
-func cursorToolCallID(event cursorEvent, idx int) string {
-	if id := firstNonEmpty(event.GenerationID, event.GenerationIDCamel, event.CallID, event.CallIDCamel, event.ToolCallID, event.ToolCallIDCamel, event.ToolUseID, event.ToolUseIDCamel); id != "" {
-		return id
-	}
+func cursorNativeEntryID(event cursorEvent) string {
 	if len(event.ID) > 0 {
 		if value := jsonStringValue(event.ID); value != "" {
 			return value
 		}
-		var num int
-		if json.Unmarshal(event.ID, &num) == nil {
-			return fmt.Sprintf("cursor-tool-%d", num)
-		}
 	}
-	return fmt.Sprintf("cursor-tool-%d", idx)
+	return ""
 }
 
-func cursorEntryID(event cursorEvent, idx int, suffix string) string {
-	base := cursorToolCallID(event, idx)
-	if strings.TrimSpace(base) == "" {
-		base = fmt.Sprintf("cursor-%d", idx)
+func cursorToolCallID(event cursorEvent, rawLine json.RawMessage) string {
+	if callID := firstNonEmpty(event.ModelCallID, event.CallID, event.CallIDCamel, event.ToolCallID, event.ToolCallIDCamel, event.ToolUseID, event.ToolUseIDCamel); callID != "" {
+		return callID
 	}
-	if suffix == "" {
-		return base
+	if entryID := cursorNativeEntryID(event); entryID != "" {
+		return entryID
 	}
-	return base + "-" + suffix
+	// Cursor assigns generation IDs to every hook in one user-message
+	// generation, so they cannot safely identify or correlate individual tool
+	// calls. An unmatched record-local ID is preferable to a false association
+	// that attaches a result to the wrong tool input.
+	return stableSyntheticEntryID("cursor-tool", rawLine, "")
+}
+
+func cursorEntryID(event cursorEvent, rawLine json.RawMessage, part string) string {
+	if part == "" {
+		if entryID := cursorNativeEntryID(event); entryID != "" {
+			return entryID
+		}
+	}
+	return stableSyntheticEntryID("cursor", rawLine, part)
+}
+
+func assignCursorRecordSyntheticEntryIDs(event cursorEvent, rawLine json.RawMessage, syntheticIDs stableSyntheticEntryIDSource, entries []*Entry) {
+	baseIDs := newStableSyntheticEntryIDSource("cursor", rawLine)
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		for _, part := range []string{"", "use", "result"} {
+			if part == "" && cursorNativeEntryID(event) != "" {
+				continue
+			}
+			if entry.UUID == baseIDs.ID(part) {
+				entry.UUID = syntheticIDs.ID(part)
+				break
+			}
+		}
+	}
 }
 
 func cursorToolName(event cursorEvent) string {

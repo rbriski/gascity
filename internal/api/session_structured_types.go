@@ -21,9 +21,11 @@ type SessionStreamStructuredMessageEvent struct {
 	ID                 string                     `json:"id"`
 	Template           string                     `json:"template"`
 	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
-	Format             string                     `json:"format" doc:"Always structured for this event."`
-	SchemaVersion      string                     `json:"schema_version" doc:"Structured session transcript schema version."`
-	History            *SessionStructuredHistory  `json:"history,omitempty" doc:"Normalized worker-history envelope for this snapshot or stream batch."`
+	Format             string                     `json:"format" enum:"structured" doc:"Always structured for this event."`
+	SchemaVersion      string                     `json:"schema_version" enum:"session.structured.v1" doc:"Structured session transcript schema version."`
+	Operation          string                     `json:"operation" enum:"snapshot,upsert,reset" doc:"How the client applies this structured frame: replace from a snapshot/reset or merge an upsert."`
+	ResetReason        string                     `json:"reset_reason,omitempty" enum:"resume_invalid,stream_changed,cursor_invalidated,history_rewritten" doc:"Present if and only if operation is reset; absent for snapshot and upsert. Identifies why the reset replaced the client transcript."`
+	History            *SessionStructuredHistory  `json:"history" doc:"Normalized worker-history envelope for this snapshot or stream batch."`
 	StructuredMessages []SessionStructuredMessage `json:"structured_messages" doc:"Provider-normalized structured messages."`
 	Pagination         *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
@@ -51,6 +53,7 @@ type SessionStructuredGeneration struct {
 // SessionStructuredCursor identifies the normalized transcript tip.
 type SessionStructuredCursor struct {
 	AfterEntryID string `json:"after_entry_id,omitempty"`
+	ResumeToken  string `json:"resume_token" doc:"Opaque cursor for an exact structured REST-to-SSE handoff or SSE reconnect."`
 }
 
 // SessionStructuredContinuity describes compaction/branch evidence.
@@ -80,19 +83,17 @@ type SessionStructuredDiagnostic struct {
 
 // SessionStructuredMessage is one provider-normalized transcript message.
 type SessionStructuredMessage struct {
-	ID               string                        `json:"id"`
-	Role             string                        `json:"role"`
-	Provider         string                        `json:"provider,omitempty"`
-	Timestamp        string                        `json:"timestamp,omitempty"`
-	Model            string                        `json:"model,omitempty"`
-	StopReason       string                        `json:"stop_reason,omitempty"`
-	Usage            *SessionStructuredUsage       `json:"usage,omitempty"`
-	UserPrompt       *SessionStructuredUserPrompt  `json:"user_prompt,omitempty"`
-	SystemEvent      *SessionStructuredSystemEvent `json:"system_event,omitempty"`
-	Status           string                        `json:"status"`
-	IsSubagent       bool                          `json:"is_subagent,omitempty"`
-	ParentToolCallID string                        `json:"parent_tool_call_id,omitempty"`
-	Blocks           []SessionStructuredBlock      `json:"blocks"`
+	ID          string                        `json:"id"`
+	Role        string                        `json:"role"`
+	Provider    string                        `json:"provider,omitempty"`
+	Timestamp   string                        `json:"timestamp,omitempty"`
+	Model       string                        `json:"model,omitempty"`
+	StopReason  string                        `json:"stop_reason,omitempty"`
+	Usage       *SessionStructuredUsage       `json:"usage,omitempty"`
+	UserPrompt  *SessionStructuredUserPrompt  `json:"user_prompt,omitempty"`
+	SystemEvent *SessionStructuredSystemEvent `json:"system_event,omitempty"`
+	Status      string                        `json:"status" enum:"unknown,final,partial,superseded"`
+	Blocks      []SessionStructuredBlock      `json:"blocks"`
 }
 
 // SessionStructuredSystemEvent carries provider-neutral system-event metadata
@@ -268,7 +269,7 @@ type SessionStructuredToolResult struct {
 // SessionStructuredToolError is provider-neutral typed error data for a failed
 // tool result.
 type SessionStructuredToolError struct {
-	Category   string `json:"category,omitempty" doc:"Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown."`
+	Category   string `json:"category" enum:"user_rejection,user_rejection_with_reason,command_failure,file_error,validation_error,timeout,network_error,unknown" doc:"Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown."`
 	Message    string `json:"message,omitempty"`
 	UserReason string `json:"user_reason,omitempty"`
 }
@@ -369,7 +370,6 @@ func structuredHistoryFromSnapshot(snapshot *worker.HistorySnapshot) *SessionStr
 }
 
 func structuredFallbackHistory(sessionID, providerSessionID, activity string) *SessionStructuredHistory {
-	now := time.Now().UTC()
 	if sessionID == "" {
 		sessionID = "unknown"
 	}
@@ -386,8 +386,7 @@ func structuredFallbackHistory(sessionID, providerSessionID, activity string) *S
 		ProviderSessionID:     providerSessionID,
 		TranscriptStreamID:    streamID,
 		Generation: SessionStructuredGeneration{
-			ID:         streamID,
-			ObservedAt: now.Format(time.RFC3339Nano),
+			ID: streamID,
 		},
 		Continuity: SessionStructuredContinuity{
 			Status: string(worker.ContinuityStatusDegraded),
@@ -417,7 +416,7 @@ func structuredFallbackMessages(sessionID, provider, text string) []SessionStruc
 		ID:       "fallback:" + sessionID + ":1",
 		Role:     "assistant",
 		Provider: provider,
-		Status:   string(worker.ContinuityStatusDegraded),
+		Status:   string(worker.ResultStatusPartial),
 		Blocks: []SessionStructuredBlock{{
 			Type: string(worker.BlockKindText),
 			Text: text,
@@ -427,7 +426,7 @@ func structuredFallbackMessages(sessionID, provider, text string) []SessionStruc
 
 func historySnapshotStructuredMessages(snapshot *worker.HistorySnapshot, includeThinking bool) ([]SessionStructuredMessage, []string) {
 	if snapshot == nil {
-		return nil, nil
+		return []SessionStructuredMessage{}, []string{}
 	}
 	messages := make([]SessionStructuredMessage, 0, len(snapshot.Entries))
 	ids := make([]string, 0, len(snapshot.Entries))
@@ -443,21 +442,29 @@ func historySnapshotStructuredMessages(snapshot *worker.HistorySnapshot, include
 }
 
 func historyEntryToStructuredMessage(entry worker.HistoryEntry, includeThinking bool) SessionStructuredMessage {
-	role := entry.Kind
-	if role == "" {
-		role = string(entry.Actor)
-	}
+	role := sessionStructuredMessageRole(entry.Actor)
 	msg := SessionStructuredMessage{
-		ID:          entry.ID,
-		Role:        role,
-		Provider:    entry.Provenance.Provider,
-		Model:       entry.Model,
-		StopReason:  entry.StopReason,
-		Usage:       sessionStructuredUsageFromWorker(entry.Usage),
-		UserPrompt:  sessionStructuredUserPromptFromWorker(entry.UserPrompt),
-		SystemEvent: sessionStructuredSystemEventFromWorker(entry.SystemEvent),
-		Status:      string(entry.Status),
-		Blocks:      make([]SessionStructuredBlock, 0, len(entry.Blocks)),
+		ID:       entry.ID,
+		Role:     role,
+		Provider: entry.Provenance.Provider,
+		Status:   sessionStructuredMessageStatus(entry.Status),
+		Blocks:   make([]SessionStructuredBlock, 0, len(entry.Blocks)),
+	}
+	switch role {
+	case string(worker.ActorAssistant):
+		msg.Model = entry.Model
+		msg.StopReason = entry.StopReason
+		msg.Usage = sessionStructuredUsageFromWorker(entry.Usage)
+	case string(worker.ActorUser):
+		msg.UserPrompt = sessionStructuredUserPromptFromWorker(entry.UserPrompt)
+	case string(worker.ActorSystem):
+		msg.SystemEvent = sessionStructuredSystemEventFromWorker(entry.SystemEvent)
+	case string(worker.ActorUnknown):
+		msg.Model = entry.Model
+		msg.StopReason = entry.StopReason
+		msg.Usage = sessionStructuredUsageFromWorker(entry.Usage)
+		msg.UserPrompt = sessionStructuredUserPromptFromWorker(entry.UserPrompt)
+		msg.SystemEvent = sessionStructuredSystemEventFromWorker(entry.SystemEvent)
 	}
 	if entry.Timestamp != nil {
 		msg.Timestamp = entry.Timestamp.Format(time.RFC3339Nano)
@@ -539,33 +546,50 @@ func sessionStructuredUsageFromWorker(usage *worker.HistoryUsage) *SessionStruct
 }
 
 func historyBlockToStructuredBlock(block worker.HistoryBlock, includeThinking bool) *SessionStructuredBlock {
-	out := &SessionStructuredBlock{
-		Type:       string(block.Kind),
-		Text:       block.Text,
-		Signature:  block.Signature,
-		ToolCallID: block.ToolUseID,
-		Name:       block.Name,
-		FilePath:   block.FilePath,
-		ImageURL:   block.ImageURL,
-		MIMEType:   block.MIMEType,
-		Input:      sessionStructuredToolInputFromWorker(block.StructuredInput),
-		Content:    block.ContentText,
-		IsError:    block.IsError,
-	}
+	out := &SessionStructuredBlock{Type: sessionStructuredBlockType(block.Kind)}
 	switch block.Kind {
+	case worker.BlockKindText:
+		out.Text = block.Text
 	case worker.BlockKindThinking:
-		out.Text = ""
 		if includeThinking {
 			out.Thinking = block.Text
+			out.Signature = block.Signature
 		}
 	case worker.BlockKindToolUse:
 		out.ID = block.ToolUseID
+		out.Name = block.Name
+		out.FilePath = block.FilePath
+		out.Input = sessionStructuredToolInputFromWorker(block.StructuredInput)
 	case worker.BlockKindToolResult:
+		out.ToolCallID = block.ToolUseID
+		out.Name = block.Name
+		out.FilePath = block.FilePath
+		out.Content = block.ContentText
 		if out.Content == "" {
 			out.Content = block.Text
 		}
+		out.IsError = block.IsError
 		out.Structured = sessionStructuredToolResultFromWorker(block.StructuredResult)
 	case worker.BlockKindInteraction:
+		out.Interaction = structuredInteraction(block.Interaction)
+	case worker.BlockKindImage:
+		out.Text = block.Text
+		out.FilePath = block.FilePath
+		out.ImageURL = block.ImageURL
+		out.MIMEType = block.MIMEType
+	default:
+		out.Text = block.Text
+		if includeThinking {
+			out.Signature = block.Signature
+		}
+		out.ToolCallID = block.ToolUseID
+		out.Name = block.Name
+		out.FilePath = block.FilePath
+		out.ImageURL = block.ImageURL
+		out.MIMEType = block.MIMEType
+		out.Input = sessionStructuredToolInputFromWorker(block.StructuredInput)
+		out.Content = block.ContentText
+		out.IsError = block.IsError
 		out.Interaction = structuredInteraction(block.Interaction)
 	}
 	return out
@@ -576,7 +600,7 @@ func sessionStructuredToolInputFromWorker(input *worker.StructuredToolInput) *Se
 		return nil
 	}
 	out := &SessionStructuredToolInput{
-		Kind:          input.Kind,
+		Kind:          sessionStructuredToolInputKind(input.Kind),
 		Text:          input.Text,
 		Command:       input.Command,
 		LinkedCommand: input.LinkedCommand,
@@ -602,6 +626,50 @@ func sessionStructuredToolInputFromWorker(input *worker.StructuredToolInput) *Se
 	if len(input.Arguments) > 0 {
 		out.Arguments = sessionStructuredArgumentsFromWorker(input.Arguments)
 	}
+	return narrowSessionStructuredToolInput(out)
+}
+
+func narrowSessionStructuredToolInput(input *SessionStructuredToolInput) *SessionStructuredToolInput {
+	if input == nil || input.Kind == "unknown" {
+		return input
+	}
+	out := &SessionStructuredToolInput{Kind: input.Kind}
+	switch input.Kind {
+	case "command":
+		out.Command, out.Arguments = input.Command, input.Arguments
+	case "stdin":
+		out.TaskID, out.Text, out.LinkedCommand = input.TaskID, input.Text, input.LinkedCommand
+	case "code":
+		out.Code, out.Language = input.Code, input.Language
+	case "patch":
+		out.Patch, out.FilePath, out.Language = input.Patch, input.FilePath, input.Language
+	case "write":
+		out.FilePath, out.Language, out.Text = input.FilePath, input.Language, input.Text
+	case "glob":
+		out.Pattern, out.Query, out.FilePath, out.Arguments = input.Pattern, input.Query, input.FilePath, input.Arguments
+	case "fetch":
+		out.URL, out.Prompt = input.URL, input.Prompt
+	case "search":
+		out.Query, out.Pattern, out.FilePath, out.Command = input.Query, input.Pattern, input.FilePath, input.Command
+		out.Arguments = input.Arguments
+	case "file":
+		out.FilePath, out.Language, out.Command = input.FilePath, input.Language, input.Command
+	case "todo":
+		out.Todos = input.Todos
+	case "plan":
+		out.Plan, out.Explanation, out.Steps = input.Plan, input.Explanation, input.Steps
+	case "question":
+		out.Question, out.Options = input.Question, input.Options
+	case "task":
+		out.TaskID, out.TaskType, out.TaskStatus = input.TaskID, input.TaskType, input.TaskStatus
+		out.Description, out.Prompt = input.Description, input.Prompt
+	case "text":
+		out.Text = input.Text
+	case "arguments":
+		out.Arguments = input.Arguments
+	default:
+		return &SessionStructuredToolInput{Kind: "unknown"}
+	}
 	return out
 }
 
@@ -623,8 +691,8 @@ func sessionStructuredToolResultFromWorker(result *worker.StructuredToolResult) 
 	if result == nil {
 		return nil
 	}
-	return &SessionStructuredToolResult{
-		Kind:              result.Kind,
+	out := &SessionStructuredToolResult{
+		Kind:              sessionStructuredToolResultKind(result.Kind),
 		Text:              result.Text,
 		Command:           result.Command,
 		Stdout:            result.Stdout,
@@ -684,6 +752,73 @@ func sessionStructuredToolResultFromWorker(result *worker.StructuredToolResult) 
 		TotalLines:        result.TotalLines,
 		Error:             sessionStructuredToolErrorFromWorker(result.Error),
 	}
+	return narrowSessionStructuredToolResult(out)
+}
+
+func narrowSessionStructuredToolResult(result *SessionStructuredToolResult) *SessionStructuredToolResult {
+	if result == nil || result.Kind == "unknown" {
+		return result
+	}
+	out := &SessionStructuredToolResult{Kind: result.Kind}
+	switch result.Kind {
+	case "bash":
+		out.Text, out.Command, out.Stdout, out.Stderr = result.Text, result.Command, result.Stdout, result.Stderr
+		out.ExitCode, out.Interrupted, out.Truncated, out.IsImage = result.ExitCode, result.Interrupted, result.Truncated, result.IsImage
+		out.TaskID, out.TaskStatus = result.TaskID, result.TaskStatus
+		out.StdoutLines, out.StderrLines, out.Timestamp = result.StdoutLines, result.StderrLines, result.Timestamp
+		out.Content, out.NumLines, out.Error = result.Content, result.NumLines, result.Error
+	case "python":
+		out.Text, out.Code, out.Stdout, out.Stderr = result.Text, result.Code, result.Stdout, result.Stderr
+		out.ExitCode, out.Interrupted, out.Truncated, out.IsImage = result.ExitCode, result.Interrupted, result.Truncated, result.IsImage
+		out.Error = result.Error
+	case "read":
+		out.FilePath, out.Language, out.Content = result.FilePath, result.Language, result.Content
+		out.NumLines, out.StartLine, out.TotalLines, out.Error = result.NumLines, result.StartLine, result.TotalLines, result.Error
+	case "glob":
+		out.Filenames, out.NumFiles, out.DurationMs = result.Filenames, result.NumFiles, result.DurationMs
+		out.Truncated, out.Content, out.NumLines, out.Error = result.Truncated, result.Content, result.NumLines, result.Error
+	case "grep", "search":
+		out.Mode, out.Query, out.Filenames = result.Mode, result.Query, result.Filenames
+		out.NumFiles, out.NumResults, out.Counts = result.NumFiles, result.NumResults, result.Counts
+		out.DurationMs, out.AppliedLimit, out.ResultItems = result.DurationMs, result.AppliedLimit, result.ResultItems
+		out.Content, out.NumLines, out.Error = result.Content, result.NumLines, result.Error
+	case "fetch":
+		out.Text, out.URL, out.StatusCode, out.StatusText = result.Text, result.URL, result.StatusCode, result.StatusText
+		out.Bytes, out.DurationMs, out.Content, out.NumLines = result.Bytes, result.DurationMs, result.Content, result.NumLines
+		out.Error = result.Error
+	case "todo":
+		out.Text, out.Content, out.OldTodos, out.NewTodos = result.Text, result.Content, result.OldTodos, result.NewTodos
+		out.Error = result.Error
+	case "plan":
+		out.Text, out.Content, out.Plan, out.Explanation = result.Text, result.Content, result.Plan, result.Explanation
+		out.Steps, out.Error = result.Steps, result.Error
+	case "question":
+		out.Text, out.Content, out.Question = result.Text, result.Content, result.Question
+		out.Questions, out.Answer, out.Options, out.Answers = result.Questions, result.Answer, result.Options, result.Answers
+		out.Error = result.Error
+	case "stdin":
+		out.Text, out.TaskID, out.Content, out.NumLines = result.Text, result.TaskID, result.Content, result.NumLines
+		out.Error = result.Error
+	case "task":
+		out.Text, out.TaskID, out.TaskType, out.TaskStatus = result.Text, result.TaskID, result.TaskType, result.TaskStatus
+		out.Description, out.TotalDurationMs, out.TotalTokens = result.Description, result.TotalDurationMs, result.TotalTokens
+		out.TotalToolUseCount, out.Output = result.TotalToolUseCount, result.Output
+		out.Stdout, out.Stderr, out.ExitCode, out.Content = result.Stdout, result.Stderr, result.ExitCode, result.Content
+		out.Error = result.Error
+	case "write":
+		out.Text, out.FilePath, out.FilePaths, out.Language = result.Text, result.FilePath, result.FilePaths, result.Language
+		out.Content, out.NumLines, out.Patch, out.PatchHunks = result.Content, result.NumLines, result.Patch, result.PatchHunks
+		out.StartLine, out.TotalLines, out.Error = result.StartLine, result.TotalLines, result.Error
+	case "edit":
+		out.FilePath, out.FilePaths, out.Patch, out.PatchHunks = result.FilePath, result.FilePaths, result.Patch, result.PatchHunks
+		out.OldString, out.NewString, out.OriginalFile = result.OldString, result.NewString, result.OriginalFile
+		out.ReplaceAll, out.UserModified, out.Content, out.Error = result.ReplaceAll, result.UserModified, result.Content, result.Error
+	case "text":
+		out.Text, out.Content, out.Error = result.Text, result.Content, result.Error
+	default:
+		return &SessionStructuredToolResult{Kind: "unknown"}
+	}
+	return out
 }
 
 func sessionStructuredToolErrorFromWorker(err *worker.StructuredToolError) *SessionStructuredToolError {

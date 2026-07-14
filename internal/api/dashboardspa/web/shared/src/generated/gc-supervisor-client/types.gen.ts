@@ -2152,6 +2152,7 @@ export type PackResponse = {
 };
 
 export type PaginationInfo = {
+    has_newer_messages?: boolean;
     has_older_messages: boolean;
     returned_message_count: number;
     total_compactions: number;
@@ -3123,6 +3124,13 @@ export type SessionPatchBody = {
     title?: string;
 };
 
+export type SessionPendingClearedEvent = {
+    /**
+     * Request ID of the interaction that was cleared.
+     */
+    request_id: string;
+};
+
 export type SessionPendingResponse = {
     pending?: PendingInteraction;
     supported: boolean;
@@ -3246,9 +3254,9 @@ export type SessionStrandedPayload = {
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
-export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | HeartbeatEvent;
+export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | HeartbeatEvent;
 
 export type SessionStreamMessageEvent = {
     format: string;
@@ -3277,29 +3285,42 @@ export type SessionStreamRawMessageEvent = {
     template: string;
 };
 
+/**
+ * Structured session stream message
+ *
+ * Provider-neutral structured transcript update with explicit snapshot, upsert, or reset application semantics.
+ */
 export type SessionStreamStructuredMessageEvent = {
     /**
      * Always structured for this event.
      */
-    format: string;
+    format: 'structured';
     /**
      * Normalized worker-history envelope for this snapshot or stream batch.
      */
-    history?: SessionStructuredHistory;
+    history: SessionStructuredHistory;
     id: string;
+    /**
+     * How the client applies this structured frame: replace from a snapshot/reset or merge an upsert.
+     */
+    operation: 'snapshot' | 'upsert' | 'reset';
     pagination?: PaginationInfo;
     /**
      * Producing provider identifier (claude, codex, gemini, opencode, etc.).
      */
     provider: string;
     /**
+     * Present if and only if operation is reset; absent for snapshot and upsert. Identifies why the reset replaced the client transcript.
+     */
+    reset_reason?: 'resume_invalid' | 'stream_changed' | 'cursor_invalidated' | 'history_rewritten';
+    /**
      * Structured session transcript schema version.
      */
-    schema_version: string;
+    schema_version: 'session.structured.v1';
     /**
      * Provider-normalized structured messages.
      */
-    structured_messages: Array<SessionStructuredMessage> | null;
+    structured_messages: Array<SessionStructuredMessage>;
     template: string;
 };
 
@@ -3308,7 +3329,91 @@ export type SessionStructuredArgument = {
     value: string;
 };
 
-export type SessionStructuredBlock = {
+/**
+ * Structured transcript block
+ *
+ * Provider-normalized transcript block discriminated by its closed block type vocabulary.
+ */
+export type SessionStructuredBlock = ({
+    type: 'text';
+} & SessionStructuredBlockText) | ({
+    type: 'thinking';
+} & SessionStructuredBlockThinking) | ({
+    type: 'tool_use';
+} & SessionStructuredBlockToolUse) | ({
+    type: 'tool_result';
+} & SessionStructuredBlockToolResult) | ({
+    type: 'interaction';
+} & SessionStructuredBlockInteraction) | ({
+    type: 'image';
+} & SessionStructuredBlockImage) | ({
+    type: 'unknown';
+} & SessionStructuredBlockUnknown);
+
+/**
+ * SessionStructuredBlockImage
+ */
+export type SessionStructuredBlockImage = {
+    file_path?: string;
+    image_url?: string;
+    mime_type?: string;
+    text?: string;
+    type: 'image';
+};
+
+/**
+ * SessionStructuredBlockInteraction
+ */
+export type SessionStructuredBlockInteraction = {
+    interaction?: SessionStructuredInteraction;
+    type: 'interaction';
+};
+
+/**
+ * SessionStructuredBlockText
+ */
+export type SessionStructuredBlockText = {
+    text?: string;
+    type: 'text';
+};
+
+/**
+ * SessionStructuredBlockThinking
+ */
+export type SessionStructuredBlockThinking = {
+    signature?: string;
+    thinking?: string;
+    type: 'thinking';
+};
+
+/**
+ * SessionStructuredBlockToolResult
+ */
+export type SessionStructuredBlockToolResult = {
+    content?: string;
+    file_path?: string;
+    is_error?: boolean;
+    name?: string;
+    structured?: SessionStructuredToolResult;
+    tool_call_id?: string;
+    type: 'tool_result';
+};
+
+/**
+ * SessionStructuredBlockToolUse
+ */
+export type SessionStructuredBlockToolUse = {
+    file_path?: string;
+    id?: string;
+    input?: SessionStructuredToolInput;
+    name?: string;
+    type: 'tool_use';
+};
+
+/**
+ * SessionStructuredBlockUnknown
+ */
+export type SessionStructuredBlockUnknown = {
     content?: string;
     file_path?: string;
     id?: string;
@@ -3323,7 +3428,7 @@ export type SessionStructuredBlock = {
     text?: string;
     thinking?: string;
     tool_call_id?: string;
-    type: string;
+    type: 'unknown';
 };
 
 export type SessionStructuredContinuity = {
@@ -3335,6 +3440,10 @@ export type SessionStructuredContinuity = {
 
 export type SessionStructuredCursor = {
     after_entry_id?: string;
+    /**
+     * Opaque cursor for an exact structured REST-to-SSE handoff or SSE reconnect.
+     */
+    resume_token: string;
 };
 
 export type SessionStructuredDiagnostic = {
@@ -3373,19 +3482,90 @@ export type SessionStructuredInteraction = {
     state: string;
 };
 
-export type SessionStructuredMessage = {
-    blocks: Array<SessionStructuredBlock> | null;
+/**
+ * Structured transcript message
+ *
+ * Provider-normalized transcript message discriminated by its closed role vocabulary.
+ */
+export type SessionStructuredMessage = ({
+    role: 'unknown';
+} & SessionStructuredMessageUnknown) | ({
+    role: 'user';
+} & SessionStructuredMessageUser) | ({
+    role: 'assistant';
+} & SessionStructuredMessageAssistant) | ({
+    role: 'system';
+} & SessionStructuredMessageSystem) | ({
+    role: 'tool';
+} & SessionStructuredMessageTool);
+
+/**
+ * SessionStructuredMessageAssistant
+ */
+export type SessionStructuredMessageAssistant = {
+    blocks: Array<SessionStructuredBlock>;
     id: string;
-    is_subagent?: boolean;
     model?: string;
-    parent_tool_call_id?: string;
     provider?: string;
-    role: string;
-    status: string;
+    role: 'assistant';
+    status: 'unknown' | 'final' | 'partial' | 'superseded';
+    stop_reason?: string;
+    timestamp?: string;
+    usage?: SessionStructuredUsage;
+};
+
+/**
+ * SessionStructuredMessageSystem
+ */
+export type SessionStructuredMessageSystem = {
+    blocks: Array<SessionStructuredBlock>;
+    id: string;
+    provider?: string;
+    role: 'system';
+    status: 'unknown' | 'final' | 'partial' | 'superseded';
+    system_event?: SessionStructuredSystemEvent;
+    timestamp?: string;
+};
+
+/**
+ * SessionStructuredMessageTool
+ */
+export type SessionStructuredMessageTool = {
+    blocks: Array<SessionStructuredBlock>;
+    id: string;
+    provider?: string;
+    role: 'tool';
+    status: 'unknown' | 'final' | 'partial' | 'superseded';
+    timestamp?: string;
+};
+
+/**
+ * SessionStructuredMessageUnknown
+ */
+export type SessionStructuredMessageUnknown = {
+    blocks: Array<SessionStructuredBlock>;
+    id: string;
+    model?: string;
+    provider?: string;
+    role: 'unknown';
+    status: 'unknown' | 'final' | 'partial' | 'superseded';
     stop_reason?: string;
     system_event?: SessionStructuredSystemEvent;
     timestamp?: string;
     usage?: SessionStructuredUsage;
+    user_prompt?: SessionStructuredUserPrompt;
+};
+
+/**
+ * SessionStructuredMessageUser
+ */
+export type SessionStructuredMessageUser = {
+    blocks: Array<SessionStructuredBlock>;
+    id: string;
+    provider?: string;
+    role: 'user';
+    status: 'unknown' | 'final' | 'partial' | 'superseded';
+    timestamp?: string;
     user_prompt?: SessionStructuredUserPrompt;
 };
 
@@ -3449,12 +3629,231 @@ export type SessionStructuredToolError = {
     /**
      * Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown.
      */
-    category?: string;
+    category: 'user_rejection' | 'user_rejection_with_reason' | 'command_failure' | 'file_error' | 'validation_error' | 'timeout' | 'network_error' | 'unknown';
     message?: string;
     user_reason?: string;
 };
 
-export type SessionStructuredToolInput = {
+/**
+ * Structured tool input
+ *
+ * Provider-neutral tool input discriminated by its closed kind vocabulary.
+ */
+export type SessionStructuredToolInput = ({
+    kind: 'unknown';
+} & SessionStructuredToolInputUnknown) | ({
+    kind: 'command';
+} & SessionStructuredToolInputCommand) | ({
+    kind: 'stdin';
+} & SessionStructuredToolInputStdin) | ({
+    kind: 'code';
+} & SessionStructuredToolInputCode) | ({
+    kind: 'patch';
+} & SessionStructuredToolInputPatch) | ({
+    kind: 'write';
+} & SessionStructuredToolInputWrite) | ({
+    kind: 'glob';
+} & SessionStructuredToolInputGlob) | ({
+    kind: 'fetch';
+} & SessionStructuredToolInputFetch) | ({
+    kind: 'search';
+} & SessionStructuredToolInputSearch) | ({
+    kind: 'file';
+} & SessionStructuredToolInputFile) | ({
+    kind: 'todo';
+} & SessionStructuredToolInputTodo) | ({
+    kind: 'plan';
+} & SessionStructuredToolInputPlan) | ({
+    kind: 'question';
+} & SessionStructuredToolInputQuestion) | ({
+    kind: 'task';
+} & SessionStructuredToolInputTask) | ({
+    kind: 'text';
+} & SessionStructuredToolInputText) | ({
+    kind: 'arguments';
+} & SessionStructuredToolInputArguments);
+
+/**
+ * SessionStructuredToolInputArguments
+ */
+export type SessionStructuredToolInputArguments = {
+    arguments: Array<SessionStructuredArgument>;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'arguments';
+};
+
+/**
+ * SessionStructuredToolInputCode
+ */
+export type SessionStructuredToolInputCode = {
+    code: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'code';
+    language?: string;
+};
+
+/**
+ * SessionStructuredToolInputCommand
+ */
+export type SessionStructuredToolInputCommand = {
+    arguments?: Array<SessionStructuredArgument> | null;
+    command: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'command';
+};
+
+/**
+ * SessionStructuredToolInputFetch
+ */
+export type SessionStructuredToolInputFetch = {
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'fetch';
+    prompt?: string;
+    url?: string;
+};
+
+/**
+ * SessionStructuredToolInputFile
+ */
+export type SessionStructuredToolInputFile = {
+    command?: string;
+    file_path: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'file';
+    language?: string;
+};
+
+/**
+ * SessionStructuredToolInputGlob
+ */
+export type SessionStructuredToolInputGlob = {
+    arguments?: Array<SessionStructuredArgument> | null;
+    file_path?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'glob';
+    pattern?: string;
+    query?: string;
+};
+
+/**
+ * SessionStructuredToolInputPatch
+ */
+export type SessionStructuredToolInputPatch = {
+    file_path?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'patch';
+    language?: string;
+    patch: string;
+};
+
+/**
+ * SessionStructuredToolInputPlan
+ */
+export type SessionStructuredToolInputPlan = {
+    explanation?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'plan';
+    plan?: string;
+    steps?: Array<SessionStructuredPlanStep> | null;
+};
+
+/**
+ * SessionStructuredToolInputQuestion
+ */
+export type SessionStructuredToolInputQuestion = {
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'question';
+    options?: Array<string> | null;
+    question?: string;
+};
+
+/**
+ * SessionStructuredToolInputSearch
+ */
+export type SessionStructuredToolInputSearch = {
+    arguments?: Array<SessionStructuredArgument> | null;
+    command?: string;
+    file_path?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'search';
+    pattern?: string;
+    query?: string;
+};
+
+/**
+ * SessionStructuredToolInputStdin
+ */
+export type SessionStructuredToolInputStdin = {
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'stdin';
+    linked_command?: string;
+    task_id?: string;
+    text?: string;
+};
+
+/**
+ * SessionStructuredToolInputTask
+ */
+export type SessionStructuredToolInputTask = {
+    description?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'task';
+    prompt?: string;
+    task_id?: string;
+    task_status?: string;
+    task_type?: string;
+};
+
+/**
+ * SessionStructuredToolInputText
+ */
+export type SessionStructuredToolInputText = {
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'text';
+    text: string;
+};
+
+/**
+ * SessionStructuredToolInputTodo
+ */
+export type SessionStructuredToolInputTodo = {
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'todo';
+    todos?: Array<SessionStructuredTodoItem> | null;
+};
+
+/**
+ * SessionStructuredToolInputUnknown
+ */
+export type SessionStructuredToolInputUnknown = {
     arguments?: Array<SessionStructuredArgument> | null;
     code?: string;
     command?: string;
@@ -3464,7 +3863,7 @@ export type SessionStructuredToolInput = {
     /**
      * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
      */
-    kind?: string;
+    kind: 'unknown';
     language?: string;
     linked_command?: string;
     options?: Array<string> | null;
@@ -3483,7 +3882,284 @@ export type SessionStructuredToolInput = {
     url?: string;
 };
 
-export type SessionStructuredToolResult = {
+/**
+ * SessionStructuredToolInputWrite
+ */
+export type SessionStructuredToolInputWrite = {
+    file_path?: string;
+    /**
+     * Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+     */
+    kind: 'write';
+    language?: string;
+    text?: string;
+};
+
+/**
+ * Structured tool result
+ *
+ * Provider-neutral tool result discriminated by its closed kind vocabulary.
+ */
+export type SessionStructuredToolResult = ({
+    kind: 'unknown';
+} & SessionStructuredToolResultUnknown) | ({
+    kind: 'bash';
+} & SessionStructuredToolResultBash) | ({
+    kind: 'python';
+} & SessionStructuredToolResultPython) | ({
+    kind: 'read';
+} & SessionStructuredToolResultRead) | ({
+    kind: 'glob';
+} & SessionStructuredToolResultGlob) | ({
+    kind: 'grep';
+} & SessionStructuredToolResultGrep) | ({
+    kind: 'search';
+} & SessionStructuredToolResultSearch) | ({
+    kind: 'fetch';
+} & SessionStructuredToolResultFetch) | ({
+    kind: 'todo';
+} & SessionStructuredToolResultTodo) | ({
+    kind: 'plan';
+} & SessionStructuredToolResultPlan) | ({
+    kind: 'question';
+} & SessionStructuredToolResultQuestion) | ({
+    kind: 'stdin';
+} & SessionStructuredToolResultStdin) | ({
+    kind: 'task';
+} & SessionStructuredToolResultTask) | ({
+    kind: 'write';
+} & SessionStructuredToolResultWrite) | ({
+    kind: 'edit';
+} & SessionStructuredToolResultEdit) | ({
+    kind: 'text';
+} & SessionStructuredToolResultText);
+
+/**
+ * SessionStructuredToolResultBash
+ */
+export type SessionStructuredToolResultBash = {
+    command?: string;
+    content?: string;
+    error?: SessionStructuredToolError;
+    exit_code?: number;
+    interrupted?: boolean;
+    is_image?: boolean;
+    kind: 'bash';
+    num_lines?: number;
+    stderr?: string;
+    stderr_lines?: number;
+    stdout?: string;
+    stdout_lines?: number;
+    task_id?: string;
+    task_status?: string;
+    text?: string;
+    timestamp?: string;
+    truncated?: boolean;
+};
+
+/**
+ * SessionStructuredToolResultEdit
+ */
+export type SessionStructuredToolResultEdit = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    file_path?: string;
+    file_paths?: Array<string> | null;
+    kind: 'edit';
+    new_string?: string;
+    old_string?: string;
+    original_file?: string;
+    patch?: string;
+    patch_hunks?: Array<SessionStructuredPatchHunk> | null;
+    replace_all?: boolean;
+    user_modified?: boolean;
+};
+
+/**
+ * SessionStructuredToolResultFetch
+ */
+export type SessionStructuredToolResultFetch = {
+    bytes?: number;
+    content?: string;
+    duration_ms?: number;
+    error?: SessionStructuredToolError;
+    kind: 'fetch';
+    num_lines?: number;
+    status_code?: number;
+    status_text?: string;
+    text?: string;
+    url?: string;
+};
+
+/**
+ * SessionStructuredToolResultGlob
+ */
+export type SessionStructuredToolResultGlob = {
+    content?: string;
+    duration_ms?: number;
+    error?: SessionStructuredToolError;
+    filenames?: Array<string> | null;
+    kind: 'glob';
+    num_files?: number;
+    num_lines?: number;
+    truncated?: boolean;
+};
+
+/**
+ * SessionStructuredToolResultGrep
+ */
+export type SessionStructuredToolResultGrep = {
+    applied_limit?: number;
+    content?: string;
+    counts?: Array<SessionStructuredArgument> | null;
+    duration_ms?: number;
+    error?: SessionStructuredToolError;
+    filenames?: Array<string> | null;
+    kind: 'grep';
+    mode?: string;
+    num_files?: number;
+    num_lines?: number;
+    num_results?: number;
+    query?: string;
+    result_items?: Array<SessionStructuredSearchResultItem> | null;
+};
+
+/**
+ * SessionStructuredToolResultPlan
+ */
+export type SessionStructuredToolResultPlan = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    explanation?: string;
+    kind: 'plan';
+    plan?: string;
+    steps?: Array<SessionStructuredPlanStep> | null;
+    text?: string;
+};
+
+/**
+ * SessionStructuredToolResultPython
+ */
+export type SessionStructuredToolResultPython = {
+    code?: string;
+    error?: SessionStructuredToolError;
+    exit_code?: number;
+    interrupted?: boolean;
+    is_image?: boolean;
+    kind: 'python';
+    stderr?: string;
+    stdout?: string;
+    text?: string;
+    truncated?: boolean;
+};
+
+/**
+ * SessionStructuredToolResultQuestion
+ */
+export type SessionStructuredToolResultQuestion = {
+    answer?: string;
+    answers?: Array<SessionStructuredArgument> | null;
+    content?: string;
+    error?: SessionStructuredToolError;
+    kind: 'question';
+    options?: Array<string> | null;
+    question?: string;
+    questions?: Array<SessionStructuredQuestion> | null;
+    text?: string;
+};
+
+/**
+ * SessionStructuredToolResultRead
+ */
+export type SessionStructuredToolResultRead = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    file_path?: string;
+    kind: 'read';
+    language?: string;
+    num_lines?: number;
+    start_line?: number;
+    total_lines?: number;
+};
+
+/**
+ * SessionStructuredToolResultSearch
+ */
+export type SessionStructuredToolResultSearch = {
+    applied_limit?: number;
+    content?: string;
+    counts?: Array<SessionStructuredArgument> | null;
+    duration_ms?: number;
+    error?: SessionStructuredToolError;
+    filenames?: Array<string> | null;
+    kind: 'search';
+    mode?: string;
+    num_files?: number;
+    num_lines?: number;
+    num_results?: number;
+    query?: string;
+    result_items?: Array<SessionStructuredSearchResultItem> | null;
+};
+
+/**
+ * SessionStructuredToolResultStdin
+ */
+export type SessionStructuredToolResultStdin = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    kind: 'stdin';
+    num_lines?: number;
+    task_id?: string;
+    text?: string;
+};
+
+/**
+ * SessionStructuredToolResultTask
+ */
+export type SessionStructuredToolResultTask = {
+    content?: string;
+    description?: string;
+    error?: SessionStructuredToolError;
+    exit_code?: number;
+    kind: 'task';
+    output?: string;
+    stderr?: string;
+    stdout?: string;
+    task_id?: string;
+    task_status?: string;
+    task_type?: string;
+    text?: string;
+    total_duration_ms?: number;
+    total_tokens?: number;
+    total_tool_use_count?: number;
+};
+
+/**
+ * SessionStructuredToolResultText
+ */
+export type SessionStructuredToolResultText = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    kind: 'text';
+    text?: string;
+};
+
+/**
+ * SessionStructuredToolResultTodo
+ */
+export type SessionStructuredToolResultTodo = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    kind: 'todo';
+    new_todos?: Array<SessionStructuredTodoItem> | null;
+    old_todos?: Array<SessionStructuredTodoItem> | null;
+    text?: string;
+};
+
+/**
+ * SessionStructuredToolResultUnknown
+ */
+export type SessionStructuredToolResultUnknown = {
     answer?: string;
     answers?: Array<SessionStructuredArgument> | null;
     applied_limit?: number;
@@ -3502,7 +4178,7 @@ export type SessionStructuredToolResult = {
     filenames?: Array<string> | null;
     interrupted?: boolean;
     is_image?: boolean;
-    kind: string;
+    kind: 'unknown';
     language?: string;
     mode?: string;
     new_string?: string;
@@ -3543,6 +4219,24 @@ export type SessionStructuredToolResult = {
     truncated?: boolean;
     url?: string;
     user_modified?: boolean;
+};
+
+/**
+ * SessionStructuredToolResultWrite
+ */
+export type SessionStructuredToolResultWrite = {
+    content?: string;
+    error?: SessionStructuredToolError;
+    file_path?: string;
+    file_paths?: Array<string> | null;
+    kind: 'write';
+    language?: string;
+    num_lines?: number;
+    patch?: string;
+    patch_hunks?: Array<SessionStructuredPatchHunk> | null;
+    start_line?: number;
+    text?: string;
+    total_lines?: number;
 };
 
 export type SessionStructuredUploadedFile = {
@@ -3650,6 +4344,11 @@ export type SessionTranscriptRawResponse = {
     template: string;
 };
 
+/**
+ * Structured session transcript response
+ *
+ * Provider-neutral structured transcript snapshot.
+ */
 export type SessionTranscriptStructuredResponse = {
     /**
      * Structured provider-neutral transcript format.
@@ -3658,8 +4357,12 @@ export type SessionTranscriptStructuredResponse = {
     /**
      * Normalized worker-history envelope when format is structured.
      */
-    history?: SessionStructuredHistory;
+    history: SessionStructuredHistory;
     id: string;
+    /**
+     * Always snapshot for a REST structured transcript.
+     */
+    operation: 'snapshot';
     pagination?: PaginationInfo;
     /**
      * Producing provider identifier (claude, codex, gemini, opencode, etc.).
@@ -3668,11 +4371,11 @@ export type SessionTranscriptStructuredResponse = {
     /**
      * Structured session transcript schema version.
      */
-    schema_version: string;
+    schema_version: 'session.structured.v1';
     /**
      * Provider-normalized structured messages.
      */
-    structured_messages: Array<SessionStructuredMessage> | null;
+    structured_messages: Array<SessionStructuredMessage>;
     template: string;
 };
 
@@ -15875,6 +16578,12 @@ export type PostV0CityByCityNameSessionByIdStopResponse = PostV0CityByCityNameSe
 
 export type StreamSessionData = {
     body?: never;
+    headers?: {
+        /**
+         * Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor.
+         */
+        'Last-Event-ID'?: string;
+    };
     path: {
         /**
          * City name.
@@ -15891,9 +16600,13 @@ export type StreamSessionData = {
          */
         format?: 'conversation' | 'raw' | 'structured';
         /**
-         * Include thinking block text in structured stream frames. Defaults to false.
+         * Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise.
          */
         include_thinking?: boolean;
+        /**
+         * Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect.
+         */
+        after_cursor?: string;
     };
     url: '/v0/city/{cityName}/session/{id}/stream';
 };
@@ -15920,9 +16633,9 @@ export type StreamSessionResponses = {
          */
         event: 'activity';
         /**
-         * The event ID.
+         * The event resume cursor.
          */
-        id?: number;
+        id?: string;
         /**
          * The retry time in milliseconds.
          */
@@ -15934,9 +16647,9 @@ export type StreamSessionResponses = {
          */
         event: 'heartbeat';
         /**
-         * The event ID.
+         * The event resume cursor.
          */
-        id?: number;
+        id?: string;
         /**
          * The retry time in milliseconds.
          */
@@ -15948,9 +16661,9 @@ export type StreamSessionResponses = {
          */
         event?: 'message';
         /**
-         * The event ID.
+         * The event resume cursor.
          */
-        id?: number;
+        id?: string;
         /**
          * The retry time in milliseconds.
          */
@@ -15962,9 +16675,23 @@ export type StreamSessionResponses = {
          */
         event: 'pending';
         /**
-         * The event ID.
+         * The event resume cursor.
          */
-        id?: number;
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SessionPendingClearedEvent;
+        /**
+         * The event name.
+         */
+        event: 'pending_cleared';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
         /**
          * The retry time in milliseconds.
          */
@@ -15976,9 +16703,9 @@ export type StreamSessionResponses = {
          */
         event: 'structured';
         /**
-         * The event ID.
+         * The event resume cursor.
          */
-        id?: number;
+        id?: string;
         /**
          * The retry time in milliseconds.
          */
@@ -15990,9 +16717,9 @@ export type StreamSessionResponses = {
          */
         event: 'turn';
         /**
-         * The event ID.
+         * The event resume cursor.
          */
-        id?: number;
+        id?: string;
         /**
          * The retry time in milliseconds.
          */
@@ -16148,15 +16875,15 @@ export type GetV0CityByCityNameSessionByIdTranscriptData = {
          */
         format?: 'conversation' | 'raw' | 'structured';
         /**
-         * Include thinking block text in structured responses. Defaults to false.
+         * Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise.
          */
         include_thinking?: boolean;
         /**
-         * Pagination cursor: return entries before this UUID.
+         * Pagination cursor: return entries before this stable transcript entry ID.
          */
         before?: string;
         /**
-         * Pagination cursor: return entries after this UUID.
+         * Pagination cursor: return entries after this stable transcript entry ID.
          */
         after?: string;
     };
@@ -16892,7 +17619,7 @@ export type StreamSupervisorEventsResponses = {
          */
         event: 'heartbeat';
         /**
-         * The event ID (composite cursor).
+         * The event resume cursor.
          */
         id?: string;
         /**
@@ -16906,7 +17633,7 @@ export type StreamSupervisorEventsResponses = {
          */
         event: 'tagged_event';
         /**
-         * The event ID (composite cursor).
+         * The event resume cursor.
          */
         id?: string;
         /**

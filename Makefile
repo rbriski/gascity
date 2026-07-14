@@ -94,7 +94,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -825,6 +825,16 @@ dashboard-smoke: dashboard-build
 ## shard (go list ./...); this target runs it in isolation.
 dashboard-e2e-go:
 	$(TEST_ENV) go test -tags integration -timeout 10m ./test/dashport/...
+
+## dashboard-e2e-play: drive the real embedded SPA in Chromium against the
+## existing dashport httptest listener. The Go test owns server cleanup and the
+## one ServeSeededCity harness; Playwright verifies DOM, transcript mutation,
+## SSE resume/upsert/reset semantics, and clean console/network behavior.
+dashboard-e2e-play: dashboard-build
+	$(TEST_ENV) GC_DASHPORT_BROWSER_E2E=1 PLAYWRIGHT_BROWSERS_PATH="$${PLAYWRIGHT_BROWSERS_PATH}" PLAYWRIGHT_CHROMIUM_EXECUTABLE="$${PLAYWRIGHT_CHROMIUM_EXECUTABLE}" go test -tags integration -timeout 10m -count=1 -run '^TestStructuredTranscriptBrowser$$' -v ./test/dashport
+
+## dashboard-e2e: run both the Go wire-level and real-browser dashboard layers.
+dashboard-e2e: dashboard-e2e-go dashboard-e2e-play
 
 ## dashboard-ci: regenerate the typed API client + rebuild the SPA bundle, and
 ## fail if the generated gc-supervisor-client or the embedded dist/ is stale.

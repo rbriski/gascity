@@ -49,6 +49,45 @@ func TestReadOpenCodeFileNormalizesExportedMessages(t *testing.T) {
 	}
 }
 
+func TestReadOpenCodeFilePreservesRepeatedIdlessMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session_export.json")
+	repeated := `{"info":{"role":"assistant"},"parts":[{"type":"text","text":"repeat"}]}`
+	writeRepeated := func(count int) {
+		t.Helper()
+		messages := strings.TrimSuffix(strings.Repeat(repeated+",", count), ",")
+		body := `{"info":{"id":"session-1"},"messages":[` + messages + `]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write OpenCode fixture: %v", err)
+		}
+	}
+
+	writeRepeated(2)
+	before, err := ReadProviderFile("opencode/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("read two repeated id-less messages: %v", err)
+	}
+	beforeIDs := paginationEntryIDs(before.Messages)
+	if len(beforeIDs) != 2 || beforeIDs[0] == beforeIDs[1] {
+		t.Fatalf("entry IDs = %v, want two unique IDs", beforeIDs)
+	}
+
+	writeRepeated(3)
+	after, err := ReadProviderFile("opencode/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("read after appending repeated id-less message: %v", err)
+	}
+	afterIDs := paginationEntryIDs(after.Messages)
+	if len(afterIDs) != 3 {
+		t.Fatalf("entry IDs after append = %v, want three entries", afterIDs)
+	}
+	if afterIDs[0] != beforeIDs[0] || afterIDs[1] != beforeIDs[1] {
+		t.Fatalf("retained IDs changed after append: got %v, want prefix %v", afterIDs, beforeIDs)
+	}
+	if afterIDs[2] == afterIDs[0] || afterIDs[2] == afterIDs[1] {
+		t.Fatalf("appended repeated message reused an existing ID: %v", afterIDs)
+	}
+}
+
 func TestReadOpenCodeFileNormalizesTools(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session_export.json")
 	body := `{

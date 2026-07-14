@@ -31,9 +31,9 @@ func ReadCopilotFile(path string, _ int) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	sessionID := ""
 	lastUUID := ""
-	idx := 0
 	emittedToolUse := make(map[string]bool)
 	toolNames := make(map[string]string)
+	syntheticIDs := newStableSyntheticEntryIDSequence("copilot")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -51,6 +51,7 @@ func ReadCopilotFile(path string, _ int) (*Session, error) {
 			continue
 		}
 		rawLine := append(json.RawMessage(nil), line...)
+		syntheticID := syntheticIDs.ForRecord(rawLine)
 		ts := copilotEventTimestamp(event)
 		if sessionID == "" {
 			sessionID = copilotSessionIDFromEvent(event)
@@ -61,15 +62,15 @@ func ReadCopilotFile(path string, _ int) (*Session, error) {
 		case "session.start", "session.resume":
 			continue
 		case "user.message":
-			entry = copilotMessageEntry(event, rawLine, "user", idx, ts)
+			entry = copilotMessageEntry(event, rawLine, "user", ts, syntheticID)
 		case "system.message":
-			entry = copilotMessageEntry(event, rawLine, "system", idx, ts)
+			entry = copilotMessageEntry(event, rawLine, "system", ts, syntheticID)
 		case "assistant.message":
-			entry = copilotAssistantMessageEntry(event, rawLine, idx, ts, emittedToolUse, toolNames)
+			entry = copilotAssistantMessageEntry(event, rawLine, ts, emittedToolUse, toolNames, syntheticID)
 		case "tool.execution_start":
-			entry = copilotToolStartEntry(event, rawLine, idx, ts, emittedToolUse, toolNames)
+			entry = copilotToolStartEntry(event, rawLine, ts, emittedToolUse, toolNames, syntheticID)
 		case "tool.execution_complete":
-			entry = copilotToolCompleteEntry(event, rawLine, idx, ts, toolNames)
+			entry = copilotToolCompleteEntry(event, rawLine, ts, toolNames, syntheticID)
 		default:
 			continue
 		}
@@ -79,7 +80,6 @@ func ReadCopilotFile(path string, _ int) (*Session, error) {
 		entry.ParentUUID = lastUUID
 		lastUUID = entry.UUID
 		messages = append(messages, entry)
-		idx++
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanning copilot session file: %w", err)
@@ -105,13 +105,13 @@ type copilotEvent struct {
 	SessionID string          `json:"sessionId"`
 }
 
-func copilotMessageEntry(event copilotEvent, rawLine json.RawMessage, role string, idx int, ts time.Time) *Entry {
+func copilotMessageEntry(event copilotEvent, rawLine json.RawMessage, role string, ts time.Time, syntheticID stableSyntheticEntryIDSource) *Entry {
 	text := copilotTextFromData(event.Data)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	return &Entry{
-		UUID:      copilotEntryID(event, idx),
+		UUID:      copilotEntryID(event, syntheticID),
 		Type:      role,
 		Timestamp: ts,
 		Message:   mustMarshal(MessageContent{Role: role, Content: mustMarshal(text)}),
@@ -119,7 +119,7 @@ func copilotMessageEntry(event copilotEvent, rawLine json.RawMessage, role strin
 	}
 }
 
-func copilotAssistantMessageEntry(event copilotEvent, rawLine json.RawMessage, idx int, ts time.Time, emittedToolUse map[string]bool, toolNames map[string]string) *Entry {
+func copilotAssistantMessageEntry(event copilotEvent, rawLine json.RawMessage, ts time.Time, emittedToolUse map[string]bool, toolNames map[string]string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	content := make([]ContentBlock, 0, 1)
 	if text := strings.TrimSpace(copilotTextFromData(event.Data)); text != "" {
 		content = append(content, ContentBlock{Type: "text", Text: text})
@@ -141,7 +141,7 @@ func copilotAssistantMessageEntry(event copilotEvent, rawLine json.RawMessage, i
 		return nil
 	}
 	return &Entry{
-		UUID:      copilotEntryID(event, idx),
+		UUID:      copilotEntryID(event, syntheticID),
 		Type:      "assistant",
 		Timestamp: ts,
 		Message:   copilotMessageWithMetadata("assistant", content, event.Data),
@@ -149,7 +149,7 @@ func copilotAssistantMessageEntry(event copilotEvent, rawLine json.RawMessage, i
 	}
 }
 
-func copilotToolStartEntry(event copilotEvent, rawLine json.RawMessage, idx int, ts time.Time, emittedToolUse map[string]bool, toolNames map[string]string) *Entry {
+func copilotToolStartEntry(event copilotEvent, rawLine json.RawMessage, ts time.Time, emittedToolUse map[string]bool, toolNames map[string]string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	object := copilotDataObject(event.Data)
 	callID := copilotStringField(object, "toolCallId", "tool_call_id", "callId", "call_id", "id")
 	if callID == "" {
@@ -164,7 +164,7 @@ func copilotToolStartEntry(event copilotEvent, rawLine json.RawMessage, idx int,
 	}
 	emittedToolUse[callID] = true
 	return &Entry{
-		UUID:      copilotEntryID(event, idx),
+		UUID:      copilotEntryID(event, syntheticID),
 		Type:      "assistant",
 		Timestamp: ts,
 		Message: mustMarshal(MessageContent{
@@ -180,7 +180,7 @@ func copilotToolStartEntry(event copilotEvent, rawLine json.RawMessage, idx int,
 	}
 }
 
-func copilotToolCompleteEntry(event copilotEvent, rawLine json.RawMessage, idx int, ts time.Time, toolNames map[string]string) *Entry {
+func copilotToolCompleteEntry(event copilotEvent, rawLine json.RawMessage, ts time.Time, toolNames map[string]string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	object := copilotDataObject(event.Data)
 	callID := copilotStringField(object, "toolCallId", "tool_call_id", "callId", "call_id", "id")
 	if callID == "" {
@@ -189,7 +189,7 @@ func copilotToolCompleteEntry(event copilotEvent, rawLine json.RawMessage, idx i
 	content := copilotToolResultContent(object)
 	isError := copilotToolResultIsError(object, content)
 	return &Entry{
-		UUID:      copilotEntryID(event, idx),
+		UUID:      copilotEntryID(event, syntheticID),
 		Type:      "tool_result",
 		Timestamp: ts,
 		ToolUseID: callID,
@@ -579,11 +579,11 @@ func copilotEventTimestamp(event copilotEvent) time.Time {
 	return time.Time{}
 }
 
-func copilotEntryID(event copilotEvent, idx int) string {
+func copilotEntryID(event copilotEvent, syntheticID stableSyntheticEntryIDSource) string {
 	if strings.TrimSpace(event.ID) != "" {
 		return strings.TrimSpace(event.ID)
 	}
-	return fmt.Sprintf("copilot-%d", idx)
+	return syntheticID.ID("")
 }
 
 func copilotSessionIDFromEvent(event copilotEvent) string {

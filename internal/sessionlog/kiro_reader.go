@@ -17,6 +17,10 @@ import (
 // ReadKiroFile reads a Kiro ACP session JSONL file and converts it to the
 // standard Session format used by GC session logs.
 func ReadKiroFile(path string, _ int) (*Session, error) {
+	return readKiroFile(path, "kiro")
+}
+
+func readKiroFile(path, syntheticPrefix string) (*Session, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -31,8 +35,8 @@ func ReadKiroFile(path string, _ int) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	sessionID := ""
 	lastUUID := ""
-	idx := 0
 	toolNames := make(map[string]string)
+	syntheticIDs := newStableSyntheticEntryIDSequence(syntheticPrefix)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -51,15 +55,16 @@ func ReadKiroFile(path string, _ int) (*Session, error) {
 			sessionID = kiroSessionIDFromEvent(event)
 		}
 
-		entries := kiroEntriesFromEvent(event, rawLine, idx, toolNames)
+		recordIDs := syntheticIDs.ForRecord(rawLine)
+		entries := kiroEntriesFromEvent(event, rawLine, toolNames, recordIDs)
 		for _, entry := range entries {
 			if entry == nil {
 				continue
 			}
+			entry.RawRecordID = recordIDs.RawRecordID()
 			entry.ParentUUID = lastUUID
 			lastUUID = entry.UUID
 			messages = append(messages, entry)
-			idx++
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -89,14 +94,14 @@ type kiroEvent struct {
 	CreatedAt string          `json:"created_at"`
 }
 
-func kiroEntriesFromEvent(event kiroEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
+func kiroEntriesFromEvent(event kiroEvent, rawLine json.RawMessage, toolNames map[string]string, syntheticIDs stableSyntheticEntryIDSource) []*Entry {
 	if strings.TrimSpace(event.Method) == "session/update" {
-		return kiroEntriesFromACPUpdate(event, rawLine, idx, toolNames)
+		return kiroEntriesFromACPUpdate(event, rawLine, toolNames, syntheticIDs)
 	}
-	return kiroEntriesFromNativeFrame(event, rawLine, idx, toolNames)
+	return kiroEntriesFromNativeFrame(event, rawLine, toolNames, syntheticIDs)
 }
 
-func kiroEntriesFromACPUpdate(event kiroEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
+func kiroEntriesFromACPUpdate(event kiroEvent, rawLine json.RawMessage, toolNames map[string]string, syntheticIDs stableSyntheticEntryIDSource) []*Entry {
 	params := kiroRawObject(event.Params)
 	updateRaw := firstKiroRawField(params, "update")
 	update := kiroRawObject(updateRaw)
@@ -112,7 +117,7 @@ func kiroEntriesFromACPUpdate(event kiroEvent, rawLine json.RawMessage, idx int,
 			return nil
 		}
 		return []*Entry{{
-			UUID:      kiroEntryID(event, idx),
+			UUID:      kiroEntryID(event, syntheticIDs),
 			Type:      "assistant",
 			Timestamp: ts,
 			Message:   kiroMessageWithBlocks("assistant", []ContentBlock{{Type: "text", Text: text}}),
@@ -127,7 +132,7 @@ func kiroEntriesFromACPUpdate(event kiroEvent, rawLine json.RawMessage, idx int,
 		toolNames[callID] = name
 		input := kiroNeutralToolInput(name, firstKiroRawField(update, "rawInput", "raw_input", "input", "arguments", "args"))
 		return []*Entry{{
-			UUID:      kiroEntryID(event, idx),
+			UUID:      kiroEntryID(event, syntheticIDs),
 			Type:      "assistant",
 			Timestamp: ts,
 			Message: kiroMessageWithBlocks("assistant", []ContentBlock{{
@@ -149,7 +154,7 @@ func kiroEntriesFromACPUpdate(event kiroEvent, rawLine json.RawMessage, idx int,
 		}
 		isError := kiroToolUpdateIsError(update, content)
 		return []*Entry{{
-			UUID:      kiroEntryID(event, idx),
+			UUID:      kiroEntryID(event, syntheticIDs),
 			Type:      "tool_result",
 			Timestamp: ts,
 			ToolUseID: callID,
@@ -169,7 +174,7 @@ func kiroEntriesFromACPUpdate(event kiroEvent, rawLine json.RawMessage, idx int,
 	}
 }
 
-func kiroEntriesFromNativeFrame(event kiroEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
+func kiroEntriesFromNativeFrame(event kiroEvent, rawLine json.RawMessage, toolNames map[string]string, syntheticIDs stableSyntheticEntryIDSource) []*Entry {
 	frameType := kiroNormalizeUpdateType(event.Type)
 	message := event.Message
 	if len(message) == 0 || string(message) == "null" {
@@ -182,7 +187,7 @@ func kiroEntriesFromNativeFrame(event kiroEvent, rawLine json.RawMessage, idx in
 			return nil
 		}
 		return []*Entry{{
-			UUID:      kiroEntryID(event, idx),
+			UUID:      kiroEntryID(event, syntheticIDs),
 			Type:      "user",
 			Timestamp: kiroEventTimestamp(event, nil),
 			Message:   mustMarshal(MessageContent{Role: "user", Content: mustMarshal(text)}),
@@ -194,7 +199,7 @@ func kiroEntriesFromNativeFrame(event kiroEvent, rawLine json.RawMessage, idx in
 			return nil
 		}
 		return []*Entry{{
-			UUID:      kiroEntryID(event, idx),
+			UUID:      kiroEntryID(event, syntheticIDs),
 			Type:      "assistant",
 			Timestamp: kiroEventTimestamp(event, nil),
 			Message:   kiroMessageWithBlocks("assistant", blocks),
@@ -207,8 +212,15 @@ func kiroEntriesFromNativeFrame(event kiroEvent, rawLine json.RawMessage, idx in
 			if strings.TrimSpace(block.ToolUseID) == "" {
 				continue
 			}
+			entryID := kiroEntryID(event, syntheticIDs)
+			if len(blocks) > 1 {
+				// A native record ID identifies the container, not any one of
+				// its normalized child entries. Hash each child so an ID such
+				// as x cannot fabricate x-0 and alias a real native x-0 record.
+				entryID = syntheticIDs.ID(fmt.Sprintf("%d", offset))
+			}
 			entries = append(entries, &Entry{
-				UUID:      fmt.Sprintf("%s-%d", kiroEntryID(event, idx), offset),
+				UUID:      entryID,
 				Type:      "tool_result",
 				Timestamp: kiroEventTimestamp(event, nil),
 				ToolUseID: block.ToolUseID,
@@ -578,17 +590,13 @@ func kiroEventTimestamp(event kiroEvent, update map[string]json.RawMessage) time
 	return time.Time{}
 }
 
-func kiroEntryID(event kiroEvent, idx int) string {
+func kiroEntryID(event kiroEvent, syntheticIDs stableSyntheticEntryIDSource) string {
 	if len(event.ID) > 0 {
 		if value := jsonStringValue(event.ID); value != "" {
 			return value
 		}
-		var num int
-		if json.Unmarshal(event.ID, &num) == nil {
-			return fmt.Sprintf("kiro-%d", num)
-		}
 	}
-	return fmt.Sprintf("kiro-%d", idx)
+	return syntheticIDs.ID("")
 }
 
 func kiroSessionIDFromEvent(event kiroEvent) string {

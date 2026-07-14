@@ -590,36 +590,45 @@ func TestReadProviderFileAntigravityAppliesMessageIDCursors(t *testing.T) {
 		t.Fatalf("write transcript: %v", err)
 	}
 
-	newer, err := ReadProviderFileNewer("antigravity/tmux-cli", path, 0, "agy-1")
+	full, err := ReadProviderFile("antigravity/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile: %v", err)
+	}
+	allIDs := antigravityEntryIDs(full.Messages)
+	if len(allIDs) != 4 {
+		t.Fatalf("full Antigravity message IDs = %v, want 4 entries", allIDs)
+	}
+
+	newer, err := ReadProviderFileNewer("antigravity/tmux-cli", path, 0, allIDs[1])
 	if err != nil {
 		t.Fatalf("ReadProviderFileNewer: %v", err)
 	}
-	if got := antigravityEntryIDs(newer.Messages); !reflect.DeepEqual(got, []string{"agy-2", "agy-3"}) {
-		t.Fatalf("newer Antigravity message IDs = %v, want [agy-2 agy-3]", got)
+	if got, want := antigravityEntryIDs(newer.Messages), allIDs[2:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("newer Antigravity message IDs = %v, want %v", got, want)
 	}
 
-	older, err := ReadProviderFileOlder("antigravity/tmux-cli", path, 0, "agy-2")
+	older, err := ReadProviderFileOlder("antigravity/tmux-cli", path, 0, allIDs[2])
 	if err != nil {
 		t.Fatalf("ReadProviderFileOlder: %v", err)
 	}
-	if got := antigravityEntryIDs(older.Messages); !reflect.DeepEqual(got, []string{"agy-0", "agy-1"}) {
-		t.Fatalf("older Antigravity message IDs = %v, want [agy-0 agy-1]", got)
+	if got, want := antigravityEntryIDs(older.Messages), allIDs[:2]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("older Antigravity message IDs = %v, want %v", got, want)
 	}
 
-	rawNewer, err := ReadProviderFileRawNewer("antigravity/tmux-cli", path, 0, "agy-2")
+	rawNewer, err := ReadProviderFileRawNewer("antigravity/tmux-cli", path, 0, allIDs[2])
 	if err != nil {
 		t.Fatalf("ReadProviderFileRawNewer: %v", err)
 	}
-	if got := antigravityEntryIDs(rawNewer.Messages); !reflect.DeepEqual(got, []string{"agy-3"}) {
-		t.Fatalf("raw newer Antigravity message IDs = %v, want [agy-3]", got)
+	if got, want := antigravityEntryIDs(rawNewer.Messages), allIDs[3:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw newer Antigravity message IDs = %v, want %v", got, want)
 	}
 
-	rawOlder, err := ReadProviderFileRawOlder("antigravity/tmux-cli", path, 0, "agy-3")
+	rawOlder, err := ReadProviderFileRawOlder("antigravity/tmux-cli", path, 0, allIDs[3])
 	if err != nil {
 		t.Fatalf("ReadProviderFileRawOlder: %v", err)
 	}
-	if got := antigravityEntryIDs(rawOlder.Messages); !reflect.DeepEqual(got, []string{"agy-0", "agy-1", "agy-2"}) {
-		t.Fatalf("raw older Antigravity message IDs = %v, want [agy-0 agy-1 agy-2]", got)
+	if got, want := antigravityEntryIDs(rawOlder.Messages), allIDs[:3]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw older Antigravity message IDs = %v, want %v", got, want)
 	}
 }
 

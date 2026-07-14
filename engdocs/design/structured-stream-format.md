@@ -45,7 +45,9 @@ This design adds a third requested format, **`format=structured`**, that emits
 Gas City's already-parsed content blocks as a typed, versioned schema — text,
 thinking (with signature when available and allowed), tool calls (with full
 input), tool results (with structured Bash/Grep/Read shapes where GC can derive
-them), interactions, usage, model, stop reason, and subagent relationships. The
+them), interactions, usage, model, and stop reason. Inline-subagent
+relationships remain part of the north star, but are deliberately excluded
+from `session.structured.v1`; `ga-mb46n3` owns a later version. The
 per-provider knowledge stays in **one tested place near the source**
 (`internal/sessionlog` / `internal/worker`), and **any** consumer — a chat UI,
 the dashboard, an external client — gets a rich, provider-agnostic event model
@@ -125,7 +127,8 @@ What the typed model still needs to complete:
 
 - **complete thinking provider coverage** — `ContentBlock` and `HistoryBlock`
   now carry canonical thinking text plus a provider-neutral `signature` marker,
-  and `format=structured` gates thinking text behind `include_thinking=true`.
+  and `format=structured` gates both thinking text and its signature behind
+  `include_thinking=true`.
   Remaining work is to normalize every provider's thinking/reasoning dialect
   into that carrier, including encrypted or signature-only reasoning evidence
   where available.
@@ -144,12 +147,13 @@ What the typed model still needs to complete:
   question answer maps, and task/subprocess status/output, but not every
   provider-specific result family from the MC audit has a first-class
   provider-neutral DTO yet.
-- **inline subagent nesting** — subagent mappings and transcript reads exist
-  as separate worker/API surfaces (`AgentMappings`, `AgentTranscript`), but
-  the session stream does not currently nest or reference subagent messages in
-  the primary message payload. These are provider inline subagents linked by
-  transcript metadata, not Gas City formula/drain fanout; drain correlation
-  stays in beads, convoys, formulas, and events.
+- **inline subagent nesting is outside v1** — subagent mappings and transcript
+  reads exist as separate worker/API surfaces (`AgentMappings`,
+  `AgentTranscript`), but `session.structured.v1` deliberately has no reserved
+  lineage fields. A later version may add lineage after real provider evidence
+  establishes stable parent/child identifiers and transcript joins
+  (`ga-mb46n3`). These are provider inline subagents, not Gas City formula/drain
+  fanout; drain correlation stays in beads, convoys, formulas, and events.
 
 ### Provider coverage contract
 
@@ -244,9 +248,11 @@ Phase 1 hardening task for Gemini specifically.
   the same typed envelope and gracefully downgrades to provider-neutral fallback
   data where provider-native or managed-capture evidence is incomplete.
 - Highest available fidelity for tool inputs, **structured tool results**, file
-  edits/diffs, thinking + signature, usage, model, stop-reason, provider
-  subagent relationships, artifacts, interactions, and any future provider data
-  family that clients may need for display or programmatic use.
+  edits/diffs, thinking + signature, usage, model, stop-reason, artifacts,
+  interactions, and any future provider data family that clients may need for
+  display or programmatic use. Inline-subagent relationships remain a
+  north-star goal, but v1 deliberately reserves no lineage fields;
+  `ga-mb46n3` owns a later version.
 - 100% of provider data that is present, derivable, or capturable in a
   provider run is represented as typed provider-neutral data in
   `format=structured`; provider-native bytes remain a separate `format=raw`
@@ -330,9 +336,11 @@ API inference, or dashboard parsing code.
   fields, result displays, patch-apply events, or textual result content that
   is itself a patch. GC must not fabricate an edit result from a tool input and
   claim the provider reported it.
-- Long-tail providers must degrade gracefully to typed neutral fallback data
-  such as `kind: "text"` or typed argument strings. They must not leak raw
-  provider JSON to preserve fidelity.
+- Long-tail providers must degrade gracefully to existing typed neutral fields.
+  Unknown result data may use `kind: "text"`. Search inputs may use the typed
+  `query`, `pattern`, `file_path`, and `command` fields plus scalar `path`
+  entries in `arguments`; unknown argument names, nested values, and arbitrary
+  provider JSON remain available only through `format=raw`.
 - Serialization/deserialization stays at the edges. Internal code should carry
   typed Go structs, and Huma/OpenAPI generated types are the wire source of
   truth.
@@ -431,7 +439,7 @@ generated clients, dashboard types, and golden fixtures together.
 | Provider family | Current GC state | Required gap closure |
 |---|---|---|
 | Claude | Reads JSONL blocks; Claude `toolUseResult` sidecar evidence is normalized by the sessionlog entry layer into provider-neutral result evidence before worker inference, covering initial command/edit/read/glob/search/fetch/todo/plan/question/task/text data. Read sidecars with nested `file` evidence flatten to neutral file/range/content fields; WebSearch sidecar `results[].content[]` items flatten to neutral `result_items` with title, URL, and snippet; read/write file path evidence derives provider-neutral `language` hints before API projection. | Expand Claude SDK result parsing in sessionlog/worker for the remaining MC tool family set; continue shrinking raw Claude key handling outside the reader/sessionlog boundary. |
-| Codex | Reads rollout JSONL; the reader normalizes JSON-string tool arguments, canonicalizes common tool input/result keys, preserves user image blocks as provider-neutral `image` blocks (`file_path`, external `image_url`, `mime_type`), preserves web-search `query`, `action`, and extra input fields as provider-neutral typed search input/arguments, derives provider-neutral command/read/grep input evidence for recognized shell commands including file `language`, unwraps common shell launchers (`/usr/bin/env bash -lc`, `/bin/bash -lc`, nested variants) before read/grep classification, strips Codex `Output:` wrappers, parses nested JSON command results, derives result `is_error` from explicit flags/status, JSON/text exit-code forms, and error-like text, normalizes read result content/ranges/language and grep result mode/count/filename summaries, treats no-match grep JSON results as zero-result search data rather than provider failures, parses URL-prefixed web-query output into neutral `result_items`, and carries patch-apply evidence before worker inference. Worker normalization prefers those neutral result fields and keeps typed edit hunk inference plus generic read/grep fallback for older fixtures. | Continue porting the remaining MC Codex output variants and real-provider fixtures, especially richer stderr/status forms and richer web/search result payloads beyond current URL/text result summaries. |
+| Codex | Reads rollout JSONL; the reader normalizes JSON-string tool arguments, canonicalizes common tool input/result keys, preserves user image blocks as provider-neutral `image` blocks (`file_path`, external `image_url`, `mime_type`), preserves web-search queries as typed search input while keeping provider-native actions and unrecognized extra fields raw-only, derives provider-neutral command/read/grep input evidence for recognized shell commands including file `language`, unwraps common shell launchers (`/usr/bin/env bash -lc`, `/bin/bash -lc`, nested variants) before read/grep classification, strips Codex `Output:` wrappers, parses nested JSON command results, derives result `is_error` from explicit flags/status, JSON/text exit-code forms, and error-like text, normalizes read result content/ranges/language and grep result mode/count/filename summaries, treats no-match grep JSON results as zero-result search data rather than provider failures, parses URL-prefixed web-query output into neutral `result_items`, and carries patch-apply evidence before worker inference. Worker normalization prefers those neutral result fields and keeps typed edit hunk inference plus generic read/grep fallback for older fixtures. | Continue porting the remaining MC Codex output variants and real-provider fixtures, especially richer stderr/status forms and richer web/search result payloads beyond current URL/text result summaries. |
 | Gemini | Current JSONL message `model`, nested `tokens.cache.read/write`, `type:"error"` messages, and tool-result status flow to provider-neutral structured metadata, typed `system_event`, error/text fields. Whole-file write inputs normalize as `kind: "write"` with file path/content text instead of fabricated input patches; `resultDisplay.fileDiff` and result-side file path evidence normalize in the Gemini reader into neutral patch data for current edit/write fixtures. | Normalize the remaining current Gemini `resultDisplay` and tool-response variants to typed edit/write/search/fetch data in the Gemini reader; add incremental parsing for live frame-granular streaming. |
 | Kimi | Useful tool calls/results via reader; common tool input/result object keys normalize to provider-neutral names before worker inference, native `is_error` / `isError` / status fields normalize to provider-neutral `is_error`, and result-side patch evidence produces typed edit hunks. | Expand typed command/read/edit parsing where newer Kimi wire evidence supports richer execution, search, and artifact data. |
 | OpenCode/MiMo/Groq/Cerebras | OpenCode-compatible reader gives useful blocks, neutralizes common camel-case tool input/output keys before worker inference, and export `info.modelID` / `info.tokens` now flow to provider-neutral structured model/usage metadata, including reasoning tokens when present. Result-side patch evidence from OpenCode tool output states produces typed edit hunks; input-only edit evidence still does not fabricate result diffs. | Expand OpenCode tool output-state normalization beyond the current common command/edit/file fields where native evidence supports richer read/grep/artifact data. |
@@ -520,10 +528,12 @@ parsers, native JSON escape hatches, or HTML.
   This branch adds structured cursor support, but provider-conformance tests
   must include cursor behavior so future structured work does not silently fall
   back to whole-session dumps.
-- **Subagent lineage is represented but not complete.** Inline provider
-  subagents need typed parent/child relationships, parent tool call references
-  when available, and transcript linkage that does not confuse provider
-  subagents with Gas City formulas, drains, convoys, or beads.
+- **Inline-subagent lineage is deferred beyond v1.**
+  `session.structured.v1` has no reserved lineage fields. `ga-mb46n3` owns a
+  later, evidence-backed version that may add typed parent/child relationships,
+  parent tool call references when available, and transcript linkage without
+  confusing provider inline subagents with Gas City formulas, drains, convoys,
+  or beads.
 - **Dashboard rendering must not be the evidence source.** Dashboard tests
   should prove that typed data renders rich results and colorized diffs, but the
   provider truth must be proven below the dashboard: native transcript/capture
@@ -584,13 +594,13 @@ by `format=structured` must therefore be one of:
 
 - a provider-neutral typed shape Gas City owns (preferred for known tool
   families such as Bash/Grep/Read/Edit/Search and known interaction fields);
-  or
-- a provider-neutral fallback shape made from typed fields such as
-  `{ kind: "text", text }` or `{ kind: "arguments", arguments: [{ name, value }] }`.
+- or a provider-neutral text fallback such as `{ kind: "text", text }`.
 
-Fallbacks preserve useful display data, but they do not preserve arbitrary
-provider-native JSON. Consumers that need byte-level provider evidence must ask
-for `format=raw`.
+The `arguments` carrier is not a generic fallback for unknown provider fields.
+Its input names are schema-approved scalar fields; v1 admits `path` for repeated
+search paths. Unknown names and object or array values are omitted from the
+structured projection. Consumers that need byte-level provider evidence must
+ask for `format=raw`.
 
 For edit results specifically, `tool_result.structured.patch` must come from
 result-side evidence: a provider's structured tool-result field, a provider's
@@ -612,14 +622,14 @@ StructuredHistory
   provider_session_id     string?
   transcript_stream_id    string
   generation              { id, observed_at? }
-  cursor                  { after_entry_id? }
+  cursor                  { after_entry_id?, resume_token }
   continuity              { status, compaction_count?, has_branches?, note? }
   tail_state              { activity, last_entry_id?, open_tool_call_ids?, pending_interaction_ids?, degraded?, degraded_reason? }
   diagnostics           []StructuredDiagnostic?
 
 StructuredMessage
   id                  string
-  role                "user" | "assistant" | "system" | "tool"
+  role                "user" | "assistant" | "system" | "tool" | "unknown"
   provider            string                 // claude, codex, gemini, ...
   timestamp           string (RFC3339Nano)
   model               string?                // assistant turns
@@ -627,8 +637,6 @@ StructuredMessage
   usage               StructuredUsage?
   user_prompt         StructuredUserPrompt?
   system_event        StructuredSystemEvent?
-  is_subagent         bool?
-  parent_tool_call_id string?
   status              string                 // final | partial | superseded | unknown
   blocks              []StructuredBlock
 
@@ -679,14 +687,14 @@ StructuredToolInput  (the `input` on tool_use; discriminated on `kind`)
   kind "patch"     => { patch, file_path? }
   kind "glob"      => { pattern, file_path? }
   kind "fetch"     => { url, prompt? }
-  kind "search"    => { query?, pattern? }
+  kind "search"    => { query?, pattern?, file_path?, command?, arguments?: [{ name: "path", value }] }
   kind "file"      => { file_path, language? }
   kind "write"     => { file_path, language?, text } // whole-file write input, not a fabricated patch
   kind "todo"      => { todos: TodoItem[] }
   kind "plan"      => { plan?, explanation?, steps: PlanStep[] }
   kind "question"  => { question, options[] }
   kind "task"      => { task_id?, task_type?, task_status?, description?, prompt? }
-  kind "arguments" => { arguments: [{ name, value }] } // provider-neutral strings
+  kind "arguments" => { arguments: [{ name: "path", value }] } // schema-approved scalar search paths only
   kind "text"      => { text }
 
 StructuredToolResult  (the `structured?` on tool_result; discriminated on `kind`)
@@ -749,29 +757,42 @@ QuestionOption
 ```
 
 The concrete Go wire structs should use Gas City's normal JSON spelling shown
-above (`schema_version`, `stop_reason`, `is_subagent`,
-`parent_tool_call_id`, `tool_call_id`, `is_error`, etc.). Use `tool_call_id`
+above (`schema_version`, `stop_reason`, `tool_call_id`, `is_error`, etc.). Use `tool_call_id`
 even when the native provider calls the value `tool_use_id`, `call_id`, or
 something else; native spelling belongs only in `format=raw`.
 
-The structured transcript response and the structured stream must preserve the
-worker history envelope, not only individual messages. Transcript snapshots can
-return one `history` object next to `messages`; SSE can either include the
-relevant history cursor/generation fields on each structured message or add a
-typed snapshot/reset event. In either case, generation resets, cursor
-invalidations, degraded continuity, and tail state must remain visible on the
-wire, matching `worker-conformance.md` §4.3 rather than silently replaying or
-dropping history.
+The structured transcript response and the structured stream preserve the
+worker history envelope, not only individual messages. REST returns
+`operation: "snapshot"` and an opaque `history.cursor.resume_token`. The client
+passes that token as `after_cursor` when opening SSE; browser reconnects send
+the latest SSE `id` as `Last-Event-ID`. Structured SSE frames use three typed
+operations: `snapshot` replaces the initial projection, `upsert` replays the
+previous mutable tail inclusively plus later messages, and `reset` carries a
+full replacement (including an empty array) with a typed reason. Generation
+changes remain evidence, but the volatile observation value is not itself a
+reset discriminator. Cursor invalidation, history rewrites, stream rotation,
+degraded continuity, and tail state remain visible on the wire, matching
+`worker-conformance.md` §4.3 rather than silently replaying or dropping history.
 
-The stream keeps the existing lifecycle event kinds (`activity`, `pending`,
-`heartbeat`) and adds a versioned structured message payload. Huma SSE
-registration maps **one concrete Go payload type to one SSE event name**
+The stream keeps the lifecycle event kinds (`activity`, `pending`,
+`pending_cleared`, `heartbeat`) and adds a versioned structured message payload.
+Huma SSE registration maps **one concrete Go payload type to one SSE event name**
 (`internal/api/sse.go`; `internal/api/supervisor_city_routes.go`), so Phase 1
 uses a distinct `event: structured` frame for
 `SessionStreamStructuredMessageEvent`. The existing `turn` event remains the
 conversation payload, `message` remains the raw provider-frame payload, and the
 structured payload carries `schema_version` inside `data`. `conversation` and
 `raw` payloads remain unversioned for back-compat.
+
+Pending interactions form one authoritative slot, not an append-only event
+history. After the initial structured projection, every connection immediately
+reseeds its current pending interaction. A `pending` frame replaces the slot,
+including same-ID replays and request A changing to request B;
+`pending_cleared` removes the resolved request. On every EventSource open or
+reconnect, clients clear any locally cached pending interaction before accepting
+the server reseed. This prevents a stale interaction from surviving when the new
+connection has no pending request and therefore no prior request ID for the
+server to clear.
 
 When the transcript path has no structured history yet, `format=structured`
 still honors the requested structured wire contract. The response or stream
@@ -792,11 +813,12 @@ learning provider file formats.
 (`handler_agent_output_turns.go:46-49`). `format=structured` is itself
 opt-in, but to avoid silently reversing that stance for consumers who don't
 want reasoning, thinking blocks are gated behind an explicit
-`include_thinking=true` query parameter; default omits the `thinking`
-block's text (keeping a typed placeholder block so ordering is preserved).
-The parameter must be declared on the Huma input structs so it appears in
-OpenAPI; do not read it through raw URL inspection. This is a product/safety
-decision flagged for sign-off, not just a code toggle.
+`include_thinking=true` query parameter; default omits both the `thinking`
+block's text and its signature (keeping a typed placeholder block so ordering
+is preserved). The parameter is declared on the Huma input structs so it
+appears in OpenAPI; do not read it through raw URL inspection. City read
+authorization applies to both REST and SSE. Maintainer/product-security owner
+Julian Knutsen approved this v1 policy on 2026-07-14.
 
 ## Phasing
 
@@ -997,7 +1019,7 @@ layer**, keeping only genuine presentation (markdown→HTML, highlighting, diffs
 visual pairing). The division of labor is explicit:
 
 - **Gas City owns** canonical structured *data* — typed blocks, structured
-  tool results, usage, thinking (gated), subagent nesting.
+  tool results, usage, and gated thinking.
 - **Consumers own** presentation.
 
 This is mode-agnostic: a self-hosted supervisor on loopback and a future
@@ -1017,12 +1039,17 @@ authorization/redaction layer.
 
 ## Risks & open questions
 
-- **Thinking exposure** — `include_thinking` default and whether the gated
-  default omits text or the whole block. Needs sign-off (policy, not code).
+- **Thinking exposure (settled for v1)** — `include_thinking` is explicit and
+  city-read-authorized; the default retains an ordering placeholder but omits
+  both reasoning text and signature.
+- **Inline-subagent lineage (deferred)** — v1 exposes no reserved lineage
+  fields. `ga-mb46n3` owns a versioned contract backed by real provider
+  evidence and end-to-end tests.
 - **Schema churn** — `StructuredToolInput` and `StructuredToolResult` kinds
   (bash/grep/read/edit/search/text/etc.) need fixture pressure before freezing
-  the wire. The fallback must stay provider-neutral (`kind:"text"` or
-  normalized argument strings), not raw provider JSON.
+  the wire. Unknown result data may use provider-neutral `kind:"text"`; input
+  arguments remain restricted to schema-approved scalar search fields, not
+  arbitrary provider names or raw JSON.
 - **Sensitive payload exposure** — full tool inputs, tool results,
   interaction prompts/options, code/diffs, and thinking can contain secrets.
   Any remote or multi-tenant deployment needs the same auth, redaction,

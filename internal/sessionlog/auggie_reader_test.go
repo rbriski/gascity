@@ -44,8 +44,8 @@ func TestReadAuggieFileConvertsACPUpdates(t *testing.T) {
 	if got := len(session.Messages); got != 5 {
 		t.Fatalf("len(Messages) = %d, want 5", got)
 	}
-	if strings.HasPrefix(session.Messages[0].UUID, "kiro-") {
-		t.Fatalf("Auggie synthetic UUID = %q, must not use Kiro prefix", session.Messages[0].UUID)
+	if !strings.HasPrefix(session.Messages[0].UUID, "auggie-") {
+		t.Fatalf("Auggie synthetic UUID = %q, want auggie- prefix", session.Messages[0].UUID)
 	}
 	if blocks := session.Messages[0].ContentBlocks(); len(blocks) != 1 || blocks[0].Text != "Running checks." {
 		t.Fatalf("assistant blocks = %+v, want text chunk", blocks)
@@ -92,6 +92,22 @@ func TestReadProviderFileUsesAuggieReader(t *testing.T) {
 	}
 	if session.ID != "dispatch-session" || len(session.Messages) != 1 || session.Messages[0].Type != "assistant" {
 		t.Fatalf("ReadProviderFile() = id %q messages %+v, want Auggie assistant transcript", session.ID, session.Messages)
+	}
+}
+
+func TestReadAuggieFilePreservesNativeIDsThatUseKiroPrefix(t *testing.T) {
+	path := writeAuggieJSONL(t,
+		`{"id":"kiro-native-id","type":"AssistantMessage","sessionId":"auggie-native","message":{"role":"assistant","content":"native"}}`,
+	)
+	session, err := ReadAuggieFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadAuggieFile() error = %v", err)
+	}
+	if len(session.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want one", len(session.Messages))
+	}
+	if got := session.Messages[0].UUID; got != "kiro-native-id" {
+		t.Fatalf("native UUID = %q, want kiro-native-id preserved verbatim", got)
 	}
 }
 

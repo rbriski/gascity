@@ -1,20 +1,77 @@
-// Structured session transcript wire types (`session.structured.v1`) plus the
-// shape guards and pure render helpers the dashboard needs to consume PR
-// #3718's `format=structured` stream.
-//
-// These mirror `internal/api/session_structured_types.go` exactly. The
-// gc-supervisor-client is vendored without in-tree codegen and does NOT carry
-// the structured-message types, so — following the `pending.ts` precedent —
-// the dashboard owns these wire shapes and translates at the edge. When the
-// external client re-vendors against #3718's OpenAPI these become generated.
-//
-// Optionality tracks the Go `omitempty` tags: a field WITHOUT omitempty is
-// always present (required here); a field WITH omitempty is optional. The Go
-// pointer fields (`*int` exit_code, `*bool` replace_all/user_modified) carry
-// tri-state semantics — model as optional and check presence, not truthiness.
+// Generated structured transcript wire types (`session.structured.v1`) plus
+// the shape guards and pure render helpers the dashboard uses to consume them.
+// The committed OpenAPI contract is the sole owner of every SessionStructured*
+// DTO below; this module only re-exports or derives compatibility names.
+
+import type {
+  PaginationInfo,
+  SessionStreamStructuredMessageEvent,
+  SessionStructuredArgument,
+  SessionStructuredBlock,
+  SessionStructuredContinuity,
+  SessionStructuredCursor,
+  SessionStructuredDiagnostic,
+  SessionStructuredGeneration,
+  SessionStructuredHistory,
+  SessionStructuredIdeSelection,
+  SessionStructuredInteraction,
+  SessionStructuredMessage,
+  SessionStructuredPatchHunk,
+  SessionStructuredPlanStep,
+  SessionStructuredQuestion,
+  SessionStructuredQuestionOption,
+  SessionStructuredSearchResultItem,
+  SessionStructuredSystemEvent,
+  SessionStructuredTailState,
+  SessionStructuredTodoItem,
+  SessionStructuredToolError,
+  SessionStructuredToolInput,
+  SessionStructuredToolResult,
+  SessionStructuredUploadedFile,
+  SessionStructuredUsage,
+  SessionStructuredUserPrompt,
+  SessionTranscriptStructuredResponse,
+} from './generated/gc-supervisor-client/types.gen.js';
+import { zSessionStreamStructuredMessageEvent } from './generated/gc-supervisor-client/zod.gen.js';
+
+export type {
+  SessionStreamStructuredMessageEvent,
+  SessionStructuredArgument,
+  SessionStructuredBlock,
+  SessionStructuredContinuity,
+  SessionStructuredCursor,
+  SessionStructuredDiagnostic,
+  SessionStructuredGeneration,
+  SessionStructuredHistory,
+  SessionStructuredInteraction,
+  SessionStructuredMessage,
+  SessionStructuredPatchHunk,
+  SessionStructuredPlanStep,
+  SessionStructuredQuestion,
+  SessionStructuredQuestionOption,
+  SessionStructuredSearchResultItem,
+  SessionStructuredSystemEvent,
+  SessionStructuredTailState,
+  SessionStructuredTodoItem,
+  SessionStructuredToolError,
+  SessionStructuredToolInput,
+  SessionStructuredToolResult,
+  SessionStructuredUploadedFile,
+  SessionStructuredUsage,
+  SessionStructuredUserPrompt,
+};
 
 /** The structured transcript schema version emitted on the wire. */
-export const STRUCTURED_SCHEMA_VERSION = 'session.structured.v1';
+export const STRUCTURED_SCHEMA_VERSION =
+  'session.structured.v1' satisfies SessionStreamStructuredMessageEvent['schema_version'];
+
+/** How a structured frame is applied to the current transcript projection. */
+export type SessionStructuredOperation = SessionStreamStructuredMessageEvent['operation'];
+
+/** Why a reset frame replaces the current transcript projection. */
+export type SessionStructuredResetReason = NonNullable<
+  SessionStreamStructuredMessageEvent['reset_reason']
+>;
 
 /**
  * Diagnostic code the server attaches when the provider transcript is
@@ -22,374 +79,23 @@ export const STRUCTURED_SCHEMA_VERSION = 'session.structured.v1';
  */
 export const STRUCTURED_TRANSCRIPT_UNAVAILABLE_CODE = 'transcript_unavailable';
 
-/** Known block discriminators; the wire is an open string, so callers default-case unknowns. */
-export type StructuredBlockType =
-  | 'text'
-  | 'thinking'
-  | 'tool_use'
-  | 'tool_result'
-  | 'interaction'
-  | 'image'
-  | 'unknown'
-  | string;
+/** Closed block discriminator generated from the structured wire union. */
+export type StructuredBlockType = SessionStructuredBlock['type'];
 
-/** Known tool-input kinds (open string upstream). */
-export type StructuredToolInputKind =
-  | 'command'
-  | 'code'
-  | 'patch'
-  | 'glob'
-  | 'fetch'
-  | 'search'
-  | 'file'
-  | 'arguments'
-  | 'text'
-  | string;
+/** Closed tool-input discriminator generated from the structured wire union. */
+export type StructuredToolInputKind = SessionStructuredToolInput['kind'];
 
-/** Known typed tool-result kinds (open string upstream). */
-export type StructuredToolResultKind =
-  | 'read'
-  | 'edit'
-  | 'bash'
-  | 'python'
-  | 'grep'
-  | 'search'
-  | 'glob'
-  | 'fetch'
-  | 'write'
-  | 'todo'
-  | 'plan'
-  | 'question'
-  | 'stdin'
-  | 'task'
-  | string;
+/** Closed tool-result discriminator generated from the structured wire union. */
+export type StructuredToolResultKind = SessionStructuredToolResult['kind'];
 
-// ---------------------------------------------------------------------------
-// Top-level envelope (SSE structured frame == REST structured transcript body).
-// ---------------------------------------------------------------------------
+/** REST `…/transcript?format=structured` response. */
+export type SessionStructuredTranscriptResponse = SessionTranscriptStructuredResponse;
 
-/**
- * The structured transcript envelope. Emitted both as the SSE `structured`
- * frame (`SessionStreamStructuredMessageEvent`) and as the REST
- * `GET …/transcript?format=structured` body — the fields are identical.
- */
-export interface SessionStreamStructuredMessageEvent {
-  id: string;
-  template: string;
-  /** Producing provider identifier (claude, codex, gemini, opencode, …). */
-  provider: string;
-  /** Always `"structured"` for this envelope. */
-  format: string;
-  schema_version: string;
-  history?: SessionStructuredHistory;
-  /** Always present (may be empty). */
-  structured_messages: SessionStructuredMessage[];
-  pagination?: SessionStructuredPagination;
-}
+/** Pagination envelope (compatibility name for the generated wire type). */
+export type SessionStructuredPagination = PaginationInfo;
 
-/** REST `…/transcript?format=structured` response — same shape as the SSE frame. */
-export type SessionStructuredTranscriptResponse = SessionStreamStructuredMessageEvent;
-
-/** Pagination envelope (mirrors `sessionlog.PaginationInfo`). */
-export interface SessionStructuredPagination {
-  has_older_messages: boolean;
-  total_message_count: number;
-  returned_message_count: number;
-  truncated_before_message?: string;
-  total_compactions: number;
-}
-
-// ---------------------------------------------------------------------------
-// Normalized worker-history envelope.
-// ---------------------------------------------------------------------------
-
-export interface SessionStructuredHistory {
-  gc_session_id?: string;
-  logical_conversation_id?: string;
-  provider_session_id?: string;
-  transcript_stream_id: string;
-  generation: SessionStructuredGeneration;
-  cursor: SessionStructuredCursor;
-  continuity: SessionStructuredContinuity;
-  tail_state: SessionStructuredTailState;
-  diagnostics?: SessionStructuredDiagnostic[];
-}
-
-export interface SessionStructuredGeneration {
-  id: string;
-  /** RFC3339Nano timestamp. */
-  observed_at?: string;
-}
-
-export interface SessionStructuredCursor {
-  after_entry_id?: string;
-}
-
-export interface SessionStructuredContinuity {
-  /** `unknown` | `continuous` | `compacted` | `degraded`. */
-  status: string;
-  compaction_count?: number;
-  has_branches?: boolean;
-  note?: string;
-}
-
-export interface SessionStructuredTailState {
-  /** `unknown` | `idle` | `in_turn`. */
-  activity: string;
-  last_entry_id?: string;
-  open_tool_call_ids?: string[];
-  pending_interaction_ids?: string[];
-  degraded?: boolean;
-  degraded_reason?: string;
-}
-
-export interface SessionStructuredDiagnostic {
-  code: string;
-  message?: string;
-  count?: number;
-}
-
-// ---------------------------------------------------------------------------
-// Messages and blocks.
-// ---------------------------------------------------------------------------
-
-export interface SessionStructuredMessage {
-  id: string;
-  /** Open string: `assistant` | `user` | `tool` | `system` | …. */
-  role: string;
-  provider?: string;
-  /** RFC3339Nano timestamp. */
-  timestamp?: string;
-  model?: string;
-  stop_reason?: string;
-  usage?: SessionStructuredUsage;
-  user_prompt?: SessionStructuredUserPrompt;
-  system_event?: SessionStructuredSystemEvent;
-  /** `unknown` | `final` | `partial` | `superseded` | `degraded`. */
-  status: string;
-  is_subagent?: boolean;
-  parent_tool_call_id?: string;
-  /** Always present (may be empty). */
-  blocks: SessionStructuredBlock[];
-}
-
-export interface SessionStructuredSystemEvent {
-  kind?: string;
-  category?: string;
-  code?: string;
-  message?: string;
-}
-
-export interface SessionStructuredUserPrompt {
-  text?: string;
-  opened_files?: string[];
-  uploaded_files?: SessionStructuredUploadedFile[];
-  selections?: SessionStructuredIDESelection[];
-}
-
-export interface SessionStructuredUploadedFile {
-  original_name?: string;
-  /** Human-readable size, e.g. `"12 KB"`. */
-  size?: string;
-  mime_type?: string;
-  file_path?: string;
-  preview_url?: string;
-}
-
-export interface SessionStructuredIDESelection {
-  text?: string;
-}
-
-export interface SessionStructuredUsage {
-  input_tokens?: number;
-  output_tokens?: number;
-  reasoning_tokens?: number;
-  cache_read_tokens?: number;
-  cache_creation_tokens?: number;
-  context_window_tokens?: number;
-  context_used_tokens?: number;
-  context_percent?: number;
-}
-
-export interface SessionStructuredBlock {
-  type: StructuredBlockType;
-  text?: string;
-  /** Present only when includeThinking is set. */
-  thinking?: string;
-  /** Persists even when the thinking text is redacted. */
-  signature?: string;
-  id?: string;
-  tool_call_id?: string;
-  name?: string;
-  file_path?: string;
-  image_url?: string;
-  mime_type?: string;
-  input?: SessionStructuredToolInput;
-  content?: string;
-  is_error?: boolean;
-  structured?: SessionStructuredToolResult;
-  interaction?: SessionStructuredInteraction;
-}
-
-// ---------------------------------------------------------------------------
-// Tool input / result projections.
-// ---------------------------------------------------------------------------
-
-export interface SessionStructuredToolInput {
-  kind?: StructuredToolInputKind;
-  text?: string;
-  command?: string;
-  linked_command?: string;
-  code?: string;
-  patch?: string;
-  file_path?: string;
-  language?: string;
-  url?: string;
-  prompt?: string;
-  task_id?: string;
-  task_type?: string;
-  task_status?: string;
-  description?: string;
-  question?: string;
-  options?: string[];
-  query?: string;
-  pattern?: string;
-  plan?: string;
-  explanation?: string;
-  steps?: SessionStructuredPlanStep[];
-  todos?: SessionStructuredTodoItem[];
-  arguments?: SessionStructuredArgument[];
-}
-
-export interface SessionStructuredArgument {
-  name: string;
-  value: string;
-}
-
-export interface SessionStructuredPlanStep {
-  step?: string;
-  status?: string;
-}
-
-export interface SessionStructuredToolResult {
-  kind: StructuredToolResultKind;
-  text?: string;
-  command?: string;
-  stdout?: string;
-  stderr?: string;
-  /** `*int` upstream — presence is meaningful (absent vs explicit 0). */
-  exit_code?: number;
-  interrupted?: boolean;
-  truncated?: boolean;
-  is_image?: boolean;
-  mode?: string;
-  query?: string;
-  url?: string;
-  task_id?: string;
-  task_type?: string;
-  task_status?: string;
-  description?: string;
-  total_duration_ms?: number;
-  total_tokens?: number;
-  total_tool_use_count?: number;
-  output?: string;
-  question?: string;
-  questions?: SessionStructuredQuestion[];
-  answer?: string;
-  options?: string[];
-  answers?: SessionStructuredArgument[];
-  counts?: SessionStructuredArgument[];
-  status_code?: number;
-  status_text?: string;
-  bytes?: number;
-  filenames?: string[];
-  num_files?: number;
-  num_results?: number;
-  duration_ms?: number;
-  applied_limit?: number;
-  stdout_lines?: number;
-  stderr_lines?: number;
-  timestamp?: string;
-  result_items?: SessionStructuredSearchResultItem[];
-  content?: string;
-  num_lines?: number;
-  file_path?: string;
-  file_paths?: string[];
-  language?: string;
-  code?: string;
-  plan?: string;
-  explanation?: string;
-  steps?: SessionStructuredPlanStep[];
-  patch?: string;
-  patch_hunks?: SessionStructuredPatchHunk[];
-  old_string?: string;
-  new_string?: string;
-  original_file?: string;
-  /** `*bool` upstream — presence is meaningful. */
-  replace_all?: boolean;
-  /** `*bool` upstream — presence is meaningful. */
-  user_modified?: boolean;
-  old_todos?: SessionStructuredTodoItem[];
-  new_todos?: SessionStructuredTodoItem[];
-  start_line?: number;
-  total_lines?: number;
-  error?: SessionStructuredToolError;
-}
-
-export interface SessionStructuredToolError {
-  /**
-   * `user_rejection` | `user_rejection_with_reason` | `command_failure` |
-   * `file_error` | `validation_error` | `timeout` | `network_error` | `unknown`.
-   */
-  category?: string;
-  message?: string;
-  user_reason?: string;
-}
-
-export interface SessionStructuredPatchHunk {
-  file_path?: string;
-  old_start?: number;
-  old_lines?: number;
-  new_start?: number;
-  new_lines?: number;
-  lines?: string[];
-}
-
-export interface SessionStructuredSearchResultItem {
-  title?: string;
-  url?: string;
-  snippet?: string;
-}
-
-export interface SessionStructuredQuestionOption {
-  label?: string;
-  description?: string;
-}
-
-export interface SessionStructuredQuestion {
-  question?: string;
-  header?: string;
-  options?: SessionStructuredQuestionOption[];
-  multi_select?: boolean;
-}
-
-export interface SessionStructuredTodoItem {
-  id?: string;
-  content?: string;
-  status?: string;
-  active_form?: string;
-  priority?: string;
-}
-
-export interface SessionStructuredInteraction {
-  request_id?: string;
-  kind?: string;
-  /** `unknown` | `opened` | `pending` | `resolved` | `dismissed` | `resumed_after_restart`. */
-  state: string;
-  prompt?: string;
-  options?: string[];
-  action?: string;
-}
+/** Compatibility spelling retained for existing dashboard consumers. */
+export type SessionStructuredIDESelection = SessionStructuredIdeSelection;
 
 // ---------------------------------------------------------------------------
 // Non-message stream frames consumed alongside structured frames. Dashboard-
@@ -423,7 +129,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function isSessionStructuredEvent(
   data: unknown,
 ): data is SessionStreamStructuredMessageEvent {
-  return isRecord(data) && data.format === 'structured' && Array.isArray(data.structured_messages);
+  if (
+    !isRecord(data) ||
+    data.format !== 'structured' ||
+    data.schema_version !== STRUCTURED_SCHEMA_VERSION ||
+    typeof data.id !== 'string' ||
+    typeof data.template !== 'string' ||
+    typeof data.provider !== 'string' ||
+    !Array.isArray(data.structured_messages) ||
+    !data.structured_messages.every(isStructuredMessage) ||
+    !zSessionStreamStructuredMessageEvent.safeParse(data).success
+  ) {
+    return false;
+  }
+  if (!isSessionStructuredHistory(data.history)) return false;
+  switch (data.operation) {
+    case 'snapshot':
+    case 'upsert':
+      return data.reset_reason === undefined;
+    case 'reset':
+      return isSessionStructuredResetReason(data.reset_reason);
+    default:
+      return false;
+  }
+}
+
+function isSessionStructuredResetReason(value: unknown): value is SessionStructuredResetReason {
+  return (
+    value === 'resume_invalid' ||
+    value === 'stream_changed' ||
+    value === 'cursor_invalidated' ||
+    value === 'history_rewritten'
+  );
 }
 
 /** True for an `activity` SSE frame. */
@@ -446,7 +183,9 @@ export function isSessionStructuredHistory(value: unknown): value is SessionStru
   if (typeof value.transcript_stream_id !== 'string') return false;
   const generation = value.generation;
   if (!isRecord(generation) || typeof generation.id !== 'string') return false;
-  if (!isRecord(value.cursor)) return false;
+  const cursor = value.cursor;
+  if (!isRecord(cursor) || typeof cursor.resume_token !== 'string' || cursor.resume_token === '')
+    return false;
   const continuity = value.continuity;
   if (!isRecord(continuity) || typeof continuity.status !== 'string') return false;
   const tailState = value.tail_state;
@@ -456,7 +195,37 @@ export function isSessionStructuredHistory(value: unknown): value is SessionStru
 
 /** True for a structured message — requires the `blocks` array (matches old `isStructuredMessage`). */
 export function isStructuredMessage(value: unknown): value is SessionStructuredMessage {
-  return isRecord(value) && Array.isArray(value.blocks);
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    isSessionStructuredRole(value.role) &&
+    typeof value.status === 'string' &&
+    Array.isArray(value.blocks) &&
+    value.blocks.every(isSessionStructuredBlock)
+  );
+}
+
+function isSessionStructuredRole(value: unknown): value is SessionStructuredMessage['role'] {
+  return (
+    value === 'unknown' ||
+    value === 'user' ||
+    value === 'assistant' ||
+    value === 'system' ||
+    value === 'tool'
+  );
+}
+
+function isSessionStructuredBlock(value: unknown): value is SessionStructuredBlock {
+  if (!isRecord(value)) return false;
+  return (
+    value.type === 'text' ||
+    value.type === 'thinking' ||
+    value.type === 'tool_use' ||
+    value.type === 'tool_result' ||
+    value.type === 'interaction' ||
+    value.type === 'image' ||
+    value.type === 'unknown'
+  );
 }
 
 /**
@@ -494,9 +263,9 @@ function formatPatchHunkHeader(hunk: SessionStructuredPatchHunk): string {
  * a `@@ … @@` header per hunk, then the hunk's lines verbatim.
  */
 export function patchTextFromHunks(
-  hunks: readonly SessionStructuredPatchHunk[] | undefined,
+  hunks: readonly SessionStructuredPatchHunk[] | null | undefined,
 ): string {
-  if (hunks === undefined || hunks.length === 0) return '';
+  if (hunks === undefined || hunks === null || hunks.length === 0) return '';
   const lines: string[] = [];
   let lastFilePath = '';
   for (const hunk of hunks) {
@@ -506,7 +275,7 @@ export function patchTextFromHunks(
       lastFilePath = filePath;
     }
     lines.push(formatPatchHunkHeader(hunk));
-    if (hunk.lines !== undefined) {
+    if (hunk.lines !== undefined && hunk.lines !== null) {
       for (const line of hunk.lines) lines.push(line);
     }
   }

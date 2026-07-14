@@ -8,15 +8,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // isolateProviderDiscovery points provider transcript discovery at an empty,
@@ -192,17 +197,13 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			resultAbsent: []string{"{\"stdout\""},
 		},
 		{
-			name:         "codex web search",
-			provider:     "codex",
-			writeFixture: writeStructuredCodexWebSearchFixture,
-			toolCallID:   "call-codex-web-search",
-			toolName:     "web_search",
-			inputKind:    "search",
-			inputQuery:   "structured tool result formats",
-			inputArguments: map[string]string{
-				"action": `"source":"web"`,
-				"scope":  "web",
-			},
+			name:           "codex web search",
+			provider:       "codex",
+			writeFixture:   writeStructuredCodexWebSearchFixture,
+			toolCallID:     "call-codex-web-search",
+			toolName:       "web_search",
+			inputKind:      "search",
+			inputQuery:     "structured tool result formats",
 			resultKind:     "search",
 			resultMode:     "query",
 			resultQuery:    "structured tool result formats",
@@ -667,12 +668,12 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 				t.Fatalf("structured response missing history envelope: %+v", resp.History)
 			}
 
-			toolUse, toolResult := findStructuredToolPair(resp.StructuredMessages, tt.toolCallID)
+			toolUse, toolResult := findStructuredToolPair(structuredTranscriptMessages(resp), tt.toolCallID)
 			if toolUse == nil {
-				t.Fatalf("missing tool_use %q in structured messages: %+v", tt.toolCallID, resp.StructuredMessages)
+				t.Fatalf("missing tool_use %q in structured messages: %+v", tt.toolCallID, structuredTranscriptMessages(resp))
 			}
 			if toolResult == nil {
-				t.Fatalf("missing tool_result %q in structured messages: %+v", tt.toolCallID, resp.StructuredMessages)
+				t.Fatalf("missing tool_result %q in structured messages: %+v", tt.toolCallID, structuredTranscriptMessages(resp))
 			}
 			if toolUse.Name != tt.toolName {
 				t.Fatalf("tool name = %q, want %q", toolUse.Name, tt.toolName)
@@ -705,7 +706,7 @@ func TestHandleSessionTranscriptStructuredGracefullyDowngradesAllBuiltinProvider
 			fs.sp.SetPeekOutput(info.SessionName, provider+" pane output")
 
 			w := httptest.NewRecorder()
-			r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+			r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0&include_thinking=true", nil)
 			h.ServeHTTP(w, r)
 			if w.Code != http.StatusOK {
 				t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -730,10 +731,14 @@ func TestHandleSessionTranscriptStructuredGracefullyDowngradesAllBuiltinProvider
 			if len(resp.History.Diagnostics) == 0 || resp.History.Diagnostics[0].Code != structuredTranscriptUnavailableCode {
 				t.Fatalf("Diagnostics = %+v, want transcript_unavailable", resp.History.Diagnostics)
 			}
-			if len(resp.StructuredMessages) != 1 {
-				t.Fatalf("StructuredMessages len = %d, want 1: %+v", len(resp.StructuredMessages), resp.StructuredMessages)
+			resume, ok := decodeStructuredResumeToken(resp.History.Cursor.ResumeToken)
+			if !ok || !resume.IncludeThinking {
+				t.Fatalf("fallback resume token = %+v, valid=%t; want include_thinking=true", resume, ok)
 			}
-			msg := resp.StructuredMessages[0]
+			if len(structuredTranscriptMessages(resp)) != 1 {
+				t.Fatalf("StructuredMessages len = %d, want 1: %+v", len(structuredTranscriptMessages(resp)), structuredTranscriptMessages(resp))
+			}
+			msg := structuredTranscriptMessages(resp)[0]
 			if msg.Provider != provider {
 				t.Fatalf("message provider = %q, want %q", msg.Provider, provider)
 			}
@@ -778,12 +783,12 @@ func TestHandleSessionTranscriptStructuredSkipsCodexUnknownEvents(t *testing.T) 
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.StructuredMessages) != 1 {
-		t.Fatalf("StructuredMessages = %+v, want only assistant message", resp.StructuredMessages)
+	if len(structuredTranscriptMessages(resp)) != 1 {
+		t.Fatalf("StructuredMessages = %+v, want only assistant message", structuredTranscriptMessages(resp))
 	}
-	got := resp.StructuredMessages[0]
+	got := structuredTranscriptMessages(resp)[0]
 	if got.Role != "assistant" || len(got.Blocks) != 1 || got.Blocks[0].Text != "assistant survived unknown event" {
-		t.Fatalf("structured messages = %+v, want assistant text only", resp.StructuredMessages)
+		t.Fatalf("structured messages = %+v, want assistant text only", structuredTranscriptMessages(resp))
 	}
 	assertNoStructuredWireLeak(t, body, "shutdown_complete", "provider-native event")
 }
@@ -825,11 +830,11 @@ func TestHandleSessionTranscriptStructuredNormalizesCodexSystemErrors(t *testing
 		{Kind: "error", Category: "stream_error", Message: "stream interrupted"},
 		{Kind: "turn_aborted", Category: "turn_aborted", Message: "turn was aborted"},
 	}
-	if len(resp.StructuredMessages) != len(wants) {
-		t.Fatalf("StructuredMessages = %+v, want %d system events", resp.StructuredMessages, len(wants))
+	if len(structuredTranscriptMessages(resp)) != len(wants) {
+		t.Fatalf("StructuredMessages = %+v, want %d system events", structuredTranscriptMessages(resp), len(wants))
 	}
 	for i, want := range wants {
-		msg := resp.StructuredMessages[i]
+		msg := structuredTranscriptMessages(resp)[i]
 		if msg.Role != "system" {
 			t.Fatalf("[%d] role = %q, want system; msg = %+v", i, msg.Role, msg)
 		}
@@ -873,10 +878,10 @@ func TestHandleSessionTranscriptStructuredNormalizesGeminiSystemError(t *testing
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.StructuredMessages) != 1 {
-		t.Fatalf("StructuredMessages = %+v, want one Gemini system event", resp.StructuredMessages)
+	if len(structuredTranscriptMessages(resp)) != 1 {
+		t.Fatalf("StructuredMessages = %+v, want one Gemini system event", structuredTranscriptMessages(resp))
 	}
-	msg := resp.StructuredMessages[0]
+	msg := structuredTranscriptMessages(resp)[0]
 	if msg.Role != "system" {
 		t.Fatalf("role = %q, want system; msg = %+v", msg.Role, msg)
 	}
@@ -921,9 +926,9 @@ func TestHandleSessionTranscriptStructuredNormalizesClaudeTaskOutput(t *testing.
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	toolUse, toolResult := findStructuredToolPair(resp.StructuredMessages, "call-claude-task")
+	toolUse, toolResult := findStructuredToolPair(structuredTranscriptMessages(resp), "call-claude-task")
 	if toolUse == nil || toolResult == nil {
-		t.Fatalf("missing task tool pair in structured messages: %+v", resp.StructuredMessages)
+		t.Fatalf("missing task tool pair in structured messages: %+v", structuredTranscriptMessages(resp))
 	}
 	if toolUse.Input == nil || toolUse.Input.Kind != "task" || toolUse.Input.TaskID != "task-123" {
 		t.Fatalf("task input = %+v, want neutral task input with task-123", toolUse.Input)
@@ -979,9 +984,9 @@ func TestHandleSessionTranscriptStructuredNormalizesClaudeBashOutput(t *testing.
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	toolUse, toolResult := findStructuredToolPair(resp.StructuredMessages, "call-claude-bash-output")
+	toolUse, toolResult := findStructuredToolPair(structuredTranscriptMessages(resp), "call-claude-bash-output")
 	if toolUse == nil || toolResult == nil {
-		t.Fatalf("missing bash output tool pair in structured messages: %+v", resp.StructuredMessages)
+		t.Fatalf("missing bash output tool pair in structured messages: %+v", structuredTranscriptMessages(resp))
 	}
 	if toolUse.Input == nil || toolUse.Input.Kind != "task" || toolUse.Input.TaskID != "shell-123" {
 		t.Fatalf("bash output input = %+v, want neutral task input with shell-123", toolUse.Input)
@@ -1034,16 +1039,16 @@ func TestHandleSessionTranscriptStructuredLinksClaudeWriteStdin(t *testing.T) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	bashUse, bashResult := findStructuredToolPair(resp.StructuredMessages, "call-claude-bash")
+	bashUse, bashResult := findStructuredToolPair(structuredTranscriptMessages(resp), "call-claude-bash")
 	if bashUse == nil || bashResult == nil {
-		t.Fatalf("missing bash tool pair in structured messages: %+v", resp.StructuredMessages)
+		t.Fatalf("missing bash tool pair in structured messages: %+v", structuredTranscriptMessages(resp))
 	}
 	if bashResult.Structured == nil || bashResult.Structured.Kind != "bash" || bashResult.Structured.TaskID != "42" || bashResult.Structured.Command != "claude --resume" {
 		t.Fatalf("bash structured result = %+v, want command and neutral shell id", bashResult.Structured)
 	}
-	stdinUse, stdinResult := findStructuredToolPair(resp.StructuredMessages, "call-claude-stdin")
+	stdinUse, stdinResult := findStructuredToolPair(structuredTranscriptMessages(resp), "call-claude-stdin")
 	if stdinUse == nil || stdinResult == nil {
-		t.Fatalf("missing stdin tool pair in structured messages: %+v", resp.StructuredMessages)
+		t.Fatalf("missing stdin tool pair in structured messages: %+v", structuredTranscriptMessages(resp))
 	}
 	if stdinUse.Input == nil || stdinUse.Input.Kind != "stdin" || stdinUse.Input.TaskID != "42" || stdinUse.Input.Text != "hello\n" {
 		t.Fatalf("stdin input = %+v, want typed stdin task/text", stdinUse.Input)
@@ -1102,6 +1107,642 @@ func TestHandleSessionStreamStructuredGracefullyDowngradesWithoutTranscript(t *t
 	}
 }
 
+func TestHandleSessionStreamStructuredUsesRelocatedSessionStoreForPaneFallback(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	relocated := beads.NewMemStore()
+	fs.sessionsBeadStore = relocated
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManagerWithOptions(relocated, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Relocated",
+		Command:  "cursor",
+		WorkDir:  t.TempDir(),
+		Provider: "cursor",
+		Resume:   session.ProviderResume{},
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs.sp.SetPeekOutput(info.SessionName, "relocated pane output")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/stream?format=structured", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, "relocated pane output", 10*time.Second)
+	if !strings.Contains(body, structuredTranscriptUnavailableCode) {
+		t.Fatalf("stream body missing degraded diagnostic: %s", body)
+	}
+	cancel()
+	<-done
+}
+
+func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *testing.T) {
+	for _, surface := range []string{"city-huma", "legacy"} {
+		t.Run(surface, func(t *testing.T) {
+			isolateProviderDiscovery(t)
+			fs := newSessionFakeState(t)
+			searchBase := t.TempDir()
+			srv := New(fs)
+			humaHandler := newTestCityHandlerWith(t, fs, srv)
+			srv.sessionLogSearchPaths = []string{searchBase}
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			workDir := t.TempDir()
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+				Template: "myrig/worker",
+				Title:    "Promote",
+				Command:  "claude",
+				WorkDir:  workDir,
+				Provider: "claude",
+				Hints:    runtime.Config{},
+				ExtraMeta: map[string]string{
+					"session_origin": "manual",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			fs.sp.SetPeekOutput(info.SessionName, "pane fallback before history")
+
+			handler := humaHandler
+			path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured"
+			if surface == "legacy" {
+				handler = srv.legacySessionHandler()
+				path = "/v0/session/" + info.ID + "/stream?format=structured"
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			rec := newSyncResponseRecorder()
+			req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+			done := make(chan struct{})
+			go func() {
+				handler.ServeHTTP(rec, req)
+				close(done)
+			}()
+
+			fallbackBody := waitForRecorderSubstring(t, rec, "pane fallback before history", 10*time.Second)
+			if !strings.Contains(fallbackBody, structuredTranscriptUnavailableCode) {
+				t.Fatalf("fallback body missing degraded diagnostic: %s", fallbackBody)
+			}
+
+			writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+				`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"authoritative history"},"timestamp":"2025-01-01T00:00:00Z"}`,
+			)
+
+			body := waitForRecorderSubstring(t, rec, `"reset_reason":"stream_changed"`, 10*time.Second)
+			cancel()
+			<-done
+
+			var promoted *SessionStreamStructuredMessageEvent
+			for _, frame := range parseSSETestFrames(body) {
+				if frame.Event != "structured" {
+					continue
+				}
+				var update SessionStreamStructuredMessageEvent
+				if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
+					t.Fatalf("decode structured frame: %v; data=%s", err, frame.Data)
+				}
+				if update.Operation == sessionStructuredOperationReset {
+					promoted = &update
+				}
+			}
+			if promoted == nil || promoted.ResetReason != sessionStructuredResetStreamChanged {
+				t.Fatalf("structured frames did not promote with reset/stream_changed: %s", body)
+			}
+			if got := structuredMessageIDs(promoted.StructuredMessages); !equalStrings(got, []string{"m1"}) {
+				t.Fatalf("promoted message IDs = %v, want [m1]", got)
+			}
+			if len(promoted.StructuredMessages[0].Blocks) != 1 || promoted.StructuredMessages[0].Blocks[0].Text != "authoritative history" {
+				t.Fatalf("promoted message blocks = %+v, want authoritative history", promoted.StructuredMessages[0].Blocks)
+			}
+		})
+	}
+}
+
+func TestHandleSessionStreamStructuredClosedWithoutHistoryMatchesTranscriptSnapshot(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Closed",
+		Command:  "cursor",
+		WorkDir:  t.TempDir(),
+		Provider: "cursor",
+		Resume:   session.ProviderResume{},
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	restRec := httptest.NewRecorder()
+	restReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/transcript?format=structured", nil)
+	h.ServeHTTP(restRec, restReq)
+	if restRec.Code != http.StatusOK {
+		t.Fatalf("REST status = %d, want %d; body: %s", restRec.Code, http.StatusOK, restRec.Body.String())
+	}
+	var rest sessionTranscriptGetResponse
+	if err := json.NewDecoder(restRec.Body).Decode(&rest); err != nil {
+		t.Fatalf("decode REST snapshot: %v", err)
+	}
+	if rest.Operation != sessionStructuredOperationSnapshot {
+		t.Fatalf("REST operation = %q, want %q", rest.Operation, sessionStructuredOperationSnapshot)
+	}
+	if rest.History == nil || rest.History.Cursor.ResumeToken == "" {
+		t.Fatalf("REST history cursor = %+v, want resume token", rest.History)
+	}
+
+	streamRec := httptest.NewRecorder()
+	streamReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/stream?format=structured", nil)
+	h.ServeHTTP(streamRec, streamReq)
+	if streamRec.Code != http.StatusOK {
+		t.Fatalf("SSE status = %d, want %d; body: %s", streamRec.Code, http.StatusOK, streamRec.Body.String())
+	}
+	frame := firstSSETestFrame(t, streamRec.Body.String(), "structured")
+	var streamed SessionStreamStructuredMessageEvent
+	if err := json.Unmarshal([]byte(frame.Data), &streamed); err != nil {
+		t.Fatalf("decode SSE snapshot: %v; data=%s", err, frame.Data)
+	}
+
+	if !reflect.DeepEqual(streamed.History, rest.History) {
+		t.Fatalf("SSE history = %+v, want REST history %+v", streamed.History, rest.History)
+	}
+	if !reflect.DeepEqual(streamed.StructuredMessages, structuredTranscriptMessages(rest)) {
+		t.Fatalf("SSE messages = %+v, want REST messages %+v", streamed.StructuredMessages, structuredTranscriptMessages(rest))
+	}
+	if streamed.History == nil || streamed.History.Continuity.Status != "degraded" {
+		t.Fatalf("SSE history = %+v, want degraded structured fallback", streamed.History)
+	}
+}
+
+func TestHandleSessionStreamStructuredAfterCursorSuppressesRESTSnapshotReplay(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Resume",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"m1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	restRec := httptest.NewRecorder()
+	restReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/transcript?format=structured", nil)
+	h.ServeHTTP(restRec, restReq)
+	if restRec.Code != http.StatusOK {
+		t.Fatalf("REST status = %d, want %d; body: %s", restRec.Code, http.StatusOK, restRec.Body.String())
+	}
+	var snapshot sessionTranscriptGetResponse
+	if err := json.NewDecoder(restRec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode REST snapshot: %v", err)
+	}
+	if snapshot.History == nil || snapshot.History.Cursor.ResumeToken == "" {
+		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, "event: activity", 10*time.Second)
+	cancel()
+	<-done
+	if strings.Contains(body, "event: structured") {
+		t.Fatalf("stream replayed the exact REST snapshot: %s", body)
+	}
+}
+
+func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Paginated resume",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"one"},"timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"m2","parentUuid":"m1","type":"assistant","message":{"role":"assistant","content":"two"},"timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"m3","parentUuid":"m2","type":"assistant","message":{"role":"assistant","content":"three"},"timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"m4","parentUuid":"m3","type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"four"},"timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	restRec := httptest.NewRecorder()
+	restReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&after=m2", nil)
+	h.ServeHTTP(restRec, restReq)
+	if restRec.Code != http.StatusOK {
+		t.Fatalf("REST status = %d, want %d; body: %s", restRec.Code, http.StatusOK, restRec.Body.String())
+	}
+	var snapshot sessionTranscriptGetResponse
+	if err := json.NewDecoder(restRec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode REST snapshot: %v", err)
+	}
+	if got := structuredMessageIDs(structuredTranscriptMessages(snapshot)); !equalStrings(got, []string{"m3", "m4"}) {
+		t.Fatalf("paginated REST message IDs = %v, want [m3 m4]", got)
+	}
+	if snapshot.History == nil || snapshot.History.Cursor.ResumeToken == "" {
+		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	initialBody := waitForRecorderSubstring(t, rec, "event: activity", testutil.GoroutineRaceTimeout)
+	if strings.Contains(initialBody, "event: structured") {
+		cancel()
+		<-done
+		t.Fatalf("stream reset or replayed the paginated REST snapshot: %s", initialBody)
+	}
+
+	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		cancel()
+		<-done
+		t.Fatalf("open transcript for append: %v", err)
+	}
+	_, writeErr := fmt.Fprintln(file, `{"uuid":"m5","parentUuid":"m4","type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"five"},"timestamp":"2025-01-01T00:00:04Z"}`)
+	closeErr := file.Close()
+	if writeErr != nil {
+		cancel()
+		<-done
+		t.Fatalf("append transcript: %v", writeErr)
+	}
+	if closeErr != nil {
+		cancel()
+		<-done
+		t.Fatalf("close transcript: %v", closeErr)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "event: structured", testutil.GoroutineRaceTimeout)
+	cancel()
+	<-done
+	frame := firstSSETestFrame(t, body, "structured")
+	var update SessionStreamStructuredMessageEvent
+	if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
+		t.Fatalf("decode structured upsert: %v; data=%s", err, frame.Data)
+	}
+	if update.Operation != sessionStructuredOperationUpsert {
+		t.Fatalf("operation = %q, want %q", update.Operation, sessionStructuredOperationUpsert)
+	}
+	if got := structuredMessageIDs(update.StructuredMessages); !equalStrings(got, []string{"m4", "m5"}) {
+		t.Fatalf("upsert IDs = %v, want inclusive tail [m4 m5]", got)
+	}
+}
+
+func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Empty paginated resume",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"one"},"timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"m2","parentUuid":"m1","type":"assistant","message":{"role":"assistant","content":"two"},"timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"m3","parentUuid":"m2","type":"assistant","message":{"role":"assistant","content":"three"},"timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"m4","parentUuid":"m3","type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"four"},"timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	restRec := httptest.NewRecorder()
+	restReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&after=m4", nil)
+	h.ServeHTTP(restRec, restReq)
+	if restRec.Code != http.StatusOK {
+		t.Fatalf("REST status = %d, want %d; body: %s", restRec.Code, http.StatusOK, restRec.Body.String())
+	}
+	var snapshot sessionTranscriptGetResponse
+	if err := json.NewDecoder(restRec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode REST snapshot: %v", err)
+	}
+	if got := structuredMessageIDs(structuredTranscriptMessages(snapshot)); len(got) != 0 {
+		t.Fatalf("empty paginated REST message IDs = %v, want none", got)
+	}
+	if snapshot.History == nil || snapshot.History.Cursor.ResumeToken == "" {
+		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	initialBody := waitForRecorderSubstring(t, rec, "event: structured", testutil.GoroutineRaceTimeout)
+	initialFrame := firstSSETestFrame(t, initialBody, "structured")
+	var initialUpdate SessionStreamStructuredMessageEvent
+	if err := json.Unmarshal([]byte(initialFrame.Data), &initialUpdate); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("decode initial structured upsert: %v; data=%s", err, initialFrame.Data)
+	}
+	if initialUpdate.Operation != sessionStructuredOperationUpsert {
+		cancel()
+		<-done
+		t.Fatalf("initial operation = %q, want %q", initialUpdate.Operation, sessionStructuredOperationUpsert)
+	}
+	if got := structuredMessageIDs(initialUpdate.StructuredMessages); !equalStrings(got, []string{"m4"}) {
+		cancel()
+		<-done
+		t.Fatalf("initial upsert IDs = %v, want bounded anchor [m4]", got)
+	}
+
+	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		cancel()
+		<-done
+		t.Fatalf("open transcript for append: %v", err)
+	}
+	_, writeErr := fmt.Fprintln(file, `{"uuid":"m5","parentUuid":"m4","type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"five"},"timestamp":"2025-01-01T00:00:04Z"}`)
+	closeErr := file.Close()
+	if writeErr != nil {
+		cancel()
+		<-done
+		t.Fatalf("append transcript: %v", writeErr)
+	}
+	if closeErr != nil {
+		cancel()
+		<-done
+		t.Fatalf("close transcript: %v", closeErr)
+	}
+
+	body := waitForRecorderSubstring(t, rec, `"id":"m5"`, testutil.GoroutineRaceTimeout)
+	cancel()
+	<-done
+	var frame sseTestFrame
+	for _, candidate := range parseSSETestFrames(body) {
+		if candidate.Event == "structured" {
+			frame = candidate
+		}
+	}
+	if frame.Event == "" {
+		t.Fatalf("appended structured event not found in body: %s", body)
+	}
+	var update SessionStreamStructuredMessageEvent
+	if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
+		t.Fatalf("decode structured upsert: %v; data=%s", err, frame.Data)
+	}
+	if update.Operation != sessionStructuredOperationUpsert {
+		t.Fatalf("operation = %q, want %q", update.Operation, sessionStructuredOperationUpsert)
+	}
+	if got := structuredMessageIDs(update.StructuredMessages); !equalStrings(got, []string{"m4", "m5"}) {
+		t.Fatalf("upsert IDs = %v, want inclusive tail [m4 m5]", got)
+	}
+}
+
+func TestHandleSessionStreamStructuredInvalidCursorEmitsResetSnapshot(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Reset",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"m1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/stream?format=structured&after_cursor=not-a-token", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	frame := firstSSETestFrame(t, rec.Body.String(), "structured")
+	var update SessionStreamStructuredMessageEvent
+	if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
+		t.Fatalf("decode structured reset: %v; data=%s", err, frame.Data)
+	}
+	if update.Operation != sessionStructuredOperationReset || update.ResetReason != sessionStructuredResetResumeInvalid {
+		t.Fatalf("reset operation = %q reason = %q, want reset/%s", update.Operation, update.ResetReason, sessionStructuredResetResumeInvalid)
+	}
+	if len(update.StructuredMessages) != 1 || update.StructuredMessages[0].ID != "m1" {
+		t.Fatalf("reset messages = %+v, want full m1 snapshot", update.StructuredMessages)
+	}
+	if frame.ID == "" || update.History == nil || frame.ID != update.History.Cursor.ResumeToken {
+		t.Fatalf("SSE id = %q history = %+v, want matching resume token", frame.ID, update.History)
+	}
+}
+
+func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Append",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"m1","parentUuid":"","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	restRec := httptest.NewRecorder()
+	restReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/")+info.ID+"/transcript?format=structured", nil)
+	h.ServeHTTP(restRec, restReq)
+	if restRec.Code != http.StatusOK {
+		t.Fatalf("REST status = %d, want %d; body: %s", restRec.Code, http.StatusOK, restRec.Body.String())
+	}
+	var snapshot sessionTranscriptGetResponse
+	if err := json.NewDecoder(restRec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode REST snapshot: %v", err)
+	}
+	if snapshot.History == nil || snapshot.History.Cursor.ResumeToken == "" {
+		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+	initialBody := waitForRecorderSubstring(t, rec, "event: activity", 10*time.Second)
+	if strings.Contains(initialBody, "event: structured") {
+		t.Fatalf("stream replayed exact initial snapshot: %s", initialBody)
+	}
+
+	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open transcript for append: %v", err)
+	}
+	_, writeErr := fmt.Fprintln(file, `{"uuid":"m2","parentUuid":"m1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"second\"}","timestamp":"2025-01-01T00:00:01Z"}`)
+	closeErr := file.Close()
+	if writeErr != nil {
+		t.Fatalf("append transcript: %v", writeErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close transcript: %v", closeErr)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "event: structured", 10*time.Second)
+	cancel()
+	<-done
+	frame := firstSSETestFrame(t, body, "structured")
+	var update SessionStreamStructuredMessageEvent
+	if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
+		t.Fatalf("decode structured upsert: %v; data=%s", err, frame.Data)
+	}
+	if update.Operation != sessionStructuredOperationUpsert {
+		t.Fatalf("operation = %q, want %q", update.Operation, sessionStructuredOperationUpsert)
+	}
+	if got := structuredMessageIDs(update.StructuredMessages); !equalStrings(got, []string{"m1", "m2"}) {
+		t.Fatalf("upsert IDs = %v, want inclusive tail [m1 m2]", got)
+	}
+}
+
 func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1114,7 +1755,7 @@ func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
 	fs.sp.SetPeekOutput(info.SessionName, "cursor pane output")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?format=structured&tail=0", nil)
+	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?format=structured&tail=0&include_thinking=true", nil)
 	srv.legacySessionHandler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -1130,8 +1771,12 @@ func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
 	if resp.History == nil || resp.History.Continuity.Status != "degraded" {
 		t.Fatalf("History = %+v, want degraded structured fallback", resp.History)
 	}
-	if len(resp.StructuredMessages) != 1 || resp.StructuredMessages[0].Role != "assistant" || !strings.Contains(resp.StructuredMessages[0].Blocks[0].Text, "cursor pane output") {
-		t.Fatalf("StructuredMessages = %+v, want cursor pane output text fallback", resp.StructuredMessages)
+	resume, ok := decodeStructuredResumeToken(resp.History.Cursor.ResumeToken)
+	if !ok || !resume.IncludeThinking {
+		t.Fatalf("legacy fallback resume token = %+v, valid=%t; want include_thinking=true", resume, ok)
+	}
+	if len(structuredTranscriptMessages(resp)) != 1 || structuredTranscriptMessages(resp)[0].Role != "assistant" || !strings.Contains(structuredTranscriptMessages(resp)[0].Blocks[0].Text, "cursor pane output") {
+		t.Fatalf("StructuredMessages = %+v, want cursor pane output text fallback", structuredTranscriptMessages(resp))
 	}
 }
 

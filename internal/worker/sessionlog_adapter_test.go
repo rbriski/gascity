@@ -759,32 +759,97 @@ func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
 		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
 	)
 
+	full, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("ReadTranscript full: %v", err)
+	}
+	allIDs := transcriptEntryIDs(full)
+	if len(allIDs) != 4 {
+		t.Fatalf("full Antigravity transcript IDs = %v, want 4 entries", allIDs)
+	}
+
 	older, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
-		BeforeEntryID:  "agy-2",
+		BeforeEntryID:  allIDs[2],
 	})
 	if err != nil {
 		t.Fatalf("ReadTranscript older: %v", err)
 	}
-	if got := transcriptEntryIDs(older); strings.Join(got, ",") != "agy-0,agy-1" {
-		t.Fatalf("older Antigravity transcript IDs = %v, want [agy-0 agy-1]", got)
+	if got, want := transcriptEntryIDs(older), allIDs[:2]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("older Antigravity transcript IDs = %v, want %v", got, want)
 	}
 
 	rawNewer, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
-		AfterEntryID:   "agy-2",
+		AfterEntryID:   allIDs[2],
 		Raw:            true,
 	})
 	if err != nil {
 		t.Fatalf("ReadTranscript raw newer: %v", err)
 	}
-	if got := transcriptEntryIDs(rawNewer); strings.Join(got, ",") != "agy-3" {
-		t.Fatalf("raw newer Antigravity transcript IDs = %v, want [agy-3]", got)
+	if got, want := transcriptEntryIDs(rawNewer), allIDs[3:]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("raw newer Antigravity transcript IDs = %v, want %v", got, want)
 	}
 	if len(rawNewer.RawMessages) != 1 {
 		t.Fatalf("raw newer RawMessages = %d, want 1", len(rawNewer.RawMessages))
+	}
+}
+
+func TestSessionLogAdapterReadTranscriptRawEmitsMultipartRecordsOnce(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider string
+		record   string
+	}{
+		{
+			name:     "kiro tool results",
+			provider: "kiro/tmux-cli",
+			record:   `{"type":"ToolResults","sessionId":"kiro-raw","message":{"role":"tool","content":[{"type":"toolResult","toolUseId":"toolu-one","content":"one"},{"type":"toolResult","toolUseId":"toolu-two","content":"two"}]}}`,
+		},
+		{
+			name:     "amp tool results",
+			provider: "amp/tmux-cli",
+			record:   `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-one","content":"one"},{"type":"tool_result","tool_use_id":"toolu-two","content":"two"}]},"session_id":"amp-raw"}`,
+		},
+		{
+			name:     "cursor file edit",
+			provider: "cursor/tmux-cli",
+			record:   `{"hook_event_name":"afterFileEdit","file_path":"notes.txt","new_text":"updated","session_id":"cursor-raw"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			writeLines(t, path, tt.record, tt.record)
+
+			result, err := (SessionLogAdapter{}).ReadTranscript(TranscriptRequest{
+				Provider:       tt.provider,
+				TranscriptPath: path,
+				Raw:            true,
+			})
+			if err != nil {
+				t.Fatalf("ReadTranscript() error = %v", err)
+			}
+			if got := len(result.Session.Messages); got != 4 {
+				t.Fatalf("normalized messages = %d, want two children per provider record", got)
+			}
+			if got := len(result.RawMessages); got != 2 {
+				t.Fatalf("raw messages = %d, want each repeated provider record exactly once", got)
+			}
+			for i, raw := range result.RawMessages {
+				if string(raw) != tt.record {
+					t.Fatalf("raw message %d = %s, want byte-exact source record", i, raw)
+				}
+			}
+		})
 	}
 }
 
@@ -799,16 +864,28 @@ func TestSessionLogAdapterLoadHistoryHonorsCursors(t *testing.T) {
 		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
 	)
 
+	full, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory full: %v", err)
+	}
+	allIDs := historyEntryIDs(full)
+	if len(allIDs) != 4 {
+		t.Fatalf("full Antigravity history IDs = %v, want 4 entries", allIDs)
+	}
+
 	older, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
-		BeforeEntryID:  "agy-2",
+		BeforeEntryID:  allIDs[2],
 	})
 	if err != nil {
 		t.Fatalf("LoadHistory older: %v", err)
 	}
-	if got := historyEntryIDs(older); strings.Join(got, ",") != "agy-0,agy-1" {
-		t.Fatalf("older history IDs = %v, want [agy-0 agy-1]", got)
+	if got, want := historyEntryIDs(older), allIDs[:2]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("older history IDs = %v, want %v", got, want)
 	}
 	if older.Pagination == nil || older.Pagination.ReturnedMessageCount != 2 || older.Pagination.TotalMessageCount != 4 {
 		t.Fatalf("older pagination = %+v, want returned/total counts 2/4", older.Pagination)
@@ -817,13 +894,13 @@ func TestSessionLogAdapterLoadHistoryHonorsCursors(t *testing.T) {
 	newer, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
-		AfterEntryID:   "agy-2",
+		AfterEntryID:   allIDs[2],
 	})
 	if err != nil {
 		t.Fatalf("LoadHistory newer: %v", err)
 	}
-	if got := historyEntryIDs(newer); strings.Join(got, ",") != "agy-3" {
-		t.Fatalf("newer history IDs = %v, want [agy-3]", got)
+	if got, want := historyEntryIDs(newer), allIDs[3:]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("newer history IDs = %v, want %v", got, want)
 	}
 	if newer.Pagination == nil || newer.Pagination.ReturnedMessageCount != 1 || newer.Pagination.TotalMessageCount != 4 {
 		t.Fatalf("newer pagination = %+v, want returned/total counts 1/4", newer.Pagination)
@@ -1082,8 +1159,9 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	if snapshot.Continuity.Status != ContinuityStatusContinuous {
 		t.Fatalf("Continuity.Status = %q, want %q", snapshot.Continuity.Status, ContinuityStatusContinuous)
 	}
-	if snapshot.TailState.LastEntryID != "codex-3" {
-		t.Fatalf("TailState.LastEntryID = %q, want codex-3", snapshot.TailState.LastEntryID)
+	lastEntryID := snapshot.Entries[len(snapshot.Entries)-1].ID
+	if snapshot.TailState.LastEntryID != lastEntryID {
+		t.Fatalf("TailState.LastEntryID = %q, want final entry ID %q", snapshot.TailState.LastEntryID, lastEntryID)
 	}
 	if snapshot.Entries[1].Blocks[0].Kind != BlockKindToolUse {
 		t.Fatalf("function call block kind = %q, want %q", snapshot.Entries[1].Blocks[0].Kind, BlockKindToolUse)

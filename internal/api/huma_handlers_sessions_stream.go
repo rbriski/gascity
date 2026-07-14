@@ -44,6 +44,9 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 	history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), historyReq)
 	hasHistory := historyErr == nil && history != nil
 	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+		if problem := transcriptCursorInvalidatedProblem(historyErr, "reading session history"); problem != nil {
+			return nil, problem
+		}
 		return nil, apierr.Internal.Msg("reading session history: " + historyErr.Error())
 	}
 
@@ -52,7 +55,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 		return nil, humaSessionManagerError(stateErr)
 	}
 	running := workerPhaseHasLiveOutput(state.Phase)
-	if !hasHistory && !running {
+	if !hasHistory && !running && input.Format != "structured" {
 		return nil, apierr.SessionNotFound.Msg("session " + id + " has no live output")
 	}
 
@@ -79,7 +82,7 @@ func (s *Server) checkSessionStream(ctx context.Context, input *SessionStreamInp
 
 // streamSession is the SSE streaming callback for GET /v0/session/{id}/stream.
 
-func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, send sse.Sender) {
+func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, send StringIDSender) {
 	reqCtx := hctx.Context()
 	state := input.resolved
 	if state == nil {
@@ -103,6 +106,8 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	hasHistory := state.hasHistory
 	running := state.running
 	format := input.Format
+	resumeToken := sessionStreamResumeToken(input.LastEventID, input.AfterCursor)
+	integerSend := integerSSESender(send)
 
 	// Custom session state headers.
 	if info.State != "" {
@@ -116,16 +121,20 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	if info.Closed {
 		switch format {
 		case "raw":
-			s.emitClosedSessionSnapshotRawHuma(send, info, history)
+			s.emitClosedSessionSnapshotRawHuma(integerSend, info, history)
 		case "structured":
-			s.emitClosedSessionSnapshotStructuredHuma(send, info, history, input.IncludeThinking)
+			s.emitClosedSessionSnapshotStructuredHuma(send, info, history, input.IncludeThinking, resumeToken)
 		default:
-			s.emitClosedSessionSnapshotHuma(send, info, history)
+			s.emitClosedSessionSnapshotHuma(integerSend, info, history)
 		}
 		return
 	}
+	if format == "structured" && !hasHistory && !running {
+		s.emitStructuredFallbackSnapshotHuma(send, info, "", input.IncludeThinking, resumeToken)
+		return
+	}
 	if format == "raw" {
-		_ = send(sse.Message{ID: 0, Data: SessionStreamRawMessageEvent{
+		_ = integerSend(sse.Message{ID: 0, Data: SessionStreamRawMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
 			Provider: info.Provider,
@@ -137,18 +146,18 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	case hasHistory:
 		switch format {
 		case "raw":
-			s.streamSessionTranscriptLogRawHuma(reqCtx, send, info, handle, history, historyReq)
+			s.streamSessionTranscriptLogRawHuma(reqCtx, integerSend, info, handle, history, historyReq)
 		case "structured":
-			s.streamSessionTranscriptLogStructuredHuma(reqCtx, send, info, handle, history, input.IncludeThinking)
+			s.streamSessionTranscriptLogStructuredHuma(reqCtx, send, info, handle, history, input.IncludeThinking, resumeToken, "", "")
 		default:
-			s.streamSessionTranscriptLogHuma(reqCtx, send, info, handle, history)
+			s.streamSessionTranscriptLogHuma(reqCtx, integerSend, info, handle, history)
 		}
 	case format == "structured":
-		s.streamSessionPeekStructuredHuma(reqCtx, send, info)
+		s.streamSessionPeekStructuredHuma(reqCtx, send, info, handle, input.IncludeThinking, resumeToken)
 	case format == "raw":
-		s.streamSessionPeekRawHuma(reqCtx, send, info)
+		s.streamSessionPeekRawHuma(reqCtx, integerSend, info)
 	default:
-		s.streamSessionPeekHuma(reqCtx, send, info)
+		s.streamSessionPeekHuma(reqCtx, integerSend, info)
 	}
 }
 
@@ -190,16 +199,13 @@ func (s *Server) emitClosedSessionSnapshotRawHuma(send sse.Sender, info session.
 	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }
 
-func (s *Server) emitClosedSessionSnapshotStructuredHuma(send sse.Sender, info session.Info, history *worker.HistorySnapshot, includeThinking bool) {
+func (s *Server) emitClosedSessionSnapshotStructuredHuma(send StringIDSender, info session.Info, history *worker.HistorySnapshot, includeThinking bool, resumeToken string) {
 	if history == nil {
+		s.emitStructuredFallbackSnapshotHuma(send, info, "", includeThinking, resumeToken)
 		return
 	}
 	messages, _ := historySnapshotStructuredMessages(history, includeThinking)
-	if len(messages) == 0 {
-		return
-	}
-
-	_ = send(sse.Message{ID: 1, Data: SessionStreamStructuredMessageEvent{
+	projection := SessionStreamStructuredMessageEvent{
 		ID:                 info.ID,
 		Template:           info.Template,
 		Provider:           info.Provider,
@@ -207,6 +213,25 @@ func (s *Server) emitClosedSessionSnapshotStructuredHuma(send sse.Sender, info s
 		SchemaVersion:      sessionStructuredSchemaVersion,
 		History:            structuredHistoryFromSnapshot(history),
 		StructuredMessages: messages,
-	}})
-	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
+	}
+	if update := buildStructuredStreamUpdate(resumeToken, projection, includeThinking); update != nil {
+		_ = send(StringIDMessage{ID: update.History.Cursor.ResumeToken, Data: *update})
+	}
+	_ = send(StringIDMessage{Data: SessionActivityEvent{Activity: "idle"}})
+}
+
+func (s *Server) emitStructuredFallbackSnapshotHuma(send StringIDSender, info session.Info, output string, includeThinking bool, resumeToken string) {
+	projection := SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityIdle)),
+		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+	}
+	if update := buildStructuredStreamUpdate(resumeToken, projection, includeThinking); update != nil {
+		_ = send(StringIDMessage{ID: update.History.Cursor.ResumeToken, Data: *update})
+	}
+	_ = send(StringIDMessage{Data: SessionActivityEvent{Activity: "idle"}})
 }

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -144,12 +145,7 @@ func (a SessionLogAdapter) ReadAgentTranscript(path, agentID string) (*AgentTran
 	result := &AgentTranscriptResult{
 		TranscriptPath: filepath.Clean(path),
 		Session:        sess,
-		RawMessages:    make([]json.RawMessage, 0, len(sess.Messages)),
-	}
-	for _, entry := range sess.Messages {
-		if len(entry.Raw) > 0 {
-			result.RawMessages = append(result.RawMessages, entry.Raw)
-		}
+		RawMessages:    rawMessagesFromEntries(sess.Messages),
 	}
 	return result, nil
 }
@@ -162,12 +158,11 @@ func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptRes
 		return nil, fmt.Errorf("transcript path is required")
 	}
 
-	var (
-		sess *sessionlog.Session
-		err  error
-	)
-	beforeID := strings.TrimSpace(req.BeforeEntryID)
-	afterID := strings.TrimSpace(req.AfterEntryID)
+	beforeID, afterID, err := transcriptPageEntryIDs(req.BeforeEntryID, req.AfterEntryID)
+	if err != nil {
+		return nil, err
+	}
+	var sess *sessionlog.Session
 	switch {
 	case req.Raw && afterID != "":
 		sess, err = sessionlog.ReadProviderFileRawNewer(req.Provider, path, req.TailCompactions, afterID)
@@ -192,14 +187,27 @@ func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptRes
 		Session:        sess,
 	}
 	if req.Raw && sess != nil {
-		result.RawMessages = make([]json.RawMessage, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			if len(entry.Raw) > 0 {
-				result.RawMessages = append(result.RawMessages, entry.Raw)
-			}
-		}
+		result.RawMessages = rawMessagesFromEntries(sess.Messages)
 	}
 	return result, nil
+}
+
+func rawMessagesFromEntries(entries []*sessionlog.Entry) []json.RawMessage {
+	rawMessages := make([]json.RawMessage, 0, len(entries))
+	seenRecords := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		if entry.RawRecordID != "" {
+			if _, seen := seenRecords[entry.RawRecordID]; seen {
+				continue
+			}
+			seenRecords[entry.RawRecordID] = struct{}{}
+		}
+		rawMessages = append(rawMessages, entry.Raw)
+	}
+	return rawMessages
 }
 
 // LoadHistory loads and normalizes a provider transcript.
@@ -209,24 +217,20 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		return nil, fmt.Errorf("transcript path is required")
 	}
 
-	var (
-		session *sessionlog.Session
-		err     error
-	)
-	beforeID := strings.TrimSpace(req.BeforeEntryID)
-	afterID := strings.TrimSpace(req.AfterEntryID)
-	switch {
-	case beforeID != "" && afterID != "":
-		return nil, fmt.Errorf("before and after entry IDs are mutually exclusive")
-	case afterID != "":
-		session, err = sessionlog.ReadProviderFileRawNewer(req.Provider, path, req.TailCompactions, afterID)
-	case beforeID != "":
-		session, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, beforeID)
-	default:
-		session, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
-	}
+	beforeID, afterID, err := transcriptPageEntryIDs(req.BeforeEntryID, req.AfterEntryID)
 	if err != nil {
 		return nil, err
+	}
+	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
+	if err != nil {
+		return nil, err
+	}
+	session := fullSession
+	if req.TailCompactions > 0 || beforeID != "" || afterID != "" {
+		session, err = sessionlog.PageSession(fullSession, req.TailCompactions, beforeID, afterID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	info, err := os.Stat(path)
@@ -234,24 +238,13 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
 
-	entries := make([]HistoryEntry, 0, len(session.Messages))
-	compactionCount := 0
-	lastEntryID := ""
-	for idx, entry := range session.Messages {
-		normalized := normalizeEntry(req.Provider, path, session.ID, idx, entry)
-		if normalized.ID != "" {
-			lastEntryID = normalized.ID
-		}
-		if entry.IsCompactBoundary() {
-			compactionCount++
-		}
-		entries = append(entries, normalized)
-	}
+	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
 	entries = attachStructuredToolData(entries)
 	entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
 	if err != nil {
 		return nil, err
 	}
+	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
 	tailMeta, err := sessionlog.ExtractTailMeta(path)
 	if err != nil {
@@ -265,27 +258,26 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		logicalConversationID = firstNonEmpty(strings.TrimSpace(req.GCSessionID), session.ID)
 	}
 
-	openToolUseIDs := sortedKeys(session.OrphanedToolUseIDs)
-	pendingIDs := pendingInteractionIDs(entries)
-	diagnostics := historyDiagnostics(session.Diagnostics)
+	openToolUseIDs := sortedKeys(fullSession.OrphanedToolUseIDs)
+	diagnostics := historyDiagnostics(fullSession.Diagnostics)
 	continuity := Continuity{
 		Status:          ContinuityStatusContinuous,
 		CompactionCount: compactionCount,
-		HasBranches:     session.HasBranches,
+		HasBranches:     fullSession.HasBranches,
 	}
 	if compactionCount > 0 {
 		continuity.Status = ContinuityStatusCompacted
 	}
-	if len(entries) == 0 {
+	if len(fullSession.Messages) == 0 {
 		continuity.Status = ContinuityStatusUnknown
 	}
 	if len(diagnostics) > 0 {
 		continuity.Note = diagnostics[0].Message
-		if len(entries) > 0 {
+		if len(fullSession.Messages) > 0 {
 			continuity.Status = ContinuityStatusDegraded
 		}
 	}
-	tailDegradedReason := tailDegradedReason(session.Diagnostics)
+	tailDegradedReason := tailDegradedReason(fullSession.Diagnostics)
 
 	return &HistorySnapshot{
 		GCSessionID:           req.GCSessionID,
@@ -314,6 +306,57 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}, nil
 }
 
+func normalizeHistoryEntries(provider, path, sessionID string, messages []*sessionlog.Entry) []HistoryEntry {
+	entries := make([]HistoryEntry, 0, len(messages))
+	for idx, entry := range messages {
+		entries = append(entries, normalizeEntry(provider, path, sessionID, idx, entry))
+	}
+	return entries
+}
+
+func transcriptGlobalFacts(messages []*sessionlog.Entry) (int, string, []string) {
+	compactionCount := 0
+	lastEntryID := ""
+	pending := make(map[string]bool)
+	for idx, entry := range messages {
+		lastEntryID = normalizedHistoryEntryID(entry, idx)
+		if entry.IsCompactBoundary() {
+			compactionCount++
+		}
+		// Avoid decoding potentially large off-page tool results. Provider
+		// readers normalize interaction records to content blocks with this
+		// discriminator before they reach the worker boundary.
+		if !bytes.Contains(entry.Message, []byte(`"interaction"`)) {
+			continue
+		}
+		for _, block := range entry.ContentBlocks() {
+			if normalizeBlockKind(block.Type) != BlockKindInteraction {
+				continue
+			}
+			id := strings.TrimSpace(firstNonEmpty(block.RequestID, block.ID, block.ToolUseID))
+			if id == "" {
+				continue
+			}
+			switch normalizeInteractionState(block.State) {
+			case InteractionStateOpened, InteractionStatePending, InteractionStateResumedAfterRestart:
+				pending[id] = true
+			case InteractionStateResolved, InteractionStateDismissed:
+				delete(pending, id)
+			}
+		}
+	}
+	return compactionCount, lastEntryID, sortedKeys(pending)
+}
+
+func transcriptPageEntryIDs(beforeEntryID, afterEntryID string) (string, string, error) {
+	beforeID := strings.TrimSpace(beforeEntryID)
+	afterID := strings.TrimSpace(afterEntryID)
+	if beforeID != "" && afterID != "" {
+		return "", "", ErrTranscriptCursorConflict
+	}
+	return beforeID, afterID, nil
+}
+
 func normalizeEntry(provider, path, sessionID string, order int, entry *sessionlog.Entry) HistoryEntry {
 	provenance := Provenance{
 		Provider:          provider,
@@ -322,10 +365,11 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		RawEntryID:        entry.UUID,
 		RawType:           entry.Type,
 		Raw:               cloneRaw(entry.Raw),
+		RawRecordID:       entry.RawRecordID,
 	}
 
 	normalized := HistoryEntry{
-		ID:         firstNonEmpty(entry.UUID, fmt.Sprintf("derived-%d", order)),
+		ID:         normalizedHistoryEntryID(entry, order),
 		Kind:       entry.Type,
 		Actor:      actorForEntry(entry),
 		Order:      order,
@@ -351,6 +395,10 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		normalized.UserPrompt = parseHistoryUserPrompt(normalized.Text)
 	}
 	return normalized
+}
+
+func normalizedHistoryEntryID(entry *sessionlog.Entry, order int) string {
+	return firstNonEmpty(entry.UUID, fmt.Sprintf("derived-%d", order))
 }
 
 func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySystemEvent {
@@ -858,28 +906,6 @@ func normalizeInteractionState(state string) InteractionState {
 	default:
 		return InteractionStateUnknown
 	}
-}
-
-func pendingInteractionIDs(entries []HistoryEntry) []string {
-	pending := map[string]bool{}
-	for _, entry := range entries {
-		for _, block := range entry.Blocks {
-			if block.Kind != BlockKindInteraction || block.Interaction == nil {
-				continue
-			}
-			id := strings.TrimSpace(block.Interaction.RequestID)
-			if id == "" {
-				continue
-			}
-			switch block.Interaction.State {
-			case InteractionStateOpened, InteractionStatePending, InteractionStateResumedAfterRestart:
-				pending[id] = true
-			case InteractionStateResolved, InteractionStateDismissed:
-				delete(pending, id)
-			}
-		}
-	}
-	return sortedKeys(pending)
 }
 
 func tailDegradedReason(session sessionlog.SessionDiagnostics) string {

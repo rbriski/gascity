@@ -47,6 +47,7 @@ type SessionDiagnostics struct {
 // PaginationInfo describes the pagination state of a session response.
 type PaginationInfo struct {
 	HasOlderMessages       bool   `json:"has_older_messages"`
+	HasNewerMessages       bool   `json:"has_newer_messages,omitempty"`
 	TotalMessageCount      int    `json:"total_message_count"`
 	ReturnedMessageCount   int    `json:"returned_message_count"`
 	TruncatedBeforeMessage string `json:"truncated_before_message,omitempty"`
@@ -151,36 +152,47 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 
 // ReadProviderFile reads a provider-specific transcript file.
 func ReadProviderFile(provider, path string, tailCompactions int) (*Session, error) {
+	var (
+		sess *Session
+		err  error
+	)
 	switch ProviderFamily(provider) {
 	case "auggie":
-		return ReadAuggieFile(path, tailCompactions)
+		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
-		return ReadAmpFile(path, tailCompactions)
+		sess, err = ReadAmpFile(path, tailCompactions)
 	case "codex":
-		return ReadCodexFile(path, tailCompactions)
+		sess, err = ReadCodexFile(path, tailCompactions)
 	case "copilot":
-		return ReadCopilotFile(path, tailCompactions)
+		sess, err = ReadCopilotFile(path, tailCompactions)
 	case "cursor":
-		return ReadCursorFile(path, tailCompactions)
+		sess, err = ReadCursorFile(path, tailCompactions)
 	case "grok":
-		return ReadGrokFile(path, tailCompactions)
+		sess, err = ReadGrokFile(path, tailCompactions)
 	case "kiro":
-		return ReadKiroFile(path, tailCompactions)
+		sess, err = ReadKiroFile(path, tailCompactions)
 	case "gemini":
-		return ReadGeminiFile(path, tailCompactions)
+		sess, err = ReadGeminiFile(path, tailCompactions)
 	case "kimi":
-		return ReadKimiFile(path, tailCompactions)
+		sess, err = ReadKimiFile(path, tailCompactions)
 	case "mimocode":
-		return ReadMimoCodeFile(path, tailCompactions)
+		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
-		return ReadOpenCodeFile(path, tailCompactions)
+		sess, err = ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
-		return ReadPiFile(path, tailCompactions)
+		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
-		return ReadAntigravityFile(path, tailCompactions)
+		sess, err = ReadAntigravityFile(path, tailCompactions)
 	default:
-		return ReadFile(path, tailCompactions)
+		sess, err = ReadFile(path, tailCompactions)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUniqueEntryIDs(sess); err != nil {
+		return nil, err
+	}
+	return sess, nil
 }
 
 // ReadFileRaw reads a session file without display-type filtering.
@@ -220,36 +232,47 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 // on each returned entry, so the Codex reader is sufficient for both raw and
 // conversation views.
 func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, error) {
+	var (
+		sess *Session
+		err  error
+	)
 	switch ProviderFamily(provider) {
 	case "auggie":
-		return ReadAuggieFile(path, tailCompactions)
+		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
-		return ReadAmpFile(path, tailCompactions)
+		sess, err = ReadAmpFile(path, tailCompactions)
 	case "codex":
-		return ReadCodexFile(path, tailCompactions)
+		sess, err = ReadCodexFile(path, tailCompactions)
 	case "copilot":
-		return ReadCopilotFile(path, tailCompactions)
+		sess, err = ReadCopilotFile(path, tailCompactions)
 	case "cursor":
-		return ReadCursorFile(path, tailCompactions)
+		sess, err = ReadCursorFile(path, tailCompactions)
 	case "grok":
-		return ReadGrokFile(path, tailCompactions)
+		sess, err = ReadGrokFile(path, tailCompactions)
 	case "kiro":
-		return ReadKiroFile(path, tailCompactions)
+		sess, err = ReadKiroFile(path, tailCompactions)
 	case "gemini":
-		return ReadGeminiFile(path, tailCompactions)
+		sess, err = ReadGeminiFile(path, tailCompactions)
 	case "kimi":
-		return ReadKimiFile(path, tailCompactions)
+		sess, err = ReadKimiFile(path, tailCompactions)
 	case "mimocode":
-		return ReadMimoCodeFile(path, tailCompactions)
+		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
-		return ReadOpenCodeFile(path, tailCompactions)
+		sess, err = ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
-		return ReadPiFile(path, tailCompactions)
+		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
-		return ReadAntigravityFileRaw(path, tailCompactions)
+		sess, err = ReadAntigravityFileRaw(path, tailCompactions)
 	default:
-		return ReadFileRaw(path, tailCompactions)
+		sess, err = ReadFileRaw(path, tailCompactions)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUniqueEntryIDs(sess); err != nil {
+		return nil, err
+	}
+	return sess, nil
 }
 
 // ReadFileOlder loads older messages before a cursor, returning the
@@ -272,16 +295,13 @@ func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*S
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID, "")
-
-	return &Session{
+	return paginateSession(&Session{
 		ID:                 sessionID,
-		Messages:           paginated,
+		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
-		Pagination:         info,
 		Diagnostics:        diagnostics,
-	}, nil
+	}, tailCompactions, beforeMessageID, "")
 }
 
 // ReadFileRawOlder loads older raw (unfiltered) messages before a cursor.
@@ -297,88 +317,24 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID, "")
-
-	return &Session{
+	return paginateSession(&Session{
 		ID:                 sessionID,
-		Messages:           paginated,
+		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
-		Pagination:         info,
 		Diagnostics:        diagnostics,
-	}, nil
+	}, tailCompactions, beforeMessageID, "")
 }
 
 // ReadProviderFileOlder reads an older page of a provider-specific transcript.
-// Provider families without page-aware readers return the full provider
-// transcript.
 func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	switch ProviderFamily(provider) {
-	case "auggie":
-		return ReadAuggieFile(path, tailCompactions)
-	case "amp":
-		return ReadAmpFile(path, tailCompactions)
-	case "codex":
-		return ReadCodexFile(path, tailCompactions)
-	case "copilot":
-		return ReadCopilotFile(path, tailCompactions)
-	case "cursor":
-		return ReadCursorFile(path, tailCompactions)
-	case "grok":
-		return ReadGrokFile(path, tailCompactions)
-	case "kiro":
-		return ReadKiroFile(path, tailCompactions)
-	case "gemini":
-		return ReadGeminiFile(path, tailCompactions)
-	case "kimi":
-		return ReadKimiFilePage(path, tailCompactions, beforeMessageID, "")
-	case "mimocode":
-		return ReadMimoCodeFile(path, tailCompactions)
-	case "opencode":
-		return ReadOpenCodeFile(path, tailCompactions)
-	case "pi":
-		return ReadPiFile(path, tailCompactions)
-	case "antigravity":
-		return ReadAntigravityFilePage(path, tailCompactions, beforeMessageID, "")
-	default:
-		return ReadFileOlder(path, tailCompactions, beforeMessageID)
-	}
+	return readProviderFilePage(provider, path, tailCompactions, beforeMessageID, "", false)
 }
 
 // ReadProviderFileRawOlder reads an older page of a provider-specific raw
-// transcript. Provider families without page-aware readers return the full
-// provider transcript.
+// transcript.
 func ReadProviderFileRawOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	switch ProviderFamily(provider) {
-	case "auggie":
-		return ReadAuggieFile(path, tailCompactions)
-	case "amp":
-		return ReadAmpFile(path, tailCompactions)
-	case "codex":
-		return ReadCodexFile(path, tailCompactions)
-	case "copilot":
-		return ReadCopilotFile(path, tailCompactions)
-	case "cursor":
-		return ReadCursorFile(path, tailCompactions)
-	case "grok":
-		return ReadGrokFile(path, tailCompactions)
-	case "kiro":
-		return ReadKiroFile(path, tailCompactions)
-	case "gemini":
-		return ReadGeminiFile(path, tailCompactions)
-	case "kimi":
-		return ReadKimiFilePage(path, tailCompactions, beforeMessageID, "")
-	case "mimocode":
-		return ReadMimoCodeFile(path, tailCompactions)
-	case "opencode":
-		return ReadOpenCodeFile(path, tailCompactions)
-	case "pi":
-		return ReadPiFile(path, tailCompactions)
-	case "antigravity":
-		return ReadAntigravityFileRawPage(path, tailCompactions, beforeMessageID, "")
-	default:
-		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
-	}
+	return readProviderFilePage(provider, path, tailCompactions, beforeMessageID, "", true)
 }
 
 // ReadFileNewer loads newer messages after a cursor.
@@ -400,16 +356,13 @@ func ReadFileNewer(path string, tailCompactions int, afterMessageID string) (*Se
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", afterMessageID)
-
-	return &Session{
+	return paginateSession(&Session{
 		ID:                 sessionID,
-		Messages:           paginated,
+		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
-		Pagination:         info,
 		Diagnostics:        diagnostics,
-	}, nil
+	}, tailCompactions, "", afterMessageID)
 }
 
 // ReadFileRawNewer loads newer raw (unfiltered) messages after a cursor.
@@ -425,88 +378,24 @@ func ReadFileRawNewer(path string, tailCompactions int, afterMessageID string) (
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", afterMessageID)
-
-	return &Session{
+	return paginateSession(&Session{
 		ID:                 sessionID,
-		Messages:           paginated,
+		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
-		Pagination:         info,
 		Diagnostics:        diagnostics,
-	}, nil
+	}, tailCompactions, "", afterMessageID)
 }
 
 // ReadProviderFileNewer reads a newer page of a provider-specific transcript.
-// Provider families without page-aware readers return the full provider
-// transcript.
 func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
-	switch ProviderFamily(provider) {
-	case "auggie":
-		return ReadAuggieFile(path, tailCompactions)
-	case "amp":
-		return ReadAmpFile(path, tailCompactions)
-	case "codex":
-		return ReadCodexFile(path, tailCompactions)
-	case "copilot":
-		return ReadCopilotFile(path, tailCompactions)
-	case "cursor":
-		return ReadCursorFile(path, tailCompactions)
-	case "grok":
-		return ReadGrokFile(path, tailCompactions)
-	case "kiro":
-		return ReadKiroFile(path, tailCompactions)
-	case "gemini":
-		return ReadGeminiFile(path, tailCompactions)
-	case "kimi":
-		return ReadKimiFilePage(path, tailCompactions, "", afterMessageID)
-	case "mimocode":
-		return ReadMimoCodeFile(path, tailCompactions)
-	case "opencode":
-		return ReadOpenCodeFile(path, tailCompactions)
-	case "pi":
-		return ReadPiFile(path, tailCompactions)
-	case "antigravity":
-		return ReadAntigravityFilePage(path, tailCompactions, "", afterMessageID)
-	default:
-		return ReadFileNewer(path, tailCompactions, afterMessageID)
-	}
+	return readProviderFilePage(provider, path, tailCompactions, "", afterMessageID, false)
 }
 
 // ReadProviderFileRawNewer reads a newer page of a provider-specific raw
-// transcript. Provider families without page-aware readers return the full
-// provider transcript.
+// transcript.
 func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
-	switch ProviderFamily(provider) {
-	case "auggie":
-		return ReadAuggieFile(path, tailCompactions)
-	case "amp":
-		return ReadAmpFile(path, tailCompactions)
-	case "codex":
-		return ReadCodexFile(path, tailCompactions)
-	case "copilot":
-		return ReadCopilotFile(path, tailCompactions)
-	case "cursor":
-		return ReadCursorFile(path, tailCompactions)
-	case "grok":
-		return ReadGrokFile(path, tailCompactions)
-	case "kiro":
-		return ReadKiroFile(path, tailCompactions)
-	case "gemini":
-		return ReadGeminiFile(path, tailCompactions)
-	case "kimi":
-		return ReadKimiFilePage(path, tailCompactions, "", afterMessageID)
-	case "mimocode":
-		return ReadMimoCodeFile(path, tailCompactions)
-	case "opencode":
-		return ReadOpenCodeFile(path, tailCompactions)
-	case "pi":
-		return ReadPiFile(path, tailCompactions)
-	case "antigravity":
-		return ReadAntigravityFileRawPage(path, tailCompactions, "", afterMessageID)
-	default:
-		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
-	}
+	return readProviderFilePage(provider, path, tailCompactions, "", afterMessageID, true)
 }
 
 // parseFile reads all JSONL lines from a file into entries.
@@ -564,12 +453,15 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 // included so consumers can render a "Context compacted" divider.
 func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMessageID, afterMessageID string) ([]*Entry, *PaginationInfo) {
 	totalCount := len(messages)
+	startOffset := 0
+	endOffset := totalCount
 
 	// For "load older" requests: truncate at cursor first.
 	working := messages
 	if beforeMessageID != "" {
 		for i, m := range messages {
 			if m.UUID == beforeMessageID {
+				endOffset = i
 				working = messages[:i]
 				break
 			}
@@ -580,6 +472,7 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 	if afterMessageID != "" {
 		for i, m := range working {
 			if m.UUID == afterMessageID {
+				startOffset += i + 1
 				working = working[i+1:]
 				break
 			}
@@ -589,7 +482,8 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 	// Guard: tailCompactions <= 0 means "return the working set as-is".
 	if tailCompactions <= 0 {
 		return working, &PaginationInfo{
-			HasOlderMessages:     false,
+			HasOlderMessages:     startOffset > 0,
+			HasNewerMessages:     endOffset < totalCount,
 			TotalMessageCount:    totalCount,
 			ReturnedMessageCount: len(working),
 		}
@@ -608,7 +502,8 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 	// Fewer boundaries than requested — return everything.
 	if len(compactIndices) <= tailCompactions {
 		return working, &PaginationInfo{
-			HasOlderMessages:     false,
+			HasOlderMessages:     startOffset > 0,
+			HasNewerMessages:     endOffset < totalCount,
 			TotalMessageCount:    totalCount,
 			ReturnedMessageCount: len(working),
 			TotalCompactions:     totalCompactions,
@@ -618,6 +513,7 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 	// Slice from the Nth-from-last boundary (inclusive).
 	sliceFrom := compactIndices[len(compactIndices)-tailCompactions]
 	sliced := working[sliceFrom:]
+	startOffset += sliceFrom
 
 	var truncatedBefore string
 	if len(sliced) > 0 {
@@ -625,7 +521,8 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 	}
 
 	return sliced, &PaginationInfo{
-		HasOlderMessages:       true,
+		HasOlderMessages:       startOffset > 0,
+		HasNewerMessages:       endOffset < totalCount,
 		TotalMessageCount:      totalCount,
 		ReturnedMessageCount:   len(sliced),
 		TruncatedBeforeMessage: truncatedBefore,

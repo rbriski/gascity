@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // Kimi uses MD5 as its documented workdir storage key.
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -5470,6 +5471,91 @@ func TestHandleSessionTranscriptAfterCursorRaw(t *testing.T) {
 	}
 }
 
+func TestHandleSessionTranscriptCursorPaginationMetadata(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"second\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"third\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"fourth\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{
+			name:    "city-huma",
+			path:    cityURL(fs, "/session/") + info.ID + "/transcript",
+			handler: h,
+		},
+		{
+			name:    "legacy",
+			path:    "/v0/session/" + info.ID + "/transcript",
+			handler: srv.legacySessionHandler(),
+		},
+	}
+	directions := []struct {
+		name      string
+		query     string
+		wantOlder bool
+		wantNewer bool
+	}{
+		{name: "before", query: "before=3", wantNewer: true},
+		{name: "after", query: "after=2", wantOlder: true},
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, direction := range directions {
+				t.Run(surface.name+"/"+format+"/"+direction.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					path := surface.path + "?format=" + format + "&" + direction.query
+					r := httptest.NewRequest(http.MethodGet, path, nil)
+					surface.handler.ServeHTTP(w, r)
+
+					if w.Code != http.StatusOK {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+					}
+					var response struct {
+						Pagination *sessionlog.PaginationInfo `json:"pagination"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+						t.Fatalf("decode transcript response: %v", err)
+					}
+					if response.Pagination == nil {
+						t.Fatal("pagination metadata is nil")
+					}
+					if response.Pagination.TotalMessageCount != 4 || response.Pagination.ReturnedMessageCount != 2 {
+						t.Fatalf("pagination = %+v, want total=4 returned=2", response.Pagination)
+					}
+					if response.Pagination.HasOlderMessages != direction.wantOlder || response.Pagination.HasNewerMessages != direction.wantNewer {
+						t.Fatalf("pagination flags = older:%t newer:%t, want older:%t newer:%t", response.Pagination.HasOlderMessages, response.Pagination.HasNewerMessages, direction.wantOlder, direction.wantNewer)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -5503,12 +5589,11 @@ func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	}
 }
 
-func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
+func TestHandleSessionTranscriptMissingCursorReturnsConflict(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
@@ -5528,20 +5613,388 @@ func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?after=nonexistent", nil)
-	h.ServeHTTP(w, r)
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{
+			name:    "city-huma",
+			path:    cityURL(fs, "/session/") + info.ID + "/transcript",
+			handler: h,
+		},
+		{
+			name:    "legacy",
+			path:    "/v0/session/" + info.ID + "/transcript",
+			handler: srv.legacySessionHandler(),
+		},
+	}
+	formats := []string{"conversation", "raw", "structured"}
+	directions := []string{"before", "after"}
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	for _, surface := range surfaces {
+		for _, format := range formats {
+			for _, direction := range directions {
+				t.Run(surface.name+"/"+format+"/"+direction, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					path := surface.path + "?format=" + format + "&" + direction + "=nonexistent"
+					r := httptest.NewRequest(http.MethodGet, path, nil)
+					surface.handler.ServeHTTP(w, r)
+
+					if w.Code != http.StatusConflict {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+					}
+					if got := strings.Split(w.Header().Get("Content-Type"), ";")[0]; got != "application/problem+json" {
+						t.Fatalf("Content-Type = %q, want application/problem+json", w.Header().Get("Content-Type"))
+					}
+
+					var problem struct {
+						Type   string `json:"type"`
+						Title  string `json:"title"`
+						Status int    `json:"status"`
+						Detail string `json:"detail"`
+						Code   string `json:"code"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+						t.Fatalf("decode problem details: %v", err)
+					}
+					if problem.Type != "urn:gascity:error:transcript-cursor-invalidated" {
+						t.Errorf("type = %q, want transcript cursor invalidation URN", problem.Type)
+					}
+					if problem.Code != "transcript-cursor-invalidated" {
+						t.Errorf("code = %q, want transcript-cursor-invalidated", problem.Code)
+					}
+					if problem.Title != "Transcript Cursor Invalidated" {
+						t.Errorf("title = %q, want Transcript Cursor Invalidated", problem.Title)
+					}
+					if problem.Status != http.StatusConflict {
+						t.Errorf("problem status = %d, want %d", problem.Status, http.StatusConflict)
+					}
+					if !strings.Contains(problem.Detail, "nonexistent") {
+						t.Errorf("detail = %q, want missing cursor", problem.Detail)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSessionTranscriptAndStreamDuplicateEntryIDReturnsConflict(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "copilot",
+		WorkDir:  workDir,
+		Provider: "copilot",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
 
-	var resp SessionStreamMessageEvent
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	path := filepath.Join(searchBase, "copilot-session", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir Copilot fixture: %v", err)
 	}
-	if len(resp.Turns) != 2 {
-		t.Fatalf("got %d turns, want 2 (cursor not found = full set)", len(resp.Turns))
+	body := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session.start","data":{"cwd":%q}}`, workDir),
+		`{"type":"user.message","data":{"content":"zero"},"id":"duplicate"}`,
+		`{"type":"assistant.message","data":{"content":"one"},"id":"duplicate"}`,
+		`{"type":"user.message","data":{"content":"two"},"id":"copilot-2"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write Copilot fixture: %v", err)
+	}
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/transcript", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/transcript", handler: srv.legacySessionHandler()},
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, direction := range []string{"before", "after"} {
+				t.Run(surface.name+"/"+format+"/"+direction, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					r := httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+direction+"=duplicate", nil)
+					surface.handler.ServeHTTP(w, r)
+
+					if w.Code != http.StatusConflict {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+					}
+					if got := strings.Split(w.Header().Get("Content-Type"), ";")[0]; got != "application/problem+json" {
+						t.Fatalf("Content-Type = %q, want application/problem+json", w.Header().Get("Content-Type"))
+					}
+					var problem struct {
+						Code   string `json:"code"`
+						Detail string `json:"detail"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+						t.Fatalf("decode problem details: %v", err)
+					}
+					if problem.Code != "transcript-cursor-invalidated" {
+						t.Fatalf("problem code = %q, want transcript-cursor-invalidated", problem.Code)
+					}
+					if !strings.Contains(problem.Detail, "duplicate") {
+						t.Fatalf("detail = %q, want duplicate entry ID", problem.Detail)
+					}
+				})
+			}
+		}
+	}
+
+	streamSurfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/stream", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/stream", handler: srv.legacySessionHandler()},
+	}
+	for _, surface := range streamSurfaces {
+		t.Run(surface.name+"/stream", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, surface.path+"?format=structured", nil)
+			surface.handler.ServeHTTP(w, r)
+
+			if w.Code != http.StatusConflict {
+				t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+			}
+			if got := strings.Split(w.Header().Get("Content-Type"), ";")[0]; got != "application/problem+json" {
+				t.Fatalf("Content-Type = %q, want application/problem+json", w.Header().Get("Content-Type"))
+			}
+			var problem struct {
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+				t.Fatalf("decode problem details: %v", err)
+			}
+			if problem.Code != "transcript-cursor-invalidated" {
+				t.Fatalf("problem code = %q, want transcript-cursor-invalidated", problem.Code)
+			}
+			if !strings.Contains(problem.Detail, "duplicate") {
+				t.Fatalf("detail = %q, want duplicate entry ID", problem.Detail)
+			}
+		})
+	}
+}
+
+func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesOnRewrite(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "kimi",
+		WorkDir:  workDir,
+		Provider: "kimi",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	workHash := fmt.Sprintf("%x", md5.Sum([]byte(filepath.Clean(workDir))))
+	sessionDir := info.SessionKey
+	if sessionDir == "" {
+		sessionDir = "kimi-session"
+	}
+	path := filepath.Join(searchBase, workHash, sessionDir, "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir Kimi fixture: %v", err)
+	}
+	write := func(lines ...string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatalf("write Kimi fixture: %v", err)
+		}
+	}
+	initialLines := []string{
+		`{"role":"user","content":"zero"}`,
+		`{"role":"assistant","content":"one"}`,
+		`{"role":"user","content":"two"}`,
+	}
+	write(initialLines...)
+	initial, err := sessionlog.ReadProviderFile("kimi", path, 0)
+	if err != nil {
+		t.Fatalf("read initial Kimi fixture: %v", err)
+	}
+	if len(initial.Messages) != 3 {
+		t.Fatalf("initial Kimi messages = %d, want 3", len(initial.Messages))
+	}
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
+	}
+	discoveredPath, err := handle.TranscriptPath(context.Background())
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if discoveredPath != path {
+		t.Fatalf("discovered transcript path = %q, want %q", discoveredPath, path)
+	}
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/transcript", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/transcript", handler: srv.legacySessionHandler()},
+	}
+	directions := []struct {
+		name      string
+		cursor    string
+		wantOlder bool
+		wantNewer bool
+	}{
+		{name: "before", cursor: initial.Messages[2].UUID, wantNewer: true},
+		{name: "after", cursor: initial.Messages[1].UUID, wantOlder: true},
+	}
+	replacementLines := []string{
+		`{"role":"user","content":"replacement zero"}`,
+		`{"role":"assistant","content":"replacement one"}`,
+		`{"role":"user","content":"replacement two"}`,
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, direction := range directions {
+				t.Run(surface.name+"/"+format+"/"+direction.name, func(t *testing.T) {
+					write(initialLines[1:]...)
+					w := httptest.NewRecorder()
+					r := httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+direction.name+"="+direction.cursor, nil)
+					surface.handler.ServeHTTP(w, r)
+					if w.Code != http.StatusOK {
+						t.Fatalf("truncated transcript status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+					}
+					var response struct {
+						Pagination *sessionlog.PaginationInfo `json:"pagination"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+						t.Fatalf("decode truncated transcript: %v", err)
+					}
+					if response.Pagination == nil || response.Pagination.TotalMessageCount != 2 || response.Pagination.ReturnedMessageCount != 1 {
+						t.Fatalf("truncated pagination = %+v, want total=2 returned=1", response.Pagination)
+					}
+					if response.Pagination.HasOlderMessages != direction.wantOlder || response.Pagination.HasNewerMessages != direction.wantNewer {
+						t.Fatalf("truncated pagination flags = older:%t newer:%t, want older:%t newer:%t", response.Pagination.HasOlderMessages, response.Pagination.HasNewerMessages, direction.wantOlder, direction.wantNewer)
+					}
+
+					write(replacementLines...)
+					w = httptest.NewRecorder()
+					r = httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+direction.name+"="+direction.cursor, nil)
+					surface.handler.ServeHTTP(w, r)
+					if w.Code != http.StatusConflict {
+						t.Fatalf("rewritten transcript status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+					}
+					var problem struct {
+						Code string `json:"code"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+						t.Fatalf("decode rewritten transcript problem: %v", err)
+					}
+					if problem.Code != "transcript-cursor-invalidated" {
+						t.Fatalf("rewritten transcript problem code = %q, want transcript-cursor-invalidated", problem.Code)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestHandleSessionTranscriptNoHistoryStillValidatesCursors(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/transcript", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/transcript", handler: srv.legacySessionHandler()},
+	}
+	cases := []struct {
+		name       string
+		query      string
+		wantStatus int
+	}{
+		{name: "conflicting", query: "before=older&after=newer", wantStatus: http.StatusUnprocessableEntity},
+		{name: "missing-before", query: "before=missing", wantStatus: http.StatusConflict},
+		{name: "missing-after", query: "after=missing", wantStatus: http.StatusConflict},
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, tc := range cases {
+				t.Run(surface.name+"/"+format+"/"+tc.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					r := httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+tc.query, nil)
+					surface.handler.ServeHTTP(w, r)
+					if w.Code != tc.wantStatus {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, tc.wantStatus, w.Body.String())
+					}
+					if tc.wantStatus == http.StatusConflict {
+						var problem struct {
+							Code string `json:"code"`
+						}
+						if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+							t.Fatalf("decode problem details: %v", err)
+						}
+						if problem.Code != "transcript-cursor-invalidated" {
+							t.Fatalf("problem code = %q, want transcript-cursor-invalidated", problem.Code)
+						}
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -6727,6 +7180,100 @@ func TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute(t *testing.T) {
 	}
 }
 
+func TestSessionStreamStructuredHistoryStallEmitsPending(t *testing.T) {
+	prevStallTimeout := sessionStreamPendingStallTimeout
+	sessionStreamPendingStallTimeout = 10 * time.Second
+	defer func() {
+		sessionStreamPendingStallTimeout = prevStallTimeout
+	}()
+
+	for _, route := range []struct {
+		name string
+		city bool
+	}{
+		{name: "legacy"},
+		{name: "huma-city", city: true},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			searchBase := t.TempDir()
+			srv := New(fs)
+			srv.sessionLogSearchPaths = []string{searchBase}
+			var handler http.Handler = srv
+			if route.city {
+				handler = newTestCityHandlerWith(t, fs, srv)
+			}
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			resume := session.ProviderResume{
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			}
+			workDir := t.TempDir()
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+				`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+				`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+			)
+			fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+				RequestID: "req-structured-1",
+				Kind:      "approval",
+				Prompt:    "Proceed?",
+			})
+
+			path := "/v0/session/" + info.ID + "/stream?format=structured"
+			if route.city {
+				path = cityURL(fs, "/session/") + info.ID + "/stream?format=structured"
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+			rec := newSyncResponseRecorder()
+			done := make(chan struct{})
+			go func() {
+				handler.ServeHTTP(rec, req)
+				close(done)
+			}()
+
+			if body := waitForRecorderSubstring(t, rec, `"structured_messages"`, time.Second); !strings.Contains(body, `"operation":"snapshot"`) {
+				t.Fatalf("structured stream body missing initial history snapshot: %s", body)
+			}
+			_ = waitForRecorderSubstring(t, rec, "req-structured-1", time.Second)
+			fs.sp.SetPendingInteraction(info.SessionName, nil)
+			logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+			logFile, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+			if openErr != nil {
+				t.Fatalf("open transcript for pending resolution: %v", openErr)
+			}
+			_, writeErr := fmt.Fprintln(logFile, `{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"resolved\"}","timestamp":"2025-01-01T00:00:02Z"}`)
+			closeErr := logFile.Close()
+			if writeErr != nil {
+				t.Fatalf("append resolved transcript entry: %v", writeErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("close resolved transcript entry: %v", closeErr)
+			}
+			body := waitForRecorderSubstring(t, rec, "event: pending_cleared", time.Second)
+			cancel()
+			<-done
+
+			if !strings.Contains(body, "event: pending") {
+				t.Fatalf("structured history stream missing pending SSE event: %s", body)
+			}
+			if !strings.Contains(body, "event: pending_cleared") {
+				t.Fatalf("structured history stream missing pending-cleared SSE event: %s", body)
+			}
+			if !strings.Contains(body, `"request_id":"req-structured-1"`) {
+				t.Fatalf("structured history stream pending-cleared event missing request ID: %s", body)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStreamRawRunningSessionWithoutTranscriptOpensImmediately(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -7125,10 +7672,10 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	if resp.History == nil || resp.History.TranscriptStreamID == "" {
 		t.Fatalf("structured transcript missing history envelope: %+v", resp.History)
 	}
-	if len(resp.StructuredMessages) != 2 {
-		t.Fatalf("got %d structured messages, want 2; body: %s", len(resp.StructuredMessages), w.Body.String())
+	if len(structuredTranscriptMessages(resp)) != 2 {
+		t.Fatalf("got %d structured messages, want 2; body: %s", len(structuredTranscriptMessages(resp)), w.Body.String())
 	}
-	first := resp.StructuredMessages[0]
+	first := structuredTranscriptMessages(resp)[0]
 	if len(first.Blocks) != 1 || first.Blocks[0].Type != "tool_use" || first.Blocks[0].Name != "apply_patch" {
 		t.Fatalf("first structured message blocks = %+v, want apply_patch tool_use", first.Blocks)
 	}
@@ -7141,7 +7688,7 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	if !strings.Contains(first.Blocks[0].Input.Patch, "Created by Chris Sells") {
 		t.Fatalf("tool input lost patch payload: %+v", first.Blocks[0].Input)
 	}
-	second := resp.StructuredMessages[1]
+	second := structuredTranscriptMessages(resp)[1]
 	if len(second.Blocks) != 1 || second.Blocks[0].Type != "tool_result" {
 		t.Fatalf("second structured message blocks = %+v, want tool_result", second.Blocks)
 	}

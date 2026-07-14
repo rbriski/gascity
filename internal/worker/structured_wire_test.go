@@ -57,20 +57,27 @@ func TestScanForbiddenTokensFindsLeaksAndExtras(t *testing.T) {
 }
 
 type wireSample struct {
-	ID       string           `json:"id"`
-	Hidden   string           `json:"-"`
-	internal string           //nolint:unused // exercises unexported-field skipping
-	Nested   *wireSampleLeaf  `json:"nested,omitempty"`
-	Items    []wireSampleLeaf `json:"items,omitempty"`
+	ID        string               `json:"id"`
+	Text      string               `json:"text,omitempty"`
+	Arguments []wireSampleArgument `json:"arguments,omitempty"`
+	Hidden    string               `json:"-"`
+	internal  string               //nolint:unused // exercises unexported-field skipping
+	Nested    *wireSampleLeaf      `json:"nested,omitempty"`
+	Items     []wireSampleLeaf     `json:"items,omitempty"`
 }
 
 type wireSampleLeaf struct {
 	Kind string `json:"kind"`
 }
 
+type wireSampleArgument struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 func TestNeutralWireKeysWalksTheTypeTree(t *testing.T) {
 	allowed := NeutralWireKeys(reflect.TypeOf(wireSample{}))
-	for _, want := range []string{"id", "nested", "items", "kind"} {
+	for _, want := range []string{"id", "text", "arguments", "name", "value", "nested", "items", "kind"} {
 		if _, ok := allowed[want]; !ok {
 			t.Fatalf("expected key %q in allowlist, got %v", want, allowed)
 		}
@@ -80,6 +87,33 @@ func TestNeutralWireKeysWalksTheTypeTree(t *testing.T) {
 	}
 	if _, ok := allowed["internal"]; ok {
 		t.Fatal("unexported field must not contribute a key")
+	}
+}
+
+func TestUnexpectedWireKeysDescendsIntoJSONStringArgumentValues(t *testing.T) {
+	allowed := NeutralWireKeys(reflect.TypeOf(wireSample{}))
+	wire := []byte(`{"id":"a","arguments":[{"name":"action","value":"[{\"someBrandNewProviderKey\":{\"deepNativeKey\":true}}]"}]}`)
+
+	unexpected, err := UnexpectedWireKeys(wire, allowed)
+	if err != nil {
+		t.Fatalf("scan string carrier: %v", err)
+	}
+	want := []string{"deepNativeKey", "someBrandNewProviderKey"}
+	if !reflect.DeepEqual(unexpected, want) {
+		t.Fatalf("UnexpectedWireKeys() = %v, want nested stringified keys %v", unexpected, want)
+	}
+}
+
+func TestUnexpectedWireKeysLeavesTypedJSONTextOpaque(t *testing.T) {
+	allowed := NeutralWireKeys(reflect.TypeOf(wireSample{}))
+	wire := []byte(`{"id":"a","text":"{\"user_supplied\":{\"nested\":true}}"}`)
+
+	unexpected, err := UnexpectedWireKeys(wire, allowed)
+	if err != nil {
+		t.Fatalf("scan typed text carrier: %v", err)
+	}
+	if unexpected != nil {
+		t.Fatalf("typed text carrier flagged keys: %v", unexpected)
 	}
 }
 

@@ -39,11 +39,10 @@ export async function fetchSupervisorSessionTranscript(
 }
 
 /**
- * Fetch a session transcript as `format=structured`, translating at the edge:
- * the vendored client types the response without the structured fields, so the
- * runtime payload is validated with the dashboard-owned guard. Returns null
- * when the server fell back to a non-structured response (the caller then
- * renders the conversation transcript instead).
+ * Fetch a session transcript as `format=structured` and narrow the generated
+ * response union at the edge. Returns null when the server fell back to a
+ * non-structured response (the caller then renders the conversation transcript
+ * instead).
  */
 export async function fetchStructuredTranscript(
   sessionId: string,
@@ -53,7 +52,17 @@ export async function fetchStructuredTranscript(
     sessionId,
     'structured',
   );
-  return isSessionStructuredEvent(transcript) ? transcript : null;
+  return structuredTranscriptOrNull(transcript);
+}
+
+export function structuredTranscriptOrNull(
+  transcript: SessionTranscriptGetResponse,
+): SessionStreamStructuredMessageEvent | null {
+  if (transcript.format !== 'structured') return null;
+  if (!isSessionStructuredEvent(transcript)) {
+    throw new Error('Malformed structured transcript response.');
+  }
+  return transcript;
 }
 
 export function normalizeSessions(list: ListBodySessionResponse): DashboardSession[] {

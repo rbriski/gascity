@@ -382,16 +382,18 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 // discriminated union so generated clients never see raw provider frames on
 // the structured response branch.
 type sessionTranscriptGetResponse struct {
-	ID                 string                     `json:"id"`
-	Template           string                     `json:"template"`
-	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
-	Format             string                     `json:"format" doc:"conversation, text, raw, or structured."`
-	SchemaVersion      string                     `json:"schema_version,omitempty" doc:"Structured session transcript schema version when format is structured."`
-	History            *SessionStructuredHistory  `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
-	Turns              []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages           []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
-	StructuredMessages []SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
-	Pagination         *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	ID                 string                      `json:"id"`
+	Template           string                      `json:"template"`
+	Provider           string                      `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format             string                      `json:"format" doc:"conversation, text, raw, or structured."`
+	SchemaVersion      string                      `json:"schema_version,omitempty" doc:"Structured session transcript schema version when format is structured."`
+	Operation          string                      `json:"operation,omitempty" doc:"Structured response application mode. REST structured transcripts are snapshots."`
+	ResetReason        string                      `json:"reset_reason,omitempty" doc:"Structured reset reason when operation is reset."`
+	History            *SessionStructuredHistory   `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
+	Turns              []outputTurn                `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
+	Messages           []SessionRawMessageFrame    `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
+	Pagination         *sessionlog.PaginationInfo  `json:"pagination,omitempty"`
 }
 
 type sessionTranscriptConversationResponse struct {
@@ -417,10 +419,30 @@ type sessionTranscriptStructuredResponse struct {
 	Template           string                     `json:"template"`
 	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
 	Format             string                     `json:"format" enum:"structured" doc:"Structured provider-neutral transcript format."`
-	SchemaVersion      string                     `json:"schema_version" doc:"Structured session transcript schema version."`
-	History            *SessionStructuredHistory  `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
+	SchemaVersion      string                     `json:"schema_version" enum:"session.structured.v1" doc:"Structured session transcript schema version."`
+	Operation          string                     `json:"operation" enum:"snapshot" doc:"Always snapshot for a REST structured transcript."`
+	History            *SessionStructuredHistory  `json:"history" doc:"Normalized worker-history envelope when format is structured."`
 	StructuredMessages []SessionStructuredMessage `json:"structured_messages" doc:"Provider-normalized structured messages."`
 	Pagination         *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+func nonNilStructuredMessages(messages []SessionStructuredMessage) []SessionStructuredMessage {
+	if messages == nil {
+		return []SessionStructuredMessage{}
+	}
+	return messages
+}
+
+func structuredMessagesField(messages []SessionStructuredMessage) *[]SessionStructuredMessage {
+	messages = nonNilStructuredMessages(messages)
+	return &messages
+}
+
+func structuredTranscriptMessages(response sessionTranscriptGetResponse) []SessionStructuredMessage {
+	if response.StructuredMessages == nil {
+		return nil
+	}
+	return *response.StructuredMessages
 }
 
 // Schema publishes session transcript responses as a discriminated union over

@@ -75,7 +75,6 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	patchApplyResults := collectCodexPatchApplyResults(entries)
 
 	var messages []*Entry
-	idx := 0
 	var lastUUID string
 	toolContexts := make(map[string]codexToolCallContext)
 
@@ -84,12 +83,11 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 
 		switch e.raw.Type {
 		case "response_item":
-			entry := convertResponseItem(e.raw.Payload, e.line, idx, ts, patchApplyResults, toolContexts)
+			entry := convertResponseItem(e.raw.Payload, e.line, ts, patchApplyResults, toolContexts)
 			if entry != nil {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
-				idx++
 			}
 
 		case "event_msg":
@@ -103,7 +101,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 					continue // prefer response_item user messages
 				}
 				entry := &Entry{
-					UUID:      fmt.Sprintf("codex-event-%d", idx),
+					UUID:      stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
 					Type:      "user",
 					Timestamp: ts,
 					Message:   mustMarshal(MessageContent{Role: "user", Content: mustMarshal(em.Message)}),
@@ -112,7 +110,6 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
-				idx++
 
 			case "agent_message":
 				// Skip — response_item has the complete text.
@@ -121,7 +118,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 					continue
 				}
 				entry := &Entry{
-					UUID:      fmt.Sprintf("codex-event-%d", idx),
+					UUID:      stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
 					Type:      "assistant",
 					Timestamp: ts,
 					Message: mustMarshal(MessageContent{
@@ -133,11 +130,10 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
-				idx++
 
 			case "agent_reasoning":
 				entry := &Entry{
-					UUID:      fmt.Sprintf("codex-event-%d", idx),
+					UUID:      stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
 					Type:      "assistant",
 					Timestamp: ts,
 					Message: mustMarshal(MessageContent{
@@ -149,12 +145,11 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
-				idx++
 
 			case "error", "stream_error", "turn_aborted":
 				systemEvent := codexSystemEvent(em)
 				entry := &Entry{
-					UUID:        fmt.Sprintf("codex-event-%d", idx),
+					UUID:        stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
 					Type:        "system",
 					Subtype:     systemEvent.Kind,
 					Timestamp:   ts,
@@ -168,7 +163,6 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
-				idx++
 
 			default:
 				continue
@@ -183,13 +177,13 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}, nil
 }
 
-func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext) *Entry {
+func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext) *Entry {
 	var ri codexResponseItem
 	if json.Unmarshal(payload, &ri) != nil {
 		return nil
 	}
 
-	uuid := fmt.Sprintf("codex-%d", idx)
+	uuid := stableSyntheticEntryID("codex", []byte(rawLine), "response_item:"+ri.Type)
 
 	switch ri.Type {
 	case "message":

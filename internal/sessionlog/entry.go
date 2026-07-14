@@ -50,7 +50,8 @@ type Entry struct {
 	SessionID string    `json:"sessionId,omitempty"`
 
 	// Raw preserves the full JSON line for pass-through to API consumers.
-	Raw json.RawMessage `json:"-"`
+	Raw         json.RawMessage `json:"-"`
+	RawRecordID string          `json:"-"`
 }
 
 // SystemEvent carries provider-neutral system event metadata extracted from a

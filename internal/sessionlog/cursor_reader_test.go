@@ -133,6 +133,127 @@ func TestReadCursorFileSkipsPartialAssistantFlushes(t *testing.T) {
 	}
 }
 
+func TestReadCursorFileUsesNativeAndStableSyntheticEntryIDs(t *testing.T) {
+	generation := `{"type":"user","generation_id":"generation-native","message":{"role":"user","content":"generation"},"session_id":"cursor-ids"}`
+	call := `{"type":"assistant","call_id":"call-native","message":{"role":"assistant","content":"call"},"session_id":"cursor-ids"}`
+	topLevel := `{"id":"event-native","type":"assistant","message":{"role":"assistant","content":"event"},"session_id":"cursor-ids"}`
+	nestedTool := `{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"toolCallId":"tool-native","args":{"path":"README.md"}}},"session_id":"cursor-ids"}`
+	synthetic := `{"type":"assistant","message":{"role":"assistant","content":"synthetic"},"session_id":"cursor-ids"}`
+	multipart := `{"hook_event_name":"afterFileEdit","file_path":"notes.txt","new_text":"updated","session_id":"cursor-ids"}`
+	path := writeCursorJSONL(t, generation, call, topLevel, nestedTool, synthetic, multipart)
+
+	session, err := ReadCursorFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCursorFile() error = %v", err)
+	}
+	if got := len(session.Messages); got != 7 {
+		t.Fatalf("len(Messages) = %d, want five single entries plus tool use/result", got)
+	}
+	if got, want := session.Messages[0].UUID, stableSyntheticEntryID("cursor", []byte(generation), ""); got != want {
+		t.Fatalf("generation-scoped entry UUID = %q, want stable record ID %q", got, want)
+	}
+	if got, want := session.Messages[1].UUID, stableSyntheticEntryID("cursor", []byte(call), ""); got != want {
+		t.Fatalf("call entry UUID = %q, want record-derived entry ID %q", got, want)
+	}
+	if got := session.Messages[2].UUID; got != "event-native" {
+		t.Fatalf("top-level entry UUID = %q, want native event ID", got)
+	}
+	if got, want := session.Messages[3].UUID, stableSyntheticEntryID("cursor", []byte(nestedTool), "use"); got != want {
+		t.Fatalf("tool entry UUID = %q, want record-derived entry ID %q", got, want)
+	}
+	toolBlocks := session.Messages[3].ContentBlocks()
+	if len(toolBlocks) != 1 || toolBlocks[0].ID != "tool-native" {
+		t.Fatalf("tool blocks = %+v, want native tool call ID", toolBlocks)
+	}
+	if got, want := session.Messages[4].UUID, stableSyntheticEntryID("cursor", []byte(synthetic), ""); got != want {
+		t.Fatalf("id-less message UUID = %q, want %q", got, want)
+	}
+	if got, want := session.Messages[5].UUID, stableSyntheticEntryID("cursor", []byte(multipart), "use"); got != want {
+		t.Fatalf("id-less tool-use UUID = %q, want %q", got, want)
+	}
+	if got, want := session.Messages[6].UUID, stableSyntheticEntryID("cursor", []byte(multipart), "result"); got != want {
+		t.Fatalf("id-less tool-result UUID = %q, want %q", got, want)
+	}
+	if session.Messages[5].UUID == session.Messages[6].UUID {
+		t.Fatalf("multipart tool entries share UUID %q", session.Messages[5].UUID)
+	}
+}
+
+func TestReadCursorFileDoesNotUseGenerationIDAsEntryIdentity(t *testing.T) {
+	first := `{"hook_event_name":"beforeShellExecution","generation_id":"generation-shared","command":"go test ./internal/api","session_id":"cursor-generation"}`
+	second := `{"hook_event_name":"beforeShellExecution","generation_id":"generation-shared","command":"go test ./internal/worker","session_id":"cursor-generation"}`
+	result := `{"hook_event_name":"afterShellExecution","generation_id":"generation-shared","command":"go test ./internal/api","stdout":"ok","exit_code":0,"session_id":"cursor-generation"}`
+	path := writeCursorJSONL(t, first, second, result)
+
+	session, err := ReadCursorFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCursorFile() error = %v", err)
+	}
+	if got := len(session.Messages); got != 3 {
+		t.Fatalf("len(Messages) = %d, want two tool-use entries and one result", got)
+	}
+	wantEntryIDs := []string{
+		stableSyntheticEntryID("cursor", []byte(first), "use"),
+		stableSyntheticEntryID("cursor", []byte(second), "use"),
+		stableSyntheticEntryID("cursor", []byte(result), "result"),
+	}
+	wantToolIDs := []string{
+		stableSyntheticEntryID("cursor-tool", []byte(first), ""),
+		stableSyntheticEntryID("cursor-tool", []byte(second), ""),
+		stableSyntheticEntryID("cursor-tool", []byte(result), ""),
+	}
+	for i, entry := range session.Messages {
+		if entry.UUID != wantEntryIDs[i] {
+			t.Fatalf("generation entry %d UUID = %q, want %q", i, entry.UUID, wantEntryIDs[i])
+		}
+		blocks := entry.ContentBlocks()
+		if len(blocks) != 1 {
+			t.Fatalf("generation entry %d blocks = %+v, want one tool block", i, blocks)
+		}
+		toolID := blocks[0].ID
+		if blocks[0].Type == "tool_result" {
+			toolID = blocks[0].ToolUseID
+		}
+		if toolID != wantToolIDs[i] {
+			t.Fatalf("generation entry %d tool ID = %q, want unique record ID %q", i, toolID, wantToolIDs[i])
+		}
+	}
+	if session.Messages[0].UUID == session.Messages[1].UUID {
+		t.Fatalf("generation-scoped hooks share entry UUID %q", session.Messages[0].UUID)
+	}
+}
+
+func TestReadCursorFileKeepsEntryAndToolIdentityDomainsDistinct(t *testing.T) {
+	numericID := `{"id":1,"type":"assistant","message":{"role":"assistant","content":"numeric"},"session_id":"cursor-aliases"}`
+	nativeStringID := `{"id":"cursor-tool-1","type":"assistant","message":{"role":"assistant","content":"native string"},"session_id":"cursor-aliases"}`
+	toolCall := `{"hook_event_name":"beforeShellExecution","call_id":"x","command":"go test ./internal/api","session_id":"cursor-aliases"}`
+	nativeSuffixID := `{"id":"x-use","type":"assistant","message":{"role":"assistant","content":"native suffix"},"session_id":"cursor-aliases"}`
+	path := writeCursorJSONL(t, numericID, nativeStringID, toolCall, nativeSuffixID)
+
+	session, err := ReadCursorFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCursorFile() error = %v", err)
+	}
+	if got := len(session.Messages); got != 4 {
+		t.Fatalf("len(Messages) = %d, want four distinguishable records", got)
+	}
+	wantEntryIDs := []string{
+		stableSyntheticEntryID("cursor", []byte(numericID), ""),
+		"cursor-tool-1",
+		stableSyntheticEntryID("cursor", []byte(toolCall), "use"),
+		"x-use",
+	}
+	for i, want := range wantEntryIDs {
+		if got := session.Messages[i].UUID; got != want {
+			t.Fatalf("entry %d UUID = %q, want %q", i, got, want)
+		}
+	}
+	blocks := session.Messages[2].ContentBlocks()
+	if len(blocks) != 1 || blocks[0].ID != "x" {
+		t.Fatalf("tool blocks = %+v, want call correlation ID x", blocks)
+	}
+}
+
 func TestReadProviderFileUsesCursorReader(t *testing.T) {
 	path := writeCursorJSONL(t,
 		`{"type":"system","subtype":"init","cwd":"/work/project","session_id":"dispatch-session"}`,

@@ -964,6 +964,7 @@ export const zPackListBody = z.object({
 });
 
 export const zPaginationInfo = z.object({
+    has_newer_messages: z.boolean().optional(),
     has_older_messages: z.boolean(),
     returned_message_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     total_compactions: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
@@ -1600,6 +1601,10 @@ export const zSessionPatchBody = z.object({
     title: z.string().min(1).optional()
 });
 
+export const zSessionPendingClearedEvent = z.object({
+    request_id: z.string()
+});
+
 export const zSessionPendingResponse = z.object({
     pending: zPendingInteraction.optional(),
     supported: z.boolean()
@@ -1649,11 +1654,12 @@ export const zSessionStrandedPayload = z.object({
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
 export const zSessionStreamCommonEvent = z.union([
     zSessionActivityEvent,
     zPendingInteraction,
+    zSessionPendingClearedEvent,
     zHeartbeatEvent
 ]);
 
@@ -1680,6 +1686,34 @@ export const zSessionStructuredArgument = z.object({
     value: z.string()
 });
 
+/**
+ * SessionStructuredBlockImage
+ */
+export const zSessionStructuredBlockImage = z.object({
+    file_path: z.string().optional(),
+    image_url: z.string().optional(),
+    mime_type: z.string().optional(),
+    text: z.string().optional(),
+    type: z.literal('image')
+});
+
+/**
+ * SessionStructuredBlockText
+ */
+export const zSessionStructuredBlockText = z.object({
+    text: z.string().optional(),
+    type: z.literal('text')
+});
+
+/**
+ * SessionStructuredBlockThinking
+ */
+export const zSessionStructuredBlockThinking = z.object({
+    signature: z.string().optional(),
+    thinking: z.string().optional(),
+    type: z.literal('thinking')
+});
+
 export const zSessionStructuredContinuity = z.object({
     compaction_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     has_branches: z.boolean().optional(),
@@ -1688,7 +1722,8 @@ export const zSessionStructuredContinuity = z.object({
 });
 
 export const zSessionStructuredCursor = z.object({
-    after_entry_id: z.string().optional()
+    after_entry_id: z.string().optional(),
+    resume_token: z.string()
 });
 
 export const zSessionStructuredDiagnostic = z.object({
@@ -1713,6 +1748,14 @@ export const zSessionStructuredInteraction = z.object({
     prompt: z.string().optional(),
     request_id: z.string().optional(),
     state: z.string()
+});
+
+/**
+ * SessionStructuredBlockInteraction
+ */
+export const zSessionStructuredBlockInteraction = z.object({
+    interaction: zSessionStructuredInteraction.optional(),
+    type: z.literal('interaction')
 });
 
 export const zSessionStructuredPatchHunk = z.object({
@@ -1784,19 +1827,166 @@ export const zSessionStructuredTodoItem = z.object({
 });
 
 export const zSessionStructuredToolError = z.object({
-    category: z.string().optional(),
+    category: z.enum([
+        'user_rejection',
+        'user_rejection_with_reason',
+        'command_failure',
+        'file_error',
+        'validation_error',
+        'timeout',
+        'network_error',
+        'unknown'
+    ]),
     message: z.string().optional(),
     user_reason: z.string().optional()
 });
 
-export const zSessionStructuredToolInput = z.object({
+/**
+ * SessionStructuredToolInputArguments
+ */
+export const zSessionStructuredToolInputArguments = z.object({
+    arguments: z.array(zSessionStructuredArgument),
+    kind: z.literal('arguments')
+});
+
+/**
+ * SessionStructuredToolInputCode
+ */
+export const zSessionStructuredToolInputCode = z.object({
+    code: z.string(),
+    kind: z.literal('code'),
+    language: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputCommand
+ */
+export const zSessionStructuredToolInputCommand = z.object({
+    arguments: z.array(zSessionStructuredArgument).nullish(),
+    command: z.string(),
+    kind: z.literal('command')
+});
+
+/**
+ * SessionStructuredToolInputFetch
+ */
+export const zSessionStructuredToolInputFetch = z.object({
+    kind: z.literal('fetch'),
+    prompt: z.string().optional(),
+    url: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputFile
+ */
+export const zSessionStructuredToolInputFile = z.object({
+    command: z.string().optional(),
+    file_path: z.string(),
+    kind: z.literal('file'),
+    language: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputGlob
+ */
+export const zSessionStructuredToolInputGlob = z.object({
+    arguments: z.array(zSessionStructuredArgument).nullish(),
+    file_path: z.string().optional(),
+    kind: z.literal('glob'),
+    pattern: z.string().optional(),
+    query: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputPatch
+ */
+export const zSessionStructuredToolInputPatch = z.object({
+    file_path: z.string().optional(),
+    kind: z.literal('patch'),
+    language: z.string().optional(),
+    patch: z.string()
+});
+
+/**
+ * SessionStructuredToolInputPlan
+ */
+export const zSessionStructuredToolInputPlan = z.object({
+    explanation: z.string().optional(),
+    kind: z.literal('plan'),
+    plan: z.string().optional(),
+    steps: z.array(zSessionStructuredPlanStep).nullish()
+});
+
+/**
+ * SessionStructuredToolInputQuestion
+ */
+export const zSessionStructuredToolInputQuestion = z.object({
+    kind: z.literal('question'),
+    options: z.array(z.string()).nullish(),
+    question: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputSearch
+ */
+export const zSessionStructuredToolInputSearch = z.object({
+    arguments: z.array(zSessionStructuredArgument).nullish(),
+    command: z.string().optional(),
+    file_path: z.string().optional(),
+    kind: z.literal('search'),
+    pattern: z.string().optional(),
+    query: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputStdin
+ */
+export const zSessionStructuredToolInputStdin = z.object({
+    kind: z.literal('stdin'),
+    linked_command: z.string().optional(),
+    task_id: z.string().optional(),
+    text: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputTask
+ */
+export const zSessionStructuredToolInputTask = z.object({
+    description: z.string().optional(),
+    kind: z.literal('task'),
+    prompt: z.string().optional(),
+    task_id: z.string().optional(),
+    task_status: z.string().optional(),
+    task_type: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolInputText
+ */
+export const zSessionStructuredToolInputText = z.object({
+    kind: z.literal('text'),
+    text: z.string()
+});
+
+/**
+ * SessionStructuredToolInputTodo
+ */
+export const zSessionStructuredToolInputTodo = z.object({
+    kind: z.literal('todo'),
+    todos: z.array(zSessionStructuredTodoItem).nullish()
+});
+
+/**
+ * SessionStructuredToolInputUnknown
+ */
+export const zSessionStructuredToolInputUnknown = z.object({
     arguments: z.array(zSessionStructuredArgument).nullish(),
     code: z.string().optional(),
     command: z.string().optional(),
     description: z.string().optional(),
     explanation: z.string().optional(),
     file_path: z.string().optional(),
-    kind: z.string().optional(),
+    kind: z.literal('unknown'),
     language: z.string().optional(),
     linked_command: z.string().optional(),
     options: z.array(z.string()).nullish(),
@@ -1815,7 +2005,277 @@ export const zSessionStructuredToolInput = z.object({
     url: z.string().optional()
 });
 
-export const zSessionStructuredToolResult = z.object({
+/**
+ * SessionStructuredToolInputWrite
+ */
+export const zSessionStructuredToolInputWrite = z.object({
+    file_path: z.string().optional(),
+    kind: z.literal('write'),
+    language: z.string().optional(),
+    text: z.string().optional()
+});
+
+/**
+ * Structured tool input
+ *
+ * Provider-neutral tool input discriminated by its closed kind vocabulary.
+ */
+export const zSessionStructuredToolInput = z.discriminatedUnion('kind', [
+    zSessionStructuredToolInputUnknown.extend({ kind: z.literal('unknown') }),
+    zSessionStructuredToolInputCommand.extend({ kind: z.literal('command') }),
+    zSessionStructuredToolInputStdin.extend({ kind: z.literal('stdin') }),
+    zSessionStructuredToolInputCode.extend({ kind: z.literal('code') }),
+    zSessionStructuredToolInputPatch.extend({ kind: z.literal('patch') }),
+    zSessionStructuredToolInputWrite.extend({ kind: z.literal('write') }),
+    zSessionStructuredToolInputGlob.extend({ kind: z.literal('glob') }),
+    zSessionStructuredToolInputFetch.extend({ kind: z.literal('fetch') }),
+    zSessionStructuredToolInputSearch.extend({ kind: z.literal('search') }),
+    zSessionStructuredToolInputFile.extend({ kind: z.literal('file') }),
+    zSessionStructuredToolInputTodo.extend({ kind: z.literal('todo') }),
+    zSessionStructuredToolInputPlan.extend({ kind: z.literal('plan') }),
+    zSessionStructuredToolInputQuestion.extend({ kind: z.literal('question') }),
+    zSessionStructuredToolInputTask.extend({ kind: z.literal('task') }),
+    zSessionStructuredToolInputText.extend({ kind: z.literal('text') }),
+    zSessionStructuredToolInputArguments.extend({ kind: z.literal('arguments') })
+]);
+
+/**
+ * SessionStructuredBlockToolUse
+ */
+export const zSessionStructuredBlockToolUse = z.object({
+    file_path: z.string().optional(),
+    id: z.string().optional(),
+    input: zSessionStructuredToolInput.optional(),
+    name: z.string().optional(),
+    type: z.literal('tool_use')
+});
+
+/**
+ * SessionStructuredToolResultBash
+ */
+export const zSessionStructuredToolResultBash = z.object({
+    command: z.string().optional(),
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    exit_code: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    interrupted: z.boolean().optional(),
+    is_image: z.boolean().optional(),
+    kind: z.literal('bash'),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    stderr: z.string().optional(),
+    stderr_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    stdout: z.string().optional(),
+    stdout_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    task_id: z.string().optional(),
+    task_status: z.string().optional(),
+    text: z.string().optional(),
+    timestamp: z.string().optional(),
+    truncated: z.boolean().optional()
+});
+
+/**
+ * SessionStructuredToolResultEdit
+ */
+export const zSessionStructuredToolResultEdit = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    file_path: z.string().optional(),
+    file_paths: z.array(z.string()).nullish(),
+    kind: z.literal('edit'),
+    new_string: z.string().optional(),
+    old_string: z.string().optional(),
+    original_file: z.string().optional(),
+    patch: z.string().optional(),
+    patch_hunks: z.array(zSessionStructuredPatchHunk).nullish(),
+    replace_all: z.boolean().optional(),
+    user_modified: z.boolean().optional()
+});
+
+/**
+ * SessionStructuredToolResultFetch
+ */
+export const zSessionStructuredToolResultFetch = z.object({
+    bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    content: z.string().optional(),
+    duration_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    error: zSessionStructuredToolError.optional(),
+    kind: z.literal('fetch'),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    status_code: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    status_text: z.string().optional(),
+    text: z.string().optional(),
+    url: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolResultGlob
+ */
+export const zSessionStructuredToolResultGlob = z.object({
+    content: z.string().optional(),
+    duration_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    error: zSessionStructuredToolError.optional(),
+    filenames: z.array(z.string()).nullish(),
+    kind: z.literal('glob'),
+    num_files: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    truncated: z.boolean().optional()
+});
+
+/**
+ * SessionStructuredToolResultGrep
+ */
+export const zSessionStructuredToolResultGrep = z.object({
+    applied_limit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    content: z.string().optional(),
+    counts: z.array(zSessionStructuredArgument).nullish(),
+    duration_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    error: zSessionStructuredToolError.optional(),
+    filenames: z.array(z.string()).nullish(),
+    kind: z.literal('grep'),
+    mode: z.string().optional(),
+    num_files: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    num_results: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    query: z.string().optional(),
+    result_items: z.array(zSessionStructuredSearchResultItem).nullish()
+});
+
+/**
+ * SessionStructuredToolResultPlan
+ */
+export const zSessionStructuredToolResultPlan = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    explanation: z.string().optional(),
+    kind: z.literal('plan'),
+    plan: z.string().optional(),
+    steps: z.array(zSessionStructuredPlanStep).nullish(),
+    text: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolResultPython
+ */
+export const zSessionStructuredToolResultPython = z.object({
+    code: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    exit_code: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    interrupted: z.boolean().optional(),
+    is_image: z.boolean().optional(),
+    kind: z.literal('python'),
+    stderr: z.string().optional(),
+    stdout: z.string().optional(),
+    text: z.string().optional(),
+    truncated: z.boolean().optional()
+});
+
+/**
+ * SessionStructuredToolResultQuestion
+ */
+export const zSessionStructuredToolResultQuestion = z.object({
+    answer: z.string().optional(),
+    answers: z.array(zSessionStructuredArgument).nullish(),
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    kind: z.literal('question'),
+    options: z.array(z.string()).nullish(),
+    question: z.string().optional(),
+    questions: z.array(zSessionStructuredQuestion).nullish(),
+    text: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolResultRead
+ */
+export const zSessionStructuredToolResultRead = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    file_path: z.string().optional(),
+    kind: z.literal('read'),
+    language: z.string().optional(),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    start_line: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    total_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+/**
+ * SessionStructuredToolResultSearch
+ */
+export const zSessionStructuredToolResultSearch = z.object({
+    applied_limit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    content: z.string().optional(),
+    counts: z.array(zSessionStructuredArgument).nullish(),
+    duration_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    error: zSessionStructuredToolError.optional(),
+    filenames: z.array(z.string()).nullish(),
+    kind: z.literal('search'),
+    mode: z.string().optional(),
+    num_files: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    num_results: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    query: z.string().optional(),
+    result_items: z.array(zSessionStructuredSearchResultItem).nullish()
+});
+
+/**
+ * SessionStructuredToolResultStdin
+ */
+export const zSessionStructuredToolResultStdin = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    kind: z.literal('stdin'),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    task_id: z.string().optional(),
+    text: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolResultTask
+ */
+export const zSessionStructuredToolResultTask = z.object({
+    content: z.string().optional(),
+    description: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    exit_code: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    kind: z.literal('task'),
+    output: z.string().optional(),
+    stderr: z.string().optional(),
+    stdout: z.string().optional(),
+    task_id: z.string().optional(),
+    task_status: z.string().optional(),
+    task_type: z.string().optional(),
+    text: z.string().optional(),
+    total_duration_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    total_tokens: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    total_tool_use_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+/**
+ * SessionStructuredToolResultText
+ */
+export const zSessionStructuredToolResultText = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    kind: z.literal('text'),
+    text: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolResultTodo
+ */
+export const zSessionStructuredToolResultTodo = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    kind: z.literal('todo'),
+    new_todos: z.array(zSessionStructuredTodoItem).nullish(),
+    old_todos: z.array(zSessionStructuredTodoItem).nullish(),
+    text: z.string().optional()
+});
+
+/**
+ * SessionStructuredToolResultUnknown
+ */
+export const zSessionStructuredToolResultUnknown = z.object({
     answer: z.string().optional(),
     answers: z.array(zSessionStructuredArgument).nullish(),
     applied_limit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
@@ -1834,7 +2294,7 @@ export const zSessionStructuredToolResult = z.object({
     filenames: z.array(z.string()).nullish(),
     interrupted: z.boolean().optional(),
     is_image: z.boolean().optional(),
-    kind: z.string(),
+    kind: z.literal('unknown'),
     language: z.string().optional(),
     mode: z.string().optional(),
     new_string: z.string().optional(),
@@ -1877,7 +2337,65 @@ export const zSessionStructuredToolResult = z.object({
     user_modified: z.boolean().optional()
 });
 
-export const zSessionStructuredBlock = z.object({
+/**
+ * SessionStructuredToolResultWrite
+ */
+export const zSessionStructuredToolResultWrite = z.object({
+    content: z.string().optional(),
+    error: zSessionStructuredToolError.optional(),
+    file_path: z.string().optional(),
+    file_paths: z.array(z.string()).nullish(),
+    kind: z.literal('write'),
+    language: z.string().optional(),
+    num_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    patch: z.string().optional(),
+    patch_hunks: z.array(zSessionStructuredPatchHunk).nullish(),
+    start_line: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    text: z.string().optional(),
+    total_lines: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+/**
+ * Structured tool result
+ *
+ * Provider-neutral tool result discriminated by its closed kind vocabulary.
+ */
+export const zSessionStructuredToolResult = z.discriminatedUnion('kind', [
+    zSessionStructuredToolResultUnknown.extend({ kind: z.literal('unknown') }),
+    zSessionStructuredToolResultBash.extend({ kind: z.literal('bash') }),
+    zSessionStructuredToolResultPython.extend({ kind: z.literal('python') }),
+    zSessionStructuredToolResultRead.extend({ kind: z.literal('read') }),
+    zSessionStructuredToolResultGlob.extend({ kind: z.literal('glob') }),
+    zSessionStructuredToolResultGrep.extend({ kind: z.literal('grep') }),
+    zSessionStructuredToolResultSearch.extend({ kind: z.literal('search') }),
+    zSessionStructuredToolResultFetch.extend({ kind: z.literal('fetch') }),
+    zSessionStructuredToolResultTodo.extend({ kind: z.literal('todo') }),
+    zSessionStructuredToolResultPlan.extend({ kind: z.literal('plan') }),
+    zSessionStructuredToolResultQuestion.extend({ kind: z.literal('question') }),
+    zSessionStructuredToolResultStdin.extend({ kind: z.literal('stdin') }),
+    zSessionStructuredToolResultTask.extend({ kind: z.literal('task') }),
+    zSessionStructuredToolResultWrite.extend({ kind: z.literal('write') }),
+    zSessionStructuredToolResultEdit.extend({ kind: z.literal('edit') }),
+    zSessionStructuredToolResultText.extend({ kind: z.literal('text') })
+]);
+
+/**
+ * SessionStructuredBlockToolResult
+ */
+export const zSessionStructuredBlockToolResult = z.object({
+    content: z.string().optional(),
+    file_path: z.string().optional(),
+    is_error: z.boolean().optional(),
+    name: z.string().optional(),
+    structured: zSessionStructuredToolResult.optional(),
+    tool_call_id: z.string().optional(),
+    type: z.literal('tool_result')
+});
+
+/**
+ * SessionStructuredBlockUnknown
+ */
+export const zSessionStructuredBlockUnknown = z.object({
     content: z.string().optional(),
     file_path: z.string().optional(),
     id: z.string().optional(),
@@ -1892,7 +2410,57 @@ export const zSessionStructuredBlock = z.object({
     text: z.string().optional(),
     thinking: z.string().optional(),
     tool_call_id: z.string().optional(),
-    type: z.string()
+    type: z.literal('unknown')
+});
+
+/**
+ * Structured transcript block
+ *
+ * Provider-normalized transcript block discriminated by its closed block type vocabulary.
+ */
+export const zSessionStructuredBlock = z.discriminatedUnion('type', [
+    zSessionStructuredBlockText.extend({ type: z.literal('text') }),
+    zSessionStructuredBlockThinking.extend({ type: z.literal('thinking') }),
+    zSessionStructuredBlockToolUse.extend({ type: z.literal('tool_use') }),
+    zSessionStructuredBlockToolResult.extend({ type: z.literal('tool_result') }),
+    zSessionStructuredBlockInteraction.extend({ type: z.literal('interaction') }),
+    zSessionStructuredBlockImage.extend({ type: z.literal('image') }),
+    zSessionStructuredBlockUnknown.extend({ type: z.literal('unknown') })
+]);
+
+/**
+ * SessionStructuredMessageSystem
+ */
+export const zSessionStructuredMessageSystem = z.object({
+    blocks: z.array(zSessionStructuredBlock),
+    id: z.string(),
+    provider: z.string().optional(),
+    role: z.literal('system'),
+    status: z.enum([
+        'unknown',
+        'final',
+        'partial',
+        'superseded'
+    ]),
+    system_event: zSessionStructuredSystemEvent.optional(),
+    timestamp: z.string().optional()
+});
+
+/**
+ * SessionStructuredMessageTool
+ */
+export const zSessionStructuredMessageTool = z.object({
+    blocks: z.array(zSessionStructuredBlock),
+    id: z.string(),
+    provider: z.string().optional(),
+    role: z.literal('tool'),
+    status: z.enum([
+        'unknown',
+        'final',
+        'partial',
+        'superseded'
+    ]),
+    timestamp: z.string().optional()
 });
 
 export const zSessionStructuredUploadedFile = z.object({
@@ -1914,6 +2482,26 @@ export const zSessionStructuredUsage = z.object({
     reasoning_tokens: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });
 
+/**
+ * SessionStructuredMessageAssistant
+ */
+export const zSessionStructuredMessageAssistant = z.object({
+    blocks: z.array(zSessionStructuredBlock),
+    id: z.string(),
+    model: z.string().optional(),
+    provider: z.string().optional(),
+    role: z.literal('assistant'),
+    status: z.enum([
+        'unknown',
+        'final',
+        'partial',
+        'superseded'
+    ]),
+    stop_reason: z.string().optional(),
+    timestamp: z.string().optional(),
+    usage: zSessionStructuredUsage.optional()
+});
+
 export const zSessionStructuredUserPrompt = z.object({
     opened_files: z.array(z.string()).nullish(),
     selections: z.array(zSessionStructuredIdeSelection).nullish(),
@@ -1921,15 +2509,21 @@ export const zSessionStructuredUserPrompt = z.object({
     uploaded_files: z.array(zSessionStructuredUploadedFile).nullish()
 });
 
-export const zSessionStructuredMessage = z.object({
-    blocks: z.array(zSessionStructuredBlock).nullable(),
+/**
+ * SessionStructuredMessageUnknown
+ */
+export const zSessionStructuredMessageUnknown = z.object({
+    blocks: z.array(zSessionStructuredBlock),
     id: z.string(),
-    is_subagent: z.boolean().optional(),
     model: z.string().optional(),
-    parent_tool_call_id: z.string().optional(),
     provider: z.string().optional(),
-    role: z.string(),
-    status: z.string(),
+    role: z.literal('unknown'),
+    status: z.enum([
+        'unknown',
+        'final',
+        'partial',
+        'superseded'
+    ]),
     stop_reason: z.string().optional(),
     system_event: zSessionStructuredSystemEvent.optional(),
     timestamp: z.string().optional(),
@@ -1937,14 +2531,61 @@ export const zSessionStructuredMessage = z.object({
     user_prompt: zSessionStructuredUserPrompt.optional()
 });
 
-export const zSessionStreamStructuredMessageEvent = z.object({
-    format: z.string(),
-    history: zSessionStructuredHistory.optional(),
+/**
+ * SessionStructuredMessageUser
+ */
+export const zSessionStructuredMessageUser = z.object({
+    blocks: z.array(zSessionStructuredBlock),
     id: z.string(),
+    provider: z.string().optional(),
+    role: z.literal('user'),
+    status: z.enum([
+        'unknown',
+        'final',
+        'partial',
+        'superseded'
+    ]),
+    timestamp: z.string().optional(),
+    user_prompt: zSessionStructuredUserPrompt.optional()
+});
+
+/**
+ * Structured transcript message
+ *
+ * Provider-normalized transcript message discriminated by its closed role vocabulary.
+ */
+export const zSessionStructuredMessage = z.discriminatedUnion('role', [
+    zSessionStructuredMessageUnknown.extend({ role: z.literal('unknown') }),
+    zSessionStructuredMessageUser.extend({ role: z.literal('user') }),
+    zSessionStructuredMessageAssistant.extend({ role: z.literal('assistant') }),
+    zSessionStructuredMessageSystem.extend({ role: z.literal('system') }),
+    zSessionStructuredMessageTool.extend({ role: z.literal('tool') })
+]);
+
+/**
+ * Structured session stream message
+ *
+ * Provider-neutral structured transcript update with explicit snapshot, upsert, or reset application semantics.
+ */
+export const zSessionStreamStructuredMessageEvent = z.object({
+    format: z.literal('structured'),
+    history: zSessionStructuredHistory,
+    id: z.string(),
+    operation: z.enum([
+        'snapshot',
+        'upsert',
+        'reset'
+    ]),
     pagination: zPaginationInfo.optional(),
     provider: z.string(),
-    schema_version: z.string(),
-    structured_messages: z.array(zSessionStructuredMessage).nullable(),
+    reset_reason: z.enum([
+        'resume_invalid',
+        'stream_changed',
+        'cursor_invalidated',
+        'history_rewritten'
+    ]).optional(),
+    schema_version: z.literal('session.structured.v1'),
+    structured_messages: z.array(zSessionStructuredMessage),
     template: z.string()
 });
 
@@ -1973,14 +2614,20 @@ export const zSessionTranscriptRawResponse = z.object({
     template: z.string()
 });
 
+/**
+ * Structured session transcript response
+ *
+ * Provider-neutral structured transcript snapshot.
+ */
 export const zSessionTranscriptStructuredResponse = z.object({
-    format: z.enum(['structured']),
-    history: zSessionStructuredHistory.optional(),
+    format: z.literal('structured'),
+    history: zSessionStructuredHistory,
     id: z.string(),
+    operation: z.literal('snapshot'),
     pagination: zPaginationInfo.optional(),
     provider: z.string(),
-    schema_version: z.string(),
-    structured_messages: z.array(zSessionStructuredMessage).nullable(),
+    schema_version: z.literal('session.structured.v1'),
+    structured_messages: z.array(zSessionStructuredMessage),
     template: z.string()
 });
 
@@ -7559,6 +8206,10 @@ export const zPostV0CityByCityNameSessionByIdStopPath = z.object({
  */
 export const zPostV0CityByCityNameSessionByIdStopResponse = zOkWithIdResponseBody;
 
+export const zStreamSessionHeaders = z.object({
+    'Last-Event-ID': z.string().max(2048).optional()
+});
+
 export const zStreamSessionPath = z.object({
     cityName: z.string().min(1).regex(/\S/),
     id: z.string()
@@ -7570,7 +8221,8 @@ export const zStreamSessionQuery = z.object({
         'raw',
         'structured'
     ]).optional(),
-    include_thinking: z.boolean().optional()
+    include_thinking: z.boolean().optional(),
+    after_cursor: z.string().max(2048).optional()
 });
 
 /**
@@ -7582,37 +8234,43 @@ export const zStreamSessionResponse = z.array(z.union([
     z.object({
         data: zSessionActivityEvent,
         event: z.literal('activity'),
-        id: z.int().optional(),
+        id: z.string().optional(),
         retry: z.int().optional()
     }),
     z.object({
         data: zHeartbeatEvent,
         event: z.literal('heartbeat'),
-        id: z.int().optional(),
+        id: z.string().optional(),
         retry: z.int().optional()
     }),
     z.object({
         data: zSessionStreamRawMessageEvent,
         event: z.literal('message').optional(),
-        id: z.int().optional(),
+        id: z.string().optional(),
         retry: z.int().optional()
     }),
     z.object({
         data: zPendingInteraction,
         event: z.literal('pending'),
-        id: z.int().optional(),
+        id: z.string().optional(),
+        retry: z.int().optional()
+    }),
+    z.object({
+        data: zSessionPendingClearedEvent,
+        event: z.literal('pending_cleared'),
+        id: z.string().optional(),
         retry: z.int().optional()
     }),
     z.object({
         data: zSessionStreamStructuredMessageEvent,
         event: z.literal('structured'),
-        id: z.int().optional(),
+        id: z.string().optional(),
         retry: z.int().optional()
     }),
     z.object({
         data: zSessionStreamMessageEvent,
         event: z.literal('turn'),
-        id: z.int().optional(),
+        id: z.string().optional(),
         retry: z.int().optional()
     })
 ]));

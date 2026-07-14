@@ -31,8 +31,8 @@ func ReadAmpFile(path string, _ int) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	sessionID := ""
 	lastUUID := ""
-	idx := 0
 	toolNames := make(map[string]string)
+	syntheticIDs := newStableSyntheticEntryIDSequence("amp")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -51,15 +51,16 @@ func ReadAmpFile(path string, _ int) (*Session, error) {
 			sessionID = strings.TrimSpace(event.SessionID)
 		}
 
-		entries := ampEntriesFromEvent(event, rawLine, idx, toolNames)
+		recordIDs := syntheticIDs.ForRecord(rawLine)
+		entries := ampEntriesFromEvent(event, rawLine, toolNames, recordIDs)
 		for _, entry := range entries {
 			if entry == nil {
 				continue
 			}
+			entry.RawRecordID = recordIDs.RawRecordID()
 			entry.ParentUUID = lastUUID
 			lastUUID = entry.UUID
 			messages = append(messages, entry)
-			idx++
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -90,20 +91,20 @@ type ampEvent struct {
 	Usage           json.RawMessage `json:"usage"`
 }
 
-func ampEntriesFromEvent(event ampEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
+func ampEntriesFromEvent(event ampEvent, rawLine json.RawMessage, toolNames map[string]string, syntheticIDs stableSyntheticEntryIDSource) []*Entry {
 	switch strings.ToLower(strings.TrimSpace(event.Type)) {
 	case "system":
 		return nil
 	case "assistant":
-		entry := ampAssistantEntry(event, rawLine, idx, toolNames)
+		entry := ampAssistantEntry(event, rawLine, toolNames, syntheticIDs)
 		if entry == nil {
 			return nil
 		}
 		return []*Entry{entry}
 	case "user":
-		return ampUserEntries(event, rawLine, idx, toolNames)
+		return ampUserEntries(event, rawLine, toolNames, syntheticIDs)
 	case "result":
-		entry := ampResultEntry(event, rawLine, idx)
+		entry := ampResultEntry(event, rawLine, syntheticIDs)
 		if entry == nil {
 			return nil
 		}
@@ -113,14 +114,14 @@ func ampEntriesFromEvent(event ampEvent, rawLine json.RawMessage, idx int, toolN
 	}
 }
 
-func ampAssistantEntry(event ampEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) *Entry {
+func ampAssistantEntry(event ampEvent, rawLine json.RawMessage, toolNames map[string]string, syntheticIDs stableSyntheticEntryIDSource) *Entry {
 	message := ampMessageObject(event.Message)
 	blocks := ampAssistantContentBlocks(message.Content, toolNames)
 	if len(blocks) == 0 {
 		return nil
 	}
 	return &Entry{
-		UUID:      ampEntryID(event, idx),
+		UUID:      syntheticIDs.ID("assistant"),
 		Type:      "assistant",
 		Message:   ampMessageWithMetadata("assistant", blocks, message),
 		SessionID: strings.TrimSpace(event.SessionID),
@@ -128,13 +129,13 @@ func ampAssistantEntry(event ampEvent, rawLine json.RawMessage, idx int, toolNam
 	}
 }
 
-func ampUserEntries(event ampEvent, rawLine json.RawMessage, idx int, toolNames map[string]string) []*Entry {
+func ampUserEntries(event ampEvent, rawLine json.RawMessage, toolNames map[string]string, syntheticIDs stableSyntheticEntryIDSource) []*Entry {
 	message := ampMessageObject(event.Message)
 	rawBlocks := ampRawArray(message.Content)
 	if len(rawBlocks) == 0 {
 		if text := ampTextFromRaw(message.Content); text != "" {
 			return []*Entry{{
-				UUID:      ampEntryID(event, idx),
+				UUID:      syntheticIDs.ID("user"),
 				Type:      "user",
 				Message:   mustMarshal(MessageContent{Role: "user", Content: mustMarshal(text)}),
 				SessionID: strings.TrimSpace(event.SessionID),
@@ -159,7 +160,7 @@ func ampUserEntries(event ampEvent, rawLine json.RawMessage, idx int, toolNames 
 			}
 			content := ampNeutralToolResult(firstAmpRawField(block, "content", "result", "output"))
 			entries = append(entries, &Entry{
-				UUID:      fmt.Sprintf("%s-tool-%d", ampEntryID(event, idx), len(entries)),
+				UUID:      syntheticIDs.ID(fmt.Sprintf("tool_result:%s:%d", callID, len(entries))),
 				Type:      "tool_result",
 				ToolUseID: callID,
 				SessionID: strings.TrimSpace(event.SessionID),
@@ -176,7 +177,7 @@ func ampUserEntries(event ampEvent, rawLine json.RawMessage, idx int, toolNames 
 	}
 	if len(textBlocks) > 0 {
 		entries = append([]*Entry{{
-			UUID:      ampEntryID(event, idx),
+			UUID:      syntheticIDs.ID("user"),
 			Type:      "user",
 			Message:   ampMessageWithBlocks("user", textBlocks),
 			SessionID: strings.TrimSpace(event.SessionID),
@@ -186,7 +187,7 @@ func ampUserEntries(event ampEvent, rawLine json.RawMessage, idx int, toolNames 
 	return entries
 }
 
-func ampResultEntry(event ampEvent, rawLine json.RawMessage, idx int) *Entry {
+func ampResultEntry(event ampEvent, rawLine json.RawMessage, syntheticIDs stableSyntheticEntryIDSource) *Entry {
 	message := firstNonEmpty(strings.TrimSpace(event.Result), strings.TrimSpace(event.Error))
 	kind := "result"
 	category := strings.TrimSpace(event.Subtype)
@@ -197,7 +198,7 @@ func ampResultEntry(event ampEvent, rawLine json.RawMessage, idx int) *Entry {
 		return nil
 	}
 	return &Entry{
-		UUID:      ampEntryID(event, idx),
+		UUID:      syntheticIDs.ID("result"),
 		Type:      "system",
 		Subtype:   "result",
 		Message:   mustMarshal(MessageContent{Role: "system", Content: mustMarshal(message)}),
@@ -401,14 +402,6 @@ func ampBoolField(object map[string]json.RawMessage, names ...string) bool {
 		}
 	}
 	return false
-}
-
-func ampEntryID(event ampEvent, idx int) string {
-	sessionID := strings.TrimSpace(event.SessionID)
-	if sessionID == "" {
-		return fmt.Sprintf("amp-%d", idx)
-	}
-	return fmt.Sprintf("%s-%d", sessionID, idx)
 }
 
 // DefaultAmpSearchPaths intentionally returns no local default. Amp documents

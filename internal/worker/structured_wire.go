@@ -110,32 +110,57 @@ func collectNeutralWireKeys(t reflect.Type, out map[string]struct{}, seen map[re
 }
 
 // UnexpectedWireKeys returns the JSON object keys present in the serialized wire
-// that are not in allowed, de-duplicated and sorted. A non-empty result means a
-// key the typed schema does not define crossed the wire — typically a leaked
-// provider-native key.
+// that are not in allowed, de-duplicated and sorted. It also descends into
+// stringified JSON object/array values in generic argument carriers. Other
+// strings stay opaque because typed text, command, code, and patch fields may
+// legitimately contain JSON. A non-empty result means a key the typed schema
+// does not define crossed the wire — typically a leaked provider-native key.
 func UnexpectedWireKeys(wire []byte, allowed map[string]struct{}) ([]string, error) {
 	var decoded any
 	if err := json.Unmarshal(wire, &decoded); err != nil {
 		return nil, err
 	}
 	unexpected := map[string]struct{}{}
-	collectUnexpectedWireKeys(decoded, allowed, unexpected)
+	collectUnexpectedWireKeys(decoded, allowed, unexpected, false)
 	return sortedStringSet(unexpected), nil
 }
 
-func collectUnexpectedWireKeys(value any, allowed, unexpected map[string]struct{}) {
+func collectUnexpectedWireKeys(value any, allowed, unexpected map[string]struct{}, inspectString bool) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
 			if _, ok := allowed[key]; !ok {
 				unexpected[key] = struct{}{}
 			}
-			collectUnexpectedWireKeys(child, allowed, unexpected)
+			collectUnexpectedWireKeys(child, allowed, unexpected, key == "value")
 		}
 	case []any:
 		for _, child := range typed {
-			collectUnexpectedWireKeys(child, allowed, unexpected)
+			collectUnexpectedWireKeys(child, allowed, unexpected, inspectString)
 		}
+	case string:
+		if inspectString {
+			if nested, ok := decodeJSONStringContainer(typed); ok {
+				collectUnexpectedWireKeys(nested, allowed, unexpected, false)
+			}
+		}
+	}
+}
+
+func decodeJSONStringContainer(value string) (any, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || (value[0] != '{' && value[0] != '[') {
+		return nil, false
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return nil, false
+	}
+	switch decoded.(type) {
+	case map[string]any, []any:
+		return decoded, true
+	default:
+		return nil, false
 	}
 }
 

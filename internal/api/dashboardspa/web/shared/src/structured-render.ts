@@ -72,20 +72,30 @@ function appendExit(rows: string[], value: number | undefined): void {
   rows.push(`exit ${String(value)}`);
 }
 
-function appendFlags(rows: string[], structured: SessionStructuredToolResult): void {
+function appendFlags(
+  rows: string[],
+  structured: Extract<SessionStructuredToolResult, { kind: 'bash' | 'python' | 'glob' }>,
+): void {
   if (structured.truncated === true) rows.push('truncated');
-  if (structured.interrupted === true) rows.push('interrupted');
+  if ('interrupted' in structured && structured.interrupted === true) rows.push('interrupted');
 }
 
-function appendStringList(rows: string[], label: string, value: string[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendStringList(
+  rows: string[],
+  label: string,
+  value: readonly string[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   const parts = value.filter((item) => item !== '');
   if (parts.length === 0) return;
   rows.push(`${label}: ${parts.join(', ')}`);
 }
 
-function appendUploadedFiles(rows: string[], value: SessionStructuredUploadedFile[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendUploadedFiles(
+  rows: string[],
+  value: readonly SessionStructuredUploadedFile[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   rows.push('uploaded files:');
   for (const file of value) {
     const name = file.original_name ?? '';
@@ -99,16 +109,22 @@ function appendUploadedFiles(rows: string[], value: SessionStructuredUploadedFil
   }
 }
 
-function appendIDESelections(rows: string[], value: { text?: string }[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendIDESelections(
+  rows: string[],
+  value: readonly { text?: string }[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   const selections = value.map((item) => item.text ?? '').filter((text) => text !== '');
   if (selections.length === 0) return;
   rows.push('selections:');
   for (const selection of selections) rows.push(`- ${selection}`);
 }
 
-function appendPlanSteps(rows: string[], value: SessionStructuredPlanStep[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendPlanSteps(
+  rows: string[],
+  value: readonly SessionStructuredPlanStep[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   rows.push('steps:');
   value.forEach((step, index) => {
     const text = step.step ?? '';
@@ -121,8 +137,12 @@ function appendPlanSteps(rows: string[], value: SessionStructuredPlanStep[] | un
   });
 }
 
-function appendArgumentList(rows: string[], label: string, value: SessionStructuredArgument[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendArgumentList(
+  rows: string[],
+  label: string,
+  value: readonly SessionStructuredArgument[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   rows.push(`${label}:`);
   for (const item of value) {
     const formatted = formatArgument(item);
@@ -130,8 +150,11 @@ function appendArgumentList(rows: string[], label: string, value: SessionStructu
   }
 }
 
-function appendSearchResultItems(rows: string[], value: SessionStructuredSearchResultItem[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendSearchResultItems(
+  rows: string[],
+  value: readonly SessionStructuredSearchResultItem[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   rows.push('result items:');
   value.forEach((item, index) => {
     const title = item.title ?? '';
@@ -143,8 +166,11 @@ function appendSearchResultItems(rows: string[], value: SessionStructuredSearchR
   });
 }
 
-function appendQuestions(rows: string[], value: SessionStructuredQuestion[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendQuestions(
+  rows: string[],
+  value: readonly SessionStructuredQuestion[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   rows.push('questions:');
   value.forEach((question, index) => {
     const text = question.question ?? '';
@@ -154,7 +180,7 @@ function appendQuestions(rows: string[], value: SessionStructuredQuestion[] | un
     const parts = [header, label, multiSelect].filter((part) => part !== '');
     rows.push(`- ${parts.join(' | ')}`);
     const options = question.options;
-    if (options !== undefined && options.length > 0) {
+    if (options !== undefined && options !== null && options.length > 0) {
       const rendered = options
         .map((option) => {
           const optionLabel = option.label ?? '';
@@ -167,8 +193,12 @@ function appendQuestions(rows: string[], value: SessionStructuredQuestion[] | un
   });
 }
 
-function appendTodoList(rows: string[], label: string, value: SessionStructuredTodoItem[] | undefined): void {
-  if (value === undefined || value.length === 0) return;
+function appendTodoList(
+  rows: string[],
+  label: string,
+  value: readonly SessionStructuredTodoItem[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
   rows.push(`${label}:`);
   value.forEach((todo, index) => {
     const status = todo.status ?? '';
@@ -285,7 +315,8 @@ export function diffLineKind(line: string): DiffLineKind {
  * "interaction". Spec §9.
  */
 export function formatInteraction(block: SessionStructuredBlock): string {
-  const interaction = block.interaction;
+  const interaction =
+    block.type === 'interaction' || block.type === 'unknown' ? block.interaction : undefined;
   const kind = interaction?.kind ?? 'interaction';
   const state = interaction?.state ?? '';
   const prompt = interaction?.prompt ?? '';
@@ -372,6 +403,7 @@ export function historyRows(history: SessionStructuredHistory): string[] {
 /** Build the image-block metadata rows (file/url/mime). The `<img>` itself is the React layer's job. Spec §6. */
 export function imageRows(block: SessionStructuredBlock): string[] {
   const rows: string[] = [];
+  if (block.type !== 'image' && block.type !== 'unknown') return rows;
   appendField(rows, 'file', block.file_path);
   appendField(rows, 'url', block.image_url);
   appendField(rows, 'mime', block.mime_type);
@@ -390,34 +422,109 @@ export function imageRows(block: SessionStructuredBlock): string[] {
  */
 export function toolInputRows(input: SessionStructuredToolInput): string[] {
   const rows: string[] = [];
-  const patch = input.patch ?? '';
   appendField(rows, 'kind', input.kind);
-  appendField(rows, 'file', input.file_path);
-  appendField(rows, 'language', input.language);
-  appendField(rows, 'url', input.url);
-  appendField(rows, 'prompt', input.prompt);
-  appendField(rows, 'task', input.task_id);
-  appendField(rows, 'task type', input.task_type);
-  appendField(rows, 'task status', input.task_status);
-  appendField(rows, 'description', input.description);
-  appendField(rows, 'question', input.question);
-  appendStringList(rows, 'options', input.options);
-  appendField(rows, 'command', input.command);
-  appendField(rows, 'linked command', input.linked_command);
-  appendField(rows, 'code', input.code);
-  appendField(rows, 'query', input.query);
-  appendField(rows, 'pattern', input.pattern);
-  appendField(rows, 'plan', input.plan);
-  appendField(rows, 'explanation', input.explanation);
-  appendPlanSteps(rows, input.steps);
-  appendField(rows, 'text', input.text);
-  appendField(rows, 'patch', patch);
-  appendTodoList(rows, 'todos', input.todos);
-  if (input.arguments !== undefined && input.arguments.length > 0) {
-    rows.push(...input.arguments.map((arg) => formatArgument(arg)));
+
+  switch (input.kind) {
+    case 'command':
+      appendField(rows, 'command', input.command);
+      appendArgumentRows(rows, input.arguments);
+      break;
+    case 'stdin':
+      appendField(rows, 'task', input.task_id);
+      appendField(rows, 'linked command', input.linked_command);
+      appendField(rows, 'text', input.text);
+      break;
+    case 'code':
+      appendField(rows, 'language', input.language);
+      appendField(rows, 'code', input.code);
+      break;
+    case 'patch':
+      appendField(rows, 'file', input.file_path);
+      appendField(rows, 'language', input.language);
+      appendField(rows, 'patch', input.patch);
+      break;
+    case 'write':
+      appendField(rows, 'file', input.file_path);
+      appendField(rows, 'language', input.language);
+      appendField(rows, 'text', input.text);
+      break;
+    case 'glob':
+    case 'search':
+      appendField(rows, 'file', input.file_path);
+      if (input.kind === 'search') appendField(rows, 'command', input.command);
+      appendField(rows, 'query', input.query);
+      appendField(rows, 'pattern', input.pattern);
+      appendArgumentRows(rows, input.arguments);
+      break;
+    case 'fetch':
+      appendField(rows, 'url', input.url);
+      appendField(rows, 'prompt', input.prompt);
+      break;
+    case 'file':
+      appendField(rows, 'file', input.file_path);
+      appendField(rows, 'language', input.language);
+      appendField(rows, 'command', input.command);
+      break;
+    case 'todo':
+      appendTodoList(rows, 'todos', input.todos);
+      break;
+    case 'plan':
+      appendField(rows, 'plan', input.plan);
+      appendField(rows, 'explanation', input.explanation);
+      appendPlanSteps(rows, input.steps);
+      break;
+    case 'question':
+      appendField(rows, 'question', input.question);
+      appendStringList(rows, 'options', input.options);
+      break;
+    case 'task':
+      appendField(rows, 'prompt', input.prompt);
+      appendField(rows, 'task', input.task_id);
+      appendField(rows, 'task type', input.task_type);
+      appendField(rows, 'task status', input.task_status);
+      appendField(rows, 'description', input.description);
+      break;
+    case 'text':
+      appendField(rows, 'text', input.text);
+      break;
+    case 'arguments':
+      appendArgumentRows(rows, input.arguments);
+      break;
+    case 'unknown':
+      appendField(rows, 'file', input.file_path);
+      appendField(rows, 'language', input.language);
+      appendField(rows, 'url', input.url);
+      appendField(rows, 'prompt', input.prompt);
+      appendField(rows, 'task', input.task_id);
+      appendField(rows, 'task type', input.task_type);
+      appendField(rows, 'task status', input.task_status);
+      appendField(rows, 'description', input.description);
+      appendField(rows, 'question', input.question);
+      appendStringList(rows, 'options', input.options);
+      appendField(rows, 'command', input.command);
+      appendField(rows, 'linked command', input.linked_command);
+      appendField(rows, 'code', input.code);
+      appendField(rows, 'query', input.query);
+      appendField(rows, 'pattern', input.pattern);
+      appendField(rows, 'plan', input.plan);
+      appendField(rows, 'explanation', input.explanation);
+      appendPlanSteps(rows, input.steps);
+      appendField(rows, 'text', input.text);
+      appendField(rows, 'patch', input.patch);
+      appendTodoList(rows, 'todos', input.todos);
+      appendArgumentRows(rows, input.arguments);
+      break;
   }
   if (rows.length === 0) rows.push(formatInlineValue(input));
   return rows;
+}
+
+function appendArgumentRows(
+  rows: string[],
+  value: readonly SessionStructuredArgument[] | null | undefined,
+): void {
+  if (value === undefined || value === null || value.length === 0) return;
+  rows.push(...value.map((argument) => formatArgument(argument)));
 }
 
 // ---------------------------------------------------------------------------
@@ -441,21 +548,25 @@ export interface ToolResultSections {
  * `block.content` and `kind` is "result". Spec §8 + __perKindRendering__.
  */
 export function toolResultSections(block: SessionStructuredBlock): ToolResultSections {
-  const structured = block.structured;
+  const structured =
+    block.type === 'tool_result' || block.type === 'unknown' ? block.structured : undefined;
   if (structured === undefined) {
-    if (typeof block.content === 'string') return { kind: 'result', body: block.content, diff: '' };
-    if (block.content !== undefined) return { kind: 'result', body: formatInlineValue(block.content), diff: '' };
+    const content =
+      block.type === 'tool_result' || block.type === 'unknown' ? block.content : undefined;
+    if (typeof content === 'string') return { kind: 'result', body: content, diff: '' };
+    if (content !== undefined)
+      return { kind: 'result', body: formatInlineValue(content), diff: '' };
     return { kind: 'result', body: '', diff: '' };
   }
 
-  const kind = typeof structured.kind === 'string' ? structured.kind : 'result';
+  const kind = structured.kind;
   const lines: string[] = [];
   appendField(lines, 'kind', kind);
-  appendField(lines, 'file', structured.file_path);
-  appendField(lines, 'language', structured.language);
+  appendField(lines, 'file', 'file_path' in structured ? structured.file_path : undefined);
+  appendField(lines, 'language', 'language' in structured ? structured.language : undefined);
   appendToolError(lines, structured.error);
 
-  if (kind === 'bash') {
+  if (structured.kind === 'bash') {
     appendField(lines, 'command', structured.command);
     appendField(lines, 'task', structured.task_id);
     appendField(lines, 'task status', structured.task_status);
@@ -468,7 +579,7 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendFlags(lines, structured);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'python') {
+  if (structured.kind === 'python') {
     appendField(lines, 'code', structured.code);
     appendField(lines, 'stdout', structured.stdout);
     appendField(lines, 'stderr', structured.stderr);
@@ -476,13 +587,13 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendFlags(lines, structured);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'stdin') {
+  if (structured.kind === 'stdin') {
     appendField(lines, 'task', structured.task_id);
     appendField(lines, 'content', structured.content);
     appendField(lines, 'text', structured.text);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'edit') {
+  if (structured.kind === 'edit') {
     const patch = (structured.patch ?? '') || patchTextFromHunks(structured.patch_hunks);
     appendField(lines, 'old', structured.old_string);
     appendField(lines, 'new', structured.new_string);
@@ -492,15 +603,14 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendField(lines, 'content', structured.content);
     return { kind, body: joinBody(lines), diff: patch };
   }
-  if (kind === 'read') {
+  if (structured.kind === 'read') {
     appendField(lines, 'content', structured.content);
     appendNumber(lines, 'start', structured.start_line);
     appendNumber(lines, 'lines', structured.num_lines);
     appendNumber(lines, 'total', structured.total_lines);
-    appendFlags(lines, structured);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'write') {
+  if (structured.kind === 'write') {
     const patch = (structured.patch ?? '') || patchTextFromHunks(structured.patch_hunks);
     appendField(lines, 'content', structured.content);
     appendField(lines, 'text', structured.text);
@@ -509,7 +619,7 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendNumber(lines, 'total', structured.total_lines);
     return { kind, body: joinBody(lines), diff: patch };
   }
-  if (kind === 'fetch') {
+  if (structured.kind === 'fetch') {
     appendField(lines, 'url', structured.url);
     appendNumber(lines, 'status', structured.status_code);
     appendField(lines, 'status text', structured.status_text);
@@ -519,13 +629,13 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendField(lines, 'text', structured.text);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'todo') {
+  if (structured.kind === 'todo') {
     appendField(lines, 'content', structured.content);
     appendTodoList(lines, 'old todos', structured.old_todos);
     appendTodoList(lines, 'new todos', structured.new_todos);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'plan') {
+  if (structured.kind === 'plan') {
     appendField(lines, 'plan', structured.plan);
     appendField(lines, 'explanation', structured.explanation);
     appendPlanSteps(lines, structured.steps);
@@ -533,7 +643,7 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendField(lines, 'text', structured.text);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'question') {
+  if (structured.kind === 'question') {
     appendField(lines, 'question', structured.question);
     appendQuestions(lines, structured.questions);
     appendStringList(lines, 'options', structured.options);
@@ -543,7 +653,7 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendField(lines, 'text', structured.text);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'task') {
+  if (structured.kind === 'task') {
     appendField(lines, 'task', structured.task_id);
     appendField(lines, 'task type', structured.task_type);
     appendField(lines, 'task status', structured.task_status);
@@ -559,8 +669,12 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendField(lines, 'text', structured.text);
     return { kind, body: joinBody(lines), diff: '' };
   }
-  if (kind === 'grep' || kind === 'search' || kind === 'glob') {
-    if (structured.filenames !== undefined && structured.filenames.length > 0) {
+  if (structured.kind === 'grep' || structured.kind === 'search') {
+    if (
+      structured.filenames !== undefined &&
+      structured.filenames !== null &&
+      structured.filenames.length > 0
+    ) {
       appendField(lines, 'files', structured.filenames.join(', '));
     }
     appendField(lines, 'query', structured.query);
@@ -568,13 +682,33 @@ export function toolResultSections(block: SessionStructuredBlock): ToolResultSec
     appendArgumentList(lines, 'counts', structured.counts);
     appendSearchResultItems(lines, structured.result_items);
     appendField(lines, 'content', structured.content);
-    appendField(lines, 'text', structured.text);
     appendNumber(lines, 'files', structured.num_files);
     appendNumber(lines, 'results', structured.num_results);
     appendNumber(lines, 'duration ms', structured.duration_ms);
     appendNumber(lines, 'applied limit', structured.applied_limit);
     appendNumber(lines, 'lines', structured.num_lines);
+    return { kind, body: joinBody(lines), diff: '' };
+  }
+
+  if (structured.kind === 'glob') {
+    if (
+      structured.filenames !== undefined &&
+      structured.filenames !== null &&
+      structured.filenames.length > 0
+    ) {
+      appendField(lines, 'files', structured.filenames.join(', '));
+    }
+    appendField(lines, 'content', structured.content);
+    appendNumber(lines, 'files', structured.num_files);
+    appendNumber(lines, 'duration ms', structured.duration_ms);
+    appendNumber(lines, 'lines', structured.num_lines);
     appendFlags(lines, structured);
+    return { kind, body: joinBody(lines), diff: '' };
+  }
+
+  if (structured.kind === 'text') {
+    appendField(lines, 'content', structured.content);
+    appendField(lines, 'text', structured.text);
     return { kind, body: joinBody(lines), diff: '' };
   }
 

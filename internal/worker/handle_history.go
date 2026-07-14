@@ -111,7 +111,11 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 	h.maybePersistDerivedSessionKey(id, info, snapshot)
 	// After any session-key persist, so the keyed transcript path can resolve.
 	h.writeTranscriptSessionMeta()
-	if req.TailCompactions > 0 {
+	// Cursor and tail requests are bounded views, not authoritative continuity
+	// snapshots. Returning them through the generation cache can replace a
+	// successful page with a previously cached full (or different) view when
+	// the underlying transcript generation has not changed.
+	if req.TailCompactions > 0 || strings.TrimSpace(req.BeforeEntryID) != "" || strings.TrimSpace(req.AfterEntryID) != "" {
 		return cloneHistorySnapshot(snapshot), nil
 	}
 	return h.mergeLoadedHistorySnapshot(snapshot), nil
@@ -160,6 +164,13 @@ func mergeConversationHistorySnapshots(previous, current *HistorySnapshot) *Hist
 	}
 	merged := cloneHistorySnapshot(current)
 	if previous == nil || !sameHistoryConversation(previous, current) {
+		return merged
+	}
+	// A later generation of the same provider stream is authoritative: some
+	// structured transcripts are rewritten in place. Stitch only across a
+	// rotated stream, where the prior file is the continuity evidence.
+	previousStreamID := strings.TrimSpace(previous.TranscriptStreamID)
+	if previousStreamID != "" && previousStreamID == strings.TrimSpace(current.TranscriptStreamID) {
 		return merged
 	}
 

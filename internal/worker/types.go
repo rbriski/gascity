@@ -147,6 +147,7 @@ type Provenance struct {
 	RawType           string          `json:"raw_type,omitempty"`
 	Derived           bool            `json:"derived,omitempty"`
 	Raw               json.RawMessage `json:"raw,omitempty"`
+	RawRecordID       string          `json:"-"`
 }
 
 // HistoryDiagnostic records normalized-history evidence that could affect

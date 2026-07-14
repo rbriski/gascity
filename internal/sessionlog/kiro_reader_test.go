@@ -132,6 +132,87 @@ func TestReadKiroFileConvertsPersistedHistoryFrames(t *testing.T) {
 	}
 }
 
+func TestReadKiroFileUsesNativeAndStableSyntheticEntryIDs(t *testing.T) {
+	native := `{"id":"native-message-id","type":"AssistantMessage","sessionId":"kiro-ids","message":{"role":"assistant","content":"native"}}`
+	synthetic := `{"type":"AssistantMessage","sessionId":"kiro-ids","message":{"role":"assistant","content":"synthetic"}}`
+	multipart := `{"type":"ToolResults","sessionId":"kiro-ids","message":{"role":"tool","content":[{"type":"toolResult","toolUseId":"toolu-one","content":"one"},{"type":"toolResult","toolUseId":"toolu-two","content":"two"}]}}`
+	path := writeKiroJSONL(t, native, synthetic, multipart)
+
+	session, err := ReadKiroFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadKiroFile() error = %v", err)
+	}
+	if got := len(session.Messages); got != 4 {
+		t.Fatalf("len(Messages) = %d, want native, synthetic, and two tool results", got)
+	}
+	if got := session.Messages[0].UUID; got != "native-message-id" {
+		t.Fatalf("native entry UUID = %q, want provider ID", got)
+	}
+	if got, want := session.Messages[1].UUID, stableSyntheticEntryID("kiro", []byte(synthetic), ""); got != want {
+		t.Fatalf("id-less entry UUID = %q, want %q", got, want)
+	}
+	for i, wantToolUseID := range []string{"toolu-one", "toolu-two"} {
+		entry := session.Messages[i+2]
+		wantID := stableSyntheticEntryID("kiro", []byte(multipart), fmt.Sprintf("%d", i))
+		if entry.UUID != wantID {
+			t.Fatalf("tool result %d UUID = %q, want %q", i, entry.UUID, wantID)
+		}
+		if entry.ToolUseID != wantToolUseID {
+			t.Fatalf("tool result %d ToolUseID = %q, want %q", i, entry.ToolUseID, wantToolUseID)
+		}
+	}
+	if session.Messages[2].UUID == session.Messages[3].UUID {
+		t.Fatalf("multipart tool results share UUID %q", session.Messages[2].UUID)
+	}
+}
+
+func TestReadKiroFileMultipartNativeRecordCannotAliasNativeEntryID(t *testing.T) {
+	multipart := `{"id":"x","type":"ToolResults","sessionId":"kiro-native-alias","message":{"role":"tool","content":[{"type":"toolResult","toolUseId":"toolu-one","content":"one"},{"type":"toolResult","toolUseId":"toolu-two","content":"two"}]}}`
+	native := `{"id":"x-0","type":"AssistantMessage","sessionId":"kiro-native-alias","message":{"role":"assistant","content":"native x-0"}}`
+	path := writeKiroJSONL(t, multipart, native)
+
+	session, err := ReadKiroFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadKiroFile() error = %v", err)
+	}
+	if got := len(session.Messages); got != 3 {
+		t.Fatalf("len(Messages) = %d, want two tool results plus assistant", got)
+	}
+	want := []string{
+		stableSyntheticEntryID("kiro", []byte(multipart), "0"),
+		stableSyntheticEntryID("kiro", []byte(multipart), "1"),
+		"x-0",
+	}
+	for i, entry := range session.Messages {
+		if entry.UUID != want[i] {
+			t.Fatalf("message %d UUID = %q, want %q", i, entry.UUID, want[i])
+		}
+	}
+}
+
+func TestReadKiroFileNumericIDCannotAliasNativeStringID(t *testing.T) {
+	numeric := `{"id":1,"type":"AssistantMessage","sessionId":"kiro-numeric-alias","message":{"role":"assistant","content":"numeric"}}`
+	native := `{"id":"kiro-1","type":"AssistantMessage","sessionId":"kiro-numeric-alias","message":{"role":"assistant","content":"native string"}}`
+	path := writeKiroJSONL(t, numeric, native)
+
+	session, err := ReadProviderFile("kiro/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile() error = %v", err)
+	}
+	want := []string{
+		stableSyntheticEntryID("kiro", []byte(numeric), ""),
+		"kiro-1",
+	}
+	if len(session.Messages) != len(want) {
+		t.Fatalf("len(Messages) = %d, want %d", len(session.Messages), len(want))
+	}
+	for i, entry := range session.Messages {
+		if entry.UUID != want[i] {
+			t.Fatalf("message %d UUID = %q, want %q", i, entry.UUID, want[i])
+		}
+	}
+}
+
 func TestReadProviderFileUsesKiroReader(t *testing.T) {
 	path := writeKiroJSONL(t,
 		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"dispatch-session","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello"}}}}`,

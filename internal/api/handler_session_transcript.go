@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -64,6 +65,19 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 	format := r.URL.Query().Get("format")
 	wantRaw := format == "raw"
 	wantStructured := format == "structured"
+	includeThinking := wantStructured && queryBoolParam(r, "include_thinking")
+	before := strings.TrimSpace(r.URL.Query().Get("before"))
+	after := strings.TrimSpace(r.URL.Query().Get("after"))
+	if before != "" && after != "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_params", "before and after are mutually exclusive")
+		return
+	}
+	if path == "" {
+		if cursorErr := transcriptCursorAbsentError(before, after); cursorErr != nil {
+			writeTranscriptReadError(w, cursorErr, "reading session log")
+			return
+		}
+	}
 
 	if path != "" {
 		tail := 0
@@ -72,14 +86,6 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 				tail = n
 			}
 		}
-		before := r.URL.Query().Get("before")
-		after := r.URL.Query().Get("after")
-
-		if before != "" && after != "" {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_params", "before and after are mutually exclusive")
-			return
-		}
-
 		if wantStructured {
 			history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), worker.HistoryRequest{
 				TailCompactions: tail,
@@ -88,14 +94,14 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			})
 			if historyErr != nil {
 				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
-					writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle))
+					writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle, includeThinking))
 					return
 				}
-				writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
+				writeTranscriptReadError(w, historyErr, "reading session history")
 				return
 			}
-			messages, _ := historySnapshotStructuredMessages(history, queryBoolParam(r, "include_thinking"))
-			writeJSON(w, http.StatusOK, sessionTranscriptGetResponse{
+			messages, _ := historySnapshotStructuredMessages(history, includeThinking)
+			projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{
 				ID:                 info.ID,
 				Template:           info.Template,
 				Provider:           info.Provider,
@@ -104,7 +110,8 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 				History:            structuredHistoryFromSnapshot(history),
 				StructuredMessages: messages,
 				Pagination:         history.Pagination,
-			})
+			}, includeThinking)
+			writeJSON(w, http.StatusOK, structuredTranscriptResponseFromEvent(projection))
 			return
 		}
 
@@ -116,7 +123,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 				Raw:             true,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
+				writeTranscriptReadError(w, err, "reading session log")
 				return
 			}
 			writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
@@ -135,7 +142,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			AfterEntryID:    after,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
+			writeTranscriptReadError(w, err, "reading session log")
 			return
 		}
 		sess := transcript.Session
@@ -169,7 +176,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 	}
 
 	if wantStructured {
-		writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle))
+		writeJSON(w, http.StatusOK, legacyStructuredFallbackTranscriptResponse(r.Context(), info, handle, includeThinking))
 		return
 	}
 
@@ -200,7 +207,38 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info session.Info, handle worker.PeekHandle) sessionTranscriptGetResponse {
+func transcriptCursorInvalidatedProblem(err error, action string) *apierr.ErrorModel {
+	if !errors.Is(err, worker.ErrTranscriptCursorNotFound) && !errors.Is(err, worker.ErrTranscriptDuplicateEntryID) {
+		return nil
+	}
+	return apierr.TranscriptCursorInvalidated.Msg(action + ": " + err.Error())
+}
+
+func transcriptCursorAbsentError(before, after string) error {
+	if before != "" {
+		return &worker.TranscriptCursorNotFoundError{
+			Direction: worker.TranscriptCursorDirectionBefore,
+			EntryID:   before,
+		}
+	}
+	if after != "" {
+		return &worker.TranscriptCursorNotFoundError{
+			Direction: worker.TranscriptCursorDirectionAfter,
+			EntryID:   after,
+		}
+	}
+	return nil
+}
+
+func writeTranscriptReadError(w http.ResponseWriter, err error, action string) {
+	if problem := transcriptCursorInvalidatedProblem(err, action); problem != nil {
+		writeJSONWithType(w, problem.Status, "application/problem+json", problem)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "internal", action+": "+err.Error())
+}
+
+func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info session.Info, handle worker.PeekHandle, includeThinking bool) sessionTranscriptGetResponse {
 	activity := string(worker.TailActivityIdle)
 	output := ""
 	peekOutput, peekErr := handle.Peek(ctx, 100)
@@ -208,7 +246,7 @@ func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info sessio
 		activity = string(worker.TailActivityInTurn)
 		output = peekOutput
 	}
-	return sessionTranscriptGetResponse{
+	projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{
 		ID:                 info.ID,
 		Template:           info.Template,
 		Provider:           info.Provider,
@@ -216,7 +254,8 @@ func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info sessio
 		SchemaVersion:      sessionStructuredSchemaVersion,
 		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
-	}
+	}, includeThinking)
+	return structuredTranscriptResponseFromEvent(projection)
 }
 
 func queryBoolParam(r *http.Request, name string) bool {

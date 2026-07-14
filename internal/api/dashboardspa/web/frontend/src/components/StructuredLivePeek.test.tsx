@@ -26,14 +26,19 @@ const readyState: StructuredStreamState = {
     history: {
       transcript_stream_id: 'stream-1',
       generation: { id: 'gen-1' },
-      cursor: {},
+      cursor: { resume_token: 'st1.live-peek' },
       continuity: { status: 'continuous' },
       tail_state: { activity: 'idle' },
     },
     items: [
       {
         kind: 'message',
-        message: { id: 'm1', role: 'assistant', status: 'final', blocks: [{ type: 'text', text: 'hello world' }] },
+        message: {
+          id: 'm1',
+          role: 'assistant',
+          status: 'final',
+          blocks: [{ type: 'text', text: 'hello world' }],
+        },
       },
     ],
     activity: 'idle',
@@ -73,7 +78,10 @@ describe('StructuredLivePeek', () => {
     expect(mockUseSessionStream).not.toHaveBeenCalled(); // no conversation fallback
     // StructuredMessage is itself an <li>; the body must not double-wrap it.
     expect(container.querySelector('li li')).toBeNull();
-    expect(container.querySelector('ol > li')).not.toBeNull();
+    const transcript = container.querySelector('ol');
+    expect(transcript?.querySelector(':scope > li')).not.toBeNull();
+    expect(transcript?.getAttribute('aria-live')).toBe('polite');
+    expect(transcript?.getAttribute('aria-relevant')).toBe('additions text');
   });
 
   it('renders pending interactions appended to the transcript', () => {
@@ -105,7 +113,11 @@ describe('StructuredLivePeek', () => {
   });
 
   it('surfaces a load failure as an alert', () => {
-    mockUseStructured.mockReturnValue({ status: 'failed', error: 'peek failed', stream: { status: 'idle' } });
+    mockUseStructured.mockReturnValue({
+      status: 'failed',
+      error: 'peek failed',
+      stream: { status: 'idle' },
+    });
     const { getByRole } = render(<StructuredLivePeek sessionId="s1" stream />);
     expect(getByRole('alert').textContent).toBe('peek failed');
   });

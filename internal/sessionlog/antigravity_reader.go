@@ -71,16 +71,14 @@ func ReadAntigravityFile(path string, tailCompactions int) (*Session, error) {
 }
 
 // ReadAntigravityFilePage parses an agy trajectory JSONL log and applies
-// message-ID pagination using the stable agy-N entry IDs emitted by the reader.
+// message-ID pagination using the stable content-derived IDs emitted by the
+// reader.
 func ReadAntigravityFilePage(path string, tailCompactions int, beforeMessageID, afterMessageID string) (*Session, error) {
 	sess, err := readAntigravityFile(path, false)
 	if err != nil {
 		return nil, err
 	}
-	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
-	sess.Messages = paginated
-	sess.Pagination = info
-	return sess, nil
+	return paginateSession(sess, tailCompactions, beforeMessageID, afterMessageID)
 }
 
 // ReadAntigravityFileRaw parses an agy trajectory JSONL log without display type filtering.
@@ -104,10 +102,7 @@ func ReadAntigravityFileRawPage(path string, tailCompactions int, beforeMessageI
 	if err != nil {
 		return nil, err
 	}
-	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
-	sess.Messages = paginated
-	sess.Pagination = info
-	return sess, nil
+	return paginateSession(sess, tailCompactions, beforeMessageID, afterMessageID)
 }
 
 func readAntigravityFile(path string, rawMode bool) (*Session, error) {
@@ -175,7 +170,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 
 func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) *Entry {
 	ts, _ := time.Parse(time.RFC3339, raw.CreatedAt)
-	uuid := fmt.Sprintf("agy-%d", raw.StepIndex)
+	uuid := stableSyntheticEntryID("agy", rawLine, raw.Type)
 
 	switch raw.Type {
 	case "USER_INPUT":

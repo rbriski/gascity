@@ -44,8 +44,8 @@ func TestReadGrokFileConvertsACPUpdates(t *testing.T) {
 	if got := len(session.Messages); got != 5 {
 		t.Fatalf("len(Messages) = %d, want 5", got)
 	}
-	if strings.HasPrefix(session.Messages[0].UUID, "kiro-") {
-		t.Fatalf("Grok synthetic UUID = %q, must not use Kiro prefix", session.Messages[0].UUID)
+	if !strings.HasPrefix(session.Messages[0].UUID, "grok-") {
+		t.Fatalf("Grok synthetic UUID = %q, want grok- prefix", session.Messages[0].UUID)
 	}
 	if blocks := session.Messages[0].ContentBlocks(); len(blocks) != 1 || blocks[0].Text != "Running tests." {
 		t.Fatalf("assistant blocks = %+v, want text chunk", blocks)

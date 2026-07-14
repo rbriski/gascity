@@ -178,7 +178,10 @@ func normalizeStructuredToolInput(name string, raw json.RawMessage) *StructuredT
 		case "text":
 			out.Text = firstNonEmptyString(out.Text, field.Value)
 		default:
-			out.Arguments = append(out.Arguments, field)
+			// Unknown provider fields are not provider-neutral merely because
+			// their names and values fit inside the generic argument shape.
+			// Preserve provider-owned data on the raw transcript only.
+			continue
 		}
 	}
 
@@ -273,7 +276,7 @@ func normalizeStructuredToolInput(name string, raw json.RawMessage) *StructuredT
 		out.Kind = "text"
 	case len(out.Arguments) > 0:
 		out.Kind = "arguments"
-	case text != "":
+	case text != "" && !structuredJSONContainer(raw):
 		out.Kind = "text"
 		out.Text = text
 	}
@@ -686,12 +689,66 @@ func structuredJSONFields(raw json.RawMessage) []StructuredArgument {
 	sort.Strings(keys)
 	fields := make([]StructuredArgument, 0, len(keys))
 	for _, key := range keys {
+		value, ok := structuredJSONScalar(object[key])
+		if !ok {
+			continue
+		}
 		fields = append(fields, StructuredArgument{
 			Name:  key,
-			Value: structuredJSONText(object[key]),
+			Value: value,
 		})
 	}
 	return fields
+}
+
+func structuredJSONScalar(raw json.RawMessage) (string, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return "", false
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case json.Number:
+		return typed.String(), true
+	case bool:
+		if typed {
+			return "true", true
+		}
+		return "false", true
+	default:
+		return "", false
+	}
+}
+
+func structuredJSONContainer(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return false
+	}
+	var decoded any
+	if err := json.Unmarshal(trimmed, &decoded); err != nil {
+		return false
+	}
+	switch decoded.(type) {
+	case map[string]any, []any:
+		return true
+	default:
+		return false
+	}
+}
+
+func structuredArgumentScalar(raw json.RawMessage) (string, bool) {
+	value, ok := structuredJSONScalar(raw)
+	if !ok {
+		return "", false
+	}
+	if _, encodedContainer := decodeJSONStringContainer(value); encodedContainer {
+		return "", false
+	}
+	return value, true
 }
 
 func readResultObject(object map[string]json.RawMessage) map[string]json.RawMessage {
@@ -3114,7 +3171,7 @@ func argumentListFromRaw(raw json.RawMessage) []StructuredArgument {
 		sort.Strings(keys)
 		out := make([]StructuredArgument, 0, len(keys))
 		for _, key := range keys {
-			if value := strings.TrimSpace(structuredJSONText(object[key])); value != "" {
+			if value, ok := structuredArgumentScalar(object[key]); ok && strings.TrimSpace(value) != "" {
 				out = append(out, StructuredArgument{Name: key, Value: value})
 			}
 		}
@@ -3133,6 +3190,9 @@ func argumentListFromRaw(raw json.RawMessage) []StructuredArgument {
 		arg := StructuredArgument{
 			Name:  firstNonEmptyString(strings.TrimSpace(item.Name), strings.TrimSpace(item.Key)),
 			Value: strings.TrimSpace(item.Value),
+		}
+		if _, encodedContainer := decodeJSONStringContainer(arg.Value); encodedContainer {
+			continue
 		}
 		if arg.Name != "" || arg.Value != "" {
 			out = append(out, arg)
@@ -3493,11 +3553,11 @@ func jsonStringSliceField(object map[string]json.RawMessage, names ...string) []
 		if json.Unmarshal(raw, &values) == nil {
 			return compactStringSlice(values)
 		}
-		var anyValues []any
-		if json.Unmarshal(raw, &anyValues) == nil {
-			out := make([]string, 0, len(anyValues))
-			for _, value := range anyValues {
-				if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+		var rawValues []json.RawMessage
+		if json.Unmarshal(raw, &rawValues) == nil {
+			out := make([]string, 0, len(rawValues))
+			for _, value := range rawValues {
+				if text, ok := structuredJSONScalar(value); ok && strings.TrimSpace(text) != "" {
 					out = append(out, text)
 				}
 			}

@@ -150,7 +150,7 @@ export interface SupervisorApi {
   sessionStreamUrl(
     cityName: string,
     sessionId: string,
-    after?: string,
+    afterCursor?: string,
     format?: SessionStreamFormat,
   ): string;
   listSessions(cityName: string): Promise<ListBodySessionResponse>;
@@ -440,9 +440,9 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         afterSeq === undefined ? undefined : { after_seq: afterSeq },
       );
     },
-    sessionStreamUrl(cityName, sessionId, after, format) {
+    sessionStreamUrl(cityName, sessionId, afterCursor, format) {
       const query: Record<string, string> = {};
-      if (after !== undefined) query.after = after;
+      if (afterCursor !== undefined) query.after_cursor = afterCursor;
       if (format !== undefined) query.format = format;
       return supervisorUrl(
         baseUrl,

@@ -3,6 +3,7 @@
 package dashport_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 const (
@@ -32,6 +36,12 @@ const (
 	corpusMailSubject = "seeded handoff"
 	corpusMailFrom    = "builder"
 	corpusMailTo      = "reviewer"
+
+	transcriptInitialUserID      = "transcript-user-1"
+	transcriptInitialAssistantID = "transcript-assistant-1"
+	transcriptInitialAnswer      = "Initial structured answer"
+	transcriptAppendedUserID     = "transcript-user-2"
+	transcriptAppendedPrompt     = "Appended structured prompt"
 )
 
 // fixtures is the loaded, seeded corpus plus the state a test drives.
@@ -44,6 +54,26 @@ type fixtures struct {
 	rigStores map[string]beads.Store
 	eventProv events.Provider
 	mailProv  *beadmail.Provider
+
+	sessionProvider *runtime.Fake
+	sessionManager  *session.Manager
+	sessionID       string
+	transcriptPath  string
+}
+
+type claudeTranscriptMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type claudeTranscriptEntry struct {
+	UUID       string                  `json:"uuid"`
+	ParentUUID string                  `json:"parentUuid"`
+	Type       string                  `json:"type"`
+	Timestamp  string                  `json:"timestamp"`
+	SessionID  string                  `json:"sessionId,omitempty"`
+	CWD        string                  `json:"cwd,omitempty"`
+	Message    claudeTranscriptMessage `json:"message"`
 }
 
 // corpusBeads is the on-disk beads.json shape: a sequence counter and the bead
@@ -68,15 +98,104 @@ func loadFixtures(t *testing.T) *fixtures {
 	store := seedBeadStore(t)
 	rec := seedEventLog(t, cityPath)
 	mailProv := seedMail(t, store)
+	transcriptRoot := filepath.Join(cityPath, ".gc", "provider-transcripts")
+	sessionProvider, sessionManager, sessionID, transcriptPath := seedTranscriptSession(t, store, cityPath, transcriptRoot)
 
 	return &fixtures{
 		CityName:  corpusCityName,
 		CityPath:  cityPath,
-		config:    corpusConfig(),
+		config:    corpusConfig(cityPath, transcriptRoot),
 		cityStore: store,
 		rigStores: map[string]beads.Store{corpusRigName: beads.NewMemStore()},
 		eventProv: rec,
 		mailProv:  mailProv,
+
+		sessionProvider: sessionProvider,
+		sessionManager:  sessionManager,
+		sessionID:       sessionID,
+		transcriptPath:  transcriptPath,
+	}
+}
+
+func seedTranscriptSession(t *testing.T, store beads.Store, cityPath, transcriptRoot string) (*runtime.Fake, *session.Manager, string, string) {
+	t.Helper()
+	provider := runtime.NewFake()
+	manager := session.NewManagerWithOptions(store, provider)
+	workDir := filepath.Join(cityPath, "rigs", corpusRigName)
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("create transcript workdir: %v", err)
+	}
+	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
+		Template: "demo/builder",
+		Title:    "Structured transcript",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Resume: session.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("create transcript session: %v", err)
+	}
+
+	transcriptDir := filepath.Join(transcriptRoot, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("create transcript directory: %v", err)
+	}
+	transcriptPath := filepath.Join(transcriptDir, info.SessionKey+".jsonl")
+	writeClaudeTranscript(t, transcriptPath,
+		claudeTranscriptEntry{
+			UUID:      transcriptInitialUserID,
+			Type:      "user",
+			Timestamp: "2026-07-14T00:00:00Z",
+			SessionID: info.SessionKey,
+			CWD:       workDir,
+			Message:   claudeTranscriptMessage{Role: "user", Content: "Inspect transcript enrichment"},
+		},
+		claudeTranscriptEntry{
+			UUID:       transcriptInitialAssistantID,
+			ParentUUID: transcriptInitialUserID,
+			Type:       "assistant",
+			Timestamp:  "2026-07-14T00:00:01Z",
+			SessionID:  info.SessionKey,
+			CWD:        workDir,
+			Message:    claudeTranscriptMessage{Role: "assistant", Content: transcriptInitialAnswer},
+		},
+	)
+	return provider, manager, info.ID, transcriptPath
+}
+
+func writeClaudeTranscript(t *testing.T, path string, entries ...claudeTranscriptEntry) {
+	t.Helper()
+	var payload bytes.Buffer
+	encoder := json.NewEncoder(&payload)
+	for _, entry := range entries {
+		if err := encoder.Encode(entry); err != nil {
+			t.Fatalf("encode transcript entry %q: %v", entry.UUID, err)
+		}
+	}
+	if err := os.WriteFile(path, payload.Bytes(), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+}
+
+func appendClaudeTranscript(t *testing.T, path string, entry claudeTranscriptEntry) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open transcript for append: %v", err)
+	}
+	if err := json.NewEncoder(file).Encode(entry); err != nil {
+		_ = file.Close()
+		t.Fatalf("append transcript entry %q: %v", entry.UUID, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close appended transcript: %v", err)
 	}
 }
 
@@ -149,14 +268,15 @@ func seedMail(t *testing.T, store beads.Store) *beadmail.Provider {
 // corpusConfig builds the seeded city config in Go (config.City uses TOML tags,
 // so it is authored here rather than deserialized from the corpus). It mirrors
 // the fake-state defaults but names one rig and one agent the assertions expect.
-func corpusConfig() *config.City {
+func corpusConfig(cityPath, transcriptRoot string) *config.City {
 	return &config.City{
 		Workspace: config.Workspace{Name: corpusCityName},
+		Daemon:    config.DaemonConfig{ObservePaths: []string{transcriptRoot}},
 		Agents: []config.Agent{
 			{Name: "builder", Dir: corpusRigName, Provider: "test-agent", MaxActiveSessions: intPtr(2)},
 		},
 		Rigs: []config.Rig{
-			{Name: corpusRigName, Path: filepath.Join(os.TempDir(), "dashport-"+corpusRigName)},
+			{Name: corpusRigName, Path: filepath.Join(cityPath, "rigs", corpusRigName)},
 		},
 		Providers: map[string]config.ProviderSpec{
 			"test-agent": {DisplayName: "Test Agent"},
@@ -168,13 +288,14 @@ func corpusConfig() *config.City {
 // The returned stop function drains the plane's run tailers and status samplers.
 func serveSeededCity(ctx context.Context, fx *fixtures) (http.Handler, func(), error) {
 	return api.ServeSeededCity(ctx, api.SeededCityDeps{
-		CityName:      fx.CityName,
-		CityPath:      fx.CityPath,
-		Config:        fx.config,
-		CityBeadStore: fx.cityStore,
-		RigStores:     fx.rigStores,
-		MailProvider:  fx.mailProv,
-		EventProvider: fx.eventProv,
+		CityName:        fx.CityName,
+		CityPath:        fx.CityPath,
+		Config:          fx.config,
+		CityBeadStore:   fx.cityStore,
+		RigStores:       fx.rigStores,
+		MailProvider:    fx.mailProv,
+		EventProvider:   fx.eventProv,
+		SessionProvider: fx.sessionProvider,
 	}, "")
 }
 

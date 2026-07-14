@@ -142,29 +142,50 @@ func TestSessionStreamStructuredEventInSpec(t *testing.T) {
 			if gotRef != "#/components/schemas/SessionStreamStructuredMessageEvent" {
 				t.Fatalf("session structured event data ref = %q, want SessionStreamStructuredMessageEvent", gotRef)
 			}
+			gotRef = sseEventDataRef(t, source.spec, "/v0/city/{cityName}/session/{id}/stream", "pending_cleared")
+			if gotRef != "#/components/schemas/SessionPendingClearedEvent" {
+				t.Fatalf("session pending_cleared event data ref = %q, want SessionPendingClearedEvent", gotRef)
+			}
 
 			schemas := componentSchemas(t, source.spec)
 			blockSchema := schemaByRef(t, schemas, "#/components/schemas/SessionStructuredBlock")
-			properties, ok := blockSchema["properties"].(map[string]any)
+			mapping := structuredDiscriminatorMapping(t, "SessionStructuredBlock", blockSchema, "type")
+			toolUseSchema := schemaByRef(t, schemas, mapping["tool_use"])
+			toolUseProperties := structuredSchemaProperties(t, "SessionStructuredBlockToolUse", toolUseSchema)
+			inputProperty, ok := toolUseProperties["input"].(map[string]any)
 			if !ok {
-				t.Fatal("SessionStructuredBlock properties missing")
-			}
-			inputProperty, ok := properties["input"].(map[string]any)
-			if !ok {
-				t.Fatal("SessionStructuredBlock.input property missing")
+				t.Fatal("SessionStructuredBlockToolUse.input property missing")
 			}
 			if gotRef, _ := inputProperty["$ref"].(string); gotRef != "#/components/schemas/SessionStructuredToolInput" {
-				t.Fatalf("SessionStructuredBlock.input ref = %q, want SessionStructuredToolInput", gotRef)
+				t.Fatalf("SessionStructuredBlockToolUse.input ref = %q, want SessionStructuredToolInput", gotRef)
 			}
-			contentProperty, ok := properties["content"].(map[string]any)
+			toolResultSchema := schemaByRef(t, schemas, mapping["tool_result"])
+			toolResultProperties := structuredSchemaProperties(t, "SessionStructuredBlockToolResult", toolResultSchema)
+			contentProperty, ok := toolResultProperties["content"].(map[string]any)
 			if !ok {
-				t.Fatal("SessionStructuredBlock.content property missing")
+				t.Fatal("SessionStructuredBlockToolResult.content property missing")
 			}
-			if gotType, _ := contentProperty["type"].(string); gotType != "string" {
-				t.Fatalf("SessionStructuredBlock.content type = %q, want string", gotType)
+			if !schemaIncludesJSONType(contentProperty, "string") {
+				t.Fatalf("SessionStructuredBlockToolResult.content does not include string: %#v", contentProperty)
 			}
 		})
 	}
+}
+
+func schemaIncludesJSONType(schema map[string]any, want string) bool {
+	if got, ok := schema["type"].(string); ok {
+		return got == want
+	}
+	values, ok := schema["type"].([]any)
+	if !ok {
+		return false
+	}
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSessionTranscriptStructuredSchemaExcludesRawMessages(t *testing.T) {

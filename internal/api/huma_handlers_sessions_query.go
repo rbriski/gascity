@@ -151,6 +151,16 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 
 	wantRaw := input.Format == "raw"
 	wantStructured := input.Format == "structured"
+	before := strings.TrimSpace(input.Before)
+	after := strings.TrimSpace(input.After)
+	if before != "" && after != "" {
+		return nil, apierr.ValidationFailed.Msg("before and after are mutually exclusive")
+	}
+	if path == "" {
+		if cursorErr := transcriptCursorAbsentError(before, after); cursorErr != nil {
+			return nil, transcriptCursorInvalidatedProblem(cursorErr, "reading session log")
+		}
+	}
 
 	if path != "" {
 		// Compactions() returns (n, provided). When the client omitted
@@ -158,18 +168,12 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		// entries, so default to 0 (sessionlog's "no pagination"
 		// sentinel) rather than 1 compaction.
 		tail, _ := input.Compactions()
-		before := input.Before
-		after := input.After
-
-		if before != "" && after != "" {
-			return nil, apierr.ValidationFailed.Msg("before and after are mutually exclusive")
+		handle, handleErr := s.workerHandleForSession(store.Store, id)
+		if handleErr != nil {
+			return nil, humaSessionManagerError(handleErr)
 		}
 
 		if wantStructured {
-			handle, handleErr := s.workerHandleForSession(store.Store, id)
-			if handleErr != nil {
-				return nil, humaSessionManagerError(handleErr)
-			}
 			history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{
 				TailCompactions: tail,
 				BeforeEntryID:   before,
@@ -177,37 +181,41 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 			})
 			if historyErr != nil {
 				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
-					return s.structuredTranscriptFallback(info)
+					return s.structuredTranscriptFallback(info, input.IncludeThinking)
+				}
+				if problem := transcriptCursorInvalidatedProblem(historyErr, "reading session history"); problem != nil {
+					return nil, problem
 				}
 				return nil, apierr.Internal.Msg("reading session history: " + historyErr.Error())
 			}
 			messages, _ := historySnapshotStructuredMessages(history, input.IncludeThinking)
+			projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{
+				ID:                 info.ID,
+				Template:           info.Template,
+				Provider:           info.Provider,
+				Format:             "structured",
+				SchemaVersion:      sessionStructuredSchemaVersion,
+				History:            structuredHistoryFromSnapshot(history),
+				StructuredMessages: messages,
+				Pagination:         history.Pagination,
+			}, input.IncludeThinking)
 			return &IndexOutput[sessionTranscriptGetResponse]{
 				Index: s.latestIndex(),
-				Body: sessionTranscriptGetResponse{
-					ID:                 info.ID,
-					Template:           info.Template,
-					Provider:           info.Provider,
-					Format:             "structured",
-					SchemaVersion:      sessionStructuredSchemaVersion,
-					History:            structuredHistoryFromSnapshot(history),
-					StructuredMessages: messages,
-					Pagination:         history.Pagination,
-				},
+				Body:  structuredTranscriptResponseFromEvent(projection),
 			}, nil
 		}
 
 		if wantRaw {
-			var rawSess *sessionlog.Session
-			switch {
-			case before != "":
-				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			case after != "":
-				rawSess, err = sessionlog.ReadProviderFileRawNewer(info.Provider, path, tail, after)
-			default:
-				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
-			}
+			transcript, err := handle.Transcript(ctx, worker.TranscriptRequest{
+				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
+				Raw:             true,
+			})
 			if err != nil {
+				if problem := transcriptCursorInvalidatedProblem(err, "reading session log"); problem != nil {
+					return nil, problem
+				}
 				return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 			}
 			return &IndexOutput[sessionTranscriptGetResponse]{
@@ -217,24 +225,24 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 					Template:   info.Template,
 					Provider:   info.Provider,
 					Format:     "raw",
-					Messages:   wrapRawFrameBytes(rawSess.RawPayloadBytes()),
-					Pagination: rawSess.Pagination,
+					Messages:   wrapRawFrameBytes(transcript.RawMessages),
+					Pagination: transcript.Session.Pagination,
 				},
 			}, nil
 		}
 
-		var sess *sessionlog.Session
-		switch {
-		case before != "":
-			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		case after != "":
-			sess, err = sessionlog.ReadProviderFileNewer(info.Provider, path, tail, after)
-		default:
-			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
-		}
+		transcript, err := handle.Transcript(ctx, worker.TranscriptRequest{
+			TailCompactions: tail,
+			BeforeEntryID:   before,
+			AfterEntryID:    after,
+		})
 		if err != nil {
+			if problem := transcriptCursorInvalidatedProblem(err, "reading session log"); problem != nil {
+				return nil, problem
+			}
 			return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 		}
+		sess := transcript.Session
 
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
@@ -258,7 +266,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 	}
 
 	if wantStructured {
-		return s.structuredTranscriptFallback(info)
+		return s.structuredTranscriptFallback(info, input.IncludeThinking)
 	}
 
 	if wantRaw {
@@ -307,7 +315,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 	}, nil
 }
 
-func (s *Server) structuredTranscriptFallback(info session.Info) (*IndexOutput[sessionTranscriptGetResponse], error) {
+func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	activity := string(worker.TailActivityIdle)
 	output := ""
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
@@ -318,17 +326,18 @@ func (s *Server) structuredTranscriptFallback(info session.Info) (*IndexOutput[s
 		}
 		output = peekOutput
 	}
+	projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+	}, includeThinking)
 	return &IndexOutput[sessionTranscriptGetResponse]{
 		Index: s.latestIndex(),
-		Body: sessionTranscriptGetResponse{
-			ID:                 info.ID,
-			Template:           info.Template,
-			Provider:           info.Provider,
-			Format:             "structured",
-			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
-			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
-		},
+		Body:  structuredTranscriptResponseFromEvent(projection),
 	}, nil
 }
 

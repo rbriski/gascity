@@ -8,6 +8,12 @@ cmd/gc/.runtime/
 /bin/
 /dist/
 /gc
+
+# Dashboard browser-e2e reports and local browser state.
+internal/api/dashboardspa/web/frontend/test-results/
+internal/api/dashboardspa/web/frontend/playwright-report/
+internal/api/dashboardspa/web/frontend/blob-report/
+internal/api/dashboardspa/web/frontend/.playwright/
 /genschema
 /bd
 /br

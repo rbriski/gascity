@@ -14,12 +14,13 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":       SessionStreamMessageEvent{},
-		"message":    SessionStreamRawMessageEvent{},
-		"structured": SessionStreamStructuredMessageEvent{},
-		"activity":   SessionActivityEvent{},
-		"pending":    runtime.PendingInteraction{},
-		"heartbeat":  HeartbeatEvent{},
+		"turn":            SessionStreamMessageEvent{},
+		"message":         SessionStreamRawMessageEvent{},
+		"structured":      SessionStreamStructuredMessageEvent{},
+		"activity":        SessionActivityEvent{},
+		"pending":         runtime.PendingInteraction{},
+		"pending_cleared": SessionPendingClearedEvent{},
+		"heartbeat":       HeartbeatEvent{},
 	}
 }
 
@@ -411,7 +412,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// Session SSE stream.
-	registerSSE(sm.humaAPI, huma.Operation{
+	registerSSEStringID(sm.humaAPI, huma.Operation{
 		OperationID: "stream-session",
 		Method:      http.MethodGet,
 		Path:        cityScopePrefix + "/session/{id}/stream",
@@ -423,7 +424,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),
 	}, sessionStreamEventMap(),
 		sseCityPrecheck(sm, (*Server).checkSessionStream),
-		sseCityStream(sm, (*Server).streamSession))
+		sseCityStringIDStream(sm, (*Server).streamSession))
 
 	// Event SSE stream (per-city).
 	registerSSE(sm.humaAPI, huma.Operation{

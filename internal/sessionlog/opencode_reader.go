@@ -2,7 +2,6 @@ package sessionlog
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,9 +29,10 @@ func ReadOpenCodeFile(path string, tailCompactions int) (*Session, error) {
 
 	messages := make([]*Entry, 0, len(export.Messages))
 	orphanedToolUseIDs := make(map[string]bool)
+	syntheticIDs := newStableSyntheticEntryIDSequence("opencode")
 	var lastID string
-	for idx, rawMessage := range export.Messages {
-		entry := convertOpenCodeMessage(rawMessage, sessionID, idx, orphanedToolUseIDs)
+	for _, rawMessage := range export.Messages {
+		entry := convertOpenCodeMessage(rawMessage, sessionID, syntheticIDs.ForRecord(rawMessage), orphanedToolUseIDs)
 		if entry == nil {
 			continue
 		}
@@ -139,7 +139,7 @@ func findOpenCodeSessionFileIn(root, workDir string) string {
 	return candidates[0].path
 }
 
-func convertOpenCodeMessage(rawMessage json.RawMessage, sessionID string, idx int, orphanedToolUseIDs map[string]bool) *Entry {
+func convertOpenCodeMessage(rawMessage json.RawMessage, sessionID string, syntheticID stableSyntheticEntryIDSource, orphanedToolUseIDs map[string]bool) *Entry {
 	var message openCodeMessage
 	if err := json.Unmarshal(rawMessage, &message); err != nil {
 		return nil
@@ -155,7 +155,7 @@ func convertOpenCodeMessage(rawMessage json.RawMessage, sessionID string, idx in
 
 	uuid := strings.TrimSpace(message.Info.ID)
 	if uuid == "" {
-		uuid = fmt.Sprintf("opencode-%d", idx)
+		uuid = syntheticID.ID("")
 	}
 	ts := time.Time{}
 	if message.Info.Time.Created > 0 {

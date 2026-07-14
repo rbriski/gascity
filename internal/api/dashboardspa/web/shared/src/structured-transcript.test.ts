@@ -8,6 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   patchTextFromHunks,
   formatUsage,
@@ -25,6 +26,13 @@ import { patchTextFromHunks as barrelPatch } from './index.js';
 
 test('STRUCTURED_SCHEMA_VERSION pins the wire schema constant', () => {
   assert.equal(STRUCTURED_SCHEMA_VERSION, 'session.structured.v1');
+});
+
+test('structured wire DTOs come only from the generated supervisor client', () => {
+  const source = readFileSync(new URL('./structured-transcript.ts', import.meta.url), 'utf8');
+  assert.match(source, /from '.\/generated\/gc-supervisor-client\/types\.gen\.js'/);
+  assert.doesNotMatch(source, /export\s+interface\s+SessionStructured/);
+  assert.doesNotMatch(source, /interface\s+SessionStreamStructuredMessageEventBase/);
 });
 
 test('patchTextFromHunks renders file separator + hunk header + lines', () => {
@@ -47,7 +55,9 @@ test('patchTextFromHunks renders file separator + hunk header + lines', () => {
 test('patchTextFromHunks emits multi-line ranges as start,count and single as start', () => {
   // old_lines=3 → "1,3"; new_lines=2 → "1,2"; no file_path → no separator.
   assert.equal(
-    patchTextFromHunks([{ old_start: 1, old_lines: 3, new_start: 1, new_lines: 2, lines: ['ctx'] }]),
+    patchTextFromHunks([
+      { old_start: 1, old_lines: 3, new_start: 1, new_lines: 2, lines: ['ctx'] },
+    ]),
     '@@ -1,3 +1,2 @@\nctx',
   );
 });
@@ -98,7 +108,10 @@ test('formatUsage skips zero token counts but keeps a defined zero percent', () 
 });
 
 test('formatUsage requires both context_used and context_window for the pair', () => {
-  assert.equal(formatUsage({ context_used_tokens: 108, context_window_tokens: 200000 }), 'tokens 108/200000');
+  assert.equal(
+    formatUsage({ context_used_tokens: 108, context_window_tokens: 200000 }),
+    'tokens 108/200000',
+  );
   assert.equal(formatUsage({ context_used_tokens: 108 }), '');
 });
 
@@ -114,11 +127,73 @@ test('isSessionStructuredEvent accepts a structured envelope and rejects others'
     provider: 'claude',
     format: 'structured',
     schema_version: STRUCTURED_SCHEMA_VERSION,
+    operation: 'snapshot',
+    history: {
+      transcript_stream_id: 'stream-1',
+      generation: { id: 'generation-1' },
+      cursor: { resume_token: 'st1.snapshot' },
+      continuity: { status: 'continuous' },
+      tail_state: { activity: 'idle' },
+    },
     structured_messages: [],
   };
   assert.equal(isSessionStructuredEvent(event), true);
+  assert.equal(isSessionStructuredEvent({ ...event, operation: 'upsert' }), true);
+  assert.equal(
+    isSessionStructuredEvent({
+      ...event,
+      operation: 'reset',
+      reset_reason: 'stream_changed',
+    }),
+    true,
+  );
   assert.equal(isSessionStructuredEvent({ format: 'raw', messages: [] }), false);
   assert.equal(isSessionStructuredEvent({ format: 'structured', structured_messages: 'x' }), false);
+  assert.equal(isSessionStructuredEvent({ ...event, operation: undefined }), false);
+  assert.equal(isSessionStructuredEvent({ ...event, operation: 'append' }), false);
+  assert.equal(isSessionStructuredEvent({ ...event, schema_version: 'session.structured.v2' }), false);
+  assert.equal(isSessionStructuredEvent({ ...event, id: undefined }), false);
+  assert.equal(isSessionStructuredEvent({ ...event, template: undefined }), false);
+  assert.equal(isSessionStructuredEvent({ ...event, provider: undefined }), false);
+  assert.equal(
+    isSessionStructuredEvent({ ...event, structured_messages: [{ blocks: [] }] }),
+    false,
+  );
+  assert.equal(
+    isSessionStructuredEvent({
+      ...event,
+      structured_messages: [
+        {
+          id: 'tool-1',
+          role: 'assistant',
+          status: 'final',
+          blocks: [
+            {
+              type: 'tool_use',
+              input: { kind: 'plan', steps: 'not-an-array' },
+            },
+          ],
+        },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isSessionStructuredEvent({ ...event, operation: 'reset', reset_reason: undefined }),
+    false,
+  );
+  assert.equal(
+    isSessionStructuredEvent({ ...event, operation: 'reset', reset_reason: 'unknown' }),
+    false,
+  );
+  assert.equal(isSessionStructuredEvent({ ...event, history: undefined }), false);
+  assert.equal(
+    isSessionStructuredEvent({
+      ...event,
+      history: { ...event.history, cursor: {} },
+    }),
+    false,
+  );
   assert.equal(isSessionStructuredEvent('nope'), false);
   assert.equal(isSessionStructuredEvent(null), false);
 });
@@ -135,7 +210,7 @@ test('isSessionStructuredHistory requires the load-bearing nested fields', () =>
   const ok = {
     transcript_stream_id: 's',
     generation: { id: 'g' },
-    cursor: {},
+    cursor: { resume_token: 'st1.history' },
     continuity: { status: 'continuous' },
     tail_state: { activity: 'idle' },
   };
@@ -144,15 +219,22 @@ test('isSessionStructuredHistory requires the load-bearing nested fields', () =>
   assert.equal(isSessionStructuredHistory({ ...ok, generation: {} }), false);
   assert.equal(isSessionStructuredHistory({ ...ok, continuity: {} }), false);
   assert.equal(isSessionStructuredHistory({ ...ok, tail_state: {} }), false);
+  assert.equal(isSessionStructuredHistory({ ...ok, cursor: {} }), false);
+  assert.equal(isSessionStructuredHistory({ ...ok, cursor: { resume_token: 1 } }), false);
   assert.equal(isSessionStructuredHistory(null), false);
   // Intentional hardening over the old guard: an array is not a record, so a
   // sub-field supplied as an array is rejected (the server never sends one).
   assert.equal(isSessionStructuredHistory({ ...ok, cursor: [] }), false);
 });
 
-test('isStructuredMessage requires a blocks array', () => {
-  assert.equal(isStructuredMessage({ blocks: [] }), true);
-  assert.equal(isStructuredMessage({ blocks: 'x' }), false);
+test('isStructuredMessage requires identity, a closed role, status, and typed blocks', () => {
+  const message = { id: 'm1', role: 'assistant', status: 'final', blocks: [] };
+  assert.equal(isStructuredMessage(message), true);
+  assert.equal(isStructuredMessage({ ...message, id: undefined }), false);
+  assert.equal(isStructuredMessage({ ...message, role: 'provider-special' }), false);
+  assert.equal(isStructuredMessage({ ...message, status: undefined }), false);
+  assert.equal(isStructuredMessage({ ...message, blocks: 'x' }), false);
+  assert.equal(isStructuredMessage({ ...message, blocks: [{ type: 'provider-special' }] }), false);
   assert.equal(isStructuredMessage({}), false);
 });
 

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1315,11 +1316,19 @@ func TestInferStructuredToolResultCarriesNeutralSearchResultItems(t *testing.T) 
 	}
 }
 
-func TestNormalizeStructuredToolInputCarriesWebSearchArguments(t *testing.T) {
+func TestNormalizeStructuredToolInputOmitsProviderNativeFallbackFields(t *testing.T) {
 	raw := mustMarshalStructuredToolTest(t, map[string]any{
-		"query":  "structured tool result formats",
-		"action": `{"source":"web","type":"search"}`,
-		"scope":  "web",
+		"query":       "structured tool result formats",
+		"url":         "https://example.com/search",
+		"task_id":     42,
+		"description": true,
+		"action": map[string]any{
+			"source": "web",
+			"type":   "search",
+		},
+		"encoded_action": `{"source":"web","type":"search"}`,
+		"native_list":    []any{"web", map[string]any{"source": "provider"}},
+		"scope":          "web",
 	})
 
 	got := normalizeStructuredToolInput("web_search", raw)
@@ -1332,11 +1341,101 @@ func TestNormalizeStructuredToolInputCarriesWebSearchArguments(t *testing.T) {
 	if got.Query != "structured tool result formats" {
 		t.Fatalf("Query = %q, want structured tool result formats; input = %+v", got.Query, got)
 	}
-	if !structuredArgumentsContain(got.Arguments, "action", `{"source":"web","type":"search"}`) {
-		t.Fatalf("Arguments = %+v, missing action JSON string", got.Arguments)
+	if got.URL != "https://example.com/search" {
+		t.Fatalf("URL = %q, want typed search URL; input = %+v", got.URL, got)
 	}
-	if !structuredArgumentsContain(got.Arguments, "scope", "web") {
-		t.Fatalf("Arguments = %+v, missing scope=web", got.Arguments)
+	if got.TaskID != "42" || got.Description != "true" {
+		t.Fatalf("known neutral scalar fields = task_id %q description %q, want 42/true; input = %+v", got.TaskID, got.Description, got)
+	}
+	if len(got.Arguments) != 0 {
+		t.Fatalf("Arguments = %+v, want provider-native fallback fields omitted", got.Arguments)
+	}
+}
+
+func TestNormalizeStructuredToolInputOmitsUnknownObjectFallback(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]any{
+		"action": map[string]any{
+			"source": "web",
+			"type":   "search",
+		},
+		"encoded_action": `{"source":"web","type":"search"}`,
+		"native_list":    []any{"web", map[string]any{"source": "provider"}},
+		"scope":          "web",
+	})
+
+	if got := normalizeStructuredToolInput("provider_native_tool", raw); got != nil {
+		t.Fatalf("normalizeStructuredToolInput() = %+v, want unknown provider object omitted", got)
+	}
+}
+
+func TestNormalizeStructuredToolInputPreservesExplicitJSONText(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]any{
+		"text": `{"user_supplied":true}`,
+	})
+
+	got := normalizeStructuredToolInput("display_text", raw)
+	if got == nil {
+		t.Fatal("normalizeStructuredToolInput returned nil")
+	}
+	if got.Kind != "text" || got.Text != `{"user_supplied":true}` {
+		t.Fatalf("normalizeStructuredToolInput() = %+v, want explicit JSON text preserved", got)
+	}
+}
+
+func TestStructuredJSONFieldsKeepsOnlyScalarValues(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]any{
+		"bool":   true,
+		"list":   []any{"one", map[string]any{"native": "value"}},
+		"null":   nil,
+		"number": 42,
+		"object": map[string]any{"native": "value"},
+		"string": "value",
+	})
+
+	got := structuredJSONFields(raw)
+	want := []StructuredArgument{
+		{Name: "bool", Value: "true"},
+		{Name: "number", Value: "42"},
+		{Name: "string", Value: "value"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("structuredJSONFields() = %+v, want scalar-only %+v", got, want)
+	}
+}
+
+func TestArgumentListFromRawOmitsNestedValues(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]any{
+		"count":        7,
+		"label":        "matches",
+		"native":       map[string]any{"source": "provider"},
+		"items":        []any{"one", "two"},
+		"encoded":      `{"source":"provider"}`,
+		"encoded_list": `["provider"]`,
+	})
+
+	got := argumentListFromRaw(raw)
+	want := []StructuredArgument{
+		{Name: "count", Value: "7"},
+		{Name: "label", Value: "matches"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argumentListFromRaw() = %+v, want scalar-only %+v", got, want)
+	}
+}
+
+func TestJSONStringSliceFieldOmitsNestedValues(t *testing.T) {
+	raw := mustMarshalStructuredToolTest(t, map[string]any{
+		"values": []any{"one", 2, true, map[string]any{"source": "provider"}, []string{"nested"}},
+	})
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	got := jsonStringSliceField(object, "values")
+	want := []string{"one", "2", "true"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("jsonStringSliceField() = %v, want scalar-only %v", got, want)
 	}
 }
 

@@ -80,7 +80,10 @@ test('formatInlineValue renders null/undefined as empty and primitives verbatim'
 });
 
 test('formatArgument renders name: value, defaulting name and inlining non-string value', () => {
-  assert.equal(formatArgument({ name: 'Select rollout scope', value: 'All providers' }), 'Select rollout scope: All providers');
+  assert.equal(
+    formatArgument({ name: 'Select rollout scope', value: 'All providers' }),
+    'Select rollout scope: All providers',
+  );
   assert.equal(formatArgument({ value: 'x' }), 'argument: x');
   assert.equal(formatArgument({ name: 'count', value: 5 }), 'count: 5');
   assert.equal(formatArgument('plain'), 'plain');
@@ -142,7 +145,9 @@ test('userPromptRows renders prompt, opened files, uploaded files, and selection
 
 test('userPromptRows renders an uploaded file with a preview suffix and no path', () => {
   assert.deepEqual(
-    userPromptRows({ uploaded_files: [{ original_name: 'note.txt', preview_url: 'https://ex/p' }] }),
+    userPromptRows({
+      uploaded_files: [{ original_name: 'note.txt', preview_url: 'https://ex/p' }],
+    }),
     ['uploaded files:', '- note.txt preview: https://ex/p'],
   );
 });
@@ -175,7 +180,7 @@ test('historyRows renders stream/generation/continuity/tail/diagnostics in order
     transcript_stream_id: 'stream-open-code-1',
     provider_session_id: 'provider-session-99',
     generation: { id: 'generation-1', observed_at: '2026-04-18T20:00:00Z' },
-    cursor: { after_entry_id: 'entry-42' },
+    cursor: { after_entry_id: 'entry-42', resume_token: 'st1.history-rows' },
     continuity: { status: 'compacted', has_branches: true, note: 'compacted transcript' },
     tail_state: {
       activity: 'in-turn',
@@ -210,7 +215,7 @@ test('historyRows includes a zero compaction count (appendNumber keeps zero)', (
   const history: SessionStructuredHistory = {
     transcript_stream_id: 's',
     generation: { id: 'g' },
-    cursor: {},
+    cursor: { resume_token: 'st1.minimal-history' },
     continuity: { status: 'continuous', compaction_count: 0 },
     tail_state: { activity: 'idle' },
   };
@@ -230,17 +235,24 @@ test('toolInputRows renders fields in the appendField order', () => {
     kind: 'patch',
     file_path: 'src/app.ts',
     language: 'typescript',
+    patch: '*** Update File: src/app.ts',
   };
   assert.deepEqual(toolInputRows(input), [
     'kind: patch',
     'file: src/app.ts',
     'language: typescript',
+    'patch: *** Update File: src/app.ts',
   ]);
 });
 
 test('toolInputRows renders plan steps and stdin linked command', () => {
   assert.deepEqual(
-    toolInputRows({ kind: 'plan', plan: 'Expose typed plan data without HTML.', explanation: 'Keep clients provider-neutral.', steps: [{ step: 'Add plan DTO', status: 'in_progress' }] }),
+    toolInputRows({
+      kind: 'plan',
+      plan: 'Expose typed plan data without HTML.',
+      explanation: 'Keep clients provider-neutral.',
+      steps: [{ step: 'Add plan DTO', status: 'in_progress' }],
+    }),
     [
       'kind: plan',
       'plan: Expose typed plan data without HTML.',
@@ -250,7 +262,12 @@ test('toolInputRows renders plan steps and stdin linked command', () => {
     ],
   );
   assert.deepEqual(
-    toolInputRows({ kind: 'stdin', task_id: '42', text: 'hello\n', linked_command: 'claude --resume' }),
+    toolInputRows({
+      kind: 'stdin',
+      task_id: '42',
+      text: 'hello\n',
+      linked_command: 'claude --resume',
+    }),
     ['kind: stdin', 'task: 42', 'linked command: claude --resume', 'text: hello\n'],
   );
 });
@@ -259,18 +276,38 @@ test('toolInputRows renders typed todos and arguments', () => {
   assert.deepEqual(
     toolInputRows({
       kind: 'todo',
-      todos: [{ content: 'Normalize typed todos', status: 'in_progress', active_form: 'Normalizing typed todos', priority: 'high' }],
+      todos: [
+        {
+          content: 'Normalize typed todos',
+          status: 'in_progress',
+          active_form: 'Normalizing typed todos',
+          priority: 'high',
+        },
+      ],
     }),
-    ['kind: todo', 'todos:', '- [in_progress] Normalize typed todos priority high (Normalizing typed todos)'],
+    [
+      'kind: todo',
+      'todos:',
+      '- [in_progress] Normalize typed todos priority high (Normalizing typed todos)',
+    ],
   );
   assert.deepEqual(
-    toolInputRows({ arguments: [{ name: 'a', value: '1' }, { name: 'b', value: '2' }] }),
-    ['a: 1', 'b: 2'],
+    toolInputRows({
+      kind: 'arguments',
+      arguments: [
+        { name: 'a', value: '1' },
+        { name: 'b', value: '2' },
+      ],
+    }),
+    ['kind: arguments', 'a: 1', 'b: 2'],
   );
 });
 
 test('toolInputRows falls back to inline value when no rows accumulate', () => {
-  assert.deepEqual(toolInputRows({}), ['{}']);
+  assert.deepEqual(
+    toolInputRows({} as unknown as SessionStructuredToolInput),
+    ['{}'],
+  );
 });
 
 // --- toolResultSections per kind (spec §8 + __perKindRendering__) ----------
@@ -288,7 +325,11 @@ test('toolResultSections bash renders command/task/stdout lines/timestamp and to
       stdout_lines: 1,
       stderr_lines: 1,
       timestamp: '2026-06-01T00:00:02Z',
-      error: { category: 'command_failure', message: 'npm ERR! test failed', user_reason: 'stopped by user' },
+      error: {
+        category: 'command_failure',
+        message: 'npm ERR! test failed',
+        user_reason: 'stopped by user',
+      },
     }),
   );
   assert.equal(sections.kind, 'bash');
@@ -315,14 +356,26 @@ test('toolResultSections bash renders command/task/stdout lines/timestamp and to
 
 test('toolResultSections python renders code/stdout/stderr/exit', () => {
   const sections = toolResultSections(
-    resultBlock({ kind: 'python', code: 'print(1)', stdout: 'out', stderr: 'err', exit_code: 0, truncated: true }),
+    resultBlock({
+      kind: 'python',
+      code: 'print(1)',
+      stdout: 'out',
+      stderr: 'err',
+      exit_code: 0,
+      truncated: true,
+    }),
   );
   assert.equal(sections.kind, 'python');
-  assert.equal(sections.body, 'kind: python\ncode: print(1)\nstdout: out\nstderr: err\nexit 0\ntruncated');
+  assert.equal(
+    sections.body,
+    'kind: python\ncode: print(1)\nstdout: out\nstderr: err\nexit 0\ntruncated',
+  );
 });
 
 test('toolResultSections stdin renders task/content/text', () => {
-  const sections = toolResultSections(resultBlock({ kind: 'stdin', task_id: '42', content: 'sent' }));
+  const sections = toolResultSections(
+    resultBlock({ kind: 'stdin', task_id: '42', content: 'sent' }),
+  );
   assert.equal(sections.kind, 'stdin');
   assert.equal(sections.body, 'kind: stdin\ntask: 42\ncontent: sent');
 });
@@ -339,7 +392,14 @@ test('toolResultSections edit renders fields plus a diff from patch_hunks', () =
       replace_all: false,
       user_modified: false,
       patch_hunks: [
-        { file_path: 'src/app.ts', old_start: 1, old_lines: 1, new_start: 1, new_lines: 1, lines: ['- old line', '+ new line'] },
+        {
+          file_path: 'src/app.ts',
+          old_start: 1,
+          old_lines: 1,
+          new_start: 1,
+          new_lines: 1,
+          lines: ['- old line', '+ new line'],
+        },
       ],
     }),
   );
@@ -368,7 +428,11 @@ test('toolResultSections places appendToolError in the shared preamble for any k
   // The oracle only drove the error block through bash; pin its placement in
   // the common preamble by exercising a non-bash kind (read).
   const sections = toolResultSections(
-    resultBlock({ kind: 'read', content: 'file body', error: { category: 'file_error', message: 'no such file' } }),
+    resultBlock({
+      kind: 'read',
+      content: 'file body',
+      error: { category: 'file_error', message: 'no such file' },
+    }),
   );
   assert.equal(sections.kind, 'read');
   assert.match(sections.body, /error category: file_error/);
@@ -384,7 +448,13 @@ test('toolResultSections edit prefers an explicit patch string over hunks', () =
 
 test('toolResultSections read renders content and numeric line fields', () => {
   const sections = toolResultSections(
-    resultBlock({ kind: 'read', content: 'file body', start_line: 1, num_lines: 10, total_lines: 100 }),
+    resultBlock({
+      kind: 'read',
+      content: 'file body',
+      start_line: 1,
+      num_lines: 10,
+      total_lines: 100,
+    }),
   );
   assert.equal(sections.kind, 'read');
   assert.equal(sections.body, 'kind: read\ncontent: file body\nstart: 1\nlines: 10\ntotal: 100');
@@ -392,10 +462,19 @@ test('toolResultSections read renders content and numeric line fields', () => {
 
 test('toolResultSections write renders the body and a patch diff', () => {
   const sections = toolResultSections(
-    resultBlock({ kind: 'write', file_path: 'notes.txt', language: 'text', content: 'wrote notes.txt', num_lines: 1 }),
+    resultBlock({
+      kind: 'write',
+      file_path: 'notes.txt',
+      language: 'text',
+      content: 'wrote notes.txt',
+      num_lines: 1,
+    }),
   );
   assert.equal(sections.kind, 'write');
-  assert.equal(sections.body, 'kind: write\nfile: notes.txt\nlanguage: text\ncontent: wrote notes.txt\nlines: 1');
+  assert.equal(
+    sections.body,
+    'kind: write\nfile: notes.txt\nlanguage: text\ncontent: wrote notes.txt\nlines: 1',
+  );
   assert.equal(sections.diff, '');
 });
 
@@ -431,8 +510,20 @@ test('toolResultSections todo renders old/new todo lists', () => {
     resultBlock({
       kind: 'todo',
       content: 'todos updated',
-      old_todos: [{ content: 'Normalize typed todos', status: 'in_progress', active_form: 'Normalizing typed todos' }],
-      new_todos: [{ content: 'Normalize typed todos', status: 'completed', active_form: 'Normalizing typed todos' }],
+      old_todos: [
+        {
+          content: 'Normalize typed todos',
+          status: 'in_progress',
+          active_form: 'Normalizing typed todos',
+        },
+      ],
+      new_todos: [
+        {
+          content: 'Normalize typed todos',
+          status: 'completed',
+          active_form: 'Normalizing typed todos',
+        },
+      ],
     }),
   );
   assert.equal(sections.kind, 'todo');
@@ -451,10 +542,17 @@ test('toolResultSections todo renders old/new todo lists', () => {
 
 test('toolResultSections plan renders plan/explanation/steps', () => {
   const sections = toolResultSections(
-    resultBlock({ kind: 'plan', plan: 'Expose typed plan data without HTML.', content: 'plan captured' }),
+    resultBlock({
+      kind: 'plan',
+      plan: 'Expose typed plan data without HTML.',
+      content: 'plan captured',
+    }),
   );
   assert.equal(sections.kind, 'plan');
-  assert.equal(sections.body, 'kind: plan\nplan: Expose typed plan data without HTML.\ncontent: plan captured');
+  assert.equal(
+    sections.body,
+    'kind: plan\nplan: Expose typed plan data without HTML.\ncontent: plan captured',
+  );
 });
 
 test('toolResultSections question renders questions/options/answer/answers', () => {
@@ -573,7 +671,11 @@ test('toolResultSections search renders result items', () => {
       filenames: ['https://example.com/provider-format'],
       num_results: 1,
       result_items: [
-        { title: 'Provider format notes', url: 'https://example.com/provider-format', snippet: 'Typed provider-neutral search item.' },
+        {
+          title: 'Provider format notes',
+          url: 'https://example.com/provider-format',
+          snippet: 'Typed provider-neutral search item.',
+        },
       ],
       content: 'https://example.com/provider-format: Provider format notes\n',
     }),
@@ -596,7 +698,13 @@ test('toolResultSections search renders result items', () => {
 
 test('toolResultSections glob renders files/duration and truncated flag', () => {
   const sections = toolResultSections(
-    resultBlock({ kind: 'glob', filenames: ['internal/api/session_structured_types.go'], num_files: 1, duration_ms: 27, truncated: true }),
+    resultBlock({
+      kind: 'glob',
+      filenames: ['internal/api/session_structured_types.go'],
+      num_files: 1,
+      duration_ms: 27,
+      truncated: true,
+    }),
   );
   assert.equal(sections.kind, 'glob');
   assert.equal(
@@ -612,7 +720,9 @@ test('toolResultSections glob renders files/duration and truncated flag', () => 
 });
 
 test('toolResultSections generic fallback appends inline value when only kind rendered', () => {
-  const sections = toolResultSections(resultBlock({ kind: 'mystery', foo: 'bar' } as unknown as SessionStructuredToolResult));
+  const sections = toolResultSections(
+    resultBlock({ kind: 'mystery', foo: 'bar' } as unknown as SessionStructuredToolResult),
+  );
   assert.equal(sections.kind, 'mystery');
   assert.equal(sections.body, 'kind: mystery\n{"kind":"mystery","foo":"bar"}');
   assert.equal(sections.diff, '');
@@ -620,7 +730,11 @@ test('toolResultSections generic fallback appends inline value when only kind re
 
 test('toolResultSections generic fallback renders common content/stdout when present', () => {
   const sections = toolResultSections(
-    resultBlock({ kind: 'unknownkind', content: 'plain content', exit_code: 1 } as unknown as SessionStructuredToolResult),
+    resultBlock({
+      kind: 'unknownkind',
+      content: 'plain content',
+      exit_code: 1,
+    } as unknown as SessionStructuredToolResult),
   );
   assert.equal(sections.body, 'kind: unknownkind\ncontent: plain content\nexit 1');
 });
@@ -631,14 +745,23 @@ test('toolResultSections with no structured payload uses block.content', () => {
     body: 'raw string',
     diff: '',
   });
-  assert.deepEqual(toolResultSections({ type: 'tool_result' }), { kind: 'result', body: '', diff: '' });
+  assert.deepEqual(toolResultSections({ type: 'tool_result' }), {
+    kind: 'result',
+    body: '',
+    diff: '',
+  });
 });
 
 // --- imageRows (spec §6) ---------------------------------------------------
 
 test('imageRows renders file/url/mime rows', () => {
   assert.deepEqual(
-    imageRows({ type: 'image', file_path: 'screens/shot.png', image_url: 'https://example.com/shot.png', mime_type: 'image/png' }),
+    imageRows({
+      type: 'image',
+      file_path: 'screens/shot.png',
+      image_url: 'https://example.com/shot.png',
+      mime_type: 'image/png',
+    }),
     ['file: screens/shot.png', 'url: https://example.com/shot.png', 'mime: image/png'],
   );
   assert.deepEqual(imageRows({ type: 'image' }), []);
@@ -662,7 +785,10 @@ test('pendingRows renders kind/request/prompt/options', () => {
 });
 
 test('pendingRows omits absent optional fields', () => {
-  assert.deepEqual(pendingRows({ kind: 'approval', request_id: 'r-1' }), ['kind: approval', 'request: r-1']);
+  assert.deepEqual(pendingRows({ kind: 'approval', request_id: 'r-1' }), [
+    'kind: approval',
+    'request: r-1',
+  ]);
 });
 
 // --- barrel re-export ------------------------------------------------------

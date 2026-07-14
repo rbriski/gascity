@@ -3,6 +3,7 @@ package sessionlog
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -360,20 +361,29 @@ func TestFindKimiSessionFileByIDRejectsTraversalSessionID(t *testing.T) {
 
 func TestReadProviderFileNewerDispatchesKimi(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
-		`{"role":"user","content":"hello"}`,
+		`{"role":"user","content":"before"}`,
+		`{"role":"assistant","content":"after"}`,
 	})
-	sess, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, "ignored")
+	full, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile: %v", err)
+	}
+	fullIDs := kimiEntryIDs(full.Messages)
+	if len(fullIDs) != 2 {
+		t.Fatalf("full Kimi message IDs = %v, want two entries", fullIDs)
+	}
+	sess, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, fullIDs[0])
 	if err != nil {
 		t.Fatalf("ReadProviderFileNewer: %v", err)
 	}
-	if sess.ID != "session-123" || len(sess.Messages) != 1 {
+	if sess.ID != "session-123" || len(sess.Messages) != 1 || sess.Messages[0].UUID != fullIDs[1] {
 		t.Fatalf("ReadProviderFileNewer session = id %q messages %d, want Kimi reader output", sess.ID, len(sess.Messages))
 	}
-	rawSess, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, "ignored")
+	rawSess, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, fullIDs[0])
 	if err != nil {
 		t.Fatalf("ReadProviderFileRawNewer: %v", err)
 	}
-	if rawSess.ID != "session-123" || len(rawSess.Messages) != 1 {
+	if rawSess.ID != "session-123" || len(rawSess.Messages) != 1 || rawSess.Messages[0].UUID != fullIDs[1] {
 		t.Fatalf("ReadProviderFileRawNewer session = id %q messages %d, want Kimi reader output", rawSess.ID, len(rawSess.Messages))
 	}
 }
@@ -385,29 +395,105 @@ func TestReadProviderFileKimiAppliesMessageIDCursors(t *testing.T) {
 		`{"role":"user","content":"third"}`,
 		`{"role":"assistant","content":"fourth"}`,
 	})
+	full, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile: %v", err)
+	}
+	fullIDs := kimiEntryIDs(full.Messages)
+	if len(fullIDs) != 4 {
+		t.Fatalf("full Kimi message IDs = %v, want four entries", fullIDs)
+	}
 
-	newer, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, "kimi-1")
+	newer, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, fullIDs[1])
 	if err != nil {
 		t.Fatalf("ReadProviderFileNewer: %v", err)
 	}
-	if got := kimiEntryIDs(newer.Messages); !reflect.DeepEqual(got, []string{"kimi-2", "kimi-3"}) {
-		t.Fatalf("newer Kimi message IDs = %v, want [kimi-2 kimi-3]", got)
+	if got := kimiEntryIDs(newer.Messages); !reflect.DeepEqual(got, fullIDs[2:]) {
+		t.Fatalf("newer Kimi message IDs = %v, want %v", got, fullIDs[2:])
 	}
 
-	older, err := ReadProviderFileOlder("kimi/tmux-cli", path, 0, "kimi-2")
+	older, err := ReadProviderFileOlder("kimi/tmux-cli", path, 0, fullIDs[2])
 	if err != nil {
 		t.Fatalf("ReadProviderFileOlder: %v", err)
 	}
-	if got := kimiEntryIDs(older.Messages); !reflect.DeepEqual(got, []string{"kimi-0", "kimi-1"}) {
-		t.Fatalf("older Kimi message IDs = %v, want [kimi-0 kimi-1]", got)
+	if got := kimiEntryIDs(older.Messages); !reflect.DeepEqual(got, fullIDs[:2]) {
+		t.Fatalf("older Kimi message IDs = %v, want %v", got, fullIDs[:2])
 	}
 
-	rawNewer, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, "kimi-2")
+	rawNewer, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, fullIDs[2])
 	if err != nil {
 		t.Fatalf("ReadProviderFileRawNewer: %v", err)
 	}
-	if got := kimiEntryIDs(rawNewer.Messages); !reflect.DeepEqual(got, []string{"kimi-3"}) {
-		t.Fatalf("raw newer Kimi message IDs = %v, want [kimi-3]", got)
+	if got := kimiEntryIDs(rawNewer.Messages); !reflect.DeepEqual(got, fullIDs[3:]) {
+		t.Fatalf("raw newer Kimi message IDs = %v, want %v", got, fullIDs[3:])
+	}
+}
+
+func TestReadProviderFileKimiDisambiguatesRepeatedNativeRowsAcrossAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl")
+	repeated := `{"role":"assistant","content":"same answer"}`
+	writeKimiContext(t, path, []string{
+		`{"role":"_checkpoint","id":0}`,
+		`{"role":"user","content":"first prompt"}`,
+		`{"role":"_checkpoint","id":1}`,
+		repeated,
+		`{"role":"user","content":"repeat it"}`,
+		`{"role":"_checkpoint","id":2}`,
+		repeated,
+	})
+
+	before, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile before append: %v", err)
+	}
+	beforeIDs := kimiEntryIDs(before.Messages)
+	if len(beforeIDs) != 4 {
+		t.Fatalf("before IDs = %v, want four entries", beforeIDs)
+	}
+	if beforeIDs[1] == beforeIDs[3] {
+		t.Fatalf("repeated native rows share ID %q", beforeIDs[1])
+	}
+	if want := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:1"); beforeIDs[1] != want {
+		t.Fatalf("first repeated row ID = %q, want checkpoint-derived %q", beforeIDs[1], want)
+	}
+	if want := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:2"); beforeIDs[3] != want {
+		t.Fatalf("second repeated row ID = %q, want checkpoint-derived %q", beforeIDs[3], want)
+	}
+
+	writeKimiContext(t, path, []string{
+		`{"role":"_checkpoint","id":0}`,
+		`{"role":"user","content":"first prompt"}`,
+		`{"role":"_checkpoint","id":1}`,
+		repeated,
+		`{"role":"user","content":"repeat it"}`,
+		`{"role":"_checkpoint","id":2}`,
+		repeated,
+		`{"role":"_checkpoint","id":3}`,
+		`{"role":"user","content":"appended later"}`,
+	})
+	after, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile after append: %v", err)
+	}
+	afterIDs := kimiEntryIDs(after.Messages)
+	if len(afterIDs) != 5 {
+		t.Fatalf("after IDs = %v, want five entries", afterIDs)
+	}
+	if !reflect.DeepEqual(afterIDs[:4], beforeIDs) {
+		t.Fatalf("append changed existing IDs: before=%v after=%v", beforeIDs, afterIDs)
+	}
+}
+
+func TestReadProviderFileKimiRejectsRepeatedNativeRowsWithinCheckpoint(t *testing.T) {
+	path := writeKimiContext(t, filepath.Join(t.TempDir(), "context.jsonl"), []string{
+		`{"role":"_checkpoint","id":1}`,
+		`{"role":"assistant","content":"same answer"}`,
+		`{"role":"assistant","content":"same answer"}`,
+	})
+
+	_, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if !errors.Is(err, ErrDuplicateEntryID) {
+		t.Fatalf("ReadProviderFile error = %v, want ErrDuplicateEntryID", err)
 	}
 }
 

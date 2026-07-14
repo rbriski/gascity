@@ -139,6 +139,34 @@ func TestReadCopilotFileEmitsStartOnlyToolUseWhenAssistantRequestIsAbsent(t *tes
 	}
 }
 
+func TestReadCopilotFileUsesNativeAndStableSyntheticEntryIDs(t *testing.T) {
+	native := `{"type":"assistant.message","data":{"content":"native"},"id":"native-event-id","sessionId":"copilot-ids"}`
+	synthetic := `{"type":"assistant.message","data":{"content":"synthetic"},"sessionId":"copilot-ids"}`
+	tool := `{"type":"tool.execution_start","data":{"toolCallId":"toolu-native","toolName":"bash","arguments":{"command":"go test ./..."}},"sessionId":"copilot-ids"}`
+	path := writeCopilotJSONL(t, native, synthetic, tool)
+
+	session, err := ReadCopilotFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCopilotFile() error = %v", err)
+	}
+	if got := len(session.Messages); got != 3 {
+		t.Fatalf("len(Messages) = %d, want two messages and one tool use", got)
+	}
+	if got := session.Messages[0].UUID; got != "native-event-id" {
+		t.Fatalf("native entry UUID = %q, want provider event ID", got)
+	}
+	if got, want := session.Messages[1].UUID, stableSyntheticEntryID("copilot", []byte(synthetic), ""); got != want {
+		t.Fatalf("id-less message UUID = %q, want %q", got, want)
+	}
+	if got, want := session.Messages[2].UUID, stableSyntheticEntryID("copilot", []byte(tool), ""); got != want {
+		t.Fatalf("id-less tool entry UUID = %q, want %q", got, want)
+	}
+	blocks := session.Messages[2].ContentBlocks()
+	if len(blocks) != 1 || blocks[0].ID != "toolu-native" {
+		t.Fatalf("tool blocks = %+v, want native tool call ID", blocks)
+	}
+}
+
 func TestReadCopilotFileConvertsToolErrors(t *testing.T) {
 	path := writeCopilotJSONL(t,
 		`{"type":"session.start","data":{"sessionId":"copilot-error","context":{"cwd":"/work/project"}},"id":"start-1","timestamp":"2026-03-04T02:30:58.550Z"}`,

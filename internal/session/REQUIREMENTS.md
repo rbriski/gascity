@@ -157,6 +157,19 @@ unless the row names how they map to the canonical projection.
 | SESSION-RUNTIME-004 | Stop turn | Stop-turn interrupts active sessions and is allowed for pool-managed and pool-slot-only sessions where tests permit it. | `internal/session/manager_test.go`; `internal/session/submit_test.go`; `internal/session/submit_family_test.go` |
 | SESSION-RUNTIME-005 | Transcript lookup | Transcript paths prefer session key, allow closed sessions, avoid ambiguous historical work-dir fallback, and use provider-specific fallback when work dirs collide across providers. | `internal/session/manager_test.go` |
 
+## Effect Inventory
+
+The reconciler's side-effect surface is mechanically inventoried so the redesign
+never reasons from stale hand-counted prose. The canonical analyzer and registry
+live in `internal/reconciletest/effectinventory`; later plan slices extend that
+one registry rather than adding competing scanners.
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-EFFECT-001 | Type-aware effect census | Every production effect site in `cmd/gc`, `internal/session`, `internal/worker`, and `internal/runtime` is enumerated by a type-aware go/types analyzer that resolves each call's receiver, so unrelated `Stop`/`Nudge`/`Close` method names on other types never count as effects. Counts are generated and pinned by a Go test, not hand-maintained prose; any added or removed effect site fails the gate until the inventory is regenerated. Boundaries: authoritative store mutations, provider mutations, destructive process actions, event emission, and wake sources. | `internal/reconciletest/effectinventory/{discover.go,boundaries.go}`; `internal/reconciletest/effectinventory/discover_golden_test.go` (five build/OS profiles); `cmd/gc/reconciler_effect_inventory_test.go` (`TestReconcilerEffectInventoryOnBoundHead`) |
+| SESSION-EFFECT-002 | Classified ownership registry | The canonical registry classifies load-bearing effect routes by owner, action family, executing process, fence strength, rollout gate, target source, and access path, and every classified site must resolve to a site the analyzer discovers on the execution head. Weak-fence and bypass routes carry an explicit temporary exception anchored to an immutable commit with an expiry. | `internal/reconciletest/effectinventory/{registry.go,inventory.go}`; `internal/reconciletest/effectinventory/{registry_test.go,inventory_test.go}` |
+| SESSION-EFFECT-003 | Bypasses and provider-internal effects are recorded | Route recovery's live-reread/non-CAS residual store write, direct raw external-store (`*beads.BdStore`) bypasses, and provider-internal kill/signal sites are all present in the inventory. Provider-internal kill/signal sites are never absent. | `internal/reconciletest/effectinventory/inventory.go` (route-recovery route); `cmd/gc/reconciler_effect_inventory_test.go` (bypass and provider-internal process assertions) |
+
 ## Maintenance Rules
 
 - Add one row per behavior scenario, not one paragraph per file.

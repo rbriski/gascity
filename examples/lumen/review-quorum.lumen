@@ -1,0 +1,22 @@
+// Routed pooled review quorum for the City-backed gc run demo. Each reviewer
+// binds to its own configured Agent route; synthesize uses the --route default.
+// The top-level synthesize step auto-chains after both scatter members settle.
+//
+// Required City Agent templates:
+//   laneOneAgent, laneTwoAgent, and the default route passed to gc run.
+//
+// Example input:
+//   {"convoy_id":"demo","lane_one_id":"architecture","lane_two_id":"risk"}
+
+formula main accepts {
+  convoy_id?: string
+  base_ref: string = "origin/main"
+  lane_one_id: string
+  lane_two_id: string
+} {
+  lanes: scatter {
+    retry 3 { reviewLaneOne: prompt with laneOneAgent Review convoy {{ convoy_id }} as lane {{ lane_one_id }} against {{ base_ref }}; persist durable JSON. }
+    retry 3 { reviewLaneTwo: prompt with laneTwoAgent Review convoy {{ convoy_id }} as lane {{ lane_two_id }} against {{ base_ref }}; persist durable JSON. }
+  }
+  synthesize: prompt Synthesize lanes {{ lane_one_id }} and {{ lane_two_id }} for convoy {{ convoy_id }} into a quorum verdict.
+}

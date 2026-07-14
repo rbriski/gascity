@@ -35,7 +35,7 @@ func packReviewQuorumIRPath(t *testing.T) string {
 
 func packReviewQuorumRoutedIRPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(repoRoot(t), "examples", "lumen", "pack-review-quorum-routed.lumen.json")
+	return filepath.Join(repoRoot(t), "examples", "lumen", "review-quorum.lumen.json")
 }
 
 // reviewQuorumInput is the required-input contract of the pooled mol-review-quorum
@@ -174,10 +174,10 @@ func TestLumenPackReviewQuorumRoutedDoltE2E(t *testing.T) {
 
 	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, packReviewQuorumRoutedIRPath(t), "--input", reviewQuorumInput)
 	if err != nil {
-		t.Fatalf("gc lumen sling (pack-review-quorum-routed) failed: %v\noutput: %s", err, slingOut)
+		t.Fatalf("gc lumen sling (review-quorum) failed: %v\noutput: %s", err, slingOut)
 	}
 	streamID := parseLumenStreamID(t, slingOut)
-	t.Logf("PROOF pack-review-quorum-routed streamID = %s", streamID)
+	t.Logf("PROOF review-quorum streamID = %s", streamID)
 
 	journalPath := filepath.Join(cityDir, ".gc", "graph", "journal.db")
 	gs, err := graphstore.Open(ctx, journalPath, graphstore.Options{})

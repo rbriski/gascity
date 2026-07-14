@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2114,6 +2115,291 @@ exit 0
 	}
 }
 
+// TestGcBdSuccessfulClosePokesLumenRuns pins the cross-process completion
+// wake-up a Lumen work bead needs. Closing work through gc bd changes only the
+// work store (not the run journal head), so a successful close-equivalent write
+// must best-effort poke the controller's Lumen loop exactly once. Read-only and
+// non-closing writes (including the heartbeat metadata update) must not poke;
+// neither may a failed close-equivalent write.
+func TestGcBdSuccessfulClosePokesLumenRuns(t *testing.T) {
+	tests := []struct {
+		name      string
+		bdScript  string
+		args      []string
+		wantCode  int
+		wantPokes int
+	}{
+		{
+			name:      "successful status closed update pokes once despite poke failure",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "demo-abc", "--set-metadata", "gc.outcome=pass", "--status", "closed"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "successful close pokes once",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"close", "demo-abc", "--reason", "done"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "successful id-less close pokes once",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"close"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "successful id-less status closed update pokes once",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "--status", "closed"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "leading global boolean flag still recognizes close",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"--json", "close", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "leading global value flag still recognizes status closed update",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"--actor", "test-worker", "update", "demo-abc", "--status", "closed"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "attached global value flag still recognizes close",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"-C/tmp", "close", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "clustered global booleans still recognize close",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"-qv", "close", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "explicit false leading short boolean still recognizes close",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"-q=false", "close", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "documented done alias pokes once",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"done", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "attached short status closed pokes once",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "demo-abc", "-sclosed"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "last status closed pokes once",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "demo-abc", "--status", "open", "--status", "closed"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "last status open does not poke",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "demo-abc", "--status", "closed", "--status", "open"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "status-shaped notes value does not poke",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "demo-abc", "--notes", "--status=closed"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "close help does not poke",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"close", "demo-abc", "--help"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "explicit false long help still pokes",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"close", "demo-abc", "--help=false"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "explicit false short force still pokes",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"close", "demo-abc", "-f=false"},
+			wantCode:  0,
+			wantPokes: 1,
+		},
+		{
+			name:      "global terminator does not infer a close",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"--", "close", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "read only command does not poke",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"list"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "non-closing update does not poke",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"update", "demo-abc", "--set-metadata", "note=still-open"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "heartbeat update does not poke",
+			bdScript:  "#!/bin/sh\nexit 0\n",
+			args:      []string{"heartbeat", "demo-abc"},
+			wantCode:  0,
+			wantPokes: 0,
+		},
+		{
+			name:      "failed status closed update does not poke",
+			bdScript:  "#!/bin/sh\nexit 3\n",
+			args:      []string{"update", "demo-abc", "--status", "closed"},
+			wantCode:  3,
+			wantPokes: 0,
+		},
+		{
+			name:      "silent fallback close does not poke",
+			bdScript:  silentFallbackFakeBdScript,
+			args:      []string{"close", "demo-abc"},
+			wantCode:  bdSilentFallbackExitCode,
+			wantPokes: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			silentFallbackTestSetup(t, tt.bdScript)
+
+			origPoke := pokeLumenRuns
+			pokes := 0
+			pokeLumenRuns = func(string) error {
+				pokes++
+				return errors.New("controller unavailable")
+			}
+			t.Cleanup(func() { pokeLumenRuns = origPoke })
+
+			var stdout, stderr bytes.Buffer
+			if got := doBd(tt.args, &stdout, &stderr); got != tt.wantCode {
+				t.Fatalf("doBd(%q) = %d, want %d; stdout=%q stderr=%q", tt.args, got, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if pokes != tt.wantPokes {
+				t.Errorf("lumen-runs pokes after doBd(%q) = %d, want %d", tt.args, pokes, tt.wantPokes)
+			}
+		})
+	}
+}
+
+// TestPokeLumenRunsDoesNotInheritLongControllerTimeout keeps the completion
+// wake-up best-effort in wall-clock terms. The patrol tick is the correctness
+// backstop, so a controller that accepts the command but never acknowledges it
+// must not hold a successfully closed work bead behind the generic 95-second
+// controller-command read timeout.
+func TestPokeLumenRunsDoesNotInheritLongControllerTimeout(t *testing.T) {
+	cityDir := shortSocketTempDir(t, "gc-bd-lumen-poke-")
+	sockPath := controllerSocketPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen on controller socket: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(sockPath)
+	})
+
+	type acceptedCommand struct {
+		conn    net.Conn
+		command string
+		err     error
+	}
+	accepted := make(chan acceptedCommand, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			accepted <- acceptedCommand{err: acceptErr}
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 64)
+		n, readErr := conn.Read(buf)
+		accepted <- acceptedCommand{
+			conn:    conn,
+			command: strings.TrimSpace(string(buf[:n])),
+			err:     readErr,
+		}
+	}()
+
+	result := make(chan error, 1)
+	go func() { result <- pokeLumenRuns(cityDir) }()
+
+	var peer net.Conn
+	select {
+	case got := <-accepted:
+		peer = got.conn
+		if got.err != nil {
+			if peer != nil {
+				_ = peer.Close()
+			}
+			t.Fatalf("receive controller command: %v", got.err)
+		}
+		if got.command != "lumen-runs" {
+			_ = peer.Close()
+			t.Fatalf("controller command = %q, want lumen-runs", got.command)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for lumen-runs controller command")
+	}
+	t.Cleanup(func() {
+		if peer != nil {
+			_ = peer.Close()
+		}
+	})
+
+	const maxPokeLatency = 2 * time.Second
+	select {
+	case <-result:
+		// Both a short timeout error and a fire-and-forget success satisfy the
+		// best-effort latency contract.
+	case <-time.After(maxPokeLatency):
+		_ = peer.Close()
+		select {
+		case <-result:
+		case <-time.After(2 * time.Second):
+			t.Fatal("poke goroutine did not exit after the test peer closed")
+		}
+		t.Fatalf("pokeLumenRuns exceeded %s; it appears to inherit the generic controller timeout", maxPokeLatency)
+	}
+}
+
 // TestGcBdProcessExitCodeMatchesSilentFallbackContract pins the process-
 // level exit code contract that the bdSilentFallbackExitCode = 4 doc
 // comment promises operators and CI. PR #2327 review found the previous
@@ -2434,6 +2720,11 @@ func TestBdMutationWriteIDs(t *testing.T) {
 		{
 			name: "--title=value with id after",
 			args: []string{"update", "--title=new title", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "unknown self-contained flag value does not make ids ambiguous",
+			args: []string{"update", "--future-mode=atomic", "gcy-dv7"},
 			want: result{ids: []string{"gcy-dv7"}, ok: true},
 		},
 

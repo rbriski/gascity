@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -356,6 +357,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return bdSilentFallbackExitCode
 	}
 
+	// A Lumen work-bead close changes only the work store, not the run journal,
+	// so the journal-head level trigger cannot notice it. Wake the dedicated
+	// Lumen loop after a persisted close-equivalent mutation; failure is safe
+	// because the patrol tick remains the correctness backstop. Keep this
+	// narrow: ordinary metadata updates (especially agent heartbeats) must not
+	// generate controller traffic.
+	if bdCommandClosesWork(bdArgs) {
+		_ = pokeLumenRuns(cityPath)
+	}
+
 	return 0
 }
 
@@ -371,6 +382,152 @@ func parseBdReleaseIfCurrentArgs(args []string) (id, expectedAssignee string, ok
 
 func invalidBdReleaseIfCurrentArg(value string) bool {
 	return value == "" || strings.IndexFunc(value, unicode.IsSpace) >= 0
+}
+
+// bdCommandClosesWork reports whether a successful bd invocation closes work.
+// It recognizes bd's supported placement of global flags before the subcommand,
+// the close/done aliases (including their last-touched, ID-less forms), and
+// update commands whose final --status value is closed.
+func bdCommandClosesWork(args []string) bool {
+	start := bdSubcommandStart(args)
+	if start < 0 {
+		return false
+	}
+	subArgs := args[start:]
+	switch subArgs[0] {
+	case "close", "done":
+		return !bdCloseCommandRequestsHelp(subArgs)
+	case "update":
+		return bdUpdateClosesStatus(subArgs)
+	default:
+		return false
+	}
+}
+
+// bdSubcommandStart returns the first non-global-flag argument. Unknown or
+// malformed leading flags fail closed so a read or unrelated mutation never
+// generates a spurious controller wakeup.
+func bdSubcommandStart(args []string) int {
+	valueFlags := bdGlobalValueFlags()
+	boolFlags := bdGlobalBoolFlags()
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return -1
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return i
+		}
+		flag, next, ok := parseBDFlagAt(args, i, valueFlags, boolFlags)
+		if !ok || flag.Help {
+			return -1
+		}
+		i = next - 1
+	}
+	return -1
+}
+
+// parsedBDFlag is one pflag-compatible flag token. Name is the value-taking
+// flag in a short cluster (if any), Value is its attached or following value,
+// and Help reports an effective -h/--help boolean that was not consumed as
+// another flag's value.
+type parsedBDFlag struct {
+	Name     string
+	Value    string
+	HasValue bool
+	Help     bool
+}
+
+// parseBDFlagAt parses the flag beginning at args[index] and returns the next
+// unconsumed index. It supports long = values, attached short values (-sclosed,
+// -C/tmp), and clusters of short booleans (-qv), matching pflag's forms.
+func parseBDFlagAt(args []string, index int, valueFlags, boolFlags map[string]bool) (parsedBDFlag, int, bool) {
+	if index < 0 || index >= len(args) {
+		return parsedBDFlag{}, index, false
+	}
+	arg := args[index]
+	if strings.HasPrefix(arg, "--") {
+		name, value, hasValue := strings.Cut(arg, "=")
+		switch {
+		case valueFlags[name]:
+			if hasValue {
+				return parsedBDFlag{Name: name, Value: value, HasValue: true}, index + 1, true
+			}
+			if index+1 >= len(args) {
+				return parsedBDFlag{}, index, false
+			}
+			return parsedBDFlag{Name: name, Value: args[index+1], HasValue: true}, index + 2, true
+		case boolFlags[name]:
+			enabled := true
+			if hasValue {
+				var err error
+				enabled, err = strconv.ParseBool(value)
+				if err != nil {
+					return parsedBDFlag{}, index, false
+				}
+			}
+			return parsedBDFlag{Name: name, Help: name == "--help" && enabled}, index + 1, true
+		default:
+			return parsedBDFlag{}, index, false
+		}
+	}
+	if !strings.HasPrefix(arg, "-") || len(arg) < 2 {
+		return parsedBDFlag{}, index, false
+	}
+
+	rest := arg[1:]
+	help := false
+	for offset := 0; offset < len(rest); offset++ {
+		name := "-" + rest[offset:offset+1]
+		if boolFlags[name] {
+			if offset+1 < len(rest) && rest[offset+1] == '=' {
+				enabled, err := strconv.ParseBool(rest[offset+2:])
+				if err != nil {
+					return parsedBDFlag{}, index, false
+				}
+				help = help || (name == "-h" && enabled)
+				return parsedBDFlag{Name: name, Help: help}, index + 1, true
+			}
+			help = help || name == "-h"
+			continue
+		}
+		if !valueFlags[name] {
+			return parsedBDFlag{}, index, false
+		}
+		value := strings.TrimPrefix(rest[offset+1:], "=")
+		if value != "" || offset+1 < len(rest) {
+			return parsedBDFlag{Name: name, Value: value, HasValue: true, Help: help}, index + 1, true
+		}
+		if index+1 >= len(args) {
+			return parsedBDFlag{}, index, false
+		}
+		return parsedBDFlag{Name: name, Value: args[index+1], HasValue: true, Help: help}, index + 2, true
+	}
+	return parsedBDFlag{Help: help}, index + 1, true
+}
+
+func bdCloseCommandRequestsHelp(args []string) bool {
+	valueFlags := bdSubcmdValueFlags("close")
+	boolFlags := bdSubcmdBoolFlags("close")
+	for i := 1; i < len(args); {
+		arg := args[i]
+		if arg == "--" {
+			return false
+		}
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		flag, next, ok := parseBDFlagAt(args, i, valueFlags, boolFlags)
+		if !ok {
+			return true // unknown flag: conservatively leave wakeup to patrol
+		}
+		if flag.Help {
+			return true
+		}
+		i = next
+	}
+	return false
 }
 
 // bdMutationWriteIDs extracts all positional bead IDs from a bd write-mutation
@@ -433,29 +590,19 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 			}
 			continue
 		}
-		// Flag token.
-		// --flag=value form: value is embedded, no next-arg consumed.
-		if strings.Contains(arg, "=") {
-			continue
+		_, next, known := parseBDFlagAt(args, i, valueFlags, boolFlags)
+		if !known {
+			// An attached value is self-contained, so it cannot hide the next
+			// positional bead ID. Preserve forward compatibility with newer bd
+			// flags while keeping separated unknown flags fail-closed below.
+			if strings.Contains(arg, "=") {
+				continue
+			}
+			// Unknown flag. It might consume a value argument that looks like a
+			// bead ID. Fail-closed: report ambiguity so the caller can reject.
+			return nil, true, true
 		}
-		// Strip leading dashes to get the flag name for lookup.
-		flagName := strings.TrimLeft(arg, "-")
-		// Reconstruct the canonical long or short form for set membership.
-		longForm := "--" + flagName
-		shortForm := "-" + flagName // only meaningful when flagName is 1 char
-
-		if valueFlags[longForm] || (len(flagName) == 1 && valueFlags[shortForm]) {
-			// Known value-consuming flag: skip its value argument.
-			i++
-			continue
-		}
-		if boolFlags[longForm] || (len(flagName) == 1 && boolFlags[shortForm]) {
-			// Known boolean flag: no value to skip.
-			continue
-		}
-		// Unknown flag. It might consume a value argument that looks like a
-		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		return nil, true, true
+		i = next - 1
 	}
 	return ids, true, false
 }
@@ -465,10 +612,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 // Sourced from `bd <sub> --help` output (2026-06-10).
 func bdSubcmdValueFlags(sub string) map[string]bool {
 	// Global flags shared by all bd subcommands that take a value.
-	global := map[string]bool{
-		"--actor": true, "--db": true, "--directory": true, "-C": true,
-		"--dolt-auto-commit": true,
-	}
+	global := bdGlobalValueFlags()
 	var subFlags map[string]bool
 	switch sub {
 	case "update":
@@ -528,14 +672,7 @@ func bdSubcmdValueFlags(sub string) map[string]bool {
 // Sourced from `bd <sub> --help` output (2026-06-10).
 func bdSubcmdBoolFlags(sub string) map[string]bool {
 	// Global boolean flags shared by all bd subcommands.
-	global := map[string]bool{
-		"--global": true, "--ignore-schema-skew": true,
-		"--json": true, "--profile": true,
-		"-q": true, "--quiet": true,
-		"--readonly": true, "--sandbox": true,
-		"-v": true, "--verbose": true,
-		"-h": true, "--help": true,
-	}
+	global := bdGlobalBoolFlags()
 	var subFlags map[string]bool
 	switch sub {
 	case "update":
@@ -567,6 +704,24 @@ func bdSubcmdBoolFlags(sub string) map[string]bool {
 		merged[k] = true
 	}
 	return merged
+}
+
+func bdGlobalValueFlags() map[string]bool {
+	return map[string]bool{
+		"--actor": true, "--db": true, "--directory": true, "-C": true,
+		"--dolt-auto-commit": true,
+	}
+}
+
+func bdGlobalBoolFlags() map[string]bool {
+	return map[string]bool{
+		"--global": true, "--ignore-schema-skew": true,
+		"--json": true, "--profile": true,
+		"-q": true, "--quiet": true,
+		"--readonly": true, "--sandbox": true,
+		"-v": true, "--verbose": true,
+		"-h": true, "--help": true,
+	}
 }
 
 // bdMutationWriteID is a compatibility shim retained for callers that only

@@ -143,19 +143,30 @@ func workRecordCloseTargets(bdArgs []string) ([]string, bool) {
 // bdUpdateClosesStatus reports whether a `bd update` arg list sets the status to
 // "closed" (in any of the --status=closed, --status closed, -s closed forms).
 func bdUpdateClosesStatus(bdArgs []string) bool {
-	for i := 1; i < len(bdArgs); i++ {
+	valueFlags := bdSubcmdValueFlags("update")
+	boolFlags := bdSubcmdBoolFlags("update")
+	var status string
+	seen := false
+	for i := 1; i < len(bdArgs); {
 		arg := bdArgs[i]
-		if v, ok := strings.CutPrefix(arg, "--status="); ok {
-			return strings.EqualFold(strings.TrimSpace(v), "closed")
+		if arg == "--" {
+			break
 		}
-		if v, ok := strings.CutPrefix(arg, "-s="); ok {
-			return strings.EqualFold(strings.TrimSpace(v), "closed")
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
 		}
-		if (arg == "--status" || arg == "-s") && i+1 < len(bdArgs) {
-			return strings.EqualFold(strings.TrimSpace(bdArgs[i+1]), "closed")
+		flag, next, ok := parseBDFlagAt(bdArgs, i, valueFlags, boolFlags)
+		if !ok || flag.Help {
+			return false
 		}
+		if flag.HasValue && (flag.Name == "--status" || flag.Name == "-s") {
+			status = flag.Value
+			seen = true
+		}
+		i = next
 	}
-	return false
+	return seen && strings.EqualFold(strings.TrimSpace(status), "closed")
 }
 
 // runWorkRecordCloseGate validates every bead a `gc bd close` (or

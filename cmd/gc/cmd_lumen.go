@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -47,7 +48,8 @@ type lumenEnqueueResult struct {
 // poke (controller down, socket race, an older binary that does not know the verb)
 // costs at most one patrol interval, never correctness.
 var pokeLumenRuns = func(cityPath string) error {
-	_, err := sendControllerCommand(cityPath, "lumen-runs")
+	const pokeTimeout = 500 * time.Millisecond
+	_, err := sendControllerCommandWithTimeouts(cityPath, "lumen-runs", pokeTimeout, pokeTimeout, pokeTimeout)
 	return err
 }
 

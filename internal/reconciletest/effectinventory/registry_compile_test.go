@@ -42,9 +42,9 @@ func TestCompileRegistryRejectsDiscoveredProfileWithoutClassificationCase(t *tes
 	discovery := discoveryForRegistry(registry)
 	additional := observedForRegistry(registry)[0]
 	additional.Profile = BuildLinuxDefault
-	for index := range discovery.Profiles {
-		if discovery.Profiles[index].Profile == BuildLinuxDefault {
-			discovery.Profiles[index].Sites = append(discovery.Profiles[index].Sites, additional)
+	for index := range discovery.profiles {
+		if discovery.profiles[index].profile == BuildLinuxDefault {
+			discovery.profiles[index].sites = append(discovery.profiles[index].sites, additional)
 			break
 		}
 	}
@@ -59,26 +59,26 @@ func TestCompileRegistryRequiresEveryCanonicalDiscoveryProfileExactlyOnce(t *tes
 
 	t.Run("missing profile", func(t *testing.T) {
 		missing := allDiscovery
-		missing.Profiles = missing.Profiles[:len(missing.Profiles)-1]
+		missing.profiles = missing.profiles[:len(missing.profiles)-1]
 		_, err := CompileRegistry(registry, missing, validationDate())
 		assertErrorContains(t, err, "missing discovery profile")
 	})
 
 	t.Run("duplicate profile", func(t *testing.T) {
 		duplicate := allDiscovery
-		duplicate.Profiles = append([]ProfileDiscovery(nil), allDiscovery.Profiles...)
-		duplicate.Profiles = append(duplicate.Profiles, allDiscovery.Profiles[0])
+		duplicate.profiles = append([]profileDiscovery(nil), allDiscovery.profiles...)
+		duplicate.profiles = append(duplicate.profiles, allDiscovery.profiles[0])
 		_, err := CompileRegistry(registry, duplicate, validationDate())
 		assertErrorContains(t, err, "duplicate discovery profile")
 	})
 
 	t.Run("site profile mismatch", func(t *testing.T) {
 		mismatch := discoveryForRegistry(registry)
-		for index := range mismatch.Profiles {
-			if len(mismatch.Profiles[index].Sites) == 0 {
+		for index := range mismatch.profiles {
+			if len(mismatch.profiles[index].sites) == 0 {
 				continue
 			}
-			mismatch.Profiles[index].Sites[0].Profile = BuildLinuxDefault
+			mismatch.profiles[index].sites[0].Profile = BuildLinuxDefault
 			break
 		}
 		_, err := CompileRegistry(registry, mismatch, validationDate())
@@ -93,6 +93,60 @@ func TestCompileRegistryBindsDiscoveryToExactBoundaryVocabulary(t *testing.T) {
 
 	_, err := CompileRegistry(registry, discovery, validationDate())
 	assertErrorContains(t, err, "discovery boundary digest", "does not match registry digest")
+}
+
+func TestCompileRegistryRejectsIncompleteOrTamperedDiscoveryEvidence(t *testing.T) {
+	registry := compileRegistryFixture()
+	tests := []struct {
+		name   string
+		mutate func(*DiscoveryResult)
+		want   string
+	}{
+		{
+			name: "missing source scope",
+			mutate: func(discovery *DiscoveryResult) {
+				discovery.sourceScopeDigest = ""
+			},
+			want: "source-scope digest",
+		},
+		{
+			name: "expected revision is abbreviated",
+			mutate: func(discovery *DiscoveryResult) {
+				discovery.expectedGitRevision = "91597432c"
+			},
+			want: "expected git revision",
+		},
+		{
+			name: "head revision differs",
+			mutate: func(discovery *DiscoveryResult) {
+				discovery.observedGitRevision = "a1597432ce9b44d6dbc0a6530b198df1d6d1f113"
+			},
+			want: "does not match expected git revision",
+		},
+		{
+			name: "missing head identity",
+			mutate: func(discovery *DiscoveryResult) {
+				discovery.gitHeadIdentity = ""
+			},
+			want: "git HEAD identity is required",
+		},
+		{
+			name: "tampered evidence digest",
+			mutate: func(discovery *DiscoveryResult) {
+				discovery.evidenceDigest = strings.Repeat("0", len(discovery.evidenceDigest))
+			},
+			want: "discovery evidence digest",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			discovery := discoveryForRegistry(registry)
+			tt.mutate(&discovery)
+			_, err := CompileRegistry(registry, discovery, validationDate())
+			assertErrorContains(t, err, tt.want)
+		})
+	}
 }
 
 func TestCompileRegistryRejectsStaleRegistrationProfile(t *testing.T) {
@@ -125,13 +179,13 @@ func TestCompileRegistryRejectsDuplicateClassificationForSiteProfile(t *testing.
 func TestCompileRegistryRejectsDuplicateAnalyzerObservation(t *testing.T) {
 	registry := compileRegistryFixture()
 	discovery := discoveryForRegistry(registry)
-	for index := range discovery.Profiles {
-		if len(discovery.Profiles[index].Sites) == 0 {
+	for index := range discovery.profiles {
+		if len(discovery.profiles[index].sites) == 0 {
 			continue
 		}
-		discovery.Profiles[index].Sites = append(
-			discovery.Profiles[index].Sites,
-			discovery.Profiles[index].Sites[0],
+		discovery.profiles[index].sites = append(
+			discovery.profiles[index].sites,
+			discovery.profiles[index].sites[0],
 		)
 		break
 	}
@@ -412,9 +466,9 @@ func TestCompileRegistryCanonicalizesInputAndDoesNotAliasIt(t *testing.T) {
 	}
 	reverse(permuted.Registrations)
 	permutedDiscovery := discoveryForRegistry(permuted)
-	reverse(permutedDiscovery.Profiles)
-	for index := range permutedDiscovery.Profiles {
-		reverse(permutedDiscovery.Profiles[index].Sites)
+	reverse(permutedDiscovery.profiles)
+	for index := range permutedDiscovery.profiles {
+		reverse(permutedDiscovery.profiles[index].sites)
 	}
 	permutedCompiled, err := CompileRegistry(permuted, permutedDiscovery, validationDate())
 	if err != nil {
@@ -667,25 +721,29 @@ func discoveryForRegistry(registry Registry) DiscoveryResult {
 
 func discoveryWithSites(registry Registry, sites []ObservedSite) DiscoveryResult {
 	profiles := canonicalAnalysisProfiles()
-	discovery := DiscoveryResult{
-		BoundaryDigest: deriveBoundaryDigest(registry.Boundaries),
-		Profiles:       make([]ProfileDiscovery, len(profiles)),
-	}
+	discoveryProfiles := make([]profileDiscovery, len(profiles))
 	byProfile := make(map[BuildProfileID]int, len(profiles))
 	for index, profile := range profiles {
-		discovery.Profiles[index].Profile = profile.ID
+		discoveryProfiles[index].profile = profile.ID
 		byProfile[profile.ID] = index
 	}
 	for _, site := range sites {
 		index, ok := byProfile[site.Profile]
 		if !ok {
-			discovery.Profiles = append(discovery.Profiles, ProfileDiscovery{
-				Profile: site.Profile,
-				Sites:   []ObservedSite{site},
+			discoveryProfiles = append(discoveryProfiles, profileDiscovery{
+				profile: site.Profile,
+				sites:   []ObservedSite{site},
 			})
 			continue
 		}
-		discovery.Profiles[index].Sites = append(discovery.Profiles[index].Sites, site)
+		discoveryProfiles[index].sites = append(discoveryProfiles[index].sites, site)
 	}
-	return discovery
+	return newDiscoveryResult(
+		deriveBoundaryDigest(registry.Boundaries),
+		deriveContentID("source-scope-v1-", "fixture"),
+		"91597432ce9b44d6dbc0a6530b198df1d6d1f113",
+		"91597432ce9b44d6dbc0a6530b198df1d6d1f113",
+		"ref:refs/heads/fixture@91597432ce9b44d6dbc0a6530b198df1d6d1f113",
+		discoveryProfiles,
+	)
 }

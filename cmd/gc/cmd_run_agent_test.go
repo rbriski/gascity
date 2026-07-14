@@ -94,6 +94,6 @@ func TestRunDoStepWithoutAgentCmdErrorsClearly(t *testing.T) {
 func stubStandaloneRun(t *testing.T) {
 	t.Helper()
 	orig := resolveRunCity
-	resolveRunCity = func() (string, error) { return "", os.ErrNotExist }
+	resolveRunCity = func() (string, error) { return "", errImplicitCityNotFound }
 	t.Cleanup(func() { resolveRunCity = orig })
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,6 +127,55 @@ func TestRunInResolvedCityPropagatesTerminalStatus(t *testing.T) {
 			combined := stdout.String() + stderr.String()
 			if !strings.Contains(combined, tt.wantOutput) {
 				t.Fatalf("output missing %q:\n%s", tt.wantOutput, combined)
+			}
+		})
+	}
+}
+
+func TestRunCityResolutionErrorDoesNotFallBackToStandalone(t *testing.T) {
+	cityPath := tbHookGraphCity(t)
+	sourcePath := writeRunSourceAndIR(t, cityPath)
+
+	origResolver := resolveRunCity
+	resolveRunCity = func() (string, error) {
+		return "", errors.New("explicit city selector is not registered")
+	}
+	t.Cleanup(func() { resolveRunCity = origResolver })
+
+	var stdout, stderr bytes.Buffer
+	cmd := newRunCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{sourcePath, "--route", tbHookRoute})
+	err := cmd.Execute()
+	if got := commandExitCode(err); got != 1 {
+		t.Fatalf("exit code = %d (err %v), want 1", got, err)
+	}
+	if !strings.Contains(stderr.String(), "explicit city selector is not registered") {
+		t.Fatalf("stderr = %q, want the City resolution error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pass --agent-cmd") {
+		t.Fatalf("stderr = %q, must not enter the standalone runner", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no standalone run output", stdout.String())
+	}
+}
+
+func TestImplicitRunCityMissClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "typed miss", err: errImplicitCityNotFound, want: true},
+		{name: "wrapped typed miss", err: fmt.Errorf("discovering City: %w", errImplicitCityNotFound), want: true},
+		{name: "same text is not the typed miss", err: errors.New(errImplicitCityNotFound.Error()), want: false},
+		{name: "explicit resolution error", err: errors.New("explicit city selector is not registered"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isImplicitRunCityMiss(tt.err); got != tt.want {
+				t.Fatalf("isImplicitRunCityMiss(%v) = %t, want %t", tt.err, got, tt.want)
 			}
 		})
 	}

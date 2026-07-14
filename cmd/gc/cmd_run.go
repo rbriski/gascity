@@ -161,12 +161,17 @@ func doRun(ctx context.Context, arg, dbPath string, keep bool, route, inputJSON 
 		return 1
 	}
 
-	if cityPath, cityErr := resolveRunCity(); cityErr == nil {
+	cityPath, cityErr := resolveRunCity()
+	if cityErr == nil {
 		if strings.TrimSpace(dbPath) != "" || keep || agentOpts != (runAgentOptions{}) {
 			fmt.Fprintln(stderr, "gc run: --db, --keep, and --agent-* flags are standalone-only; omit them to run through the current City") //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		return doCityRun(ctx, cityPath, irPath, route, inputJSON, doc, stdout, stderr)
+	}
+	if !isImplicitRunCityMiss(cityErr) {
+		fmt.Fprintf(stderr, "gc run: resolving current City: %v\n", cityErr) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	storePath, cleanup, err := resolveRunStorePath(dbPath, keep, stderr)
@@ -213,6 +218,13 @@ func doRun(ctx context.Context, arg, dbPath string, keep bool, route, inputJSON 
 		return 1
 	}
 	return 0
+}
+
+// isImplicitRunCityMiss distinguishes the ordinary "run from outside a City"
+// case from explicit selector, registry, filesystem, and resolver failures.
+// Only the former selects the backward-compatible standalone runner.
+func isImplicitRunCityMiss(err error) bool {
+	return errors.Is(err, errImplicitCityNotFound)
 }
 
 // doCityRun enqueues a pool/controller-driven run into the resolved City,

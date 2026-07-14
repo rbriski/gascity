@@ -1,13 +1,15 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+var errImplicitCityNotFound = errors.New("not in a city directory (no city.toml or .gc/ found)")
 
 type cityDiscoveryOptions struct {
 	ceilingDirs          []string
@@ -47,7 +49,7 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 	if legacy != "" {
 		return legacy, nil
 	}
-	return "", fmt.Errorf("not in a city directory (no city.toml or .gc/ found)")
+	return "", errImplicitCityNotFound
 }
 
 func implicitCityDiscoveryOptions() cityDiscoveryOptions {

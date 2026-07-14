@@ -1,6 +1,5 @@
 //go:build !windows
 
-// Package processgroup provides Unix process-group cleanup helpers.
 package processgroup
 
 import (
@@ -11,15 +10,6 @@ import (
 	"syscall"
 	"time"
 )
-
-const defaultPollPeriod = 25 * time.Millisecond
-
-// Options configures process-group cleanup.
-type Options struct {
-	Kill           func(pid int, sig syscall.Signal) error
-	CurrentGroupID func() int
-	PollPeriod     time.Duration
-}
 
 func (o Options) kill(pid int, sig syscall.Signal) error {
 	if o.Kill != nil {
@@ -35,19 +25,24 @@ func (o Options) currentGroupID() int {
 	return syscall.Getpgrp()
 }
 
-func (o Options) pollPeriod() time.Duration {
-	if o.PollPeriod > 0 {
-		return o.PollPeriod
-	}
-	return defaultPollPeriod
-}
-
 // StartCommandInNewGroup configures cmd to start as a new process-group leader.
 func StartCommandInNewGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
+}
+
+// SignalCommand sends sig to cmd's process group and falls back to the direct
+// process when the group signal cannot be delivered.
+func SignalCommand(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil {
+		return nil
+	}
+	return cmd.Process.Signal(sig)
 }
 
 // Terminate sends SIGTERM to pgid, waits for exit, then escalates to SIGKILL.

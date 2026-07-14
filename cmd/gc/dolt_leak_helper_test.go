@@ -588,6 +588,7 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		func(string) bool { return false },
 		func() { registeredReaped = true },
 		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		func(string) bool { return false },
 	)
 
 	if code != 1 {
@@ -598,5 +599,40 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 	}
 	if !registeredReaped {
 		t.Fatal("registered process reaper was not called after leak detection")
+	}
+}
+
+func TestDoltLeakGuardedTestingMRunWithSweepsStaleDirsAtStartupBeforeTests(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct12345-current")
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	var sweepDirsLabel string
+	testsRan := false
+	sweepDirsCalledBeforeTests := false
+
+	code := g.runWith(
+		func() int {
+			testsRan = true
+			return 0
+		},
+		func() ([]DoltProcInfo, error) { return nil, nil },
+		func(string) bool { return false },
+		func() {},
+		func([]DoltProcInfo) {},
+		func(label string) bool {
+			sweepDirsLabel = label
+			sweepDirsCalledBeforeTests = !testsRan
+			return false
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("guard returned code %d, want 0", code)
+	}
+	if sweepDirsLabel != "startup" {
+		t.Fatalf("sweepStaleDirs label = %q, want %q", sweepDirsLabel, "startup")
+	}
+	if !sweepDirsCalledBeforeTests {
+		t.Fatal("sweepStaleDirs must run before runTests, mirroring the existing process-sweepStale(\"startup\") call")
 	}
 }

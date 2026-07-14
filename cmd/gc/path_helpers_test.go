@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -104,7 +105,7 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses, g.sweepStaleCmdGCTestDoltStoreDirs)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
@@ -113,8 +114,10 @@ func (g *doltLeakGuardedTestingM) runWith(
 	sweepStale func(string) bool,
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
+	sweepStaleDirs func(string) bool,
 ) int {
 	_ = sweepStale("startup")
+	_ = sweepStaleDirs("startup")
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
@@ -226,6 +229,34 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep reaping %d stale cmd/gc test dolt sql-server process(es)\n", label, len(leaked)) //nolint:errcheck
 	writeDoltLeakReport(os.Stderr, leaked)
 	reapDoltLeakProcesses(leaked)
+	return true
+}
+
+// sweepStaleCmdGCTestDoltStoreDirs removes orphaned Dolt store directories
+// left under os.TempDir() by prior test runs, mirroring
+// sweepStaleCmdGCTestDoltProcesses's broad startup-time scope: a leaked store
+// dir survives its owning process's exit (unlike a leaked process, which a
+// signal can reap), so this is the only reaper for that residue. See
+// internal/doltorphan for the age/marker/lsof-unheld safety semantics.
+func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltStoreDirs(label string) bool {
+	result := doltorphan.Sweep(doltorphan.SweepConfig{
+		Roots:  []string{os.TempDir()},
+		MinAge: doltorphan.DefaultMinAge,
+	})
+	if result.LsofUnavailable {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s store-dir sweep skipped: lsof unavailable\n", label) //nolint:errcheck
+		return true
+	}
+	for _, err := range result.RemoveErrors {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s store-dir sweep failed to remove %s: %v\n", label, err.Path, err.Err) //nolint:errcheck
+	}
+	if len(result.Removed) == 0 {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep removed %d orphaned dolt store dir(s)\n", label, len(result.Removed)) //nolint:errcheck
+	for _, path := range result.Removed {
+		fmt.Fprintf(os.Stderr, "  %s\n", path) //nolint:errcheck
+	}
 	return true
 }
 

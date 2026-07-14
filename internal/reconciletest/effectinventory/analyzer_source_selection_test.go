@@ -18,12 +18,14 @@ import (
 func TestSourceSelectionCanonicalRootsAndPatterns(t *testing.T) {
 	wantRoots := []string{
 		"cmd/gc",
+		"internal/api",
 		"internal/session",
 		"internal/worker",
 		"internal/runtime",
 	}
 	wantPatterns := []string{
 		"./cmd/gc/...",
+		"./internal/api/...",
 		"./internal/session/...",
 		"./internal/worker/...",
 		"./internal/runtime/...",
@@ -389,6 +391,21 @@ func TestProductionSourceSelectionCoveredByCanonicalProfiles(t *testing.T) {
 	if err := auditCanonicalSourceSelection(context.Background(), config); err != nil {
 		t.Fatalf("production source selection is outside the canonical profiles: %v", err)
 	}
+}
+
+func TestSourceSelectionCanonicalIntegrationSupportExclusionFailsClosed(t *testing.T) {
+	repoRoot, config := newSourceSelectionModule(t)
+	config.Roots = []string{"internal/api"}
+	writeSourceSelectionFile(t, repoRoot, "internal/api/server.go", "package api\n")
+	writeSourceSelectionFile(t, repoRoot, "internal/api/dashport_support.go", "//go:build integration\n\npackage api\n")
+
+	if err := auditCanonicalSourceSelection(context.Background(), config); err != nil {
+		t.Fatalf("integration-only support file escaped its canonical exclusion: %v", err)
+	}
+
+	writeSourceSelectionFile(t, repoRoot, "internal/api/dashport_support.go", "package api\n")
+	err := auditCanonicalSourceSelection(context.Background(), config)
+	requireSourceSelectionError(t, err, "internal/api/dashport_support.go", "selected a file outside the production source census")
 }
 
 func TestSourceSelectionAuditRejectsUnselectedFile(t *testing.T) {

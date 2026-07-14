@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 const (
@@ -221,7 +222,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)
@@ -414,17 +415,9 @@ func serviceUnavailableMessage(reason string) string {
 }
 
 func stopProcessGroup(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
+	knownGroupID := 0
+	if cmd != nil && cmd.Process != nil {
+		knownGroupID = cmd.Process.Pid
 	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-	deadline := time.Now().Add(proxyProcessShutdownWait)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(-cmd.Process.Pid, 0); errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	return nil
+	return processgroup.TerminateCommand(cmd, knownGroupID, proxyProcessShutdownWait, processgroup.Options{})
 }

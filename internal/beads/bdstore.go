@@ -1004,7 +1004,13 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
-	out, err := s.runner(s.dir, "bd", "show", "--json", id)
+	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
+	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
+	// "invalid connection"/"i/o timeout" transport error. The runner performs a
+	// single recover-and-retry per call; the wrapper's outer attempts give the
+	// rebind enough total time to complete under CI load, matching every other
+	// BdStore read/write path (ga-gellq1).
+	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -1094,6 +1100,19 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
+//
+// SEAM (bd conditional-release verb): today this rides raw `bd sql`. The
+// sqlite backend refuses raw DB access, so that rejection — and embedded dolt
+// WITHOUT a configured dolt directory — surface ErrConditionalReleaseUnsupported
+// (the latter via the releaseIfCurrentViaEmbeddedDoltSQL fallback). Embedded
+// dolt WITH a configured directory instead services the CAS directly through
+// that fallback, returning real rows-affected rather than reporting
+// unsupported. When bd ships its native issueops CAS release verb, consume it
+// HERE as the first attempt:
+// probe by invoking the verb and fall back to this `bd sql` path when bd
+// reports the command unknown (older pinned bd). Callers already treat
+// ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
+// (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
@@ -2118,6 +2137,48 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
+// bdDeleteBatchChunk bounds how many ids ride on a single `bd delete`
+// invocation so a large closure stays within command-line argument limits.
+const bdDeleteBatchChunk = 256
+
+// DeleteBatch removes exactly the given beads with batched `bd delete … --force`
+// calls. `--force` deletes the listed ids and orphans external dependents — it
+// removes every dependency link touching each deleted bead (any type, both
+// directions) and leaves beads that merely depend on them alive, matching the
+// per-bead Delete path (BdStore.Delete also uses `--force`). It is
+// deliberately NOT `--cascade`, which would recursively delete dependent issues
+// outside the collected closure. --force tolerates ids that are already gone,
+// and ids are chunked to respect command-line limits. DeleteBatch is the
+// batched counterpart to Delete that lets the wisp GC tear down a molecule
+// closure with a handful of subprocesses instead of one per bead and edge. It
+// satisfies BatchDeleter.
+//
+// Each chunk is a separate committed `bd delete` subprocess, so a later chunk
+// can fail after earlier chunks are durably gone. On such a partial failure it
+// returns a *BatchDeleteError carrying the ids from the fully-committed earlier
+// chunks, letting a caching layer reconcile exactly those instead of treating
+// the whole batch as untouched.
+func (s *BdStore) DeleteBatch(ids []string) error {
+	for start := 0; start < len(ids); start += bdDeleteBatchChunk {
+		end := start + bdDeleteBatchChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := make([]string, 0, len(chunk)+2)
+		args = append(args, "delete")
+		args = append(args, chunk...)
+		args = append(args, "--force")
+		if err := s.runBDTransientWrite(args...); err != nil {
+			return &BatchDeleteError{
+				Committed: append([]string(nil), ids[:start]...),
+				Err:       fmt.Errorf("batch delete of %d bead(s): %w", len(chunk), err),
+			}
+		}
+	}
+	return nil
+}
+
 // List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
@@ -2212,6 +2273,13 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 		return true
 	}
 	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
+		return true
+	}
+	// bd list exposes no compound (created_at, id) seek flag; the boundary is
+	// resolved Go-side (identical tie-break to the in-memory sort), so a
+	// bd-side limit would cut rows before that filter runs — fetch unbounded
+	// and let applyListQuery filter then limit.
+	if serverQuery.SeekAfter != nil {
 		return true
 	}
 	return false
@@ -2315,10 +2383,15 @@ func isBdQueryUnsupported(err error) bool {
 }
 
 func canApplyWispsServerLimit(query ListQuery) bool {
+	// SeekAfter: the compound (created_at, id) boundary is resolved Go-side
+	// (identical tie-break to the in-memory sort), not via a bd query flag, so
+	// a bd-side limit would cut rows before that filter runs — same class as
+	// CreatedBefore.
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
-		len(query.Metadata) == 0
+		len(query.Metadata) == 0 &&
+		query.SeekAfter == nil
 }
 
 func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
@@ -2545,7 +2618,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -2587,7 +2660,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil

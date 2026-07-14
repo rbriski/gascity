@@ -190,7 +190,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// the handler stamps through the apierr catalog. Mutations additionally declare
 	// 403 because the always-installed CSRF middleware (and read-only mode) reject
 	// a mutation with a 403 before the handler runs; reads never emit it.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// GET /beads also declares 400: an invalid pagination cursor is a typed
+	// invalid-cursor problem response, never a silent page-1 restart.
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
@@ -234,7 +236,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/mail/{id}/reply",
 		Summary:       "Reply to a mail message",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleMailReply)
 	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
@@ -264,7 +267,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/events",
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleEventEmit)
 	cityRegister(sm, huma.Operation{
 		OperationID: "rotate-events",
@@ -310,6 +314,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
@@ -457,7 +464,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/extmsg/adapters",
 		Summary:       "Register an external messaging adapter",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgAdapterRegister)
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 }

@@ -91,36 +91,44 @@ func IsDeterministicControlDispatcher(agent *Agent) bool {
 }
 
 // PreferredDeterministicControlDispatcher returns the deterministic control-
-// dispatcher to route a scope's control beads to, binding-agnostic. The
-// city-level singleton (Dir == "") is preferred for every scope — given
-// max_active_sessions=1, it is the one whose session actually runs and claims
-// the control queue — and a rig-scoped instance (Dir == rigContext) is used only
-// when no city-level deterministic dispatcher is configured. Routing to a
-// rig-scoped copy when a city singleton exists strands the control bead, since
-// the singleton session never claims a <rig>/... route. This is the canonical
-// selection shared by the graph.v2 decoration path (internal/graphroute) and the
-// attempt-time control re-route path (internal/dispatch); keep them in lockstep.
+// dispatcher for a scope, binding-agnostic. A city graph (empty rigContext)
+// selects the city dispatcher; a rig graph selects only the dispatcher expanded
+// for that rig. This keeps the route identity aligned with the store that owns
+// the graph. It is the canonical selection shared by graph.v2 decoration and
+// attempt-time control re-routing; keep those paths in lockstep.
 func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agent, bool) {
 	if cfg == nil {
 		return Agent{}, false
 	}
 	rigContext = strings.TrimSpace(rigContext)
-	var rigScoped Agent
-	haveRigScoped := false
 	for _, a := range cfg.Agents {
 		if !IsDeterministicControlDispatcher(&a) {
 			continue
 		}
-		if strings.TrimSpace(a.Dir) == "" {
+		if strings.TrimSpace(a.Dir) == rigContext {
 			return a, true
 		}
-		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
-			rigScoped = a
-			haveRigScoped = true
-		}
 	}
-	if haveRigScoped {
-		return rigScoped, true
+	return Agent{}, false
+}
+
+// ControlDispatcherForScope returns the configured control dispatcher whose
+// directory exactly matches rigContext. Deterministic dispatchers are preferred,
+// while an exact-scope plain dispatcher remains supported for minimal/custom
+// configs. It never substitutes a city dispatcher for a rig scope (or vice
+// versa), because those dispatchers read different bead stores.
+func ControlDispatcherForScope(cfg *City, rigContext string) (Agent, bool) {
+	if dispatcher, ok := PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+		return dispatcher, true
+	}
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigContext = strings.TrimSpace(rigContext)
+	for _, agent := range cfg.Agents {
+		if agent.Name == ControlDispatcherAgentName && strings.TrimSpace(agent.Dir) == rigContext {
+			return agent, true
+		}
 	}
 	return Agent{}, false
 }
@@ -2046,7 +2054,11 @@ type APIConfig struct {
 	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
-	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field.
+	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
+	// multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,
+	// no config field) additionally binds the gate to the controller's own
+	// city id: every grant must then carry that exact cid claim, failing
+	// closed on a mismatching or missing cid.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	// WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup
 	// error instead of silently disabling the gate, so a config that intends to
@@ -3356,6 +3368,18 @@ func (a *Agent) MouseModeOn() bool {
 // AttachEnabled reports whether the agent supports interactive attachment.
 func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
+}
+
+// EffectiveDefaultSlingFormula returns the default sling formula for
+// this agent, or "" if none is set.
+func (a *Agent) EffectiveDefaultSlingFormula() string {
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
+	}
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
 }
 
 // InjectImplicitAgents adds on-demand agents for each explicitly configured

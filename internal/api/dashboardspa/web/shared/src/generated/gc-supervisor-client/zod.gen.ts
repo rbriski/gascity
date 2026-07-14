@@ -1420,6 +1420,12 @@ export const zRun = z.object({
     updated_at: z.string().optional()
 });
 
+export const zRunCancelOutputBody = z.object({
+    closed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    run_id: z.string(),
+    status: zRunStatus
+});
+
 export const zRunRef = z.object({
     kind: z.enum(['sling', 'order']),
     run_id: z.string(),
@@ -1435,7 +1441,8 @@ export const zRunStepStatus = z.enum([
     'blocked',
     'completed',
     'failed',
-    'skipped'
+    'skipped',
+    'canceled'
 ]);
 
 export const zRunStep = z.object({
@@ -5187,7 +5194,8 @@ export const zGetV0CitiesResponse = zSupervisorCitiesOutputBody;
 export const zPostV0CityBody = zCityCreateRequest;
 
 export const zPostV0CityHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 /**
@@ -5785,7 +5793,8 @@ export const zGetV0CityByCityNameEventsResponse = zListBodyWireEvent;
 export const zEmitEventBody = zEventEmitRequest;
 
 export const zEmitEventHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zEmitEventPath = z.object({
@@ -5870,7 +5879,8 @@ export const zGetV0CityByCityNameExtmsgAdaptersResponse = zListBodyExtmsgAdapter
 export const zRegisterExtmsgAdapterBody = zExtMsgAdapterRegisterInputBody;
 
 export const zRegisterExtmsgAdapterHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zRegisterExtmsgAdapterPath = z.object({
@@ -6363,7 +6373,8 @@ export const zPostV0CityByCityNameMailByIdReadResponse = zOkResponseBody;
 export const zReplyMailBody = zMailReplyInputBody;
 
 export const zReplyMailHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zReplyMailPath = z.object({
@@ -6962,6 +6973,20 @@ export const zGetV0CityByCityNameRunsByRunIdPath = z.object({
  * OK
  */
 export const zGetV0CityByCityNameRunsByRunIdResponse = zRun;
+
+export const zPostV0CityByCityNameRunsByRunIdCancelHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameRunsByRunIdCancelPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    run_id: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * Accepted
+ */
+export const zPostV0CityByCityNameRunsByRunIdCancelResponse = zRunCancelOutputBody;
 
 export const zGetV0CityByCityNameRunsByRunIdStepsPath = z.object({
     cityName: z.string().min(1).regex(/\S/),

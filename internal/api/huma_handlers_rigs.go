@@ -109,7 +109,7 @@ func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput)
 		// The cached value is the whole typed output; the sync response carries
 		// no live-state-derived fields, so an Idempotency-Key replay is
 		// byte-identical to the first 201.
-		return withIdempotency(s, "/v0/rigs", input.IdempotencyKey, body,
+		return withIdempotency(s.idem, "/v0/rigs", input.IdempotencyKey, body,
 			func() (*RigCreateOutput, error) {
 				return s.rigCreateSync(sm, body)
 			})

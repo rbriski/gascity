@@ -208,6 +208,7 @@ func (e RunStatus) Valid() bool {
 const (
 	RunStepStatusActive    RunStepStatus = "active"
 	RunStepStatusBlocked   RunStepStatus = "blocked"
+	RunStepStatusCanceled  RunStepStatus = "canceled"
 	RunStepStatusCompleted RunStepStatus = "completed"
 	RunStepStatusFailed    RunStepStatus = "failed"
 	RunStepStatusPending   RunStepStatus = "pending"
@@ -220,6 +221,8 @@ func (e RunStepStatus) Valid() bool {
 	case RunStepStatusActive:
 		return true
 	case RunStepStatusBlocked:
+		return true
+	case RunStepStatusCanceled:
 		return true
 	case RunStepStatusCompleted:
 		return true
@@ -2877,6 +2880,18 @@ type Run struct {
 
 	// UpdatedAt RFC3339 time of the run's most recent activity.
 	UpdatedAt *string `json:"updated_at,omitempty"`
+}
+
+// RunCancelOutputBody defines model for RunCancelOutputBody.
+type RunCancelOutputBody struct {
+	// Closed Count of the run's beads closed by the cancel.
+	Closed int64 `json:"closed"`
+
+	// RunId The canceled run.
+	RunId string `json:"run_id"`
+
+	// Status Closed lifecycle state of a run.
+	Status RunStatus `json:"status"`
 }
 
 // RunLastError defines model for RunLastError.
@@ -6465,6 +6480,9 @@ type WorkspaceResponse struct {
 type PostV0CityParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PatchV0CityByCityNameParams defines parameters for PatchV0CityByCityName.
@@ -6729,6 +6747,9 @@ type GetV0CityByCityNameEventsParams struct {
 type EmitEventParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // RotateEventsParams defines parameters for RotateEvents.
@@ -6759,6 +6780,9 @@ type DeleteV0CityByCityNameExtmsgAdaptersParams struct {
 type RegisterExtmsgAdapterParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameExtmsgBindParams defines parameters for PostV0CityByCityNameExtmsgBind.
@@ -7044,6 +7068,9 @@ type ReplyMailParams struct {
 
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // TriggerMaintenanceDoltGcParams defines parameters for TriggerMaintenanceDoltGc.
@@ -7257,6 +7284,12 @@ type CreateRigParams struct {
 type GetV0CityByCityNameRunsParams struct {
 	// Limit Maximum runs to return (0 uses the server default).
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// PostV0CityByCityNameRunsByRunIdCancelParams defines parameters for PostV0CityByCityNameRunsByRunIdCancel.
+type PostV0CityByCityNameRunsByRunIdCancelParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameServiceByNameRestartParams defines parameters for PostV0CityByCityNameServiceByNameRestart.
@@ -14060,6 +14093,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameRunsByRunId request
 	GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0CityByCityNameRunsByRunIdCancel request
+	PostV0CityByCityNameRunsByRunIdCancel(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameRunsByRunIdSteps request
 	GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16123,6 +16159,18 @@ func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
+func (c *Client) PostV0CityByCityNameRunsByRunIdCancel(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameRunsByRunIdCancelRequest(c.Server, cityName, runId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameRunsByRunIdStepsRequest(c.Server, cityName, runId)
 	if err != nil {
@@ -16728,6 +16776,17 @@ func NewPostV0CityRequestWithBody(server string, params *PostV0CityParams, conte
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -19434,6 +19493,17 @@ func NewEmitEventRequestWithBody(server string, cityName string, params *EmitEve
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -19727,6 +19797,17 @@ func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, par
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -22126,6 +22207,17 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -24586,6 +24678,60 @@ func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, ru
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameRunsByRunIdCancelRequest generates requests for PostV0CityByCityNameRunsByRunIdCancel
+func NewPostV0CityByCityNameRunsByRunIdCancelRequest(server string, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s/cancel", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -27298,6 +27444,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameRunsByRunIdWithResponse request
 	GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error)
 
+	// PostV0CityByCityNameRunsByRunIdCancelWithResponse request
+	PostV0CityByCityNameRunsByRunIdCancelWithResponse(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error)
+
 	// GetV0CityByCityNameRunsByRunIdStepsWithResponse request
 	GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error)
 
@@ -27464,10 +27613,15 @@ func (r GetV0CitiesResponse) StatusCode() int {
 }
 
 type PostV0CityResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON202                       *AsyncAcceptedResponse
-	ApplicationproblemJSONDefault *ErrorModel
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *AsyncAcceptedResponse
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -28145,6 +28299,7 @@ type GetV0CityByCityNameBeadsResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
 	JSON200                   *ListBodyBead
+	ApplicationproblemJSON400 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
@@ -28600,6 +28755,7 @@ type EmitEventResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -28732,6 +28888,7 @@ type RegisterExtmsgAdapterResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -29612,6 +29769,7 @@ type ReplyMailResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 }
@@ -30837,6 +30995,33 @@ func (r GetV0CityByCityNameRunsByRunIdResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameRunsByRunIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameRunsByRunIdCancelResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *RunCancelOutputBody
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameRunsByRunIdCancelResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameRunsByRunIdCancelResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -33180,6 +33365,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx con
 	return ParseGetV0CityByCityNameRunsByRunIdResponse(rsp)
 }
 
+// PostV0CityByCityNameRunsByRunIdCancelWithResponse request returning *PostV0CityByCityNameRunsByRunIdCancelResponse
+func (c *ClientWithResponses) PostV0CityByCityNameRunsByRunIdCancelWithResponse(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error) {
+	rsp, err := c.PostV0CityByCityNameRunsByRunIdCancel(ctx, cityName, runId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameRunsByRunIdCancelResponse(rsp)
+}
+
 // GetV0CityByCityNameRunsByRunIdStepsWithResponse request returning *GetV0CityByCityNameRunsByRunIdStepsResponse
 func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error) {
 	rsp, err := c.GetV0CityByCityNameRunsByRunIdSteps(ctx, cityName, runId, reqEditors...)
@@ -33637,12 +33831,47 @@ func ParsePostV0CityResponse(rsp *http.Response) (*PostV0CityResponse, error) {
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.ApplicationproblemJSONDefault = &dest
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
 
 	}
 
@@ -35183,6 +35412,13 @@ func ParseGetV0CityByCityNameBeadsResponse(rsp *http.Response) (*GetV0CityByCity
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -36192,6 +36428,13 @@ func ParseEmitEventResponse(rsp *http.Response) (*EmitEventResponse, error) {
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -36475,6 +36718,13 @@ func ParseRegisterExtmsgAdapterResponse(rsp *http.Response) (*RegisterExtmsgAdap
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -38539,6 +38789,13 @@ func ParseReplyMailResponse(rsp *http.Response) (*ReplyMailResponse, error) {
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -41249,6 +41506,67 @@ func ParseGetV0CityByCityNameRunsByRunIdResponse(rsp *http.Response) (*GetV0City
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameRunsByRunIdCancelResponse parses an HTTP response from a PostV0CityByCityNameRunsByRunIdCancelWithResponse call
+func ParsePostV0CityByCityNameRunsByRunIdCancelResponse(rsp *http.Response) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameRunsByRunIdCancelResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest RunCancelOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

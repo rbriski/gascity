@@ -2797,6 +2797,21 @@ export type Run = {
     updated_at?: string;
 };
 
+export type RunCancelOutputBody = {
+    /**
+     * Count of the run's beads closed by the cancel.
+     */
+    closed: number;
+    /**
+     * The canceled run.
+     */
+    run_id: string;
+    /**
+     * Run status after the cancel wind-down.
+     */
+    status: RunStatus;
+};
+
 export type RunLastError = {
     /**
      * Machine-readable outcome code (e.g. fail, skipped, canceled).
@@ -2865,7 +2880,7 @@ export type RunStep = {
 /**
  * Closed lifecycle state of a run step.
  */
-export type RunStepStatus = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped';
+export type RunStepStatus = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled';
 
 export type RunStepsOutputBody = {
     /**
@@ -7305,6 +7320,10 @@ export type PostV0CityData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path?: never;
     query?: never;
@@ -7313,9 +7332,29 @@ export type PostV0CityData = {
 
 export type PostV0CityErrors = {
     /**
-     * Error
+     * Unauthorized
      */
-    default: ErrorModel;
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
 };
 
 export type PostV0CityError = PostV0CityErrors[keyof PostV0CityErrors];
@@ -8829,6 +8868,10 @@ export type GetV0CityByCityNameBeadsData = {
 
 export type GetV0CityByCityNameBeadsErrors = {
     /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
      * Not Found
      */
     404: ErrorModel;
@@ -9703,6 +9746,10 @@ export type EmitEventData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -9727,6 +9774,10 @@ export type EmitEventErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -9989,6 +10040,10 @@ export type RegisterExtmsgAdapterData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -10013,6 +10068,10 @@ export type RegisterExtmsgAdapterErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -11885,6 +11944,10 @@ export type ReplyMailData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -11918,6 +11981,10 @@ export type ReplyMailErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -14306,6 +14373,62 @@ export type GetV0CityByCityNameRunsByRunIdResponses = {
 };
 
 export type GetV0CityByCityNameRunsByRunIdResponse = GetV0CityByCityNameRunsByRunIdResponses[keyof GetV0CityByCityNameRunsByRunIdResponses];
+
+export type PostV0CityByCityNameRunsByRunIdCancelData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Run identifier.
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/{run_id}/cancel';
+};
+
+export type PostV0CityByCityNameRunsByRunIdCancelErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameRunsByRunIdCancelError = PostV0CityByCityNameRunsByRunIdCancelErrors[keyof PostV0CityByCityNameRunsByRunIdCancelErrors];
+
+export type PostV0CityByCityNameRunsByRunIdCancelResponses = {
+    /**
+     * Accepted
+     */
+    202: RunCancelOutputBody;
+};
+
+export type PostV0CityByCityNameRunsByRunIdCancelResponse = PostV0CityByCityNameRunsByRunIdCancelResponses[keyof PostV0CityByCityNameRunsByRunIdCancelResponses];
 
 export type GetV0CityByCityNameRunsByRunIdStepsData = {
     body?: never;

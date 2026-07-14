@@ -70,6 +70,8 @@ func validateDiscoveryEvidence(discovery DiscoveryResult, expectedBoundaryDigest
 	}
 	if strings.TrimSpace(discovery.gitHeadIdentity) == "" {
 		*problems = append(*problems, "discovery git HEAD identity is required")
+	} else if !strings.HasSuffix(discovery.gitHeadIdentity, "@"+discovery.observedGitRevision) {
+		*problems = append(*problems, "discovery git HEAD identity does not bind the observed git revision")
 	}
 	wantEvidenceDigest := deriveDiscoveryEvidenceDigest(discovery)
 	if discovery.evidenceDigest != wantEvidenceDigest {

@@ -157,14 +157,17 @@ func (analysis *loadedAnalysis) collectEscapedArgumentBoundaries(argument ssa.Va
 	visiting[argument] = true
 	defer delete(visiting, argument)
 
-	provenance := analysis.traceChannel(argument, boundaries, nil, make(map[ssa.Value]bool))
-	for boundaryID := range provenance.matches {
-		matches[boundaryID] = true
-	}
-	if (provenance.openWorld || provenance.unsafe) && hasCompatibleChannelCarrierBoundary(argument.Type(), boundaries) {
-		for _, boundary := range boundaries {
-			if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelCarrierTypeCompatible(argument.Type(), boundary.channel) {
-				matches[boundary.definition.ID] = true
+	argumentType := argument.Type()
+	if shouldTraceEscapedArgumentChannel(argument, argumentType, boundaries) {
+		provenance := analysis.traceChannel(argument, boundaries, nil, make(map[ssa.Value]bool))
+		for boundaryID := range provenance.matches {
+			matches[boundaryID] = true
+		}
+		if provenance.openWorld || provenance.unsafe {
+			for _, boundary := range boundaries {
+				if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelCarrierTypeCompatible(argumentType, boundary.channel) {
+					matches[boundary.definition.ID] = true
+				}
 			}
 		}
 	}
@@ -430,6 +433,18 @@ func hasCompatibleChannelCarrierBoundary(valueType types.Type, boundaries []reso
 	for _, boundary := range boundaries {
 		if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelCarrierTypeCompatible(valueType, boundary.channel) {
 			return true
+		}
+	}
+	return false
+}
+
+func shouldTraceEscapedArgumentChannel(argument ssa.Value, argumentType types.Type, boundaries []resolvedBoundary) bool {
+	if hasCompatibleChannelCarrierBoundary(argumentType, boundaries) {
+		return true
+	}
+	for _, boundary := range boundaries {
+		if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil {
+			return channelValueHasUnsafeAncestry(argument, make(map[ssa.Value]bool))
 		}
 	}
 	return false

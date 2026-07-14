@@ -30,14 +30,16 @@ func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
+		script := bdFatalGuardFunctionScript() +
+			standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
+	script := bdFatalGuardFunctionScript() +
+		legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 		`probe_pool_demand "$1"; ` +
@@ -52,9 +54,9 @@ func oldEffectiveAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) s
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 }
 
 func oldEffectiveAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string {
@@ -63,9 +65,9 @@ func oldEffectiveAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 }
 
 func oldEffectiveRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {

@@ -17,6 +17,12 @@ import (
 // TerminateCommand instead.
 func StartCommandInNewGroup(_ *exec.Cmd) {}
 
+// SignalGroup reports that Windows has no killable process-group containment
+// primitive compatible with the Unix contract.
+func SignalGroup(pgid int, _ syscall.Signal) error {
+	return fmt.Errorf("%w: cannot signal process group %d", ErrProcessGroupsUnsupported, pgid)
+}
+
 // SignalCommand signals only cmd's root process on Windows. Go supports
 // os.Kill; other signals may return a platform error.
 func SignalCommand(cmd *exec.Cmd, sig syscall.Signal) error {

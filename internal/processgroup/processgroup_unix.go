@@ -33,6 +33,14 @@ func StartCommandInNewGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// SignalGroup sends sig to one positive, non-caller process group.
+func SignalGroup(pgid int, sig syscall.Signal) error {
+	if pgid <= 1 || pgid == syscall.Getpgrp() {
+		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
+	}
+	return syscall.Kill(-pgid, sig)
+}
+
 // SignalCommand sends sig to cmd's process group and falls back to the direct
 // process when the group signal cannot be delivered.
 func SignalCommand(cmd *exec.Cmd, sig syscall.Signal) error {
@@ -42,7 +50,11 @@ func SignalCommand(cmd *exec.Cmd, sig syscall.Signal) error {
 	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil {
 		return nil
 	}
-	return cmd.Process.Signal(sig)
+	err := cmd.Process.Signal(sig)
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
 }
 
 // Terminate sends SIGTERM to pgid, waits for exit, then escalates to SIGKILL.

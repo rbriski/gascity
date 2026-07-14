@@ -15,6 +15,14 @@ func TestSignalCommandNilSafe(t *testing.T) {
 	}
 }
 
+func TestSignalGroupRejectsUnsafeID(t *testing.T) {
+	for _, pgid := range []int{0, 1} {
+		if err := SignalGroup(pgid, syscall.SIGKILL); err == nil {
+			t.Errorf("SignalGroup(%d) error = nil, want refusal", pgid)
+		}
+	}
+}
+
 func TestProcessGroupsUnsupportedSentinelExists(t *testing.T) {
 	if ErrProcessGroupsUnsupported == nil {
 		t.Fatal("ErrProcessGroupsUnsupported = nil")

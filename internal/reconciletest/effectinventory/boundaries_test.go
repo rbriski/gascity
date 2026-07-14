@@ -40,6 +40,8 @@ func TestCanonicalBoundariesContainAuditedTypedVocabulary(t *testing.T) {
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/runtime", Receiver: "Attachment", Name: "Close"}, KindProviderMutation, ObjectMatchInterfaceImplementors},
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/events", Receiver: "Recorder", Name: "Record"}, KindEventEmission, ObjectMatchInterfaceImplementors},
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/pidutil", Name: "Signal"}, KindProcessMutation, ObjectMatchExact},
+		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/pidutil", Name: "SignalProcess"}, KindProcessMutation, ObjectMatchExact},
+		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/processgroup", Name: "SignalGroup"}, KindProcessMutation, ObjectMatchExact},
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/processgroup", Name: "TerminateCommand"}, KindProcessMutation, ObjectMatchExact},
 		{ObjectRef{Package: "github.com/gastownhall/gascity/cmd/gc", Receiver: "CityRuntime", Name: "pokeCh"}, KindWakeSource, ObjectMatchChannel},
 		{ObjectRef{Package: "os/signal", Name: "Notify"}, KindWakeSource, ObjectMatchChannel},
@@ -59,6 +61,8 @@ func TestCanonicalBoundariesContainAuditedTypedVocabulary(t *testing.T) {
 		{Package: "github.com/gastownhall/gascity/internal/runtime", Receiver: "Provider", Name: "SetMeta"},
 		{Package: "github.com/gastownhall/gascity/internal/runtime", Receiver: "Provider", Name: "RemoveMeta"},
 		{Package: "syscall", Name: "Kill"},
+		{Package: "os", Receiver: "Process", Name: "Release"},
+		{Package: "github.com/gastownhall/gascity/cmd/gc", Name: "terminateManagedDoltTestProcessGroup"},
 	}
 	for _, method := range []string{"Create", "Update", "Close", "Reopen", "CloseAll", "SetMetadata", "SetMetadataBatch", "Delete", "DepAdd", "DepRemove"} {
 		forbidden = append(forbidden, ObjectRef{Package: "github.com/gastownhall/gascity/internal/beads", Receiver: "Store", Name: method})

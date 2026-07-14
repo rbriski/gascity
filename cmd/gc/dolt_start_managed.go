@@ -1072,7 +1072,7 @@ func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches fu
 	if err != nil {
 		return err
 	}
-	_ = process.Signal(syscall.SIGTERM)
+	_ = pidutil.SignalProcess(process, syscall.SIGTERM)
 	gracePeriod := resolveManagedDoltStopTimeout(cityPath)
 	deadline := time.Now().Add(gracePeriod)
 	pollInterval := managedDoltStopPollInterval(gracePeriod)
@@ -1098,7 +1098,7 @@ func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches fu
 		managedDoltCleanupLogf("skipping SIGKILL of pid %d: start identity changed (PID reused)", pid)
 		return nil
 	}
-	_ = process.Signal(syscall.SIGKILL)
+	_ = pidutil.SignalProcess(process, syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
 }

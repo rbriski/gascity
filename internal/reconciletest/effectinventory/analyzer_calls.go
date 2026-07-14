@@ -195,7 +195,7 @@ func (analysis *loadedAnalysis) observeCallInstruction(function *ssa.Function, c
 		return nil, []string{err.Error()}
 	}
 	if builtin, ok := call.Common().Value.(*ssa.Builtin); ok && builtin.Name() == "close" && len(call.Common().Args) == 1 {
-		provenance := analysis.traceChannel(call.Common().Args[0], boundaries, nil, make(map[ssa.Value]bool))
+		provenance := analysis.traceChannel(call.Common().Args[0], boundaries, make(map[ssa.Value]bool))
 		matches := provenance.sortedMatches()
 		if len(matches) != 0 {
 			return nil, []string{fmt.Sprintf("%s: unsupported close operation on inventoried channel boundary %s", ref.key(), strings.Join(matches, ", "))}

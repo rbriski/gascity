@@ -157,15 +157,14 @@ func (analysis *loadedAnalysis) collectEscapedArgumentBoundaries(argument ssa.Va
 	visiting[argument] = true
 	defer delete(visiting, argument)
 
-	argumentType := argument.Type()
-	if shouldTraceEscapedArgumentChannel(argument, argumentType, boundaries) {
-		provenance := analysis.traceChannel(argument, boundaries, nil, make(map[ssa.Value]bool))
+	if analysis.shouldTraceEscapedArgumentChannel(argument, boundaries) {
+		provenance := analysis.traceChannel(argument, boundaries, make(map[ssa.Value]bool))
 		for boundaryID := range provenance.matches {
 			matches[boundaryID] = true
 		}
 		if provenance.openWorld || provenance.unsafe {
 			for _, boundary := range boundaries {
-				if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelCarrierTypeCompatible(argumentType, boundary.channel) {
+				if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelSourceValueCompatible(argument, boundary.channel, make(map[ssa.Value]bool)) {
 					matches[boundary.definition.ID] = true
 				}
 			}
@@ -193,7 +192,7 @@ func (analysis *loadedAnalysis) collectEscapedArgumentBoundaries(argument ssa.Va
 }
 
 func (analysis *loadedAnalysis) collectExactBoundaryMatches(value ssa.Value, boundaries []resolvedBoundary, matches map[string]bool) {
-	provenance := analysis.traceChannel(value, boundaries, nil, make(map[ssa.Value]bool))
+	provenance := analysis.traceChannel(value, boundaries, make(map[ssa.Value]bool))
 	for boundaryID := range provenance.matches {
 		matches[boundaryID] = true
 	}
@@ -317,6 +316,8 @@ func (state *sliceContentTraversal) inspect(value ssa.Value) sliceContentResult 
 		return sliceContentResult{}
 	}
 	switch value := value.(type) {
+	case *ssa.Const:
+		return sliceContentResult{closed: value.IsNil(), isSlice: true}
 	case *ssa.Slice:
 		values, closed := indexedContainerValues(value.X)
 		return sliceContentResult{values: values, closed: closed, isSlice: true}
@@ -379,9 +380,16 @@ func addOpenSliceElementBoundaries(sliceType types.Type, boundaries []resolvedBo
 		return
 	}
 	element := slice.Elem()
+	if _, erased := types.Unalias(element).Underlying().(*types.Interface); erased {
+		// Exact values already contributed their source ancestry above. A fully
+		// erased element type alone is not evidence that any inventoried value
+		// exists in the slice; treating assignability to any as provenance would
+		// invent every callable and channel boundary at ordinary []any handoffs.
+		return
+	}
 	for _, boundary := range boundaries {
 		if boundary.definition.Match == ObjectMatchChannel {
-			if boundary.channel != nil && channelCarrierTypeCompatible(element, boundary.channel) {
+			if boundary.channel != nil && concreteChannelCarrierTypeCompatible(element, boundary.channel) {
 				matches[boundary.definition.ID] = true
 			}
 			continue
@@ -390,9 +398,6 @@ func addOpenSliceElementBoundaries(sliceType types.Type, boundaries []resolvedBo
 		if ok && callableSignatureCompatible(signature, boundary) {
 			matches[boundary.definition.ID] = true
 			continue
-		}
-		if _, isInterface := types.Unalias(element).Underlying().(*types.Interface); isInterface && boundary.function != nil && types.AssignableTo(boundary.function.Type(), element) {
-			matches[boundary.definition.ID] = true
 		}
 	}
 }
@@ -429,17 +434,23 @@ func sliceCarrierTypeAlong(value ssa.Value, visiting map[ssa.Value]bool) types.T
 	return nil
 }
 
-func hasCompatibleChannelCarrierBoundary(valueType types.Type, boundaries []resolvedBoundary) bool {
+func hasCompatibleChannelSourceBoundary(value ssa.Value, boundaries []resolvedBoundary) bool {
 	for _, boundary := range boundaries {
-		if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelCarrierTypeCompatible(valueType, boundary.channel) {
+		if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelSourceValueCompatible(value, boundary.channel, make(map[ssa.Value]bool)) {
 			return true
 		}
 	}
 	return false
 }
 
-func shouldTraceEscapedArgumentChannel(argument ssa.Value, argumentType types.Type, boundaries []resolvedBoundary) bool {
-	if hasCompatibleChannelCarrierBoundary(argumentType, boundaries) {
+func (analysis *loadedAnalysis) shouldTraceEscapedArgumentChannel(argument ssa.Value, boundaries []resolvedBoundary) bool {
+	if hasCompatibleChannelSourceBoundary(argument, boundaries) {
+		return true
+	}
+	if analysis.authoredCallReturnsCompatibleChannel(argument, boundaries, make(map[ssa.Value]bool)) {
+		// An authored call may return an exact channel behind an erased result.
+		// The cheap return preflight avoids tracing arbitrary interface-valued
+		// calls while leaving the full tracer responsible for exact provenance.
 		return true
 	}
 	for _, boundary := range boundaries {
@@ -450,13 +461,158 @@ func shouldTraceEscapedArgumentChannel(argument ssa.Value, argumentType types.Ty
 	return false
 }
 
-func channelCarrierTypeCompatible(carrier, channel types.Type) bool {
-	if channelTypesCompatible(carrier, channel) {
-		return true
+func (analysis *loadedAnalysis) authoredCallReturnsCompatibleChannel(value ssa.Value, boundaries []resolvedBoundary, visiting map[ssa.Value]bool) bool {
+	if value == nil || visiting[value] {
+		return false
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	traceable := func(candidate ssa.Value) bool {
+		return analysis.authoredCallReturnsCompatibleChannel(candidate, boundaries, visiting)
+	}
+	switch value := value.(type) {
+	case *ssa.Call:
+		if _, erased := types.Unalias(value.Type()).Underlying().(*types.Interface); !erased {
+			return false
+		}
+		return analysis.authoredCallResultHasCompatibleChannel(value, 0, boundaries, visiting)
+	case *ssa.MakeInterface:
+		return traceable(value.X)
+	case *ssa.ChangeInterface:
+		return traceable(value.X)
+	case *ssa.TypeAssert:
+		return traceable(value.X)
+	case *ssa.Extract:
+		if _, erased := types.Unalias(value.Type()).Underlying().(*types.Interface); !erased {
+			return false
+		}
+		if call, ok := value.Tuple.(*ssa.Call); ok {
+			return analysis.authoredCallResultHasCompatibleChannel(call, value.Index, boundaries, visiting)
+		}
+		return traceable(value.Tuple)
+	case *ssa.UnOp:
+		return traceable(value.X)
+	case *ssa.ChangeType:
+		return traceable(value.X)
+	case *ssa.Convert:
+		return traceable(value.X)
+	case *ssa.Phi:
+		for _, edge := range value.Edges {
+			if traceable(edge) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (analysis *loadedAnalysis) authoredCallResultHasCompatibleChannel(call *ssa.Call, resultIndex int, boundaries []resolvedBoundary, visiting map[ssa.Value]bool) bool {
+	if call == nil || resultIndex < 0 {
+		return false
+	}
+	callee := call.Call.StaticCallee()
+	if callee == nil || !analysis.authoredSourceFunction(callee) || len(callee.Blocks) == 0 {
+		return false
+	}
+	for _, block := range callee.Blocks {
+		for _, instruction := range block.Instrs {
+			returned, ok := instruction.(*ssa.Return)
+			if !ok || resultIndex >= len(returned.Results) {
+				continue
+			}
+			for _, boundary := range boundaries {
+				if boundary.definition.Match == ObjectMatchChannel && boundary.channel != nil && channelSourceValueCompatible(returned.Results[resultIndex], boundary.channel, make(map[ssa.Value]bool)) {
+					return true
+				}
+			}
+			if analysis.authoredCallReturnsCompatibleChannel(returned.Results[resultIndex], boundaries, visiting) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func concreteChannelCarrierTypeCompatible(carrier, channel types.Type) bool {
+	if carrier == nil || channel == nil {
+		return false
 	}
 	carrier = types.Unalias(carrier)
+	if _, parameter := carrier.(*types.TypeParam); parameter {
+		return channelTypesCompatible(carrier, channel)
+	}
 	if pointer, ok := carrier.(*types.Pointer); ok {
-		return channelTypesCompatible(pointer.Elem(), channel)
+		carrier = types.Unalias(pointer.Elem())
+	}
+	if _, parameter := carrier.(*types.TypeParam); parameter {
+		return channelTypesCompatible(carrier, channel)
+	}
+	if _, ok := carrier.Underlying().(*types.Chan); !ok {
+		return false
+	}
+	return channelTypesCompatible(carrier, channel)
+}
+
+func channelSourceValueCompatible(value ssa.Value, channel types.Type, visiting map[ssa.Value]bool) bool {
+	if value == nil || visiting[value] {
+		return false
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	if concreteChannelCarrierTypeCompatible(value.Type(), channel) {
+		return true
+	}
+	compatible := func(candidate ssa.Value) bool {
+		return channelSourceValueCompatible(candidate, channel, visiting)
+	}
+	switch value := value.(type) {
+	case *ssa.MakeInterface:
+		return compatible(value.X)
+	case *ssa.ChangeInterface:
+		return compatible(value.X)
+	case *ssa.TypeAssert:
+		return compatible(value.X)
+	case *ssa.Extract:
+		return compatible(value.Tuple)
+	case *ssa.UnOp:
+		return compatible(value.X)
+	case *ssa.ChangeType:
+		return compatible(value.X)
+	case *ssa.Convert:
+		return compatible(value.X)
+	case *ssa.Phi:
+		for _, edge := range value.Edges {
+			if compatible(edge) {
+				return true
+			}
+		}
+	case *ssa.FreeVar:
+		for _, binding := range freeVariableBindings(value) {
+			if compatible(binding) {
+				return true
+			}
+		}
+	case *ssa.FieldAddr:
+		for _, stored := range localFieldStoredValues(value.X, value.Field) {
+			if compatible(stored) {
+				return true
+			}
+		}
+	case *ssa.Field:
+		for _, stored := range localFieldStoredValues(value.X, value.Field) {
+			if compatible(stored) {
+				return true
+			}
+		}
+	case *ssa.Alloc:
+		if references := value.Referrers(); references != nil {
+			for _, instruction := range *references {
+				store, ok := instruction.(*ssa.Store)
+				if ok && store.Addr == value && compatible(store.Val) {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }

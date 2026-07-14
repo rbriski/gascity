@@ -155,27 +155,20 @@ func TestDiscoverProfileRejectsBoundaryValuesEscapedToUnanalyzedCallees(t *testi
 		"OpenInterfaceDrop", "OpenFunctionDrop", "BodylessDrop",
 		"OpenBoundSink", "OpenBoundBoxedSink", "OpenBoundOnlyBoxedSink",
 		"OpenBoundOnlyFreeVarSink", "OpenBoundOnlyFieldSink", "OpenThunkSink", "MixedInterfaceDrop", "BoxedCallback",
-		"BoxedChannel", "VariadicCallback", "VariadicChannel", "AsyncValues", "unanalyzed",
+		"BoxedChannel", "BoxedChannelResult", "VariadicCallback", "VariadicChannel", "AsyncValues", "unanalyzed",
 		"EllipsisBoxedCallback", "EllipsisBoxedChannel", "EllipsisCallback",
-		"EllipsisChannel", "EllipsisOpenCallback", "EllipsisOpenChannel", "EllipsisOpenBoxed",
-		"BoxedSliceCallback", "BoxedSliceChannel", "BoxedOpenSlice",
+		"EllipsisChannel", "EllipsisOpenCallback", "EllipsisOpenChannel",
+		"BoxedSliceCallback", "BoxedSliceChannel",
 	} {
 		if !strings.Contains(err.Error(), fragment) {
 			t.Errorf("discoverProfile() error = %q, want %q", err, fragment)
-		}
-	}
-	for _, owner := range []string{"EllipsisOpenBoxed", "BoxedOpenSlice"} {
-		line := diagnosticLine(err.Error(), owner)
-		for _, boundaryID := range []string{"callescape.external.callback", "callescape.external.channel"} {
-			if !strings.Contains(line, boundaryID) {
-				t.Errorf("discoverProfile() diagnostic for %s = %q, want boundary %q", owner, line, boundaryID)
-			}
 		}
 	}
 	for _, fragment := range []string{
 		"RouteUnrelatedBound", "SortOtherEntries", "AuthoredDrops",
 		"ClosedDynamicDrop", "ClosedInterfaceDrop", "AuthoredGenericDrop",
 		"AuthoredBoundDrop", "AuthoredBoundWithInterfaceArg", "ClosedExternalValues",
+		"NilVariadicValues", "EllipsisOpenBoxed", "BoxedOpenSlice",
 	} {
 		if strings.Contains(err.Error(), fragment) {
 			t.Errorf("discoverProfile() error = %q, do not want closed negative control %q", err, fragment)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/filelock"
 )
 
 // Dolt holds an exclusive flock on each database's `.dolt/noms/LOCK` for the
@@ -85,14 +86,14 @@ func managedDoltDataDirLockHolder(dataDir string) string {
 			}
 			continue
 		}
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		acquired, err := filelock.TryLock(f, filelock.Exclusive)
+		if err == nil && acquired {
+			_ = filelock.Unlock(f)
 			_ = f.Close()
 			continue
 		}
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		if err == nil {
 			return path
 		}
 		fmt.Fprintf(os.Stderr, "warning: cannot probe dolt store lock %s: %v; treating as free (gastownhall/gascity#3174)\n", path, err)

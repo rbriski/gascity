@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/filelock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
@@ -222,7 +223,8 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	acquired, err := filelock.TryLock(f, filelock.Exclusive)
+	if err != nil || !acquired {
 		f.Close() //nolint:errcheck
 		return nil, fmt.Errorf("supervisor already running")
 	}

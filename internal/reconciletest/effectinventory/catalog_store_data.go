@@ -38,6 +38,7 @@ const (
 	storeClassAdapterOrderControllerBatchSet                    catalogRouteClassID = "adapter/order/order/controller/batch-set"
 	storeClassAdapterOrderControllerCreate                      catalogRouteClassID = "adapter/order/order/controller/create"
 	storeClassAdapterOrderControllerDirect                      catalogRouteClassID = "adapter/order/order/controller/direct"
+	storeClassFrontSessionCloseWorkReleaseControllerDirect      catalogRouteClassID = "front/session/close-work-release/controller/direct"
 	storeClassFrontSessionStartInitiationControllerCreate       catalogRouteClassID = "front/session/start-initiation/controller/create"
 	storeClassFrontSessionStatusHealControllerBatchOne          catalogRouteClassID = "front/session/status-heal/controller/batch-one"
 	storeClassFrontSessionStatusHealControllerDirect            catalogRouteClassID = "front/session/status-heal/controller/direct"
@@ -50,13 +51,13 @@ const (
 	storeClassManagerSessionDrainBeginControllerBatchOne        catalogRouteClassID = "manager/session/drain-begin/controller/batch-one"
 	storeClassManagerSessionIdentityHealControllerBatchOne      catalogRouteClassID = "manager/session/identity-heal/controller/batch-one"
 	storeClassManagerSessionIdentityHealControllerDirect        catalogRouteClassID = "manager/session/identity-heal/controller/direct"
+	storeClassManagerSessionObservationControllerDirect         catalogRouteClassID = "manager/session/observation/controller/direct"
 	storeClassManagerSessionRestartGenerationControllerBatchOne catalogRouteClassID = "manager/session/restart-generation/controller/batch-one"
 	storeClassManagerSessionStartConfirmationControllerBatchOne catalogRouteClassID = "manager/session/start-confirmation/controller/batch-one"
+	storeClassManagerSessionStartConfirmationControllerDirect   catalogRouteClassID = "manager/session/start-confirmation/controller/direct"
 	storeClassManagerSessionStartInitiationControllerBatchOne   catalogRouteClassID = "manager/session/start-initiation/controller/batch-one"
 	storeClassManagerSessionStartInitiationControllerCreate     catalogRouteClassID = "manager/session/start-initiation/controller/create"
 	storeClassManagerSessionStartInitiationControllerDirect     catalogRouteClassID = "manager/session/start-initiation/controller/direct"
-	storeClassManagerSessionStatusHealControllerBatchOne        catalogRouteClassID = "manager/session/status-heal/controller/batch-one"
-	storeClassManagerSessionStatusHealControllerDirect          catalogRouteClassID = "manager/session/status-heal/controller/direct"
 	storeClassManagerSessionStopControllerBatchOne              catalogRouteClassID = "manager/session/stop/controller/batch-one"
 	storeClassManagerSessionStopControllerDirect                catalogRouteClassID = "manager/session/stop/controller/direct"
 	storeClassRawControlControllerBatchOne                      catalogRouteClassID = "raw/control/control/controller/batch-one"
@@ -66,10 +67,10 @@ const (
 	storeClassRawOrderControllerBatchSet                        catalogRouteClassID = "raw/order/order/controller/batch-set"
 	storeClassRawOrderControllerDirect                          catalogRouteClassID = "raw/order/order/controller/direct"
 	storeClassRawPoolControllerDirect                           catalogRouteClassID = "raw/pool/pool/controller/direct"
+	storeClassRawRouteAPIDirect                                 catalogRouteClassID = "raw/route/route/api/direct"
 	storeClassRawRouteControllerDirect                          catalogRouteClassID = "raw/route/route/controller/direct"
 	storeClassRawSessionCloseWorkReleaseAPIDirect               catalogRouteClassID = "raw/session/close-work-release/api/direct"
 	storeClassRawSessionIdentityHealAPIBatchOne                 catalogRouteClassID = "raw/session/identity-heal/api/batch-one"
-	storeClassRawSessionIdentityHealAPIDirect                   catalogRouteClassID = "raw/session/identity-heal/api/direct"
 	storeClassRawSessionStartInitiationAPIBatchOne              catalogRouteClassID = "raw/session/start-initiation/api/batch-one"
 	storeClassRawSessionStartInitiationAPIDirect                catalogRouteClassID = "raw/session/start-initiation/api/direct"
 	storeClassRawSessionStatusHealControllerDirect              catalogRouteClassID = "raw/session/status-heal/controller/direct"
@@ -114,6 +115,7 @@ func knownStoreCatalogClassID(id catalogRouteClassID) bool {
 		storeClassAdapterOrderControllerBatchSet,
 		storeClassAdapterOrderControllerCreate,
 		storeClassAdapterOrderControllerDirect,
+		storeClassFrontSessionCloseWorkReleaseControllerDirect,
 		storeClassFrontSessionStartInitiationControllerCreate,
 		storeClassFrontSessionStatusHealControllerBatchOne,
 		storeClassFrontSessionStatusHealControllerDirect,
@@ -126,13 +128,13 @@ func knownStoreCatalogClassID(id catalogRouteClassID) bool {
 		storeClassManagerSessionDrainBeginControllerBatchOne,
 		storeClassManagerSessionIdentityHealControllerBatchOne,
 		storeClassManagerSessionIdentityHealControllerDirect,
+		storeClassManagerSessionObservationControllerDirect,
 		storeClassManagerSessionRestartGenerationControllerBatchOne,
 		storeClassManagerSessionStartConfirmationControllerBatchOne,
+		storeClassManagerSessionStartConfirmationControllerDirect,
 		storeClassManagerSessionStartInitiationControllerBatchOne,
 		storeClassManagerSessionStartInitiationControllerCreate,
 		storeClassManagerSessionStartInitiationControllerDirect,
-		storeClassManagerSessionStatusHealControllerBatchOne,
-		storeClassManagerSessionStatusHealControllerDirect,
 		storeClassManagerSessionStopControllerBatchOne,
 		storeClassManagerSessionStopControllerDirect,
 		storeClassRawControlControllerBatchOne,
@@ -142,10 +144,10 @@ func knownStoreCatalogClassID(id catalogRouteClassID) bool {
 		storeClassRawOrderControllerBatchSet,
 		storeClassRawOrderControllerDirect,
 		storeClassRawPoolControllerDirect,
+		storeClassRawRouteAPIDirect,
 		storeClassRawRouteControllerDirect,
 		storeClassRawSessionCloseWorkReleaseAPIDirect,
 		storeClassRawSessionIdentityHealAPIBatchOne,
-		storeClassRawSessionIdentityHealAPIDirect,
 		storeClassRawSessionStartInitiationAPIBatchOne,
 		storeClassRawSessionStartInitiationAPIDirect,
 		storeClassRawSessionStatusHealControllerDirect,
@@ -193,6 +195,7 @@ var storeCatalogRouteClassSpecs = []storeCatalogRouteClassSpec{
 	{ID: storeClassAdapterOrderControllerBatchSet, StoreDomain: StoreDomainOrderDispatch, ActionFamily: FamilyOrderDispatch, ExecutingProcess: ProcessController, AccessPath: AccessStoreAdapter, TargetShape: storeTargetBatchSet, ReplacementGate: ""},
 	{ID: storeClassAdapterOrderControllerCreate, StoreDomain: StoreDomainOrderDispatch, ActionFamily: FamilyOrderDispatch, ExecutingProcess: ProcessController, AccessPath: AccessStoreAdapter, TargetShape: storeTargetCreate, ReplacementGate: ""},
 	{ID: storeClassAdapterOrderControllerDirect, StoreDomain: StoreDomainOrderDispatch, ActionFamily: FamilyOrderDispatch, ExecutingProcess: ProcessController, AccessPath: AccessStoreAdapter, TargetShape: storeTargetDirect, ReplacementGate: ""},
+	{ID: storeClassFrontSessionCloseWorkReleaseControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyCloseWorkRelease, ExecutingProcess: ProcessController, AccessPath: AccessSessionStoreFrontDoor, TargetShape: storeTargetDirect, ReplacementGate: ""},
 	{ID: storeClassFrontSessionStartInitiationControllerCreate, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartInitiation, ExecutingProcess: ProcessController, AccessPath: AccessSessionStoreFrontDoor, TargetShape: storeTargetCreate, ReplacementGate: ""},
 	{ID: storeClassFrontSessionStatusHealControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStatusHeal, ExecutingProcess: ProcessController, AccessPath: AccessSessionStoreFrontDoor, TargetShape: storeTargetBatchOne, ReplacementGate: ""},
 	{ID: storeClassFrontSessionStatusHealControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStatusHeal, ExecutingProcess: ProcessController, AccessPath: AccessSessionStoreFrontDoor, TargetShape: storeTargetDirect, ReplacementGate: ""},
@@ -205,13 +208,13 @@ var storeCatalogRouteClassSpecs = []storeCatalogRouteClassSpec{
 	{ID: storeClassManagerSessionDrainBeginControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyDrainBeginCancel, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionIdentityHealControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyIdentityHealRetirement, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionIdentityHealControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyIdentityHealRetirement, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
+	{ID: storeClassManagerSessionObservationControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyObservation, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionRestartGenerationControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyRestartGeneration, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionStartConfirmationControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartConfirmationAdoption, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
+	{ID: storeClassManagerSessionStartConfirmationControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartConfirmationAdoption, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionStartInitiationControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartInitiation, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionStartInitiationControllerCreate, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartInitiation, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetCreate, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionStartInitiationControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartInitiation, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
-	{ID: storeClassManagerSessionStatusHealControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStatusHeal, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
-	{ID: storeClassManagerSessionStatusHealControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStatusHeal, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionStopControllerBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStop, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
 	{ID: storeClassManagerSessionStopControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStop, ExecutingProcess: ProcessController, AccessPath: AccessManagerBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassRawControlControllerBatchOne, StoreDomain: StoreDomainControlDispatch, ActionFamily: FamilyControlDispatch, ExecutingProcess: ProcessController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P9.1"},
@@ -221,10 +224,10 @@ var storeCatalogRouteClassSpecs = []storeCatalogRouteClassSpec{
 	{ID: storeClassRawOrderControllerBatchSet, StoreDomain: StoreDomainOrderDispatch, ActionFamily: FamilyOrderDispatch, ExecutingProcess: ProcessController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetBatchSet, ReplacementGate: "P9.2"},
 	{ID: storeClassRawOrderControllerDirect, StoreDomain: StoreDomainOrderDispatch, ActionFamily: FamilyOrderDispatch, ExecutingProcess: ProcessController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P9.2"},
 	{ID: storeClassRawPoolControllerDirect, StoreDomain: StoreDomainPoolRouting, ActionFamily: FamilyPoolScale, ExecutingProcess: ProcessController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P8.6"},
+	{ID: storeClassRawRouteAPIDirect, StoreDomain: StoreDomainRouteRecovery, ActionFamily: FamilyRouteRecovery, ExecutingProcess: ProcessAPIInController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P9.4"},
 	{ID: storeClassRawRouteControllerDirect, StoreDomain: StoreDomainRouteRecovery, ActionFamily: FamilyRouteRecovery, ExecutingProcess: ProcessController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P9.4"},
 	{ID: storeClassRawSessionCloseWorkReleaseAPIDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyCloseWorkRelease, ExecutingProcess: ProcessAPIInController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassRawSessionIdentityHealAPIBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyIdentityHealRetirement, ExecutingProcess: ProcessAPIInController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
-	{ID: storeClassRawSessionIdentityHealAPIDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyIdentityHealRetirement, ExecutingProcess: ProcessAPIInController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassRawSessionStartInitiationAPIBatchOne, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartInitiation, ExecutingProcess: ProcessAPIInController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetBatchOne, ReplacementGate: "P2.10A"},
 	{ID: storeClassRawSessionStartInitiationAPIDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStartInitiation, ExecutingProcess: ProcessAPIInController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
 	{ID: storeClassRawSessionStatusHealControllerDirect, StoreDomain: StoreDomainSessionLifecycle, ActionFamily: FamilyStatusHeal, ExecutingProcess: ProcessController, AccessPath: AccessRawStoreBypass, TargetShape: storeTargetDirect, ReplacementGate: "P2.10A"},
@@ -303,8 +306,8 @@ var storeCatalogSiteSpecs = []storeCatalogSiteSpec{
 	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "createStarted", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
 	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "createStarted", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 2, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
 	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "createStarted", File: "internal/session/manager.go", ClosurePath: []int{1, 1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
-	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "Close", File: "internal/session/store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontSessionStatusHealControllerDirect},
-	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "CloseWithoutReason", File: "internal/session/store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontSessionStatusHealControllerDirect},
+	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "Close", File: "internal/session/store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontSessionCloseWorkReleaseControllerDirect},
+	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "CloseWithoutReason", File: "internal/session/store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontSessionCloseWorkReleaseControllerDirect},
 	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "ReassignWaits", File: "internal/session/wait_store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontWaitControllerDirect},
 	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "setWaitTerminalState", File: "internal/session/wait_store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontWaitControllerDirect},
 	{BoundaryID: "beads.writer.Close", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/sourceworkflow", Receiver: "", Function: "closeRootWithMarker", File: "internal/sourceworkflow/sourceworkflow.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterControlControllerDirect},
@@ -485,8 +488,8 @@ var storeCatalogSiteSpecs = []storeCatalogSiteSpec{
 	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "clearStaleResumeMetadata", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 4, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionIdentityHealControllerDirect},
 	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "ensureRunning", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
 	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "ensureRunningRuntimeOnly", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
-	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "markStartupDialogsVerifiedLocked", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStatusHealControllerDirect},
-	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "PersistInvocationUsageCursor", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStatusHealControllerDirect},
+	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "markStartupDialogsVerifiedLocked", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartConfirmationControllerDirect},
+	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "PersistInvocationUsageCursor", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionObservationControllerDirect},
 	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "PersistSessionKey", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionIdentityHealControllerDirect},
 	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "createBeadOnly", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
 	{BoundaryID: "beads.writer.SetMetadata", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "createStarted", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerDirect},
@@ -564,7 +567,7 @@ var storeCatalogSiteSpecs = []storeCatalogSiteSpec{
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/nudgequeue", Receiver: "Store", Function: "SweepStale", File: "internal/nudgequeue/store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterNudgeControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/nudgequeue", Receiver: "Store", Function: "Terminalize", File: "internal/nudgequeue/store.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterNudgeControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/nudgequeue", Receiver: "", Function: "markTerminalBead", File: "internal/nudgequeue/waits.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterNudgeControllerBatchOne},
-	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "confirmLiveSessionState", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStatusHealControllerBatchOne},
+	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "confirmLiveSessionState", File: "internal/session/chat.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartConfirmationControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "Archive", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionCloseWorkReleaseControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "BeginDrain", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionDrainBeginControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "ConfirmCreation", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartConfirmationControllerBatchOne},
@@ -572,7 +575,7 @@ var storeCatalogSiteSpecs = []storeCatalogSiteSpec{
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "Reactivate", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartInitiationControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "RequestFreshRestart", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionRestartGenerationControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "UpdateTemplateOverrides", File: "internal/session/manager.go", ClosurePath: []int{1}, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionIdentityHealControllerBatchOne},
-	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "clearWakeAndHoldOverrides", File: "internal/session/manager.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStopControllerBatchOne},
+	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "clearWakeAndHoldOverrides", File: "internal/session/manager.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionCloseWorkReleaseControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Manager", Function: "confirmStartedRuntimeMetadata", File: "internal/session/manager.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassManagerSessionStartConfirmationControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "ApplyPatch", File: "internal/session/store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontSessionStatusHealControllerBatchOne},
 	{BoundaryID: "beads.writer.SetMetadataBatch", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/session", Receiver: "Store", Function: "MarkWaitReady", File: "internal/session/wait_store.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassFrontWaitControllerBatchOne},
@@ -606,7 +609,7 @@ var storeCatalogSiteSpecs = []storeCatalogSiteSpec{
 	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "Server", Function: "humaHandleBeadUpdate", File: "internal/api/huma_handlers_beads.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterMaintenanceAPIDirect},
 	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "", Function: "rollbackConvoyMembershipRemoval", File: "internal/api/huma_handlers_convoys.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterControlAPIDirect},
 	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "Server", Function: "humaHandleConvoyRemove", File: "internal/api/huma_handlers_convoys.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterControlAPIDirect},
-	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "", Function: "reassignOpenWorkAssignedToSession", File: "internal/api/session_resolution.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassRawSessionIdentityHealAPIDirect},
+	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "", Function: "reassignOpenWorkAssignedToSession", File: "internal/api/session_resolution.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassRawRouteAPIDirect},
 	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "", Function: "MaybeGenerateTitleAsync", File: "internal/api/title_generate.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterMaintenanceAPIDirect},
 	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/api", Receiver: "", Function: "generateAndSetTitle", File: "internal/api/title_generate.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterMaintenanceAPIDirect},
 	{BoundaryID: "beads.writer.Update", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/beads", Receiver: "bdStoreTx", Function: "apply", File: "internal/beads/bdstore.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterMaintenanceControllerDirect},
@@ -654,4 +657,4 @@ var storeCatalogSiteSpecs = []storeCatalogSiteSpec{
 	{BoundaryID: "gc.explicit-reason-close.CloseWithReason", Operation: OperationCall, Package: "github.com/gastownhall/gascity/cmd/gc", Receiver: "", Function: "closeMoleculeWithReason", File: "cmd/gc/molecule_autoclose.go", ClosurePath: nil, Ordinal: 1, ProfileSet: storeProfileSetAll, Class: storeClassAdapterControlControllerDirect},
 }
 
-// generated counts: 419 sites, 72 semantic classes
+// generated counts: 419 sites, 73 semantic classes

@@ -8,6 +8,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -119,6 +120,9 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	}
 	if strings.TrimSpace(string(profile.ID)) == "" || profile.GOOS == "" || profile.GOARCH == "" {
 		return nil, fmt.Errorf("effect discovery: profile id, GOOS, and GOARCH are required")
+	}
+	if err := validateAnalysisProfile(profile); err != nil {
+		return nil, fmt.Errorf("effect discovery: %w", err)
 	}
 
 	repoRoot, err := filepath.Abs(config.RepoRoot)
@@ -258,12 +262,18 @@ func functionsReachableFromInitializers(packages []*ssa.Package, graph *callgrap
 func profileEnvironment(profile analysisProfile) []string {
 	overridden := map[string]bool{
 		"CGO_ENABLED":      true,
+		"GO111MODULE":      true,
 		"GOARCH":           true,
+		"GOCACHEPROG":      true,
+		"GODEBUG":          true,
 		"GOENV":            true,
 		"GOEXPERIMENT":     true,
+		"GOFIPS140":        true,
 		"GOFLAGS":          true,
 		"GOOS":             true,
 		"GOPACKAGESDRIVER": true,
+		"GOROOT":           true,
+		"GOTOOLCHAIN":      true,
 		"GOWORK":           true,
 		"GOAMD64":          true,
 	}
@@ -276,12 +286,21 @@ func profileEnvironment(profile analysisProfile) []string {
 	}
 	environment = append(environment,
 		"CGO_ENABLED=0",
+		"GO111MODULE=on",
 		"GOARCH="+profile.GOARCH,
+		"GOCACHEPROG=",
+		"GODEBUG=",
 		"GOENV=off",
 		"GOEXPERIMENT=",
+		"GOFIPS140=off",
 		"GOFLAGS=",
 		"GOOS="+profile.GOOS,
 		"GOPACKAGESDRIVER=off",
+		"GOROOT=",
+		// A specific name makes the child use the analyzer's own toolchain,
+		// independent of the PATH launcher's bundled version.
+		// See https://go.dev/doc/toolchain#select.
+		"GOTOOLCHAIN="+runtime.Version(),
 		"GOWORK=off",
 	)
 	if profile.GOARCH == "amd64" {

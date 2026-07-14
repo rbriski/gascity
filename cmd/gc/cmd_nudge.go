@@ -1901,6 +1901,28 @@ func takeQueuedNudgesByID(items []queuedNudge, id string, removed []queuedNudge)
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
+	committed, err := persistQueuedNudgeWithStore(cityPath, store, item)
+	if err != nil {
+		return err
+	}
+	// Best-effort wake of the supervisor's nudge dispatcher. Legacy-mode
+	// cities and ad-hoc invocations (no listener) get a fast dial failure and
+	// fall through to the per-session poller / patrol tick. The exact hint
+	// contains only durable identities and remains advisory; an unkeyed legacy
+	// command automatically emits the one-byte wake.
+	pingNudgeWakeSocketHint(cityPath, nudgeWakeHint{
+		Version:   nudgequeue.SessionWakeHintVersion1,
+		CommandID: committed.ID,
+		SessionID: committed.SessionID,
+	})
+	return nil
+}
+
+// persistQueuedNudgeWithStore returns the canonical stored item and a nil error
+// only after the authoritative queue state write has committed. Keeping socket
+// notification in the small wrapper above makes commit-before-wake dominance
+// mechanically reviewable.
+func persistQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) (queuedNudge, error) {
 	ownStore := false
 	if store.Store == nil {
 		store = openNudgeBeadStore(cityPath)
@@ -1915,7 +1937,7 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 	}
 	beadID, created, err := ensureQueuedNudgeBead(store, item)
 	if err != nil {
-		return err
+		return queuedNudge{}, err
 	}
 	if beadID != "" {
 		item.BeadID = beadID
@@ -1932,7 +1954,8 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if queuedNudgeExists(state, item.ID) {
+		if existing, ok := queuedNudgeByID(state, item.ID); ok {
+			item = existing
 			return nil
 		}
 		// Supersede pending and in-flight nudges for the same (agent, source, reference).
@@ -1997,13 +2020,10 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 			err = errors.Join(err, fmt.Errorf("rollback nudge bead %q: %w", beadID, rbErr))
 		}
 	}
-	if err == nil {
-		// Best-effort wake of the supervisor's nudge dispatcher. Legacy-mode
-		// cities and ad-hoc invocations (no listener) get a fast dial
-		// failure and fall through to the per-session poller / patrol tick.
-		pingNudgeWakeSocket(cityPath)
+	if err != nil {
+		return queuedNudge{}, err
 	}
-	return err
+	return item, nil
 }
 
 func ackQueuedNudges(cityPath string, ids []string) error {
@@ -2358,23 +2378,23 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now,
 	return nil
 }
 
-func queuedNudgeExists(state *nudgeQueueState, id string) bool {
+func queuedNudgeByID(state *nudgeQueueState, id string) (queuedNudge, bool) {
 	for _, item := range state.Pending {
 		if item.ID == id {
-			return true
+			return item, true
 		}
 	}
 	for _, item := range state.InFlight {
 		if item.ID == id {
-			return true
+			return item, true
 		}
 	}
 	for _, item := range state.Dead {
 		if item.ID == id {
-			return true
+			return item, true
 		}
 	}
-	return false
+	return queuedNudge{}, false
 }
 
 func sortQueuedNudges(state *nudgeQueueState) {

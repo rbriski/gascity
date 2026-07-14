@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -22,6 +23,16 @@ import (
 // dial to fail fast.
 const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 
+// maxConcurrentNudgeWakeHintReaders bounds slow or malicious same-UID clients
+// without letting one connection head-of-line block legacy global wakes. When
+// all slots are occupied, the accepted connection still produces the global
+// wake and is then closed without exact decoding.
+const maxConcurrentNudgeWakeHintReaders = 8
+
+type nudgeWakeHint = nudgequeue.SessionWakeHint
+
+const nudgeWakeHintMaxPayloadBytes = nudgequeue.MaxSessionWakeHintWireBytes
+
 // pingNudgeWakeSocket sends a best-effort wake signal to the supervisor's
 // nudge dispatcher. Callers invoke this after enqueueing a queued nudge so
 // the supervisor delivers within sub-second latency instead of waiting for
@@ -30,6 +41,22 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
 func pingNudgeWakeSocket(cityPath string) {
+	pingNudgeWakeSocketPayload(cityPath, []byte{1})
+}
+
+// pingNudgeWakeSocketHint sends an exact-target advisory when both durable IDs
+// fit the versioned protocol. Invalid or legacy identifiers retain the global
+// one-byte wake; a hint can never make durable enqueue fail.
+func pingNudgeWakeSocketHint(cityPath string, hint nudgeWakeHint) {
+	payload, err := nudgequeue.EncodeSessionWakeHint(hint)
+	if err != nil {
+		pingNudgeWakeSocket(cityPath)
+		return
+	}
+	pingNudgeWakeSocketPayload(cityPath, payload)
+}
+
+func pingNudgeWakeSocketPayload(cityPath string, payload []byte) {
 	if cityPath == "" {
 		return
 	}
@@ -40,7 +67,13 @@ func pingNudgeWakeSocket(cityPath string) {
 	}
 	defer conn.Close() //nolint:errcheck // best-effort signaling
 	_ = conn.SetWriteDeadline(time.Now().Add(pingNudgeWakeSocketDialTimeout))
-	_, _ = conn.Write([]byte{1})
+	for len(payload) > 0 {
+		n, err := conn.Write(payload)
+		if err != nil || n == 0 {
+			return
+		}
+		payload = payload[n:]
+	}
 }
 
 // startNudgeWakeListener opens the supervisor wake socket and spawns an
@@ -48,7 +81,16 @@ func pingNudgeWakeSocket(cityPath string) {
 // listener is closed when ctx is canceled. Returns nil, nil when the
 // socket cannot be opened (e.g. permission, path-too-long); callers fall
 // back to patrol-interval dispatching.
-func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
+func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}) (net.Listener, error) {
+	return startNudgeWakeListenerWithHints(ctx, cityPath, wakeCh, nil, nil, "")
+}
+
+// startNudgeWakeListenerWithHints preserves the global wake for every accepted
+// connection and additionally decodes valid exact-target hints. The exact
+// callback is advisory, may run concurrently, and must remain O(1) and
+// thread-safe. Malformed input or saturated exact-reader capacity never
+// suppresses the legacy dispatcher signal.
+func startNudgeWakeListenerWithHints(ctx context.Context, cityPath string, wakeCh chan<- struct{}, onExact func(nudgeWakeHint), stderr io.Writer, logPrefix string) (net.Listener, error) {
 	path := nudgequeue.WakeSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
@@ -63,9 +105,10 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 	}
 	// TOCTOU: there is a narrow window between Listen and Chmod where
 	// the socket exists at the umask-default permissions and a co-local
-	// user could connect. Worst case is a spurious dispatch tick — the
-	// socket carries a single signal byte with no payload or auth — so
-	// this is acceptable for now. A future hardening pass could set
+	// user could connect. The versioned payload carries only advisory command
+	// and session IDs, never authority or message content; worst case in this
+	// phase is a spurious legacy dispatch plus effect-free shadow enqueue. A
+	// future hardening pass could set
 	// umask before Listen, or use platform-specific abstract namespace
 	// sockets where supported.
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -76,6 +119,10 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 		<-ctx.Done()
 		_ = lis.Close()
 	}()
+	readerSlots := make(chan struct{}, maxConcurrentNudgeWakeHintReaders)
+	readConnection := func(conn net.Conn) {
+		readNudgeWakeHintConnection(ctx, conn, onExact, stderr, logPrefix)
+	}
 	go func() {
 		for {
 			conn, err := lis.Accept()
@@ -88,21 +135,56 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 				}
 				continue
 			}
-			// Drain whatever the producer sent (a single signal byte) and
-			// close. The wake itself is the signal — payload is reserved
-			// for future protocol extensions.
-			_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			var buf [16]byte
-			_, _ = conn.Read(buf[:])
-			_ = conn.Close()
-			select {
-			case wakeCh <- struct{}{}:
-			default:
-				// Already-pending wake covers this enqueue; coalesced.
-			}
+			dispatchAcceptedNudgeWake(conn, wakeCh, readerSlots, readConnection)
 		}
 	}()
 	return lis, nil
+}
+
+func dispatchAcceptedNudgeWake(conn net.Conn, wakeCh chan<- struct{}, readerSlots chan struct{}, readConnection func(net.Conn)) {
+	// Acceptance itself is the legacy signal. Never wait for an exact frame
+	// before waking the established global dispatcher.
+	select {
+	case wakeCh <- struct{}{}:
+	default:
+		// Already-pending wake covers this enqueue; coalesced.
+	}
+	select {
+	case readerSlots <- struct{}{}:
+		go func() {
+			defer func() { <-readerSlots }()
+			readConnection(conn)
+		}()
+	default:
+		_ = conn.Close()
+	}
+}
+
+func readNudgeWakeHintConnection(ctx context.Context, conn net.Conn, onExact func(nudgeWakeHint), stderr io.Writer, logPrefix string) {
+	defer conn.Close() //nolint:errcheck // best-effort advisory connection
+	if onExact == nil {
+		return
+	}
+	// One connection is one frame. The limit and EOF framing handle fragmented
+	// stream writes without allowing an untrusted local client to allocate an
+	// unbounded buffer.
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	payload, err := io.ReadAll(io.LimitReader(conn, nudgeWakeHintMaxPayloadBytes+1))
+	if err != nil || ctx.Err() != nil {
+		return
+	}
+	if hint, ok := nudgequeue.DecodeSessionWakeHint(payload); ok {
+		invokeNudgeWakeHint(onExact, hint, stderr, logPrefix)
+	}
+}
+
+func invokeNudgeWakeHint(onExact func(nudgeWakeHint), hint nudgeWakeHint, stderr io.Writer, logPrefix string) {
+	defer func() {
+		if recovered := recover(); recovered != nil && stderr != nil {
+			fmt.Fprintf(stderr, "%s: nudge exact wake callback panicked: %v\n%s", logPrefix, recovered, debug.Stack()) //nolint:errcheck // preserve listener; legacy wake already fired
+		}
+	}()
+	onExact(hint)
 }
 
 // dispatchAllQueuedNudges runs one supervisor-side dispatcher pass: scan

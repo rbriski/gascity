@@ -92,6 +92,7 @@ func TestValidateRegistryRejectsBoundaryDrift(t *testing.T) {
 			r.Boundaries = append(r.Boundaries, extra)
 		}, "duplicates boundary object"},
 		{"interface dispatch without receiver", func(r *Registry) { r.Boundaries[0].Object.Receiver = "" }, "interface boundary requires a receiver"},
+		{"invalid object name", func(r *Registry) { r.Boundaries[0].Object.Name = "not.a.name" }, "must be a Go identifier"},
 		{"non-channel input", func(r *Registry) { r.Boundaries[0].Input = ValueSlot{Kind: SlotParameter, Index: 1} }, "non-channel boundary cannot name an input slot"},
 		{"non-channel output", func(r *Registry) { r.Boundaries[0].Output = ValueSlot{Kind: SlotResult, Index: 1} }, "non-channel boundary cannot name an output slot"},
 		{"channel input and output", func(r *Registry) {
@@ -130,7 +131,7 @@ func TestValidateRegistryRejectsDuplicateSiteAndRouteIdentity(t *testing.T) {
 	registry.Registrations[0].Cases[0].Routes = append(registry.Registrations[0].Cases[0].Routes, duplicateRoute)
 
 	err := validateRegistry(registry, validationDate())
-	assertErrorContains(t, err, "duplicates physical site registration", "logical route", "classified more than once")
+	assertErrorContains(t, err, "duplicates physical site registration", "logical origin", "has multiple classifications")
 }
 
 func TestValidateRegistryRejectsRouteProfileMismatch(t *testing.T) {
@@ -196,6 +197,21 @@ func TestValidateRegistryRejectsProviderBypassOnNonProviderBoundary(t *testing.T
 	firstRoute(&registry).AccessPath = AccessProviderBypass
 
 	assertErrorContains(t, validateRegistry(registry, validationDate()), "provider-bypass requires a provider-mutation boundary")
+}
+
+func TestValidateRegistryClassifiesStoreDomainOnEachLogicalRoute(t *testing.T) {
+	t.Run("missing on store route", func(t *testing.T) {
+		registry := validRegistry()
+		firstRoute(&registry).StoreDomain = ""
+		assertErrorContains(t, validateRegistry(registry, validationDate()), "store domain is required")
+	})
+
+	t.Run("present on non-store route", func(t *testing.T) {
+		registry := validRegistry()
+		registry.Boundaries[0].Kind = KindProviderMutation
+		firstRoute(&registry).AccessPath = AccessProviderNative
+		assertErrorContains(t, validateRegistry(registry, validationDate()), "store domain is only valid for store mutations")
+	})
 }
 
 func TestValidateRegistryRejectsFenceEvidenceThatDoesNotMatchMechanism(t *testing.T) {
@@ -454,7 +470,7 @@ func firstRoute(registry *Registry) *Route {
 }
 
 func validateRegistry(registry Registry, asOf time.Time) error {
-	return ValidateRegistry(registry, observedForRegistry(registry), asOf)
+	return ValidateRegistry(registry, discoveryForRegistry(registry), asOf)
 }
 
 func validationDate() time.Time {

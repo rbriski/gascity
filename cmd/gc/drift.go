@@ -192,12 +192,12 @@ type restartHelpers struct {
 	// uses supervisorLaunchctlRun.
 	Launchctl func(args ...string) error
 
-	// Kill sends SIGTERM to pid. Production uses syscall.Kill.
+	// Kill sends SIGTERM to pid through the shared process helper.
 	Kill func(pid int) error
 
 	// WaitExit blocks until pid has exited (or the helper escalates
-	// and gives up). Production polls syscall.Kill(pid, 0) until it
-	// returns ESRCH, then SIGKILLs as a fallback. Tests set this to
+	// and gives up). Production polls shared PID liveness, then sends
+	// SIGKILL as a fallback. Tests set this to
 	// nil or a no-op when they don't model process lifetimes.
 	WaitExit func(pid int) error
 
@@ -224,7 +224,7 @@ type restartHelpers struct {
 //     supervisors against the same socket.
 //
 // The helpers allow unit tests to substitute fakes; production wires
-// real systemctl/syscall.Kill/exec invocations.
+// real systemctl/process/exec invocations.
 func restartSupervisor(spec restartSpec, h restartHelpers) error {
 	if spec.SystemdManaged && spec.LaunchdManaged {
 		return fmt.Errorf("restartSupervisor: supervisor cannot be both systemd- and launchd-managed")

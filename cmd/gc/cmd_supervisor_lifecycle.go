@@ -101,9 +101,6 @@ var (
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
-	supervisorGetpgid                                   = syscall.Getpgid
-	supervisorGetpgrp                                   = syscall.Getpgrp
-	supervisorKill                                      = syscall.Kill
 	supervisorProcessGroupPollPeriod                    = 20 * time.Millisecond
 	supervisorRuntimeGOOS                               = goruntime.GOOS
 	supervisorWorkspaceServiceCleanupWarnings io.Writer = os.Stderr

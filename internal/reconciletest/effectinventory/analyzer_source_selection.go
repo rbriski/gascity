@@ -31,6 +31,7 @@ type sourceSelectionProblem struct {
 func canonicalAnalysisRoots() []string {
 	return []string{
 		"cmd/gc",
+		"internal/api",
 		"internal/session",
 		"internal/worker",
 		"internal/runtime",
@@ -134,6 +135,9 @@ func sourceCandidates(repoRoot string, roots []string) ([]string, error) {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("source file %s is not regular", diagnosticPath)
 			}
+			if canonicalNonProductionSourceFile(diagnosticPath) {
+				return nil
+			}
 			candidates[diagnosticPath] = true
 			return nil
 		})
@@ -148,6 +152,14 @@ func sourceCandidates(repoRoot string, roots []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func canonicalNonProductionSourceFile(filename string) bool {
+	// This integration-only composition seam is imported by the dashboard
+	// end-to-end harness and is deliberately absent from production builds.
+	// If its constraint is removed, selectedCanonicalSources reports it as a
+	// selected file outside this production census instead of hiding it.
+	return filename == "internal/api/dashport_support.go"
 }
 
 func stableFilesystemError(err error) string {

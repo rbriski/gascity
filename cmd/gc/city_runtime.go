@@ -106,6 +106,9 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+	// nudgeKeyController is a domain-local keyed child. Production constructors
+	// leave it nil until the shadow/ownership gates explicitly install it.
+	nudgeKeyController *nudgeKeyController
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -632,6 +635,16 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// Start any installed keyed child before readiness is published. The child
+	// is nil in every production constructor today, so this is default-inert.
+	// The defer is registered after run's shutdown defer, so LIFO ordering stops
+	// queue admission and workers before shutdown inspects live sessions.
+	stopNudgeKeyController := cr.startNudgeKeyController(ctx)
+	defer stopNudgeKeyController()
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Mark city as started only after all retry-critical startup work has
 	// completed. Publishing readiness before bead reconciliation or
 	// convergence index population would let API callers observe a started
@@ -765,6 +778,41 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// startNudgeKeyController starts the optional shadow-only keyed nudge child and
+// returns an idempotent stop function. A nil child is intentionally inert.
+func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
+	if cr.nudgeKeyController == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := cr.nudgeKeyController.Run(ctx); err != nil {
+			stderr := cr.stderr
+			if stderr == nil {
+				stderr = io.Discard
+			}
+			fmt.Fprintf(stderr, "%s: nudge keyed reconciler: %v\n", cr.logPrefix, err) //nolint:errcheck // child failure is surfaced; legacy remains owner
+		}
+	}()
+	select {
+	case <-cr.nudgeKeyController.ready:
+	case <-done:
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			// Linearize admission closure before cancellation. An enqueue that
+			// returns success therefore happened before the shutdown boundary;
+			// later enqueues are rejected rather than acknowledged then cleared.
+			cr.nudgeKeyController.closeAdmission()
+			cancel()
+			<-done
+		})
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 func prepareCommandForTimeout(cmd *exec.Cmd) {
@@ -19,7 +21,7 @@ func killCommandTree(cmd *exec.Cmd) error {
 	}
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err == nil {
-		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) && !errors.Is(killErr, syscall.ESRCH) {
+		if killErr := processgroup.SignalGroup(pgid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) && !errors.Is(killErr, syscall.ESRCH) {
 			return killErr
 		}
 		return nil

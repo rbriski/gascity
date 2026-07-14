@@ -219,8 +219,18 @@ type cleanupOptions struct {
 
 	DiscoverProcesses func() ([]DoltProcInfo, error)
 	ActiveTestRoots   []string
-	KillProcess       func(pid int, sig syscall.Signal) error
+	KillProcess       cleanupProcessSignaler
 	ReapGracePeriod   time.Duration
+}
+
+type cleanupProcessSignaler interface {
+	Signal(pid int, sig syscall.Signal) error
+}
+
+type cleanupPIDSignaler struct{}
+
+func (cleanupPIDSignaler) Signal(pid int, sig syscall.Signal) error {
+	return killProcess(pid, sig)
 }
 
 // runDoltCleanup is the testable core of the `gc dolt-cleanup` command. It
@@ -393,9 +403,9 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		return
 	}
 
-	killFn := opts.KillProcess
-	if killFn == nil {
-		killFn = killProcess
+	signaler := opts.KillProcess
+	if signaler == nil {
+		signaler = cleanupPIDSignaler{}
 	}
 	grace := opts.ReapGracePeriod
 	if grace <= 0 {
@@ -414,7 +424,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		default:
 			continue
 		}
-		if err := killFn(target.PID, syscall.SIGTERM); err != nil {
+		if err := signaler.Signal(target.PID, syscall.SIGTERM); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
 				gone[target.PID] = true
 			} else {
@@ -440,7 +450,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		default:
 			continue
 		}
-		if err := killFn(target.PID, syscall.SIGKILL); err != nil {
+		if err := signaler.Signal(target.PID, syscall.SIGKILL); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
 				gone[target.PID] = true
 			} else {

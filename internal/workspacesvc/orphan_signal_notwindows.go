@@ -5,6 +5,9 @@ package workspacesvc
 import (
 	"log"
 	"syscall"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 // signalProcessOrGroup signals the process group led by pid, falling back
@@ -15,10 +18,10 @@ func signalProcessOrGroup(pid int, sig syscall.Signal) {
 		log.Printf("workspacesvc: refusing to signal unsafe orphan-reap target pid %d", pid)
 		return
 	}
-	if err := syscall.Kill(-pid, sig); err == nil {
+	if err := processgroup.SignalGroup(pid, sig); err == nil {
 		return
 	}
-	_ = syscall.Kill(pid, sig)
+	_ = pidutil.Signal(pid, sig)
 }
 
 // unsafeSignalTarget reports whether pid must never be signaled: init,

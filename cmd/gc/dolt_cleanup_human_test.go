@@ -197,7 +197,7 @@ func TestRunDoltCleanup_HumanOutputCountsPostSIGTERMGoneAsReaped(t *testing.T) {
 				return nil, nil
 			}
 		},
-		KillProcess:     func(_ int, _ syscall.Signal) error { return nil },
+		KillProcess:     cleanupProcessSignalerFunc(func(_ int, _ syscall.Signal) error { return nil }),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)

@@ -67,6 +67,9 @@ func runCanonicalProfile(ctx context.Context, config analysisConfig, profile ana
 	if err != nil {
 		return canonicalProfileRun{}, err
 	}
+	if err := validateCanonicalRawProcessGuard(analysis); err != nil {
+		return canonicalProfileRun{}, err
+	}
 	sites, err := discoverLoadedProfile(analysis, boundaries)
 	if err != nil {
 		return canonicalProfileRun{}, err

@@ -139,7 +139,7 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	cmd := exec.Command(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
+	configureManagedDoltSQLServerProcess(cmd)
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -202,7 +202,7 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	// Setpgid: the dolt sql-server leads its own process group, matching
-	// the direct production spawn (managedDoltSQLServerSysProcAttr) and the
+	// the direct production spawn (configureManagedDoltSQLServerProcess) and the
 	// test watchdog's layout, and keeping the server's descendants out of
 	// the watchdog's own group. Termination here is leader-only:
 	// the guarded terminate below signals just this PID — group-kill

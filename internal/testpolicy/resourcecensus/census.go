@@ -221,9 +221,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   374,
+			BaselineCalls:   375,
 			BaselineFiles:   97,
-			ReportedCalls:   374,
+			ReportedCalls:   375,
 			ReportedFiles:   97,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline",

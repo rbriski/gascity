@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -25,10 +26,10 @@ type rawProcessVehicle struct {
 }
 
 type rawProcessEvidence struct {
-	Operation rawProcessOperation
-	Matcher   OperationSite
-	VehicleID string
-	Profiles  []BuildProfileID
+	Operation  rawProcessOperation
+	Matcher    OperationSite
+	VehicleIDs []string
+	Profiles   []BuildProfileID
 }
 
 type rawProcessTarget struct {
@@ -80,8 +81,8 @@ func canonicalRawProcessEvidence() []rawProcessEvidence {
 				},
 				Ordinal: ordinal,
 			},
-			VehicleID: vehicleID,
-			Profiles:  append([]BuildProfileID(nil), profiles...),
+			VehicleIDs: []string{vehicleID},
+			Profiles:   append([]BuildProfileID(nil), profiles...),
 		}
 	}
 	return []rawProcessEvidence{
@@ -361,8 +362,19 @@ func validateRawProcessGuard(analysis *loadedAnalysis, vehicles []rawProcessVehi
 		if !knownRawProcessOperation(item.Operation) {
 			problems = append(problems, fmt.Sprintf("raw process evidence names unknown operation %q", item.Operation))
 		}
-		if _, exists := vehicleRoots[item.VehicleID]; !exists {
-			problems = append(problems, fmt.Sprintf("raw process evidence %s names unknown typed vehicle %q", item.Matcher.key(), item.VehicleID))
+		if len(item.VehicleIDs) == 0 {
+			problems = append(problems, fmt.Sprintf("raw process evidence %s names no typed vehicles", item.Matcher.key()))
+		}
+		seenVehicles := make(map[string]bool)
+		for _, vehicleID := range item.VehicleIDs {
+			if seenVehicles[vehicleID] {
+				problems = append(problems, fmt.Sprintf("raw process evidence %s repeats typed vehicle %q", item.Matcher.key(), vehicleID))
+				continue
+			}
+			seenVehicles[vehicleID] = true
+			if _, exists := vehicleRoots[vehicleID]; !exists {
+				problems = append(problems, fmt.Sprintf("raw process evidence %s names unknown typed vehicle %q", item.Matcher.key(), vehicleID))
+			}
 		}
 		seenProfiles := make(map[BuildProfileID]bool)
 		if len(item.Profiles) == 0 {
@@ -382,7 +394,7 @@ func validateRawProcessGuard(analysis *loadedAnalysis, vehicles []rawProcessVehi
 			}
 			key := rawProcessEvidenceKey(item.Operation, item.Matcher)
 			if previous, exists := evidenceBySite[key]; exists {
-				problems = append(problems, fmt.Sprintf("duplicate raw process evidence for %s (%q and %q)", key, previous.VehicleID, item.VehicleID))
+				problems = append(problems, fmt.Sprintf("duplicate raw process evidence for %s (%q and %q)", key, previous.VehicleIDs, item.VehicleIDs))
 				continue
 			}
 			evidenceBySite[key] = item
@@ -399,12 +411,19 @@ func validateRawProcessGuard(analysis *loadedAnalysis, vehicles []rawProcessVehi
 			problems = append(problems, fmt.Sprintf("%s at %s has no evidence for profile %q", operation, observation.site.Matcher.key(), analysis.profile.ID))
 			continue
 		}
-		root := vehicleRoots[item.VehicleID]
-		if root == nil {
-			continue
+		roots := make(map[*ssa.Function]string, len(item.VehicleIDs))
+		for _, vehicleID := range item.VehicleIDs {
+			root := vehicleRoots[vehicleID]
+			if root == nil {
+				continue
+			}
+			roots[root] = vehicleID
+			if !rawProcessFunctionReachable(analysis, root, observation.function) {
+				problems = append(problems, fmt.Sprintf("raw process evidence %s at %s is not reachable from typed vehicle %q (%s)", operation, observation.site.Matcher.key(), vehicleID, itemRootKey(vehicles, vehicleID)))
+			}
 		}
-		if !rawProcessFunctionReachable(analysis, root, observation.function) {
-			problems = append(problems, fmt.Sprintf("raw process evidence %s at %s is not reachable from typed vehicle %q (%s)", operation, observation.site.Matcher.key(), item.VehicleID, itemRootKey(vehicles, item.VehicleID)))
+		if len(roots) != 0 {
+			problems = append(problems, rawProcessCallerContainmentProblems(analysis, observation, roots)...)
 		}
 	}
 	for key := range evidenceBySite {
@@ -455,6 +474,289 @@ func rawProcessFunctionReachable(analysis *loadedAnalysis, root, target *ssa.Fun
 		return false
 	}
 	return visit(root)
+}
+
+// rawProcessCallerContainmentProblems proves that every current production
+// caller path to one raw leaf crosses one of its explicitly named vehicles.
+// Vehicle roots are barriers: callers may reach the vehicle however they
+// choose, but no caller may enter the raw implementation below that boundary.
+func rawProcessCallerContainmentProblems(analysis *loadedAnalysis, observation rawProcessObservation, roots map[*ssa.Function]string) []string {
+	if _, ok := rawProcessRootID(observation.function, roots); ok {
+		return nil
+	}
+
+	nodes := map[*ssa.Function]bool{observation.function: true}
+	edges := make(map[*ssa.Function]map[*ssa.Function]bool)
+	rootIncoming := make(map[*ssa.Function]map[string]bool)
+	externalIncoming := make(map[*ssa.Function]map[string]bool)
+	queue := []*ssa.Function{observation.function}
+	for len(queue) != 0 {
+		current := queue[0]
+		queue = queue[1:]
+		node := analysis.callGraph.Nodes[current]
+		if node == nil {
+			continue
+		}
+		incoming := append([]*callgraph.Edge(nil), node.In...)
+		sort.Slice(incoming, func(i, j int) bool {
+			return rawProcessCallerEdgeKey(incoming[i]) < rawProcessCallerEdgeKey(incoming[j])
+		})
+		for _, edge := range incoming {
+			var caller *ssa.Function
+			if edge != nil && edge.Caller != nil {
+				caller = edge.Caller.Func
+			}
+			sources, external := rawProcessExpandCaller(analysis, caller, make(map[*ssa.Function]bool))
+			for externalCaller := range external {
+				if externalIncoming[current] == nil {
+					externalIncoming[current] = make(map[string]bool)
+				}
+				externalIncoming[current][externalCaller] = true
+			}
+			for source := range sources {
+				if vehicleID, ok := rawProcessRootID(source, roots); ok {
+					if rootIncoming[current] == nil {
+						rootIncoming[current] = make(map[string]bool)
+					}
+					rootIncoming[current][vehicleID] = true
+					continue
+				}
+				if edges[source] == nil {
+					edges[source] = make(map[*ssa.Function]bool)
+				}
+				edges[source][current] = true
+				if !nodes[source] {
+					nodes[source] = true
+					queue = append(queue, source)
+				}
+			}
+		}
+	}
+
+	components := rawProcessCallerComponents(nodes, edges)
+	componentOf := make(map[*ssa.Function]int, len(nodes))
+	for componentIndex, component := range components {
+		for _, function := range component {
+			componentOf[function] = componentIndex
+		}
+	}
+	incomingComponents := make([]map[int]bool, len(components))
+	componentRoots := make([]map[string]bool, len(components))
+	componentExternal := make([]map[string]bool, len(components))
+	for caller, callees := range edges {
+		callerComponent := componentOf[caller]
+		for callee := range callees {
+			calleeComponent := componentOf[callee]
+			if callerComponent == calleeComponent {
+				continue
+			}
+			if incomingComponents[calleeComponent] == nil {
+				incomingComponents[calleeComponent] = make(map[int]bool)
+			}
+			incomingComponents[calleeComponent][callerComponent] = true
+		}
+	}
+	for function, vehicleIDs := range rootIncoming {
+		component := componentOf[function]
+		if componentRoots[component] == nil {
+			componentRoots[component] = make(map[string]bool)
+		}
+		for vehicleID := range vehicleIDs {
+			componentRoots[component][vehicleID] = true
+		}
+	}
+	for function, callers := range externalIncoming {
+		component := componentOf[function]
+		if componentExternal[component] == nil {
+			componentExternal[component] = make(map[string]bool)
+		}
+		for caller := range callers {
+			componentExternal[component][caller] = true
+		}
+	}
+
+	vehicleIDs := sortedRawProcessStringsFromRoots(roots)
+	var problems []string
+	for componentIndex, component := range components {
+		if len(componentExternal[componentIndex]) != 0 {
+			problems = append(problems, fmt.Sprintf(
+				"%s at %s caller path bypasses typed vehicles %q through non-production caller %q",
+				observation.site.BoundaryID,
+				observation.site.Matcher.key(),
+				vehicleIDs,
+				sortedStringSet(componentExternal[componentIndex]),
+			))
+		}
+		if len(incomingComponents[componentIndex]) != 0 || len(componentRoots[componentIndex]) != 0 {
+			continue
+		}
+		problems = append(problems, fmt.Sprintf(
+			"%s at %s caller path bypasses typed vehicles %q through %s",
+			observation.site.BoundaryID,
+			observation.site.Matcher.key(),
+			vehicleIDs,
+			functionSortKey(component[0]),
+		))
+	}
+	sort.Strings(problems)
+	return compactStrings(problems)
+}
+
+func rawProcessRootID(function *ssa.Function, roots map[*ssa.Function]string) (string, bool) {
+	if function == nil {
+		return "", false
+	}
+	if id, ok := roots[function]; ok {
+		return id, true
+	}
+	if origin := function.Origin(); origin != nil {
+		id, ok := roots[origin]
+		return id, ok
+	}
+	return "", false
+}
+
+func rawProcessExpandCaller(analysis *loadedAnalysis, function *ssa.Function, visiting map[*ssa.Function]bool) (map[*ssa.Function]bool, map[string]bool) {
+	sources := make(map[*ssa.Function]bool)
+	external := make(map[string]bool)
+	if function == nil {
+		external["<nil>"] = true
+		return sources, external
+	}
+	if visiting[function] {
+		return sources, external
+	}
+	visiting[function] = true
+	defer delete(visiting, function)
+	if analysis.sourceFuncs[function] {
+		sources[function] = true
+		return sources, external
+	}
+	if origin := function.Origin(); origin != nil && analysis.sourceFuncs[origin] {
+		sources[function] = true
+		return sources, external
+	}
+	if !dispatchOnlySynthetic(function.Synthetic) {
+		external[functionSortKey(function)] = true
+		return sources, external
+	}
+	node := analysis.callGraph.Nodes[function]
+	if node == nil || len(node.In) == 0 {
+		// CHA creates unused adaptation wrappers. With no caller they are not a
+		// production path and must not become synthetic bypass entries.
+		return sources, external
+	}
+	incoming := append([]*callgraph.Edge(nil), node.In...)
+	sort.Slice(incoming, func(i, j int) bool {
+		return rawProcessCallerEdgeKey(incoming[i]) < rawProcessCallerEdgeKey(incoming[j])
+	})
+	for _, edge := range incoming {
+		var caller *ssa.Function
+		if edge != nil && edge.Caller != nil {
+			caller = edge.Caller.Func
+		}
+		nestedSources, nestedExternal := rawProcessExpandCaller(analysis, caller, visiting)
+		for source := range nestedSources {
+			sources[source] = true
+		}
+		for externalCaller := range nestedExternal {
+			external[externalCaller] = true
+		}
+	}
+	return sources, external
+}
+
+func rawProcessCallerEdgeKey(edge *callgraph.Edge) string {
+	if edge == nil || edge.Caller == nil {
+		return ""
+	}
+	return functionSortKey(edge.Caller.Func)
+}
+
+func rawProcessCallerComponents(nodes map[*ssa.Function]bool, edges map[*ssa.Function]map[*ssa.Function]bool) [][]*ssa.Function {
+	ordered := sortedRawProcessFunctions(nodes)
+	visited := make(map[*ssa.Function]bool, len(nodes))
+	var finish []*ssa.Function
+	var visitForward func(*ssa.Function)
+	visitForward = func(function *ssa.Function) {
+		if visited[function] {
+			return
+		}
+		visited[function] = true
+		for _, callee := range sortedRawProcessFunctions(edges[function]) {
+			visitForward(callee)
+		}
+		finish = append(finish, function)
+	}
+	for _, function := range ordered {
+		visitForward(function)
+	}
+
+	reverse := make(map[*ssa.Function]map[*ssa.Function]bool)
+	for caller, callees := range edges {
+		for callee := range callees {
+			if reverse[callee] == nil {
+				reverse[callee] = make(map[*ssa.Function]bool)
+			}
+			reverse[callee][caller] = true
+		}
+	}
+	visited = make(map[*ssa.Function]bool, len(nodes))
+	var components [][]*ssa.Function
+	var collectReverse func(*ssa.Function, *[]*ssa.Function)
+	collectReverse = func(function *ssa.Function, component *[]*ssa.Function) {
+		if visited[function] {
+			return
+		}
+		visited[function] = true
+		*component = append(*component, function)
+		for _, caller := range sortedRawProcessFunctions(reverse[function]) {
+			collectReverse(caller, component)
+		}
+	}
+	for index := len(finish) - 1; index >= 0; index-- {
+		if visited[finish[index]] {
+			continue
+		}
+		var component []*ssa.Function
+		collectReverse(finish[index], &component)
+		sort.Slice(component, func(i, j int) bool {
+			return functionSortKey(component[i]) < functionSortKey(component[j])
+		})
+		components = append(components, component)
+	}
+	sort.Slice(components, func(i, j int) bool {
+		return functionSortKey(components[i][0]) < functionSortKey(components[j][0])
+	})
+	return components
+}
+
+func sortedRawProcessFunctions(set map[*ssa.Function]bool) []*ssa.Function {
+	result := make([]*ssa.Function, 0, len(set))
+	for function := range set {
+		result = append(result, function)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return functionSortKey(result[i]) < functionSortKey(result[j])
+	})
+	return result
+}
+
+func sortedRawProcessStringsFromRoots(roots map[*ssa.Function]string) []string {
+	set := make(map[string]bool, len(roots))
+	for _, id := range roots {
+		set[id] = true
+	}
+	return sortedStringSet(set)
+}
+
+func sortedStringSet(set map[string]bool) []string {
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func itemRootKey(vehicles []rawProcessVehicle, id string) string {

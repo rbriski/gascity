@@ -42,6 +42,7 @@ func writeDoFormula(t *testing.T) string {
 // host into the run and prints the do step outcome. The host is injected as a
 // deterministic stub, so the CLI path is exercised without spawning a session.
 func TestRunAgentDoStepWithInjectedHost(t *testing.T) {
+	stubStandaloneRun(t)
 	path := writeDoFormula(t)
 
 	orig := buildRunAgentHost
@@ -76,6 +77,7 @@ func TestRunAgentDoStepWithInjectedHost(t *testing.T) {
 // TestRunDoStepWithoutAgentCmdErrorsClearly proves a do formula run without
 // --agent-cmd is refused with a message directing the user to set it.
 func TestRunDoStepWithoutAgentCmdErrorsClearly(t *testing.T) {
+	stubStandaloneRun(t)
 	path := writeDoFormula(t)
 
 	var out, errb bytes.Buffer
@@ -87,4 +89,11 @@ func TestRunDoStepWithoutAgentCmdErrorsClearly(t *testing.T) {
 	if !strings.Contains(errb.String(), "--agent-cmd") {
 		t.Errorf("stderr = %q, want a hint to pass --agent-cmd", errb.String())
 	}
+}
+
+func stubStandaloneRun(t *testing.T) {
+	t.Helper()
+	orig := resolveRunCity
+	resolveRunCity = func() (string, error) { return "", os.ErrNotExist }
+	t.Cleanup(func() { resolveRunCity = orig })
 }

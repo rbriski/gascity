@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -21,9 +23,11 @@ import (
 )
 
 // runDemoCityID is the chain-genesis city id stamped on the throwaway (or
-// --db) graphstore a `gc run` invocation opens. It has no relationship to any
-// registered city — `gc run` is deliberately standalone and never resolves one.
+// --db) graphstore a standalone `gc run` invocation opens. It has no
+// relationship to any registered city.
 const runDemoCityID = "gc-run-demo"
+
+const runCityPollInterval = 250 * time.Millisecond
 
 // runAgentOptions carries the agent-`do` bridge flags for a run. When Command
 // is empty, no agent host is built and a do node is refused (today's behavior).
@@ -34,46 +38,51 @@ type runAgentOptions struct {
 	Timeout    time.Duration // --agent-timeout per-do-step bound
 }
 
-// newRunCmd builds the standalone `gc run <lumen-file>` command: the
-// proof-of-concept that executes a compiled Lumen formula on the native
-// graphstore journal substrate. It resolves and opens its own store and never
-// requires (or discovers) a city.
+// newRunCmd builds `gc run <lumen-file>`. In a resolved City it enqueues the
+// compiled formula on the City's controller-driven graph path and waits for the
+// durable run to seal. Outside a City it preserves the standalone graphstore
+// runner.
 func newRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dbPath string
 	var keep bool
 	var inputJSON string
+	var route string
 	var agent runAgentOptions
 	cmd := &cobra.Command{
 		Use:   "run <lumen-file>",
-		Short: "Run a compiled Lumen formula on the graph substrate",
-		Long: `Run a compiled Lumen formula (lumen.ir) directly on the native
-graphstore journal substrate.
+		Short: "Run a compiled Lumen formula",
+		Long: `Run a compiled Lumen formula (lumen.ir).
 
 The argument is a Lumen source file (e.g. hello.lumen) or a compiled IR
 document (hello.lumen.json). For a source file, gc looks for a sibling compiled
 IR next to it. Compile a .lumen source to IR before running it.
 
-By default the run writes to a throwaway SQLite store in a temp directory that
-is deleted afterward, so repeated runs of the same formula do not collide on
-the deterministic stream id. Use --db to run against a persistent store and
---keep to retain the temp store for inspection.
+When the current directory, --city, or normal City selectors resolve a City,
+the run uses that City's controller, durable Beads, and configured Agent pools.
+Pass --route for do steps without an explicit Agent binding. The command prints
+the run stream immediately, then waits for the terminal formula outcome. Other
+terminals can observe the same Agents with gc session list.
 
-A formula with an agent 'do' step needs an agent command to run it: pass
+Outside a City, the existing standalone runner writes to a throwaway SQLite
+store that is deleted afterward. Use --db for a persistent standalone store and
+--keep to retain the temporary store.
+
+A standalone formula with an agent 'do' step needs an agent command: pass
 --agent-cmd (e.g. --agent-cmd claude --agent-prompt-flag -p). Without it, a do
 step is refused. GC_SESSION=fake selects the fake session provider for tests.`,
 		Args:          cobra.ExactArgs(1),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if doRun(cmd, args[0], dbPath, keep, inputJSON, agent, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stopSignals()
+			return exitForCode(doRun(ctx, args[0], dbPath, keep, route, inputJSON, agent, stdout, stderr))
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to a persistent graphstore db (default: throwaway temp store)")
 	cmd.Flags().BoolVar(&keep, "keep", false, "keep the throwaway temp store instead of deleting it")
 	cmd.Flags().StringVar(&inputJSON, "input", "", "run input as a JSON object (default: empty)")
+	cmd.Flags().StringVar(&route, "route", "", "default City Agent route for unbound 'do' steps")
 	cmd.Flags().StringVar(&agent.Command, "agent-cmd", "", "agent CLI to run 'do' steps (e.g. claude); enables agent steps")
 	cmd.Flags().StringVar(&agent.PromptFlag, "agent-prompt-flag", "", "CLI flag the rendered prompt rides (e.g. -p)")
 	cmd.Flags().StringVar(&agent.Provider, "session-provider", "", "session runtime provider for agent steps (default: GC_SESSION or subprocess)")
@@ -85,6 +94,15 @@ step is refused. GC_SESSION=fake selects the fake session provider for tests.`,
 // package var so tests can inject a deterministic host (e.g. a StubHost) without
 // spawning real sessions. The returned cleanup is always safe to call.
 var buildRunAgentHost = defaultRunAgentHost
+
+// resolveRunCity is the normal City resolver behind a package var so the
+// standalone and City-backed command paths can be selected deterministically in
+// unit tests.
+var resolveRunCity = resolveCity
+
+// runWaitForLumenRun is the read-only terminal observer behind a package var so
+// command tests can prove enqueue/wait wiring without running a controller.
+var runWaitForLumenRun = waitForLumenRun
 
 // runAgentProviderName resolves the session provider a run will use: the
 // --session-provider flag, else GC_SESSION, else the subprocess default.
@@ -119,7 +137,7 @@ func defaultRunAgentHost(_ context.Context, opts runAgentOptions) (enginehost.Ag
 	return host, func() {}, nil
 }
 
-func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, agentOpts runAgentOptions, stdout, stderr io.Writer) int {
+func doRun(ctx context.Context, arg, dbPath string, keep bool, route, inputJSON string, agentOpts runAgentOptions, stdout, stderr io.Writer) int {
 	irPath, err := resolveLumenIRPath(arg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -143,6 +161,14 @@ func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, 
 		return 1
 	}
 
+	if cityPath, cityErr := resolveRunCity(); cityErr == nil {
+		if strings.TrimSpace(dbPath) != "" || keep || agentOpts != (runAgentOptions{}) {
+			fmt.Fprintln(stderr, "gc run: --db, --keep, and --agent-* flags are standalone-only; omit them to run through the current City") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doCityRun(ctx, cityPath, irPath, route, inputJSON, doc, stdout, stderr)
+	}
+
 	storePath, cleanup, err := resolveRunStorePath(dbPath, keep, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -150,7 +176,6 @@ func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, 
 	}
 	defer cleanup()
 
-	ctx := cmd.Context()
 	store, err := graphstore.Open(ctx, storePath, graphstore.Options{CityID: runDemoCityID})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc run: opening graphstore: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -188,6 +213,82 @@ func doRun(cmd *cobra.Command, arg, dbPath string, keep bool, inputJSON string, 
 		return 1
 	}
 	return 0
+}
+
+// doCityRun enqueues a pool/controller-driven run into the resolved City,
+// exposes its durable stream id before blocking, and observes the journal until
+// the run seals. Stopping the local waiter never mutates or cancels the run.
+func doCityRun(ctx context.Context, cityPath, irPath, route, inputJSON string, doc *ir.IR, stdout, stderr io.Writer) int {
+	queued, err := lumenEnqueue(ctx, cityPath, lumenEnqueueRequest{
+		IRPath:    irPath,
+		Route:     route,
+		InputJSON: inputJSON,
+	}, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	printRunHeader(stdout, doc, queued.StreamID)
+
+	backend, err := loadGraphJournalBackendConfig(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc run: resolving graph journal backend after enqueueing %s: %v\n", queued.StreamID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, err := backend.openGraphStore(ctx, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc run: opening graph store after enqueueing %s: %v\n", queued.StreamID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer func() { _ = store.Close() }()
+
+	result, err := runWaitForLumenRun(ctx, store, queued.StreamID, runCityPollInterval)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintf(stderr, "gc run: detached from %s; run continues in city %s\n", queued.StreamID, cityPath) //nolint:errcheck // best-effort stderr
+			return 130
+		}
+		fmt.Fprintf(stderr, "gc run: waiting for %s: %v\n", queued.StreamID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	printRunCompletion(stdout, doc, result)
+	if result.Outcome != engine.OutcomePass {
+		return 1
+	}
+	return 0
+}
+
+// waitForLumenRun polls the canonical per-run journal fold until it closes. The
+// graph store has no subscription primitive; the controller poke handles prompt
+// execution while this read-only loop provides a bounded, cancellable observer.
+func waitForLumenRun(ctx context.Context, store *graphstore.Store, streamID string, pollInterval time.Duration) (engine.RunResult, error) {
+	if pollInterval <= 0 {
+		return engine.RunResult{}, fmt.Errorf("gc run: poll interval must be positive")
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		view, err := engine.FoldRunView(ctx, store, streamID)
+		if err != nil {
+			return engine.RunResult{}, err
+		}
+		if view.Closed {
+			events, err := store.ReadStream(ctx, streamID, 1, 0)
+			if err != nil {
+				return engine.RunResult{}, fmt.Errorf("reading terminal journal: %w", err)
+			}
+			return engine.RunResult{StreamID: streamID, Outcome: view.Outcome, Events: events}, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return engine.RunResult{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // printAgentOutcomeCaveat warns the demo user, when a run actually executed an
@@ -290,8 +391,15 @@ func resolveRunStorePath(dbPath string, keep bool, stderr io.Writer) (string, fu
 // node kind, and outcome) with its captured output indented beneath, and the
 // aggregated run outcome.
 func printRunResult(stdout io.Writer, doc *ir.IR, result engine.RunResult) {
-	fmt.Fprintf(stdout, "lumen run: %s  (stream %s)\n", doc.Name, result.StreamID) //nolint:errcheck // best-effort stdout
+	printRunHeader(stdout, doc, result.StreamID)
+	printRunCompletion(stdout, doc, result)
+}
 
+func printRunHeader(stdout io.Writer, doc *ir.IR, streamID string) {
+	fmt.Fprintf(stdout, "lumen run: %s  (stream %s)\n", doc.Name, streamID) //nolint:errcheck // best-effort stdout
+}
+
+func printRunCompletion(stdout io.Writer, doc *ir.IR, result engine.RunResult) {
 	kinds := nodeKindsByID(doc)
 	for _, ev := range result.Events {
 		if ev.Type != engine.EventOutcomeSettled {

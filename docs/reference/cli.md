@@ -64,7 +64,7 @@ gc [flags]
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
-| [gc run](#gc-run) | Run a compiled Lumen formula on the graph substrate |
+| [gc run](#gc-run) | Run a compiled Lumen formula |
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
@@ -3369,19 +3369,23 @@ gc rig suspend [name] [flags]
 
 ## gc run
 
-Run a compiled Lumen formula (lumen.ir) directly on the native
-graphstore journal substrate.
+Run a compiled Lumen formula (lumen.ir).
 
 The argument is a Lumen source file (e.g. hello.lumen) or a compiled IR
 document (hello.lumen.json). For a source file, gc looks for a sibling compiled
 IR next to it. Compile a .lumen source to IR before running it.
 
-By default the run writes to a throwaway SQLite store in a temp directory that
-is deleted afterward, so repeated runs of the same formula do not collide on
-the deterministic stream id. Use --db to run against a persistent store and
---keep to retain the temp store for inspection.
+When the current directory, --city, or normal City selectors resolve a City,
+the run uses that City's controller, durable Beads, and configured Agent pools.
+Pass --route for do steps without an explicit Agent binding. The command prints
+the run stream immediately, then waits for the terminal formula outcome. Other
+terminals can observe the same Agents with gc session list.
 
-A formula with an agent 'do' step needs an agent command to run it: pass
+Outside a City, the existing standalone runner writes to a throwaway SQLite
+store that is deleted afterward. Use --db for a persistent standalone store and
+--keep to retain the temporary store.
+
+A standalone formula with an agent 'do' step needs an agent command: pass
 --agent-cmd (e.g. --agent-cmd claude --agent-prompt-flag -p). Without it, a do
 step is refused. GC_SESSION=fake selects the fake session provider for tests.
 
@@ -3397,6 +3401,7 @@ gc run <lumen-file> [flags]
 | `--db` | string |  | path to a persistent graphstore db (default: throwaway temp store) |
 | `--input` | string |  | run input as a JSON object (default: empty) |
 | `--keep` | bool |  | keep the throwaway temp store instead of deleting it |
+| `--route` | string |  | default City Agent route for unbound 'do' steps |
 | `--session-provider` | string |  | session runtime provider for agent steps (default: GC_SESSION or subprocess) |
 
 ## gc runtime

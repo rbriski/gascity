@@ -2017,6 +2017,8 @@ export type OrderListBody = {
 export type OrderResponse = {
     capture_output: boolean;
     check?: string;
+    check_timeout?: string;
+    check_timeout_ms?: number;
     description?: string;
     enabled: boolean;
     env?: {

@@ -877,6 +877,8 @@ export const zOrderHistoryListBody = z.object({
 export const zOrderResponse = z.object({
     capture_output: z.boolean(),
     check: z.string().optional(),
+    check_timeout: z.string().optional(),
+    check_timeout_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     description: z.string().optional(),
     enabled: z.boolean(),
     env: z.record(z.string(), z.string()).optional(),

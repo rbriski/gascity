@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/filelock"
 )
 
 func TestControllerLockLeaseCreatesOnlyMinimalLockScaffold(t *testing.T) {
@@ -137,11 +139,11 @@ func TestAcquireControllerLockPreservesUnexpectedFlockError(t *testing.T) {
 	cityPath := t.TempDir()
 	wantErr := syscall.EPERM
 	ops := defaultControllerLockOps()
-	ops.flock = func(fd, operation int) error {
-		if err := syscall.Flock(fd, operation); err != nil {
+	ops.tryLock = func(file *os.File) (bool, error) {
+		if err := filelock.Lock(file, filelock.Exclusive); err != nil {
 			t.Fatalf("seeding injected held lock: %v", err)
 		}
-		return wantErr
+		return false, wantErr
 	}
 
 	lease, err := acquireControllerLockWithOps(cityPath, ops)

@@ -5,10 +5,20 @@ package externaldep
 import (
 	"os"
 	"path/filepath"
+	"unsafe"
 )
 
 // Accept receives one boxed value.
 func Accept(any) {}
+
+// AcceptInt receives a non-channel scalar without boxing it.
+func AcceptInt(int) {}
+
+// AcceptStringChannel receives a string channel without boxing it.
+func AcceptStringChannel(chan string) {}
+
+// AcceptUnsafePointer receives an unsafe capability carrier.
+func AcceptUnsafePointer(unsafe.Pointer) {}
 
 // AcceptVariadic receives compiler-packed boxed values.
 func AcceptVariadic(...any) {}

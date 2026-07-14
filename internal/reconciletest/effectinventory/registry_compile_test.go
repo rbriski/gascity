@@ -249,7 +249,7 @@ func TestCanonicalRouteCoversEveryAuthoredRouteField(t *testing.T) {
 		{"ActionFamily", func(route *Route) { route.ActionFamily = FamilyMaintenance }},
 		{"ExecutingProcess", func(route *Route) { route.ExecutingProcess = ProcessForegroundCLI }},
 		{"LogicalOwner", func(route *Route) { route.LogicalOwner.Object.Name = "otherOwner" }},
-		{"Target", func(route *Route) { route.Target.Detail += " changed" }},
+		{"Target", func(route *Route) { route.Target.Kind = TargetSessionIdentity }},
 		{"Fences", func(route *Route) { route.Fences[0].Source.Name = "OtherGet" }},
 		{"CurrentGate", func(route *Route) { route.CurrentGate.Expected = "changed" }},
 		{"Disposition", func(route *Route) { route.Disposition.Reason += " changed" }},

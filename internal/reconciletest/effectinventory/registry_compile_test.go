@@ -206,7 +206,6 @@ func TestCompileRegistryRouteIDsCoverProfileAndSafetyClassification(t *testing.T
 		name   string
 		mutate func(*ProfileCase, *Route)
 	}{
-		{"target detail", func(_ *ProfileCase, route *Route) { route.Target.Detail += " with exact cardinality" }},
 		{"target safety signature", func(_ *ProfileCase, route *Route) { route.Target = batchTarget(TargetCardinalitySet) }},
 		{"target identity projection", func(_ *ProfileCase, route *Route) {
 			route.Target.Identities[0].Projection = objectRef(beadsPackage, "Bead", "ID")
@@ -279,7 +278,7 @@ func TestCanonicalRouteCoversEveryAuthoredRouteField(t *testing.T) {
 	}
 }
 
-func TestCanonicalTargetCoversEveryAuthoredTargetField(t *testing.T) {
+func TestCanonicalTargetCoversEverySemanticTargetField(t *testing.T) {
 	base := compileFixtureTarget()
 	wantDifferent := []struct {
 		name   string
@@ -290,7 +289,6 @@ func TestCanonicalTargetCoversEveryAuthoredTargetField(t *testing.T) {
 		{"Identity", func(target *TargetRef) { target.Identity = TargetIdentityGenerated }},
 		{"Signature", func(target *TargetRef) { target.Signature = TargetSignatureBatch }},
 		{"Identities", func(target *TargetRef) { target.Identities[0].Projection = objectRef(beadsPackage, "Bead", "ID") }},
-		{"Detail", func(target *TargetRef) { target.Detail += " changed" }},
 	}
 
 	baseline := canonicalTargetRef(base)

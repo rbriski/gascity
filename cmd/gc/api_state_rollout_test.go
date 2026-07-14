@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -53,17 +55,89 @@ func TestNewControllerStateLatchesRolloutFlags(t *testing.T) {
 func TestControllerStateBootResolveErrorZeroFlags(t *testing.T) {
 	stubManagedDoltStoreOpeners(t)
 	dir := t.TempDir()
-	toml := "[beads]\nconditional_writes = \"requre\"\n" // typo → out-of-enum on Resolve
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Parse([]byte(toml))
-	if err != nil {
-		t.Skipf("config.Parse rejects the typo before Resolve can (%v); enum validated earlier", err)
-	}
+	// config.Parse rejects this typo at load now; construct the City directly
+	// to cover the defensive boot behavior for a value arriving through a
+	// non-Parse path.
+	cfg := &config.City{Beads: config.BeadsConfig{ConditionalWrites: "requre"}}
 	cs := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
 	if got := cs.RolloutFlags().BeadsConditionalWrites(); got != rollout.ModeUnset {
 		t.Errorf("boot RolloutFlags after resolve error = %q, want ModeUnset (zero Flags)", got)
+	}
+}
+
+// TestPreflightConditionalWritesRequire proves the boot-time require probe:
+// every controller-owned store that cannot fence gets a loud ERROR line at
+// startup (instead of a silent boot that refuses on the first fenced write),
+// capable stores stay quiet, and the probe is require-only — auto's degrade
+// surface is the resolve latch, not a boot scan. Stores come through the real
+// command front door (openStoreResultAtForCityWithMode) so the factory stamp
+// is the production one; the incapable store simulates a post-open capability
+// loss, which is exactly the gap the boot probe exists to surface.
+func TestPreflightConditionalWritesRequire(t *testing.T) {
+	openStamped := func(t *testing.T, mode gate.Mode) beads.Store {
+		t.Helper()
+		dir := t.TempDir()
+		toml := "[workspace]\nname = \"t\"\nprefix = \"ga\"\n\n[beads]\nprovider = \"file\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true)
+		if err != nil {
+			t.Fatalf("openStoreResultAtForCityWithMode: %v", err)
+		}
+		return result.Store
+	}
+	disableFencing := func(t *testing.T, s beads.Store) beads.Store {
+		t.Helper()
+		// The front door wraps the store (policy store, cache); walk the
+		// declared resolve targets to the FileStore that owns the capability.
+		inner := s
+		for {
+			target, ok := inner.(beads.ConditionalWritesResolveTargeter)
+			if !ok {
+				break
+			}
+			inner = target.ConditionalWritesResolveTarget()
+		}
+		fs, ok := inner.(*beads.FileStore)
+		if !ok {
+			t.Fatalf("front door resolve target is %T, want *beads.FileStore", inner)
+		}
+		fs.DisableConditionalWrites = true
+		return s
+	}
+
+	var logs []string
+	cs := &controllerState{
+		rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Require)),
+		rolloutLogf:  func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+	cs.cityBeadStore = openStamped(t, gate.Require)
+	cs.beadStores = map[string]beads.Store{
+		"good": openStamped(t, gate.Require),
+		"bad":  disableFencing(t, openStamped(t, gate.Require)),
+	}
+	cs.preflightConditionalWrites()
+	var errLines []string
+	for _, l := range logs {
+		if strings.Contains(l, "ERROR") {
+			errLines = append(errLines, l)
+		}
+	}
+	if len(errLines) != 1 || !strings.Contains(errLines[0], "rig/bad") {
+		t.Fatalf("require preflight ERROR lines = %v, want exactly one naming rig/bad", errLines)
+	}
+
+	// Auto never boot-scans: silence even with an incapable store present.
+	logs = nil
+	cs = &controllerState{
+		rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Auto)),
+		rolloutLogf:  func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+	cs.cityBeadStore = disableFencing(t, openStamped(t, gate.Auto))
+	cs.preflightConditionalWrites()
+	if len(logs) != 0 {
+		t.Fatalf("auto preflight logged %v, want silence (degrade fires from the resolve latch)", logs)
 	}
 }
 

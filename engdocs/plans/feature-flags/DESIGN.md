@@ -953,6 +953,61 @@ Stage 3 as built (same change series):
   the graph class resolves to the primary store, which is covered. The §10
   sqlite deliverable applies only to branches that still carry that store.
 
+#### 6.4.2 Review-response amendments (2026-07-14, local review at 8329a6257)
+
+The pre-merge local review (REQUEST CHANGES, 12 findings) drove a second
+as-built pass. Where these contradict §6.4.1 or earlier sections, these win.
+
+1. **Cache rule: forward and EVICT — never patch, never adopt.** The
+   write-through/refresh-adopt behavior §6.4.1 shipped is gone on BOTH sides
+   of a fenced write. The backend does not return the committed row, so a
+   post-write refresh cannot be attributed to our write — installing anything
+   derived from local knowledge fabricates a snapshot that never existed at
+   that revision. Success evicts; precondition failure and CAS exhaustion
+   evict; gate refusal/unsupported touch nothing; ambiguous errors mark
+   dirty. The refresh, when it succeeds, feeds the change notification
+   verbatim and nothing else (`caching_store_conditional.go`).
+2. **Require refuses unstampable opens; auto degrades loudly.** The factory's
+   carrier-less/not-landed paths (`unstampableResult`) now fail closed under
+   require with `ConditionalWritesRequiredError` instead of logging and
+   proceeding; under auto they warn and fire the degrade callback directly.
+   "Require fails open through a store that cannot carry the mode" is now
+   inexpressible.
+3. **Attach candidates are created SPECULATIVELY under an active fence.**
+   Steps instantiate with `DeferAssignees` and the
+   `gc.attach_fence_pending` marker; only the fence winner activates
+   (`activateAttachCandidate`), the loser is neutralized with propagated
+   errors, and `findExistingAttach` recovers pending-only states
+   deterministically (smallest bead ID wins). No candidate is runnable
+   before the fence verdict.
+4. **Fence loss is a convergent transient, not a terminal failure.**
+   `molecule.ErrEpochConflict` is wrapped transient at the dispatch
+   boundary; `IsTransientControllerError` also accepts CAS exhaustion and
+   unsupported. `ConditionalWritesRequiredError` stays terminal by design —
+   a require refusal never converges by retrying. Drain reservation failures
+   are classified by `retryableDrainReservationError` before the control is
+   closed.
+5. **The enum is validated at config load** (`validateConditionalWrites` in
+   `config.Parse`): a typo can never mean "off". The §6.3 claim that the
+   string is mapped "in internal/rollout — never here" is amended: rollout
+   still owns the resolve, but load rejects unknown spellings.
+6. **Require is preflighted and observable at boot**: the controller probes
+   every owned store's resolution eagerly (`preflightConditionalWrites`,
+   ERROR line per incapable store) and logs the resolved-flag notices. The
+   §12.5 status-wire surface remains future work.
+7. **FileStore revisions are downgrade-safe**: `revisions_sealed` marks
+   files whose Revisions map is authoritative; unsealed files (written by an
+   older binary that dropped the map) re-seed deterministically at
+   `revisionContinuityFloor` (2^40, above any plausible prior revision), so
+   a downgrade/upgrade cycle can never resurrect a stale fence.
+8. **Backend contract pins**: empty `UpdateOpts` is a typed error
+   (`ErrEmptyConditionalUpdate`) on every store — never a silent no-op or a
+   fence skip (conformance row); BdStore's emulation does a final-lap
+   re-read before declaring exhaustion; the degrade event maps the
+   build-tagged `*beads.DoltliteReadStore` to wire kind `bd`; the
+   graduation forcing function now also validates the REAL `deps.env`
+   (anchor floor vs `BD_PREV_VERSION`) the moment it arms.
+
 ### 6.5 What each layer holds
 
 | Layer | Holds | Never holds |

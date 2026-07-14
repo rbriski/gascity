@@ -8,35 +8,27 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
-// This file holds CachingStore's ConditionalWriter forwarding. The cache rule
-// for fenced writes is: forward, and evict — never patch. The unconditional
-// write paths optimistically patch the cached clone when the post-write
-// refresh fails; a conditional-write port of that fallback is poison, because
-// the patch cannot synthesize the new revision, so every consumer's
-// precondition recovery would re-read the stale revision through the cache
-// and re-fail — a livelock indistinguishable from real contention. Eviction
-// instead routes the next Get to the backing store (dirty-set + entry
-// removal; NEVER a deletedSeq stamp, which would short-circuit Get to
-// ErrNotFound without consulting the backing).
+// This file holds CachingStore's ConditionalWriter forwarding. The cache
+// rule for fenced writes is: forward, and EVICT — never patch, never adopt.
 //
-// On success with a working refresh, the cache adopts the fresh read and
-// writes through exactly what the fenced verb proved committed — the caller's
-// opts, the closed status, or the swapped metadata key — because backings
-// with read visibility lag can serve the pre-write row on the refresh. The
-// revision always comes from the fresh read, never synthesized: a lagged
-// revision self-heals (a fenced write against it precondition-fails and
-// evicts), whereas a lagged field value would leave this process blind to its
-// own committed write.
+// Failure side: the unconditional write paths optimistically patch the cached
+// clone when the post-write refresh fails; a conditional-write port of that
+// fallback is poison, because the patch cannot synthesize the new revision,
+// so every consumer's precondition recovery would re-read the stale revision
+// through the cache and re-fail — a livelock indistinguishable from real
+// contention. Eviction instead routes the next Get to the backing store
+// (dirty-set + entry removal; NEVER a deletedSeq stamp, which would
+// short-circuit Get to ErrNotFound without consulting the backing).
 //
-// The write-through has a known advance hazard, accepted as the price of the
-// lag defense: when the refresh observes a LATER state (another writer landed
-// between our commit and our refresh), the write-through stomps that writer's
-// value onto a current revision, producing a clean cache entry the fence
-// cannot self-heal (fenced writes succeed against it). Lag and advance are
-// indistinguishable here without revision arithmetic, which the
-// ConditionalWriter granularity contract forbids. The fabrication heals via
-// the reconciler's content diff, bounded by the recent-local-mutation
-// conflict window.
+// Success side: the entry is evicted TOO. The backend does not return the
+// committed row or its revision, so a post-write refresh cannot be attributed
+// to our write — it may observe a LATER state, and installing anything
+// derived from local knowledge over an independently-refreshed revision would
+// fabricate a snapshot that never existed at that revision (a later IfMatch
+// against it would succeed on fabricated content, defeating optimistic
+// concurrency). Until a backend returns the exact committed row, the only
+// honest cache action after a fenced write is a miss. The refresh, when it
+// succeeds, feeds the change notification verbatim and nothing else.
 var (
 	_ ConditionalWriter                = (*CachingStore)(nil)
 	_ conditionalWritesModeCarrier     = (*CachingStore)(nil)
@@ -130,14 +122,18 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
+	// EVICT unconditionally: the backend does not return the committed row,
+	// so a refresh cannot be attributed — it may observe a LATER state, and
+	// installing local fields over an independently-refreshed revision would
+	// fabricate a snapshot that never existed (and IfMatch against that
+	// revision would then succeed on fabricated content, defeating OCC). The
+	// next read consults the backing. The refresh, when it succeeds, feeds
+	// the change notification only — verbatim, never overlaid.
 	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after conditional update")
-	if !refreshed {
-		c.evictForConditionalWrite(id)
-		return nil
+	c.evictForConditionalWrite(id)
+	if refreshed {
+		c.notifyChange("bead.updated", fresh)
 	}
-	fresh = applyUpdateOptsToBead(fresh, opts)
-	c.adoptConditionalRefresh(id, fresh, opts.Status != nil)
-	c.notifyChange("bead.updated", fresh)
 	return nil
 }
 
@@ -158,15 +154,16 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	fresh, err := c.backing.Get(id)
+	c.evictForConditionalWrite(id)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
 			c.recordProblem("refresh bead after conditional close", fmt.Errorf("%s: %w", id, err))
 		}
-		c.evictForConditionalWrite(id)
 		return nil
 	}
+	// The close is proven committed; forcing the status onto the event
+	// payload states that fact without installing anything in the cache.
 	fresh.Status = "closed"
-	c.adoptConditionalRefresh(id, fresh, true)
 	c.notifyChange("bead.closed", fresh)
 	return nil
 }
@@ -219,33 +216,29 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 		return false, nil
 	}
 	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after conditional metadata swap")
-	if !refreshed {
-		c.evictForConditionalWrite(id)
-		return true, nil
+	c.evictForConditionalWrite(id)
+	if refreshed {
+		c.notifyChange("bead.updated", fresh)
 	}
-	if fresh.Metadata == nil {
-		fresh.Metadata = make(map[string]string, 1)
-	}
-	fresh.Metadata[key] = next
-	c.adoptConditionalRefresh(id, fresh, false)
-	c.notifyChange("bead.updated", fresh)
 	return true, nil
 }
 
 // applyConditionalWriteFailure maps the backing writer's error class onto the
 // cache action it dictates. A precondition failure proves the cached revision
-// stale → evict. Gate refusal, CAS exhaustion, and unsupported prove the write
-// did not commit and nothing about this entry's freshness → no action.
-// Anything else (transport failures, not-found, ambiguous may-have-committed
-// errors) marks the entry dirty: the next Get re-reads the backing and
-// re-primes, without dropping the entry from cached listings. The error itself
-// is always returned to the caller untouched — the backing stores stamp
-// ID/Expected/Current; this layer adds cache maintenance, not decoration.
+// stale → evict. CAS exhaustion proves the backing revision kept moving under
+// repeated re-reads → the cached row cannot be trusted either → evict. Gate
+// refusal and unsupported prove the write did not commit and say nothing
+// about this entry's freshness → no action. Anything else (transport
+// failures, not-found, ambiguous may-have-committed errors) marks the entry
+// dirty: the next Get re-reads the backing and re-primes, without dropping
+// the entry from cached listings. The error itself is always returned to the
+// caller untouched — the backing stores stamp ID/Expected/Current; this layer
+// adds cache maintenance, not decoration.
 func (c *CachingStore) applyConditionalWriteFailure(id string, err error) {
 	switch {
-	case IsPreconditionFailed(err):
+	case IsPreconditionFailed(err), IsCASRetriesExhausted(err):
 		c.evictForConditionalWrite(id)
-	case IsGateRefusal(err), IsCASRetriesExhausted(err), IsConditionalWriteUnsupported(err):
+	case IsGateRefusal(err), IsConditionalWriteUnsupported(err):
 	default:
 		// noteLocalMutationLocked bumps the mutation seq so a scan that
 		// started before this failure cannot merge its pre-write row back
@@ -273,24 +266,6 @@ func (c *CachingStore) evictForConditionalWrite(id string) {
 	delete(c.deps, id)
 	c.dirty[id] = struct{}{}
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
-	c.updateStatsLocked()
-	c.mu.Unlock()
-}
-
-// adoptConditionalRefresh installs the post-write backing state into the
-// cache — the same bookkeeping the unconditional write paths perform after a
-// successful refresh.
-func (c *CachingStore) adoptConditionalRefresh(id string, fresh Bead, statusChanged bool) {
-	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
-	c.beads[id] = cloneBead(fresh)
-	c.deps[id] = depsFromBeadFields(fresh)
-	if statusChanged {
-		c.clearDependentReadyProjectionsLocked(id)
-	}
-	delete(c.dirty, id)
-	delete(c.deletedSeq, id)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()

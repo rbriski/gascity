@@ -396,7 +396,14 @@ func TestCachingStoreConditionalWriteSuccessRefreshesCache(t *testing.T) {
 // lagged revision is accepted (it self-heals: a fenced write against it
 // precondition-fails and evicts); a lagged field value would not self-heal
 // for plain readers.
-func TestCachingStoreConditionalWriteWritesThroughOnLaggedRefresh(t *testing.T) {
+// TestCachingStoreConditionalWriteEvictsOnLaggedRefresh pins the
+// no-fabrication contract: a fenced write's post-write refresh cannot be
+// attributed to our commit (the backing may serve a LAGGED pre-write row, or
+// a LATER one), so the cache installs NOTHING — the entry is evicted and the
+// next read consults the backing, which by then serves the committed state.
+// The change notification fires with the verbatim refresh; consumers re-read
+// by id rather than trusting event payloads for point-in-time state.
+func TestCachingStoreConditionalWriteEvictsOnLaggedRefresh(t *testing.T) {
 	t.Parallel()
 
 	t.Run("update_opts", func(t *testing.T) {
@@ -425,25 +432,29 @@ func TestCachingStoreConditionalWriteWritesThroughOnLaggedRefresh(t *testing.T) 
 		if err := cache.UpdateIfMatch(b.ID, got.Revision, UpdateOpts{Title: &title}); err != nil {
 			t.Fatalf("UpdateIfMatch: %v", err)
 		}
+
+		// Evicted, never adopted: no cached row survives the fenced write.
+		cache.mu.RLock()
+		_, inBeads := cache.beads[b.ID]
+		_, dirty := cache.dirty[b.ID]
+		cache.mu.RUnlock()
+		if inBeads {
+			t.Fatal("fenced update adopted a row into the cache; the lagged refresh makes any adoption a fabrication")
+		}
+		if !dirty {
+			t.Fatal("fenced update did not mark the entry dirty for backing re-read")
+		}
+
+		// The next read consults the backing and reports the committed state.
 		cached, err := cache.Get(b.ID)
 		if err != nil {
-			t.Fatalf("Get after lagged refresh: %v", err)
+			t.Fatalf("Get after fenced update: %v", err)
 		}
 		if cached.Title != title {
-			t.Fatalf("cached title after lagged refresh = %q, want %q (the committed opts must be written through)",
-				cached.Title, title)
+			t.Fatalf("post-write read = %q, want the backing's committed %q", cached.Title, title)
 		}
-		// The notification payload must carry the written-through state too —
-		// not the lagged pre-write row.
 		if len(notes) != 1 || notes[0].eventType != "bead.updated" {
 			t.Fatalf("notifications = %+v, want exactly one bead.updated", notes)
-		}
-		var published Bead
-		if err := json.Unmarshal(notes[0].payload, &published); err != nil {
-			t.Fatalf("unmarshal notification payload: %v", err)
-		}
-		if published.Title != title {
-			t.Fatalf("published title = %q, want the written-through %q", published.Title, title)
 		}
 	})
 
@@ -459,7 +470,6 @@ func TestCachingStoreConditionalWriteWritesThroughOnLaggedRefresh(t *testing.T) 
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
-
 		snapshot := cloneBead(got)
 		backing.staleNextGet = &snapshot
 		if err := cache.CloseIfMatch(b.ID, got.Revision); err != nil {
@@ -467,44 +477,10 @@ func TestCachingStoreConditionalWriteWritesThroughOnLaggedRefresh(t *testing.T) 
 		}
 		cached, err := cache.Get(b.ID)
 		if err != nil {
-			t.Fatalf("Get after lagged refresh: %v", err)
+			t.Fatalf("Get after fenced close: %v", err)
 		}
 		if cached.Status != "closed" {
-			t.Fatalf("cached status after lagged refresh = %q, want closed (the committed close must be written through)",
-				cached.Status)
-		}
-	})
-
-	t.Run("swapped_metadata_key_nil_map", func(t *testing.T) {
-		t.Parallel()
-		// The lagged refresh row carries no metadata map at all: the
-		// write-through must allocate one instead of assigning into nil.
-		backing := &casBackingStore{Store: NewMemStore()}
-		cache := newConditionalCacheForTest(t, backing)
-		b, err := cache.Create(Bead{Title: "cas-lag-nil"})
-		if err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		got, err := cache.Get(b.ID)
-		if err != nil {
-			t.Fatalf("Get: %v", err)
-		}
-		if got.Metadata != nil {
-			t.Fatalf("setup: bead metadata = %#v, want nil", got.Metadata)
-		}
-
-		snapshot := cloneBead(got)
-		backing.staleNextGet = &snapshot
-		ok, err := cache.CompareAndSetMetadataKey(b.ID, "k", "", "v")
-		if err != nil || !ok {
-			t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (true, nil)", ok, err)
-		}
-		cached, err := cache.Get(b.ID)
-		if err != nil {
-			t.Fatalf("Get after lagged refresh: %v", err)
-		}
-		if cached.Metadata["k"] != "v" {
-			t.Fatalf("cached metadata k after lagged nil-map refresh = %q, want %q", cached.Metadata["k"], "v")
+			t.Fatalf("post-close read = %q, want the backing's committed closed status", cached.Status)
 		}
 	})
 
@@ -516,27 +492,22 @@ func TestCachingStoreConditionalWriteWritesThroughOnLaggedRefresh(t *testing.T) 
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := cache.SetMetadata(b.ID, "k", "start"); err != nil {
-			t.Fatalf("SetMetadata: %v", err)
-		}
 		got, err := cache.Get(b.ID)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
-
 		snapshot := cloneBead(got)
 		backing.staleNextGet = &snapshot
-		ok, err := cache.CompareAndSetMetadataKey(b.ID, "k", "start", "next")
-		if err != nil || !ok {
+		ok, err := cache.CompareAndSetMetadataKey(b.ID, "k", "", "v")
+		if !ok || err != nil {
 			t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (true, nil)", ok, err)
 		}
 		cached, err := cache.Get(b.ID)
 		if err != nil {
-			t.Fatalf("Get after lagged refresh: %v", err)
+			t.Fatalf("Get after fenced swap: %v", err)
 		}
-		if cached.Metadata["k"] != "next" {
-			t.Fatalf("cached metadata k after lagged refresh = %q, want %q (the swapped key must be written through)",
-				cached.Metadata["k"], "next")
+		if cached.Metadata["k"] != "v" {
+			t.Fatalf("post-swap read k = %q, want the backing's committed %q", cached.Metadata["k"], "v")
 		}
 	})
 }
@@ -610,9 +581,14 @@ func TestCachingStoreCloseIfMatchClearsDependentReadyProjection(t *testing.T) {
 		t.Fatalf("CloseIfMatch: %v", err)
 	}
 
+	// The fenced close evicts the blocker (dirty), so the cached view is
+	// legitimately unavailable until a read re-primes the entry.
+	if _, err := cache.Get(blocker.ID); err != nil {
+		t.Fatalf("re-prime blocker after fenced close: %v", err)
+	}
 	ready, ok = cache.CachedReady()
 	if !ok {
-		t.Fatal("CachedReady reported cache unavailable after the fenced close")
+		t.Fatal("CachedReady reported cache unavailable after the fenced close and re-prime")
 	}
 	readyByID = make(map[string]bool, len(ready))
 	for _, bead := range ready {
@@ -813,20 +789,24 @@ func TestCachingStoreConditionalWriteErrorClassCacheActions(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name      string
-		inject    error
-		wantDirty bool
+		name        string
+		inject      error
+		wantDirty   bool
+		wantEvicted bool
 	}{
-		// Gate refusal and CAS exhaustion prove the write did not commit and
-		// nothing about this entry's freshness: the cache keeps serving.
-		{"gate_refusal", &GateRefusalError{Verb: "update", Code: "close-authority"}, false},
-		{"cas_retries_exhausted", &CASRetriesExhaustedError{Key: "k", Attempts: 4}, false},
+		// Gate refusal proves the write did not commit and nothing about this
+		// entry's freshness: the cache keeps serving.
+		{"gate_refusal", &GateRefusalError{Verb: "update", Code: "close-authority"}, false, false},
+		// CAS exhaustion proves the backing revision kept moving under
+		// repeated re-reads: the cached row cannot be trusted either — evict
+		// (dirty routes the next read through the backing).
+		{"cas_retries_exhausted", &CASRetriesExhaustedError{Key: "k", Attempts: 4}, true, true},
 		// A disabled/incapable backing likewise proves no commit.
-		{"unsupported", ErrConditionalWriteUnsupported, false},
+		{"unsupported", ErrConditionalWriteUnsupported, false, false},
 		// Anything else may have committed (ambiguous transport failure):
 		// dirty forces the next Get through the backing without dropping the
 		// entry from cached listings.
-		{"ambiguous_transport", errors.New("bd: connection reset mid-write"), true},
+		{"ambiguous_transport", errors.New("bd: connection reset mid-write"), true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -854,8 +834,8 @@ func TestCachingStoreConditionalWriteErrorClassCacheActions(t *testing.T) {
 			_, dirty := cache.dirty[b.ID]
 			_, deleted := cache.deletedSeq[b.ID]
 			cache.mu.RUnlock()
-			if !inBeads {
-				t.Fatalf("%s evicted the entry; only precondition failures and value-losses evict", tc.name)
+			if inBeads == tc.wantEvicted {
+				t.Fatalf("%s: entry cached=%v, want evicted=%v", tc.name, inBeads, tc.wantEvicted)
 			}
 			if dirty != tc.wantDirty {
 				t.Fatalf("dirty = %v, want %v", dirty, tc.wantDirty)

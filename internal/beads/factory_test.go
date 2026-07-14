@@ -537,24 +537,54 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 		}
 	})
 
-	t.Run("carrier-less store opens without error", func(t *testing.T) {
+	t.Run("require refuses a carrier-less store at open", func(t *testing.T) {
 		bare := &struct{ Store }{Store: NewMemStore()}
-		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 			ScopeRoot:         scope,
 			Provider:          "file",
 			ConditionalWrites: gate.Require,
 			OpenFileStore:     func() (Store, error) { return bare, nil },
 		})
+		if !IsConditionalWritesRequired(err) {
+			t.Fatalf("err = %v, want the typed require refusal: a store that cannot carry the mode must never be handed to a caller whose config promises fencing", err)
+		}
+	})
+
+	t.Run("auto degrades a carrier-less store loudly at open", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		var degraded []ConditionalWritesDegrade
+		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			ScopeRoot:                   scope,
+			Provider:                    "file",
+			ConditionalWrites:           gate.Auto,
+			OpenFileStore:               func() (Store, error) { return bare, nil },
+			OnConditionalWritesDegraded: func(d ConditionalWritesDegrade) { degraded = append(degraded, d) },
+		})
 		if err != nil {
 			t.Fatalf("OpenStoreAtForCity: %v", err)
 		}
 		if result.Store != Store(bare) {
-			t.Fatalf("store = %T, want the carrier-less store returned as-is", result.Store)
+			t.Fatalf("store = %T, want the carrier-less store returned under auto", result.Store)
 		}
-		// Unstampable → the seam sees ModeUnset → legacy; enforcement is
-		// never raised on a path that cannot carry the mode.
+		if len(degraded) != 1 || degraded[0].Mode != "auto" {
+			t.Fatalf("degrade notifications = %+v, want exactly one auto degrade at open", degraded)
+		}
+		// The seam then takes the legacy path — degraded, never fenced.
 		if w, diag, resolveErr := ResolveConditionalWriter(result.Store); w != nil || diag != nil || resolveErr != nil {
-			t.Fatal("carrier-less store must resolve to the legacy path")
+			t.Fatal("carrier-less store must resolve to the legacy path under auto")
+		}
+	})
+
+	t.Run("off leaves a carrier-less store silent", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			ScopeRoot:         scope,
+			Provider:          "file",
+			ConditionalWrites: gate.Off,
+			OpenFileStore:     func() (Store, error) { return bare, nil },
+		})
+		if err != nil || result.Store != Store(bare) {
+			t.Fatalf("off over carrier-less = (%T, %v), want the store as-is", result.Store, err)
 		}
 	})
 

@@ -75,6 +75,8 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 
 	strPtr := func(s string) *string { return &s }
 
+	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
+
 	t.Run(name+"/every_mutation_bumps_revision", func(t *testing.T) {
 		s := open(t)
 		w := writerFor(t, s)
@@ -447,4 +449,36 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 			}
 		})
 	}
+}
+
+// runEmptyUpdateContract asserts the pinned empty-fenced-update contract: an
+// UpdateIfMatch with no fields is invalid input on EVERY store — it neither
+// evaluates the fence nor bumps the revision.
+func runEmptyUpdateContract(t *testing.T, open func(t *testing.T) beads.Store) {
+	t.Run("empty_update_opts_is_invalid_and_never_bumps", func(t *testing.T) {
+		store := open(t)
+		writer, ok := beads.ConditionalWriterFor(store)
+		if !ok {
+			t.Fatal("store lost ConditionalWriter")
+		}
+		created, err := store.Create(beads.Bead{Title: "empty-opts"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		before, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		err = writer.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{})
+		if !errors.Is(err, beads.ErrEmptyConditionalUpdate) {
+			t.Fatalf("empty fenced update = %v, want ErrEmptyConditionalUpdate", err)
+		}
+		after, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("Get after: %v", err)
+		}
+		if after.Revision != before.Revision {
+			t.Fatalf("revision %d -> %d on an invalid empty update, want unchanged", before.Revision, after.Revision)
+		}
+	})
 }

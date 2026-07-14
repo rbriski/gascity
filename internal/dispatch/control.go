@@ -434,6 +434,16 @@ func IsTransientControllerError(err error) bool {
 	if errors.Is(err, errTransientControllerBoundary) {
 		return true
 	}
+	// Conditional-write contention and capability loss are level-triggered
+	// re-entry classes, never terminal dispositions: exhaustion means the
+	// store could not get a clean shot (re-enter and retry), and a runtime
+	// unsupported latch means the next resolve degrades (auto) or refuses
+	// (require) — neither is a broken control. A require refusal
+	// (ConditionalWritesRequiredError) is deliberately NOT here: it is a
+	// persistent policy refusal and stays hard/fail-closed.
+	if beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	if isTransientWorkQueryFailure(msg) {
 		return true
@@ -601,6 +611,16 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		ExpectedEpoch:  epoch,
 	})
 	if err != nil {
+		// An epoch conflict is a ROUTINE convergence signal under the CAS-last
+		// fence: another processor won this attempt, and the next
+		// level-triggered pass re-enters and converges on the winner through
+		// findExistingAttach. It must classify transient — the partial-attach
+		// hard path below exists for genuinely broken (crash-partial)
+		// attempts, and routing a normal fence loser there terminally closes
+		// the shared control, making the promised convergence impossible.
+		if errors.Is(err, molecule.ErrEpochConflict) {
+			return markTransientControllerBoundaryError(fmt.Errorf("attach epoch conflict on %s attempt %d (fence lost; converging next pass): %w", control.ID, attemptNum, err))
+		}
 		failedRootID, lookupErr := failedAttemptAttachRootID(store, control, attemptNum)
 		if lookupErr != nil {
 			return &failedAttemptAttachLookupError{lookupErr: lookupErr, err: err}

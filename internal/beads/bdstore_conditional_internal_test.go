@@ -640,11 +640,13 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 }
 
-func TestUpdateIfMatchEmptyOptsIsNoOpNoWrite(t *testing.T) {
+func TestUpdateIfMatchEmptyOptsIsTypedErrorNoWrite(t *testing.T) {
+	// Pinned cross-store contract: an empty fenced update is invalid input
+	// (ErrEmptyConditionalUpdate) — never a silent nil, never a fence write.
 	w := &scriptedBd{id: "ga-1", revision: 1}
 	s := NewBdStore("/city", w.runner)
-	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{}); err != nil {
-		t.Fatalf("empty UpdateIfMatch: got %v, want nil", err)
+	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{}); !errors.Is(err, ErrEmptyConditionalUpdate) {
+		t.Fatalf("empty UpdateIfMatch: got %v, want ErrEmptyConditionalUpdate", err)
 	}
 	if w.writeCalls != 0 {
 		t.Fatalf("empty UpdateIfMatch issued %d writes, want 0", w.writeCalls)
@@ -1269,5 +1271,60 @@ func TestResolveConditionalWriterBdStoreProbeFailureReason(t *testing.T) {
 		if strings.Contains(diag.PreflightReason, "lacks") {
 			t.Fatalf("%s resolve reason = %q, misreports a broken bd as an old bd", call, diag.PreflightReason)
 		}
+	}
+}
+
+// TestCompareAndSetMetadataKeyExhaustionFinalReadDetectsValueLoss pins the
+// review's M9 finding: when the final precondition conflict was caused by a
+// competitor landing on the TARGET key, the emulation must report the genuine
+// value loss (false, nil) after a final re-read — not exhaustion, which would
+// send the caller back into a race it already definitively lost.
+func TestCompareAndSetMetadataKeyExhaustionFinalReadDetectsValueLoss(t *testing.T) {
+	restoreSleep := conditionalWriteSleep
+	conditionalWriteSleep = func(time.Duration) {}
+	defer func() { conditionalWriteSleep = restoreSleep }()
+
+	w := &scriptedBd{id: "ga-1", revision: 1, metadata: map[string]string{}}
+	attempts := 0
+	w.writeHook = func(w *scriptedBd, _ string, _ int64) ([]byte, error, bool) {
+		attempts++
+		// Every fenced attempt conflicts (an unrelated writer keeps bumping
+		// the revision); before the final re-read, a competitor has landed on
+		// the target key itself.
+		w.revision++
+		if attempts == casEmulationMaxAttempts {
+			w.metadata["k"] = "competitor"
+		}
+		return []byte(`{"error":"revision precondition failed","code":"precondition-failed"}`), errors.New("exit status 1"), true
+	}
+	s := NewBdStore("/city", w.runner)
+
+	swapped, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "mine")
+	if err != nil {
+		t.Fatalf("CompareAndSetMetadataKey error = %v, want the (false, nil) value loss", err)
+	}
+	if swapped {
+		t.Fatal("swapped = true under permanent conflict")
+	}
+}
+
+// TestCompareAndSetMetadataKeyExhaustionWithoutValueLossStaysTyped pins the
+// counterpart: pure cross-key interference (the target key never changes)
+// still exhausts with the typed transient, never a false (false, nil) loss.
+func TestCompareAndSetMetadataKeyExhaustionWithoutValueLossStaysTyped(t *testing.T) {
+	restoreSleep := conditionalWriteSleep
+	conditionalWriteSleep = func(time.Duration) {}
+	defer func() { conditionalWriteSleep = restoreSleep }()
+
+	w := &scriptedBd{id: "ga-1", revision: 1, metadata: map[string]string{}}
+	w.writeHook = func(w *scriptedBd, _ string, _ int64) ([]byte, error, bool) {
+		w.revision++
+		return []byte(`{"error":"revision precondition failed","code":"precondition-failed"}`), errors.New("exit status 1"), true
+	}
+	s := NewBdStore("/city", w.runner)
+
+	swapped, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "mine")
+	if swapped || !IsCASRetriesExhausted(err) {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (false, *CASRetriesExhaustedError)", swapped, err)
 	}
 }

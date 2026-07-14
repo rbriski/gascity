@@ -22,6 +22,15 @@ type fileData struct {
 	// cross-process flock mode) would reset all revisions to 0, breaking the
 	// monotonic-never-reused contract. Absent (legacy files) ≡ all zero.
 	Revisions map[string]int64 `json:"revisions,omitempty"`
+	// RevisionsSealed marks a file written by a revisions-aware binary. An
+	// OLDER binary's full rewrite drops both this marker and the revisions
+	// map while keeping the beads — the exact state in which fresh-from-zero
+	// revisions would REUSE previously issued tokens and break the
+	// monotonic-never-reused contract. Loading an unsealed file with beads
+	// therefore re-seeds every revision at a deterministic floor far above
+	// any counter a prior writer could have issued (see
+	// applyBeadRevisionsSealed).
+	RevisionsSealed bool `json:"revisions_sealed,omitempty"`
 }
 
 // beadRevisions extracts the out-of-band revision map for persistence. Zero
@@ -49,6 +58,42 @@ func applyBeadRevisions(beads []Bead, revs map[string]int64) {
 	for i := range beads {
 		if r, ok := revs[beads[i].ID]; ok {
 			beads[i].Revision = r
+		}
+	}
+}
+
+// revisionContinuityFloor is the minimum re-seed value for revisions on an
+// unsealed file. Any prior writer issued small per-mutation counters, so a
+// floor around 2^40 (≈10^12) can never collide with a previously issued
+// token, while staying far below int64 overflow for subsequent +1 bumps.
+const revisionContinuityFloor = int64(1) << 40
+
+// applyBeadRevisionsSealed applies the persisted revisions and, when the file
+// is UNSEALED but carries beads (a pre-revisions legacy file, or a file an
+// older binary rewrote — dropping the revisions map and the seal), re-seeds
+// every bead's revision at a deterministic floor derived from the file's own
+// timestamps. Determinism matters: the seed must be identical across
+// processes and repeated reloads of the same bytes, or the reload-before-
+// write path would invent a new revision on every pass and spuriously fail
+// in-flight fences. The floor guarantees no previously issued token is ever
+// reused; per-bead monotonicity resumes with ordinary +1 bumps from there.
+func applyBeadRevisionsSealed(fd *fileData) {
+	applyBeadRevisions(fd.Beads, fd.Revisions)
+	if fd.RevisionsSealed || len(fd.Beads) == 0 {
+		return
+	}
+	seed := revisionContinuityFloor
+	for _, b := range fd.Beads {
+		if v := b.UpdatedAt.UnixNano(); !b.UpdatedAt.IsZero() && v > seed {
+			seed = v
+		}
+		if v := b.CreatedAt.UnixNano(); !b.CreatedAt.IsZero() && v > seed {
+			seed = v
+		}
+	}
+	for i := range fd.Beads {
+		if fd.Beads[i].Revision < seed {
+			fd.Beads[i].Revision = seed
 		}
 	}
 }
@@ -119,7 +164,7 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
-	applyBeadRevisions(fd.Beads, fd.Revisions)
+	applyBeadRevisionsSealed(&fd)
 	store := &FileStore{
 		MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps),
 		fs:       fs,
@@ -156,7 +201,7 @@ func (fs *FileStore) reloadFromDisk() error {
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return fmt.Errorf("reloading file store: %w", err)
 	}
-	applyBeadRevisions(fd.Beads, fd.Revisions)
+	applyBeadRevisionsSealed(&fd)
 	fs.restoreFrom(fd.Seq, fd.Beads, fd.Deps)
 	return nil
 }
@@ -613,7 +658,7 @@ func (fs *FileStore) save() error {
 	seq, beads, deps := fs.snapshot()
 	fs.mu.Unlock()
 
-	fd := fileData{Seq: seq, Beads: beads, Deps: deps, Revisions: beadRevisions(beads)}
+	fd := fileData{Seq: seq, Beads: beads, Deps: deps, Revisions: beadRevisions(beads), RevisionsSealed: true}
 	data, err := json.MarshalIndent(fd, "", "  ")
 	if err != nil {
 		return fmt.Errorf("saving file store: %w", err)

@@ -201,23 +201,11 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	}
 	carrier, ok := result.Store.(conditionalWritesModeCarrier)
 	if !ok {
-		if opts.Logger != nil {
-			opts.Logger.Debug("conditional_writes stamp skipped",
-				slog.String("store", result.Diagnostic.Store),
-				slog.String("reason", "store carries no conditional-writes mode"),
-				slog.String("scope", opts.ScopeRoot))
-		}
-		return result, nil
+		return opts.unstampableResult(result, mode, "store cannot carry the conditional-writes mode")
 	}
 	carrier.setConditionalWritesDegradeCallback(opts.OnConditionalWritesDegraded)
 	if !carrier.stampConditionalWritesMode(mode, defaulted) {
-		if opts.Logger != nil {
-			opts.Logger.Debug("conditional_writes stamp skipped",
-				slog.String("store", result.Diagnostic.Store),
-				slog.String("reason", "store forwards the stamp into a backing that cannot carry it"),
-				slog.String("scope", opts.ScopeRoot))
-		}
-		return result, nil
+		return opts.unstampableResult(result, mode, "store forwards the stamp into a backing that cannot carry it")
 	}
 	if defaulted && opts.Logger != nil {
 		opts.Logger.Debug("conditional_writes mode not threaded; defaulted to off",
@@ -225,6 +213,47 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 			slog.String("scope", opts.ScopeRoot))
 	}
 	return result, nil
+}
+
+// unstampableResult resolves an open whose store cannot carry the
+// conditional-writes mode. The outcome follows the gate's own cell contract
+// instead of silently succeeding (the pre-review behavior): under require the
+// OPEN refuses — a store that cannot enforce the fence must never be handed
+// to a caller whose config promises fencing; under auto the open succeeds but
+// degrades LOUDLY (warn log plus the degrade notification, fired directly —
+// there is no stamp to latch on, and an open happens once per store); off and
+// unset stay a debug note.
+func (opts StoreOpenOptions) unstampableResult(result StoreOpenResult, mode gate.Mode, reason string) (StoreOpenResult, error) {
+	switch mode {
+	case gate.Require:
+		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w",
+			result.Diagnostic.Store, opts.ScopeRoot,
+			&ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason})
+	case gate.Auto:
+		if opts.Logger != nil {
+			opts.Logger.Warn("conditional_writes degraded at open",
+				slog.String("store", result.Diagnostic.Store),
+				slog.String("mode", string(mode)),
+				slog.String("reason", reason),
+				slog.String("scope", opts.ScopeRoot))
+		}
+		if opts.OnConditionalWritesDegraded != nil {
+			opts.OnConditionalWritesDegraded(ConditionalWritesDegrade{
+				StoreKind: result.Diagnostic.Store,
+				Mode:      string(mode),
+				Reason:    reason,
+			})
+		}
+		return result, nil
+	default:
+		if opts.Logger != nil {
+			opts.Logger.Debug("conditional_writes stamp skipped",
+				slog.String("store", result.Diagnostic.Store),
+				slog.String("reason", reason),
+				slog.String("scope", opts.ScopeRoot))
+		}
+		return result, nil
+	}
 }
 
 func (opts StoreOpenOptions) openNativeStore(ctx context.Context) (Store, error) {

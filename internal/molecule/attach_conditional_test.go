@@ -283,3 +283,177 @@ func (w commitThenErrWriter) CompareAndSetMetadataKey(id, key, expected, next st
 	}
 	return false, w.err
 }
+
+// TestAttachFencedWinnerActivatedLoserNeverRunnable pins the speculative-
+// creation contract: under an active fence writer, candidates are created
+// deferred (non-runnable), only the fence winner activates, and a fence
+// loser is neutralized WITHOUT ever having been runnable.
+func TestAttachFencedWinnerActivatedLoserNeverRunnable(t *testing.T) {
+	store := newStampedAttachStore(t, gate.Auto)
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	results := make([]*AttachResult, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recipe := makeWorkflowRecipe("attempt", "run")
+			results[i], errs[i] = Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+				IdempotencyKey: control.ID + ":attempt:2",
+				ExpectedEpoch:  1,
+			})
+		}()
+	}
+	wg.Wait()
+
+	all, err := store.List(beads.ListQuery{Metadata: map[string]string{
+		beadmeta.IdempotencyKeyMetadataKey: control.ID + ":attempt:2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activated, neutralized, pendingLeft int
+	for _, b := range all {
+		switch {
+		case b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true":
+			neutralized++
+			if b.Metadata[beadmeta.DeferredTypeMetadataKey] == "" {
+				t.Fatalf("loser root %s lost its deferred marker: it was ACTIVATED before neutralization (was runnable)", b.ID)
+			}
+		case b.Metadata[beadmeta.AttachFencePendingMetadataKey] == "true":
+			pendingLeft++
+		default:
+			activated++
+			if b.Metadata[beadmeta.DeferredTypeMetadataKey] != "" || b.Type == "gate" {
+				t.Fatalf("winner root %s not fully activated: type=%q deferred=%q", b.ID, b.Type, b.Metadata[beadmeta.DeferredTypeMetadataKey])
+			}
+		}
+	}
+	if activated != 1 {
+		t.Fatalf("activated roots = %d (neutralized=%d pending=%d), want exactly 1 runnable root", activated, neutralized, pendingLeft)
+	}
+	for i := range 2 {
+		if errs[i] != nil && !errors.Is(errs[i], ErrEpochConflict) {
+			t.Fatalf("attach %d error = %v, want nil or the convergent epoch conflict", i, errs[i])
+		}
+	}
+}
+
+// TestAttachAmbiguousFenceConvergesDeterministically drives the §9.3 hole the
+// review flagged: an ambiguous fence error leaves a NON-RUNNABLE pending
+// candidate, and the retry converges through deterministic pending recovery —
+// activating exactly one candidate and advancing the epoch — rather than
+// accepting whichever same-idempotency root it happens to find.
+func TestAttachAmbiguousFenceConvergesDeterministically(t *testing.T) {
+	store := newStampedAttachStore(t, gate.Auto)
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	// First attempt: the fence write COMMITS but reports an ambiguous
+	// transport error, so Attach surfaces transient and leaves the candidate
+	// pending and deferred.
+	inner, _ := beads.ConditionalWriterFor(store)
+	sub, err := store.Create(beads.Bead{
+		Title: "ambiguous candidate",
+		Type:  "gate",
+		Metadata: map[string]string{
+			beadmeta.IdempotencyKeyMetadataKey:     control.ID + ":attempt:2",
+			beadmeta.RootBeadIDMetadataKey:         root.ID,
+			beadmeta.AttachFencePendingMetadataKey: "true",
+			beadmeta.DeferredTypeMetadataKey:       "task",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &Result{RootID: sub.ID, IDMapping: map[string]string{"root": sub.ID}}
+	fenceErr := advanceAttachEpochFence(store, commitThenErrWriter{inner: inner, err: errors.New("i/o timeout")}, control.ID, 1, result)
+	if fenceErr == nil || errors.Is(fenceErr, ErrEpochConflict) {
+		t.Fatalf("ambiguous fence err = %v, want transient", fenceErr)
+	}
+	if got, _ := store.Get(sub.ID); got.Metadata[beadmeta.AttachFencePendingMetadataKey] != "true" {
+		t.Fatal("candidate lost its pending marker on ambiguity")
+	}
+
+	// Retry: findExistingAttach's recovery must adopt the pending candidate,
+	// activate it, and return it as the duplicate with the epoch advanced.
+	recipe := makeWorkflowRecipe("attempt", "run")
+	retry, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		IdempotencyKey: control.ID + ":attempt:2",
+		ExpectedEpoch:  2, // the ambiguous write committed: epoch is 2
+	})
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !retry.Duplicate || retry.RootID != sub.ID {
+		t.Fatalf("retry = %+v, want Duplicate of the pending candidate %s", retry, sub.ID)
+	}
+	got, _ := store.Get(sub.ID)
+	if got.Metadata[beadmeta.AttachFencePendingMetadataKey] == "true" {
+		t.Fatal("recovered candidate still pending: never activated")
+	}
+	if got.Type != "task" {
+		t.Fatalf("recovered candidate type = %q, want the deferred type restored", got.Type)
+	}
+}
+
+// TestFindExistingAttachResolvesDualPendingDeterministically seeds the
+// worst-case ambiguity — BOTH racers ambiguous, both candidates alive and
+// pending — and asserts recovery picks the lexicographically smallest,
+// activates only it, and neutralizes the other.
+func TestFindExistingAttachResolvesDualPendingDeterministically(t *testing.T) {
+	store := newStampedAttachStore(t, gate.Auto)
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "2") // fence committed by someone
+
+	mk := func(title string) beads.Bead {
+		b, err := store.Create(beads.Bead{
+			Title: title,
+			Type:  "gate",
+			Metadata: map[string]string{
+				beadmeta.IdempotencyKeyMetadataKey:     control.ID + ":attempt:2",
+				beadmeta.RootBeadIDMetadataKey:         root.ID,
+				beadmeta.AttachFencePendingMetadataKey: "true",
+				beadmeta.DeferredTypeMetadataKey:       "task",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	c1, c2 := mk("candidate one"), mk("candidate two")
+	winnerID, loserID := c1.ID, c2.ID
+	if c2.ID < c1.ID {
+		winnerID, loserID = c2.ID, c1.ID
+	}
+
+	recipe := makeWorkflowRecipe("attempt", "run")
+	got, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		IdempotencyKey: control.ID + ":attempt:2",
+		ExpectedEpoch:  2,
+	})
+	if err != nil {
+		t.Fatalf("recovery attach: %v", err)
+	}
+	if !got.Duplicate || got.RootID != winnerID {
+		t.Fatalf("recovery = %+v, want deterministic Duplicate of %s", got, winnerID)
+	}
+	w, _ := store.Get(winnerID)
+	if w.Metadata[beadmeta.AttachFencePendingMetadataKey] == "true" || w.Type != "task" {
+		t.Fatalf("deterministic winner %s not activated: %+v", winnerID, w.Metadata)
+	}
+	l, _ := store.Get(loserID)
+	if l.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
+		t.Fatalf("stale candidate %s not neutralized", loserID)
+	}
+	if l.Metadata[beadmeta.DeferredTypeMetadataKey] == "" {
+		t.Fatalf("stale candidate %s was activated before neutralization", loserID)
+	}
+}

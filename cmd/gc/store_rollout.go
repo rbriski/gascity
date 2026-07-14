@@ -115,6 +115,12 @@ func conditionalWritesEventStoreKind(kind string) string {
 		return "mem"
 	case "CachingStore":
 		return "caching"
+	case "*beads.DoltliteReadStore":
+		// DoltliteReadStore only exists under the gascity_native_beads build
+		// tag, so beads.conditionalStoreKind cannot name it and it arrives as
+		// the %T spelling. It embeds *BdStore and its entire conditional-write
+		// surface IS bd's, so on the wire it is a bd store.
+		return "bd"
 	default:
 		return kind
 	}

@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
@@ -125,7 +126,9 @@ var beadEventWatcherRetryDelay = time.Second
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
 // and skip spawning managed dolt (~12s per call).
-var newControllerStateOpenCityStore = openCityStoreResultAt
+var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true)
+}
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
 // the same native-selection factory as direct city/rig store opens. Tests swap
@@ -188,13 +191,20 @@ func newControllerState(
 		beadEventStartSeqOK: beadEventStartSeqOK,
 		rolloutFlags:        rolloutFlags,
 	}
+	// Boot-resolved rollout notices are retained on the Flags value; echo
+	// them once at startup so an env override contradicting explicit config
+	// (or an ignored invalid env value) is visible in the boot log, not only
+	// to whoever thinks to run doctor.
+	for _, n := range cs.rolloutFlags.Notices() {
+		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
+	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
 	// Open city-level store for session beads and mail (best-effort).
-	if opened, err := newControllerStateOpenCityStore(cityPath); err != nil {
+	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites()); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
@@ -204,6 +214,7 @@ func newControllerState(
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
+	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
 }
@@ -299,9 +310,23 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	var sharedLegacyFileStore beads.Store
 	var sharedLegacyCachedStore beads.Store
 	if cityProvider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
-		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
+		// Through the factory so the shared legacy store carries the
+		// boot-latched conditional-writes stamp like every other store; a
+		// direct open here left legacy-file cities silently unfenced.
+		result, err := beads.OpenStoreAtForCity(cs.cacheCtx, beads.StoreOpenOptions{
+			ScopeRoot:                   cs.cityPath,
+			CityPath:                    cs.cityPath,
+			Provider:                    "file",
+			ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+			OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "city"),
+			OpenFileStore: func() (beads.Store, error) {
+				return openCompatibleFileStore(cs.cityPath, cs.cityPath)
+			},
+		})
 		if err == nil {
-			sharedLegacyFileStore = wrapStoreWithBeadPolicies(store, cfg)
+			sharedLegacyFileStore = wrapStoreWithBeadPolicies(result.Store, cfg)
+		} else {
+			cs.rolloutWarnf("api: shared legacy file store: %v\n", err)
 		}
 	}
 
@@ -367,13 +392,6 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		}
 		s.SetEnv(env)
 		return s, nil
-	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
-		store, err := openExecStore()
-		if err != nil {
-			return unavailableStore{err: fmt.Errorf("open exec rig store %s: %w", scopeRoot, err)}
-		}
-		return wrapStoreWithBeadPolicies(store, cfg)
 	}
 	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:                   scopeRoot,
@@ -696,7 +714,10 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// reload instead of writing to the old sink until the controller restarts.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	// Reopen city-level store for session beads and mail.
-	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath)
+	// Reopen carries the BOOT-latched mode: re-resolving from the (possibly
+	// edited) on-disk config here would flip the city store's write
+	// discipline mid-process while rig stores keep the boot mode.
+	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -912,6 +933,30 @@ func (cs *controllerState) noteRolloutDrift(next *config.City) {
 		return
 	}
 	cs.rolloutWarnf("%s", logLine)
+}
+
+// preflightConditionalWrites probes every controller-owned store's
+// conditional-write resolution eagerly at boot. Under require this converts
+// "starts healthy, refuses on the first fenced write" into a loud startup
+// ERROR line per incapable store; under auto the resolve itself fires the
+// once-latched degrade surface. Reads stay functional either way — fenced
+// writes fail closed per-operation, which is the contract.
+func (cs *controllerState) preflightConditionalWrites() {
+	if cs.rolloutFlags.BeadsConditionalWrites() != rollout.Require {
+		return
+	}
+	probe := func(name string, store beads.Store) {
+		if store == nil {
+			return
+		}
+		if _, _, err := beads.ResolveConditionalWriter(store); err != nil {
+			cs.rolloutWarnf("api: rollout: ERROR: conditional_writes=require but store %s cannot fence: %v\n", name, err)
+		}
+	}
+	for rigName, store := range cs.beadStores {
+		probe("rig/"+rigName, store)
+	}
+	probe("city", cs.cityBeadStore)
 }
 
 // rolloutWarnf routes noteRolloutDrift's transition lines to the injected sink

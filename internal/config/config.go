@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/remotesource"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -1383,12 +1384,10 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
-	// ConditionalWrites selects the bead-write discipline (the rollout gate keyed
-	// "beads.conditional_writes"; see internal/rollout): "off" (legacy,
-	// byte-identical), "auto" (compare-and-swap where the store is capable, loud
-	// degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to
-	// "off". The string is validated and mapped to a rollout.Mode in
-	// internal/rollout — never here, which would be an import cycle.
+	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
+	// byte-identical), "auto" (compare-and-swap where the store is capable,
+	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
+	// defaults to "off". Any other value fails config load.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
@@ -4397,7 +4396,25 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateConditionalWrites rejects an out-of-enum beads.conditional_writes
+// value at load time. This gate selects a correctness discipline: a typo like
+// "requre" silently meaning "off" would leave an operator believing the epoch
+// fence is enforced while every write runs unfenced, so the config fails to
+// load instead. The empty string (unset) is valid and defaults to off.
+func validateConditionalWrites(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

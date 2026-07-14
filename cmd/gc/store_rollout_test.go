@@ -30,12 +30,16 @@ func TestResolvedConditionalWritesMode(t *testing.T) {
 		}
 	})
 	t.Run("resolve error degrades to unset, never raises", func(t *testing.T) {
-		cfg, err := config.Parse([]byte("[beads]\nconditional_writes = \"requre\"\n")) // out-of-enum
-		if err != nil {
-			t.Fatal(err)
-		}
+		// config.Parse rejects the typo at load now; this defensive cell
+		// covers an invalid value arriving through a non-Parse construction.
+		cfg := &config.City{Beads: config.BeadsConfig{ConditionalWrites: "requre"}}
 		if got := resolvedConditionalWritesMode(cfg); got != gate.ModeUnset {
 			t.Fatalf("mode = %q, want unset (best-effort open paths cannot honor an invalid value)", got)
+		}
+	})
+	t.Run("out-of-enum config fails to load at all", func(t *testing.T) {
+		if _, err := config.Parse([]byte("[beads]\nconditional_writes = \"requre\"\n")); err == nil {
+			t.Fatal("config.Parse accepted an out-of-enum conditional_writes — a typo must never silently mean off")
 		}
 	})
 }
@@ -158,4 +162,23 @@ func TestConditionalWritesDegradedRecorder(t *testing.T) {
 			t.Fatalf("payload = %+v, want wire vocabulary (bd) + origin config", payload)
 		}
 	})
+}
+
+// TestConditionalWritesEventStoreKind pins the internal→wire vocabulary map,
+// including the build-tagged DoltliteReadStore, which beads cannot name and
+// therefore reaches this layer as its %T spelling.
+func TestConditionalWritesEventStoreKind(t *testing.T) {
+	for in, want := range map[string]string{
+		beads.BeadsStoreNameBdStore:         "bd",
+		beads.BeadsStoreNameNativeDoltStore: "native",
+		beads.BeadsStoreNameFileStore:       "file",
+		"MemStore":                          "mem",
+		"CachingStore":                      "caching",
+		"*beads.DoltliteReadStore":          "bd",
+		"someFutureStore":                   "someFutureStore",
+	} {
+		if got := conditionalWritesEventStoreKind(in); got != want {
+			t.Errorf("conditionalWritesEventStoreKind(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

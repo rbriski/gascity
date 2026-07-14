@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -393,11 +394,16 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 }
 
 // UpdateIfMatch applies opts to id only if the bead's revision still equals
-// expectedRevision, via bd update --if-revision. An empty opts is the same no-op
-// Update performs (bd rejects an empty update) and returns nil without a fenced
-// write. If this store cannot fence, it returns ErrConditionalWriteUnsupported
-// rather than falling through to an unconditional write.
+// expectedRevision, via bd update --if-revision. An empty opts is invalid
+// input (ErrEmptyConditionalUpdate) on every ConditionalWriter — bd cannot
+// even express an empty fenced update, so a silent nil here would diverge
+// from the stores that can. If this store cannot fence, it returns
+// ErrConditionalWriteUnsupported rather than falling through to an
+// unconditional write.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if isEmptyUpdateOpts(opts) {
+		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
+	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
@@ -560,9 +566,15 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 			return true, nil
 		case IsPreconditionFailed(err):
 			// The revision moved under us; re-read and re-check the value next
-			// lap. The value never mismatched, so exhaustion is a transient, not
-			// a loss.
+			// lap. On the final lap, one more read distinguishes the outcomes
+			// before the exhaustion verdict: the interfering write may have
+			// been a competitor landing on OUR key, which is a genuine value
+			// loss ((false, nil)) — misreporting it as exhaustion would make
+			// the caller re-enter a race it already definitively lost.
 			if attempt >= casEmulationMaxAttempts {
+				if final, readErr := s.Get(id); readErr == nil && final.Metadata[key] != expected {
+					return false, nil
+				}
 				return false, &CASRetriesExhaustedError{
 					ID: id, Key: key, Attempts: attempt, LastRevision: b.Revision,
 				}

@@ -3,12 +3,14 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -300,5 +302,71 @@ func TestSyncControlEpochToAttemptCASNeverRegresses(t *testing.T) {
 	updated, _ := store.Get(control.ID)
 	if got := updated.Metadata[beadmeta.ControlEpochMetadataKey]; got != "3" {
 		t.Fatalf("epoch = %q, want 3", got)
+	}
+}
+
+func TestRetryableDrainReservationErrorClassification(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{"genuine competing owner is terminal", drainReservationError{ControlID: "a", MemberID: "m", Owner: "b"}, false},
+		{"require refusal is terminal fail-closed", &beads.ConditionalWritesRequiredError{StoreKind: "BdStore", Reason: "r"}, false},
+		{"CAS exhaustion re-enters", &beads.CASRetriesExhaustedError{ID: "m", Key: "k", Attempts: 4}, true},
+		{"runtime unsupported latch re-enters (next resolve degrades)", beads.ErrConditionalWriteUnsupported, true},
+		{"transport transient re-enters", errors.New("dial tcp: i/o timeout"), true},
+		{"plain store error stays terminal (pre-fence behavior)", errors.New("corrupt manifest"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryableDrainReservationError(tc.err); got != tc.retryable {
+				t.Fatalf("retryable(%v) = %v, want %v", tc.err, got, tc.retryable)
+			}
+		})
+	}
+}
+
+// TestFenceLossClassifiesTransientAndKeepsControlOpen pins the CRITICAL
+// review finding: a routine CAS-last fence loser (molecule.ErrEpochConflict)
+// must be a retryable convergence signal — classified transient by
+// markControllerSpawnError with the control left OPEN — never routed into
+// the partial-attach hard path that terminally closes the shared control and
+// makes the promised next-pass convergence impossible.
+func TestFenceLossClassifiesTransientAndKeepsControlOpen(t *testing.T) {
+	store := newStampedDrainStore(t, gate.Auto)
+	control, err := store.Create(beads.Bead{Title: "control"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fenceLoss := markTransientControllerBoundaryError(
+		fmt.Errorf("attach epoch conflict on %s attempt 2 (fence lost; converging next pass): %w", control.ID, molecule.ErrEpochConflict))
+	if !IsTransientControllerError(fenceLoss) {
+		t.Fatal("fence-loss error not classified transient")
+	}
+	if retryable := markControllerSpawnError(store, control.ID, fenceLoss, ProcessOptions{}); !retryable {
+		t.Fatal("markControllerSpawnError treated the fence loss as hard")
+	}
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status == "closed" {
+		t.Fatal("control was closed on a routine fence loss — convergence impossible")
+	}
+	if after.Metadata[beadmeta.ControllerRetryableMetadataKey] != "true" {
+		t.Fatalf("control not marked retryable: %+v", after.Metadata)
+	}
+
+	// The typed CAS contention classes re-enter too.
+	if !IsTransientControllerError(&beads.CASRetriesExhaustedError{ID: "x", Key: "k", Attempts: 4}) {
+		t.Fatal("CAS exhaustion not transient")
+	}
+	if !IsTransientControllerError(fmt.Errorf("wrapped: %w", beads.ErrConditionalWriteUnsupported)) {
+		t.Fatal("runtime unsupported latch not transient")
+	}
+	if IsTransientControllerError(&beads.ConditionalWritesRequiredError{StoreKind: "BdStore", Reason: "r"}) {
+		t.Fatal("require refusal must stay hard/fail-closed")
 	}
 }

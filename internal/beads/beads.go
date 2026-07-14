@@ -185,6 +185,20 @@ type ConditionalWriter interface {
 	CompareAndSetMetadataKey(id, key, expected, next string) (bool, error)
 }
 
+// ErrEmptyConditionalUpdate reports an UpdateIfMatch with no fields to apply.
+// The three in-tree implementations diverged here (bd cannot express an empty
+// fenced update; the native stores validated-and-bumped), so the contract is
+// pinned as invalid input: an empty fenced update neither evaluates the fence
+// nor bumps the revision on ANY store.
+var ErrEmptyConditionalUpdate = errors.New("conditional update: empty UpdateOpts (nothing to apply)")
+
+// isEmptyUpdateOpts reports whether opts carries no mutation at all.
+func isEmptyUpdateOpts(o UpdateOpts) bool {
+	return o.Title == nil && o.Status == nil && o.Type == nil && o.Priority == nil &&
+		o.Description == nil && o.ParentID == nil && o.Assignee == nil &&
+		len(o.Labels) == 0 && len(o.RemoveLabels) == 0 && len(o.Metadata) == 0
+}
+
 // ConditionalWriterHandleProvider exposes a conditional-write handle for stores
 // whose capability depends on wrapped runtime state.
 type ConditionalWriterHandleProvider interface {

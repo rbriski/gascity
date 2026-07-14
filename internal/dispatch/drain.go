@@ -114,6 +114,9 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		return advanceSharedDrain(store, bead, manifest, members, itemFormula, parentVars, opts)
 	}
 	if err := reserveDrainMembers(store, bead, members, opts); err != nil {
+		if retryableDrainReservationError(err) {
+			return ControlResult{}, fmt.Errorf("%s: reserving drain members (retrying next pass): %w", bead.ID, err)
+		}
 		return closeDrainReservationFailure(store, bead, manifest, err, opts)
 	}
 
@@ -514,6 +517,9 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		}
 		member := members[i]
 		if err := reserveDrainMember(store, bead, member, opts); err != nil {
+			if retryableDrainReservationError(err) {
+				return ControlResult{}, fmt.Errorf("%s: reserving drain member %s (retrying next pass): %w", bead.ID, member.ID, err)
+			}
 			return closeDrainReservationFailure(store, bead, manifest, err, opts)
 		}
 		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
@@ -1393,6 +1399,25 @@ func releaseDrainReservation(memberStore beads.Store, controlID, memberID string
 		return nil
 	}
 	return fmt.Errorf("%s: releasing drain reservation on %s: %w", controlID, memberID, casErr)
+}
+
+// retryableDrainReservationError reports whether a reservation failure is a
+// level-triggered re-entry class rather than a terminal drain disposition.
+// Conditional-write contention (bounded-CAS exhaustion), a runtime capability
+// latch (the next resolve degrades under auto), and transport-transient store
+// errors all heal on a later pass. A genuine competing owner
+// (drainReservationError) and a require-mode policy refusal stay terminal —
+// the first is the drain's designed skip/fail outcome, the second is
+// fail-closed by contract.
+func retryableDrainReservationError(err error) bool {
+	var re drainReservationError
+	if errors.As(err, &re) {
+		return false
+	}
+	if beads.IsConditionalWritesRequired(err) {
+		return false
+	}
+	return beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) || IsTransientControllerError(err)
 }
 
 func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {

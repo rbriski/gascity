@@ -612,23 +612,6 @@ type CompiledRoute struct {
 	Definition Route
 }
 
-// ProfileDiscovery records one completed analyzer run, including the valid
-// zero-site result.
-type ProfileDiscovery struct {
-	Profile BuildProfileID
-	Sites   []ObservedSite
-}
-
-// DiscoveryResult is the analyzer evidence reconciled by CompileRegistry.
-// BoundaryDigest binds observations to the exact discovery vocabulary used to
-// produce them; Profiles must contain every canonical analysis profile once.
-// Production gates must construct this from the analyzer rather than from
-// catalog-derived observations.
-type DiscoveryResult struct {
-	BoundaryDigest string
-	Profiles       []ProfileDiscovery
-}
-
 type fencePolicy struct {
 	Scope                  FenceScope
 	SerializesSameIdentity bool
@@ -666,7 +649,8 @@ func CompileRegistry(registry Registry, discovery DiscoveryResult, asOf time.Tim
 
 	boundaries := validateBoundaries(registry.Boundaries, &problems)
 	registrations := validateRegistrations(registry.Registrations, boundaries, asOf, validDate, &problems)
-	reconcileDiscovery(registrations, discovery, deriveBoundaryDigest(registry.Boundaries), boundaries, &problems)
+	validateDiscoveryEvidence(discovery, deriveBoundaryDigest(registry.Boundaries), &problems)
+	reconcileDiscovery(registrations, discovery, boundaries, &problems)
 
 	if len(problems) == 0 {
 		return compileValidatedRegistry(registry.Boundaries, registrations), nil
@@ -865,11 +849,8 @@ func validateStoreDomain(domain StoreDomain, boundaryKind EffectKind, scope stri
 	}
 }
 
-func reconcileDiscovery(registrations []validatedRegistration, discovery DiscoveryResult, expectedBoundaryDigest string, boundaries map[string]BoundaryDefinition, problems *[]string) {
-	if discovery.BoundaryDigest != expectedBoundaryDigest {
-		*problems = append(*problems, fmt.Sprintf("discovery boundary digest %q does not match registry digest %q", discovery.BoundaryDigest, expectedBoundaryDigest))
-	}
-	observed := validateDiscoveryProfiles(discovery.Profiles, problems)
+func reconcileDiscovery(registrations []validatedRegistration, discovery DiscoveryResult, boundaries map[string]BoundaryDefinition, problems *[]string) {
+	observed := validateDiscoveryProfiles(discovery.profiles, problems)
 	registrationsByPhysical := make(map[string][]validatedRegistration, len(registrations))
 	classificationCounts := make(map[string]int)
 	for _, registration := range registrations {
@@ -932,7 +913,7 @@ func reconcileDiscovery(registrations []validatedRegistration, discovery Discove
 	}
 }
 
-func validateDiscoveryProfiles(discovery []ProfileDiscovery, problems *[]string) []ObservedSite {
+func validateDiscoveryProfiles(discovery []profileDiscovery, problems *[]string) []ObservedSite {
 	expected := make(map[BuildProfileID]bool)
 	for _, profile := range canonicalAnalysisProfiles() {
 		expected[profile.ID] = true
@@ -940,19 +921,19 @@ func validateDiscoveryProfiles(discovery []ProfileDiscovery, problems *[]string)
 	counts := make(map[BuildProfileID]int, len(discovery))
 	var observed []ObservedSite
 	for _, result := range discovery {
-		scope := fmt.Sprintf("discovery profile %q", result.Profile)
-		counts[result.Profile]++
-		if !expected[result.Profile] {
+		scope := fmt.Sprintf("discovery profile %q", result.profile)
+		counts[result.profile]++
+		if !expected[result.profile] {
 			addProblem(problems, scope, "is not a canonical analysis profile")
 		}
-		if counts[result.Profile] == 2 {
+		if counts[result.profile] == 2 {
 			addProblem(problems, scope, "duplicate discovery profile")
 		}
-		for _, site := range result.Sites {
-			if site.Profile != result.Profile {
+		for _, site := range result.sites {
+			if site.Profile != result.profile {
 				addProblem(problems, scope, "contains site labeled with build profile %q", site.Profile)
 			}
-			site.Profile = result.Profile
+			site.Profile = result.profile
 			observed = append(observed, site)
 		}
 	}

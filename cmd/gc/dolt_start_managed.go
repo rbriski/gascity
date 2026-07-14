@@ -1244,7 +1244,10 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 	if parentPipe == nil {
 		return nil, nil, fmt.Errorf("open parent pipe fd %d", fd)
 	}
-	syscall.CloseOnExec(fd)
+	if err := makeManagedDoltParentPipeNonInheritable(parentPipe); err != nil {
+		_ = parentPipe.Close()
+		return nil, nil, fmt.Errorf("protect parent pipe fd %d from child inheritance: %w", fd, err)
+	}
 	done := make(chan struct{})
 	go func() {
 		var buf [1]byte

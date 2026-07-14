@@ -208,6 +208,14 @@ func validateTargetIdentityRef(identity TargetIdentityRef, signature TargetSigna
 	}
 
 	switch signature {
+	case TargetSignatureDirect:
+		if identity.Role == TargetRolePrimary && !oneOf(identity.BoundarySlot.Kind, SlotReceiver, SlotParameter) {
+			addProblem(problems, identityScope, "direct target identity must use a receiver or parameter slot")
+		}
+	case TargetSignatureBatch:
+		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotParameter {
+			addProblem(problems, identityScope, "batch target identity must use a parameter slot")
+		}
 	case TargetSignatureChannel:
 		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotBoundaryObject {
 			addProblem(problems, identityScope, "channel target identity must use the registered boundary object")

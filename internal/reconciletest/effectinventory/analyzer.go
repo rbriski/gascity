@@ -53,6 +53,7 @@ type loadedAnalysis struct {
 	selectOps     map[token.Pos]OperationKind
 	receivers     map[token.Pos]types.Type
 	initReachable map[*ssa.Function]bool
+	channelInputs map[ssa.Value]map[string]bool
 }
 
 type resolvedBoundary struct {
@@ -79,9 +80,10 @@ func discoverProfile(ctx context.Context, config analysisConfig, profile analysi
 	if err != nil {
 		return nil, err
 	}
+	inputProblems := analysis.indexChannelInputBoundaries(boundaries)
 
 	var observed []observedCall
-	var problems []string
+	problems := append([]string(nil), inputProblems...)
 	for function := range analysis.sourceFuncs {
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {

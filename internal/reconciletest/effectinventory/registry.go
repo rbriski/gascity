@@ -312,13 +312,15 @@ type OperationSite struct {
 }
 
 // BoundaryDefinition is a closed discovery seed for the analyzer. For channel
-// matching, a zero Output means Object itself must have channel type; a
-// function or method result always names its explicit one-based result slot.
+// matching, zero Input and Output mean Object itself must have channel type.
+// A channel-producing function parameter or result names its explicit
+// one-based slot; Input and Output are mutually exclusive.
 type BoundaryDefinition struct {
 	ID     string
 	Kind   EffectKind
 	Object ObjectRef
 	Match  ObjectMatchKind
+	Input  ValueSlot
 	Output ValueSlot
 }
 
@@ -501,11 +503,22 @@ func validateBoundaries(definitions []BoundaryDefinition, problems *[]string) ma
 			addProblem(problems, scope, "channel boundary must be a wake source")
 		}
 		if boundary.Match == ObjectMatchChannel {
+			if !boundary.Input.zero() && !boundary.Output.zero() {
+				addProblem(problems, scope, "channel boundary cannot name both input and output slots")
+			}
+			if !boundary.Input.zero() {
+				validateExactSlot(boundary.Input, SlotParameter, scope+" channel input", problems)
+			}
 			if !boundary.Output.zero() {
 				validateExactSlot(boundary.Output, SlotResult, scope+" channel output", problems)
 			}
-		} else if !boundary.Output.zero() {
-			addProblem(problems, scope, "non-channel boundary cannot name an output slot")
+		} else {
+			if !boundary.Input.zero() {
+				addProblem(problems, scope, "non-channel boundary cannot name an input slot")
+			}
+			if !boundary.Output.zero() {
+				addProblem(problems, scope, "non-channel boundary cannot name an output slot")
+			}
 		}
 		if previous, exists := byID[boundary.ID]; exists {
 			addProblem(problems, scope, "duplicate boundary id %q (first object %s)", boundary.ID, previous.Object.key())

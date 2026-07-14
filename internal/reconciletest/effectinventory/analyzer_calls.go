@@ -131,7 +131,10 @@ func resolveObject(pkg *types.Package, reference ObjectRef) (types.Object, error
 }
 
 func validateChannelBoundaryObject(boundary *resolvedBoundary) error {
-	if boundary.definition.Output.zero() {
+	if !boundary.definition.Input.zero() && !boundary.definition.Output.zero() {
+		return fmt.Errorf("object %s cannot name both channel input and output slots", boundary.definition.Object.key())
+	}
+	if boundary.definition.Input.zero() && boundary.definition.Output.zero() {
 		if _, ok := types.Unalias(boundary.object.Type()).Underlying().(*types.Chan); !ok {
 			return fmt.Errorf("object %s does not have channel type", boundary.definition.Object.key())
 		}
@@ -144,6 +147,17 @@ func validateChannelBoundaryObject(boundary *resolvedBoundary) error {
 	signature, ok := boundary.function.Type().(*types.Signature)
 	if !ok {
 		return fmt.Errorf("object %s has no function signature", boundary.definition.Object.key())
+	}
+	if !boundary.definition.Input.zero() {
+		index := boundary.definition.Input.Index - 1
+		if boundary.definition.Input.Kind != SlotParameter || index < 0 || index >= signature.Params().Len() {
+			return fmt.Errorf("object %s has no parameter slot %d", boundary.definition.Object.key(), boundary.definition.Input.Index)
+		}
+		if _, ok := types.Unalias(signature.Params().At(index).Type()).Underlying().(*types.Chan); !ok {
+			return fmt.Errorf("object %s parameter %d does not have channel type", boundary.definition.Object.key(), boundary.definition.Input.Index)
+		}
+		boundary.channel = signature.Params().At(index).Type()
+		return nil
 	}
 	index := boundary.definition.Output.Index - 1
 	if boundary.definition.Output.Kind != SlotResult || index < 0 || index >= signature.Results().Len() {

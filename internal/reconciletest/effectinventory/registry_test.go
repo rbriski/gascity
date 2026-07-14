@@ -90,7 +90,14 @@ func TestValidateRegistryRejectsBoundaryDrift(t *testing.T) {
 			r.Boundaries = append(r.Boundaries, extra)
 		}, "duplicates boundary object"},
 		{"interface dispatch without receiver", func(r *Registry) { r.Boundaries[0].Object.Receiver = "" }, "interface boundary requires a receiver"},
+		{"non-channel input", func(r *Registry) { r.Boundaries[0].Input = ValueSlot{Kind: SlotParameter, Index: 1} }, "non-channel boundary cannot name an input slot"},
 		{"non-channel output", func(r *Registry) { r.Boundaries[0].Output = ValueSlot{Kind: SlotResult, Index: 1} }, "non-channel boundary cannot name an output slot"},
+		{"channel input and output", func(r *Registry) {
+			r.Boundaries[0].Kind = KindWakeSource
+			r.Boundaries[0].Match = ObjectMatchChannel
+			r.Boundaries[0].Input = ValueSlot{Kind: SlotParameter, Index: 1}
+			r.Boundaries[0].Output = ValueSlot{Kind: SlotResult, Index: 1}
+		}, "channel boundary cannot name both input and output slots"},
 	}
 
 	for _, tt := range tests {

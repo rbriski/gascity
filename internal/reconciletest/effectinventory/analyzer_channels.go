@@ -146,6 +146,7 @@ type channelProvenance struct {
 	matches   map[string]bool
 	openWorld bool
 	unsafe    bool
+	grounded  bool
 }
 
 func newChannelProvenance() channelProvenance {
@@ -158,6 +159,7 @@ func (provenance *channelProvenance) merge(other channelProvenance) {
 	}
 	provenance.openWorld = provenance.openWorld || other.openWorld
 	provenance.unsafe = provenance.unsafe || other.unsafe
+	provenance.grounded = provenance.grounded || other.grounded
 }
 
 func (provenance channelProvenance) sortedMatches() []string {
@@ -205,6 +207,112 @@ func channelLike(value types.Type) bool {
 	return ok
 }
 
+func (analysis *loadedAnalysis) indexChannelInputBoundaries(boundaries []resolvedBoundary) []string {
+	analysis.channelInputs = make(map[ssa.Value]map[string]bool)
+	var problems []string
+	for function := range analysis.sourceFuncs {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || !call.Pos().IsValid() {
+					continue
+				}
+				callees := resolvedCallees(analysis.callGraph, function, call)
+				for _, boundary := range boundaries {
+					if boundary.definition.Match != ObjectMatchChannel || boundary.definition.Input.zero() {
+						continue
+					}
+					matches, ambiguous := analysis.callMatchesChannelInputBoundary(call, callees, boundary)
+					if !matches {
+						continue
+					}
+					ref, err := analysis.functionRef(function, call.Pos())
+					if err != nil {
+						problems = append(problems, err.Error())
+						continue
+					}
+					if ambiguous {
+						problems = append(problems, fmt.Sprintf("%s: channel input boundary %s has ambiguous call provenance", ref.key(), boundary.definition.ID))
+						continue
+					}
+					argument, ok := channelInputArgument(call.Common(), boundary)
+					if !ok {
+						problems = append(problems, fmt.Sprintf("%s: channel input boundary %s has no bindable parameter %d", ref.key(), boundary.definition.ID, boundary.definition.Input.Index))
+						continue
+					}
+					analysis.indexChannelInputValue(argument, boundary.definition.ID, make(map[ssa.Value]bool))
+				}
+			}
+		}
+	}
+	return problems
+}
+
+func (analysis *loadedAnalysis) indexChannelInputValue(value ssa.Value, boundaryID string, visiting map[ssa.Value]bool) {
+	if value == nil || visiting[value] {
+		return
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	if analysis.channelInputs[value] == nil {
+		analysis.channelInputs[value] = make(map[string]bool)
+	}
+	analysis.channelInputs[value][boundaryID] = true
+
+	index := func(candidate ssa.Value) {
+		analysis.indexChannelInputValue(candidate, boundaryID, visiting)
+	}
+	switch value := value.(type) {
+	case *ssa.ChangeType:
+		index(value.X)
+	case *ssa.Convert:
+		index(value.X)
+	}
+}
+
+func (analysis *loadedAnalysis) callMatchesChannelInputBoundary(call ssa.CallInstruction, callees []*ssa.Function, boundary resolvedBoundary) (bool, bool) {
+	common := call.Common()
+	if static := common.StaticCallee(); static != nil {
+		return ssaFunctionMatchesBoundary(static, boundary, analysis.effectiveReceiverTypes(call)), false
+	}
+	if common.Method != nil && functionMatchesBoundary(common.Method, boundary) {
+		return true, false
+	}
+
+	matched := false
+	unmatched := false
+	for _, callee := range callees {
+		if calleeMatchesBoundary(callee, boundary, analysis.callGraph, analysis.effectiveReceiverTypes(call), make(map[*ssa.Function]bool)) {
+			matched = true
+		} else {
+			unmatched = true
+		}
+	}
+	if !matched {
+		return false, false
+	}
+	openWorld := len(callees) == 0 || callHasOpenWorldSyntheticDispatch(common) || hasOpenWorldFunctionSource(common.Value, make(map[ssa.Value]bool))
+	return true, unmatched || openWorld
+}
+
+func channelInputArgument(common *ssa.CallCommon, boundary resolvedBoundary) (ssa.Value, bool) {
+	index := boundary.definition.Input.Index - 1
+	if index < 0 || boundary.function == nil {
+		return nil, false
+	}
+	boundarySignature, _ := boundary.function.Type().(*types.Signature)
+	if boundarySignature == nil {
+		return nil, false
+	}
+	if boundarySignature.Recv() != nil && !common.IsInvoke() {
+		index++
+	}
+	if index < 0 || index >= len(common.Args) {
+		return nil, false
+	}
+	return common.Args[index], true
+}
+
 func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
 	provenance := newChannelProvenance()
 	if value == nil {
@@ -218,12 +326,16 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 	visiting[value] = true
 	defer delete(visiting, value)
 
+	for boundaryID := range analysis.channelInputs[value] {
+		provenance.matches[boundaryID] = true
+	}
 	for _, boundary := range boundaries {
-		if boundary.definition.Match == ObjectMatchChannel && boundary.definition.Output.zero() && channelValueObject(value) == boundary.object {
+		if boundary.definition.Match == ObjectMatchChannel && boundary.definition.Input.zero() && boundary.definition.Output.zero() && channelValueObject(value) == boundary.object {
 			provenance.matches[boundary.definition.ID] = true
 		}
 	}
 	if len(provenance.matches) != 0 {
+		provenance.grounded = true
 		provenance.unsafe = channelValueHasUnsafeAncestry(value, make(map[ssa.Value]bool))
 		return provenance
 	}
@@ -233,10 +345,14 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 	}
 	switch value := value.(type) {
 	case *ssa.Parameter:
-		if actual := bindings[value]; actual != nil {
-			mergeValue(actual)
+		if bindings != nil {
+			if actual, bound := bindings[value]; bound && actual != nil {
+				mergeValue(actual)
+			} else {
+				provenance.openWorld = true
+			}
 		} else {
-			provenance.openWorld = true
+			provenance.merge(analysis.traceChannelParameter(value, boundaries, visiting))
 		}
 	case *ssa.FreeVar:
 		provenance.merge(analysis.traceChannelFreeVar(value, boundaries, bindings, visiting))
@@ -244,6 +360,7 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 		provenance.openWorld = true
 	case *ssa.MakeChan, *ssa.Const:
 		// Locally created channels and nil are closed-world non-boundaries.
+		provenance.grounded = true
 	case *ssa.UnOp:
 		mergeValue(value.X)
 	case *ssa.FieldAddr:
@@ -288,6 +405,79 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 	return provenance
 }
 
+func (analysis *loadedAnalysis) traceChannelParameter(parameter *ssa.Parameter, boundaries []resolvedBoundary, visiting map[ssa.Value]bool) channelProvenance {
+	provenance := newChannelProvenance()
+	function := parameter.Parent()
+	if function == nil {
+		provenance.openWorld = true
+		return provenance
+	}
+	parameterIndex := -1
+	for index, candidate := range function.Params {
+		if candidate == parameter {
+			parameterIndex = index
+			break
+		}
+	}
+	if parameterIndex < 0 {
+		provenance.openWorld = true
+		return provenance
+	}
+
+	node := analysis.callGraph.Nodes[function]
+	if node == nil || len(node.In) == 0 {
+		provenance.openWorld = true
+		return provenance
+	}
+	foundBinding := false
+	for _, edge := range node.In {
+		if edge == nil || edge.Caller == nil || edge.Caller.Func == nil || edge.Site == nil || !analysis.authoredSourceFunction(edge.Caller.Func) {
+			provenance.openWorld = true
+			continue
+		}
+		actual, ok := channelParameterActual(edge.Site.Common(), function, parameterIndex)
+		if !ok {
+			provenance.openWorld = true
+			continue
+		}
+		foundBinding = true
+		provenance.merge(analysis.traceChannel(actual, boundaries, nil, visiting))
+	}
+	if !foundBinding {
+		provenance.openWorld = true
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
+	}
+	return provenance
+}
+
+func (analysis *loadedAnalysis) authoredSourceFunction(function *ssa.Function) bool {
+	if function == nil {
+		return false
+	}
+	if analysis.sourceFuncs[function] {
+		return true
+	}
+	return function.Origin() != nil && analysis.sourceFuncs[function.Origin()]
+}
+
+func channelParameterActual(common *ssa.CallCommon, callee *ssa.Function, parameterIndex int) (ssa.Value, bool) {
+	if common == nil || callee == nil || parameterIndex < 0 {
+		return nil, false
+	}
+	if common.IsInvoke() && callee.Signature.Recv() != nil {
+		if parameterIndex == 0 {
+			return common.Value, common.Value != nil
+		}
+		parameterIndex--
+	}
+	if parameterIndex < 0 || parameterIndex >= len(common.Args) {
+		return nil, false
+	}
+	return common.Args[parameterIndex], true
+}
+
 func (analysis *loadedAnalysis) traceChannelFreeVar(freeVariable *ssa.FreeVar, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
 	provenance := newChannelProvenance()
 	owner := freeVariable.Parent()
@@ -318,6 +508,9 @@ func (analysis *loadedAnalysis) traceChannelFreeVar(freeVariable *ssa.FreeVar, b
 		}
 	}
 	if !foundBinding {
+		provenance.openWorld = true
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
 		provenance.openWorld = true
 	}
 	return provenance
@@ -421,18 +614,24 @@ func (analysis *loadedAnalysis) traceChannelField(base ssa.Value, field int, bou
 	}
 	if !foundStore {
 		// A zero-valued local field is a closed-world nil channel.
+		provenance.grounded = true
 		return provenance
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
 	}
 	return provenance
 }
 
 func (analysis *loadedAnalysis) traceChannelStores(allocation *ssa.Alloc, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
 	provenance := newChannelProvenance()
+	foundStore := false
 	if references := allocation.Referrers(); references != nil {
 		for _, instruction := range *references {
 			switch instruction := instruction.(type) {
 			case *ssa.Store:
 				if instruction.Addr == allocation {
+					foundStore = true
 					provenance.merge(analysis.traceChannel(instruction.Val, boundaries, bindings, visiting))
 				}
 			case *ssa.UnOp, *ssa.DebugRef, *ssa.MakeClosure:
@@ -441,6 +640,12 @@ func (analysis *loadedAnalysis) traceChannelStores(allocation *ssa.Alloc, bounda
 				provenance.openWorld = true
 			}
 		}
+	}
+	if !foundStore {
+		provenance.grounded = true
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
 	}
 	return provenance
 }
@@ -455,6 +660,7 @@ func (analysis *loadedAnalysis) traceChannelCall(call *ssa.Call, resultIndex int
 		}
 	}
 	if authoritativeMatch {
+		provenance.grounded = true
 		return provenance
 	}
 	if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && isUnsafeBuiltin(builtin.Name()) {
@@ -499,6 +705,9 @@ func (analysis *loadedAnalysis) traceChannelCall(call *ssa.Call, resultIndex int
 		if !foundReturn {
 			provenance.openWorld = true
 		}
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
 	}
 	return provenance
 }

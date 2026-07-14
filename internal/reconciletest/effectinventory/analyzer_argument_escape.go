@@ -15,8 +15,9 @@ func (analysis *loadedAnalysis) unanalyzedBoundaryArgumentProblems(ref FunctionR
 	}
 
 	var problems []string
-	for _, argument := range call.Common().Args {
+	for argumentIndex, argument := range call.Common().Args {
 		matches := analysis.escapedArgumentBoundaries(argument, boundaries)
+		matches = removeBoundaryIDs(matches, analysis.consumedChannelInputBoundaries(call, callees, argumentIndex, boundaries))
 		if len(matches) == 0 {
 			continue
 		}
@@ -45,6 +46,41 @@ func (analysis *loadedAnalysis) unanalyzedBoundaryArgumentProblems(ref FunctionR
 		))
 	}
 	return problems
+}
+
+func (analysis *loadedAnalysis) consumedChannelInputBoundaries(call ssa.CallInstruction, callees []*ssa.Function, argumentIndex int, boundaries []resolvedBoundary) map[string]bool {
+	consumed := make(map[string]bool)
+	if argumentIndex < 0 || argumentIndex >= len(call.Common().Args) {
+		return consumed
+	}
+	argument := call.Common().Args[argumentIndex]
+	for _, boundary := range boundaries {
+		if boundary.definition.Match != ObjectMatchChannel || boundary.definition.Input.zero() {
+			continue
+		}
+		matches, ambiguous := analysis.callMatchesChannelInputBoundary(call, callees, boundary)
+		if !matches || ambiguous {
+			continue
+		}
+		input, ok := channelInputArgument(call.Common(), boundary)
+		if ok && input == argument {
+			consumed[boundary.definition.ID] = true
+		}
+	}
+	return consumed
+}
+
+func removeBoundaryIDs(boundaryIDs []string, removed map[string]bool) []string {
+	if len(boundaryIDs) == 0 || len(removed) == 0 {
+		return boundaryIDs
+	}
+	filtered := make([]string, 0, len(boundaryIDs))
+	for _, boundaryID := range boundaryIDs {
+		if !removed[boundaryID] {
+			filtered = append(filtered, boundaryID)
+		}
+	}
+	return filtered
 }
 
 func (analysis *loadedAnalysis) callLeavesAuthoredUniverse(call ssa.CallInstruction, callees []*ssa.Function) bool {

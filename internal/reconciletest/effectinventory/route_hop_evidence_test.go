@@ -14,15 +14,22 @@ const routeHopFixturePackage = fixtureModulePath + "/routehops"
 func TestValidateRouteHopEvidenceForProfileAcceptsExactVTAClosureGoAndDeferEdges(t *testing.T) {
 	analysis := loadRouteHopFixture(t)
 	leaf := routeHopFixtureRef("", "Leaf", "routehops.go", nil)
+	genericLeaf := routeHopFixtureRef("", "GenericLeaf", "routehops.go", nil)
 	closure := routeHopFixtureRef("", "ClosureOwner", "routehops.go", []int{1})
 	workerA := routeHopFixtureRef("WorkerA", "Run", "routehops.go", nil)
+	workerB := routeHopFixtureRef("WorkerB", "Run", "routehops.go", nil)
 
 	registry := Registry{Registrations: []SiteRegistration{
 		routeHopRegistration(leaf,
+			routeHopRoute(leaf),
 			routeHopRoute(routeHopFixtureRef("", "DuplicateOwner", "routehops.go", nil),
 				routeHop("DuplicateOwner", OperationCall, 1, HopDispatchExact, leaf)),
 			routeHopRoute(routeHopFixtureRef("", "DuplicateOwner", "routehops.go", nil),
 				routeHop("DuplicateOwner", OperationCall, 2, HopDispatchExact, leaf)),
+			routeHopRoute(routeHopFixtureRef("", "MixedDispatchOwner", "routehops.go", nil),
+				routeHop("MixedDispatchOwner", OperationCall, 1, HopDispatchExact, leaf)),
+			routeHopRoute(routeHopFixtureRef("", "MixedDispatchOwner", "routehops.go", nil),
+				routeHop("MixedDispatchOwner", OperationCall, 2, HopDispatchVTA, leaf)),
 			routeHopRoute(routeHopFixtureRef("", "ClosureOwner", "routehops.go", nil),
 				routeHop("ClosureOwner", OperationCall, 1, HopDispatchExact, closure),
 				RouteHop{Site: OperationSite{Operation: OperationCall, Enclosing: closure, Ordinal: 1}, Dispatch: HopDispatchExact, Callee: leaf}),
@@ -34,6 +41,57 @@ func TestValidateRouteHopEvidenceForProfileAcceptsExactVTAClosureGoAndDeferEdges
 		routeHopRegistration(workerA,
 			routeHopRoute(routeHopFixtureRef("", "InterfaceOwner", "routehops.go", nil),
 				routeHop("InterfaceOwner", OperationCall, 1, HopDispatchVTA, workerA)),
+			routeHopRoute(routeHopFixtureRef("", "GenericInterfaceOwner", "routehops.go", nil),
+				routeHop("GenericInterfaceOwner", OperationCall, 1, HopDispatchVTA, workerA)),
+		),
+		routeHopRegistration(workerB,
+			routeHopRoute(routeHopFixtureRef("", "InterfaceOwner", "routehops.go", nil),
+				routeHop("InterfaceOwner", OperationCall, 1, HopDispatchVTA, workerB)),
+			routeHopRoute(routeHopFixtureRef("", "GenericInterfaceOwner", "routehops.go", nil),
+				routeHop("GenericInterfaceOwner", OperationCall, 1, HopDispatchVTA, workerB)),
+		),
+		routeHopRegistration(genericLeaf,
+			routeHopRoute(routeHopFixtureRef("", "GenericOwner", "routehops.go", nil),
+				routeHop("GenericOwner", OperationCall, 1, HopDispatchExact, genericLeaf)),
+			routeHopRoute(routeHopFixtureRef("", "GenericDynamicOwner", "routehops.go", nil),
+				routeHop("GenericDynamicOwner", OperationCall, 1, HopDispatchVTA, genericLeaf)),
+		),
+	}}
+
+	if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
+		t.Fatalf("validateRouteHopEvidenceForProfile() error: %v", err)
+	}
+}
+
+func TestValidateRouteHopEvidenceForProfileNormalizesOnlyDispatchSyntheticWrappers(t *testing.T) {
+	analysis := loadRouteHopFixture(t)
+	workerA := routeHopFixtureRef("WorkerA", "Run", "routehops.go", nil)
+	workerB := routeHopFixtureRef("WorkerB", "Run", "routehops.go", nil)
+	pointerWorker := routeHopFixtureRef("PointerWorker", "Run", "routehops.go", nil)
+	registry := Registry{Registrations: []SiteRegistration{
+		routeHopRegistration(workerA,
+			routeHopRoute(routeHopFixtureRef("", "PromotedOwner", "routehops.go", nil),
+				routeHop("PromotedOwner", OperationCall, 1, HopDispatchExact, workerA)),
+			routeHopRoute(routeHopFixtureRef("", "BoundConcreteOwner", "routehops.go", nil),
+				routeHop("BoundConcreteOwner", OperationCall, 1, HopDispatchExact, workerA)),
+			routeHopRoute(routeHopFixtureRef("", "ConcreteExpressionOwner", "routehops.go", nil),
+				routeHop("ConcreteExpressionOwner", OperationCall, 1, HopDispatchExact, workerA)),
+			routeHopRoute(routeHopFixtureRef("", "BoundInterfaceOwner", "routehops.go", nil),
+				routeHop("BoundInterfaceOwner", OperationCall, 1, HopDispatchVTA, workerA)),
+			routeHopRoute(routeHopFixtureRef("", "InterfaceExpressionOwner", "routehops.go", nil),
+				routeHop("InterfaceExpressionOwner", OperationCall, 1, HopDispatchVTA, workerA)),
+		),
+		routeHopRegistration(workerB,
+			routeHopRoute(routeHopFixtureRef("", "BoundInterfaceOwner", "routehops.go", nil),
+				routeHop("BoundInterfaceOwner", OperationCall, 1, HopDispatchVTA, workerB)),
+			routeHopRoute(routeHopFixtureRef("", "InterfaceExpressionOwner", "routehops.go", nil),
+				routeHop("InterfaceExpressionOwner", OperationCall, 1, HopDispatchVTA, workerB)),
+		),
+		routeHopRegistration(pointerWorker,
+			routeHopRoute(routeHopFixtureRef("", "PointerAdaptOwner", "routehops.go", nil),
+				routeHop("PointerAdaptOwner", OperationCall, 1, HopDispatchExact, pointerWorker)),
+			routeHopRoute(routeHopFixtureRef("", "BoundPointerOwner", "routehops.go", nil),
+				routeHop("BoundPointerOwner", OperationCall, 1, HopDispatchExact, pointerWorker)),
 		),
 	}}
 
@@ -60,6 +118,13 @@ func TestValidateRouteHopEvidenceForProfileRejectsAdversarialClaims(t *testing.T
 				routeHopRoute(routeHopFixtureRef("", "MissingOwner", "routehops.go", nil)),
 			)}},
 			want: []string{"logical owner", "missing from loaded profile"},
+		},
+		{
+			name: "direct route owner mismatch",
+			registry: Registry{Registrations: []SiteRegistration{routeHopRegistration(leaf,
+				routeHopRoute(otherLeaf),
+			)}},
+			want: []string{"chain mismatch", "route without hops", "OtherLeaf", "Leaf"},
 		},
 		{
 			name: "stale closure path",
@@ -102,6 +167,14 @@ func TestValidateRouteHopEvidenceForProfileRejectsAdversarialClaims(t *testing.T
 					routeHop("DuplicateOwner", OperationCall, 1, HopDispatchExact, otherLeaf)),
 			)}},
 			want: []string{"hop[0]", "has no call edge to callee", "OtherLeaf"},
+		},
+		{
+			name: "authored intermediate is not collapsed",
+			registry: Registry{Registrations: []SiteRegistration{routeHopRegistration(leaf,
+				routeHopRoute(routeHopFixtureRef("", "ChainOwner", "routehops.go", nil),
+					routeHop("ChainOwner", OperationCall, 1, HopDispatchExact, leaf)),
+			)}},
+			want: []string{"hop[0]", "has no call edge to callee", "Leaf"},
 		},
 		{
 			name: "broken resolved chain",
@@ -216,7 +289,7 @@ func TestValidateRouteHopEvidenceForProfileDiagnosticsAreDeterministic(t *testin
 			t.Fatalf("diagnostics changed\n got:\n%s\nwant:\n%s", err, baseline)
 		}
 	}
-	lines := strings.Split(strings.TrimPrefix(baseline, `effect route-hop evidence failed for profile "linux/default":\n- `), "\n- ")
+	lines := strings.Split(strings.TrimPrefix(baseline, "effect route-hop evidence failed for profile \"linux/default\":\n- "), "\n- ")
 	sorted := append([]string(nil), lines...)
 	sort.Strings(sorted)
 	if !reflect.DeepEqual(lines, sorted) {

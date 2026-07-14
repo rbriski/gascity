@@ -89,6 +89,10 @@ func canonicalBoundaries() []BoundaryDefinition {
 		"CopyTo", "SendKeys", "RunLive")
 	addInterface("runtime.meta-store", KindProviderMutation, runtimePackage, "MetaStore", "SetMeta", "RemoveMeta")
 	addInterface("runtime.runtime", KindProviderMutation, runtimePackage, "Runtime", "Provision", "Teardown")
+	// Place.Exec is the typed outer arbitrary-command mutation. ExecProvider.Exec
+	// is intentionally absent: providers also use that inner connection for
+	// read-only ProcessAlive probes, while mutating calls enter through Provider,
+	// Place, Carrier, or Attachment.
 	addInterface("runtime.place", KindProviderMutation, runtimePackage, "Place", "Exec", "Stage", "Teardown")
 	addInterface("runtime.transport", KindProviderMutation, runtimePackage, "Transport", "Launch", "Attach")
 	addInterface("runtime.attachment", KindProviderMutation, runtimePackage, "Attachment",
@@ -96,7 +100,6 @@ func canonicalBoundaries() []BoundaryDefinition {
 	addInterface("runtime.carrier", KindProviderMutation, runtimePackage, "Carrier",
 		"Nudge", "SendKeys", "Interrupt", "ClearScrollback")
 	addInterface("runtime.interaction", KindProviderMutation, runtimePackage, "InteractionProvider", "Respond")
-	addInterface("runtime.exec-provider", KindProviderMutation, runtimePackage, "ExecProvider", "Exec")
 	addInterface("runtime.dialog", KindProviderMutation, runtimePackage, "DialogProvider", "DismissKnownDialogs")
 	addInterface("runtime.immediate-nudge", KindProviderMutation, runtimePackage, "ImmediateNudgeProvider", "NudgeNow")
 	addInterface("runtime.interrupted-turn-reset", KindProviderMutation, runtimePackage, "InterruptedTurnResetProvider", "ResetInterruptedTurn")

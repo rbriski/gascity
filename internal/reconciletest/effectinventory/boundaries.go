@@ -40,6 +40,32 @@ func canonicalBoundaries() []BoundaryDefinition {
 			})
 		}
 	}
+	addChannelField := func(id, packagePath, receiver, name string) {
+		definitions = append(definitions, BoundaryDefinition{
+			ID:     id,
+			Kind:   KindWakeSource,
+			Object: ObjectRef{Package: packagePath, Receiver: receiver, Name: name},
+			Match:  ObjectMatchChannel,
+		})
+	}
+	addChannelResult := func(id, packagePath, receiver, name string, result int) {
+		definitions = append(definitions, BoundaryDefinition{
+			ID:     id,
+			Kind:   KindWakeSource,
+			Object: ObjectRef{Package: packagePath, Receiver: receiver, Name: name},
+			Match:  ObjectMatchChannel,
+			Output: ValueSlot{Kind: SlotResult, Index: result},
+		})
+	}
+	addChannelInput := func(id, packagePath, receiver, name string, parameter int) {
+		definitions = append(definitions, BoundaryDefinition{
+			ID:     id,
+			Kind:   KindWakeSource,
+			Object: ObjectRef{Package: packagePath, Receiver: receiver, Name: name},
+			Match:  ObjectMatchChannel,
+			Input:  ValueSlot{Kind: SlotParameter, Index: parameter},
+		})
+	}
 
 	// Writer is the narrow canonical mutation handle. Store implements Writer,
 	// so registering Store's duplicate method set would classify one typed call
@@ -95,6 +121,20 @@ func canonicalBoundaries() []BoundaryDefinition {
 	// therefore explicit effect vehicles rather than an invisible scope hole.
 	addExact("workspacesvc.manager", KindProcessMutation, workspacesvcPackage, "Manager", "Reload", "Tick", "Close")
 	addInterface("workspacesvc.registry", KindProcessMutation, workspacesvcPackage, "Registry", "Restart")
+
+	// Controller channels are named at their owning fields so every producer
+	// and consumer shares one identity even when helpers pass the channel as a
+	// parameter. Standard timer, cancellation, and signal registrations cover
+	// the external/time-based wake inputs used throughout the four roots.
+	for _, field := range []string{"pokeCh", "controlDispatcherCh", "nudgeWakeCh", "convergenceReqCh", "reloadReqCh"} {
+		addChannelField("wake.city-runtime."+field, gcCommandPackage, "CityRuntime", field)
+	}
+	addChannelField("wake.tick-debouncer.fire", gcCommandPackage, "tickDebouncer", "fireCh")
+	addChannelField("wake.time.ticker", "time", "Ticker", "C")
+	addChannelField("wake.time.timer", "time", "Timer", "C")
+	addChannelResult("wake.time.after", "time", "", "After", 1)
+	addChannelResult("wake.context.done", "context", "Context", "Done", 1)
+	addChannelInput("wake.signal.notify", "os/signal", "", "Notify", 1)
 
 	return definitions
 }

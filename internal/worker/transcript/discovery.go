@@ -12,7 +12,7 @@ import (
 // transcript identifier that should be preferred over workdir-only discovery.
 func SupportsIDLookup(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
-	case "opencode", "mimocode":
+	case "codex", "gemini", "opencode", "mimocode":
 		return false
 	default:
 		return true

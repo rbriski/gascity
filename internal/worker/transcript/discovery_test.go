@@ -588,7 +588,7 @@ func TestSupportsIDLookup(t *testing.T) {
 		{provider: "codex/tmux-cli", want: false},
 		{provider: "auggie/tmux-cli", want: true},
 		{provider: "copilot/tmux-cli", want: true},
-		{provider: "gemini/tmux-cli", want: true},
+		{provider: "gemini/tmux-cli", want: false},
 		{provider: "grok/tmux-cli", want: true},
 		{provider: "kiro/tmux-cli", want: true},
 		{provider: "kimi/tmux-cli", want: true},

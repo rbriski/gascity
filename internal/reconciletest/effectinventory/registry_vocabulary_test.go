@@ -175,7 +175,6 @@ func TestValidateRegistryRejectsImpossibleOrIncompleteTargetSignatures(t *testin
 		{"wrong identity kind", func(target *TargetRef) { target.Identity = TargetIdentityGenerated }, `signature "direct" requires target identity "existing"`},
 		{"wrong target kind", func(target *TargetRef) { target.Kind = TargetControllerChannel }, `signature "direct" does not allow target kind "controller-channel"`},
 		{"duplicate identity role", func(target *TargetRef) { target.Identities = append(target.Identities, target.Identities[0]) }, `duplicate target identity role "primary"`},
-		{"missing detail", func(target *TargetRef) { target.Detail = "" }, "target detail is required"},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +397,134 @@ func TestStoreDomainIsAuthoredOnlyOnLogicalRoute(t *testing.T) {
 	}
 }
 
+func TestTargetDetailIsOptionalAndExcludedFromRouteIdentity(t *testing.T) {
+	withDetail := validRegistry()
+	withDetailID := compiledFixtureRouteID(t, withDetail)
+
+	withoutDetail := validRegistry()
+	firstRoute(&withoutDetail).Target.Detail = ""
+	withoutDetailID := compiledFixtureRouteID(t, withoutDetail)
+	if withoutDetailID != withDetailID {
+		t.Fatalf("route ID changed with non-semantic target detail: with=%q without=%q", withDetailID, withoutDetailID)
+	}
+}
+
+func TestValidateRegistryAcceptsCallbackDefinedStoreTransactionTarget(t *testing.T) {
+	registry := registryForTarget(KindStoreMutation, AccessStoreAdapter, StoreDomainMaintenance, transactionTarget())
+	setStoreBoundary(&registry, "beads.store.Tx", "Tx")
+
+	if err := validateRegistry(registry, validationDate()); err != nil {
+		t.Fatalf("ValidateRegistry() rejected callback-defined transaction target: %v", err)
+	}
+}
+
+func TestKnownStoreBoundariesRequireHonestTargetShape(t *testing.T) {
+	tests := []struct {
+		name        string
+		boundaryID  string
+		method      string
+		target      TargetRef
+		wrongTarget TargetRef
+		want        string
+	}{
+		{
+			name:        "Create",
+			boundaryID:  "beads.writer.Create",
+			method:      "Create",
+			target:      singleCreateTarget(),
+			wrongTarget: batchTarget(TargetCardinalityOne),
+			want:        `boundary "beads.writer.Create" requires target signature "single-create"`,
+		},
+		{
+			name:        "CreateWithStorage",
+			boundaryID:  "beads.storage-create.CreateWithStorage",
+			method:      "CreateWithStorage",
+			target:      singleCreateTarget(),
+			wrongTarget: batchTarget(TargetCardinalityOne),
+			want:        `boundary "beads.storage-create.CreateWithStorage" requires target signature "single-create"`,
+		},
+		{
+			name:        "SetMetadataBatch has one target",
+			boundaryID:  "beads.writer.SetMetadataBatch",
+			method:      "SetMetadataBatch",
+			target:      batchTarget(TargetCardinalityOne),
+			wrongTarget: batchTarget(TargetCardinalitySet),
+			want:        `boundary "beads.writer.SetMetadataBatch" requires target cardinality "one"`,
+		},
+		{
+			name:        "CloseAll has a target set",
+			boundaryID:  "beads.writer.CloseAll",
+			method:      "CloseAll",
+			target:      batchTarget(TargetCardinalitySet),
+			wrongTarget: batchTarget(TargetCardinalityOne),
+			want:        `boundary "beads.writer.CloseAll" requires target cardinality "set"`,
+		},
+		{
+			name:        "DeleteBatch has a target set",
+			boundaryID:  "beads.batch-delete.DeleteBatch",
+			method:      "DeleteBatch",
+			target:      batchTarget(TargetCardinalitySet),
+			wrongTarget: batchTarget(TargetCardinalityOne),
+			want:        `boundary "beads.batch-delete.DeleteBatch" requires target cardinality "set"`,
+		},
+		{
+			name:        "ApplyGraphPlan",
+			boundaryID:  "beads.graph-apply.ApplyGraphPlan",
+			method:      "ApplyGraphPlan",
+			target:      graphPlanTarget(),
+			wrongTarget: singleCreateTarget(),
+			want:        `boundary "beads.graph-apply.ApplyGraphPlan" requires target signature "graph-plan"`,
+		},
+		{
+			name:        "ApplyGraphPlanWithStorage",
+			boundaryID:  "beads.storage-graph-apply.ApplyGraphPlanWithStorage",
+			method:      "ApplyGraphPlanWithStorage",
+			target:      graphPlanTarget(),
+			wrongTarget: singleCreateTarget(),
+			want:        `boundary "beads.storage-graph-apply.ApplyGraphPlanWithStorage" requires target signature "graph-plan"`,
+		},
+		{
+			name:        "DepAdd",
+			boundaryID:  "beads.writer.DepAdd",
+			method:      "DepAdd",
+			target:      dependencyEdgeTarget(),
+			wrongTarget: compileFixtureTarget(),
+			want:        `boundary "beads.writer.DepAdd" requires target signature "dependency-edge"`,
+		},
+		{
+			name:        "DepRemove",
+			boundaryID:  "beads.writer.DepRemove",
+			method:      "DepRemove",
+			target:      dependencyEdgeTarget(),
+			wrongTarget: compileFixtureTarget(),
+			want:        `boundary "beads.writer.DepRemove" requires target signature "dependency-edge"`,
+		},
+		{
+			name:        "Tx",
+			boundaryID:  "beads.store.Tx",
+			method:      "Tx",
+			target:      transactionTarget(),
+			wrongTarget: batchTarget(TargetCardinalitySet),
+			want:        `boundary "beads.store.Tx" requires target signature "transaction"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+" accepts exact shape", func(t *testing.T) {
+			registry := registryForTarget(KindStoreMutation, AccessStoreAdapter, StoreDomainMaintenance, tt.target)
+			setStoreBoundary(&registry, tt.boundaryID, tt.method)
+			if err := validateRegistry(registry, validationDate()); err != nil {
+				t.Fatalf("ValidateRegistry() rejected exact target shape: %v", err)
+			}
+		})
+		t.Run(tt.name+" rejects false shape", func(t *testing.T) {
+			registry := registryForTarget(KindStoreMutation, AccessStoreAdapter, StoreDomainMaintenance, tt.wrongTarget)
+			setStoreBoundary(&registry, tt.boundaryID, tt.method)
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
+		})
+	}
+}
+
 func batchTarget(cardinality TargetCardinality) TargetRef {
 	return TargetRef{
 		Kind:        TargetDurableRecord,
@@ -425,6 +552,79 @@ func operatorAttachTarget() TargetRef {
 		},
 		Detail: "the calling operator terminal attached to one named runtime destination",
 	}
+}
+
+func singleCreateTarget() TargetRef {
+	return TargetRef{
+		Kind:        TargetDurableRecord,
+		Cardinality: TargetCardinalityOne,
+		Identity:    TargetIdentityGenerated,
+		Signature:   TargetSignatureCreate,
+		Identities: []TargetIdentityRef{
+			{Role: TargetRoleInput, BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 1}, Source: TargetSourceBoundaryValue},
+			{
+				Role:         TargetRoleGenerated,
+				BoundarySlot: ValueSlot{Kind: SlotResult, Index: 1},
+				Projection:   objectRef(beadsPackage, "Bead", "ID"),
+				Source:       TargetSourceBoundaryValue,
+			},
+		},
+		Detail: "one durable record whose ID is assigned by the store",
+	}
+}
+
+func graphPlanTarget() TargetRef {
+	return TargetRef{
+		Kind:        TargetDurableGraph,
+		Cardinality: TargetCardinalityPlan,
+		Identity:    TargetIdentitySymbolicGenerated,
+		Signature:   TargetSignatureGraphPlan,
+		Identities: []TargetIdentityRef{
+			{Role: TargetRolePlan, BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 2}, Source: TargetSourceBoundaryValue},
+			{
+				Role:         TargetRoleGenerated,
+				BoundarySlot: ValueSlot{Kind: SlotResult, Index: 1},
+				Projection:   objectRef(beadsPackage, "GraphApplyResult", "IDs"),
+				Source:       TargetSourceBoundaryValue,
+			},
+		},
+		Detail: "plan node keys map to store-generated durable IDs",
+	}
+}
+
+func dependencyEdgeTarget() TargetRef {
+	return TargetRef{
+		Kind:        TargetDurableDependencyEdge,
+		Cardinality: TargetCardinalityOne,
+		Identity:    TargetIdentityComposite,
+		Signature:   TargetSignatureDependencyEdge,
+		Identities: []TargetIdentityRef{
+			{Role: TargetRoleFrom, BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 1}, Source: TargetSourceBoundaryValue},
+			{Role: TargetRoleTo, BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 2}, Source: TargetSourceBoundaryValue},
+		},
+		Detail: "one ordered dependency edge identified by both durable endpoints",
+	}
+}
+
+func transactionTarget() TargetRef {
+	return TargetRef{
+		Kind:        TargetDurableTransaction,
+		Cardinality: TargetCardinalityCallback,
+		Identity:    TargetIdentityCallbackEffects,
+		Signature:   TargetSignatureTransaction,
+		Identities: []TargetIdentityRef{{
+			Role:         TargetRoleCallback,
+			BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 2},
+			Source:       TargetSourceBoundaryValue,
+		}},
+		Detail: "the durable effects selected by the transaction callback",
+	}
+}
+
+func setStoreBoundary(registry *Registry, id, method string) {
+	registry.Boundaries[0].ID = id
+	registry.Boundaries[0].Object.Name = method
+	registry.Registrations[0].BoundaryID = id
 }
 
 func registryForTarget(kind EffectKind, access AccessPath, domain StoreDomain, target TargetRef) Registry {

@@ -155,6 +155,7 @@ const (
 	TargetDurableRecord         TargetKind = "durable-record"
 	TargetDurableGraph          TargetKind = "durable-graph"
 	TargetDurableDependencyEdge TargetKind = "durable-dependency-edge"
+	TargetDurableTransaction    TargetKind = "durable-transaction"
 	TargetSessionIdentity       TargetKind = "session-identity"
 	TargetRuntimeIdentity       TargetKind = "runtime-identity"
 	TargetProcessIdentity       TargetKind = "process-identity"
@@ -168,19 +169,20 @@ const (
 // physical boundary crossing may affect.
 type TargetCardinality string
 
-// TargetCardinality values distinguish one target, an explicit set, and a
-// graph whose target count is defined by the plan.
+// TargetCardinality values distinguish one target, an explicit set, a graph
+// whose target count is plan-defined, and effects selected inside a callback.
 const (
-	TargetCardinalityOne  TargetCardinality = "one"
-	TargetCardinalitySet  TargetCardinality = "set"
-	TargetCardinalityPlan TargetCardinality = "plan"
+	TargetCardinalityOne      TargetCardinality = "one"
+	TargetCardinalitySet      TargetCardinality = "set"
+	TargetCardinalityPlan     TargetCardinality = "plan"
+	TargetCardinalityCallback TargetCardinality = "callback-defined"
 )
 
 // TargetIdentityKind records how target identity comes into existence.
 type TargetIdentityKind string
 
 // TargetIdentityKind values distinguish pre-existing, generated, composite,
-// singleton, and append-only identities.
+// singleton, append-only, and callback-selected identities.
 const (
 	TargetIdentityExisting          TargetIdentityKind = "existing"
 	TargetIdentityGenerated         TargetIdentityKind = "generated"
@@ -188,6 +190,7 @@ const (
 	TargetIdentityComposite         TargetIdentityKind = "composite"
 	TargetIdentitySingleton         TargetIdentityKind = "singleton"
 	TargetIdentityAppendRecord      TargetIdentityKind = "append-record"
+	TargetIdentityCallbackEffects   TargetIdentityKind = "callback-effects"
 )
 
 // TargetSignatureKind names the bounded argument/result shape of an effect.
@@ -206,6 +209,7 @@ const (
 	TargetSignatureProcess        TargetSignatureKind = "process"
 	TargetSignatureEventAppend    TargetSignatureKind = "event-append"
 	TargetSignatureOperatorAttach TargetSignatureKind = "operator-terminal-attach"
+	TargetSignatureTransaction    TargetSignatureKind = "transaction"
 )
 
 // TargetIdentityRole gives each identity component a semantic position in a
@@ -222,6 +226,7 @@ const (
 	TargetRoleTo               TargetIdentityRole = "to"
 	TargetRoleOperatorTerminal TargetIdentityRole = "operator-terminal"
 	TargetRoleDestination      TargetIdentityRole = "destination"
+	TargetRoleCallback         TargetIdentityRole = "callback"
 )
 
 // TargetSourceKind identifies a mechanically inspectable target provenance.
@@ -457,7 +462,9 @@ type TargetRef struct {
 	Identity    TargetIdentityKind
 	Signature   TargetSignatureKind
 	Identities  []TargetIdentityRef
-	Detail      string
+	// Detail is an optional operator note. It is deliberately excluded from
+	// RouteID so wording changes cannot churn a safety identity.
+	Detail string
 }
 
 // Fence records exact source/token objects for one fence mechanism.
@@ -634,6 +641,11 @@ type targetSignaturePolicy struct {
 	Kinds         []TargetKind
 	Effects       []EffectKind
 	Roles         []TargetIdentityRole
+}
+
+type targetBoundaryRequirement struct {
+	Signature   TargetSignatureKind
+	Cardinality TargetCardinality
 }
 
 type validatedRegistration struct {
@@ -826,6 +838,9 @@ func validateRoute(route Route, matcher OperationSite, boundary BoundaryDefiniti
 	}
 	validateFunction(route.LogicalOwner, scope+" logical owner", problems)
 	validateTarget(route.Target, boundaryKind, scope, problems)
+	if boundaryExists {
+		validateKnownBoundaryTarget(boundary, route.Target, scope, problems)
+	}
 	validateTargetActionFamily(route.Target, route.ActionFamily, scope, problems)
 	validateFences(route.Fences, scope, problems)
 	validateGate(route.CurrentGate, scope, problems)
@@ -848,6 +863,38 @@ func validateTargetActionFamily(target TargetRef, family ActionFamily, scope str
 	}
 	if family == FamilyOperatorAttach && target.Signature != TargetSignatureOperatorAttach {
 		addProblem(problems, scope, "action family %q requires an operator-terminal-attach target", FamilyOperatorAttach)
+	}
+}
+
+func validateKnownBoundaryTarget(boundary BoundaryDefinition, target TargetRef, scope string, problems *[]string) {
+	requirement, ok := targetRequirementForBoundary(boundary.ID)
+	if !ok {
+		return
+	}
+	if target.Signature != requirement.Signature {
+		addProblem(problems, scope, "boundary %q requires target signature %q", boundary.ID, requirement.Signature)
+	}
+	if target.Cardinality != requirement.Cardinality {
+		addProblem(problems, scope, "boundary %q requires target cardinality %q", boundary.ID, requirement.Cardinality)
+	}
+}
+
+func targetRequirementForBoundary(boundaryID string) (targetBoundaryRequirement, bool) {
+	switch boundaryID {
+	case "beads.writer.Create", "beads.storage-create.CreateWithStorage":
+		return targetBoundaryRequirement{Signature: TargetSignatureCreate, Cardinality: TargetCardinalityOne}, true
+	case "beads.writer.SetMetadataBatch":
+		return targetBoundaryRequirement{Signature: TargetSignatureBatch, Cardinality: TargetCardinalityOne}, true
+	case "beads.writer.CloseAll", "beads.batch-delete.DeleteBatch":
+		return targetBoundaryRequirement{Signature: TargetSignatureBatch, Cardinality: TargetCardinalitySet}, true
+	case "beads.graph-apply.ApplyGraphPlan", "beads.storage-graph-apply.ApplyGraphPlanWithStorage":
+		return targetBoundaryRequirement{Signature: TargetSignatureGraphPlan, Cardinality: TargetCardinalityPlan}, true
+	case "beads.writer.DepAdd", "beads.writer.DepRemove":
+		return targetBoundaryRequirement{Signature: TargetSignatureDependencyEdge, Cardinality: TargetCardinalityOne}, true
+	case "beads.store.Tx":
+		return targetBoundaryRequirement{Signature: TargetSignatureTransaction, Cardinality: TargetCardinalityCallback}, true
+	default:
+		return targetBoundaryRequirement{}, false
 	}
 }
 
@@ -1176,7 +1223,6 @@ func canonicalTargetRef(target TargetRef) string {
 		string(target.Identity),
 		string(target.Signature),
 		canonicalStringList("target-identities-v1", identities),
-		target.Detail,
 	)
 }
 
@@ -1381,9 +1427,6 @@ func validateTarget(target TargetRef, effect EffectKind, scope string, problems 
 			addProblem(problems, scope, "signature %q does not allow effect kind %q", target.Signature, effect)
 		}
 	}
-	if strings.TrimSpace(target.Detail) == "" {
-		addProblem(problems, scope, "target detail is required")
-	}
 	if len(target.Identities) == 0 {
 		addProblem(problems, scope, "target identities are required")
 		if knownSignature && len(policy.Roles) != 0 {
@@ -1452,7 +1495,7 @@ func validateTargetIdentityRef(identity TargetIdentityRef, signature TargetSigna
 		if identity.Source != TargetSourceBoundaryValue {
 			addProblem(problems, identityScope, "generated target identity must use boundary-value provenance")
 		}
-	case TargetRoleInput, TargetRolePlan, TargetRoleFrom, TargetRoleTo, TargetRoleDestination:
+	case TargetRoleInput, TargetRolePlan, TargetRoleFrom, TargetRoleTo, TargetRoleDestination, TargetRoleCallback:
 		if identity.BoundarySlot.Kind != SlotParameter {
 			addProblem(problems, identityScope, "%s target identity must use a parameter slot", identity.Role)
 		}
@@ -1557,6 +1600,14 @@ func targetPolicyFor(signature TargetSignatureKind) (targetSignaturePolicy, bool
 			Kinds:         []TargetKind{TargetOperatorTerminal},
 			Effects:       []EffectKind{KindProviderMutation},
 			Roles:         []TargetIdentityRole{TargetRoleOperatorTerminal, TargetRoleDestination},
+		}, true
+	case TargetSignatureTransaction:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityCallback},
+			Identity:      TargetIdentityCallbackEffects,
+			Kinds:         []TargetKind{TargetDurableTransaction},
+			Effects:       []EffectKind{KindStoreMutation},
+			Roles:         []TargetIdentityRole{TargetRoleCallback},
 		}, true
 	default:
 		return targetSignaturePolicy{}, false
@@ -2106,6 +2157,7 @@ func knownStoreDomain(value StoreDomain) bool {
 func knownTargetKind(value TargetKind) bool {
 	return oneOf(value,
 		TargetDurableRecord, TargetDurableGraph, TargetDurableDependencyEdge,
+		TargetDurableTransaction,
 		TargetSessionIdentity, TargetRuntimeIdentity, TargetProcessIdentity,
 		TargetProviderServer, TargetEventLog, TargetControllerChannel,
 		TargetOperatorTerminal,
@@ -2113,7 +2165,7 @@ func knownTargetKind(value TargetKind) bool {
 }
 
 func knownTargetCardinality(value TargetCardinality) bool {
-	return oneOf(value, TargetCardinalityOne, TargetCardinalitySet, TargetCardinalityPlan)
+	return oneOf(value, TargetCardinalityOne, TargetCardinalitySet, TargetCardinalityPlan, TargetCardinalityCallback)
 }
 
 func knownTargetIdentity(value TargetIdentityKind) bool {
@@ -2121,6 +2173,7 @@ func knownTargetIdentity(value TargetIdentityKind) bool {
 		TargetIdentityExisting, TargetIdentityGenerated,
 		TargetIdentitySymbolicGenerated, TargetIdentityComposite,
 		TargetIdentitySingleton, TargetIdentityAppendRecord,
+		TargetIdentityCallbackEffects,
 	)
 }
 
@@ -2128,7 +2181,7 @@ func knownTargetIdentityRole(value TargetIdentityRole) bool {
 	return oneOf(value,
 		TargetRolePrimary, TargetRoleInput, TargetRoleGenerated, TargetRolePlan,
 		TargetRoleFrom, TargetRoleTo, TargetRoleOperatorTerminal,
-		TargetRoleDestination,
+		TargetRoleDestination, TargetRoleCallback,
 	)
 }
 

@@ -207,52 +207,93 @@ func (analysis *loadedAnalysis) callableValueCompatibleWithBoundary(value ssa.Va
 }
 
 func sliceContentValues(value ssa.Value) ([]ssa.Value, bool, bool) {
-	if value == nil {
-		return nil, false, false
+	state := sliceContentTraversal{
+		visiting: make(map[ssa.Value]bool),
+		memo:     make(map[ssa.Value]sliceContentResult),
 	}
+	result := state.visit(value)
+	return result.values, result.closed, result.isSlice
+}
+
+type sliceContentResult struct {
+	values  []ssa.Value
+	closed  bool
+	isSlice bool
+}
+
+type sliceContentTraversal struct {
+	visiting map[ssa.Value]bool
+	memo     map[ssa.Value]sliceContentResult
+}
+
+func (state *sliceContentTraversal) visit(value ssa.Value) sliceContentResult {
+	if value == nil {
+		return sliceContentResult{}
+	}
+	if result, ok := state.memo[value]; ok {
+		return result
+	}
+	if state.visiting[value] {
+		// A Phi back edge cannot prove closed contents. Preserve its slice
+		// shape so callers remain fail-closed while sibling edges still
+		// contribute every exact value they contain.
+		_, isSlice := types.Unalias(value.Type()).Underlying().(*types.Slice)
+		return sliceContentResult{isSlice: isSlice}
+	}
+	state.visiting[value] = true
+	defer delete(state.visiting, value)
+
+	result := state.inspect(value)
+	state.memo[value] = result
+	return result
+}
+
+func (state *sliceContentTraversal) inspect(value ssa.Value) sliceContentResult {
 	switch value := value.(type) {
 	case *ssa.MakeInterface:
-		return sliceContentValues(value.X)
+		return state.visit(value.X)
 	case *ssa.ChangeInterface:
-		return sliceContentValues(value.X)
+		return state.visit(value.X)
 	case *ssa.TypeAssert:
-		return sliceContentValues(value.X)
+		return state.visit(value.X)
 	case *ssa.Extract:
-		return sliceContentValues(value.Tuple)
+		return state.visit(value.Tuple)
 	case *ssa.Phi:
 		closed := true
 		found := false
 		var values []ssa.Value
 		for _, edge := range value.Edges {
-			edgeValues, edgeClosed, edgeIsSlice := sliceContentValues(edge)
-			if !edgeIsSlice {
+			edgeResult := state.visit(edge)
+			if !edgeResult.isSlice {
 				closed = false
 				continue
 			}
 			found = true
-			closed = closed && edgeClosed
-			values = append(values, edgeValues...)
+			closed = closed && edgeResult.closed
+			values = append(values, edgeResult.values...)
 		}
-		return values, closed, found
+		return sliceContentResult{values: values, closed: closed, isSlice: found}
 	}
 	if _, isSlice := types.Unalias(value.Type()).Underlying().(*types.Slice); !isSlice {
-		return nil, false, false
+		return sliceContentResult{}
 	}
 	switch value := value.(type) {
 	case *ssa.Slice:
 		values, closed := indexedContainerValues(value.X)
-		return values, closed, true
+		return sliceContentResult{values: values, closed: closed, isSlice: true}
 	case *ssa.MakeSlice, *ssa.Alloc:
 		values, closed := indexedContainerValues(value)
-		return values, closed, true
+		return sliceContentResult{values: values, closed: closed, isSlice: true}
 	case *ssa.ChangeType:
-		values, closed, _ := sliceContentValues(value.X)
-		return values, closed, true
+		result := state.visit(value.X)
+		result.isSlice = true
+		return result
 	case *ssa.Convert:
-		values, closed, _ := sliceContentValues(value.X)
-		return values, closed, true
+		result := state.visit(value.X)
+		result.isSlice = true
+		return result
 	default:
-		return nil, false, true
+		return sliceContentResult{isSlice: true}
 	}
 }
 
@@ -318,24 +359,30 @@ func addOpenSliceElementBoundaries(sliceType types.Type, boundaries []resolvedBo
 }
 
 func sliceCarrierType(value ssa.Value) types.Type {
-	if value == nil {
+	return sliceCarrierTypeAlong(value, make(map[ssa.Value]bool))
+}
+
+func sliceCarrierTypeAlong(value ssa.Value, visiting map[ssa.Value]bool) types.Type {
+	if value == nil || visiting[value] {
 		return nil
 	}
 	if _, isSlice := types.Unalias(value.Type()).Underlying().(*types.Slice); isSlice {
 		return value.Type()
 	}
+	visiting[value] = true
+	defer delete(visiting, value)
 	switch value := value.(type) {
 	case *ssa.MakeInterface:
-		return sliceCarrierType(value.X)
+		return sliceCarrierTypeAlong(value.X, visiting)
 	case *ssa.ChangeInterface:
-		return sliceCarrierType(value.X)
+		return sliceCarrierTypeAlong(value.X, visiting)
 	case *ssa.TypeAssert:
-		return sliceCarrierType(value.X)
+		return sliceCarrierTypeAlong(value.X, visiting)
 	case *ssa.Extract:
-		return sliceCarrierType(value.Tuple)
+		return sliceCarrierTypeAlong(value.Tuple, visiting)
 	case *ssa.Phi:
 		for _, edge := range value.Edges {
-			if candidate := sliceCarrierType(edge); candidate != nil {
+			if candidate := sliceCarrierTypeAlong(edge, visiting); candidate != nil {
 				return candidate
 			}
 		}

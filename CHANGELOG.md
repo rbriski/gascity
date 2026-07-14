@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bump the `bd`/`beads` dependency from v1.0.4 to v1.1.0.** Homebrew now
+  resolves the unversioned `beads` dependency to 1.1.0, while gc 1.3.0 through
+  1.3.4 link the beads library at v1.0.4. The native-store preflight gate
+  (`version_compat`) requires the installed `bd` CLI to match the linked
+  library version exactly, so every Homebrew install since beads 1.1.0 shipped
+  on July 4 has silently fallen back from the in-process NativeDoltStore to
+  the much slower `bd` subprocess store (#3946). This release moves the Go
+  module, the CI `bd` toolchain (`BD_VERSION`), and the pinned install SHAs to
+  v1.1.0 so a stock `brew install` pairs matching versions again. The default
+  `bd_compatibility = "bd-1.0.4"` semantics are unchanged and run correctly on
+  bd 1.1.0, matching what main has exercised in CI since July 6.
+
 ## [1.3.4] - 2026-07-10
 
 ### Fixed

@@ -20,13 +20,13 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/filelock"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -254,7 +254,7 @@ func WithLock(ctx context.Context, cityPath, scopeRef, sourceBeadID string, fn f
 	if err := lockFile(ctx, f, sourceBeadID); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	defer filelock.Unlock(f) //nolint:errcheck // best-effort unlock
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -309,11 +309,11 @@ func (l *localLock) Unlock() {
 
 func lockFile(ctx context.Context, f *os.File, sourceBeadID string) error {
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
+		acquired, err := filelock.TryLock(f, filelock.Exclusive)
+		if acquired {
 			return nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		if err != nil {
 			return fmt.Errorf("lock source workflow %q: %w", sourceBeadID, err)
 		}
 		timer := time.NewTimer(fileLockRetryInterval)

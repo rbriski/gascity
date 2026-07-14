@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -26,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
+	"github.com/gastownhall/gascity/internal/filelock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -2800,12 +2800,12 @@ func IsControllerRunning(cityPath string) bool {
 	}
 	defer f.Close() //nolint:errcheck // probe only
 
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err != nil {
+	acquired, err := filelock.TryLock(f, filelock.Exclusive)
+	if err != nil || !acquired {
 		// EWOULDBLOCK means the lock is held — controller is running.
 		return true
 	}
 	// We got the lock, release immediately — no controller running.
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	filelock.Unlock(f) //nolint:errcheck // best-effort unlock
 	return false
 }

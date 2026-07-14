@@ -6,8 +6,10 @@ package effectinventory
 import (
 	"crypto/sha256"
 	"fmt"
+	"go/token"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -334,8 +336,9 @@ type SiteRegistration struct {
 	Cases      []ProfileCase
 }
 
-// ProfileCase is the one classification that applies to a physical site in
-// each listed build profile. A case may have several logical ownership routes.
+// ProfileCase is the one exhaustive routing case that applies to a physical
+// site in each listed build profile. A case may have several distinct logical
+// origins, but no profile may appear in more than one case for the site.
 type ProfileCase struct {
 	BuildProfiles []BuildProfileID
 	Routes        []Route
@@ -387,7 +390,8 @@ type Continuation struct {
 	Completion CompletionKind
 }
 
-// RouteHop identifies one exact origin-to-leaf call edge.
+// RouteHop identifies one authored origin-to-leaf call edge. Registry
+// validation proves chain consistency; it does not rediscover callgraph edges.
 type RouteHop struct {
 	Site     OperationSite
 	Dispatch HopDispatchKind
@@ -417,8 +421,8 @@ type TemporaryException struct {
 	OwningTest   TestRef
 }
 
-// Route classifies one logical origin and its exact call path to a registered
-// physical site.
+// Route classifies one logical origin and its authored call path to a
+// registered physical site.
 type Route struct {
 	StoreDomain      StoreDomain
 	ActionFamily     ActionFamily
@@ -445,7 +449,8 @@ type Registry struct {
 // SiteRegistrationID is the content-derived identity of one physical site.
 type SiteRegistrationID string
 
-// RouteID is the content-derived identity of one logical ownership route.
+// RouteID is the content-derived identity of one site/profile route
+// classification, including its complete current safety evidence.
 type RouteID string
 
 // CompiledRegistry is a validated, discovery-complete, canonically ordered
@@ -470,10 +475,27 @@ type CompiledProfileCase struct {
 	Routes        []CompiledRoute
 }
 
-// CompiledRoute is one logical route with a derived ID.
+// CompiledRoute is one logical route classification with a derived ID.
 type CompiledRoute struct {
 	ID         RouteID
 	Definition Route
+}
+
+// ProfileDiscovery records one completed analyzer run, including the valid
+// zero-site result.
+type ProfileDiscovery struct {
+	Profile BuildProfileID
+	Sites   []ObservedSite
+}
+
+// DiscoveryResult is the analyzer evidence reconciled by CompileRegistry.
+// BoundaryDigest binds observations to the exact discovery vocabulary used to
+// produce them; Profiles must contain every canonical analysis profile once.
+// Production gates must construct this from the analyzer rather than from
+// catalog-derived observations.
+type DiscoveryResult struct {
+	BoundaryDigest string
+	Profiles       []ProfileDiscovery
 }
 
 type fencePolicy struct {
@@ -494,8 +516,10 @@ type validatedRegistration struct {
 
 // CompileRegistry rejects incomplete, ambiguous, duplicate, stale, unknown, or
 // expired classifications. It compiles only when discovery and registration
-// cover the same exact physical sites in every build profile.
-func CompileRegistry(registry Registry, observed []ObservedSite, asOf time.Time) (CompiledRegistry, error) {
+// cover the same exact physical sites in every build profile. Route call paths
+// receive structural validation here; callgraph-evidence binding is outside
+// this physical-site compiler.
+func CompileRegistry(registry Registry, discovery DiscoveryResult, asOf time.Time) (CompiledRegistry, error) {
 	var problems []string
 	validDate := !asOf.IsZero()
 	if !validDate {
@@ -510,7 +534,7 @@ func CompileRegistry(registry Registry, observed []ObservedSite, asOf time.Time)
 
 	boundaries := validateBoundaries(registry.Boundaries, &problems)
 	registrations := validateRegistrations(registry.Registrations, boundaries, asOf, validDate, &problems)
-	reconcileDiscovery(registrations, observed, boundaries, &problems)
+	reconcileDiscovery(registrations, discovery, deriveBoundaryDigest(registry.Boundaries), boundaries, &problems)
 
 	if len(problems) == 0 {
 		return compileValidatedRegistry(registry.Boundaries, registrations), nil
@@ -522,16 +546,20 @@ func CompileRegistry(registry Registry, observed []ObservedSite, asOf time.Time)
 
 // ValidateRegistry validates and reconciles a registry against exact analyzer
 // observations without retaining the compiled representation.
-func ValidateRegistry(registry Registry, observed []ObservedSite, asOf time.Time) error {
-	_, err := CompileRegistry(registry, observed, asOf)
+func ValidateRegistry(registry Registry, discovery DiscoveryResult, asOf time.Time) error {
+	_, err := CompileRegistry(registry, discovery, asOf)
 	return err
 }
 
 func validateBoundaries(definitions []BoundaryDefinition, problems *[]string) map[string]BoundaryDefinition {
+	definitions = append([]BoundaryDefinition(nil), definitions...)
+	sort.Slice(definitions, func(i, j int) bool {
+		return canonicalBoundary(definitions[i]) < canonicalBoundary(definitions[j])
+	})
 	byID := make(map[string]BoundaryDefinition, len(definitions))
 	objects := make(map[string]string, len(definitions))
-	for index, boundary := range definitions {
-		scope := fmt.Sprintf("boundary[%d]", index)
+	for _, boundary := range definitions {
+		scope := fmt.Sprintf("boundary %q", deriveContentID("boundary-v1-", canonicalBoundary(boundary)))
 		if strings.TrimSpace(boundary.ID) == "" {
 			addProblem(problems, scope, "boundary id is required")
 		}
@@ -571,7 +599,7 @@ func validateBoundaries(definitions []BoundaryDefinition, problems *[]string) ma
 		} else if boundary.ID != "" {
 			byID[boundary.ID] = boundary
 		}
-		objectKey := boundary.Object.key()
+		objectKey := canonicalObjectRef(boundary.Object)
 		if previous, exists := objects[objectKey]; exists {
 			addProblem(problems, scope, "boundary %q duplicates boundary object owned by %q", boundary.ID, previous)
 		} else {
@@ -587,7 +615,7 @@ func validateRegistrations(registrations []SiteRegistration, boundaries map[stri
 	totalRoutes := 0
 	for _, registration := range registrations {
 		registrationID := deriveSiteRegistrationID(registration.BoundaryID, registration.Matcher)
-		scope := fmt.Sprintf("registration %q", registrationID)
+		scope := fmt.Sprintf("registration %q (%s)", registrationID, describePhysicalSite(registration.BoundaryID, registration.Matcher))
 		boundary, boundaryExists := boundaries[registration.BoundaryID]
 		if !boundaryExists {
 			addProblem(problems, scope, "references unknown boundary %q", registration.BoundaryID)
@@ -621,16 +649,16 @@ func validateRegistrations(registrations []SiteRegistration, boundaries map[stri
 				addProblem(problems, caseScope, "at least one logical route is required")
 			}
 			totalRoutes += len(profileCase.Routes)
-			semanticRoutes := make(map[string]RouteID, len(profileCase.Routes))
+			originCounts := make(map[string]int, len(profileCase.Routes))
 			for _, route := range profileCase.Routes {
-				routeID := deriveRouteID(registrationID, route)
+				routeID := deriveRouteID(registrationID, profileCase.BuildProfiles, route)
 				routeScope := fmt.Sprintf("%s route %q", caseScope, routeID)
 				validateRoute(route, registration.Matcher, boundary, boundaryExists, routeScope, asOf, validDate, problems)
-				semanticKey := route.semanticKey()
-				if previous, exists := semanticRoutes[semanticKey]; exists {
-					addProblem(problems, caseScope, "logical route %q is classified more than once", previous)
-				} else {
-					semanticRoutes[semanticKey] = routeID
+				originKey := route.originKey()
+				originCounts[originKey]++
+				if originCounts[originKey] == 2 {
+					originID := deriveContentID("origin-v1-", originKey)
+					addProblem(problems, caseScope, "logical origin %q has multiple classifications", originID)
 				}
 			}
 		}
@@ -701,7 +729,11 @@ func validateStoreDomain(domain StoreDomain, boundaryKind EffectKind, scope stri
 	}
 }
 
-func reconcileDiscovery(registrations []validatedRegistration, observed []ObservedSite, boundaries map[string]BoundaryDefinition, problems *[]string) {
+func reconcileDiscovery(registrations []validatedRegistration, discovery DiscoveryResult, expectedBoundaryDigest string, boundaries map[string]BoundaryDefinition, problems *[]string) {
+	if discovery.BoundaryDigest != expectedBoundaryDigest {
+		*problems = append(*problems, fmt.Sprintf("discovery boundary digest %q does not match registry digest %q", discovery.BoundaryDigest, expectedBoundaryDigest))
+	}
+	observed := validateDiscoveryProfiles(discovery.Profiles, problems)
 	registrationsByPhysical := make(map[string][]validatedRegistration, len(registrations))
 	classificationCounts := make(map[string]int)
 	for _, registration := range registrations {
@@ -715,7 +747,7 @@ func reconcileDiscovery(registrations []validatedRegistration, observed []Observ
 	observedCounts := make(map[string]int, len(observed))
 	for _, site := range observed {
 		registrationID := deriveSiteRegistrationID(site.BoundaryID, site.Matcher)
-		scope := fmt.Sprintf("discovered site %q in build profile %q", registrationID, site.Profile)
+		scope := fmt.Sprintf("discovered site %q (%s) in build profile %q", registrationID, describePhysicalSite(site.BoundaryID, site.Matcher), site.Profile)
 		boundary, boundaryExists := boundaries[site.BoundaryID]
 		if !boundaryExists {
 			addProblem(problems, scope, "references unknown boundary %q", site.BoundaryID)
@@ -753,10 +785,47 @@ func reconcileDiscovery(registrations []validatedRegistration, observed []Observ
 		sort.Slice(profiles, func(i, j int) bool { return profiles[i] < profiles[j] })
 		for _, profile := range profiles {
 			if observedCounts[siteProfileKey(physicalKey, profile)] == 0 {
-				*problems = append(*problems, fmt.Sprintf("stale registration %q in build profile %q: site was not discovered", registration.id, profile))
+				*problems = append(*problems, fmt.Sprintf(
+					"stale registration %q (%s) in build profile %q: site was not discovered",
+					registration.id,
+					describePhysicalSite(registration.registration.BoundaryID, registration.registration.Matcher),
+					profile,
+				))
 			}
 		}
 	}
+}
+
+func validateDiscoveryProfiles(discovery []ProfileDiscovery, problems *[]string) []ObservedSite {
+	expected := make(map[BuildProfileID]bool)
+	for _, profile := range canonicalAnalysisProfiles() {
+		expected[profile.ID] = true
+	}
+	counts := make(map[BuildProfileID]int, len(discovery))
+	var observed []ObservedSite
+	for _, result := range discovery {
+		scope := fmt.Sprintf("discovery profile %q", result.Profile)
+		counts[result.Profile]++
+		if !expected[result.Profile] {
+			addProblem(problems, scope, "is not a canonical analysis profile")
+		}
+		if counts[result.Profile] == 2 {
+			addProblem(problems, scope, "duplicate discovery profile")
+		}
+		for _, site := range result.Sites {
+			if site.Profile != result.Profile {
+				addProblem(problems, scope, "contains site labeled with build profile %q", site.Profile)
+			}
+			site.Profile = result.Profile
+			observed = append(observed, site)
+		}
+	}
+	for _, profile := range canonicalAnalysisProfiles() {
+		if counts[profile.ID] == 0 {
+			*problems = append(*problems, fmt.Sprintf("missing discovery profile %q", profile.ID))
+		}
+	}
+	return observed
 }
 
 func compileValidatedRegistry(boundaries []BoundaryDefinition, registrations []validatedRegistration) CompiledRegistry {
@@ -782,7 +851,7 @@ func compileValidatedRegistry(boundaries []BoundaryDefinition, registrations []v
 			}
 			for _, route := range profileCase.Routes {
 				compiledCase.Routes = append(compiledCase.Routes, CompiledRoute{
-					ID:         deriveRouteID(validated.id, route),
+					ID:         deriveRouteID(validated.id, profileCase.BuildProfiles, route),
 					Definition: cloneRoute(route),
 				})
 			}
@@ -831,8 +900,14 @@ func deriveSiteRegistrationID(boundaryID string, matcher OperationSite) SiteRegi
 	return SiteRegistrationID(deriveContentID("site-v1-", registrationPhysicalKey(boundaryID, matcher)))
 }
 
-func deriveRouteID(registrationID SiteRegistrationID, route Route) RouteID {
-	return RouteID(deriveContentID("route-v1-", string(registrationID)+"\x00"+route.semanticKey()))
+func deriveRouteID(registrationID SiteRegistrationID, profiles []BuildProfileID, route Route) RouteID {
+	content := canonicalFields(
+		"compiled-route-v1",
+		string(registrationID),
+		canonicalBuildProfiles(profiles),
+		canonicalRoute(route),
+	)
+	return RouteID(deriveContentID("route-v1-", content))
 }
 
 func deriveContentID(prefix, canonical string) string {
@@ -841,11 +916,23 @@ func deriveContentID(prefix, canonical string) string {
 }
 
 func registrationPhysicalKey(boundaryID string, matcher OperationSite) string {
-	return boundaryID + "|" + matcher.key()
+	return canonicalFields("physical-site-v1", boundaryID, canonicalOperationSite(matcher))
+}
+
+func describePhysicalSite(boundaryID string, matcher OperationSite) string {
+	return fmt.Sprintf(
+		"boundary=%q operation=%q function=%q file=%q closure=%v ordinal=%d",
+		boundaryID,
+		matcher.Operation,
+		matcher.Enclosing.Object.key(),
+		matcher.Enclosing.File,
+		matcher.Enclosing.ClosurePath,
+		matcher.Ordinal,
+	)
 }
 
 func siteProfileKey(physicalKey string, profile BuildProfileID) string {
-	return physicalKey + "|" + string(profile)
+	return canonicalFields("site-profile-v1", physicalKey, string(profile))
 }
 
 func canonicalProfileKey(profiles []BuildProfileID) string {
@@ -859,6 +946,212 @@ func canonicalProfileKey(profiles []BuildProfileID) string {
 		return "<none>"
 	}
 	return strings.Join(parts, ",")
+}
+
+func deriveBoundaryDigest(boundaries []BoundaryDefinition) string {
+	records := make([]string, len(boundaries))
+	for index, boundary := range boundaries {
+		records[index] = canonicalBoundary(boundary)
+	}
+	sort.Strings(records)
+	return deriveContentID("boundaries-v1-", canonicalStringList("boundary-set-v1", records))
+}
+
+func canonicalBoundary(boundary BoundaryDefinition) string {
+	return canonicalFields(
+		"boundary-v1",
+		boundary.ID,
+		string(boundary.Kind),
+		canonicalObjectRef(boundary.Object),
+		string(boundary.Match),
+		canonicalValueSlot(boundary.Input),
+		canonicalValueSlot(boundary.Output),
+	)
+}
+
+func canonicalRoute(route Route) string {
+	fences := make([]string, len(route.Fences))
+	for index, fence := range route.Fences {
+		fences[index] = canonicalFence(fence)
+	}
+	sort.Strings(fences)
+
+	hops := make([]string, len(route.Hops))
+	for index, hop := range route.Hops {
+		hops[index] = canonicalRouteHop(hop)
+	}
+
+	tests := make([]string, len(route.OwningTests))
+	for index, test := range route.OwningTests {
+		tests[index] = canonicalTestRef(test)
+	}
+	sort.Strings(tests)
+
+	return canonicalFields(
+		"route-classification-v1",
+		string(route.StoreDomain),
+		string(route.ActionFamily),
+		string(route.ExecutingProcess),
+		canonicalFunctionRef(route.LogicalOwner),
+		canonicalTargetRef(route.Target),
+		canonicalStringList("fences-v1", fences),
+		canonicalGateRef(route.CurrentGate),
+		canonicalDisposition(route.Disposition),
+		string(route.AccessPath),
+		canonicalContinuation(route.Continuation),
+		canonicalStringList("route-hops-v1", hops),
+		canonicalStringList("owning-tests-v1", tests),
+		canonicalTemporaryException(route.Exception),
+	)
+}
+
+func canonicalTargetRef(target TargetRef) string {
+	return canonicalFields(
+		"target-v1",
+		string(target.Kind),
+		canonicalValueSlot(target.Sink),
+		string(target.Source),
+		canonicalObjectRef(target.SourceObject),
+		canonicalValueSlot(target.SourceSlot),
+		target.Detail,
+	)
+}
+
+func canonicalFence(fence Fence) string {
+	return canonicalFields(
+		"fence-v1",
+		string(fence.Kind),
+		canonicalObjectRef(fence.Source),
+		canonicalObjectRef(fence.Token),
+	)
+}
+
+func canonicalGateRef(gate GateRef) string {
+	return canonicalFields(
+		"gate-v1",
+		string(gate.Kind),
+		canonicalObjectRef(gate.Predicate),
+		gate.Expected,
+	)
+}
+
+func canonicalDisposition(disposition Disposition) string {
+	gates := make([]string, len(disposition.Gates))
+	for index, gate := range disposition.Gates {
+		gates[index] = string(gate)
+	}
+	sort.Strings(gates)
+	return canonicalFields(
+		"disposition-v1",
+		string(disposition.Kind),
+		canonicalStringList("disposition-gates-v1", gates),
+		disposition.Reason,
+	)
+}
+
+func canonicalContinuation(continuation Continuation) string {
+	return canonicalFields(
+		"continuation-v1",
+		string(continuation.Locus),
+		string(continuation.Completion),
+	)
+}
+
+func canonicalRouteHop(hop RouteHop) string {
+	return canonicalFields(
+		"route-hop-v1",
+		canonicalOperationSite(hop.Site),
+		string(hop.Dispatch),
+		canonicalFunctionRef(hop.Callee),
+	)
+}
+
+func canonicalTemporaryException(exception *TemporaryException) string {
+	if exception == nil {
+		return canonicalFields("temporary-exception-v1", "absent")
+	}
+	removalTasks := make([]string, len(exception.RemovalTasks))
+	for index, task := range exception.RemovalTasks {
+		removalTasks[index] = string(task)
+	}
+	sort.Strings(removalTasks)
+	return canonicalFields(
+		"temporary-exception-v1",
+		"present",
+		string(exception.Kind),
+		exception.Reason,
+		string(exception.OwnerTask),
+		canonicalStringList("removal-tasks-v1", removalTasks),
+		canonicalVersionAnchor(exception.Anchor),
+		exception.Expires,
+		canonicalTestRef(exception.OwningTest),
+	)
+}
+
+func canonicalVersionAnchor(anchor VersionAnchor) string {
+	return canonicalFields("version-anchor-v1", string(anchor.Kind), anchor.Value)
+}
+
+func canonicalTestRef(test TestRef) string {
+	return canonicalFields("test-ref-v1", test.Package, test.Name)
+}
+
+func canonicalBuildProfiles(profiles []BuildProfileID) string {
+	values := make([]string, len(profiles))
+	for index, profile := range profiles {
+		values[index] = string(profile)
+	}
+	sort.Strings(values)
+	return canonicalStringList("build-profiles-v1", values)
+}
+
+func canonicalOperationSite(site OperationSite) string {
+	return canonicalFields(
+		"operation-site-v1",
+		string(site.Operation),
+		canonicalFunctionRef(site.Enclosing),
+		strconv.Itoa(site.Ordinal),
+	)
+}
+
+func canonicalFunctionRef(function FunctionRef) string {
+	closure := make([]string, len(function.ClosurePath))
+	for index, item := range function.ClosurePath {
+		closure[index] = strconv.Itoa(item)
+	}
+	return canonicalFields(
+		"function-ref-v1",
+		canonicalObjectRef(function.Object),
+		function.File,
+		canonicalStringList("closure-path-v1", closure),
+	)
+}
+
+func canonicalObjectRef(object ObjectRef) string {
+	return canonicalFields("object-ref-v1", object.Package, object.Receiver, object.Name)
+}
+
+func canonicalValueSlot(slot ValueSlot) string {
+	return canonicalFields("value-slot-v1", string(slot.Kind), strconv.Itoa(slot.Index))
+}
+
+func canonicalStringList(kind string, values []string) string {
+	fields := make([]string, 0, len(values)+2)
+	fields = append(fields, kind, strconv.Itoa(len(values)))
+	fields = append(fields, values...)
+	return canonicalFields(fields...)
+}
+
+func canonicalFields(values ...string) string {
+	var result strings.Builder
+	result.WriteString(strconv.Itoa(len(values)))
+	result.WriteByte(';')
+	for _, value := range values {
+		result.WriteString(strconv.Itoa(len(value)))
+		result.WriteByte(':')
+		result.WriteString(value)
+	}
+	return result.String()
 }
 
 func validateTarget(target TargetRef, scope string, problems *[]string) {
@@ -1227,6 +1520,11 @@ func validateObject(object ObjectRef, scope string, problems *[]string) {
 	}
 	if strings.TrimSpace(object.Name) == "" {
 		addProblem(problems, scope, "%s name is required", lastWords(scope, 3))
+	} else if !token.IsIdentifier(object.Name) {
+		addProblem(problems, scope, "%s name %q must be a Go identifier", lastWords(scope, 3), object.Name)
+	}
+	if object.Receiver != "" && !token.IsIdentifier(object.Receiver) {
+		addProblem(problems, scope, "%s receiver %q must be a Go identifier", lastWords(scope, 3), object.Receiver)
 	}
 }
 
@@ -1427,33 +1725,16 @@ func oneOf[T comparable](value T, candidates ...T) bool {
 	return false
 }
 
-func (route Route) semanticKey() string {
+func (route Route) originKey() string {
 	hops := make([]string, len(route.Hops))
 	for index, hop := range route.Hops {
-		hops[index] = hop.key()
+		hops[index] = canonicalRouteHop(hop)
 	}
-	return strings.Join([]string{
-		string(route.StoreDomain),
-		string(route.ActionFamily),
-		string(route.ExecutingProcess),
-		route.LogicalOwner.key(),
-		route.Target.semanticKey(),
-		string(route.AccessPath),
-		string(route.Continuation.Locus),
-		string(route.Continuation.Completion),
-		strings.Join(hops, ","),
-	}, "|")
-}
-
-func (target TargetRef) semanticKey() string {
-	return strings.Join([]string{
-		string(target.Kind), target.Sink.key(), string(target.Source),
-		target.SourceObject.key(), target.SourceSlot.key(),
-	}, "|")
-}
-
-func (hop RouteHop) key() string {
-	return hop.Site.key() + "|" + string(hop.Dispatch) + "|" + hop.Callee.key()
+	return canonicalFields(
+		"logical-origin-v1",
+		canonicalFunctionRef(route.LogicalOwner),
+		canonicalStringList("logical-origin-hops-v1", hops),
+	)
 }
 
 func (site OperationSite) key() string {
@@ -1469,7 +1750,7 @@ func (function FunctionRef) key() string {
 }
 
 func (function FunctionRef) equal(other FunctionRef) bool {
-	return function.key() == other.key()
+	return canonicalFunctionRef(function) == canonicalFunctionRef(other)
 }
 
 func (object ObjectRef) key() string {
@@ -1478,10 +1759,6 @@ func (object ObjectRef) key() string {
 
 func (object ObjectRef) zero() bool {
 	return object == (ObjectRef{})
-}
-
-func (slot ValueSlot) key() string {
-	return fmt.Sprintf("%s:%d", slot.Kind, slot.Index)
 }
 
 func (slot ValueSlot) zero() bool {

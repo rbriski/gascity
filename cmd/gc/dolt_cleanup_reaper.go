@@ -59,17 +59,23 @@ type DoltProcInfo struct {
 // (e.g. "active rig dolt server (rig: beads)") and set for deleted-scope
 // reaps (deleted cwd, vanished config); empty for the classic
 // test-config-path allowlist reap where the path itself is the explanation.
+// DataDir carries the --data-dir path observed on the cmdline for bare
+// servers reaped on the data-dir allowlist signal (rule 4); empty otherwise.
 type reapClassification struct {
 	Action     string
 	Reason     string
 	ConfigPath string
+	DataDir    string
 }
 
 // ReapTarget is a single PID slated for SIGTERM+SIGKILL during the reap stage.
-// Reason mirrors reapClassification.Reason for deleted-scope targets.
+// Reason mirrors reapClassification.Reason for deleted-scope targets. DataDir
+// mirrors reapClassification.DataDir for bare servers reaped on the
+// --data-dir allowlist signal (rule 4); empty otherwise.
 type ReapTarget struct {
 	PID            int
 	ConfigPath     string
+	DataDir        string
 	Reason         string
 	RSSBytes       int64
 	StartTimeTicks uint64
@@ -104,6 +110,24 @@ func extractConfigPath(argv []string) string {
 		}
 		if strings.HasPrefix(arg, "--config=") {
 			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return ""
+}
+
+// extractDataDirFlag pulls the --data-dir <path> argument from a dolt
+// sql-server argv. Supports both `--data-dir foo` and `--data-dir=foo` forms;
+// returns empty when the flag is absent or has no value.
+func extractDataDirFlag(argv []string) string {
+	for i, arg := range argv {
+		if arg == "--data-dir" {
+			if i+1 < len(argv) {
+				return argv[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "--data-dir=") {
+			return strings.TrimPrefix(arg, "--data-dir=")
 		}
 	}
 	return ""
@@ -195,8 +219,10 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //  3. Else reap when the working directory is an unlinked inode (ga-10wmzh):
 //     a cwd readlink ending in " (deleted)" can never revert, so it proves the
 //     scope is gone — this also covers bare servers started without --config.
-//  4. Else protect bare servers (no --config): an unidentified dolt server is
-//     never killed.
+//  4. Else, for a bare server (no --config), reap when --data-dir is on the
+//     test-config-path allowlist (the same ownership signal as step 5, applied
+//     to --data-dir instead of --config). Otherwise protect: an unidentified
+//     dolt server is never killed.
 //  5. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
 //     os.TempDir()/Test*, known Gas City temp prefixes). The allowlist match
 //     is an ownership signal, so an owned test scope is reaped even if its
@@ -235,6 +261,14 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 	}
 	if cfgPath == "" {
+		if dataDir := extractDataDirFlag(p.Argv); isTestConfigPath(dataDir, homeDir, tempDir) {
+			// A --data-dir match is the same ownership signal as the --config
+			// allowlist match below (step 5), applied to bare servers: this is
+			// what makes the ga-ntbpyb.2 exemplar leak (dolt sql-server started
+			// with --data-dir only, no --config) reapable instead of protected
+			// forever as "unidentified."
+			return reapClassification{Action: "reap", DataDir: dataDir}
+		}
 		return reapClassification{
 			Action: "protect",
 			Reason: "no --config path detected; refusing to kill an unidentified dolt server",
@@ -293,6 +327,7 @@ func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir,
 			plan.Reap = append(plan.Reap, ReapTarget{
 				PID:            p.PID,
 				ConfigPath:     c.ConfigPath,
+				DataDir:        c.DataDir,
 				Reason:         c.Reason,
 				RSSBytes:       p.RSSBytes,
 				StartTimeTicks: p.StartTimeTicks,

@@ -41,6 +41,41 @@ func TestExtractConfigPath_FlagAtEnd(t *testing.T) {
 	}
 }
 
+func TestExtractDataDirFlag_SpaceSeparated(t *testing.T) {
+	argv := []string{"dolt", "sql-server", "--data-dir", "/tmp/TestFoo123/dolt"}
+	got := extractDataDirFlag(argv)
+	want := "/tmp/TestFoo123/dolt"
+	if got != want {
+		t.Errorf("extractDataDirFlag() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractDataDirFlag_EqualsForm(t *testing.T) {
+	argv := []string{"dolt", "sql-server", "--data-dir=/tmp/TestFoo/dolt"}
+	got := extractDataDirFlag(argv)
+	want := "/tmp/TestFoo/dolt"
+	if got != want {
+		t.Errorf("extractDataDirFlag() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractDataDirFlag_Missing(t *testing.T) {
+	argv := []string{"dolt", "sql-server", "--port", "3307"}
+	got := extractDataDirFlag(argv)
+	if got != "" {
+		t.Errorf("extractDataDirFlag() = %q, want empty", got)
+	}
+}
+
+func TestExtractDataDirFlag_FlagAtEnd(t *testing.T) {
+	// --data-dir with no value should return empty (malformed cmdline).
+	argv := []string{"dolt", "sql-server", "--data-dir"}
+	got := extractDataDirFlag(argv)
+	if got != "" {
+		t.Errorf("extractDataDirFlag() = %q, want empty for trailing --data-dir", got)
+	}
+}
+
 func TestIsTestConfigPath_TmpTestPrefix(t *testing.T) {
 	if !isTestConfigPath("/tmp/TestOrchestrator123/config.yaml", "/home/u", "") {
 		t.Error("expected /tmp/Test* to be a test path")
@@ -210,6 +245,44 @@ func TestClassifyDoltProcess_ProtectedWhenConfigMissing(t *testing.T) {
 		PID:   4444,
 		Argv:  []string{"dolt", "sql-server"},
 		Ports: []int{},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "protect" {
+		t.Errorf("Action = %q, want protect", got.Action)
+	}
+	if !strings.Contains(got.Reason, "config") {
+		t.Errorf("Reason = %q, want config-path-related reason", got.Reason)
+	}
+}
+
+func TestClassifyDoltProcess_ReapsBareDataDirUnderTestPath(t *testing.T) {
+	// Mirrors the confirmed leak exemplar (TestReaperWorkflowRootCleanupRealDoltSemantics):
+	// a bare server started with --data-dir but no --config, whose data dir sits
+	// on the test-config-path allowlist. Rule 4 (no --config -> protect) must not
+	// swallow this case; the --data-dir value is itself an ownership signal.
+	dataDir := "/tmp/TestReaperWorkflowRootCleanupRealDoltSemantics/001/dolt"
+	p := DoltProcInfo{
+		PID:  4445,
+		Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33405", "--data-dir", dataDir, "--loglevel", "warning"},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "reap" {
+		t.Errorf("Action = %q, want reap (reason: %q)", got.Action, got.Reason)
+	}
+	if got.DataDir != dataDir {
+		t.Errorf("DataDir = %q, want %q", got.DataDir, dataDir)
+	}
+}
+
+func TestClassifyDoltProcess_ProtectsBareDataDirNotOnAllowlist(t *testing.T) {
+	// A bare server (no --config) whose --data-dir is a real, non-test path
+	// must still protect — the allowlist match is required, not the mere
+	// presence of --data-dir.
+	p := DoltProcInfo{
+		PID:  4446,
+		Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33406", "--data-dir", "/var/lib/dolt-data"},
 	}
 	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
 

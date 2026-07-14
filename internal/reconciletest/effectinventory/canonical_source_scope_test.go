@@ -43,6 +43,53 @@ func TestRunCanonicalProfileRejectsStaleRouteHopEvidenceDeterministically(t *tes
 	}
 }
 
+func TestRunCanonicalProfileRejectsStaleTargetGateEvidenceDeterministically(t *testing.T) {
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/canonicalroute",
+	})
+	leaf := routeHopFixtureRef("", "Leaf", "routehops.go", nil)
+	route := routeHopRoute(routeHopFixtureRef("", "DuplicateOwner", "routehops.go", nil),
+		routeHop("DuplicateOwner", OperationCall, 2, HopDispatchExact, leaf))
+	route.CurrentGate = GateRef{
+		Kind:      GatePredicate,
+		Predicate: ObjectRef{Package: routeHopFixturePackage, Name: "MissingPredicate"},
+		Expected:  "true",
+	}
+	registry := Registry{
+		Boundaries: []BoundaryDefinition{{
+			ID:     "route-hop.fixture",
+			Kind:   KindProviderMutation,
+			Object: ObjectRef{Package: routeHopFixturePackage, Name: "Leaf"},
+			Match:  ObjectMatchExact,
+		}},
+		Registrations: []SiteRegistration{routeHopRegistration(leaf, route)},
+	}
+
+	var baseline string
+	for repetition := 0; repetition < 2; repetition++ {
+		_, err := runCanonicalProfile(context.Background(), config, fixtureLinuxProfile(), registry)
+		if err == nil {
+			t.Fatal("runCanonicalProfile() error = nil, want stale target/gate rejection")
+		}
+		for _, want := range []string{
+			`effect target/gate evidence failed for profile "linux/default"`,
+			"MissingPredicate",
+			"does not exist",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("runCanonicalProfile() error = %q, want %q", err, want)
+			}
+		}
+		if baseline == "" {
+			baseline = err.Error()
+			continue
+		}
+		if err.Error() != baseline {
+			t.Fatalf("canonical target/gate diagnostic changed\n got:\n%s\nwant:\n%s", err, baseline)
+		}
+	}
+}
+
 func TestSourceScopeManifestDetectsContentDrift(t *testing.T) {
 	repoRoot := t.TempDir()
 	relative := "cmd/gc/main.go"

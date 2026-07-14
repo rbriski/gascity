@@ -15,13 +15,26 @@ type routeHopFunction struct {
 }
 
 type routeHopFunctionIndex struct {
-	exact    map[string][]routeHopFunction
-	byObject map[string][]routeHopFunction
+	exact             map[string][]routeHopFunction
+	byObject          map[string][]routeHopFunction
+	instancesByOrigin map[*ssa.Function][]*ssa.Function
 }
 
 type routeHopCall struct {
 	position token.Pos
 	dispatch HopDispatchKind
+}
+
+type routeHopDispatchStep struct {
+	callee   *ssa.Function
+	dispatch HopDispatchKind
+}
+
+type routeHopDispatchSearch struct {
+	analysis *loadedAnalysis
+	target   *ssa.Function
+	matches  map[HopDispatchKind]bool
+	problems []string
 }
 
 // validateRouteHopEvidenceForProfile proves the authored route chains active
@@ -40,7 +53,7 @@ func validateRouteHopEvidenceForProfile(analysis *loadedAnalysis, registry Regis
 		registrationScope := fmt.Sprintf("registration %q", registrationID)
 		activeCases := 0
 		for _, profileCase := range registration.Cases {
-			memberships := countBuildProfile(profileCase.BuildProfiles, profile)
+			memberships := routeHopProfileMemberships(profileCase.BuildProfiles, profile)
 			if memberships == 0 {
 				continue
 			}
@@ -75,8 +88,9 @@ func validateRouteHopEvidenceForProfile(analysis *loadedAnalysis, registry Regis
 
 func newRouteHopFunctionIndex(analysis *loadedAnalysis) (*routeHopFunctionIndex, []string) {
 	index := &routeHopFunctionIndex{
-		exact:    make(map[string][]routeHopFunction),
-		byObject: make(map[string][]routeHopFunction),
+		exact:             make(map[string][]routeHopFunction),
+		byObject:          make(map[string][]routeHopFunction),
+		instancesByOrigin: make(map[*ssa.Function][]*ssa.Function),
 	}
 	if analysis == nil {
 		return index, []string{"building function index: loaded analysis is required"}
@@ -111,6 +125,22 @@ func newRouteHopFunctionIndex(analysis *loadedAnalysis) (*routeHopFunctionIndex,
 	}
 	for _, candidates := range index.byObject {
 		sortRouteHopFunctions(candidates)
+	}
+	if analysis.callGraph != nil {
+		for function := range analysis.callGraph.Nodes {
+			if function == nil || function.Origin() == nil {
+				continue
+			}
+			origin := routeHopFunctionOrigin(function)
+			if function != origin {
+				index.instancesByOrigin[origin] = append(index.instancesByOrigin[origin], function)
+			}
+		}
+		for _, instances := range index.instancesByOrigin {
+			sort.Slice(instances, func(i, j int) bool {
+				return functionSortKey(instances[i]) < functionSortKey(instances[j])
+			})
+		}
 	}
 	sort.Strings(problems)
 	return index, compactStrings(problems)
@@ -192,7 +222,7 @@ func validateRouteHopRouteEvidence(analysis *loadedAnalysis, index *routeHopFunc
 		enclosing[hopIndex] = index.resolve(hop.Site.Enclosing, hopScope+" enclosing", problems)
 		callees[hopIndex] = index.resolve(hop.Callee, hopScope+" callee", problems)
 		if enclosing[hopIndex] != nil && callees[hopIndex] != nil {
-			validateRouteHopCallEvidence(analysis, enclosing[hopIndex], callees[hopIndex], hop, hopScope, problems)
+			validateRouteHopCallEvidence(analysis, index, enclosing[hopIndex], callees[hopIndex], hop, hopScope, problems)
 		}
 	}
 
@@ -229,7 +259,7 @@ func validateRouteHopRouteEvidence(analysis *loadedAnalysis, index *routeHopFunc
 			describeRouteHopFunction(matcher.Enclosing),
 		))
 	}
-	if logicalOwner != nil && !resolvedRouteContainsFunction(enclosing, callees, logicalOwner) {
+	if logicalOwner != nil && !resolvedRouteHopContainsFunction(enclosing, callees, logicalOwner) {
 		*problems = append(*problems, fmt.Sprintf(
 			"%s: chain mismatch: logical owner %s is absent from the resolved route chain",
 			scope,
@@ -238,13 +268,19 @@ func validateRouteHopRouteEvidence(analysis *loadedAnalysis, index *routeHopFunc
 	}
 }
 
-func validateRouteHopCallEvidence(analysis *loadedAnalysis, enclosing, callee *ssa.Function, hop RouteHop, scope string, problems *[]string) {
+func validateRouteHopCallEvidence(analysis *loadedAnalysis, index *routeHopFunctionIndex, enclosing, callee *ssa.Function, hop RouteHop, scope string, problems *[]string) {
 	if !oneOf(hop.Site.Operation, OperationCall, OperationGo, OperationDefer) {
 		*problems = append(*problems, fmt.Sprintf("%s: operation %q is not a call, go, or defer edge", scope, hop.Site.Operation))
 		return
 	}
 
-	matches := routeHopCallsTo(analysis, enclosing, callee, hop.Site.Operation)
+	matches, resolutionProblems := routeHopCallsTo(analysis, index, enclosing, callee, hop.Site.Operation)
+	for _, problem := range resolutionProblems {
+		*problems = append(*problems, scope+": "+problem)
+	}
+	if len(resolutionProblems) != 0 {
+		return
+	}
 	if len(matches) == 0 {
 		*problems = append(*problems, fmt.Sprintf(
 			"%s: %s has no %s edge to callee %s",
@@ -272,11 +308,10 @@ func validateRouteHopCallEvidence(analysis *loadedAnalysis, enclosing, callee *s
 	for candidateIndex, candidate := range matches {
 		if candidateIndex != selectedIndex && candidate.position == selected.position {
 			*problems = append(*problems, fmt.Sprintf(
-				"%s: ordinal %d is ambiguous across multiple SSA %s edges at %s",
+				"%s: ordinal %d is ambiguous across multiple SSA %s edges at one source position",
 				scope,
 				hop.Site.Ordinal,
 				hop.Site.Operation,
-				analysis.program.Fset.PositionFor(selected.position, false),
 			))
 			return
 		}
@@ -292,8 +327,9 @@ func validateRouteHopCallEvidence(analysis *loadedAnalysis, enclosing, callee *s
 	}
 }
 
-func routeHopCallsTo(analysis *loadedAnalysis, enclosing, callee *ssa.Function, operation OperationKind) []routeHopCall {
+func routeHopCallsTo(analysis *loadedAnalysis, index *routeHopFunctionIndex, enclosing, callee *ssa.Function, operation OperationKind) ([]routeHopCall, []string) {
 	var matches []routeHopCall
+	var problems []string
 	for _, block := range enclosing.Blocks {
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(ssa.CallInstruction)
@@ -304,7 +340,11 @@ func routeHopCallsTo(analysis *loadedAnalysis, enclosing, callee *ssa.Function, 
 			if !ok || actualOperation != operation {
 				continue
 			}
-			dispatch, matchesCallee := routeHopDispatchTo(analysis, enclosing, call, callee)
+			dispatch, matchesCallee, problem := routeHopDispatchTo(analysis, index, enclosing, call, callee)
+			if problem != "" {
+				problems = append(problems, problem)
+				continue
+			}
 			if matchesCallee {
 				matches = append(matches, routeHopCall{position: call.Pos(), dispatch: dispatch})
 			}
@@ -313,22 +353,163 @@ func routeHopCallsTo(analysis *loadedAnalysis, enclosing, callee *ssa.Function, 
 	sort.Slice(matches, func(i, j int) bool {
 		return matches[i].position < matches[j].position
 	})
-	return matches
+	sort.Strings(problems)
+	return matches, compactStrings(problems)
 }
 
-func routeHopDispatchTo(analysis *loadedAnalysis, enclosing *ssa.Function, call ssa.CallInstruction, callee *ssa.Function) (HopDispatchKind, bool) {
-	if sameRouteHopFunction(call.Common().StaticCallee(), callee) {
-		return HopDispatchExact, true
+func routeHopDispatchTo(analysis *loadedAnalysis, index *routeHopFunctionIndex, enclosing *ssa.Function, call ssa.CallInstruction, callee *ssa.Function) (HopDispatchKind, bool, string) {
+	search := routeHopDispatchSearch{
+		analysis: analysis,
+		target:   callee,
+		matches:  make(map[HopDispatchKind]bool),
 	}
-	if call.Common().StaticCallee() != nil {
-		return "", false
+	for _, step := range routeHopAuthoredDispatchSteps(analysis, index, enclosing, call) {
+		search.visit(step.callee, step.dispatch, make(map[*ssa.Function]bool))
 	}
-	for _, candidate := range resolvedCallees(analysis.callGraph, enclosing, call) {
-		if sameRouteHopFunction(candidate, callee) {
-			return HopDispatchVTA, true
+	if len(search.problems) != 0 {
+		sort.Strings(search.problems)
+		return "", false, strings.Join(compactStrings(search.problems), "; ")
+	}
+	if len(search.matches) == 0 {
+		return "", false, ""
+	}
+	if len(search.matches) != 1 {
+		return "", false, fmt.Sprintf(
+			"callee %s has ambiguous exact and VTA dispatch evidence",
+			describeRouteHopFunctionRefFromSSA(analysis, callee),
+		)
+	}
+	for dispatch := range search.matches {
+		return dispatch, true, ""
+	}
+	return "", false, ""
+}
+
+func routeHopAuthoredDispatchSteps(analysis *loadedAnalysis, index *routeHopFunctionIndex, enclosing *ssa.Function, call ssa.CallInstruction) []routeHopDispatchStep {
+	if static := call.Common().StaticCallee(); static != nil {
+		return []routeHopDispatchStep{{callee: static, dispatch: HopDispatchExact}}
+	}
+
+	type callVariant struct {
+		enclosing *ssa.Function
+		call      ssa.CallInstruction
+	}
+	variants := []callVariant{{enclosing: enclosing, call: call}}
+	seenCalls := map[ssa.CallInstruction]bool{call: true}
+	operation, _ := operationForCall(call)
+	for _, function := range index.instancesByOrigin[routeHopFunctionOrigin(enclosing)] {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				candidate, ok := instruction.(ssa.CallInstruction)
+				if !ok || seenCalls[candidate] || candidate.Pos() != call.Pos() {
+					continue
+				}
+				candidateOperation, candidateOK := operationForCall(candidate)
+				if !candidateOK || candidateOperation != operation {
+					continue
+				}
+				seenCalls[candidate] = true
+				variants = append(variants, callVariant{enclosing: function, call: candidate})
+			}
 		}
 	}
-	return "", false
+
+	var steps []routeHopDispatchStep
+	for _, variant := range variants {
+		if static := variant.call.Common().StaticCallee(); static != nil {
+			// The authored origin was dynamic. Even if instantiation makes one
+			// body exact, resolving that body still required VTA/instance evidence.
+			steps = append(steps, routeHopDispatchStep{callee: static, dispatch: HopDispatchVTA})
+			continue
+		}
+		for _, candidate := range resolvedCallees(analysis.callGraph, variant.enclosing, variant.call) {
+			steps = append(steps, routeHopDispatchStep{callee: candidate, dispatch: HopDispatchVTA})
+		}
+	}
+	sort.Slice(steps, func(i, j int) bool {
+		return functionSortKey(steps[i].callee) < functionSortKey(steps[j].callee)
+	})
+	return steps
+}
+
+func routeHopDispatchSteps(analysis *loadedAnalysis, enclosing *ssa.Function, call ssa.CallInstruction) []routeHopDispatchStep {
+	if static := call.Common().StaticCallee(); static != nil {
+		return []routeHopDispatchStep{{callee: static, dispatch: HopDispatchExact}}
+	}
+	callees := resolvedCallees(analysis.callGraph, enclosing, call)
+	steps := make([]routeHopDispatchStep, len(callees))
+	for index, callee := range callees {
+		steps[index] = routeHopDispatchStep{callee: callee, dispatch: HopDispatchVTA}
+	}
+	return steps
+}
+
+func (search *routeHopDispatchSearch) visit(function *ssa.Function, dispatch HopDispatchKind, visiting map[*ssa.Function]bool) {
+	if function == nil {
+		return
+	}
+	if sameRouteHopFunction(function, search.target) {
+		search.matches[dispatch] = true
+		return
+	}
+	if !dispatchOnlySynthetic(function.Synthetic) {
+		return
+	}
+	if visiting[function] {
+		search.problems = append(search.problems, fmt.Sprintf(
+			"dispatch-only SSA cycle through %s",
+			functionSortKey(function),
+		))
+		return
+	}
+	visiting[function] = true
+	defer delete(visiting, function)
+
+	steps := routeHopSyntheticDispatchSteps(search.analysis, function)
+	if len(steps) == 0 {
+		search.problems = append(search.problems, fmt.Sprintf(
+			"dispatch-only SSA function %s has no resolvable call edge",
+			functionSortKey(function),
+		))
+		return
+	}
+	for _, step := range steps {
+		search.visit(step.callee, combineRouteHopDispatch(dispatch, step.dispatch), visiting)
+	}
+}
+
+func routeHopSyntheticDispatchSteps(analysis *loadedAnalysis, function *ssa.Function) []routeHopDispatchStep {
+	var steps []routeHopDispatchStep
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			steps = append(steps, routeHopDispatchSteps(analysis, function, call)...)
+		}
+	}
+	sort.Slice(steps, func(i, j int) bool {
+		left := string(steps[i].dispatch) + "|" + functionSortKey(steps[i].callee)
+		right := string(steps[j].dispatch) + "|" + functionSortKey(steps[j].callee)
+		return left < right
+	})
+	return steps
+}
+
+func combineRouteHopDispatch(left, right HopDispatchKind) HopDispatchKind {
+	if left == HopDispatchVTA || right == HopDispatchVTA {
+		return HopDispatchVTA
+	}
+	return HopDispatchExact
+}
+
+func describeRouteHopFunctionRefFromSSA(analysis *loadedAnalysis, function *ssa.Function) string {
+	reference, err := analysis.functionRef(function, function.Pos())
+	if err != nil {
+		return functionSortKey(function)
+	}
+	return describeRouteHopFunction(reference)
 }
 
 func routeHopFunctionOrigin(function *ssa.Function) *ssa.Function {
@@ -344,7 +525,7 @@ func sameRouteHopFunction(left, right *ssa.Function) bool {
 	return left != nil && right != nil && routeHopFunctionOrigin(left) == routeHopFunctionOrigin(right)
 }
 
-func resolvedRouteContainsFunction(enclosing, callees []*ssa.Function, target *ssa.Function) bool {
+func resolvedRouteHopContainsFunction(enclosing, callees []*ssa.Function, target *ssa.Function) bool {
 	for index := range enclosing {
 		if sameRouteHopFunction(enclosing[index], target) || sameRouteHopFunction(callees[index], target) {
 			return true
@@ -353,7 +534,7 @@ func resolvedRouteContainsFunction(enclosing, callees []*ssa.Function, target *s
 	return false
 }
 
-func countBuildProfile(profiles []BuildProfileID, target BuildProfileID) int {
+func routeHopProfileMemberships(profiles []BuildProfileID, target BuildProfileID) int {
 	count := 0
 	for _, profile := range profiles {
 		if profile == target {

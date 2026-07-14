@@ -90,15 +90,74 @@ func TestValidateRawProcessGuardRejectsEvidenceOutsideItsTypedVehicle(t *testing
 	}
 	evidence := []rawProcessEvidence{
 		{
-			Operation: rawProcessSyscallKill,
-			Matcher:   rawProcessFixtureSite(rawProcessSyscallKill, "bypass", "Direct").Matcher,
-			VehicleID: "fixture.unreachable",
-			Profiles:  []BuildProfileID{BuildLinuxDefault},
+			Operation:  rawProcessSyscallKill,
+			Matcher:    rawProcessFixtureSite(rawProcessSyscallKill, "bypass", "Direct").Matcher,
+			VehicleIDs: []string{"fixture.unreachable"},
+			Profiles:   []BuildProfileID{BuildLinuxDefault},
 		},
 	}
 
 	err := validateRawProcessGuard(analysis, []rawProcessVehicle{vehicle}, evidence)
 	assertRawProcessError(t, err, "is not reachable from typed vehicle", ".Direct")
+}
+
+func TestValidateRawProcessGuardRejectsSiblingCallerThatBypassesVehicle(t *testing.T) {
+	analysis := loadRawProcessFixture(t, "callerbypass")
+	packagePath := rawProcessFixturePackage + "/callerbypass"
+	vehicle := rawProcessVehicle{
+		ID:   "fixture.vehicle",
+		Root: ObjectRef{Package: packagePath, Name: "Root"},
+	}
+	evidence := []rawProcessEvidence{{
+		Operation: rawProcessSyscallKill,
+		Matcher: OperationSite{
+			Operation: OperationCall,
+			Enclosing: FunctionRef{
+				Object: ObjectRef{Package: packagePath, Name: "helper"},
+				File:   "internal/reconciletest/effectinventory/testdata/analyzerfixture/rawprocess/callerbypass/callerbypass.go",
+			},
+			Ordinal: 1,
+		},
+		VehicleIDs: []string{"fixture.vehicle"},
+		Profiles:   []BuildProfileID{BuildLinuxDefault},
+	}}
+
+	err := validateRawProcessGuard(analysis, []rawProcessVehicle{vehicle}, evidence)
+	assertRawProcessError(t, err, "caller path bypasses typed vehicle", ".BypassVehicle")
+}
+
+func TestValidateRawProcessGuardRequiresEverySharedVehicleExplicitly(t *testing.T) {
+	analysis := loadRawProcessFixture(t, "multivehicle")
+	packagePath := rawProcessFixturePackage + "/multivehicle"
+	vehicles := []rawProcessVehicle{
+		{ID: "fixture.root-a", Root: ObjectRef{Package: packagePath, Name: "RootA"}},
+		{ID: "fixture.root-b", Root: ObjectRef{Package: packagePath, Name: "RootB"}},
+	}
+	evidence := rawProcessEvidence{
+		Operation: rawProcessSyscallKill,
+		Matcher: OperationSite{
+			Operation: OperationCall,
+			Enclosing: FunctionRef{
+				Object: ObjectRef{Package: packagePath, Name: "helper"},
+				File:   "internal/reconciletest/effectinventory/testdata/analyzerfixture/rawprocess/multivehicle/multivehicle.go",
+			},
+			Ordinal: 1,
+		},
+		VehicleIDs: []string{"fixture.root-a", "fixture.root-b"},
+		Profiles:   []BuildProfileID{BuildLinuxDefault},
+	}
+
+	if err := validateRawProcessGuard(analysis, vehicles, []rawProcessEvidence{evidence}); err != nil {
+		t.Fatalf("validateRawProcessGuard() rejected explicit shared vehicles: %v", err)
+	}
+	evidence.VehicleIDs = []string{"fixture.root-b", "fixture.root-a"}
+	if err := validateRawProcessGuard(analysis, vehicles, []rawProcessEvidence{evidence}); err != nil {
+		t.Fatalf("validateRawProcessGuard() depended on shared vehicle order: %v", err)
+	}
+
+	evidence.VehicleIDs = []string{"fixture.root-a"}
+	err := validateRawProcessGuard(analysis, vehicles, []rawProcessEvidence{evidence})
+	assertRawProcessError(t, err, "caller path bypasses typed vehicle", ".RootB")
 }
 
 func TestCanonicalRawProcessGuardAcrossProductionProfiles(t *testing.T) {
@@ -147,10 +206,10 @@ func rawProcessFixtureSite(operation rawProcessOperation, packageName, function 
 
 func fixtureRawProcessEvidence(operation rawProcessOperation, function, vehicleID string) rawProcessEvidence {
 	return rawProcessEvidence{
-		Operation: operation,
-		Matcher:   rawProcessFixtureSite(operation, "vehicle", function).Matcher,
-		VehicleID: vehicleID,
-		Profiles:  []BuildProfileID{BuildLinuxDefault},
+		Operation:  operation,
+		Matcher:    rawProcessFixtureSite(operation, "vehicle", function).Matcher,
+		VehicleIDs: []string{vehicleID},
+		Profiles:   []BuildProfileID{BuildLinuxDefault},
 	}
 }
 

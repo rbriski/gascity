@@ -55,6 +55,7 @@ type loadedAnalysis struct {
 	receivers         map[token.Pos]types.Type
 	initReachable     map[*ssa.Function]bool
 	channelInputs     map[ssa.Value]map[string]bool
+	channelTracer     *channelTracer
 }
 
 type resolvedBoundary struct {
@@ -82,6 +83,8 @@ func discoverProfile(ctx context.Context, config analysisConfig, profile analysi
 		return nil, err
 	}
 	inputProblems := analysis.indexChannelInputBoundaries(boundaries)
+	analysis.channelTracer = newChannelTracer(analysis, boundaries, nil)
+	defer func() { analysis.channelTracer = nil }()
 
 	var observed []observedCall
 	problems := append([]string(nil), inputProblems...)

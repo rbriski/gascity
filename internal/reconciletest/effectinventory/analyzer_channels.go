@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -113,7 +114,7 @@ func (analysis *loadedAnalysis) observeChannelInstruction(function *ssa.Function
 			problems = append(problems, err.Error())
 			continue
 		}
-		provenance := analysis.traceChannel(operation.channel, boundaries, nil, make(map[ssa.Value]bool))
+		provenance := analysis.traceChannel(operation.channel, boundaries, make(map[ssa.Value]bool))
 		matches := provenance.sortedMatches()
 		if len(matches) > 1 {
 			problems = append(problems, fmt.Sprintf("%s: channel operation matches multiple boundaries: %s", ref.key(), strings.Join(matches, ", ")))
@@ -143,10 +144,11 @@ func (analysis *loadedAnalysis) observeChannelInstruction(function *ssa.Function
 }
 
 type channelProvenance struct {
-	matches   map[string]bool
-	openWorld bool
-	unsafe    bool
-	grounded  bool
+	matches    map[string]bool
+	openWorld  bool
+	unsafe     bool
+	grounded   bool
+	incomplete bool
 }
 
 func newChannelProvenance() channelProvenance {
@@ -160,6 +162,27 @@ func (provenance *channelProvenance) merge(other channelProvenance) {
 	provenance.openWorld = provenance.openWorld || other.openWorld
 	provenance.unsafe = provenance.unsafe || other.unsafe
 	provenance.grounded = provenance.grounded || other.grounded
+	provenance.incomplete = provenance.incomplete || other.incomplete
+}
+
+type channelTraceStats struct {
+	ExpandedStates int
+	MemoHits       int
+}
+
+type channelTraceKey struct {
+	value      ssa.Value
+	bindingsID string
+}
+
+type channelTracer struct {
+	analysis    *loadedAnalysis
+	boundaries  []resolvedBoundary
+	visiting    map[ssa.Value]bool
+	memo        map[channelTraceKey]channelProvenance
+	valueIDs    map[ssa.Value]int
+	nextValueID int
+	stats       channelTraceStats
 }
 
 func (provenance channelProvenance) sortedMatches() []string {
@@ -313,23 +336,50 @@ func channelInputArgument(common *ssa.CallCommon, boundary resolvedBoundary) (ss
 	return common.Args[index], true
 }
 
-func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
+func newChannelTracer(analysis *loadedAnalysis, boundaries []resolvedBoundary, visiting map[ssa.Value]bool) *channelTracer {
+	if visiting == nil {
+		visiting = make(map[ssa.Value]bool)
+	}
+	return &channelTracer{
+		analysis:   analysis,
+		boundaries: boundaries,
+		visiting:   visiting,
+		memo:       make(map[channelTraceKey]channelProvenance),
+		valueIDs:   make(map[ssa.Value]int),
+	}
+}
+
+func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resolvedBoundary, visiting map[ssa.Value]bool) channelProvenance {
+	if analysis.channelTracer != nil {
+		return analysis.channelTracer.trace(value, nil)
+	}
+	return newChannelTracer(analysis, boundaries, visiting).trace(value, nil)
+}
+
+func (tracer *channelTracer) trace(value ssa.Value, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
 	if value == nil {
 		return provenance
 	}
-	if visiting[value] {
+	key := channelTraceKey{value: value, bindingsID: tracer.bindingID(bindings)}
+	if cached, ok := tracer.memo[key]; ok {
+		tracer.stats.MemoHits++
+		return cached
+	}
+	if tracer.visiting[value] {
 		// Provenance is a monotone union. Returning the empty set on a
 		// back-edge lets non-recursive branches provide the fixed-point seeds.
+		provenance.incomplete = true
 		return provenance
 	}
-	visiting[value] = true
-	defer delete(visiting, value)
+	tracer.visiting[value] = true
+	defer delete(tracer.visiting, value)
+	tracer.stats.ExpandedStates++
 
-	for boundaryID := range analysis.channelInputs[value] {
+	for boundaryID := range tracer.analysis.channelInputs[value] {
 		provenance.matches[boundaryID] = true
 	}
-	for _, boundary := range boundaries {
+	for _, boundary := range tracer.boundaries {
 		if boundary.definition.Match == ObjectMatchChannel && boundary.definition.Input.zero() && boundary.definition.Output.zero() && channelValueObject(value) == boundary.object {
 			provenance.matches[boundary.definition.ID] = true
 		}
@@ -337,11 +387,12 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 	if len(provenance.matches) != 0 {
 		provenance.grounded = true
 		provenance.unsafe = channelValueHasUnsafeAncestry(value, make(map[ssa.Value]bool))
+		tracer.memo[key] = provenance
 		return provenance
 	}
 
 	mergeValue := func(candidate ssa.Value) {
-		provenance.merge(analysis.traceChannel(candidate, boundaries, bindings, visiting))
+		provenance.merge(tracer.trace(candidate, bindings))
 	}
 	switch value := value.(type) {
 	case *ssa.Parameter:
@@ -352,10 +403,10 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 				provenance.openWorld = true
 			}
 		} else {
-			provenance.merge(analysis.traceChannelParameter(value, boundaries, visiting))
+			provenance.merge(tracer.traceChannelParameter(value))
 		}
 	case *ssa.FreeVar:
-		provenance.merge(analysis.traceChannelFreeVar(value, boundaries, bindings, visiting))
+		provenance.merge(tracer.traceChannelFreeVar(value, bindings))
 	case *ssa.Global:
 		provenance.openWorld = true
 	case *ssa.MakeChan, *ssa.Const:
@@ -364,9 +415,9 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 	case *ssa.UnOp:
 		mergeValue(value.X)
 	case *ssa.FieldAddr:
-		provenance.merge(analysis.traceChannelField(value.X, value.Field, boundaries, bindings, visiting))
+		provenance.merge(tracer.traceChannelField(value.X, value.Field, bindings))
 	case *ssa.Field:
-		provenance.merge(analysis.traceChannelField(value.X, value.Field, boundaries, bindings, visiting))
+		provenance.merge(tracer.traceChannelField(value.X, value.Field, bindings))
 	case *ssa.ChangeType:
 		mergeValue(value.X)
 	case *ssa.ChangeInterface:
@@ -382,7 +433,7 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 		mergeValue(value.X)
 	case *ssa.Extract:
 		if call, ok := value.Tuple.(*ssa.Call); ok {
-			provenance.merge(analysis.traceChannelCall(call, value.Index, boundaries, bindings, visiting))
+			provenance.merge(tracer.traceChannelCall(call, value.Index, bindings))
 		} else {
 			mergeValue(value.Tuple)
 		}
@@ -391,9 +442,9 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 			mergeValue(edge)
 		}
 	case *ssa.Alloc:
-		provenance.merge(analysis.traceChannelStores(value, boundaries, bindings, visiting))
+		provenance.merge(tracer.traceChannelStores(value, bindings))
 	case *ssa.Call:
-		provenance.merge(analysis.traceChannelCall(value, 0, boundaries, bindings, visiting))
+		provenance.merge(tracer.traceChannelCall(value, 0, bindings))
 	case *ssa.Lookup, *ssa.Index:
 		// Maps, slices, and arrays may be populated by unanalyzed callers.
 		provenance.openWorld = true
@@ -402,10 +453,56 @@ func (analysis *loadedAnalysis) traceChannel(value ssa.Value, boundaries []resol
 			provenance.openWorld = true
 		}
 	}
+	if !provenance.incomplete {
+		tracer.memo[key] = provenance
+	}
 	return provenance
 }
 
-func (analysis *loadedAnalysis) traceChannelParameter(parameter *ssa.Parameter, boundaries []resolvedBoundary, visiting map[ssa.Value]bool) channelProvenance {
+func (tracer *channelTracer) bindingID(bindings map[*ssa.Parameter]ssa.Value) string {
+	if len(bindings) == 0 {
+		return ""
+	}
+	type bindingPair struct {
+		parameter int
+		actual    int
+	}
+	pairs := make([]bindingPair, 0, len(bindings))
+	for parameter, actual := range bindings {
+		pairs = append(pairs, bindingPair{
+			parameter: tracer.valueID(parameter),
+			actual:    tracer.valueID(resolveChannelActual(actual, bindings)),
+		})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].parameter != pairs[j].parameter {
+			return pairs[i].parameter < pairs[j].parameter
+		}
+		return pairs[i].actual < pairs[j].actual
+	})
+	var result strings.Builder
+	for _, pair := range pairs {
+		result.WriteString(strconv.Itoa(pair.parameter))
+		result.WriteByte('=')
+		result.WriteString(strconv.Itoa(pair.actual))
+		result.WriteByte(';')
+	}
+	return result.String()
+}
+
+func (tracer *channelTracer) valueID(value ssa.Value) int {
+	if value == nil {
+		return 0
+	}
+	if id := tracer.valueIDs[value]; id != 0 {
+		return id
+	}
+	tracer.nextValueID++
+	tracer.valueIDs[value] = tracer.nextValueID
+	return tracer.nextValueID
+}
+
+func (tracer *channelTracer) traceChannelParameter(parameter *ssa.Parameter) channelProvenance {
 	provenance := newChannelProvenance()
 	function := parameter.Parent()
 	if function == nil {
@@ -424,14 +521,14 @@ func (analysis *loadedAnalysis) traceChannelParameter(parameter *ssa.Parameter, 
 		return provenance
 	}
 
-	node := analysis.callGraph.Nodes[function]
+	node := tracer.analysis.callGraph.Nodes[function]
 	if node == nil || len(node.In) == 0 {
 		provenance.openWorld = true
 		return provenance
 	}
 	foundBinding := false
 	for _, edge := range node.In {
-		if edge == nil || edge.Caller == nil || edge.Caller.Func == nil || edge.Site == nil || !analysis.authoredSourceFunction(edge.Caller.Func) {
+		if edge == nil || edge.Caller == nil || edge.Caller.Func == nil || edge.Site == nil || !tracer.analysis.authoredSourceFunction(edge.Caller.Func) {
 			provenance.openWorld = true
 			continue
 		}
@@ -441,7 +538,7 @@ func (analysis *loadedAnalysis) traceChannelParameter(parameter *ssa.Parameter, 
 			continue
 		}
 		foundBinding = true
-		provenance.merge(analysis.traceChannel(actual, boundaries, nil, visiting))
+		provenance.merge(tracer.trace(actual, nil))
 	}
 	if !foundBinding {
 		provenance.openWorld = true
@@ -478,7 +575,7 @@ func channelParameterActual(common *ssa.CallCommon, callee *ssa.Function, parame
 	return common.Args[parameterIndex], true
 }
 
-func (analysis *loadedAnalysis) traceChannelFreeVar(freeVariable *ssa.FreeVar, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
+func (tracer *channelTracer) traceChannelFreeVar(freeVariable *ssa.FreeVar, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
 	owner := freeVariable.Parent()
 	if owner == nil || owner.Parent() == nil {
@@ -504,7 +601,7 @@ func (analysis *loadedAnalysis) traceChannelFreeVar(freeVariable *ssa.FreeVar, b
 				continue
 			}
 			foundBinding = true
-			provenance.merge(analysis.traceChannel(closure.Bindings[index], boundaries, bindings, visiting))
+			provenance.merge(tracer.trace(closure.Bindings[index], bindings))
 		}
 	}
 	if !foundBinding {
@@ -562,7 +659,7 @@ func channelValueHasUnsafeAncestry(value ssa.Value, visiting map[ssa.Value]bool)
 	return false
 }
 
-func (analysis *loadedAnalysis) traceChannelField(base ssa.Value, field int, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
+func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
 	allocation, local := base.(*ssa.Alloc)
 	if !local {
@@ -571,7 +668,7 @@ func (analysis *loadedAnalysis) traceChannelField(base ssa.Value, field int, bou
 		}
 	}
 	if !local {
-		provenance.merge(analysis.traceChannel(base, boundaries, bindings, visiting))
+		provenance.merge(tracer.trace(base, bindings))
 		if len(provenance.matches) == 0 && !provenance.unsafe {
 			provenance.openWorld = true
 		}
@@ -592,7 +689,7 @@ func (analysis *loadedAnalysis) traceChannelField(base ssa.Value, field int, bou
 						case *ssa.Store:
 							if fieldInstruction.Addr == instruction {
 								foundStore = true
-								provenance.merge(analysis.traceChannel(fieldInstruction.Val, boundaries, bindings, visiting))
+								provenance.merge(tracer.trace(fieldInstruction.Val, bindings))
 							}
 						case *ssa.UnOp, *ssa.DebugRef:
 							// Direct loads and debug metadata do not let the address escape.
@@ -623,7 +720,7 @@ func (analysis *loadedAnalysis) traceChannelField(base ssa.Value, field int, bou
 	return provenance
 }
 
-func (analysis *loadedAnalysis) traceChannelStores(allocation *ssa.Alloc, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
+func (tracer *channelTracer) traceChannelStores(allocation *ssa.Alloc, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
 	foundStore := false
 	if references := allocation.Referrers(); references != nil {
@@ -632,7 +729,7 @@ func (analysis *loadedAnalysis) traceChannelStores(allocation *ssa.Alloc, bounda
 			case *ssa.Store:
 				if instruction.Addr == allocation {
 					foundStore = true
-					provenance.merge(analysis.traceChannel(instruction.Val, boundaries, bindings, visiting))
+					provenance.merge(tracer.trace(instruction.Val, bindings))
 				}
 			case *ssa.UnOp, *ssa.DebugRef, *ssa.MakeClosure:
 				// Direct loads, metadata, and lexical captures remain closed-world.
@@ -650,11 +747,11 @@ func (analysis *loadedAnalysis) traceChannelStores(allocation *ssa.Alloc, bounda
 	return provenance
 }
 
-func (analysis *loadedAnalysis) traceChannelCall(call *ssa.Call, resultIndex int, boundaries []resolvedBoundary, bindings map[*ssa.Parameter]ssa.Value, visiting map[ssa.Value]bool) channelProvenance {
+func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
 	authoritativeMatch := false
-	for _, boundary := range boundaries {
-		if analysis.callProducesChannel(call, resultIndex, boundary) {
+	for _, boundary := range tracer.boundaries {
+		if tracer.analysis.callProducesChannel(call, resultIndex, boundary) {
 			provenance.matches[boundary.definition.ID] = true
 			authoritativeMatch = authoritativeMatch || callDirectlyProducesChannel(call, resultIndex, boundary)
 		}
@@ -668,7 +765,7 @@ func (analysis *loadedAnalysis) traceChannelCall(call *ssa.Call, resultIndex int
 		return provenance
 	}
 
-	callees := resolvedCallees(analysis.callGraph, call.Parent(), call)
+	callees := resolvedCallees(tracer.analysis.callGraph, call.Parent(), call)
 	if call.Call.StaticCallee() == nil {
 		provenance.openWorld = true
 	}
@@ -699,7 +796,7 @@ func (analysis *loadedAnalysis) traceChannelCall(call *ssa.Call, resultIndex int
 					continue
 				}
 				foundReturn = true
-				provenance.merge(analysis.traceChannel(returned.Results[resultIndex], boundaries, calleeBindings, visiting))
+				provenance.merge(tracer.trace(returned.Results[resultIndex], calleeBindings))
 			}
 		}
 		if !foundReturn {

@@ -153,7 +153,7 @@ func TestDiscoverProfileRejectsUnresolvedAndReflectiveEffectEscapes(t *testing.T
 	}
 }
 
-func fixtureAnalysisConfig(t *testing.T, patterns []string) analysisConfig {
+func fixtureAnalysisConfig(t testing.TB, patterns []string) analysisConfig {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {

@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/gastownhall/gascity/internal/filelock"
 )
 
 // withTargetLock serializes writers that target the same provider-native MCP
@@ -35,11 +36,11 @@ func withTargetLock(lockRoot, provider, target string, fn func() error) error {
 		return fmt.Errorf("opening lock %s: %w", lockPath, err)
 	}
 	defer f.Close() //nolint:errcheck // lock released on close
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := filelock.Lock(f, filelock.Exclusive); err != nil {
 		return fmt.Errorf("locking %s: %w", lockPath, err)
 	}
 	defer func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = filelock.Unlock(f)
 	}()
 	return fn()
 }

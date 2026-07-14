@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // loadRigDoltPorts reads each rig's <rigRoot>/.beads/dolt-server.port file and
@@ -757,9 +758,9 @@ func readWithTimeout(path string) ([]byte, error) {
 	}
 }
 
-// killProcess sends a signal to a PID. Wraps syscall.Kill so the reaper can
+// killProcess sends a signal to a PID. It wraps the shared process helper so the reaper can
 // inject a no-op for tests. Errors are returned verbatim; ESRCH (no such
 // process) is the caller's responsibility to interpret as "already gone".
 func killProcess(pid int, sig syscall.Signal) error {
-	return syscall.Kill(pid, sig)
+	return pidutil.Signal(pid, sig)
 }

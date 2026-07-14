@@ -185,7 +185,7 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 // from flags and city state and hands it off.
 //
 // DiscoverProcesses and KillProcess are injection points for tests; in
-// production they default to the /proc walker and syscall.Kill respectively.
+// production they default to the /proc walker and shared PID signal helper.
 // HomeDir defaults to the live $HOME and seeds ~/.gotmp/Test* recognition.
 // TempDir defaults to the live os.TempDir() and lets the reaper recognize
 // Go test temp roots and known Gas City test prefixes on hosts where TMPDIR

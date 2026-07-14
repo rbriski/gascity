@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // driftFlags captures the operator-visible inputs that influence drift
@@ -497,14 +498,14 @@ func readDaemonAutoRestart(cityPath string) bool {
 }
 
 // defaultRestartHelpers wires the production restartHelpers using the
-// existing mockable supervisorSystemctlRun hook for systemd, and
-// syscall.Kill / a backgrounded exec.Cmd for direct launches.
+// existing mockable supervisorSystemctlRun hook for systemd, and the shared
+// PID/process helpers for direct launches.
 func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
 		Systemctl: supervisorSystemctlRun,
 		Launchctl: supervisorLaunchctlRun,
 		Kill: func(pid int) error {
-			return syscall.Kill(pid, syscall.SIGTERM)
+			return pidutil.Signal(pid, syscall.SIGTERM)
 		},
 		WaitExit: func(pid int) error {
 			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
@@ -546,7 +547,7 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 	// the only failure mode here is that the process already exited
 	// between our last probe and the signal call, which is not a real
 	// error from the caller's perspective.
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	_ = pidutil.Signal(pid, syscall.SIGKILL)
 	deadline = time.Now().Add(escalate)
 	for time.Now().Before(deadline) {
 		if pidGone(pid) {
@@ -563,30 +564,10 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 // Both cases mean the process can no longer hold ports or files, so
 // the supervisor restart can safely proceed.
 //
-// We probe via signal-zero first because it covers both "PID never
-// existed" and "PID was reaped" without an extra /proc syscall. The
-// /proc/<pid>/status fallback handles the zombie case that signal
-// zero reports as alive.
+// pidutil.Alive handles permission-denied conservatively and treats Unix
+// zombies as exited, while also providing a native Windows liveness probe.
 func pidGone(pid int) bool {
-	if err := syscall.Kill(pid, syscall.Signal(0)); err == syscall.ESRCH {
-		return true
-	}
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
-	if err != nil {
-		// If /proc/<pid>/status is missing, the kernel has already
-		// torn down the entry — ESRCH-equivalent.
-		return os.IsNotExist(err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "State:") {
-			continue
-		}
-		// State lines look like "State:\tZ (zombie)" or "State:\tR
-		// (running)" — a zombie has already released its ports and
-		// FDs even though the parent has not reaped it.
-		return strings.Contains(line, "Z")
-	}
-	return false
+	return !pidutil.Alive(pid)
 }
 
 // humanizeReadyDuration formats a sub-minute duration as `0.7s`-style

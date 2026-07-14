@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 type managedDoltStartReport struct {
@@ -429,7 +430,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
+	configureManagedDoltSQLServerProcess(cmd)
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
@@ -686,11 +687,10 @@ func readManagedDoltScopeWatchdogStart(r io.Reader, watchdogPID int) (pid int, s
 	return parseManagedDoltWatchdogStartLine(line)
 }
 
-func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
-	if managedDoltTestModeEnabled() {
-		return nil
+func configureManagedDoltSQLServerProcess(cmd *exec.Cmd) {
+	if !managedDoltTestModeEnabled() {
+		processgroup.StartCommandInNewGroup(cmd)
 	}
-	return &syscall.SysProcAttr{Setpgid: true}
 }
 
 func managedDoltTestWatchdogEnabled() bool {
@@ -785,23 +785,11 @@ func terminateManagedDoltTestPID(pid int) error {
 	if pid <= 0 {
 		return nil
 	}
-	pgid, err := syscall.Getpgid(pid)
-	if err != nil || pgid != pid || pgid <= 1 {
-		return terminateManagedDoltPID("", pid)
+	handled, err := terminateManagedDoltTestProcessGroup(pid)
+	if handled {
+		return err
 	}
-	if killErr := syscall.Kill(-pgid, syscall.SIGTERM); killErr != nil {
-		return terminateManagedDoltPID("", pid)
-	}
-	deadline := time.Now().Add(managedDoltTestProcessGroupKillWait)
-	for time.Now().Before(deadline) {
-		if !pidAlive(pid) {
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	time.Sleep(250 * time.Millisecond)
-	return nil
+	return terminateManagedDoltPID("", pid)
 }
 
 func disarmManagedDoltStartedProcess(started managedDoltStartedProcess) {
@@ -1185,7 +1173,7 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	// (kill(-pgid, ...)). Without this, dolt children (e.g. auto_gc helpers,
 	// archive workers) outlive their parent and leak across test runs
 	// (gastownhall/gascity#2313 follow-up M3).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck

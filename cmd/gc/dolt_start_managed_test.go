@@ -343,24 +343,26 @@ func cleanupManagedDoltTestPID(t *testing.T, pid int) {
 	_ = terminateManagedDoltTestPID(pid)
 }
 
-func TestManagedDoltSQLServerSysProcAttrProductionDetaches(t *testing.T) {
+func TestConfigureManagedDoltSQLServerProcessProductionDetaches(t *testing.T) {
 	withManagedDoltTestMode(t, false)
 	t.Setenv(managedDoltTestModeEnv, "")
 
-	attr := managedDoltSQLServerSysProcAttr()
+	cmd := &exec.Cmd{}
+	configureManagedDoltSQLServerProcess(cmd)
 
-	if attr == nil || !attr.Setpgid {
-		t.Fatalf("production managed Dolt must keep detached process-group behavior, got %#v", attr)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Fatalf("production managed Dolt must keep detached process-group behavior, got %#v", cmd.SysProcAttr)
 	}
 }
 
-func TestManagedDoltSQLServerSysProcAttrTestModeDoesNotDetach(t *testing.T) {
+func TestConfigureManagedDoltSQLServerProcessTestModeDoesNotDetach(t *testing.T) {
 	withManagedDoltTestMode(t, true)
 
-	attr := managedDoltSQLServerSysProcAttr()
+	cmd := &exec.Cmd{}
+	configureManagedDoltSQLServerProcess(cmd)
 
-	if attr != nil {
-		t.Fatalf("test-mode managed Dolt must stay in the test process group, got %#v", attr)
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("test-mode managed Dolt must stay in the test process group, got %#v", cmd.SysProcAttr)
 	}
 }
 

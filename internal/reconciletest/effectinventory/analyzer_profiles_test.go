@@ -147,3 +147,20 @@ func TestCanonicalProfilesSelectNativeAndDefaultSources(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsProductionAnalysisTypeChecks(t *testing.T) {
+	config := fixtureAnalysisConfig(t, nil)
+	patterns, err := canonicalSourcePatterns(canonicalAnalysisRoots())
+	if err != nil {
+		t.Fatalf("canonicalSourcePatterns() error: %v", err)
+	}
+	config.Patterns = patterns
+	profile, ok := canonicalAnalysisProfile(BuildWindowsCompile)
+	if !ok {
+		t.Fatal("canonical Windows analysis profile is missing")
+	}
+
+	if _, err := loadAnalysis(context.Background(), config, profile); err != nil {
+		t.Fatalf("Windows production analysis failed: %v", err)
+	}
+}

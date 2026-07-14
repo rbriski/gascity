@@ -48,7 +48,7 @@ type CanonicalProfileDiscovery struct {
 type canonicalCompileRuntime struct {
 	probeGit     func(context.Context, string) (gitSnapshot, error)
 	auditSources func(context.Context, sourceSelectionConfig) (sourceAudit, error)
-	runProfile   func(context.Context, analysisConfig, analysisProfile, []BoundaryDefinition) (canonicalProfileRun, error)
+	runProfile   func(context.Context, analysisConfig, analysisProfile, Registry) (canonicalProfileRun, error)
 	verifyScope  func(string, sourceScopeManifest) error
 }
 
@@ -123,7 +123,7 @@ func CompileCanonicalRegistry(ctx context.Context, request CanonicalCompileReque
 		if err := ctx.Err(); err != nil {
 			return CompiledRegistry{}, CanonicalDiscoveryReport{}, fmt.Errorf("canonical effect inventory: canceled before profile %q: %w", profile.ID, err)
 		}
-		run, err := runtime.runProfile(ctx, config, profile, append([]BoundaryDefinition(nil), boundaries...))
+		run, err := runtime.runProfile(ctx, config, profile, cloneRegistry(registry))
 		if err != nil {
 			return CompiledRegistry{}, CanonicalDiscoveryReport{}, canonicalStageError(ctx, pre.repoRoot, fmt.Sprintf("discovering profile %q", profile.ID), err)
 		}

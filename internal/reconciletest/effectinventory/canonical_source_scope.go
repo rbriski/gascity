@@ -54,7 +54,7 @@ func auditCanonicalSources(ctx context.Context, config sourceSelectionConfig) (s
 	}, nil
 }
 
-func runCanonicalProfile(ctx context.Context, config analysisConfig, profile analysisProfile, boundaries []BoundaryDefinition) (canonicalProfileRun, error) {
+func runCanonicalProfile(ctx context.Context, config analysisConfig, profile analysisProfile, registry Registry) (canonicalProfileRun, error) {
 	analysis, err := loadAnalysis(ctx, config, profile)
 	if err != nil {
 		return canonicalProfileRun{}, err
@@ -70,8 +70,11 @@ func runCanonicalProfile(ctx context.Context, config analysisConfig, profile ana
 	if err := validateCanonicalRawProcessGuard(analysis); err != nil {
 		return canonicalProfileRun{}, err
 	}
-	sites, err := discoverLoadedProfile(analysis, boundaries)
+	sites, err := discoverLoadedProfile(analysis, registry.Boundaries)
 	if err != nil {
+		return canonicalProfileRun{}, err
+	}
+	if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
 		return canonicalProfileRun{}, err
 	}
 	after, err := fingerprintSourcePaths(config.RepoRoot, paths)

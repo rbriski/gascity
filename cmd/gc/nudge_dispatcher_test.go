@@ -1,17 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // supervisorCfg returns a minimal *config.City wired for supervisor-mode
@@ -43,7 +50,7 @@ func TestStartNudgeWakeListenerSignalsOnConnect(t *testing.T) {
 	dir := t.TempDir()
 	wakeCh := make(chan struct{}, 1)
 
-	lis, err := startNudgeWakeListener(ctx, dir, wakeCh, nil, "test")
+	lis, err := startNudgeWakeListener(ctx, dir, wakeCh)
 	if err != nil {
 		t.Fatalf("startNudgeWakeListener: %v", err)
 	}
@@ -57,13 +64,439 @@ func TestStartNudgeWakeListenerSignalsOnConnect(t *testing.T) {
 	}
 }
 
+func TestDispatchAcceptedNudgeWakeSignalsImmediatelyAndBoundsSlowReaders(t *testing.T) {
+	wakeCh := make(chan struct{}, 1)
+	readerSlots := make(chan struct{}, 1)
+	firstServer, firstClient := net.Pipe()
+	defer firstClient.Close() //nolint:errcheck
+	readerStarted := make(chan struct{})
+	releaseReader := make(chan struct{})
+	readerDone := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseReader)
+		}
+	}()
+	readConnection := func(conn net.Conn) {
+		close(readerStarted)
+		<-releaseReader
+		_ = conn.Close()
+		close(readerDone)
+	}
+
+	dispatchAcceptedNudgeWake(firstServer, wakeCh, readerSlots, readConnection)
+	receiveBeforeDeadline(t, wakeCh)
+	receiveBeforeDeadline(t, readerStarted)
+
+	// The first reader is deliberately wedged. A second accepted connection
+	// must still wake legacy immediately and be closed instead of allocating an
+	// unbounded goroutine or waiting behind the slow exact frame.
+	secondServer, secondClient := net.Pipe()
+	defer secondClient.Close() //nolint:errcheck
+	if err := secondClient.SetReadDeadline(time.Now().Add(testutil.GoroutineRaceTimeout)); err != nil {
+		t.Fatalf("set saturated client read deadline: %v", err)
+	}
+	dispatchAcceptedNudgeWake(secondServer, wakeCh, readerSlots, readConnection)
+	receiveBeforeDeadline(t, wakeCh)
+	var one [1]byte
+	if _, err := secondClient.Read(one[:]); err == nil {
+		t.Fatal("saturated exact-reader connection remained open")
+	}
+
+	close(releaseReader)
+	released = true
+	receiveBeforeDeadline(t, readerDone)
+}
+
+func TestStartNudgeWakeListenerRoutesVersionedHintAndPreservesLegacyWake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	wakeCh := make(chan struct{}, 1)
+	exactCh := make(chan nudgeWakeHint, 1)
+
+	lis, err := startNudgeWakeListenerWithHints(ctx, dir, wakeCh, func(hint nudgeWakeHint) {
+		exactCh <- hint
+	}, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	want := nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "command-123", SessionID: "session-456"}
+	pingNudgeWakeSocketHint(dir, want)
+	if got := receiveBeforeDeadline(t, exactCh); got != want {
+		t.Fatalf("exact hint = %+v, want %+v", got, want)
+	}
+	receiveBeforeDeadline(t, wakeCh)
+}
+
+func TestStartNudgeWakeListenerDecodesFragmentedFrame(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	exactCh := make(chan nudgeWakeHint, 1)
+	lis, err := startNudgeWakeListenerWithHints(ctx, dir, make(chan struct{}, 1), func(hint nudgeWakeHint) {
+		exactCh <- hint
+	}, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	want := nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "fragmented-command", SessionID: "fragmented-session"}
+	wire, err := nudgequeue.EncodeSessionWakeHint(want)
+	if err != nil {
+		t.Fatalf("EncodeSessionWakeHint: %v", err)
+	}
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(dir), testutil.GoroutineRaceTimeout)
+	if err != nil {
+		t.Fatalf("dial nudge wake socket: %v", err)
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(testutil.GoroutineRaceTimeout)); err != nil {
+		_ = conn.Close()
+		t.Fatalf("set fragmented write deadline: %v", err)
+	}
+	split := len(wire) / 2
+	for _, fragment := range [][]byte{wire[:split], wire[split:]} {
+		if _, err := conn.Write(fragment); err != nil {
+			_ = conn.Close()
+			t.Fatalf("write fragmented nudge wake frame: %v", err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close fragmented nudge wake frame: %v", err)
+	}
+	if got := receiveBeforeDeadline(t, exactCh); got != want {
+		t.Fatalf("fragmented exact hint = %+v, want %+v", got, want)
+	}
+}
+
+func TestInvokeNudgeWakeHintContainsExactCallbackPanic(t *testing.T) {
+	var stderr bytes.Buffer
+	invokeNudgeWakeHint(func(nudgeWakeHint) {
+		panic("shadow callback failure")
+	}, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "panic-command", SessionID: "panic-session"}, &stderr, "test")
+	if !strings.Contains(stderr.String(), "nudge exact wake callback panicked: shadow callback failure") {
+		t.Fatalf("stderr = %q, want contained callback panic", stderr.String())
+	}
+}
+
+func TestStartNudgeWakeListenerKeepsMalformedAndLegacyPayloadsGlobalOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "legacy byte", payload: []byte{1}},
+		{name: "unknown version", payload: []byte("GCNW/2/Y21k/c2Vzc2lvbg")},
+		{name: "missing command", payload: []byte("GCNW/1//c2Vzc2lvbg")},
+		{name: "malformed base64", payload: []byte("GCNW/1/%%%/c2Vzc2lvbg")},
+		{name: "oversized", payload: bytes.Repeat([]byte("x"), nudgeWakeHintMaxPayloadBytes+1)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			dir := t.TempDir()
+			wakeCh := make(chan struct{}, 1)
+			lis, err := startNudgeWakeListenerWithHints(ctx, dir, wakeCh, func(nudgeWakeHint) {}, nil, "test")
+			if err != nil {
+				t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+			}
+			defer lis.Close() //nolint:errcheck
+
+			writeRawNudgeWakePayload(t, dir, tc.payload)
+			receiveBeforeDeadline(t, wakeCh)
+
+			// Exercise the framed reader synchronously as well. Exact readers are
+			// concurrent in production, so a cross-connection FIFO assertion
+			// would be a false barrier.
+			server, client := net.Pipe()
+			writeDone := make(chan error, 1)
+			go func() {
+				_, writeErr := client.Write(tc.payload)
+				closeErr := client.Close()
+				if writeErr == nil {
+					writeErr = closeErr
+				}
+				writeDone <- writeErr
+			}()
+			directExact := make(chan nudgeWakeHint, 1)
+			readNudgeWakeHintConnection(context.Background(), server, func(hint nudgeWakeHint) {
+				directExact <- hint
+			}, nil, "test")
+			if err := receiveBeforeDeadline(t, writeDone); err != nil {
+				t.Fatalf("write direct framed payload: %v", err)
+			}
+			select {
+			case exact := <-directExact:
+				t.Fatalf("malformed/legacy payload produced exact hint %+v", exact)
+			default:
+			}
+		})
+	}
+}
+
+func TestCommittedNudgeStartsProvisionalExactShadowBeforePatrol(t *testing.T) {
+	dir := t.TempDir()
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, "project-shadow-scope"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+	cr := &CityRuntime{
+		cityPath: dir,
+		cfg:      supervisorCfg(),
+		stderr:   &bytes.Buffer{},
+	}
+	if err := cr.installNudgeKeyShadow(); err != nil {
+		t.Fatalf("installNudgeKeyShadow: %v", err)
+	}
+	if cr.nudgeKeyController == nil {
+		t.Fatal("durable project identity did not install provisional keyed shadow controller")
+	}
+
+	type observation struct {
+		key       string
+		storeID   string
+		sessionID string
+		batch     nudgeReconcileBatch
+	}
+	observed := make(chan observation, 1)
+	type hintObservation struct {
+		hint      nudgeWakeHint
+		committed bool
+		loadErr   error
+	}
+	hintSeen := make(chan hintObservation, 1)
+	commandID := "command-exact-1"
+	sessionID := "session-durable-1"
+	cr.nudgeKeyController.reconcile = func(_ context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) {
+		observed <- observation{
+			key:       key.String(),
+			storeID:   key.StoreID(),
+			sessionID: key.SessionID(),
+			batch:     batch,
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopController := cr.startNudgeKeyController(ctx)
+	wakeCh := make(chan struct{}, 1)
+	hintErrCh := make(chan error, 1)
+	lis, err := startNudgeWakeListenerWithHints(ctx, dir, wakeCh, func(hint nudgeWakeHint) {
+		state, loadErr := nudgequeue.LoadState(dir)
+		committed := false
+		if loadErr == nil {
+			for _, queued := range state.Pending {
+				if queued.ID == hint.CommandID && queued.SessionID == hint.SessionID {
+					committed = true
+					break
+				}
+			}
+		}
+		hintSeen <- hintObservation{hint: hint, committed: committed, loadErr: loadErr}
+		if err := cr.enqueueNudgeKeyShadow(hint.SessionID); err != nil {
+			hintErrCh <- err
+		}
+	}, nil, "test")
+	if err != nil {
+		cancel()
+		stopController()
+		t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		stopController()
+		_ = lis.Close()
+	})
+
+	item := newQueuedNudge("display-alias-must-not-be-key", "message-must-not-enter-hint", time.Now())
+	item.ID = commandID
+	item.SessionID = sessionID
+	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: beads.NewMemStore()}, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	got := receiveBeforeDeadline(t, observed)
+	gotHint := receiveBeforeDeadline(t, hintSeen)
+	if gotHint.loadErr != nil || !gotHint.committed {
+		t.Fatalf("hint observed committed queue state = %v, loadErr=%v", gotHint.committed, gotHint.loadErr)
+	}
+	if gotHint.hint.CommandID != commandID || gotHint.hint.SessionID != sessionID {
+		t.Fatalf("wire hint = %+v, want only committed command/session identities", gotHint.hint)
+	}
+	if got.storeID != nudgeKeyShadowProjectScopePrefix+"project-shadow-scope" || got.sessionID != sessionID {
+		t.Fatalf("provisional key = scope %q session %q, want namespaced project scope + durable session ID (encoded %q)", got.storeID, got.sessionID, got.key)
+	}
+	if got.batch.Causes != nudgeCauseCommandCommit {
+		t.Fatalf("causes = %v, want command commit only", got.batch.Causes)
+	}
+	receiveBeforeDeadline(t, wakeCh)
+	select {
+	case err := <-hintErrCh:
+		t.Fatalf("exact hint admission: %v", err)
+	default:
+	}
+}
+
+func TestDuplicateCommandWakeUsesPersistedSessionIdentity(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	exactCh := make(chan nudgeWakeHint, 2)
+	lis, err := startNudgeWakeListenerWithHints(ctx, dir, make(chan struct{}, 2), func(hint nudgeWakeHint) {
+		exactCh <- hint
+	}, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	store := beads.NudgesStore{Store: beads.NewMemStore()}
+	first := newQueuedNudge("worker", "original", time.Now())
+	first.ID = "immutable-command-id"
+	first.SessionID = "persisted-session"
+	if err := enqueueQueuedNudgeWithStore(dir, store, first); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	if got := receiveBeforeDeadline(t, exactCh); got.CommandID != first.ID || got.SessionID != first.SessionID {
+		t.Fatalf("first hint = %+v, want persisted command/session", got)
+	}
+
+	conflictingRetry := first
+	conflictingRetry.SessionID = "caller-supplied-conflict"
+	conflictingRetry.Message = "conflicting retry"
+	if err := enqueueQueuedNudgeWithStore(dir, store, conflictingRetry); err != nil {
+		t.Fatalf("duplicate enqueue: %v", err)
+	}
+	if got := receiveBeforeDeadline(t, exactCh); got.CommandID != first.ID || got.SessionID != first.SessionID {
+		t.Fatalf("duplicate hint = %+v, want canonical persisted command/session", got)
+	}
+}
+
+func TestDistinctCommandWakeHintsCoalesceAtProvisionalSessionKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, "duplicate-project"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+	cr := &CityRuntime{cityPath: dir, cfg: supervisorCfg(), stderr: &bytes.Buffer{}}
+	if err := cr.installNudgeKeyShadow(); err != nil {
+		t.Fatalf("installNudgeKeyShadow: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	accepted := make(chan error, 2)
+	lis, err := startNudgeWakeListenerWithHints(ctx, dir, make(chan struct{}, 1), func(hint nudgeWakeHint) {
+		accepted <- cr.enqueueNudgeKeyShadow(hint.SessionID)
+	}, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "command-one", SessionID: "same-session"})
+	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "command-two", SessionID: "same-session"})
+	for i := 0; i < 2; i++ {
+		if err := receiveBeforeDeadline(t, accepted); err != nil {
+			t.Fatalf("enqueueNudgeKeyShadow: %v", err)
+		}
+	}
+
+	key, err := reconcilekey.NewSession(nudgeKeyShadowProjectScopePrefix+"duplicate-project", "same-session")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	cr.nudgeKeyController.mu.Lock()
+	batch, ok := cr.nudgeKeyController.pending[key]
+	pendingKeys := len(cr.nudgeKeyController.pending)
+	cr.nudgeKeyController.mu.Unlock()
+	if !ok || pendingKeys != 1 || batch.Causes != nudgeCauseCommandCommit {
+		t.Fatalf("coalesced pending = ok:%v keys:%d batch:%+v, want one command-commit key", ok, pendingKeys, batch)
+	}
+	if got := cr.nudgeKeyController.queue.Len(); got != 1 {
+		t.Fatalf("workqueue length = %d, want one coalesced key", got)
+	}
+	cr.nudgeKeyController.closeAdmission()
+}
+
+func TestFailedCommitEmitsNoWakeAndUnkeyedCommitFallsBackGlobal(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionID    string
+		corruptState bool
+		wantErr      bool
+		wantWakes    int
+	}{
+		{name: "failed durable write", sessionID: "session-failed", corruptState: true, wantErr: true, wantWakes: 1},
+		{name: "blank durable session id", sessionID: "", wantErr: false, wantWakes: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.corruptState {
+				statePath := nudgequeue.StatePath(dir)
+				if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+					t.Fatalf("MkdirAll queue dir: %v", err)
+				}
+				if err := os.WriteFile(statePath, []byte("{not-json\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile corrupt queue: %v", err)
+				}
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			wakeCh := make(chan struct{}, 4)
+			exactCh := make(chan nudgeWakeHint, 2)
+			lis, err := startNudgeWakeListenerWithHints(ctx, dir, wakeCh, func(hint nudgeWakeHint) {
+				exactCh <- hint
+			}, nil, "test")
+			if err != nil {
+				t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
+			}
+			defer lis.Close() //nolint:errcheck
+
+			item := newQueuedNudge("worker", "secret-message", time.Now())
+			item.ID = "command-under-test"
+			item.SessionID = tc.sessionID
+			err = enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: beads.NewMemStore()}, item)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("enqueue error = %v, wantErr=%v", err, tc.wantErr)
+			}
+
+			barrier := nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "barrier-command", SessionID: "barrier-session"}
+			pingNudgeWakeSocketHint(dir, barrier)
+			if got := receiveBeforeDeadline(t, exactCh); got != barrier {
+				t.Fatalf("first exact hint = %+v, want barrier %+v", got, barrier)
+			}
+			if got := len(wakeCh); got != tc.wantWakes {
+				t.Fatalf("global wakes after enqueue + barrier = %d, want %d", got, tc.wantWakes)
+			}
+		})
+	}
+}
+
+func writeRawNudgeWakePayload(t *testing.T, cityPath string, payload []byte) {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(cityPath), testutil.GoroutineRaceTimeout)
+	if err != nil {
+		t.Fatalf("dial nudge wake socket: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	if err := conn.SetWriteDeadline(time.Now().Add(testutil.GoroutineRaceTimeout)); err != nil {
+		t.Fatalf("set nudge wake write deadline: %v", err)
+	}
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write nudge wake payload: %v", err)
+	}
+}
+
 func TestStartNudgeWakeListenerCoalescesBurst(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := t.TempDir()
 	wakeCh := make(chan struct{}, 1)
 
-	lis, err := startNudgeWakeListener(ctx, dir, wakeCh, nil, "test")
+	lis, err := startNudgeWakeListener(ctx, dir, wakeCh)
 	if err != nil {
 		t.Fatalf("startNudgeWakeListener: %v", err)
 	}
@@ -94,7 +527,7 @@ func TestStartNudgeWakeListenerStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	wakeCh := make(chan struct{}, 1)
 
-	lis, err := startNudgeWakeListener(ctx, dir, wakeCh, nil, "test")
+	lis, err := startNudgeWakeListener(ctx, dir, wakeCh)
 	if err != nil {
 		t.Fatalf("startNudgeWakeListener: %v", err)
 	}
@@ -460,7 +893,7 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 	defer cancel()
 	dir := t.TempDir()
 	wakeCh := make(chan struct{}, 1)
-	lis, err := startNudgeWakeListener(ctx, dir, wakeCh, nil, "test")
+	lis, err := startNudgeWakeListener(ctx, dir, wakeCh)
 	if err != nil {
 		t.Fatalf("startNudgeWakeListener: %v", err)
 	}

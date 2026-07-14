@@ -217,6 +217,21 @@ func TestCityRuntimeNudgeKeyControllerDefaultsInert(t *testing.T) {
 	stop() // inert stop is idempotent
 }
 
+func TestInstallNudgeKeyShadowNeverFallsBackToCityPathOrDisplayName(t *testing.T) {
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cityName: "tempting-display-name",
+		cfg:      supervisorCfg(),
+		stderr:   &bytes.Buffer{},
+	}
+	if err := cr.installNudgeKeyShadow(); err != nil {
+		t.Fatalf("installNudgeKeyShadow without project identity: %v", err)
+	}
+	if cr.nudgeKeyController != nil || cr.nudgeKeyShadowScope != "" {
+		t.Fatalf("missing project identity installed controller=%v scope=%q; path/name fallback is forbidden", cr.nudgeKeyController != nil, cr.nudgeKeyShadowScope)
+	}
+}
+
 func TestNudgeKeyControllerRejectsMalformedAdmission(t *testing.T) {
 	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) {}, &bytes.Buffer{})
 	if err != nil {

@@ -18,12 +18,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -106,9 +108,13 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
-	// nudgeKeyController is a domain-local keyed child. Production constructors
-	// leave it nil until the shadow/ownership gates explicitly install it.
+	// nudgeKeyController is a domain-local keyed child. Production installs only
+	// an effect-free shadow when a durable project scope is available.
 	nudgeKeyController *nudgeKeyController
+	// nudgeKeyShadowScope is deliberately prefixed as uncertified. The current
+	// git-tracked project identity is sufficient for shadow correlation but is
+	// not the store UUID/restore epoch required before effect admission.
+	nudgeKeyShadowScope string
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -635,12 +641,31 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
-	// Start any installed keyed child before readiness is published. The child
-	// is nil in every production constructor today, so this is default-inert.
+	// Install and start the effect-free keyed shadow before readiness is
+	// published. Missing/invalid legacy identity leaves it inert; legacy remains
+	// the sole dispatcher owner in every case.
 	// The defer is registered after run's shutdown defer, so LIFO ordering stops
 	// queue admission and workers before shutdown inspects live sessions.
+	if err := cr.installNudgeKeyShadow(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // legacy dispatcher remains authoritative
+	}
 	stopNudgeKeyController := cr.startNudgeKeyController(ctx)
 	defer stopNudgeKeyController()
+	if ctx.Err() != nil {
+		return
+	}
+	// Open nudge ingress before publishing readiness. A producer that commits
+	// immediately after readiness must never fall into the patrol-only gap.
+	// Every accepted connection still feeds nudgeWakeCh, while valid exact
+	// hints additionally enqueue the effect-free keyed shadow.
+	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
+		onExact := func(hint nudgeWakeHint) {
+			cr.acceptNudgeKeyShadowHint(ctx, hint)
+		}
+		if _, err := startNudgeWakeListenerWithHints(ctx, cr.cityPath, cr.nudgeWakeCh, onExact, cr.stderr, cr.logPrefix); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -688,18 +713,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	interval := cr.cfg.Daemon.PatrolIntervalDuration()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	// Start the supervisor nudge dispatcher when configured. The wake-socket
-	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
-	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
-	// eventual delivery if the wake is missed (socket race, listener
-	// restart). Legacy mode skips the listener entirely; per-session
-	// pollers continue to own delivery.
-	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
-		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
-	}
 
 	// Reload acceptance runs on its own goroutine so that a slow tick
 	// body (e.g., a session-start wave that waits for startup_timeout)
@@ -778,6 +791,66 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+const nudgeKeyShadowProjectScopePrefix = "shadow-project/v1/"
+
+// installNudgeKeyShadow installs the sole production keyed-controller
+// construction. Its empty callback is structurally guarded: this phase proves
+// post-commit source-to-queue wiring only. It makes no latency or cutover claim;
+// the legacy dispatcher remains the only store/provider effect owner.
+//
+// Project identity is intentionally namespaced as an uncertified shadow scope.
+// It must be replaced by P0.15 store_uuid + restore_epoch capability evidence
+// before any callback may read commands or mutate stores/providers.
+func (cr *CityRuntime) installNudgeKeyShadow() error {
+	if cr == nil || cr.nudgeKeyController != nil || cr.cityPath == "" || !nudgeDispatcherIsSupervisor(cr.cfg) {
+		return nil
+	}
+	projectID, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, cr.cityPath)
+	if err != nil {
+		return fmt.Errorf("reading provisional project scope: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	stderr := cr.stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) {}, stderr)
+	if err != nil {
+		return err
+	}
+	cr.nudgeKeyShadowScope = nudgeKeyShadowProjectScopePrefix + projectID
+	cr.nudgeKeyController = controller
+	return nil
+}
+
+// enqueueNudgeKeyShadow maps one validated socket hint to its stable shadow
+// key. It performs no store lookup, alias resolution, fleet scan, or provider
+// operation; the queue callback is effect-free until a later ownership gate.
+func (cr *CityRuntime) enqueueNudgeKeyShadow(sessionID string) error {
+	if cr == nil || cr.nudgeKeyController == nil || cr.nudgeKeyShadowScope == "" {
+		return nil
+	}
+	key, err := reconcilekey.NewSession(cr.nudgeKeyShadowScope, sessionID)
+	if err != nil {
+		return fmt.Errorf("mapping exact nudge wake: %w", err)
+	}
+	if err := cr.nudgeKeyController.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+		return fmt.Errorf("enqueueing exact nudge wake: %w", err)
+	}
+	return nil
+}
+
+func (cr *CityRuntime) acceptNudgeKeyShadowHint(ctx context.Context, hint nudgeWakeHint) {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := cr.enqueueNudgeKeyShadow(hint.SessionID); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow admission: %v\n", cr.logPrefix, err) //nolint:errcheck // advisory shadow; legacy wake already fired
 	}
 }
 

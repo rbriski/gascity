@@ -444,7 +444,10 @@ type ValueSlot struct {
 }
 
 // TargetIdentityRef records one semantically named identity component, its
-// exact boundary slot, optional field projection, and route provenance.
+// authored boundary slot, optional field projection, and route provenance.
+// Registry validation checks the closed shape and known-boundary policy; the
+// analyzer must separately prove that the slot and projection resolve against
+// the boundary's go/types signature before this evidence is production-gating.
 type TargetIdentityRef struct {
 	Role         TargetIdentityRole
 	BoundarySlot ValueSlot
@@ -483,7 +486,8 @@ type GateParameterRef struct {
 
 // GateCondition records one typed predicate, parameter value, or capability
 // assertion. Capability names a receiverless interface/type asserted against
-// Parameter.
+// Parameter. Registry validation checks this authored shape; analyzer evidence
+// must bind the function, slot, and capability type before a production gate.
 type GateCondition struct {
 	Kind       GateConditionKind
 	Predicate  ObjectRef
@@ -635,19 +639,6 @@ type fencePolicy struct {
 	RequiresToken          bool
 }
 
-type targetSignaturePolicy struct {
-	Cardinalities []TargetCardinality
-	Identity      TargetIdentityKind
-	Kinds         []TargetKind
-	Effects       []EffectKind
-	Roles         []TargetIdentityRole
-}
-
-type targetBoundaryRequirement struct {
-	Signature   TargetSignatureKind
-	Cardinality TargetCardinality
-}
-
 type validatedRegistration struct {
 	id           SiteRegistrationID
 	registration SiteRegistration
@@ -657,8 +648,9 @@ type validatedRegistration struct {
 // CompileRegistry rejects incomplete, ambiguous, duplicate, stale, unknown, or
 // expired classifications. It compiles only when discovery and registration
 // cover the same exact physical sites in every build profile. Route call paths
-// receive structural validation here; callgraph-evidence binding is outside
-// this physical-site compiler.
+// and target slot/projection claims receive structural validation here;
+// callgraph evidence and go/types binding of those claims are outside this
+// physical-site compiler and must precede a production catalog gate.
 func CompileRegistry(registry Registry, discovery DiscoveryResult, asOf time.Time) (CompiledRegistry, error) {
 	var problems []string
 	validDate := !asOf.IsZero()
@@ -857,47 +849,6 @@ func validateRoute(route Route, matcher OperationSite, boundary BoundaryDefiniti
 	validateException(route, boundaryKind, scope, asOf, validDate, problems)
 }
 
-func validateTargetActionFamily(target TargetRef, family ActionFamily, scope string, problems *[]string) {
-	if target.Signature == TargetSignatureOperatorAttach && family != FamilyOperatorAttach {
-		addProblem(problems, scope, "operator-terminal-attach target requires action family %q", FamilyOperatorAttach)
-	}
-	if family == FamilyOperatorAttach && target.Signature != TargetSignatureOperatorAttach {
-		addProblem(problems, scope, "action family %q requires an operator-terminal-attach target", FamilyOperatorAttach)
-	}
-}
-
-func validateKnownBoundaryTarget(boundary BoundaryDefinition, target TargetRef, scope string, problems *[]string) {
-	requirement, ok := targetRequirementForBoundary(boundary.ID)
-	if !ok {
-		return
-	}
-	if target.Signature != requirement.Signature {
-		addProblem(problems, scope, "boundary %q requires target signature %q", boundary.ID, requirement.Signature)
-	}
-	if target.Cardinality != requirement.Cardinality {
-		addProblem(problems, scope, "boundary %q requires target cardinality %q", boundary.ID, requirement.Cardinality)
-	}
-}
-
-func targetRequirementForBoundary(boundaryID string) (targetBoundaryRequirement, bool) {
-	switch boundaryID {
-	case "beads.writer.Create", "beads.storage-create.CreateWithStorage":
-		return targetBoundaryRequirement{Signature: TargetSignatureCreate, Cardinality: TargetCardinalityOne}, true
-	case "beads.writer.SetMetadataBatch":
-		return targetBoundaryRequirement{Signature: TargetSignatureBatch, Cardinality: TargetCardinalityOne}, true
-	case "beads.writer.CloseAll", "beads.batch-delete.DeleteBatch":
-		return targetBoundaryRequirement{Signature: TargetSignatureBatch, Cardinality: TargetCardinalitySet}, true
-	case "beads.graph-apply.ApplyGraphPlan", "beads.storage-graph-apply.ApplyGraphPlanWithStorage":
-		return targetBoundaryRequirement{Signature: TargetSignatureGraphPlan, Cardinality: TargetCardinalityPlan}, true
-	case "beads.writer.DepAdd", "beads.writer.DepRemove":
-		return targetBoundaryRequirement{Signature: TargetSignatureDependencyEdge, Cardinality: TargetCardinalityOne}, true
-	case "beads.store.Tx":
-		return targetBoundaryRequirement{Signature: TargetSignatureTransaction, Cardinality: TargetCardinalityCallback}, true
-	default:
-		return targetBoundaryRequirement{}, false
-	}
-}
-
 func validateStoreDomain(domain StoreDomain, boundaryKind EffectKind, scope string, problems *[]string) {
 	if boundaryKind == KindStoreMutation {
 		if !knownStoreDomain(domain) {
@@ -1059,10 +1010,7 @@ func compileValidatedRegistry(boundaries []BoundaryDefinition, registrations []v
 func cloneRoute(route Route) Route {
 	clone := route
 	clone.LogicalOwner.ClosurePath = append([]int(nil), route.LogicalOwner.ClosurePath...)
-	clone.Target.Identities = append([]TargetIdentityRef(nil), route.Target.Identities...)
-	sort.Slice(clone.Target.Identities, func(i, j int) bool {
-		return canonicalTargetIdentityRef(clone.Target.Identities[i]) < canonicalTargetIdentityRef(clone.Target.Identities[j])
-	})
+	clone.Target = cloneTarget(route.Target)
 	clone.CurrentGate = cloneGate(route.CurrentGate)
 	clone.Fences = append([]Fence(nil), route.Fences...)
 	clone.Disposition.Gates = append([]TaskRef(nil), route.Disposition.Gates...)
@@ -1077,21 +1025,6 @@ func cloneRoute(route Route) Route {
 		exception.RemovalTasks = append([]TaskRef(nil), route.Exception.RemovalTasks...)
 		clone.Exception = &exception
 	}
-	return clone
-}
-
-func cloneGate(gate GateRef) GateRef {
-	clone := gate
-	clone.Conditions = append([]GateCondition(nil), gate.Conditions...)
-	for index := range clone.Conditions {
-		clone.Conditions[index].Parameter.Function.ClosurePath = append(
-			[]int(nil),
-			gate.Conditions[index].Parameter.Function.ClosurePath...,
-		)
-	}
-	sort.Slice(clone.Conditions, func(i, j int) bool {
-		return canonicalGateCondition(clone.Conditions[i]) < canonicalGateCondition(clone.Conditions[j])
-	})
 	return clone
 }
 
@@ -1210,74 +1143,12 @@ func canonicalRoute(route Route) string {
 	)
 }
 
-func canonicalTargetRef(target TargetRef) string {
-	identities := make([]string, len(target.Identities))
-	for index, identity := range target.Identities {
-		identities[index] = canonicalTargetIdentityRef(identity)
-	}
-	sort.Strings(identities)
-	return canonicalFields(
-		"target-v2",
-		string(target.Kind),
-		string(target.Cardinality),
-		string(target.Identity),
-		string(target.Signature),
-		canonicalStringList("target-identities-v1", identities),
-	)
-}
-
-func canonicalTargetIdentityRef(identity TargetIdentityRef) string {
-	return canonicalFields(
-		"target-identity-v1",
-		string(identity.Role),
-		canonicalValueSlot(identity.BoundarySlot),
-		canonicalObjectRef(identity.Projection),
-		string(identity.Source),
-		canonicalObjectRef(identity.SourceObject),
-		canonicalValueSlot(identity.SourceSlot),
-	)
-}
-
 func canonicalFence(fence Fence) string {
 	return canonicalFields(
 		"fence-v1",
 		string(fence.Kind),
 		canonicalObjectRef(fence.Source),
 		canonicalObjectRef(fence.Token),
-	)
-}
-
-func canonicalGateRef(gate GateRef) string {
-	conditions := make([]string, len(gate.Conditions))
-	for index, condition := range gate.Conditions {
-		conditions[index] = canonicalGateCondition(condition)
-	}
-	sort.Strings(conditions)
-	return canonicalFields(
-		"gate-v2",
-		string(gate.Kind),
-		canonicalObjectRef(gate.Predicate),
-		gate.Expected,
-		canonicalStringList("gate-conditions-v1", conditions),
-	)
-}
-
-func canonicalGateCondition(condition GateCondition) string {
-	return canonicalFields(
-		"gate-condition-v1",
-		string(condition.Kind),
-		canonicalObjectRef(condition.Predicate),
-		canonicalGateParameterRef(condition.Parameter),
-		canonicalObjectRef(condition.Capability),
-		condition.Expected,
-	)
-}
-
-func canonicalGateParameterRef(parameter GateParameterRef) string {
-	return canonicalFields(
-		"gate-parameter-v1",
-		canonicalFunctionRef(parameter.Function),
-		canonicalValueSlot(parameter.Slot),
 	)
 }
 
@@ -1400,220 +1271,6 @@ func canonicalFields(values ...string) string {
 	return result.String()
 }
 
-func validateTarget(target TargetRef, effect EffectKind, scope string, problems *[]string) {
-	if !knownTargetKind(target.Kind) {
-		addProblem(problems, scope, "unknown target kind %q", target.Kind)
-	}
-	if !knownTargetCardinality(target.Cardinality) {
-		addProblem(problems, scope, "unknown target cardinality %q", target.Cardinality)
-	}
-	if !knownTargetIdentity(target.Identity) {
-		addProblem(problems, scope, "unknown target identity %q", target.Identity)
-	}
-	policy, knownSignature := targetPolicyFor(target.Signature)
-	if !knownSignature {
-		addProblem(problems, scope, "unknown target signature %q", target.Signature)
-	} else {
-		if !contains(policy.Cardinalities, target.Cardinality) {
-			addProblem(problems, scope, "signature %q does not allow target cardinality %q", target.Signature, target.Cardinality)
-		}
-		if target.Identity != policy.Identity {
-			addProblem(problems, scope, "signature %q requires target identity %q", target.Signature, policy.Identity)
-		}
-		if !contains(policy.Kinds, target.Kind) {
-			addProblem(problems, scope, "signature %q does not allow target kind %q", target.Signature, target.Kind)
-		}
-		if effect != "" && !contains(policy.Effects, effect) {
-			addProblem(problems, scope, "signature %q does not allow effect kind %q", target.Signature, effect)
-		}
-	}
-	if len(target.Identities) == 0 {
-		addProblem(problems, scope, "target identities are required")
-		if knownSignature && len(policy.Roles) != 0 {
-			addProblem(problems, scope, "signature %q requires target identity roles %v", target.Signature, policy.Roles)
-		}
-		return
-	}
-
-	identities := append([]TargetIdentityRef(nil), target.Identities...)
-	sort.Slice(identities, func(i, j int) bool {
-		return canonicalTargetIdentityRef(identities[i]) < canonicalTargetIdentityRef(identities[j])
-	})
-	roles := make([]TargetIdentityRole, 0, len(identities))
-	roleCounts := make(map[TargetIdentityRole]int, len(identities))
-	for _, identity := range identities {
-		roleCounts[identity.Role]++
-		if roleCounts[identity.Role] == 2 {
-			addProblem(problems, scope, "duplicate target identity role %q", identity.Role)
-		}
-		roles = append(roles, identity.Role)
-		validateTargetIdentityRef(identity, target.Signature, scope, problems)
-	}
-	if knownSignature && !equalTargetRoleSets(roles, policy.Roles) {
-		addProblem(problems, scope, "signature %q requires target identity roles %v", target.Signature, policy.Roles)
-	}
-}
-
-func validateTargetIdentityRef(identity TargetIdentityRef, signature TargetSignatureKind, scope string, problems *[]string) {
-	identityScope := fmt.Sprintf("%s target identity %q", scope, identity.Role)
-	if !knownTargetIdentityRole(identity.Role) {
-		addProblem(problems, identityScope, "unknown target identity role %q", identity.Role)
-	}
-	validateTargetBoundarySlot(identity.BoundarySlot, identityScope+" boundary", problems)
-	if !identity.Projection.zero() {
-		validateObject(identity.Projection, identityScope+" projection", problems)
-	}
-	if !knownTargetSource(identity.Source) {
-		addProblem(problems, identityScope, "unknown target source %q", identity.Source)
-		return
-	}
-	requiresObject := !oneOf(identity.Source, TargetSourceBoundaryValue, TargetSourceAmbientTerminal)
-	if requiresObject {
-		validateObject(identity.SourceObject, identityScope+" source object", problems)
-	} else if !identity.SourceObject.zero() {
-		addProblem(problems, identityScope, "target source %q cannot name an object", identity.Source)
-	}
-	switch identity.Source {
-	case TargetSourceBoundaryValue, TargetSourceObjectField, TargetSourceConfigValue, TargetSourceConstant, TargetSourceAmbientTerminal:
-		if !identity.SourceSlot.zero() {
-			addProblem(problems, identityScope, "target source %q cannot name a source slot", identity.Source)
-		}
-	case TargetSourceFunctionResult, TargetSourceStoreLiveReread, TargetSourceProcessScan:
-		validateExactSlot(identity.SourceSlot, SlotResult, identityScope+" source", problems)
-	case TargetSourceChannelPayload:
-		validateExactSlot(identity.SourceSlot, SlotChannelElement, identityScope+" source", problems)
-	}
-
-	switch identity.Role {
-	case TargetRoleGenerated:
-		if identity.BoundarySlot.Kind != SlotResult {
-			addProblem(problems, identityScope, "generated target identity must use a result slot")
-		}
-		if identity.Projection.zero() {
-			addProblem(problems, identityScope, "generated target identity projection is required")
-		}
-		if identity.Source != TargetSourceBoundaryValue {
-			addProblem(problems, identityScope, "generated target identity must use boundary-value provenance")
-		}
-	case TargetRoleInput, TargetRolePlan, TargetRoleFrom, TargetRoleTo, TargetRoleDestination, TargetRoleCallback:
-		if identity.BoundarySlot.Kind != SlotParameter {
-			addProblem(problems, identityScope, "%s target identity must use a parameter slot", identity.Role)
-		}
-	case TargetRoleOperatorTerminal:
-		if identity.BoundarySlot.Kind != SlotAmbientTerminal {
-			addProblem(problems, identityScope, "operator-terminal identity must use the ambient terminal slot")
-		}
-		if identity.Source != TargetSourceAmbientTerminal {
-			addProblem(problems, identityScope, "operator-terminal identity must use ambient-terminal provenance")
-		}
-		if !identity.Projection.zero() {
-			addProblem(problems, identityScope, "operator-terminal identity cannot name a projection")
-		}
-	}
-
-	switch signature {
-	case TargetSignatureChannel:
-		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotBoundaryObject {
-			addProblem(problems, identityScope, "channel target identity must use the registered boundary object")
-		}
-	case TargetSignatureProcess:
-		if identity.Role == TargetRolePrimary && !oneOf(identity.BoundarySlot.Kind, SlotReceiver, SlotParameter) {
-			addProblem(problems, identityScope, "process target identity must use a receiver or parameter slot")
-		}
-	case TargetSignatureEventAppend:
-		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotReceiver {
-			addProblem(problems, identityScope, "event append target must identify the recorder receiver")
-		}
-	}
-}
-
-func targetPolicyFor(signature TargetSignatureKind) (targetSignaturePolicy, bool) {
-	switch signature {
-	case TargetSignatureDirect:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne},
-			Identity:      TargetIdentityExisting,
-			Kinds:         []TargetKind{TargetDurableRecord, TargetSessionIdentity, TargetRuntimeIdentity, TargetProviderServer},
-			Effects:       []EffectKind{KindStoreMutation, KindProviderMutation},
-			Roles:         []TargetIdentityRole{TargetRolePrimary},
-		}, true
-	case TargetSignatureCreate:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne},
-			Identity:      TargetIdentityGenerated,
-			Kinds:         []TargetKind{TargetDurableRecord},
-			Effects:       []EffectKind{KindStoreMutation},
-			Roles:         []TargetIdentityRole{TargetRoleInput, TargetRoleGenerated},
-		}, true
-	case TargetSignatureBatch:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne, TargetCardinalitySet},
-			Identity:      TargetIdentityExisting,
-			Kinds:         []TargetKind{TargetDurableRecord},
-			Effects:       []EffectKind{KindStoreMutation},
-			Roles:         []TargetIdentityRole{TargetRolePrimary},
-		}, true
-	case TargetSignatureGraphPlan:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityPlan},
-			Identity:      TargetIdentitySymbolicGenerated,
-			Kinds:         []TargetKind{TargetDurableGraph},
-			Effects:       []EffectKind{KindStoreMutation},
-			Roles:         []TargetIdentityRole{TargetRolePlan, TargetRoleGenerated},
-		}, true
-	case TargetSignatureDependencyEdge:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne},
-			Identity:      TargetIdentityComposite,
-			Kinds:         []TargetKind{TargetDurableDependencyEdge},
-			Effects:       []EffectKind{KindStoreMutation},
-			Roles:         []TargetIdentityRole{TargetRoleFrom, TargetRoleTo},
-		}, true
-	case TargetSignatureChannel:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne},
-			Identity:      TargetIdentitySingleton,
-			Kinds:         []TargetKind{TargetControllerChannel},
-			Effects:       []EffectKind{KindWakeSource},
-			Roles:         []TargetIdentityRole{TargetRolePrimary},
-		}, true
-	case TargetSignatureProcess:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne, TargetCardinalitySet},
-			Identity:      TargetIdentityExisting,
-			Kinds:         []TargetKind{TargetProcessIdentity, TargetProviderServer},
-			Effects:       []EffectKind{KindProcessMutation},
-			Roles:         []TargetIdentityRole{TargetRolePrimary},
-		}, true
-	case TargetSignatureEventAppend:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne},
-			Identity:      TargetIdentityAppendRecord,
-			Kinds:         []TargetKind{TargetEventLog},
-			Effects:       []EffectKind{KindEventEmission},
-			Roles:         []TargetIdentityRole{TargetRolePrimary},
-		}, true
-	case TargetSignatureOperatorAttach:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityOne},
-			Identity:      TargetIdentityComposite,
-			Kinds:         []TargetKind{TargetOperatorTerminal},
-			Effects:       []EffectKind{KindProviderMutation},
-			Roles:         []TargetIdentityRole{TargetRoleOperatorTerminal, TargetRoleDestination},
-		}, true
-	case TargetSignatureTransaction:
-		return targetSignaturePolicy{
-			Cardinalities: []TargetCardinality{TargetCardinalityCallback},
-			Identity:      TargetIdentityCallbackEffects,
-			Kinds:         []TargetKind{TargetDurableTransaction},
-			Effects:       []EffectKind{KindStoreMutation},
-			Roles:         []TargetIdentityRole{TargetRoleCallback},
-		}, true
-	default:
-		return targetSignaturePolicy{}, false
-	}
-}
-
 func validateFences(fences []Fence, scope string, problems *[]string) {
 	if len(fences) == 0 {
 		addProblem(problems, scope, "at least one fence disposition is required")
@@ -1687,121 +1344,6 @@ func fencePolicyFor(kind FenceKind) (fencePolicy, bool) {
 	default:
 		return fencePolicy{}, false
 	}
-}
-
-func validateGate(gate GateRef, scope string, problems *[]string) {
-	switch gate.Kind {
-	case GateUnconditionalLegacy:
-		if !gate.Predicate.zero() {
-			addProblem(problems, scope, "unconditional gate cannot name a predicate")
-		}
-		if gate.Expected != "" {
-			addProblem(problems, scope, "unconditional gate cannot name an expected value")
-		}
-		if len(gate.Conditions) != 0 {
-			addProblem(problems, scope, "unconditional gate cannot name conditions")
-		}
-	case GatePredicate:
-		validateObject(gate.Predicate, scope+" gate predicate", problems)
-		if strings.TrimSpace(gate.Expected) == "" {
-			addProblem(problems, scope, "gate expected value is required")
-		}
-		if len(gate.Conditions) != 0 {
-			addProblem(problems, scope, "simple predicate gate cannot name conditions")
-		}
-	case GateAll, GateAny:
-		if !gate.Predicate.zero() {
-			addProblem(problems, scope, "compound gate cannot name a top-level predicate")
-		}
-		if gate.Expected != "" {
-			addProblem(problems, scope, "compound gate cannot name a top-level expected value")
-		}
-		if gate.Kind == GateAll && len(gate.Conditions) == 0 {
-			addProblem(problems, scope, "all gate requires at least one condition")
-		}
-		if gate.Kind == GateAny && len(gate.Conditions) < 2 {
-			addProblem(problems, scope, "any gate requires at least two conditions")
-		}
-		validateGateConditions(gate.Conditions, scope, problems)
-	default:
-		addProblem(problems, scope, "unknown current gate %q", gate.Kind)
-	}
-}
-
-func validateGateConditions(conditions []GateCondition, scope string, problems *[]string) {
-	conditions = append([]GateCondition(nil), conditions...)
-	sort.Slice(conditions, func(i, j int) bool {
-		return canonicalGateCondition(conditions[i]) < canonicalGateCondition(conditions[j])
-	})
-	seen := make(map[string]bool, len(conditions))
-	for _, condition := range conditions {
-		key := canonicalGateCondition(condition)
-		conditionScope := fmt.Sprintf("%s gate condition %q", scope, deriveContentID("condition-v1-", key))
-		if seen[key] {
-			addProblem(problems, scope, "duplicate gate condition %q", deriveContentID("condition-v1-", key))
-		}
-		seen[key] = true
-		validateGateCondition(condition, conditionScope, problems)
-	}
-}
-
-func validateGateCondition(condition GateCondition, scope string, problems *[]string) {
-	switch condition.Kind {
-	case GateConditionPredicate:
-		validateObject(condition.Predicate, scope+" predicate", problems)
-		if !condition.Parameter.zero() {
-			addProblem(problems, scope, "predicate condition cannot name a parameter")
-		}
-		if !condition.Capability.zero() {
-			addProblem(problems, scope, "predicate condition cannot name a capability")
-		}
-		validateGateExpected(condition.Expected, scope, problems)
-	case GateConditionParameter:
-		if !condition.Predicate.zero() {
-			addProblem(problems, scope, "parameter condition cannot name a predicate")
-		}
-		validateGateParameter(condition.Parameter, scope, problems)
-		if !condition.Capability.zero() {
-			addProblem(problems, scope, "parameter condition cannot name a capability")
-		}
-		validateGateExpected(condition.Expected, scope, problems)
-	case GateConditionCapability:
-		if !condition.Predicate.zero() {
-			addProblem(problems, scope, "capability condition cannot name a predicate")
-		}
-		validateGateParameter(condition.Parameter, scope, problems)
-		validateObject(condition.Capability, scope+" gate capability", problems)
-		if condition.Capability.Receiver != "" {
-			addProblem(problems, scope, "gate capability must name a receiverless type")
-		}
-		if !oneOf(condition.Expected, GateCapabilityAvailable, GateCapabilityUnavailable) {
-			addProblem(
-				problems,
-				scope,
-				"capability expectation %q must be %q or %q",
-				condition.Expected,
-				GateCapabilityAvailable,
-				GateCapabilityUnavailable,
-			)
-		}
-	default:
-		addProblem(problems, scope, "unknown gate condition %q", condition.Kind)
-	}
-}
-
-func validateGateExpected(expected, scope string, problems *[]string) {
-	if strings.TrimSpace(expected) == "" {
-		addProblem(problems, scope, "gate condition expected value is required")
-	}
-}
-
-func validateGateParameter(parameter GateParameterRef, scope string, problems *[]string) {
-	if parameter.Function.zero() {
-		addProblem(problems, scope, "gate parameter function is required")
-	} else {
-		validateFunction(parameter.Function, scope+" gate parameter function", problems)
-	}
-	validateExactSlot(parameter.Slot, SlotParameter, scope+" gate parameter slot", problems)
 }
 
 func validateDisposition(disposition Disposition, scope string, problems *[]string) {
@@ -2057,14 +1599,6 @@ func validateObject(object ObjectRef, scope string, problems *[]string) {
 	}
 }
 
-func validateTargetBoundarySlot(slot ValueSlot, scope string, problems *[]string) {
-	if !oneOf(slot.Kind, SlotReceiver, SlotParameter, SlotResult, SlotChannelElement, SlotBoundaryObject, SlotAmbientTerminal) {
-		addProblem(problems, scope, "invalid target boundary slot %q", slot.Kind)
-		return
-	}
-	validateSlotIndex(slot, scope, problems)
-}
-
 func validateExactSlot(slot ValueSlot, want ValueSlotKind, scope string, problems *[]string) {
 	if slot.Kind != want {
 		addProblem(problems, scope, "slot must be %q", want)
@@ -2154,47 +1688,6 @@ func knownStoreDomain(value StoreDomain) bool {
 	return oneOf(value, StoreDomainSessionLifecycle, StoreDomainWaitIntent, StoreDomainNudgeIntent, StoreDomainRouteRecovery, StoreDomainPoolRouting, StoreDomainControlDispatch, StoreDomainOrderDispatch, StoreDomainMaintenance)
 }
 
-func knownTargetKind(value TargetKind) bool {
-	return oneOf(value,
-		TargetDurableRecord, TargetDurableGraph, TargetDurableDependencyEdge,
-		TargetDurableTransaction,
-		TargetSessionIdentity, TargetRuntimeIdentity, TargetProcessIdentity,
-		TargetProviderServer, TargetEventLog, TargetControllerChannel,
-		TargetOperatorTerminal,
-	)
-}
-
-func knownTargetCardinality(value TargetCardinality) bool {
-	return oneOf(value, TargetCardinalityOne, TargetCardinalitySet, TargetCardinalityPlan, TargetCardinalityCallback)
-}
-
-func knownTargetIdentity(value TargetIdentityKind) bool {
-	return oneOf(value,
-		TargetIdentityExisting, TargetIdentityGenerated,
-		TargetIdentitySymbolicGenerated, TargetIdentityComposite,
-		TargetIdentitySingleton, TargetIdentityAppendRecord,
-		TargetIdentityCallbackEffects,
-	)
-}
-
-func knownTargetIdentityRole(value TargetIdentityRole) bool {
-	return oneOf(value,
-		TargetRolePrimary, TargetRoleInput, TargetRoleGenerated, TargetRolePlan,
-		TargetRoleFrom, TargetRoleTo, TargetRoleOperatorTerminal,
-		TargetRoleDestination, TargetRoleCallback,
-	)
-}
-
-func knownTargetSource(value TargetSourceKind) bool {
-	return oneOf(value,
-		TargetSourceBoundaryValue, TargetSourceObjectField,
-		TargetSourceFunctionResult, TargetSourceStoreLiveReread,
-		TargetSourceProcessScan, TargetSourceChannelPayload,
-		TargetSourceConfigValue, TargetSourceConstant,
-		TargetSourceAmbientTerminal,
-	)
-}
-
 func knownBuildProfile(value BuildProfileID) bool {
 	_, ok := canonicalAnalysisProfile(value)
 	return ok
@@ -2242,23 +1735,6 @@ func equalTaskSets(left, right []TaskRef) bool {
 	for _, task := range right {
 		want[task]--
 		if want[task] < 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func equalTargetRoleSets(left, right []TargetIdentityRole) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	want := make(map[TargetIdentityRole]int, len(left))
-	for _, role := range left {
-		want[role]++
-	}
-	for _, role := range right {
-		want[role]--
-		if want[role] < 0 {
 			return false
 		}
 	}
@@ -2349,10 +1825,6 @@ func (function FunctionRef) equal(other FunctionRef) bool {
 	return canonicalFunctionRef(function) == canonicalFunctionRef(other)
 }
 
-func (function FunctionRef) zero() bool {
-	return function.Object.zero() && function.File == "" && len(function.ClosurePath) == 0
-}
-
 func (object ObjectRef) key() string {
 	return strings.Join([]string{object.Package, object.Receiver, object.Name}, ".")
 }
@@ -2363,10 +1835,6 @@ func (object ObjectRef) zero() bool {
 
 func (slot ValueSlot) zero() bool {
 	return slot == (ValueSlot{})
-}
-
-func (parameter GateParameterRef) zero() bool {
-	return parameter.Function.zero() && parameter.Slot.zero()
 }
 
 func (test TestRef) key() string {

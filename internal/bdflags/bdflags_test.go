@@ -90,6 +90,19 @@ func TestUpdateFlagSets(t *testing.T) {
 	}
 }
 
+func TestCreateStatusFlagsConsumeValues(t *testing.T) {
+	value := ValueFlags("create")
+	boolFlags := BoolFlags("create")
+	for _, flag := range []string{"-s", "--status"} {
+		if !value[flag] {
+			t.Errorf("ValueFlags(create)[%q] = false, want true", flag)
+		}
+		if boolFlags[flag] {
+			t.Errorf("BoolFlags(create)[%q] = true, want false", flag)
+		}
+	}
+}
+
 func TestCloseFlagSets(t *testing.T) {
 	value := ValueFlags("close")
 	for _, f := range []string{"-r", "--reason", "--reason-file", "--session"} {

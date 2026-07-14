@@ -369,6 +369,13 @@ func BoxedChannel() {
 	externaldep.Accept(Approved)
 }
 
+func boxedChannelResult() any { return Approved }
+
+// BoxedChannelResult hands an exact channel through an authored erased result.
+func BoxedChannelResult() {
+	externaldep.Accept(boxedChannelResult())
+}
+
 // VariadicCallback hands an exact callback boundary to an unauthored
 // dependency through the compiler's variadic argument pack.
 func VariadicCallback() {
@@ -419,8 +426,8 @@ func EllipsisOpenChannel(values []chan os.Signal) {
 	externaldep.AcceptChannels(values...)
 }
 
-// EllipsisOpenBoxed hands an open-world []any through ellipsis. Its elements
-// can contain any inventoried callback or channel boundary.
+// EllipsisOpenBoxed proves a fully erased element type is not source evidence
+// of an inventoried callback or channel boundary.
 func EllipsisOpenBoxed(values []any) {
 	externaldep.AcceptVariadic(values...)
 }
@@ -439,10 +446,15 @@ func BoxedSliceChannel() {
 	externaldep.Accept(values)
 }
 
-// BoxedOpenSlice hands an open-world []any to an unauthored non-variadic any
-// parameter.
+// BoxedOpenSlice proves boxing a fully erased slice does not invent boundary
+// values absent from its source ancestry.
 func BoxedOpenSlice(values []any) {
 	externaldep.Accept(values)
+}
+
+// NilVariadicValues proves that a typed nil variadic slice is closed-empty.
+func NilVariadicValues() {
+	externaldep.AcceptVariadic([]any(nil)...)
 }
 
 // AsyncValues proves go and defer call instructions use the same handoff

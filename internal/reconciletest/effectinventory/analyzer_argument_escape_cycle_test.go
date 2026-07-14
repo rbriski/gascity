@@ -55,13 +55,15 @@ func TestDiscoverProfileFailsClosedForCyclicSliceProvenance(t *testing.T) {
 			diagnostic := diagnosticLine(err.Error(), owner)
 			for _, boundaryID := range []string{
 				"callescape.phicycle.callback",
-				"callescape.phicycle.possible-callback",
 				"callescape.phicycle.channel",
 				"callescape.phicycle.ready",
 			} {
 				if !strings.Contains(diagnostic, boundaryID) {
 					t.Errorf("discoverProfile(repetition=%d) diagnostic for %s = %q, want boundary %q", repetition, owner, diagnostic, boundaryID)
 				}
+			}
+			if strings.Contains(diagnostic, "callescape.phicycle.possible-callback") {
+				t.Errorf("discoverProfile(repetition=%d) diagnostic for %s = %q, do not want an unobserved boundary inferred only from []any", repetition, owner, diagnostic)
 			}
 		}
 		if baseline == "" {

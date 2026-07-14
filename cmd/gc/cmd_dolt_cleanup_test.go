@@ -12,6 +12,12 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+type cleanupProcessSignalerFunc func(pid int, sig syscall.Signal) error
+
+func (f cleanupProcessSignalerFunc) Signal(pid int, sig syscall.Signal) error {
+	return f(pid, sig)
+}
+
 func TestCleanupReportJSONShape(t *testing.T) {
 	r := CleanupReport{
 		Schema: "gc.dolt.cleanup.v1",
@@ -233,10 +239,10 @@ func TestRunDoltCleanup_ForceProtectsSelectedPortWithoutRigPortFile(t *testing.T
 						StartTimeTicks: 10,
 					}}, nil
 				},
-				KillProcess: func(_ int, sig syscall.Signal) error {
+				KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 					killed = append(killed, sig)
 					return nil
-				},
+				}),
 				ReapGracePeriod: 1,
 			}
 			code := runDoltCleanup(opts, &stdout, &stderr)
@@ -283,10 +289,10 @@ func TestRunDoltCleanup_InvalidPortFlagIsFatal(t *testing.T) {
 				DiscoverProcesses: func() ([]DoltProcInfo, error) {
 					return []DoltProcInfo{{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}}}, nil
 				},
-				KillProcess: func(_ int, sig syscall.Signal) error {
+				KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 					killed = append(killed, sig)
 					return nil
-				},
+				}),
 				ReapGracePeriod: 1,
 			}
 			code := runDoltCleanup(opts, &stdout, &stderr)
@@ -333,10 +339,10 @@ func TestRunDoltCleanup_InvalidCityConfigPortIsFatal(t *testing.T) {
 		DiscoverProcesses: func() ([]DoltProcInfo, error) {
 			return []DoltProcInfo{{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}}}, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			killed = append(killed, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -407,10 +413,10 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 				DiscoverProcesses: func() ([]DoltProcInfo, error) {
 					return []DoltProcInfo{{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}}}, nil
 				},
-				KillProcess: func(_ int, sig syscall.Signal) error {
+				KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 					killed = append(killed, sig)
 					return nil
-				},
+				}),
 				ReapGracePeriod: 1,
 			}
 			code := runDoltCleanup(opts, &stdout, &stderr)
@@ -461,10 +467,10 @@ func TestRunDoltCleanup_ForceDoesNotProtectLegacyFallbackPort(t *testing.T) {
 				StartTimeTicks: 10,
 			}}, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return syscall.ESRCH
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -510,10 +516,10 @@ func TestRunDoltCleanup_ForceReapsBareDeletedCwd(t *testing.T) {
 		DiscoverProcesses: func() ([]DoltProcInfo, error) {
 			return []DoltProcInfo{proc}, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -656,10 +662,10 @@ func TestRunDoltCleanup_DryRunReportsReapPlanWithoutKilling(t *testing.T) {
 		HomeDir: "/home/u",
 		// Force not set → dry-run.
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
-		KillProcess: func(pid int, _ syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(pid int, _ syscall.Signal) error {
 			killed = append(killed, pid)
 			return nil
-		},
+		}),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -731,12 +737,12 @@ func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 		Force:             true,
 		HomeDir:           "/home/u",
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
-		KillProcess: func(pid int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(pid int, sig syscall.Signal) error {
 			if sig == syscall.SIGTERM {
 				termed = append(termed, pid)
 			}
 			return syscall.ESRCH // pretend the process is already gone after TERM
-		},
+		}),
 		ReapGracePeriod: 1, // tiny so the test doesn't sleep meaningfully
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -769,7 +775,7 @@ func TestRunDoltCleanup_ForceReportsReapedRSSBytes(t *testing.T) {
 		Force:             true,
 		HomeDir:           "/home/u",
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
-		KillProcess:       func(_ int, _ syscall.Signal) error { return syscall.ESRCH },
+		KillProcess:       cleanupProcessSignalerFunc(func(_ int, _ syscall.Signal) error { return syscall.ESRCH }),
 		ReapGracePeriod:   1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -802,10 +808,10 @@ func TestRunDoltCleanup_ForceCountsSuccessfulKill(t *testing.T) {
 		Force:             true,
 		HomeDir:           "/home/u",
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -854,10 +860,10 @@ func TestRunDoltCleanup_ForceCountsPostSIGTERMGoneAsReaped(t *testing.T) {
 				return nil, nil
 			}
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -916,10 +922,10 @@ func TestRunDoltCleanup_ForceRevalidatesPIDBeforeSIGTERM(t *testing.T) {
 				StartTimeTicks: 10,
 			}}, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -969,10 +975,10 @@ func TestRunDoltCleanup_ForceSkipsSignalWhenPIDStartTimeChanges(t *testing.T) {
 				StartTimeTicks: 11,
 			}}, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -1018,10 +1024,10 @@ func TestRunDoltCleanup_ForceDoesNotCountMissingPIDAfterRevalidation(t *testing.
 			}
 			return nil, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -1067,10 +1073,10 @@ func TestRunDoltCleanup_ForceSkipsSIGKILLWhenRevalidationDiscoverErrors(t *testi
 			}
 			return nil, fmt.Errorf("transient /proc walk failed")
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -1124,10 +1130,10 @@ func TestRunDoltCleanup_ForceSkipsSIGKILLWhenProcessBecomesProtected(t *testing.
 			}
 			return []DoltProcInfo{proc}, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -1163,12 +1169,12 @@ func TestRunDoltCleanup_ForceRecordsKillError(t *testing.T) {
 		Force:             true,
 		HomeDir:           "/home/u",
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			if sig == syscall.SIGTERM {
 				return nil
 			}
 			return syscall.EPERM
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
@@ -1526,10 +1532,10 @@ func TestRunDoltCleanup_MaxOrphanRefusalAbortsForcedPurgeAndReap(t *testing.T) {
 		DiscoverProcesses: func() ([]DoltProcInfo, error) {
 			return procs, nil
 		},
-		KillProcess: func(_ int, sig syscall.Signal) error {
+		KillProcess: cleanupProcessSignalerFunc(func(_ int, sig syscall.Signal) error {
 			signals = append(signals, sig)
 			return nil
-		},
+		}),
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)

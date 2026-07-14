@@ -1,11 +1,47 @@
 package effectinventory
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRunCanonicalProfileRejectsStaleRouteHopEvidenceDeterministically(t *testing.T) {
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/canonicalroute",
+	})
+	leaf := routeHopFixtureRef("", "Leaf", "routehops.go", nil)
+	registry := Registry{Registrations: []SiteRegistration{routeHopRegistration(leaf,
+		routeHopRoute(routeHopFixtureRef("", "DuplicateOwner", "routehops.go", nil),
+			routeHop("DuplicateOwner", OperationCall, 3, HopDispatchExact, leaf)),
+	)}}
+
+	var baseline string
+	for repetition := 0; repetition < 2; repetition++ {
+		_, err := runCanonicalProfile(context.Background(), config, fixtureLinuxProfile(), registry)
+		if err == nil {
+			t.Fatal("runCanonicalProfile() error = nil, want stale route-hop rejection")
+		}
+		for _, want := range []string{
+			`effect route-hop evidence failed for profile "linux/default"`,
+			"stale ordinal 3",
+			"loaded profile has only 2",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("runCanonicalProfile() error = %q, want %q", err, want)
+			}
+		}
+		if baseline == "" {
+			baseline = err.Error()
+			continue
+		}
+		if err.Error() != baseline {
+			t.Fatalf("canonical route-hop diagnostic changed\n got:\n%s\nwant:\n%s", err, baseline)
+		}
+	}
+}
 
 func TestSourceScopeManifestDetectsContentDrift(t *testing.T) {
 	repoRoot := t.TempDir()

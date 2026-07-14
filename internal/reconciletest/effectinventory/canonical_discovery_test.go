@@ -29,7 +29,7 @@ func TestCompileCanonicalRegistryRunsOnlyFixedScopeAndReturnsStructuredReport(t 
 			}
 			return sourceAudit{files: []sourceFingerprint{fixtureFingerprint("cmd/gc/main.go")}}, nil
 		},
-		runProfile: func(_ context.Context, config analysisConfig, profile analysisProfile, boundaries []BoundaryDefinition) (canonicalProfileRun, error) {
+		runProfile: func(_ context.Context, config analysisConfig, profile analysisProfile, registry Registry) (canonicalProfileRun, error) {
 			profiles = append(profiles, profile)
 			if config.RepoRoot != "/repo" || config.ModulePath != canonicalModulePath {
 				t.Fatalf("analysis config = %#v", config)
@@ -37,7 +37,7 @@ func TestCompileCanonicalRegistryRunsOnlyFixedScopeAndReturnsStructuredReport(t 
 			if !reflect.DeepEqual(config.Patterns, []string{"./cmd/gc"}) {
 				t.Fatalf("analysis patterns = %q, want only ./cmd/gc", config.Patterns)
 			}
-			if got, want := deriveBoundaryDigest(boundaries), deriveBoundaryDigest(CanonicalBoundaries()); got != want {
+			if got, want := deriveBoundaryDigest(registry.Boundaries), deriveBoundaryDigest(CanonicalBoundaries()); got != want {
 				t.Fatalf("boundary digest = %q, want %q", got, want)
 			}
 
@@ -96,10 +96,28 @@ func TestCompileCanonicalRegistryRunsOnlyFixedScopeAndReturnsStructuredReport(t 
 }
 
 func TestCompileCanonicalRegistryFreezesCallerRegistryBeforeAnalysis(t *testing.T) {
-	registry := Registry{Boundaries: CanonicalBoundaries()}
+	registration := compileRegistryFixture().Registrations[0]
+	registration.BoundaryID = "beads.writer.SetMetadata"
+	registry := Registry{
+		Boundaries:    CanonicalBoundaries(),
+		Registrations: []SiteRegistration{registration},
+	}
+	frozen := cloneRegistry(registry)
 	runtime := successfulCanonicalRuntime()
+	baseRunProfile := runtime.runProfile
+	var profileRuns int
+	runtime.runProfile = func(ctx context.Context, config analysisConfig, profile analysisProfile, got Registry) (canonicalProfileRun, error) {
+		profileRuns++
+		if !reflect.DeepEqual(got, frozen) {
+			t.Fatalf("profile %q registry = %#v, want frozen %#v", profile.ID, got, frozen)
+		}
+		got.Boundaries[0].ID = "runner-mutated-copy"
+		got.Registrations[0].BoundaryID = "runner-mutated-copy"
+		return baseRunProfile(ctx, config, profile, got)
+	}
 	runtime.auditSources = func(context.Context, sourceSelectionConfig) (sourceAudit, error) {
 		registry.Boundaries[0].ID = "caller-mutated-after-entry"
+		registry.Registrations[0].BoundaryID = "caller-mutated-after-entry"
 		registry.Registrations = append(registry.Registrations, SiteRegistration{BoundaryID: "caller-mutated-after-entry"})
 		return sourceAudit{files: []sourceFingerprint{fixtureFingerprint("cmd/gc/main.go")}}, nil
 	}
@@ -107,11 +125,14 @@ func TestCompileCanonicalRegistryFreezesCallerRegistryBeforeAnalysis(t *testing.
 	request.Registry = registry
 
 	_, report, err := CompileCanonicalRegistry(context.Background(), request)
-	if err == nil || !strings.Contains(err.Error(), "registry has no site registrations") {
-		t.Fatalf("CompileCanonicalRegistry() error = %v, want frozen empty-catalog diagnostic", err)
+	if err == nil {
+		t.Fatal("CompileCanonicalRegistry() error = nil, want catalog reconciliation failure")
 	}
-	if strings.Contains(err.Error(), "caller-mutated-after-entry") {
-		t.Fatalf("CompileCanonicalRegistry() observed caller mutation: %v", err)
+	if strings.Contains(err.Error(), "caller-mutated-after-entry") || strings.Contains(err.Error(), "runner-mutated-copy") {
+		t.Fatalf("CompileCanonicalRegistry() observed mutation after registry freeze: %v", err)
+	}
+	if profileRuns != len(canonicalAnalysisProfiles()) {
+		t.Fatalf("profile runs = %d, want %d", profileRuns, len(canonicalAnalysisProfiles()))
 	}
 	if report.BoundaryDigest != deriveBoundaryDigest(CanonicalBoundaries()) {
 		t.Fatalf("report boundary digest = %q after caller mutation", report.BoundaryDigest)
@@ -173,7 +194,7 @@ func TestCompileCanonicalRegistryFailsClosedBeforeReturningPartialEvidence(t *te
 			name: "discovery diagnostic",
 			prepare: func(runtime *canonicalCompileRuntime) {
 				calls := 0
-				runtime.runProfile = func(context.Context, analysisConfig, analysisProfile, []BoundaryDefinition) (canonicalProfileRun, error) {
+				runtime.runProfile = func(context.Context, analysisConfig, analysisProfile, Registry) (canonicalProfileRun, error) {
 					calls++
 					if calls == 3 {
 						return canonicalProfileRun{}, errors.New("effect discovery failed: unresolved dynamic call")
@@ -188,7 +209,7 @@ func TestCompileCanonicalRegistryFailsClosedBeforeReturningPartialEvidence(t *te
 			name: "cancellation after a partial run",
 			prepare: func(runtime *canonicalCompileRuntime) {
 				calls := 0
-				runtime.runProfile = func(_ context.Context, _ analysisConfig, profile analysisProfile, _ []BoundaryDefinition) (canonicalProfileRun, error) {
+				runtime.runProfile = func(_ context.Context, _ analysisConfig, profile analysisProfile, _ Registry) (canonicalProfileRun, error) {
 					calls++
 					if calls == 2 {
 						return canonicalProfileRun{}, context.Canceled
@@ -201,7 +222,7 @@ func TestCompileCanonicalRegistryFailsClosedBeforeReturningPartialEvidence(t *te
 		{
 			name: "profile identity mismatch",
 			prepare: func(runtime *canonicalCompileRuntime) {
-				runtime.runProfile = func(_ context.Context, _ analysisConfig, profile analysisProfile, _ []BoundaryDefinition) (canonicalProfileRun, error) {
+				runtime.runProfile = func(_ context.Context, _ analysisConfig, profile analysisProfile, _ Registry) (canonicalProfileRun, error) {
 					return canonicalProfileRun{profile: BuildProfileID("wrong/partial"), files: []sourceFingerprint{fixtureFingerprint("cmd/gc/main.go")}}, nil
 				}
 			},
@@ -363,7 +384,7 @@ func successfulCanonicalRuntime() canonicalCompileRuntime {
 		auditSources: func(context.Context, sourceSelectionConfig) (sourceAudit, error) {
 			return sourceAudit{files: []sourceFingerprint{fixtureFingerprint("cmd/gc/main.go")}}, nil
 		},
-		runProfile: func(_ context.Context, _ analysisConfig, profile analysisProfile, _ []BoundaryDefinition) (canonicalProfileRun, error) {
+		runProfile: func(_ context.Context, _ analysisConfig, profile analysisProfile, _ Registry) (canonicalProfileRun, error) {
 			return canonicalProfileRun{profile: profile.ID, files: []sourceFingerprint{fixtureFingerprint("cmd/gc/main.go")}}, nil
 		},
 		verifyScope: func(string, sourceScopeManifest) error { return nil },

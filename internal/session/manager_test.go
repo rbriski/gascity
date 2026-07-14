@@ -4403,40 +4403,6 @@ func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T
 	}
 }
 
-func TestTranscriptPathCodexSessionKeyMissDoesNotUseWorkDirFallback(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
-
-	workDir := t.TempDir()
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "codex", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := store.SetMetadata(info.ID, "session_key", "019d9845-miss-7000-8000-000000000456"); err != nil {
-		t.Fatalf("SetMetadata session_key: %v", err)
-	}
-
-	searchBase := t.TempDir()
-	dayDir := filepath.Join(searchBase, "2026", "05", "04")
-	if err := os.MkdirAll(dayDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	fallbackPath := filepath.Join(dayDir, "rollout-current.jsonl")
-	meta := `{"type":"session_meta","payload":{"cwd":"` + workDir + `"}}`
-	if err := os.WriteFile(fallbackPath, []byte(meta+"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile fallback: %v", err)
-	}
-
-	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
-	if err != nil {
-		t.Fatalf("TranscriptPath: %v", err)
-	}
-	if path != "" {
-		t.Errorf("TranscriptPath = %q, want empty on Codex session_key miss", path)
-	}
-}
-
 func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

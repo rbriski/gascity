@@ -31,13 +31,6 @@ cmd/gc/.runtime/
 /.claude/*
 !/.claude/skills/
 
-# Local agent skill materialization symlinks into ~/.gc/cache; regenerated per
-# developer machine and not part of the project source.
-/.claude/skills/core.gc-*
-/.claude/skills/gascity.mayor
-/.codex/
-/.gemini/
-
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
 .gc/
@@ -72,7 +65,3 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
-
-# Gas City
-.beads/*
-!.beads/config.yaml

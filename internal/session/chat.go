@@ -1004,9 +1004,6 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
 		return path, nil
 	}
-	if strings.TrimSpace(b.Metadata["session_key"]) != "" && sessionlog.ProviderFamily(provider) == "codex" {
-		return "", nil
-	}
 
 	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
 	if err != nil {

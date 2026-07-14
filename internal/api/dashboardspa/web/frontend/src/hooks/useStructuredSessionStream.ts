@@ -21,9 +21,12 @@ import type { SessionStreamProgress } from './useSessionStream';
 // Live structured-transcript reader, ported from the old dashboard's
 // connectAgentOutput (PR #3718). It seeds from the REST structured snapshot,
 // then consumes the four structured-mode SSE frames — structured, activity,
-// pending, heartbeat — in arrival order with no dedup or reconnect. Raw
-// conversation frames are rejected. A non-structured snapshot yields the
-// `unavailable` state so the caller can fall back to conversation rendering.
+// pending, heartbeat. Structured message IDs are stable within one transcript
+// generation, so replayed frames are idempotent and same-ID lifecycle updates
+// replace their prior value. A generation or transcript-stream change replaces
+// the message set. Raw conversation frames are rejected. A non-structured
+// snapshot yields the `unavailable` state so the caller can fall back to
+// conversation rendering.
 
 /** One rendered item in arrival order: a structured message or a pending interaction. */
 export type StructuredStreamItem =
@@ -97,6 +100,25 @@ export function useStructuredSessionStream(
     const messageItems = (messages: SessionStructuredMessage[]): StructuredStreamItem[] =>
       messages.map((message) => ({ kind: 'message' as const, message }));
 
+    const applyStructuredEnvelope = (
+      current: StructuredTranscriptResult,
+      envelope: Parameters<typeof structuredMessagesFromEnvelope>[0],
+    ): StructuredTranscriptResult => {
+      const history = envelope.history ?? current.history;
+      const reset = structuredGenerationChanged(current.history, envelope.history ?? null);
+      return {
+        provider: envelope.provider,
+        template: envelope.template,
+        history,
+        items: mergeStructuredItems(
+          current.items,
+          structuredMessagesFromEnvelope(envelope),
+          reset,
+        ),
+        activity: envelope.history?.tail_state.activity ?? current.activity,
+      };
+    };
+
     fetchStructuredTranscript(sessionId).then(
       (envelope) => {
         if (cancelled) return;
@@ -136,7 +158,15 @@ export function useStructuredSessionStream(
           if (cancelled) return;
           const parsed = parseFrame((event as MessageEvent<string>).data);
           if (parsed === null || !isSessionStructuredEvent(parsed)) return degrade();
-          appendItems(messageItems(structuredMessagesFromEnvelope(parsed)));
+          setState((current) =>
+            current.status === 'ready'
+              ? {
+                  status: 'ready',
+                  result: applyStructuredEnvelope(current.result, parsed),
+                  stream: { status: 'open' },
+                }
+              : current,
+          );
         });
         source.addEventListener('activity', (event) => {
           if (cancelled) return;
@@ -198,6 +228,42 @@ export function useStructuredSessionStream(
   }, [sessionId, stream]);
 
   return state;
+}
+
+function structuredGenerationChanged(
+  current: SessionStructuredHistory | null,
+  next: SessionStructuredHistory | null,
+): boolean {
+  if (current === null || next === null) return false;
+  return (
+    current.transcript_stream_id !== next.transcript_stream_id ||
+    current.generation.id !== next.generation.id
+  );
+}
+
+function mergeStructuredItems(
+  current: StructuredStreamItem[],
+  incomingMessages: SessionStructuredMessage[],
+  reset: boolean,
+): StructuredStreamItem[] {
+  if (reset) {
+    return incomingMessages.map((message) => ({ kind: 'message', message }));
+  }
+
+  const incomingByID = new Map(incomingMessages.map((message) => [message.id, message]));
+  const existingMessageIDs = new Set<string>();
+  const merged = current.map((item) => {
+    if (item.kind === 'pending') return item;
+    existingMessageIDs.add(item.message.id);
+    const replacement = incomingByID.get(item.message.id);
+    return replacement === undefined ? item : { kind: 'message' as const, message: replacement };
+  });
+  for (const message of incomingMessages) {
+    if (!existingMessageIDs.has(message.id)) {
+      merged.push({ kind: 'message', message });
+    }
+  }
+  return merged;
 }
 
 function parseFrame(data: string): unknown {

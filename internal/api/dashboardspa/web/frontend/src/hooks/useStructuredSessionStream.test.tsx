@@ -100,6 +100,75 @@ describe('useStructuredSessionStream', () => {
     ]);
   });
 
+  it('does not duplicate the REST snapshot when the stream replays it', async () => {
+    mockFetchStructuredTranscript.mockResolvedValue(envelope);
+    const { result } = renderHook(() => useStructuredSessionStream('gc-session-1', true));
+    await flush();
+
+    act(() => eventSources[0]?.emit('structured', JSON.stringify(envelope)));
+
+    if (result.current.status !== 'ready') throw new Error('expected ready');
+    expect(result.current.result.items).toEqual([
+      { kind: 'message', message: envelope.structured_messages[0] },
+    ]);
+  });
+
+  it('replaces a same-ID partial message with its final form', async () => {
+    const partial = {
+      ...envelope,
+      structured_messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          status: 'partial',
+          blocks: [{ type: 'text', text: 'hel' }],
+        },
+      ],
+    } satisfies SessionStreamStructuredMessageEvent;
+    mockFetchStructuredTranscript.mockResolvedValue(partial);
+    const { result } = renderHook(() => useStructuredSessionStream('gc-session-1', true));
+    await flush();
+
+    const finalMessage = envelope.structured_messages[0];
+    act(() => eventSources[0]?.emit('structured', JSON.stringify(envelope)));
+
+    if (result.current.status !== 'ready') throw new Error('expected ready');
+    expect(result.current.result.items).toEqual([{ kind: 'message', message: finalMessage }]);
+  });
+
+  it('replaces messages and history when the transcript generation changes', async () => {
+    mockFetchStructuredTranscript.mockResolvedValue(envelope);
+    const { result } = renderHook(() => useStructuredSessionStream('gc-session-1', true));
+    await flush();
+    if (envelope.history === undefined) throw new Error('fixture history is required');
+
+    const replacement = {
+      ...envelope,
+      history: {
+        ...envelope.history,
+        transcript_stream_id: 'stream-2',
+        generation: { id: 'gen-2' },
+        tail_state: { activity: 'in-turn' },
+      },
+      structured_messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          status: 'final',
+          blocks: [{ type: 'text', text: 'replacement' }],
+        },
+      ],
+    } satisfies SessionStreamStructuredMessageEvent;
+    act(() => eventSources[0]?.emit('structured', JSON.stringify(replacement)));
+
+    if (result.current.status !== 'ready') throw new Error('expected ready');
+    expect(result.current.result.history?.generation.id).toBe('gen-2');
+    expect(result.current.result.activity).toBe('in-turn');
+    expect(result.current.result.items).toEqual([
+      { kind: 'message', message: replacement.structured_messages[0] },
+    ]);
+  });
+
   it('updates activity from activity frames without adding items', async () => {
     mockFetchStructuredTranscript.mockResolvedValue(envelope);
     const { result } = renderHook(() => useStructuredSessionStream('gc-session-1', true));

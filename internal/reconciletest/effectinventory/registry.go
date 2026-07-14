@@ -293,6 +293,26 @@ type GateKind string
 const (
 	GateUnconditionalLegacy GateKind = "unconditional-legacy"
 	GatePredicate           GateKind = "typed-predicate"
+	GateAll                 GateKind = "all"
+	GateAny                 GateKind = "any"
+)
+
+// GateConditionKind identifies one typed input to a compound admission gate.
+type GateConditionKind string
+
+// GateConditionKind values distinguish direct predicates, exact authored
+// parameters, and optional-interface capability checks on those parameters.
+const (
+	GateConditionPredicate  GateConditionKind = "predicate"
+	GateConditionParameter  GateConditionKind = "parameter"
+	GateConditionCapability GateConditionKind = "parameter-capability"
+)
+
+// Capability condition expectations are deliberately closed rather than
+// accepting prose that cannot be compared mechanically.
+const (
+	GateCapabilityAvailable   = "available"
+	GateCapabilityUnavailable = "unavailable"
 )
 
 // DispositionKind says whether a route is replaced, removed, or retained.
@@ -447,11 +467,31 @@ type Fence struct {
 	Token  ObjectRef
 }
 
-// GateRef records an unconditional legacy path or an exact typed predicate.
+// GateParameterRef identifies an exact authored function parameter whose value
+// participates in admission.
+type GateParameterRef struct {
+	Function FunctionRef
+	Slot     ValueSlot
+}
+
+// GateCondition records one typed predicate, parameter value, or capability
+// assertion. Capability names a receiverless interface/type asserted against
+// Parameter.
+type GateCondition struct {
+	Kind       GateConditionKind
+	Predicate  ObjectRef
+	Parameter  GateParameterRef
+	Capability ObjectRef
+	Expected   string
+}
+
+// GateRef records an unconditional legacy path, the compact single-predicate
+// form, or a typed all/any condition set.
 type GateRef struct {
-	Kind      GateKind
-	Predicate ObjectRef
-	Expected  string
+	Kind       GateKind
+	Predicate  ObjectRef
+	Expected   string
+	Conditions []GateCondition
 }
 
 // TaskRef names a plan gate or beads task.
@@ -976,6 +1016,7 @@ func cloneRoute(route Route) Route {
 	sort.Slice(clone.Target.Identities, func(i, j int) bool {
 		return canonicalTargetIdentityRef(clone.Target.Identities[i]) < canonicalTargetIdentityRef(clone.Target.Identities[j])
 	})
+	clone.CurrentGate = cloneGate(route.CurrentGate)
 	clone.Fences = append([]Fence(nil), route.Fences...)
 	clone.Disposition.Gates = append([]TaskRef(nil), route.Disposition.Gates...)
 	clone.Hops = append([]RouteHop(nil), route.Hops...)
@@ -989,6 +1030,21 @@ func cloneRoute(route Route) Route {
 		exception.RemovalTasks = append([]TaskRef(nil), route.Exception.RemovalTasks...)
 		clone.Exception = &exception
 	}
+	return clone
+}
+
+func cloneGate(gate GateRef) GateRef {
+	clone := gate
+	clone.Conditions = append([]GateCondition(nil), gate.Conditions...)
+	for index := range clone.Conditions {
+		clone.Conditions[index].Parameter.Function.ClosurePath = append(
+			[]int(nil),
+			gate.Conditions[index].Parameter.Function.ClosurePath...,
+		)
+	}
+	sort.Slice(clone.Conditions, func(i, j int) bool {
+		return canonicalGateCondition(clone.Conditions[i]) < canonicalGateCondition(clone.Conditions[j])
+	})
 	return clone
 }
 
@@ -1146,11 +1202,36 @@ func canonicalFence(fence Fence) string {
 }
 
 func canonicalGateRef(gate GateRef) string {
+	conditions := make([]string, len(gate.Conditions))
+	for index, condition := range gate.Conditions {
+		conditions[index] = canonicalGateCondition(condition)
+	}
+	sort.Strings(conditions)
 	return canonicalFields(
-		"gate-v1",
+		"gate-v2",
 		string(gate.Kind),
 		canonicalObjectRef(gate.Predicate),
 		gate.Expected,
+		canonicalStringList("gate-conditions-v1", conditions),
+	)
+}
+
+func canonicalGateCondition(condition GateCondition) string {
+	return canonicalFields(
+		"gate-condition-v1",
+		string(condition.Kind),
+		canonicalObjectRef(condition.Predicate),
+		canonicalGateParameterRef(condition.Parameter),
+		canonicalObjectRef(condition.Capability),
+		condition.Expected,
+	)
+}
+
+func canonicalGateParameterRef(parameter GateParameterRef) string {
+	return canonicalFields(
+		"gate-parameter-v1",
+		canonicalFunctionRef(parameter.Function),
+		canonicalValueSlot(parameter.Slot),
 	)
 }
 
@@ -1566,14 +1647,110 @@ func validateGate(gate GateRef, scope string, problems *[]string) {
 		if gate.Expected != "" {
 			addProblem(problems, scope, "unconditional gate cannot name an expected value")
 		}
+		if len(gate.Conditions) != 0 {
+			addProblem(problems, scope, "unconditional gate cannot name conditions")
+		}
 	case GatePredicate:
 		validateObject(gate.Predicate, scope+" gate predicate", problems)
 		if strings.TrimSpace(gate.Expected) == "" {
 			addProblem(problems, scope, "gate expected value is required")
 		}
+		if len(gate.Conditions) != 0 {
+			addProblem(problems, scope, "simple predicate gate cannot name conditions")
+		}
+	case GateAll, GateAny:
+		if !gate.Predicate.zero() {
+			addProblem(problems, scope, "compound gate cannot name a top-level predicate")
+		}
+		if gate.Expected != "" {
+			addProblem(problems, scope, "compound gate cannot name a top-level expected value")
+		}
+		if gate.Kind == GateAll && len(gate.Conditions) == 0 {
+			addProblem(problems, scope, "all gate requires at least one condition")
+		}
+		if gate.Kind == GateAny && len(gate.Conditions) < 2 {
+			addProblem(problems, scope, "any gate requires at least two conditions")
+		}
+		validateGateConditions(gate.Conditions, scope, problems)
 	default:
 		addProblem(problems, scope, "unknown current gate %q", gate.Kind)
 	}
+}
+
+func validateGateConditions(conditions []GateCondition, scope string, problems *[]string) {
+	conditions = append([]GateCondition(nil), conditions...)
+	sort.Slice(conditions, func(i, j int) bool {
+		return canonicalGateCondition(conditions[i]) < canonicalGateCondition(conditions[j])
+	})
+	seen := make(map[string]bool, len(conditions))
+	for _, condition := range conditions {
+		key := canonicalGateCondition(condition)
+		conditionScope := fmt.Sprintf("%s gate condition %q", scope, deriveContentID("condition-v1-", key))
+		if seen[key] {
+			addProblem(problems, scope, "duplicate gate condition %q", deriveContentID("condition-v1-", key))
+		}
+		seen[key] = true
+		validateGateCondition(condition, conditionScope, problems)
+	}
+}
+
+func validateGateCondition(condition GateCondition, scope string, problems *[]string) {
+	switch condition.Kind {
+	case GateConditionPredicate:
+		validateObject(condition.Predicate, scope+" predicate", problems)
+		if !condition.Parameter.zero() {
+			addProblem(problems, scope, "predicate condition cannot name a parameter")
+		}
+		if !condition.Capability.zero() {
+			addProblem(problems, scope, "predicate condition cannot name a capability")
+		}
+		validateGateExpected(condition.Expected, scope, problems)
+	case GateConditionParameter:
+		if !condition.Predicate.zero() {
+			addProblem(problems, scope, "parameter condition cannot name a predicate")
+		}
+		validateGateParameter(condition.Parameter, scope, problems)
+		if !condition.Capability.zero() {
+			addProblem(problems, scope, "parameter condition cannot name a capability")
+		}
+		validateGateExpected(condition.Expected, scope, problems)
+	case GateConditionCapability:
+		if !condition.Predicate.zero() {
+			addProblem(problems, scope, "capability condition cannot name a predicate")
+		}
+		validateGateParameter(condition.Parameter, scope, problems)
+		validateObject(condition.Capability, scope+" gate capability", problems)
+		if condition.Capability.Receiver != "" {
+			addProblem(problems, scope, "gate capability must name a receiverless type")
+		}
+		if !oneOf(condition.Expected, GateCapabilityAvailable, GateCapabilityUnavailable) {
+			addProblem(
+				problems,
+				scope,
+				"capability expectation %q must be %q or %q",
+				condition.Expected,
+				GateCapabilityAvailable,
+				GateCapabilityUnavailable,
+			)
+		}
+	default:
+		addProblem(problems, scope, "unknown gate condition %q", condition.Kind)
+	}
+}
+
+func validateGateExpected(expected, scope string, problems *[]string) {
+	if strings.TrimSpace(expected) == "" {
+		addProblem(problems, scope, "gate condition expected value is required")
+	}
+}
+
+func validateGateParameter(parameter GateParameterRef, scope string, problems *[]string) {
+	if parameter.Function.zero() {
+		addProblem(problems, scope, "gate parameter function is required")
+	} else {
+		validateFunction(parameter.Function, scope+" gate parameter function", problems)
+	}
+	validateExactSlot(parameter.Slot, SlotParameter, scope+" gate parameter slot", problems)
 }
 
 func validateDisposition(disposition Disposition, scope string, problems *[]string) {
@@ -2119,6 +2296,10 @@ func (function FunctionRef) equal(other FunctionRef) bool {
 	return canonicalFunctionRef(function) == canonicalFunctionRef(other)
 }
 
+func (function FunctionRef) zero() bool {
+	return function.Object.zero() && function.File == "" && len(function.ClosurePath) == 0
+}
+
 func (object ObjectRef) key() string {
 	return strings.Join([]string{object.Package, object.Receiver, object.Name}, ".")
 }
@@ -2129,6 +2310,10 @@ func (object ObjectRef) zero() bool {
 
 func (slot ValueSlot) zero() bool {
 	return slot == (ValueSlot{})
+}
+
+func (parameter GateParameterRef) zero() bool {
+	return parameter.Function.zero() && parameter.Slot.zero()
 }
 
 func (test TestRef) key() string {

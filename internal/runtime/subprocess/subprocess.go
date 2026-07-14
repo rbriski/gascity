@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -115,7 +116,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 
 	cmd := exec.Command("sh", "-c", command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}

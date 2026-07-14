@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-func TestSourceSelectionCanonicalRootsAndPatterns(t *testing.T) {
+func TestSourceSelectionCanonicalAuditRootsAndPatterns(t *testing.T) {
 	wantRoots := []string{
 		"cmd/gc",
 		"internal/api",
@@ -31,9 +31,9 @@ func TestSourceSelectionCanonicalRootsAndPatterns(t *testing.T) {
 		"./internal/runtime/...",
 	}
 
-	roots := canonicalAnalysisRoots()
+	roots := canonicalSourceAuditRoots()
 	if !reflect.DeepEqual(roots, wantRoots) {
-		t.Fatalf("canonicalAnalysisRoots() = %#v, want %#v", roots, wantRoots)
+		t.Fatalf("canonicalSourceAuditRoots() = %#v, want %#v", roots, wantRoots)
 	}
 	patterns, err := canonicalSourcePatterns(roots)
 	if err != nil {
@@ -46,8 +46,8 @@ func TestSourceSelectionCanonicalRootsAndPatterns(t *testing.T) {
 	// Neither helper may expose mutable package state or retain caller state.
 	roots[0] = "mutated"
 	patterns[0] = "mutated"
-	if again := canonicalAnalysisRoots(); !reflect.DeepEqual(again, wantRoots) {
-		t.Fatalf("canonicalAnalysisRoots() retained caller mutation: %#v", again)
+	if again := canonicalSourceAuditRoots(); !reflect.DeepEqual(again, wantRoots) {
+		t.Fatalf("canonicalSourceAuditRoots() retained caller mutation: %#v", again)
 	}
 	ordered := []string{"zeta", "alpha/nested"}
 	got, err := canonicalSourcePatterns(ordered)
@@ -385,7 +385,7 @@ func TestProductionSourceSelectionCoveredByCanonicalProfiles(t *testing.T) {
 	config := sourceSelectionConfig{
 		RepoRoot:   analysis.RepoRoot,
 		ModulePath: analysis.ModulePath,
-		Roots:      canonicalAnalysisRoots(),
+		Roots:      canonicalSourceAuditRoots(),
 	}
 
 	if err := auditCanonicalSourceSelection(context.Background(), config); err != nil {

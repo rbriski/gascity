@@ -106,25 +106,26 @@ func canonicalBoundaries() []BoundaryDefinition {
 
 	addInterface("events.recorder", KindEventEmission, eventsPackage, "Recorder", "Record")
 
-	// Portable process seams are the auditable boundary around their
-	// OS-specific implementations. Direct os.Process calls that remain in the
-	// production scope are explicit residual leaves.
+	// Portable process seams remain the auditable boundary across OS-specific
+	// implementations. Direct os.Process calls in the production dependency
+	// closure are explicit residual leaves.
 	addExact("pidutil", KindProcessMutation, pidutilPackage, "", "Signal", "SignalProcess")
 	addExact("processgroup", KindProcessMutation, processgroupPackage, "", "SignalGroup", "SignalCommand", "Terminate", "TerminateCommand")
 	addExact("runtime.process", KindProcessMutation, runtimePackage, "", "SignalProcessGroup", "TerminateManagedProcess")
 	addExact("runtime.proctable", KindProcessMutation, proctablePackage, "", "KillByPID")
 	addExact("os.process", KindProcessMutation, "os", "Process", "Kill")
 
-	// Workspace services execute inside the controller but own child processes
-	// behind a typed ownership boundary. Their controller entry points are
-	// therefore explicit effect vehicles rather than an invisible scope hole.
+	// Workspace services execute inside the controller and own child processes.
+	// Their controller entry points are explicit effect vehicles in addition to
+	// the lower-level process mutations found in their production bodies.
 	addExact("workspacesvc.manager", KindProcessMutation, workspacesvcPackage, "Manager", "Reload", "Tick", "Close")
 	addInterface("workspacesvc.registry", KindProcessMutation, workspacesvcPackage, "Registry", "Restart")
 
 	// Controller channels are named at their owning fields so every producer
 	// and consumer shares one identity even when helpers pass the channel as a
 	// parameter. Standard timer, cancellation, and signal registrations cover
-	// the external/time-based wake inputs used throughout the production scope.
+	// external/time-based wake inputs throughout the production dependency
+	// closure.
 	for _, field := range []string{"pokeCh", "controlDispatcherCh", "nudgeWakeCh", "convergenceReqCh", "reloadReqCh"} {
 		addChannelField("wake.city-runtime."+field, gcCommandPackage, "CityRuntime", field)
 	}

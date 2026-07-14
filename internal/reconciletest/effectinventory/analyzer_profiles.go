@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+// canonicalProductionAnalysisPatterns returns the command whose Tests=false
+// in-module dependency closure defines authored analyzer source.
+func canonicalProductionAnalysisPatterns() []string {
+	return []string{"./cmd/gc"}
+}
+
 func canonicalAnalysisProfiles() []analysisProfile {
 	return []analysisProfile{
 		{ID: BuildDarwinDefault, GOOS: "darwin", GOARCH: "amd64"},

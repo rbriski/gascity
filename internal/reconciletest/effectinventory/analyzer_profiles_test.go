@@ -150,11 +150,7 @@ func TestCanonicalProfilesSelectNativeAndDefaultSources(t *testing.T) {
 
 func TestWindowsProductionAnalysisTypeChecks(t *testing.T) {
 	config := fixtureAnalysisConfig(t, nil)
-	patterns, err := canonicalSourcePatterns(canonicalAnalysisRoots())
-	if err != nil {
-		t.Fatalf("canonicalSourcePatterns() error: %v", err)
-	}
-	config.Patterns = patterns
+	config.Patterns = canonicalProductionAnalysisPatterns()
 	profile, ok := canonicalAnalysisProfile(BuildWindowsCompile)
 	if !ok {
 		t.Fatal("canonical Windows analysis profile is missing")

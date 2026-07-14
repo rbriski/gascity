@@ -34,6 +34,12 @@ class RCGatePolicyTests(unittest.TestCase):
         self.assertIn("needs: ubuntu_acceptance_c", integration)
         self.assertIn("max-parallel: 8", integration)
         self.assertIn("shard_name: review-formulas-basic-2-of-2", integration)
+        self.assertIn(
+            "- shard_name: review-formulas-lumen\n"
+            "            timeout_minutes: 35\n"
+            "            command: ./scripts/test-integration-shard review-formulas-lumen",
+            integration,
+        )
         self.assertIn("timeout_minutes: 35", integration)
 
         tutorial = _job_block(workflow, "ubuntu_tutorial")

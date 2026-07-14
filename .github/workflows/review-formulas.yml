@@ -90,6 +90,7 @@ jobs:
               - 'examples/bd/**'
               - 'examples/dolt/**'
               - 'examples/gastown/**'
+              - 'examples/lumen/**'
               - 'scripts/test-integration-shard'
               - 'test/agents/**'
               - 'test/integration/**'
@@ -159,6 +160,11 @@ jobs:
               GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-2-of-2.txt
               ./scripts/test-integration-shard review-formulas-basic-2-of-2
             coverprofile: coverage.integration-review-formulas-basic-2-of-2.txt
+          - label: lumen
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-lumen.txt
+              ./scripts/test-integration-shard review-formulas-lumen
+            coverprofile: coverage.integration-review-formulas-lumen.txt
           - label: retries-1-of-2
             command: >-
               GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt

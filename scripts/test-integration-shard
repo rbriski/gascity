@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
+  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-lumen|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
   exit 1
 fi
 
@@ -70,6 +70,7 @@ run_go_test() {
 formula_tests=(
   TestAdoptPRFormulaCompileAndRun
   TestPersonalWorkFormulaCompileAndRun
+  TestGCRunLumenReviewQuorumE2E
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
@@ -78,6 +79,10 @@ formula_tests=(
 review_formulas_basic_tests=(
   TestAdoptPRFormulaCompileAndRun
   TestPersonalWorkFormulaCompileAndRun
+)
+
+review_formulas_lumen_tests=(
+  TestGCRunLumenReviewQuorumE2E
 )
 
 review_formulas_retry_tests=(
@@ -300,6 +305,7 @@ run_rest_full_shard_modulo() {
 run_review_formulas_all() {
   local status=0 st=0
   "$0" review-formulas-basic || { st=$?; [[ $status -ne 0 ]] || status=$st; }
+  "$0" review-formulas-lumen || { st=$?; [[ $status -ne 0 ]] || status=$st; }
   "$0" review-formulas-retries || { st=$?; [[ $status -ne 0 ]] || status=$st; }
   "$0" review-formulas-recovery || { st=$?; [[ $status -ne 0 ]] || status=$st; }
   exit "$status"
@@ -347,6 +353,10 @@ case "$shard" in
     validate_selected_tests "${review_formulas_basic_tests[@]}"
     run_pkg_tests "$pkg" "${review_formulas_basic_tests[@]}"
     ;;
+  review-formulas-lumen)
+    validate_selected_tests "${review_formulas_lumen_tests[@]}"
+    run_pkg_tests "$pkg" "${review_formulas_lumen_tests[@]}"
+    ;;
   review-formulas-retries)
     validate_selected_tests "${review_formulas_retry_tests[@]}"
     run_pkg_tests "$pkg" "${review_formulas_retry_tests[@]}"
@@ -371,6 +381,7 @@ case "$shard" in
   all)
     "$0" packages
     "$0" review-formulas-basic
+    "$0" review-formulas-lumen
     "$0" review-formulas-retries
     "$0" review-formulas-recovery
     "$0" bdstore

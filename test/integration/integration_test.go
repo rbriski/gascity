@@ -1001,6 +1001,8 @@ func integrationEnvDolt() []string {
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
+	env = filterEnv(env, "GC_BEADS_BACKEND")
+	env = filterEnv(env, "BEADS_BACKEND")
 	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
 	env = filterEnv(env, "GC_DOLT")
@@ -1902,6 +1904,19 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"user.email":"gc-test@test.local"`) {
 		t.Fatalf("isolated dolt config missing user.email: %s", string(data))
+	}
+}
+
+func TestNewIsolatedToolEnvScrubsAmbientBeadsBackend(t *testing.T) {
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
+	t.Setenv("BEADS_BACKEND", "doltlite")
+
+	env := newIsolatedToolEnv(t, true)
+	got := parseEnvList(env)
+	for _, key := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s leaked into isolated default-backend env with value %q", key, value)
+		}
 	}
 }
 

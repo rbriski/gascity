@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -63,11 +64,11 @@ func setupLumenDoCityWithAgent(t *testing.T, provider, agentScriptName string) (
 	return setupLumenDoCityWithOptions(t, provider, agentScriptName, 1, "GC_LUMEN_E2E_WORK_SECONDS=3")
 }
 
-// lumenKillNonce is the per-city process-table token the firewall e2e's hang agent
-// carries in its command line (an env assignment + its re-exec'd argv[0]) so a
-// `pgrep -f` can find and SIGKILL exactly that session process. The lumenhang- prefix
-// keeps the token off the controller/supervisor argv (which carries only the plain
-// city dir path), so the kill never touches the infrastructure processes.
+// lumenKillNonce is the per-city process-table token scripted Lumen agents carry
+// in their re-exec'd argv[0]. Firewall tests use it to target a hung claimant;
+// gc-run acceptance uses it to prove every demo subprocess returned. The
+// lumenhang- prefix keeps the token off controller/supervisor argv, which carries
+// only the plain city dir path, so process-table checks never match infrastructure.
 func lumenKillNonce(cityName string) string {
 	return "lumenhang-" + cityName
 }
@@ -1759,11 +1760,12 @@ func keysOf(m map[string]bool) []string {
 }
 
 // pgrepNonce returns the PIDs whose command line matches nonce (a process-table
-// query — the house "query live state" rule). pgrep exits 1 with no matches, which is
-// not an error here.
+// query — the house "query live state" rule). Firewall tests use the positive
+// result as a kill target; gc-run acceptance uses a stable empty result as return
+// proof. pgrep exits 1 with no matches, which is not an error here.
 func pgrepNonce(t *testing.T, nonce string) []int {
 	t.Helper()
-	out, err := exec.Command("pgrep", "-f", nonce).CombinedOutput()
+	out, err := exec.Command("pgrep", "-f", lumenNonceProcessPattern(nonce)).CombinedOutput()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
 			return nil // no matches
@@ -1777,6 +1779,10 @@ func pgrepNonce(t *testing.T, nonce string) []int {
 		}
 	}
 	return pids
+}
+
+func lumenNonceProcessPattern(nonce string) string {
+	return "^" + regexp.QuoteMeta(nonce) + "([[:space:]]|$)"
 }
 
 // waitForNoncePID polls the process table until at least one hang session process

@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -23,6 +22,14 @@ var updateGolden = flag.Bool("update", false, "update workquery golden files")
 // oracle copies are eventually retired, TestWorkQueryGolden below remains as
 // the permanent byte-identity pin.
 
+// oldEffectiveWorkQuery, oldEffectiveAssignedInProgressQuery, and
+// oldEffectiveAssignedReadyQuery prepend bdFatalGuardFunctionScript() to
+// match buildWorkQuery/buildAssignedInProgressQuery/buildAssignedReadyQuery:
+// ga-ooka7o wrapped every bd call inside the shared low-level builders
+// (standardAssignedWorkQueryScript and friends) with bd_or_fatal, so the
+// generated script now requires that function's definition in scope. Unlike
+// routedPoolWorkQueryProbeScript (which embeds the guard definition itself),
+// these builders don't self-embed it -- the caller must prepend it once.
 func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -30,14 +37,16 @@ func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
+		script := bdFatalGuardFunctionScript() +
+			standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
+	script := bdFatalGuardFunctionScript() +
+		legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 		`probe_pool_demand "$1"; ` +
@@ -52,9 +61,9 @@ func oldEffectiveAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) s
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 }
 
 func oldEffectiveAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string {
@@ -63,9 +72,9 @@ func oldEffectiveAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 }
 
 func oldEffectiveRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
@@ -88,52 +97,28 @@ func oldEffectivePoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
 	return poolDemandCountShell(target, includeEphemeralReady)
 }
 
+// oldEffectiveOnDeath and oldEffectiveOnBoot delegate to the current
+// buildOnDeath/buildOnBoot rather than reconstructing the script inline,
+// unlike their five sibling oldEffective* functions above, which call
+// shared low-level builders (poolDemandFirstRowFunctionScript and friends)
+// that predate S04b unchanged. ga-ooka7o wrapped every bd invocation in
+// these two builders with bd_or_fatal -- a deliberate behavior change with
+// no separate pre-ga-ooka7o builder left to freeze a copy of. TestWorkQueryGolden
+// remains the byte-identity pin for their actual generated script; the
+// assertions here still cover override precedence and the ForBeads
+// flag-blindness invariant (I6).
 func oldEffectiveOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
-	route := a.QualifiedName()
-	if a.PoolName != "" {
-		route = a.PoolName
-	}
-	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | ` +
-		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>/dev/null; ` +
-		`fi; ` +
-		`done`
+	return buildOnDeath(a, includeEphemeralInProgress)
 }
 
 func oldEffectiveOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 	if a.OnBoot != "" {
 		return a.OnBoot
 	}
-	template := a.QualifiedName()
-	if a.PoolName != "" {
-		template = a.PoolName
-	}
-	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
-	return `template=` + shellquote.Quote(template) + `; ` +
-		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} bd update {} --status open 2>/dev/null`
+	return buildOnBoot(a, includeEphemeralInProgress)
 }
 
 // parityVariant binds an exported query kind's accessors to its frozen oracle.

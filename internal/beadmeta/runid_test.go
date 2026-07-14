@@ -32,6 +32,32 @@ func TestResolveRunID(t *testing.T) {
 			want:       "root-1",
 		},
 		{
+			// P5-OBS.2: a pooled session bead carries only gc.current_run_id (stamped at
+			// claim = the run it is executing) and no structural root of its own — it must
+			// resolve to that run, not its own id, so its usage facts roll up per-run.
+			name:       "gc.current_run_id next (pooled session bead)",
+			metadata:   map[string]string{CurrentRunIDMetadataKey: "gcg-run-1"},
+			selfID:     "sess-1",
+			fallbackID: "",
+			want:       "gcg-run-1",
+		},
+		{
+			// The structural nesting root outranks the session's current-run pointer, so a
+			// WORK bead that (hypothetically) carried both still resolves via its own root.
+			name:       "gc.root_bead_id outranks gc.current_run_id",
+			metadata:   map[string]string{RootBeadIDMetadataKey: "root-1", CurrentRunIDMetadataKey: "gcg-run-1"},
+			selfID:     "b1",
+			fallbackID: "s1",
+			want:       "root-1",
+		},
+		{
+			name:       "blank gc.current_run_id skipped, falls to self id",
+			metadata:   map[string]string{CurrentRunIDMetadataKey: "  "},
+			selfID:     "sess-1",
+			fallbackID: "",
+			want:       "sess-1",
+		},
+		{
 			name:       "self id fallback (plain work bead, worker path)",
 			metadata:   nil,
 			selfID:     "b1",

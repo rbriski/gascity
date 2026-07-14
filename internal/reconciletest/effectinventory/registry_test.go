@@ -508,13 +508,12 @@ func validRegistry() Registry {
 }
 
 func allBuildProfiles() []BuildProfileID {
-	return []BuildProfileID{
-		BuildDarwinDefault,
-		BuildDarwinNative,
-		BuildLinuxDefault,
-		BuildLinuxNative,
-		BuildWindowsCompile,
+	profiles := canonicalAnalysisProfiles()
+	result := make([]BuildProfileID, len(profiles))
+	for index, profile := range profiles {
+		result[index] = profile.ID
 	}
+	return result
 }
 
 func functionRef(packagePath, file, name string) FunctionRef {

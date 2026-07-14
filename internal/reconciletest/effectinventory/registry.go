@@ -1138,7 +1138,8 @@ func knownStoreDomain(value StoreDomain) bool {
 }
 
 func knownBuildProfile(value BuildProfileID) bool {
-	return oneOf(value, BuildDarwinDefault, BuildDarwinNative, BuildLinuxDefault, BuildLinuxNative, BuildWindowsCompile)
+	_, ok := canonicalAnalysisProfile(value)
+	return ok
 }
 
 func knownActionFamily(value ActionFamily) bool {

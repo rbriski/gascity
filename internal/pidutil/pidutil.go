@@ -24,6 +24,14 @@ func Signal(pid int, signal os.Signal) error {
 	if err != nil {
 		return err
 	}
+	return SignalProcess(process, signal)
+}
+
+// SignalProcess sends signal through an already-resolved process handle.
+func SignalProcess(process *os.Process, signal os.Signal) error {
+	if process == nil {
+		return fmt.Errorf("pidutil: process handle is required")
+	}
 	return process.Signal(signal)
 }
 

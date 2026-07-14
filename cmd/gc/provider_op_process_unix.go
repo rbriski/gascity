@@ -3,10 +3,10 @@
 package main
 
 import (
-	"errors"
-	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 func prepareProviderOpCommand(cmd *exec.Cmd) {
@@ -15,20 +15,6 @@ func prepareProviderOpCommand(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.Setpgid = true
 	cmd.Cancel = func() error {
-		if cmd == nil || cmd.Process == nil {
-			return nil
-		}
-		pgid, err := syscall.Getpgid(cmd.Process.Pid)
-		if err == nil {
-			if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil &&
-				!errors.Is(killErr, syscall.ESRCH) {
-				return killErr
-			}
-			return nil
-		}
-		if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-			return killErr
-		}
-		return nil
+		return processgroup.SignalCommand(cmd, syscall.SIGKILL)
 	}
 }

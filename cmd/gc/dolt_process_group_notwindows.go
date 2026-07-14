@@ -5,6 +5,8 @@ package main
 import (
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 func terminateManagedDoltTestProcessGroup(pid int) (bool, error) {
@@ -12,7 +14,7 @@ func terminateManagedDoltTestProcessGroup(pid int) (bool, error) {
 	if err != nil || pgid != pid || pgid <= 1 {
 		return false, nil
 	}
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+	if err := processgroup.SignalGroup(pgid, syscall.SIGTERM); err != nil {
 		return false, nil
 	}
 	deadline := time.Now().Add(managedDoltTestProcessGroupKillWait)
@@ -22,7 +24,7 @@ func terminateManagedDoltTestProcessGroup(pid int) (bool, error) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	_ = processgroup.SignalGroup(pgid, syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return true, nil
 }

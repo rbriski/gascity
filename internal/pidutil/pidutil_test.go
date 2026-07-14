@@ -40,6 +40,12 @@ func TestSignalRejectsNonPositivePID(t *testing.T) {
 	}
 }
 
+func TestSignalProcessRejectsNil(t *testing.T) {
+	if err := SignalProcess(nil, syscall.SIGKILL); err == nil {
+		t.Fatal("SignalProcess(nil) error = nil, want error")
+	}
+}
+
 func TestSignalZeroFindsCurrentProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows os.Process.Signal supports only os.Kill")

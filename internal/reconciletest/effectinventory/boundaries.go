@@ -106,18 +106,17 @@ func canonicalBoundaries() []BoundaryDefinition {
 
 	addInterface("events.recorder", KindEventEmission, eventsPackage, "Recorder", "Record")
 
-	// Portable process seams are the auditable boundary when their OS-specific
-	// implementation lives outside the four canonical source roots. Direct
-	// os.Process calls that remain in those roots are explicit residual leaves.
-	addExact("pidutil", KindProcessMutation, pidutilPackage, "", "Signal")
-	addExact("processgroup", KindProcessMutation, processgroupPackage, "", "SignalCommand", "Terminate", "TerminateCommand")
+	// Portable process seams are the auditable boundary around their
+	// OS-specific implementations. Direct os.Process calls that remain in the
+	// production scope are explicit residual leaves.
+	addExact("pidutil", KindProcessMutation, pidutilPackage, "", "Signal", "SignalProcess")
+	addExact("processgroup", KindProcessMutation, processgroupPackage, "", "SignalGroup", "SignalCommand", "Terminate", "TerminateCommand")
 	addExact("runtime.process", KindProcessMutation, runtimePackage, "", "SignalProcessGroup", "TerminateManagedProcess")
 	addExact("runtime.proctable", KindProcessMutation, proctablePackage, "", "KillByPID")
-	addExact("os.process", KindProcessMutation, "os", "Process", "Kill", "Release")
-	addExact("gc.managed-dolt-test", KindProcessMutation, gcCommandPackage, "", "terminateManagedDoltTestProcessGroup")
+	addExact("os.process", KindProcessMutation, "os", "Process", "Kill")
 
 	// Workspace services execute inside the controller but own child processes
-	// in a package below the four-root census. Their controller entry points are
+	// behind a typed ownership boundary. Their controller entry points are
 	// therefore explicit effect vehicles rather than an invisible scope hole.
 	addExact("workspacesvc.manager", KindProcessMutation, workspacesvcPackage, "Manager", "Reload", "Tick", "Close")
 	addInterface("workspacesvc.registry", KindProcessMutation, workspacesvcPackage, "Registry", "Restart")
@@ -125,7 +124,7 @@ func canonicalBoundaries() []BoundaryDefinition {
 	// Controller channels are named at their owning fields so every producer
 	// and consumer shares one identity even when helpers pass the channel as a
 	// parameter. Standard timer, cancellation, and signal registrations cover
-	// the external/time-based wake inputs used throughout the four roots.
+	// the external/time-based wake inputs used throughout the production scope.
 	for _, field := range []string{"pokeCh", "controlDispatcherCh", "nudgeWakeCh", "convergenceReqCh", "reloadReqCh"} {
 		addChannelField("wake.city-runtime."+field, gcCommandPackage, "CityRuntime", field)
 	}

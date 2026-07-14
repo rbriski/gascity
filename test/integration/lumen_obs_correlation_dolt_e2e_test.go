@@ -32,8 +32,12 @@ import (
 // chain) is P5-OBS.2's seal — the session bead's own event envelope does not resolve to
 // the run until that chain fix lands, so it is deliberately NOT asserted here.
 //
+// It also pins P5-OBS.3: the same seal emits a run.resolved event on events.jsonl
+// carrying the run root + outcome (the molecule.resolved analog for a Lumen run).
+//
 // It pins: run.closed pass; the work bead's gc.root_bead_id/gc.step_id; the events.jsonl
-// envelope; zero control beads; Verify clean. Mirrors lumen_dispatch_metadata_dolt_e2e.
+// bead envelope; the run.resolved run-lifecycle event; zero control beads; Verify clean.
+// Mirrors lumen_dispatch_metadata_dolt_e2e.
 // Seal budget: one pooled do ≈ 300s seal wait, -timeout 1200s, ISOLATION.
 func TestLumenObsCorrelationDoltE2E_RunAndStepEnvelope(t *testing.T) {
 	cityDir, _ := setupLumenDoDoltCity(t, "lumen-do.sh", 1, "GC_LUMEN_E2E_WORK_SECONDS=2")
@@ -110,11 +114,79 @@ func TestLumenObsCorrelationDoltE2E_RunAndStepEnvelope(t *testing.T) {
 	}
 	t.Logf("PROOF events.jsonl bead event for %s carries envelope run_id=%s step_id=%s", realBeadID, runID, stepID)
 
+	// (3) THE RUN-LIFECYCLE PROOF (P5-OBS.3): the controller's seal emits a
+	// run.resolved event onto .gc/events.jsonl carrying the run root + aggregated
+	// outcome — the molecule.resolved analog a Lumen run otherwise lacks (no molecule
+	// root to autoclose). Consumers (order-completion detection, honesty-gate) key on
+	// root_id. The emit lands in the same advanceLumenRun tick as the journal seal, so
+	// poll briefly for the events.jsonl flush.
+	rootID, outcome := waitForLumenRunResolvedOrDiag(t, cityDir, streamID, time.Minute)
+	if rootID != streamID {
+		t.Fatalf("run.resolved payload root_id = %q, want the run streamID %q", rootID, streamID)
+	}
+	if outcome != engine.OutcomePass {
+		t.Fatalf("run.resolved payload outcome = %q, want pass", outcome)
+	}
+	t.Logf("PROOF events.jsonl run.resolved for %s carries root_id=%s outcome=%s", streamID, rootID, outcome)
+
 	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
 	if err := gs.Verify(ctx, streamID); err != nil {
 		t.Fatalf("graphstore.Verify(%s) failed: %v", streamID, err)
 	}
 	t.Logf("PROOF graphstore.Verify(%s) clean; sequence %v", streamID, lumenStreamTypes(events))
+}
+
+// waitForLumenRunResolvedOrDiag polls .gc/events.jsonl until a run.resolved event
+// for streamID appears (P5-OBS.3 emits it at the controller's seal, in the same tick
+// as the journal run.closed, so it lands a beat after the seal wait returns) and
+// returns its payload (root_id, outcome). It fails loud with the event log on timeout.
+func waitForLumenRunResolvedOrDiag(t *testing.T, cityDir, streamID string, timeout time.Duration) (rootID, outcome string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if r, o, found := lumenRunResolvedEvent(t, cityDir, streamID); found {
+			return r, o
+		}
+		if time.Now().After(deadline) {
+			data, _ := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+			t.Fatalf("no run.resolved event for stream %s within %s\nevents.jsonl:\n%s", streamID, timeout, string(data))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// lumenRunResolvedEvent scans .gc/events.jsonl for the run.resolved event whose
+// subject is streamID and returns its payload (root_id, outcome) and whether found.
+func lumenRunResolvedEvent(t *testing.T, cityDir, streamID string) (rootID, outcome string, found bool) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", false
+		}
+		t.Fatalf("reading event log: %v", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e struct {
+			Type    string `json:"type"`
+			Subject string `json:"subject"`
+			Payload struct {
+				RootID  string `json:"root_id"`
+				Outcome string `json:"outcome"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue // tolerate a partially-flushed trailing line
+		}
+		if e.Type == "run.resolved" && e.Subject == streamID {
+			return e.Payload.RootID, e.Payload.Outcome, true
+		}
+	}
+	return "", "", false
 }
 
 // lumenBeadEventEnvelope reads the city event log (.gc/events.jsonl) and returns the

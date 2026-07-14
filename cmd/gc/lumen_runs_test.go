@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -148,7 +149,7 @@ func TestLumenRunsTickDispatchesRealWorkBead(t *testing.T) {
 // lumenCloseDoBead simulates an ordinary pooled worker closing the latest open real
 // work bead for a do node: it stamps gc.outcome and closes the bead through the plain
 // work store (NO Tier-B leg). Returns the closed bead id.
-func lumenCloseDoBead(t *testing.T, store beads.Store, streamID, nodeID, outcome string) string {
+func lumenCloseDoBead(t *testing.T, store beads.Store, streamID, nodeID, outcome string) string { //nolint:unparam // nodeID kept explicit to document the (stream, node) identity at call sites (mirrors lumenAttemptHistory); the single-do fixture happens to always use "hello"
 	t.Helper()
 	hist, err := lumenAttemptHistory(store, streamID, nodeID)
 	if err != nil {
@@ -910,4 +911,236 @@ func newLumenTestCityRuntime(t *testing.T, lumenRunsCh chan struct{}) *CityRunti
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+}
+
+// runResolvedEvents returns the recorded run.resolved events, decoding each
+// payload THROUGH the real events registry (not a raw json.Unmarshal) so the test
+// also pins that RunResolved is registered with the RunResolvedPayload type — a
+// wrong RegisterPayload sample would fail the type assertion here.
+func runResolvedEvents(t *testing.T, rec *memRecorder) []struct {
+	Envelope events.Event
+	Payload  api.RunResolvedPayload
+} {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []struct {
+		Envelope events.Event
+		Payload  api.RunResolvedPayload
+	}
+	for _, e := range rec.events {
+		if e.Type != events.RunResolved {
+			continue
+		}
+		decoded, registered, err := events.DecodePayload(events.RunResolved, e.Payload)
+		if err != nil {
+			t.Fatalf("decode run.resolved payload: %v (raw %s)", err, string(e.Payload))
+		}
+		if !registered {
+			t.Fatalf("run.resolved has no registered payload type")
+		}
+		p, ok := decoded.(api.RunResolvedPayload)
+		if !ok {
+			t.Fatalf("run.resolved payload decoded to %T, want api.RunResolvedPayload", decoded)
+		}
+		out = append(out, struct {
+			Envelope events.Event
+			Payload  api.RunResolvedPayload
+		}{e, p})
+	}
+	return out
+}
+
+// lumenSeedSelfRun enqueues a v1 agent-driven run (Driver=="self") the way
+// `gc lumen run --driver self` does, returning its stream id. The controller loop
+// must skip it (no pool dispatch, no seal), so it is the negative fixture for the
+// run.resolved emit.
+func lumenSeedSelfRun(t *testing.T, cityPath string, doc *ir.IR, input map[string]any, route string) string {
+	t.Helper()
+	if err := writeLumenIRBlob(cityPath, engine.IRHash(doc), doc); err != nil {
+		t.Fatalf("write IR blob: %v", err)
+	}
+	if err := writeLumenInputBlob(cityPath, engine.InputHash(input), input); err != nil {
+		t.Fatalf("write input blob: %v", err)
+	}
+	gs := tbHookOpenStore(t, cityPath)
+	defer func() { _ = gs.Close() }()
+	streamID, err := engine.EnqueueRunWithDriver(context.Background(), gs, doc, input, "test/formula@v1", route, lumenDriverSelf)
+	if err != nil {
+		t.Fatalf("enqueue self run: %v", err)
+	}
+	return streamID
+}
+
+// TestLumenRunsTickEmitsRunResolvedOnSeal is the P5-OBS.3 happy path: a
+// controller-driven run that dispatches, is closed pass by an ordinary worker,
+// then observed and sealed emits exactly one run.resolved carrying the run root
+// and outcome — and only at the seal, not on the earlier park, and not again on a
+// redundant follow-up tick over the now-delisted run.
+func TestLumenRunsTickEmitsRunResolvedOnSeal(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	rec := &memRecorder{}
+	cr.rec = rec
+	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
+
+	// Tick 1: dispatch + park. The run has not sealed, so no run.resolved yet.
+	cr.lumenRunsTick(ctx)
+	if got := runResolvedEvents(t, rec); len(got) != 0 {
+		t.Fatalf("run.resolved before seal = %d, want 0", len(got))
+	}
+
+	lumenCloseDoBead(t, cr.cityBeadStore(), streamID, "hello", beadmeta.OutcomePass)
+
+	// Tick 2: observe the close → outcome.settled → seal → emit.
+	cr.lumenRunsTick(ctx)
+	assertLumenRunSealed(t, cityPath, streamID)
+
+	got := runResolvedEvents(t, rec)
+	if len(got) != 1 {
+		t.Fatalf("run.resolved after seal = %d, want exactly 1", len(got))
+	}
+	e := got[0]
+	if e.Envelope.Subject != streamID {
+		t.Errorf("envelope Subject = %q, want stream id %q", e.Envelope.Subject, streamID)
+	}
+	if e.Envelope.RunID != streamID {
+		t.Errorf("envelope RunID = %q, want stream id %q", e.Envelope.RunID, streamID)
+	}
+	if e.Envelope.Actor == "" {
+		t.Errorf("envelope Actor is empty, want eventActor()")
+	}
+	if e.Payload.RootID != streamID {
+		t.Errorf("payload RootID = %q, want %q", e.Payload.RootID, streamID)
+	}
+	if e.Payload.Outcome != beadmeta.OutcomePass {
+		t.Errorf("payload Outcome = %q, want %q", e.Payload.Outcome, beadmeta.OutcomePass)
+	}
+	if e.Payload.Ts.IsZero() {
+		t.Errorf("payload Ts is zero, want a resolution timestamp")
+	}
+
+	// A redundant tick over the sealed (delisted) run does not re-enter the seal
+	// arm: the common path emits exactly once.
+	cr.lumenRunsTick(ctx)
+	if got := runResolvedEvents(t, rec); len(got) != 1 {
+		t.Fatalf("run.resolved after redundant tick = %d, want still 1", len(got))
+	}
+}
+
+// TestLumenRunResolvedCarriesNonPassOutcome pins that the emitted outcome is read
+// from the run's aggregated result, not hard-coded to pass: a run whose single do
+// closes degraded seals with outcome "degraded" and the payload reflects it.
+// (degraded is used rather than fail because a bare gc.outcome=fail is a RETRYABLE
+// close that can re-dispatch rather than seal; degraded is a terminal non-pass.)
+func TestLumenRunResolvedCarriesNonPassOutcome(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	rec := &memRecorder{}
+	cr.rec = rec
+	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
+
+	cr.lumenRunsTick(ctx)
+	lumenCloseDoBead(t, cr.cityBeadStore(), streamID, "hello", beadmeta.OutcomeDegraded)
+	cr.lumenRunsTick(ctx)
+	assertLumenRunSealed(t, cityPath, streamID)
+
+	got := runResolvedEvents(t, rec)
+	if len(got) != 1 {
+		t.Fatalf("run.resolved = %d, want 1", len(got))
+	}
+	if got[0].Payload.Outcome != engine.OutcomeDegraded {
+		t.Errorf("payload Outcome = %q, want %q", got[0].Payload.Outcome, engine.OutcomeDegraded)
+	}
+}
+
+// TestLumenRunResolvedAtLeastOnceOnAlreadySealedArm proves the at-least-once
+// contract: driving advanceLumenRun on an already-sealed stream (the crash-recovery
+// / concurrent-controller shape where the run is re-observed at seal via Advance's
+// already-sealed arm) re-emits run.resolved. Consumers key on root_id and tolerate
+// the redelivery; the recovery path is how a seal-emit lost to a crash is regained.
+func TestLumenRunResolvedAtLeastOnceOnAlreadySealedArm(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
+	cr.lumenRunsTick(ctx)
+	lumenCloseDoBead(t, cr.cityBeadStore(), streamID, "hello", beadmeta.OutcomePass)
+	cr.lumenRunsTick(ctx)
+	assertLumenRunSealed(t, cityPath, streamID)
+	if cr.lumen != nil && cr.lumen.gs != nil {
+		_ = cr.lumen.gs.Close()
+	}
+
+	// Fresh controller (empty cursors) re-observes the already-sealed run directly,
+	// modeling the H1 crash window / a second concurrent controller. The Advance
+	// already-sealed arm returns Sealed with the run result, so the emit fires again.
+	cr2, _, _ := lumenTestRuntime(t)
+	cr2.cityPath = cityPath
+	cr2.standaloneCityStore = cr.standaloneCityStore
+	rec2 := &memRecorder{}
+	cr2.rec = rec2
+	gs2 := cr2.lumenGraphStore(ctx)
+	if gs2 == nil {
+		t.Fatal("re-open graph store returned nil")
+	}
+	cr2.advanceLumenRun(ctx, gs2, engine.OpenRun{RootID: streamID, StreamID: streamID})
+
+	got := runResolvedEvents(t, rec2)
+	if len(got) != 1 {
+		t.Fatalf("run.resolved on already-sealed re-observe = %d, want 1 (at-least-once recovery)", len(got))
+	}
+	if got[0].Payload.RootID != streamID || got[0].Payload.Outcome != beadmeta.OutcomePass {
+		t.Errorf("payload = %+v, want RootID=%q Outcome=pass", got[0].Payload, streamID)
+	}
+}
+
+// TestLumenRunResolvedNotEmittedForSelfDriven pins the scope: a v1 agent-driven run
+// (Driver=="self") is skipped by the controller, so no work is dispatched, the run
+// never seals under the controller, and no run.resolved is emitted — v1 emission is
+// a separate, deferred path. The run is seeded with a VALID pool route so the ONLY
+// reason nothing is dispatched is the skip (a missing route would also dispatch
+// nothing, but for a different reason); removing the skip would dispatch a work bead
+// here, so the zero-dispatch assertion actually pins the skip.
+func TestLumenRunResolvedNotEmittedForSelfDriven(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	rec := &memRecorder{}
+	cr.rec = rec
+	streamID := lumenSeedSelfRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
+
+	cr.lumenRunsTick(ctx)
+	cr.lumenRunsTick(ctx)
+
+	// The skip records the head and leaves the run to its agent: zero work beads are
+	// dispatched for the stream. Removing the Driver=="self" early-return would
+	// dispatch the do here (valid route), so this assertion kills that mutant.
+	rows, err := cr.cityBeadStore().List(beads.ListQuery{
+		Metadata:      map[string]string{beadmeta.LumenRunMetadataKey: streamID},
+		IncludeClosed: true,
+		AllowScan:     true,
+	})
+	if err != nil {
+		t.Fatalf("list work beads: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("work beads dispatched for self-driven run = %d, want 0 (controller skips v1)", len(rows))
+	}
+	if got := runResolvedEvents(t, rec); len(got) != 0 {
+		t.Fatalf("run.resolved for self-driven run = %d, want 0 (controller skips v1)", len(got))
+	}
+}
+
+// TestLumenRunResolvedEmitNilRecorderSafe pins the never-fail guard: sealing a run
+// when the CityRuntime has no recorder wired (cr.rec == nil) must not panic — the
+// emit is best-effort and a nil recorder is a silent no-op.
+func TestLumenRunResolvedEmitNilRecorderSafe(t *testing.T) {
+	ctx := context.Background()
+	cr, cityPath, _ := lumenTestRuntime(t)
+	cr.rec = nil // no recorder wired
+	streamID := lumenSeedRun(t, cityPath, tbHookDoc(t), nil, tbHookRoute)
+
+	cr.lumenRunsTick(ctx)
+	lumenCloseDoBead(t, cr.cityBeadStore(), streamID, "hello", beadmeta.OutcomePass)
+	cr.lumenRunsTick(ctx) // seal → emit with nil recorder must not panic
+	assertLumenRunSealed(t, cityPath, streamID)
 }

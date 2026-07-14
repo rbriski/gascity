@@ -139,6 +139,20 @@ const (
 	// directly has no resolving session and degrades to empty session fields.
 	MoleculeResolved = "molecule.resolved"
 
+	// RunResolved is the run-lifecycle analog of MoleculeResolved for a Lumen
+	// run: it fires once at the controller's run-close observation
+	// (advanceLumenRun's seal arm) when a run reaches its terminal run.closed.
+	// A Lumen run has no molecule root to autoclose, so molecule.resolved never
+	// fires for it; RunResolved carries the run root id and aggregated outcome so
+	// the run-lifecycle consumers (order-completion detection, honesty-gate
+	// attribution) have an engine-agnostic terminal signal. It is engine-neutral
+	// by name (DECISION 2) so those consumers can treat molecule and run
+	// resolution uniformly. Delivery is AT-LEAST-ONCE, idempotent by root id: a
+	// crash between the run.closed commit and this emit re-lists the run open and
+	// re-emits on recovery, and a second concurrent controller can re-observe the
+	// same seal — consumers MUST key on the payload's root_id.
+	RunResolved = "run.resolved"
+
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
 	ExtMsgUnbound        = "extmsg.unbound"
@@ -240,7 +254,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
-	MoleculeResolved,
+	MoleculeResolved, RunResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,

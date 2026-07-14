@@ -2664,6 +2664,18 @@ type RotatedPayload struct {
 	PriorLastSeq  int64  `json:"prior_last_seq"`
 }
 
+// RunResolvedPayload defines model for RunResolvedPayload.
+type RunResolvedPayload struct {
+	// Outcome Aggregated run outcome: "pass", "failed", or "degraded".
+	Outcome string `json:"outcome"`
+
+	// RootId Run root id (the Lumen run stream id) that resolved.
+	RootId string `json:"root_id"`
+
+	// Ts Resolution timestamp (UTC).
+	Ts time.Time `json:"ts"`
+}
+
 // ScopeGroup defines model for ScopeGroup.
 type ScopeGroup = map[string]interface{}
 
@@ -4228,6 +4240,21 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRunResolved defines model for TypedEventStreamEnvelopeRunResolved.
+type TypedEventStreamEnvelopeRunResolved struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   RunResolvedPayload       `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Actor     string                   `json:"actor"`
@@ -5393,6 +5420,22 @@ type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Ts        time.Time                     `json:"ts"`
 	Type      string                        `json:"type"`
 	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRunResolved defines model for TypedTaggedEventStreamEnvelopeRunResolved.
+type TypedTaggedEventStreamEnvelopeRunResolved struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   RunResolvedPayload       `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
@@ -7666,6 +7709,32 @@ func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
 	return err
 }
 
+// AsRunResolvedPayload returns the union data inside the EventPayload as a RunResolvedPayload
+func (t EventPayload) AsRunResolvedPayload() (RunResolvedPayload, error) {
+	var body RunResolvedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRunResolvedPayload overwrites any union data inside the EventPayload as the provided RunResolvedPayload
+func (t *EventPayload) FromRunResolvedPayload(v RunResolvedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRunResolvedPayload performs a merge with any union data inside the EventPayload, using the provided RunResolvedPayload
+func (t *EventPayload) MergeRunResolvedPayload(v RunResolvedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionCreateSucceededPayload returns the union data inside the EventPayload as a SessionCreateSucceededPayload
 func (t EventPayload) AsSessionCreateSucceededPayload() (SessionCreateSucceededPayload, error) {
 	var body SessionCreateSucceededPayload
@@ -9686,6 +9755,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSes
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRunResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRunResolved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRunResolved() (TypedEventStreamEnvelopeRunResolved, error) {
+	var body TypedEventStreamEnvelopeRunResolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRunResolved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRunResolved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRunResolved(v TypedEventStreamEnvelopeRunResolved) error {
+	v.Type = "run.resolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRunResolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRunResolved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRunResolved(v TypedEventStreamEnvelopeRunResolved) error {
+	v.Type = "run.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionColdStartTimeout() (TypedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedEventStreamEnvelopeSessionColdStartTimeout
@@ -10448,6 +10545,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "run.resolved":
+		return t.AsTypedEventStreamEnvelopeRunResolved()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -11935,6 +12034,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequ
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRunResolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRunResolved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRunResolved() (TypedTaggedEventStreamEnvelopeRunResolved, error) {
+	var body TypedTaggedEventStreamEnvelopeRunResolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRunResolved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRunResolved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRunResolved(v TypedTaggedEventStreamEnvelopeRunResolved) error {
+	v.Type = "run.resolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRunResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRunResolved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRunResolved(v TypedTaggedEventStreamEnvelopeRunResolved) error {
+	v.Type = "run.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout() (TypedTaggedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
@@ -12697,6 +12824,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "run.resolved":
+		return t.AsTypedTaggedEventStreamEnvelopeRunResolved()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":

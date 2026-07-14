@@ -309,6 +309,30 @@ func MoleculeResolvedPayloadJSON(p MoleculeResolvedPayload) json.RawMessage {
 	return b
 }
 
+// RunResolvedPayload is the typed payload for run.resolved events — the
+// run-lifecycle analog of MoleculeResolvedPayload for a Lumen run. A Lumen run
+// is a journal stream, not a molecule bead, so it carries the run root id and
+// the aggregated run outcome rather than a bead-transition record. Session
+// fields are intentionally absent: a pooled run fans across many sessions with
+// no single resolving session (the per-session and per-run cost joins are
+// carried on the session beads via gc.current_run_id, not here). Consumers key
+// on RootID and treat delivery as at-least-once (see events.RunResolved).
+type RunResolvedPayload struct {
+	RootID  string    `json:"root_id" doc:"Run root id (the Lumen run stream id) that resolved."`
+	Outcome string    `json:"outcome" doc:"Aggregated run outcome: \"pass\", \"failed\", or \"degraded\"."`
+	Ts      time.Time `json:"ts" doc:"Resolution timestamp (UTC)."`
+}
+
+// IsEventPayload marks RunResolvedPayload as an events.Payload variant.
+func (RunResolvedPayload) IsEventPayload() {}
+
+// RunResolvedPayloadJSON builds the JSON wire form of a RunResolvedPayload for
+// attachment to an events.Event.Payload field.
+func RunResolvedPayloadJSON(p RunResolvedPayload) json.RawMessage {
+	b, _ := json.Marshal(p)
+	return b
+}
+
 // WorkerOperationEventPayload is the typed payload projected for
 // worker.operation events on the supervisor event stream.
 //
@@ -574,6 +598,7 @@ func init() {
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
 	events.RegisterPayload(events.ProjectIdentityStamped, ProjectIdentityStampedPayload{})
 	events.RegisterPayload(events.MoleculeResolved, MoleculeResolvedPayload{})
+	events.RegisterPayload(events.RunResolved, RunResolvedPayload{})
 
 	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
 	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})

@@ -2264,6 +2264,9 @@
             "$ref": "#/components/schemas/RotatedPayload"
           },
           {
+            "$ref": "#/components/schemas/RunResolvedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
@@ -6448,6 +6451,30 @@
         ],
         "type": "object"
       },
+      "RunResolvedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "description": "Aggregated run outcome: \"pass\", \"failed\", or \"degraded\".",
+            "type": "string"
+          },
+          "root_id": {
+            "description": "Run root id (the Lumen run stream id) that resolved.",
+            "type": "string"
+          },
+          "ts": {
+            "description": "Resolution timestamp (UTC).",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_id",
+          "outcome",
+          "ts"
+        ],
+        "type": "object"
+      },
       "ScopeGroup": {
         "additionalProperties": false,
         "type": "object"
@@ -8325,6 +8352,7 @@
             "request.result.session.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
+            "run.resolved": "#/components/schemas/TypedEventStreamEnvelopeRunResolved",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
@@ -8503,6 +8531,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRunResolved"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
@@ -9426,6 +9457,7 @@
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "molecule.resolved",
+                "run.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
                 "supervisor.request",
@@ -11302,6 +11334,57 @@
         "title": "TypedEventStreamEnvelope request.result.session.submit",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeRunResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RunResolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "run.resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope run.resolved",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionColdStartTimeout": {
         "additionalProperties": false,
         "properties": {
@@ -12479,6 +12562,7 @@
             "request.result.session.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
+            "run.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeRunResolved",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
@@ -12657,6 +12741,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRunResolved"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
@@ -13643,6 +13730,7 @@
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "molecule.resolved",
+                "run.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
                 "supervisor.request",
@@ -15662,6 +15750,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRunResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RunResolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "run.resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope run.resolved",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionColdStartTimeout": {

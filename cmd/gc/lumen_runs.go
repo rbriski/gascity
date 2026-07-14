@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 )
@@ -172,6 +175,11 @@ func (cr *CityRuntime) advanceLumenRun(ctx context.Context, gs *graphstore.Store
 	case res.Sealed:
 		delete(lr.heads, r.StreamID)
 		delete(lr.inflight, r.StreamID)
+		// The run reached terminal: emit the run-lifecycle event onto the city bus
+		// so run.resolved consumers (order-completion detection, honesty-gate
+		// attribution) see the close. A Lumen run has no molecule root to autoclose,
+		// so molecule.resolved never fires for it; this is its analog.
+		cr.emitRunResolved(res.Run.StreamID, res.Run.Outcome)
 	case res.Parked:
 		lr.heads[r.StreamID] = res.Head
 		lr.inflight[r.StreamID] = res.InFlight
@@ -182,6 +190,34 @@ func (cr *CityRuntime) advanceLumenRun(ctx context.Context, gs *graphstore.Store
 		default:
 		}
 	}
+}
+
+// emitRunResolved records the run.resolved run-lifecycle event for a run that
+// just reached terminal at the controller's seal observation — the
+// molecule.resolved analog for a Lumen run (which has no molecule root to
+// autoclose). It is best-effort and never-fail: the events.Recorder contract is
+// non-erroring and bounded, a nil recorder is a no-op, and the lumen-runs tick
+// already runs under safeTick panic isolation, so a recording hiccup can never
+// block or fail the run close. Delivery is at-least-once, idempotent by root id
+// (events.RunResolved): the seal is OBSERVED, so a crash between the run.closed
+// commit and this emit re-lists the run open and re-emits on recovery, and a
+// second concurrent controller can re-observe the same seal — consumers key on
+// the payload's RootID.
+func (cr *CityRuntime) emitRunResolved(rootID, outcome string) {
+	if cr.rec == nil {
+		return
+	}
+	cr.rec.Record(events.Event{
+		Type:    events.RunResolved,
+		Actor:   eventActor(),
+		Subject: rootID,
+		RunID:   rootID,
+		Payload: api.RunResolvedPayloadJSON(api.RunResolvedPayload{
+			RootID:  rootID,
+			Outcome: outcome,
+			Ts:      time.Now().UTC(),
+		}),
+	})
 }
 
 // lumenPoolRouter builds the Advance PoolRouter for a run from its default pool

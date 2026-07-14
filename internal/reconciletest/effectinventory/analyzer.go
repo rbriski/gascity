@@ -129,19 +129,13 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	if err != nil {
 		return nil, fmt.Errorf("effect discovery: resolving repository root: %w", err)
 	}
-	buildFlags := []string{"-mod=readonly"}
-	tags := append([]string(nil), profile.Tags...)
-	sort.Strings(tags)
-	if len(tags) != 0 {
-		buildFlags = append(buildFlags, "-tags="+strings.Join(tags, ","))
-	}
 	fset := token.NewFileSet()
 	roots, loadErr := packages.Load(&packages.Config{
 		Context:    ctx,
 		Mode:       packages.LoadSyntax | packages.NeedModule,
 		Dir:        repoRoot,
 		Env:        profileEnvironment(profile),
-		BuildFlags: buildFlags,
+		BuildFlags: profileBuildFlags(profile),
 		Fset:       fset,
 		Tests:      false,
 	}, config.Patterns...)

@@ -1,6 +1,10 @@
 package effectinventory
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
 
 func canonicalAnalysisProfiles() []analysisProfile {
 	return []analysisProfile{
@@ -36,6 +40,16 @@ func validateAnalysisProfile(profile analysisProfile) error {
 		return fmt.Errorf("analysis profile %q must use tags %q, got %q", profile.ID, want.Tags, profile.Tags)
 	}
 	return nil
+}
+
+func profileBuildFlags(profile analysisProfile) []string {
+	buildFlags := []string{"-mod=readonly"}
+	tags := append([]string(nil), profile.Tags...)
+	sort.Strings(tags)
+	if len(tags) != 0 {
+		buildFlags = append(buildFlags, "-tags="+strings.Join(tags, ","))
+	}
+	return buildFlags
 }
 
 func equalStrings(left, right []string) bool {

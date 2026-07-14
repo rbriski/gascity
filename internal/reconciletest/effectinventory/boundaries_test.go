@@ -41,6 +41,9 @@ func TestCanonicalBoundariesContainAuditedTypedVocabulary(t *testing.T) {
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/events", Receiver: "Recorder", Name: "Record"}, KindEventEmission, ObjectMatchInterfaceImplementors},
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/pidutil", Name: "Signal"}, KindProcessMutation, ObjectMatchExact},
 		{ObjectRef{Package: "github.com/gastownhall/gascity/internal/processgroup", Name: "TerminateCommand"}, KindProcessMutation, ObjectMatchExact},
+		{ObjectRef{Package: "github.com/gastownhall/gascity/cmd/gc", Receiver: "CityRuntime", Name: "pokeCh"}, KindWakeSource, ObjectMatchChannel},
+		{ObjectRef{Package: "os/signal", Name: "Notify"}, KindWakeSource, ObjectMatchChannel},
+		{ObjectRef{Package: "context", Receiver: "Context", Name: "Done"}, KindWakeSource, ObjectMatchChannel},
 	} {
 		got, ok := byObject[want.object.key()]
 		if !ok {
@@ -64,6 +67,15 @@ func TestCanonicalBoundariesContainAuditedTypedVocabulary(t *testing.T) {
 		if boundary, exists := byObject[forbidden.key()]; exists {
 			t.Errorf("overlapping or platform-incomplete boundary %s is registered as %q", forbidden.key(), boundary.ID)
 		}
+	}
+
+	signalBoundary := byObject[ObjectRef{Package: "os/signal", Name: "Notify"}.key()]
+	if signalBoundary.Input != (ValueSlot{Kind: SlotParameter, Index: 1}) || !signalBoundary.Output.zero() {
+		t.Errorf("signal.Notify channel slot = input %+v output %+v, want parameter 1 only", signalBoundary.Input, signalBoundary.Output)
+	}
+	contextBoundary := byObject[ObjectRef{Package: "context", Receiver: "Context", Name: "Done"}.key()]
+	if contextBoundary.Output != (ValueSlot{Kind: SlotResult, Index: 1}) || !contextBoundary.Input.zero() {
+		t.Errorf("context.Context.Done channel slot = input %+v output %+v, want result 1 only", contextBoundary.Input, contextBoundary.Output)
 	}
 }
 

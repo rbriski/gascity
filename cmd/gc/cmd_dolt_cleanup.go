@@ -109,10 +109,14 @@ type CleanupReapedReport struct {
 // identified for termination. Reason is set for deleted-scope targets
 // (deleted cwd, vanished --config) and empty for the classic
 // test-config-path allowlist match where the path itself is the explanation.
+// DataDir is set when the target was identified via a bare --data-dir
+// allowlist match (no --config); it is the directory removed once the
+// process is confirmed gone.
 type CleanupReapTarget struct {
 	PID        int    `json:"pid"`
 	ConfigPath string `json:"config_path"`
 	Reason     string `json:"reason,omitempty"`
+	DataDir    string `json:"data_dir,omitempty"`
 }
 
 // CleanupSummary aggregates totals across the three steps.
@@ -221,6 +225,10 @@ type cleanupOptions struct {
 	ActiveTestRoots   []string
 	KillProcess       func(pid int, sig syscall.Signal) error
 	ReapGracePeriod   time.Duration
+	// RemoveDataDir deletes an orphaned Dolt data directory. Called only
+	// after the owning process is confirmed gone (post-signal revalidation
+	// found it vanished). Defaults to os.RemoveAll in production.
+	RemoveDataDir func(path string) error
 }
 
 // runDoltCleanup is the testable core of the `gc dolt-cleanup` command. It
@@ -384,7 +392,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
-		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason})
+		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason, DataDir: t.DataDir})
 	}
 
 	if !opts.Force {
@@ -396,6 +404,10 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	killFn := opts.KillProcess
 	if killFn == nil {
 		killFn = killProcess
+	}
+	removeDataDir := opts.RemoveDataDir
+	if removeDataDir == nil {
+		removeDataDir = os.RemoveAll
 	}
 	grace := opts.ReapGracePeriod
 	if grace <= 0 {
@@ -451,8 +463,15 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		gone[target.PID] = true
 	}
 	for _, target := range plan.Reap {
-		if gone[target.PID] {
-			reaped++
+		if !gone[target.PID] {
+			continue
+		}
+		reaped++
+		if target.DataDir == "" {
+			continue
+		}
+		if err := removeDataDir(target.DataDir); err != nil {
+			recordReapDataDirError(report, target.PID, target.DataDir, err)
 		}
 	}
 	report.Reaped.Count = reaped
@@ -586,6 +605,16 @@ func recordReapSignalError(report *CleanupReport, pid int, sig syscall.Signal, e
 		Stage: "reap",
 		Name:  fmt.Sprintf("pid %d", pid),
 		Error: fmt.Sprintf("%s: %v", sigName, err),
+	})
+	report.Summary.ErrorsTotal++
+}
+
+func recordReapDataDirError(report *CleanupReport, pid int, dataDir string, err error) {
+	report.Reaped.Errors = append(report.Reaped.Errors, fmt.Sprintf("pid %d data dir %s: %v", pid, dataDir, err))
+	report.Errors = append(report.Errors, CleanupError{
+		Stage: "reap",
+		Name:  fmt.Sprintf("pid %d", pid),
+		Error: fmt.Sprintf("remove data dir %s: %v", dataDir, err),
 	})
 	report.Summary.ErrorsTotal++
 }

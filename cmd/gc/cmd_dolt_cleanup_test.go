@@ -544,6 +544,116 @@ func TestRunDoltCleanup_ForceReapsBareDeletedCwd(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForceRemovesDataDirAfterConfirmedReap(t *testing.T) {
+	// ga-ntbpyb.2 piece 2: a bare `dolt sql-server --data-dir <path>` (no
+	// --config) is reaped by rule 4's DataDir allowlist match. Once the
+	// process is confirmed gone (post-SIGTERM, before SIGKILL is needed),
+	// the orphaned data directory itself must be removed too — otherwise
+	// the disk-space leak the reaper exists to fix survives the reap.
+	const dataDir = "/tmp/TestX/dolt"
+
+	discoverCalls := 0
+	var signals []syscall.Signal
+	var removedDirs []string
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			discoverCalls++
+			switch discoverCalls {
+			case 1, 2:
+				return []DoltProcInfo{{
+					PID:            5151,
+					Argv:           []string{"dolt", "sql-server", "--data-dir", dataDir},
+					StartTimeTicks: 42,
+				}}, nil
+			default:
+				return nil, nil
+			}
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		RemoveDataDir: func(path string) error {
+			removedDirs = append(removedDirs, path)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals = %v, want [SIGTERM] because the process vanishes before SIGKILL is needed", signals)
+	}
+	if len(removedDirs) != 1 || removedDirs[0] != dataDir {
+		t.Fatalf("removedDirs = %v, want [%s] removed only after the process was confirmed gone", removedDirs, dataDir)
+	}
+	if r.Reaped.Count != 1 {
+		t.Errorf("Reaped.Count = %d, want 1", r.Reaped.Count)
+	}
+	if len(r.Reaped.Targets) != 1 || r.Reaped.Targets[0].DataDir != dataDir {
+		t.Fatalf("Reaped.Targets = %+v, want one target with DataDir %s", r.Reaped.Targets, dataDir)
+	}
+}
+
+func TestRunDoltCleanup_ForceDoesNotRemoveDataDirWhenProcessSurvivesSIGKILL(t *testing.T) {
+	// Mirror image of the happy path: if the target is never confirmed
+	// gone (KillProcess errors on both signals, so the process is presumed
+	// alive), RemoveDataDir must not be called. Removing a live server's
+	// data directory would corrupt an in-use Dolt store.
+	const dataDir = "/tmp/TestX/dolt"
+
+	var removedDirs []string
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{{
+				PID:            5152,
+				Argv:           []string{"dolt", "sql-server", "--data-dir", dataDir},
+				StartTimeTicks: 42,
+			}}, nil
+		},
+		KillProcess: func(_ int, _ syscall.Signal) error {
+			return fmt.Errorf("operation not permitted")
+		},
+		RemoveDataDir: func(path string) error {
+			removedDirs = append(removedDirs, path)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(removedDirs) != 0 {
+		t.Fatalf("removedDirs = %v, want none because the process was never confirmed gone", removedDirs)
+	}
+	if r.Reaped.Count != 0 {
+		t.Errorf("Reaped.Count = %d, want 0 because kill signals failed", r.Reaped.Count)
+	}
+}
+
 func TestRunDoltCleanup_SQLClientOpenFailureIsTypedAndFatal(t *testing.T) {
 	fs := fsys.NewFake()
 	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{

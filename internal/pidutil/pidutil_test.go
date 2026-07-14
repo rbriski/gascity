@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -29,6 +30,23 @@ func TestAliveTreatsZombieAsDead(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("Alive(%d) stayed true for exited child", cmd.Process.Pid)
+}
+
+func TestSignalRejectsNonPositivePID(t *testing.T) {
+	for _, pid := range []int{-1, 0} {
+		if err := Signal(pid, syscall.Signal(0)); err == nil {
+			t.Fatalf("Signal(%d, 0) error = nil, want invalid PID error", pid)
+		}
+	}
+}
+
+func TestSignalZeroFindsCurrentProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows os.Process.Signal supports only os.Kill")
+	}
+	if err := Signal(os.Getpid(), syscall.Signal(0)); err != nil {
+		t.Fatalf("Signal(self, 0) error = %v, want nil", err)
+	}
 }
 
 func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {

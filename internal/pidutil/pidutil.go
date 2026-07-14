@@ -3,7 +3,6 @@ package pidutil
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,31 +10,21 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
 const psZombieTimeout = 100 * time.Millisecond
 
-// Alive reports whether a PID exists and is not a zombie.
-func Alive(pid int) bool {
+// Signal sends signal to a positive PID's process handle.
+func Signal(pid int, signal os.Signal) error {
 	if pid <= 0 {
-		return false
+		return fmt.Errorf("pidutil: invalid PID %d", pid)
 	}
-	err := syscall.Kill(pid, 0)
-	if err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
-	}
-	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
-	data, err := os.ReadFile(statPath)
+	process, err := os.FindProcess(pid)
 	if err != nil {
-		return !psReportsZombie(pid)
+		return err
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) >= 3 && fields[2] == "Z" {
-		return false
-	}
-	return true
+	return process.Signal(signal)
 }
 
 // StartTime returns a PID's start time — field 22 (starttime, in clock ticks

@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4092
-baseline_files = 180
+baseline_calls = 4109
+baseline_files = 181
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-80po0c.2.3"
@@ -159,8 +159,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4086
-baseline_files = 180
+baseline_calls = 4103
+baseline_files = 181
 reported_calls = 4086
 reported_files = 180
 owner_bead = "ga-80po0c.2.1"

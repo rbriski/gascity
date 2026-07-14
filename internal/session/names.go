@@ -11,12 +11,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/filelock"
 )
 
 var (
@@ -301,10 +301,10 @@ func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error)
 		return fmt.Errorf("opening session identifier lock: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // best-effort cleanup
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := filelock.Lock(f, filelock.Exclusive); err != nil {
 		return fmt.Errorf("locking session identifier %q: %w", identifier, err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	defer filelock.Unlock(f) //nolint:errcheck // best-effort unlock
 	return fn()
 }
 

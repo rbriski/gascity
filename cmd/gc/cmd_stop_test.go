@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type recordingStopProvider struct {
@@ -42,6 +45,22 @@ func (p *recordingStopProvider) Stop(name string) error {
 func (p *recordingStopProvider) Interrupt(name string) error {
 	p.interrupts <- name
 	return p.Fake.Interrupt(name)
+}
+
+func TestStopCommandTimeoutHelpDescribesCompletionDeadlineAndRetainedOwnership(t *testing.T) {
+	cmd := newStopCmd(io.Discard, io.Discard)
+	for _, want := range []string{"completion deadline/SLO", "not a hard wall-clock cap", "keeps lifecycle ownership"} {
+		if !strings.Contains(cmd.Long, want) {
+			t.Fatalf("Long = %q, want %q", cmd.Long, want)
+		}
+	}
+	if strings.Contains(cmd.Long, "cap the wall-clock time") {
+		t.Fatalf("Long = %q, must not promise a hard wall-clock cap", cmd.Long)
+	}
+	timeoutFlag := cmd.Flags().Lookup("timeout")
+	if timeoutFlag == nil || !strings.Contains(timeoutFlag.Usage, "completion deadline/SLO") {
+		t.Fatalf("--timeout usage = %v, want completion deadline/SLO contract", timeoutFlag)
+	}
 }
 
 func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
@@ -153,7 +172,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 }
 
-func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
+func TestCmdStopCompletionDeadlineRetainsEnteredStop(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
 	cityDir := shortSocketTempDir(t, "gc-stop-timeout-")
@@ -182,43 +201,296 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// cmdStop's wall-clock cap returns 1 while cmdStopBody is still blocked
-	// in hangingProvider.Stop. The body goroutine eventually calls back into
-	// shutdownBeadsProviderForStop; if it does so after another test has
-	// installed its own override, the global state races. Capture the body's
-	// done channel via stopBodyLifecycleHook and wait for it to close in
-	// teardown so the leaked goroutine cannot outlive this test.
 	oldFactory := sessionProviderForStopCity
-	oldHook := stopBodyLifecycleHook
-	var bodyDone <-chan struct{}
-	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
+	oldNow := stopCompletionNow
+	oldPerTargetTimeout := stopPerTargetTimeoutDefault
+	started := time.Date(2026, 7, 13, 7, 0, 0, 0, time.UTC)
+	deadlineExpired := atomic.Bool{}
+	stopCompletionNow = func() time.Time {
+		if deadlineExpired.Load() {
+			return started.Add(101 * time.Millisecond)
+		}
+		return started
+	}
+	stopPerTargetTimeoutDefault = 50 * time.Millisecond
 	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
 		return sp
 	}
 	t.Cleanup(func() {
 		sp.release()
-		if bodyDone != nil {
-			select {
-			case <-bodyDone:
-			case <-time.After(10 * time.Second):
-				t.Errorf("cmdStopBody goroutine did not exit after hangingProvider release")
-			}
-		}
 		sessionProviderForStopCity = oldFactory
-		stopBodyLifecycleHook = oldHook
+		stopCompletionNow = oldNow
+		stopPerTargetTimeoutDefault = oldPerTargetTimeout
 	})
 
 	var stdout, stderr lockedBuffer
-	started := time.Now()
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	stopDone := make(chan int, 1)
+	go func() {
+		stopDone <- cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	}()
+	select {
+	case stopped := <-sp.stopIn:
+		if stopped != sessionName {
+			t.Fatalf("entered Stop(%q), want %q", stopped, sessionName)
+		}
+		deadlineExpired.Store(true)
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop never entered the provider Stop call")
+	}
+	select {
+	case code := <-stopDone:
+		t.Fatalf("cmdStop detached from an entered provider call with code %d", code)
+	case <-time.After(200 * time.Millisecond):
+		// The 100ms completion deadline is expired, but lifecycle ownership stays
+		// joined until the already-entered native call returns.
+	}
+	contender, err := acquireControllerLock(cityDir)
+	if contender != nil {
+		_ = contender.Close()
+	}
+	if !errors.Is(err, errControllerAlreadyRunning) {
+		t.Fatalf("concurrent starter acquired during entered Stop: %v", err)
+	}
+	sp.release()
+	var code int
+	select {
+	case code = <-stopDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop did not return after the entered provider call completed")
+	}
 	if code != 1 {
-		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdStop() = %d, want deadline code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("cmdStop returned after %s, want wall-clock cap near 100ms", elapsed)
+	if !strings.Contains(stderr.String(), "completion deadline") {
+		t.Fatalf("stderr = %q, want completion deadline message", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "timed out after 100ms") {
-		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
+	reacquired, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatalf("stop lease not released after joined Stop returned: %v", err)
+	}
+	_ = reacquired.Close()
+}
+
+func TestCmdStopCompletionDeadlineRetainsEnteredInterrupt(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	cityDir := shortSocketTempDir(t, "gc-stop-interrupt-deadline-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "interrupt-deadline-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "50ms"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newHangingProvider()
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	oldNow := stopCompletionNow
+	oldMargin := interruptPerTargetTimeoutMargin
+	started := time.Date(2026, 7, 13, 7, 30, 0, 0, time.UTC)
+	deadlineExpired := atomic.Bool{}
+	stopCompletionNow = func() time.Time {
+		if deadlineExpired.Load() {
+			return started.Add(101 * time.Millisecond)
+		}
+		return started
+	}
+	interruptPerTargetTimeoutMargin = 0
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	t.Cleanup(func() {
+		sp.release()
+		sessionProviderForStopCity = oldFactory
+		stopCompletionNow = oldNow
+		interruptPerTargetTimeoutMargin = oldMargin
+	})
+
+	var stdout, stderr lockedBuffer
+	stopDone := make(chan int, 1)
+	go func() { stopDone <- cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false) }()
+	select {
+	case interrupted := <-sp.intIn:
+		if interrupted != sessionName {
+			t.Fatalf("entered Interrupt(%q), want %q", interrupted, sessionName)
+		}
+		deadlineExpired.Store(true)
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop never entered the provider Interrupt call")
+	}
+	select {
+	case code := <-stopDone:
+		t.Fatalf("cmdStop detached from an entered Interrupt with code %d", code)
+	case <-time.After(100 * time.Millisecond):
+		// Past both the fake outer deadline and the 50ms per-target cap.
+	}
+	contender, err := acquireControllerLock(cityDir)
+	if contender != nil {
+		_ = contender.Close()
+	}
+	if !errors.Is(err, errControllerAlreadyRunning) {
+		t.Fatalf("concurrent starter acquired during entered Interrupt: %v", err)
+	}
+	sp.release()
+	select {
+	case code := <-stopDone:
+		if code != 1 {
+			t.Fatalf("cmdStop = %d, want deadline failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop did not return after the entered Interrupt completed")
+	}
+	if !strings.Contains(stderr.String(), "completion deadline") {
+		t.Fatalf("stderr = %q, want completion deadline message", stderr.String())
+	}
+	reacquired, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatalf("stop lease not released after joined Interrupt returned: %v", err)
+	}
+	_ = reacquired.Close()
+}
+
+func TestCmdStopRetainedInterruptTimeoutRemainsFailureBeforeOuterDeadline(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	cityDir := shortSocketTempDir(t, "gc-stop-interrupt-inner-timeout-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "interrupt-inner-timeout-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "20ms"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newHangingProvider()
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	oldMargin := interruptPerTargetTimeoutMargin
+	interruptPerTargetTimeoutMargin = 0
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	t.Cleanup(func() {
+		sp.release()
+		sessionProviderForStopCity = oldFactory
+		interruptPerTargetTimeoutMargin = oldMargin
+	})
+
+	var stdout, stderr lockedBuffer
+	stopDone := make(chan int, 1)
+	go func() { stopDone <- cmdStop([]string{cityDir}, &stdout, &stderr, 10*time.Second, false) }()
+	select {
+	case interrupted := <-sp.intIn:
+		if interrupted != sessionName {
+			t.Fatalf("entered Interrupt(%q), want %q", interrupted, sessionName)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop never entered the provider Interrupt call")
+	}
+
+	// Let the 20ms per-target cap elapse while the outer ten-second command
+	// budget remains live. The retained owner still joins the provider call.
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case code := <-stopDone:
+		t.Fatalf("cmdStop detached from retained Interrupt with code %d", code)
+	default:
+	}
+	sp.release()
+
+	select {
+	case code := <-stopDone:
+		if code != 1 {
+			t.Fatalf("cmdStop = %d, want sticky inner-timeout failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("cmdStop did not return after retained Interrupt completed")
+	}
+	if !strings.Contains(stderr.String(), "did not return within") {
+		t.Fatalf("stderr = %q, want retained per-target timeout", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after retained Interrupt timeout: %q", stdout.String())
+	}
+}
+
+func TestGracefulStopRetainedPoolStopTimeoutRemainsFailureBeforeOuterDeadline(t *testing.T) {
+	oldStopTimeout := stopPerTargetTimeoutDefault
+	stopPerTargetTimeoutDefault = 20 * time.Millisecond
+	t.Cleanup(func() { stopPerTargetTimeoutDefault = oldStopTimeout })
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "session-1",
+		Type:   "session",
+		Status: "open",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name":         "pool-1",
+			"state":                "active",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}, nil)
+	sp := newHangingProvider()
+	if err := sp.Start(context.Background(), "pool-1", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sp.release)
+	started := time.Now()
+	budget := newStopCompletionBudget(started, 10*time.Second, time.Now)
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- gracefulStopAllWithOwnership(
+			[]string{"pool-1"}, sp, 20*time.Millisecond, events.Discard, nil,
+			beads.SessionStore{Store: store}, io.Discard, io.Discard, nil, true, &budget,
+		)
+	}()
+	select {
+	case stopped := <-sp.stopIn:
+		if stopped != "pool-1" {
+			t.Fatalf("entered Stop(%q), want pool-1", stopped)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("graceful stop never entered the pool-managed Stop call")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case err := <-stopDone:
+		t.Fatalf("graceful stop detached from retained pool Stop: %v", err)
+	default:
+	}
+	sp.release()
+
+	select {
+	case err := <-stopDone:
+		if err == nil || !strings.Contains(err.Error(), "did not return within") {
+			t.Fatalf("graceful stop error = %v, want sticky pool Stop timeout", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("graceful stop did not return after retained pool Stop completed")
+	}
+	if budget.expired() {
+		t.Fatal("outer command budget expired; test must isolate the inner timeout")
 	}
 }
 
@@ -293,6 +565,183 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("cmdStop did not finish after delegated force stop")
+	}
+}
+
+func TestCmdStopFailsClosedOnUncertainControllerStopBeforeSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result controllerStopResult
+	}{
+		{
+			name: "request may have entered",
+			result: classifiedControllerStopResult(
+				controllerStopMayHaveEntered,
+				"test acknowledgement loss",
+				errors.New("reply lost"),
+			),
+		},
+		{
+			name:   "invalid result",
+			result: controllerStopResult{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags(t)
+			t.Setenv("GC_HOME", t.TempDir())
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+			cityDir := setupCity(t, "ambiguous-stop")
+			writeRigAnywhereCityToml(t, cityDir, "[workspace]\nname = \"ambiguous-stop\"\n\n[beads]\nprovider = \"file\"\n")
+			eventsPath := filepath.Join(cityDir, ".gc", "events.jsonl")
+			if err := os.Remove(eventsPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			retiredSentinel := filepath.Join(cityDir, ".gc", "system", "packs", "retired", "keep")
+			if err := os.MkdirAll(filepath.Dir(retiredSentinel), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(retiredSentinel, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			shimPath := gcBeadsBdScriptPath(cityDir)
+			if err := os.Remove(shimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+
+			requests := 0
+			oldRequest := controllerStopRequestForCommand
+			controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+				requests++
+				assertSameTestPath(t, path, cityDir)
+				if force {
+					t.Fatal("ordinary stop requested force transport")
+				}
+				return tt.result
+			}
+			t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+			storeOpens := 0
+			oldOpen := openCityStoreForStop
+			openCityStoreForStop = func(string) (beads.Store, error) {
+				storeOpens++
+				return beads.NewMemStore(), nil
+			}
+			t.Cleanup(func() { openCityStoreForStop = oldOpen })
+
+			providerConstructions := 0
+			oldProvider := sessionProviderForStopCity
+			sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+				providerConstructions++
+				return runtime.NewFake()
+			}
+			t.Cleanup(func() { sessionProviderForStopCity = oldProvider })
+
+			storeShutdowns := 0
+			overrideShutdownBeadsProviderForStop(t, func(string) error {
+				storeShutdowns++
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+
+			if code != 1 {
+				t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if requests != 1 {
+				t.Fatalf("controller stop requests = %d, want 1", requests)
+			}
+			if storeOpens != 0 || providerConstructions != 0 || storeShutdowns != 0 {
+				t.Fatalf("post-ambiguity effects = store opens:%d provider constructions:%d store shutdowns:%d, want all zero", storeOpens, providerConstructions, storeShutdowns)
+			}
+			if strings.Contains(stdout.String(), "City stopped") {
+				t.Fatalf("stdout reports false success: %q", stdout.String())
+			}
+			if _, err := os.Stat(eventsPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("events file created after uncertain stop, stat error = %v", err)
+			}
+			if _, err := os.Stat(retiredSentinel); err != nil {
+				t.Fatalf("pre-classification config cleanup removed retired-pack sentinel: %v", err)
+			}
+			if _, err := os.Stat(shimPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pre-classification config load materialized bead shim, stat error = %v", err)
+			}
+			if !strings.Contains(stderr.String(), "controller stop") {
+				t.Fatalf("stderr = %q, want controller-stop diagnostic", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCmdStopNoArgResolutionIsReadOnlyBeforeTransportClassification(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := setupCity(t, "no-arg-read-only")
+	workingDir := filepath.Join(cityDir, "nested", "work")
+	if err := os.MkdirAll(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
+
+	retiredSentinel := filepath.Join(cityDir, ".gc", "system", "packs", "retired", "keep")
+	if err := os.MkdirAll(filepath.Dir(retiredSentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(retiredSentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shimPath := gcBeadsBdScriptPath(cityDir)
+	if err := os.Remove(shimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityDir)
+		if force {
+			t.Fatal("ordinary stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop(nil, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop(no args) = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want 1", requests)
+	}
+	if _, err := os.Stat(retiredSentinel); err != nil {
+		t.Fatalf("no-arg resolution removed retired-pack sentinel before classification: %v", err)
+	}
+	if _, err := os.Stat(shimPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-arg resolution materialized bead shim before classification, stat error = %v", err)
 	}
 }
 
@@ -434,6 +883,80 @@ func TestCmdStopExplicitRegisteredRigPathUsesSharedResolver(t *testing.T) {
 	assertSameTestPath(t, gotCityPath, cityDir)
 }
 
+func TestCmdStopRegisteredRigResolutionIsReadOnlyBeforeTransportClassification(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := setupCity(t, "stop-read-only-rig")
+	rigDir := filepath.Join(t.TempDir(), "registered-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := fmt.Sprintf("[workspace]\nname = \"stop-read-only-rig\"\n\n[beads]\nprovider = \"file\"\n\n[[rigs]]\nname = \"registered-rig\"\npath = %q\n", rigDir)
+	writeRigAnywhereCityToml(t, cityDir, toml)
+	registerCityForRigResolution(t, gcHome, cityDir, "stop-read-only-rig")
+
+	retiredSentinel := filepath.Join(cityDir, ".gc", "system", "packs", "retired", "keep")
+	if err := os.MkdirAll(filepath.Dir(retiredSentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(retiredSentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shimPath := gcBeadsBdScriptPath(cityDir)
+	if err := os.Remove(shimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityDir)
+		if force {
+			t.Fatal("ordinary stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{rigDir}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop(rig) = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want 1", requests)
+	}
+	if _, err := os.Stat(retiredSentinel); err != nil {
+		t.Fatalf("rig resolution removed retired-pack sentinel before classification: %v", err)
+	}
+	if _, err := os.Stat(shimPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rig resolution materialized bead shim before classification, stat error = %v", err)
+	}
+}
+
 func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -553,7 +1076,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 }
 
-func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testing.T) {
+func TestCmdStopSupervisorManagedInvalidCityTomlDoesNotRepeatManagedShutdown(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	gcHome := os.Getenv("GC_HOME")
@@ -574,21 +1097,23 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
 		return nil
 	}
+	shutdownCalls := 0
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		shutdownCalls++
 		assertSameTestPath(t, path, cityDir)
-		return fmt.Errorf("provider-stop-failed")
+		return errors.New("CLI must not repeat managed provider shutdown")
 	})
 
 	var stdout, stderr lockedBuffer
 	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
-	if code != 1 {
-		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout = %q, did not want success message", stdout.String())
+	if shutdownCalls != 0 {
+		t.Fatalf("CLI-side provider shutdown calls = %d, want zero after managed cleanup", shutdownCalls)
 	}
-	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
-		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, want managed stop success", stdout.String())
 	}
 }
 
@@ -656,6 +1181,68 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 }
 
+func TestCmdStopInvalidConfigFailsClosedOnUncertainControllerStop(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result controllerStopResult
+	}{
+		{
+			name: "request may have entered",
+			result: classifiedControllerStopResult(
+				controllerStopMayHaveEntered,
+				"test acknowledgement loss",
+				errors.New("reply lost"),
+			),
+		},
+		{
+			name:   "invalid result",
+			result: controllerStopResult{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags(t)
+			cityDir := setupInvalidConfigManagedRuntime(t)
+
+			requests := 0
+			oldRequest := controllerStopRequestForCommand
+			controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+				requests++
+				assertSameTestPath(t, path, cityDir)
+				if force {
+					t.Fatal("ordinary invalid-config stop requested force transport")
+				}
+				return tt.result
+			}
+			t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+			storeShutdowns := 0
+			overrideShutdownBeadsProviderForStop(t, func(string) error {
+				storeShutdowns++
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+
+			if code != 1 {
+				t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if requests != 1 {
+				t.Fatalf("controller stop requests = %d, want 1", requests)
+			}
+			if storeShutdowns != 0 {
+				t.Fatalf("managed store shutdowns = %d, want 0", storeShutdowns)
+			}
+			if strings.Contains(stdout.String(), "City stopped") {
+				t.Fatalf("stdout reports false success: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "controller stop") {
+				t.Fatalf("stderr = %q, want controller-stop diagnostic", stderr.String())
+			}
+		})
+	}
+}
+
 func TestCmdStopInvalidConfigManagedRuntimeFailsWhenShutdownFails(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
@@ -696,12 +1283,12 @@ func TestStopCityManagedBeadsProviderUsesProviderStateWhenPublishedStateIsMissin
 		return nil
 	})
 
-	stopped, err := stopCityManagedBeadsProvider(cityDir)
+	stopped, err := stopCityManagedBeadsProviderWithHeldOwnership(cityDir)
 	if err != nil {
-		t.Fatalf("stopCityManagedBeadsProvider() error = %v", err)
+		t.Fatalf("stopCityManagedBeadsProviderWithHeldOwnership() error = %v", err)
 	}
 	if !stopped {
-		t.Fatal("stopCityManagedBeadsProvider() stopped = false, want true")
+		t.Fatal("stopCityManagedBeadsProviderWithHeldOwnership() stopped = false, want true")
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
@@ -833,7 +1420,7 @@ func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T
 	}
 }
 
-func TestStopCityManagedBeadsProviderAfterSuccessfulStopStopsDefaultBD(t *testing.T) {
+func TestStopCityManagedBeadsProviderWithHeldOwnershipStopsDefaultBD(t *testing.T) {
 	skipSlowCmdGCTest(t, "exercises managed bd provider shutdown; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
@@ -875,12 +1462,12 @@ func TestStopCityManagedBeadsProviderAfterSuccessfulStopStopsDefaultBD(t *testin
 		t.Fatal(err)
 	}
 
-	var stderr lockedBuffer
-	if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityDir, &stderr) {
-		t.Fatalf("stopCityManagedBeadsProviderAfterSuccessfulStop returned false; stderr=%q", stderr.String())
+	stopped, err := stopCityManagedBeadsProviderWithHeldOwnership(cityDir)
+	if err != nil {
+		t.Fatalf("stopCityManagedBeadsProviderWithHeldOwnership: %v", err)
 	}
-	if stderr.String() != "" {
-		t.Fatalf("unexpected stderr: %q", stderr.String())
+	if !stopped {
+		t.Fatal("stopCityManagedBeadsProviderWithHeldOwnership stopped = false, want true")
 	}
 	ops := readOpLog(t, logFile)
 	if len(ops) != 1 || ops[0] != "stop" {

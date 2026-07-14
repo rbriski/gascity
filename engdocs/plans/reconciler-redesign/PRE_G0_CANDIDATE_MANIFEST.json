@@ -1,0 +1,385 @@
+{
+  "schema_version": 1,
+  "kind": "reconciler-pre-g0-candidate",
+  "status": "development-only",
+  "hash_algorithm": "sha256",
+  "canonicalization": "go-encoding-json-v1-candidate-digest-omitted",
+  "execution_base": {
+    "repository": "gastownhall/gascity",
+    "commit": "5774497b00ecd0a6c072058069b77fc5874268f2",
+    "tree": "41eb14d20527ca0f89677e9e91c9e4ace04a0b70"
+  },
+  "contract": {
+    "commit": "1eca1e05eccc081ad4d359eca6087d8681e342e8",
+    "files": [
+      {
+        "path": ".github/CODEOWNERS",
+        "blob_oid": "675e7f1cff3ee31e70f7e31d8d5363a85e88d781",
+        "sha256": "a349ea38b1e043cffd57726cf3ec64e1214abad92be219f02b8997b4b123d6b8"
+      },
+      {
+        "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+        "blob_oid": "f960809fd9a28316a08d25c785e4284190fe0950",
+        "sha256": "953f09aa19c4a637608f67f399cdb8c446522e710100832c2b137173754edacf"
+      },
+      {
+        "path": "engdocs/plans/reconciler-redesign/EXTERNAL-REVIEW-fable-10axis.md",
+        "blob_oid": "6696360db41419534f942f1efc6876905d9420ab",
+        "sha256": "152e787f7515bb2c4c2793af462a55fb5b8ccfe97901117c8477f29c76019ea9"
+      },
+      {
+        "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+        "blob_oid": "baa2cb29560d4d5161c33a880a2eba7fe04938bd",
+        "sha256": "123f024c91780c1c24d1421dfc46d021032144f8b6a0914b86c9ab9af97d0a05"
+      },
+      {
+        "path": "internal/session/REQUIREMENTS.md",
+        "blob_oid": "c99b9652d0916625987ddbb49222ee465ae7d011",
+        "sha256": "9383b71707a9f7b581205ba99e9072dd10961bae16c33d457fffdf79a9c33a22"
+      }
+    ]
+  },
+  "current_files": [
+    {
+      "path": ".github/CODEOWNERS",
+      "blob_oid": "675e7f1cff3ee31e70f7e31d8d5363a85e88d781",
+      "sha256": "a349ea38b1e043cffd57726cf3ec64e1214abad92be219f02b8997b4b123d6b8"
+    },
+    {
+      "path": "engdocs/plans/reconciler-redesign/EXTERNAL-REVIEW-fable-10axis.md",
+      "blob_oid": "6696360db41419534f942f1efc6876905d9420ab",
+      "sha256": "152e787f7515bb2c4c2793af462a55fb5b8ccfe97901117c8477f29c76019ea9"
+    },
+    {
+      "path": "engdocs/plans/reconciler-redesign/POST_INTEGRATION_REVIEW.md",
+      "blob_oid": "295d7112e248c68ba0dbedb55352d5bc345b3f2c",
+      "sha256": "eda1522421c01ca746993525ab46899d22bb11c242c8d62bc45e8d38cc8244aa"
+    },
+    {
+      "path": "test/docsync/reconciler_candidate_manifest_test.go",
+      "blob_oid": "07496a454de90bf1f1cc6727f9ba754ced644ec8",
+      "sha256": "4acb3bf7228925b15b8fa7d98147a2a3e9b4099aefd59da97e541455f55b71b7"
+    }
+  ],
+  "sections": [
+    {
+      "id": "INV-18",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "numbered-invariant",
+      "selector": "18. **INV-18**",
+      "sha256": "b24706bf80eef506695cd2b4d17d96b583a71bde1ae5b3032d50bc885cfb29fc"
+    },
+    {
+      "id": "INV-19",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "numbered-invariant",
+      "selector": "19. **INV-19**",
+      "sha256": "e1cb8a14b6f303302d95b1249638b8bc0b295e09c26ba0ea5d69aa9a8d3428b4"
+    },
+    {
+      "id": "INV-25",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "numbered-invariant",
+      "selector": "25. **INV-25**",
+      "sha256": "dcebe13a9dc94777e23c7f8763ba94d2d15cbaceff007fb1244a3e8e7a73747f"
+    },
+    {
+      "id": "P1.0A",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "heading",
+      "selector": "### P1.0A ",
+      "sha256": "4492f9fbf99111e6e993be9c7fb9197e6ab94b4542bdfc72c75bd866b939ffae"
+    },
+    {
+      "id": "P1.0C",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "heading",
+      "selector": "### P1.0C ",
+      "sha256": "6e0a9dda76c4ce67acb840c5c24aada753e6c3c481898a134745849debd9d0ca"
+    },
+    {
+      "id": "P1.0D",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "heading",
+      "selector": "### P1.0D ",
+      "sha256": "004b5ba8837903f0f178565e0ba7d6deac6c898ef347ce9b58ca5432e732810b"
+    },
+    {
+      "id": "P1.1A",
+      "path": "engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md",
+      "kind": "heading",
+      "selector": "### P1.1A ",
+      "sha256": "11bbfb087d538f9f10c321b01d9c8a4a15d72bb18733066b14095ffc0febddc3"
+    },
+    {
+      "id": "RC-CLI-004",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-CLI-004 ",
+      "sha256": "87c2fac6bcf0d6d1c8eb19d44d088975485a75c4a0868f845b29aaa67ea806b6"
+    },
+    {
+      "id": "RC-CLI-005",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-CLI-005 ",
+      "sha256": "a9e40112e7970fcc014293ca9c724c57edd5121b64fad56432ca6009347eff02"
+    },
+    {
+      "id": "RC-CRASH-002",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-CRASH-002 ",
+      "sha256": "77d65f602d5dcf51d2cbb886a2b0930707c77e1c94288377d632a4dc0699060b"
+    },
+    {
+      "id": "RC-EVENT-001",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-EVENT-001 ",
+      "sha256": "9cc697bb8da933582684c0d3e8f62c3500490f8402ae642d1a9e9e026db72a12"
+    },
+    {
+      "id": "RC-EVENT-002",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-EVENT-002 ",
+      "sha256": "9b83ce3ccf5d876d5fdde0839212d52db7efe1f9c6fe39a8bd1a44d62a9a178c"
+    },
+    {
+      "id": "RC-EVENT-003",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-EVENT-003 ",
+      "sha256": "2d37a95f5a1b6335a4a07b43d10545067b6c6bf687d7580542557a76fdbc4f89"
+    },
+    {
+      "id": "RC-GATE-001",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-GATE-001 ",
+      "sha256": "4502c5a6e3ce2c6c2abadd380ec9d0877e521d02744c094e6638c2eef36303b2"
+    },
+    {
+      "id": "RC-PERF-001",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-PERF-001 ",
+      "sha256": "fc2fb082134e64f2600b574c2b5ff0758db512c5bfca7ff2e5064fb423c0de6a"
+    },
+    {
+      "id": "RC-PERF-002",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-PERF-002 ",
+      "sha256": "e9e00f479234b14a7333f7cc69563eb9121d86727ef9bad29a63fd97eb930962"
+    },
+    {
+      "id": "RC-SHUT-001",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-SHUT-001 ",
+      "sha256": "bc5d596b83e96b51a755d7263773151986eb2bcf5ca7dc7dc7015a7c955578af"
+    },
+    {
+      "id": "RC-SHUT-002",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-SHUT-002 ",
+      "sha256": "d124f32cc8479056102ca527f564657efc15e7fd7a0a6fe9208ad32cecb3ac8d"
+    },
+    {
+      "id": "RC-SHUT-003",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-SHUT-003 ",
+      "sha256": "39746cd347fa3639889b472b41f382974af636f3f7411e2da7f60f4f496edc76"
+    },
+    {
+      "id": "RC-SHUT-005",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-SHUT-005 ",
+      "sha256": "882969fec101d5b96906a50daf0ab429d3f33d981c53949cac0399a5ad71d4b8"
+    },
+    {
+      "id": "RC-STATE-001",
+      "path": "engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md",
+      "kind": "heading",
+      "selector": "### RC-STATE-001 ",
+      "sha256": "60cc0d8e663453dc0bb877d9618b78d2f079a7558142d9fa0ee9d0874cc2ef35"
+    }
+  ],
+  "global_constraints": [
+    "no-command",
+    "no-new-owner",
+    "no-provider-effect-path",
+    "no-schema"
+  ],
+  "slices": [
+    {
+      "task": "P1.0A",
+      "bead": "ga-f7v2ft.4",
+      "task_hash": "4492f9fbf99111e6e993be9c7fb9197e6ab94b4542bdfc72c75bd866b939ffae",
+      "row_hashes": [
+        {
+          "id": "RC-GATE-001",
+          "sha256": "4502c5a6e3ce2c6c2abadd380ec9d0877e521d02744c094e6638c2eef36303b2"
+        },
+        {
+          "id": "RC-PERF-001",
+          "sha256": "fc2fb082134e64f2600b574c2b5ff0758db512c5bfca7ff2e5064fb423c0de6a"
+        },
+        {
+          "id": "RC-PERF-002",
+          "sha256": "e9e00f479234b14a7333f7cc69563eb9121d86727ef9bad29a63fd97eb930962"
+        }
+      ],
+      "invariant_hashes": [],
+      "nonclaims": []
+    },
+    {
+      "task": "P1.0C",
+      "bead": "ga-f7v2ft.1",
+      "task_hash": "6e0a9dda76c4ce67acb840c5c24aada753e6c3c481898a134745849debd9d0ca",
+      "row_hashes": [
+        {
+          "id": "RC-GATE-001",
+          "sha256": "4502c5a6e3ce2c6c2abadd380ec9d0877e521d02744c094e6638c2eef36303b2"
+        },
+        {
+          "id": "RC-STATE-001",
+          "sha256": "60cc0d8e663453dc0bb877d9618b78d2f079a7558142d9fa0ee9d0874cc2ef35"
+        }
+      ],
+      "invariant_hashes": [
+        {
+          "id": "INV-19",
+          "sha256": "e1cb8a14b6f303302d95b1249638b8bc0b295e09c26ba0ea5d69aa9a8d3428b4"
+        }
+      ],
+      "nonclaims": []
+    },
+    {
+      "task": "P1.0D",
+      "bead": "ga-f7v2ft.2",
+      "task_hash": "004b5ba8837903f0f178565e0ba7d6deac6c898ef347ce9b58ca5432e732810b",
+      "row_hashes": [
+        {
+          "id": "RC-CLI-004",
+          "sha256": "87c2fac6bcf0d6d1c8eb19d44d088975485a75c4a0868f845b29aaa67ea806b6"
+        },
+        {
+          "id": "RC-CLI-005",
+          "sha256": "a9e40112e7970fcc014293ca9c724c57edd5121b64fad56432ca6009347eff02"
+        },
+        {
+          "id": "RC-GATE-001",
+          "sha256": "4502c5a6e3ce2c6c2abadd380ec9d0877e521d02744c094e6638c2eef36303b2"
+        },
+        {
+          "id": "RC-SHUT-001",
+          "sha256": "bc5d596b83e96b51a755d7263773151986eb2bcf5ca7dc7dc7015a7c955578af"
+        },
+        {
+          "id": "RC-SHUT-002",
+          "sha256": "d124f32cc8479056102ca527f564657efc15e7fd7a0a6fe9208ad32cecb3ac8d"
+        },
+        {
+          "id": "RC-SHUT-003",
+          "sha256": "39746cd347fa3639889b472b41f382974af636f3f7411e2da7f60f4f496edc76"
+        },
+        {
+          "id": "RC-SHUT-005",
+          "sha256": "882969fec101d5b96906a50daf0ab429d3f33d981c53949cac0399a5ad71d4b8"
+        }
+      ],
+      "invariant_hashes": [
+        {
+          "id": "INV-18",
+          "sha256": "b24706bf80eef506695cd2b4d17d96b583a71bde1ae5b3032d50bc885cfb29fc"
+        }
+      ],
+      "nonclaims": [
+        "cross-path-exclusion",
+        "durable-acceptance",
+        "operation-lookup",
+        "provider-global-admission"
+      ]
+    },
+    {
+      "task": "P1.1A",
+      "bead": "ga-f7v2ft.5",
+      "task_hash": "11bbfb087d538f9f10c321b01d9c8a4a15d72bb18733066b14095ffc0febddc3",
+      "row_hashes": [
+        {
+          "id": "RC-CRASH-002",
+          "sha256": "77d65f602d5dcf51d2cbb886a2b0930707c77e1c94288377d632a4dc0699060b"
+        },
+        {
+          "id": "RC-EVENT-001",
+          "sha256": "9cc697bb8da933582684c0d3e8f62c3500490f8402ae642d1a9e9e026db72a12"
+        },
+        {
+          "id": "RC-EVENT-002",
+          "sha256": "9b83ce3ccf5d876d5fdde0839212d52db7efe1f9c6fe39a8bd1a44d62a9a178c"
+        },
+        {
+          "id": "RC-EVENT-003",
+          "sha256": "2d37a95f5a1b6335a4a07b43d10545067b6c6bf687d7580542557a76fdbc4f89"
+        },
+        {
+          "id": "RC-GATE-001",
+          "sha256": "4502c5a6e3ce2c6c2abadd380ec9d0877e521d02744c094e6638c2eef36303b2"
+        }
+      ],
+      "invariant_hashes": [
+        {
+          "id": "INV-25",
+          "sha256": "dcebe13a9dc94777e23c7f8763ba94d2d15cbaceff007fb1244a3e8e7a73747f"
+        }
+      ],
+      "nonclaims": [
+        "closed-root-discovery",
+        "guaranteed-publication"
+      ]
+    }
+  ],
+  "review": {
+    "window_50_evidence_sha256": "152e787f7515bb2c4c2793af462a55fb5b8ccfe97901117c8477f29c76019ea9",
+    "window_50_method": "118-agent independent 10-axis review with adversarial verification; findings were integrated but the report predates the exact candidate blobs",
+    "post_integration": {
+      "path": "engdocs/plans/reconciler-redesign/POST_INTEGRATION_REVIEW.md",
+      "sha256": "eda1522421c01ca746993525ab46899d22bb11c242c8d62bc45e8d38cc8244aa",
+      "reviewer": "final_exact_reviewer",
+      "reviewed_contract_commit": "1eca1e05eccc081ad4d359eca6087d8681e342e8",
+      "plan_blob_oid": "baa2cb29560d4d5161c33a880a2eba7fe04938bd",
+      "matrix_blob_oid": "f960809fd9a28316a08d25c785e4284190fe0950",
+      "verdict": "approve"
+    },
+    "implementation_authorization": {
+      "identity": "workspace-user",
+      "date": "2026-07-12",
+      "evidence": "Thread request to integrate window 50 review, harden the design and acceptance criteria, and implement on a new origin/main worktree.",
+      "exact_candidate_approval": false,
+      "cryptographic_signature": "not-collected-pre-g0"
+    }
+  },
+  "enforcement": {
+    "code_owner": "@gastownhall/gascity-admin",
+    "observed_main_branch_protection": {
+      "checked_at": "2026-07-12",
+      "required_code_owner_reviews": false,
+      "enforce_admins": false
+    },
+    "merge_precondition": "human owner reviews the exact candidate digest before merge or branch protection begins requiring code-owner review"
+  },
+  "nonclaims": [
+    "automatic-pr-slice-enforcement",
+    "cryptographic-owner-signature",
+    "exact-candidate-owner-approval",
+    "g0-ratification",
+    "protected-merge-without-human-review"
+  ],
+  "candidate_digest": "351f8a2f24a29087e4f6286af177569421eea10cb54e102c8768e711df281c26"
+}

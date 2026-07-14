@@ -174,7 +174,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
 	removedLiveMissing := make(map[string]struct{})
-	for _, id := range c.staleParentCacheIDs(query.ParentID, items) {
+	for _, id := range c.staleParentCacheIDs(query, items) {
 		fresh, err := c.backing.Get(id)
 		switch {
 		case err == nil:
@@ -200,11 +200,28 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		len(refreshedLiveMissing) == 0 && len(removedLiveMissing) == 0 {
 		return items
 	}
+	statsIDs := make(map[string]struct{}, len(items)+len(refreshedParents)+len(removedParents)+len(refreshedLiveMissing)+len(removedLiveMissing))
+	for _, item := range items {
+		statsIDs[item.ID] = struct{}{}
+	}
+	for id := range refreshedParents {
+		statsIDs[id] = struct{}{}
+	}
+	for id := range removedParents {
+		statsIDs[id] = struct{}{}
+	}
+	for id := range refreshedLiveMissing {
+		statsIDs[id] = struct{}{}
+	}
+	for id := range removedLiveMissing {
+		statsIDs[id] = struct{}{}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
+	statsBefore, statsWorkBefore := c.statsContributionForIDsLocked(statsIDs)
 	now := time.Now()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
@@ -284,12 +301,12 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.evictLocked(id)
 	}
 	c.markFreshLocked(time.Now())
-	c.updateStatsLocked()
+	c.updateStatsForIDsLocked(statsBefore, statsWorkBefore, statsIDs)
 	return refreshed
 }
 
-func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []string {
-	if parentID == "" {
+func (c *CachingStore) staleParentCacheIDs(query ListQuery, fresh []Bead) []string {
+	if !isExhaustiveParentQuery(query) {
 		return nil
 	}
 
@@ -306,7 +323,7 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 
 	var stale []string
 	for id, bead := range c.beads {
-		if bead.ParentID != parentID {
+		if !query.Matches(bead) {
 			continue
 		}
 		if _, ok := freshIDs[id]; ok {
@@ -315,6 +332,18 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 		stale = append(stale, id)
 	}
 	return stale
+}
+
+func isExhaustiveParentQuery(query ListQuery) bool {
+	if query.ParentID == "" || len(query.ParentIDs) > 0 || query.Limit != 0 {
+		return false
+	}
+	// An unbounded parent query is exhaustive for cached rows that currently
+	// match its complete predicate. staleParentCacheIDs applies query.Matches
+	// before treating omission as evidence, so additional exact filters do not
+	// make unrelated siblings stale. A positive limit does, and is rejected
+	// above.
+	return query.Validate() == nil
 }
 
 func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string {

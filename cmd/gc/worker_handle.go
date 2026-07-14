@@ -432,25 +432,48 @@ func runtimeWorkerHandleWithConfig(
 }
 
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+	return workerKillSessionTargetWithConfigAndAdmission(cityPath, store, sp, cfg, target, nil)
+}
+
+func workerKillSessionTargetWithConfigAndAdmission(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, admit func() error) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
 	}
 	return handle.Kill(context.Background())
 }
 
 func workerStopSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+	return workerStopSessionTargetWithConfigAndAdmission(cityPath, store, sp, cfg, target, nil)
+}
+
+func workerStopSessionTargetWithConfigAndAdmission(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, admit func() error) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
 	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
+	}
 	return handle.Stop(context.Background())
 }
 
-func workerInterruptSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+func workerInterruptSessionTargetWithConfigAndAdmission(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, admit func() error) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
 	}
 	return handle.Interrupt(context.Background(), worker.InterruptRequest{})
 }

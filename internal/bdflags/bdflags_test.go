@@ -66,15 +66,6 @@ func TestGlobalFlagsPresentOnEverySubcommand(t *testing.T) {
 	}
 }
 
-func TestCreateStatusFlagsConsumeValues(t *testing.T) {
-	value := ValueFlags("create")
-	for _, flag := range []string{"-s", "--status"} {
-		if !value[flag] {
-			t.Errorf("ValueFlags(create)[%q] = false, want true", flag)
-		}
-	}
-}
-
 func TestUpdateFlagSets(t *testing.T) {
 	value := ValueFlags("update")
 	for _, f := range []string{"--assignee", "-a", "--status", "-s", "--priority", "-p", "--set-metadata", "--unset-metadata", "--parent", "--type", "-t"} {
@@ -86,6 +77,19 @@ func TestUpdateFlagSets(t *testing.T) {
 	for _, f := range []string{"--claim", "--ephemeral", "--persistent", "--stdin"} {
 		if !boolFlags[f] {
 			t.Errorf("BoolFlags(update)[%q] = false, want true", f)
+		}
+	}
+}
+
+func TestCreateStatusFlagsConsumeValues(t *testing.T) {
+	value := ValueFlags("create")
+	boolFlags := BoolFlags("create")
+	for _, flag := range []string{"-s", "--status"} {
+		if !value[flag] {
+			t.Errorf("ValueFlags(create)[%q] = false, want true", flag)
+		}
+		if boolFlags[flag] {
+			t.Errorf("BoolFlags(create)[%q] = true, want false", flag)
 		}
 	}
 }

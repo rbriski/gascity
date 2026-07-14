@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -400,7 +403,7 @@ func TestRegisterCityWithSupervisorWaitsForConfiguredStartupTimeout(t *testing.T
 	}
 }
 
-func TestRegisterCityWithSupervisorFetchesRemotePacksBeforeLoadingIncludes(t *testing.T) {
+func TestRegisterCityWithSupervisorDoesNotFetchRemotePacks(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
@@ -450,8 +453,8 @@ func TestRegisterCityWithSupervisorFetchesRemotePacksBeforeLoadingIncludes(t *te
 	}
 
 	cacheDir := config.PackCachePath(cityPath, "remote-pack", config.PackSource{Source: remote})
-	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
-		t.Fatalf("expected fetched pack cache at %s: %v", cacheDir, err)
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration materialized remote pack cache at %s: %v", cacheDir, err)
 	}
 }
 
@@ -523,7 +526,17 @@ func assertPublicGastownSyntheticCache(t *testing.T, gcHome string) {
 	}
 }
 
-func TestEffectiveCityNameHydratesLockedImportCacheBeforeLoad(t *testing.T) {
+func assertPublicGastownSyntheticCacheAbsent(t *testing.T, gcHome string) {
+	t.Helper()
+
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	cacheDir := filepath.Join(gcHome, "cache", "repos", packman.RepoCacheKey(config.PublicGastownPackSource, commit), "gastown")
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration materialized public gastown cache at %s: %v", cacheDir, err)
+	}
+}
+
+func TestEffectiveCityNameDoesNotHydrateLockedImportCache(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
@@ -536,7 +549,76 @@ func TestEffectiveCityNameHydratesLockedImportCacheBeforeLoad(t *testing.T) {
 	if name != "bright-lights" {
 		t.Fatalf("effectiveCityName = %q, want %q", name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
+}
+
+func TestSupervisorCityTimeoutReadsAreSideEffectFree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("\n[daemon]\nstart_ready_timeout = \"9m\"\nshutdown_timeout = \"4m\"\nformula_v2 = false\n\n[session]\nstartup_timeout = \"12m\"\n")...)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	previousFormulaV2 := formula.IsFormulaV2Enabled()
+	previousGraphApply := molecule.IsGraphApplyEnabled()
+	formula.SetFormulaV2Enabled(true)
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() {
+		formula.SetFormulaV2Enabled(previousFormulaV2)
+		molecule.SetGraphApplyEnabled(previousGraphApply)
+	})
+
+	if got := supervisorCityStartTimeout(cityPath); got != 12*time.Minute {
+		t.Fatalf("supervisorCityStartTimeout = %v, want 12m", got)
+	}
+	if got := supervisorCityStopTimeout(cityPath); got != 4*time.Minute+5*time.Second {
+		t.Fatalf("supervisorCityStopTimeout = %v, want 4m5s", got)
+	}
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
+	if !formula.IsFormulaV2Enabled() {
+		t.Fatal("supervisor timeout read changed the process-global formula v2 flag")
+	}
+	if !molecule.IsGraphApplyEnabled() {
+		t.Fatal("supervisor timeout read changed the process-global graph apply flag")
+	}
+}
+
+func TestRegisteredCityNameDefersUncachedPackRuntimeRegistrationValidation(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := writeRuntimeCityFixture(t, "subprocess")
+	// This pack exists only at its declared source path; registration has not
+	// materialized any managed cache. Intent reads must not turn the partial
+	// composition into a full runtime-registry validation boundary.
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime pack unexpectedly cached before intent read: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("\n[session]\nprovider = \"subprocess\"\n")...)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	name, err := registeredCityName(cityPath, "")
+	if err != nil {
+		t.Fatalf("read-only supervisor intent rejected pack-defined selected runtime: %v", err)
+	}
+	if name != "demo" {
+		t.Fatalf("effective city name = %q, want demo", name)
+	}
+
+	if _, _, err := loadSupervisorCityConfig(cityPath); err == nil {
+		t.Fatal("locked full config load accepted a pack runtime that collides with a builtin")
+	}
 }
 
 func TestLoadSupervisorCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
@@ -655,7 +737,7 @@ func TestLoadConfigCommandCityConfigHydratesLockedImportCacheBeforeLoad(t *testi
 	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
-func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLoad(t *testing.T) {
+func TestRegisterCityWithSupervisorDoesNotInstallLockedBundledRemoteImport(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
@@ -676,10 +758,10 @@ func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLo
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 0: %s", code, stderr.String())
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
 }
 
-func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *testing.T) {
+func TestRegisterCityWithSupervisorNameOverrideDoesNotHydrateLockedImportCache(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
@@ -700,7 +782,7 @@ func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *test
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
 }
 
 func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
@@ -1087,6 +1169,64 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	}
 }
 
+func TestUnregisterCityFromSupervisorChecksSupervisorAfterRegistryMutation(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := setupCity(t, "late-supervisor")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "late-supervisor"); err != nil {
+		t.Fatal(err)
+	}
+
+	aliveCalls := 0
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int {
+			aliveCalls++
+			entries, err := reg.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) == 0 {
+				return 4242
+			}
+			return 0
+		},
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	cityWaits := 0
+	controllerWaits := 0
+	waitForSupervisorCityHook = func(string, bool, time.Duration, io.Writer) error {
+		cityWaits++
+		return nil
+	}
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		controllerWaits++
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr)
+
+	if !handled || code != 0 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
+	}
+	if aliveCalls != 1 {
+		t.Fatalf("supervisor liveness probes = %d, want one post-mutation probe", aliveCalls)
+	}
+	if reloads != 1 || cityWaits != 1 || controllerWaits != 1 {
+		t.Fatalf("late-supervisor effects = reloads:%d city waits:%d controller waits:%d, want 1 each", reloads, cityWaits, controllerWaits)
+	}
+}
+
 func TestUnregisterCityFromSupervisorUsesStopTimeoutForSupervisorCityStopWait(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -1226,6 +1366,374 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")
+	}
+}
+
+func TestCmdStopForceUnregisterFailsClosedOnUncertainControllerStop(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result controllerStopResult
+	}{
+		{
+			name: "request may have entered",
+			result: classifiedControllerStopResult(
+				controllerStopMayHaveEntered,
+				"test acknowledgement loss",
+				errors.New("reply lost"),
+			),
+		},
+		{
+			name:   "invalid result",
+			result: controllerStopResult{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+			cityPath := setupCity(t, "force-ambiguous-city")
+			reg := supervisor.NewRegistry(supervisor.RegistryPath())
+			if err := reg.Register(cityPath, "force-ambiguous-city"); err != nil {
+				t.Fatal(err)
+			}
+			const pendingRequestID = "req-existing-api-operation"
+			if err := reg.StorePendingCityRequestID(cityPath, pendingRequestID); err != nil {
+				t.Fatal(err)
+			}
+
+			aliveCalls := 0
+			reloads := 0
+			withSupervisorTestHooks(
+				t,
+				func(_, _ io.Writer) int { return 0 },
+				func(_, _ io.Writer) int {
+					reloads++
+					return 0
+				},
+				func() int {
+					aliveCalls++
+					return 4242
+				},
+				func(string) (bool, string, bool) { return false, "", false },
+				20*time.Millisecond,
+				time.Millisecond,
+			)
+			cityWaits := 0
+			controllerWaits := 0
+			waitForSupervisorCityHook = func(string, bool, time.Duration, io.Writer) error {
+				cityWaits++
+				return nil
+			}
+			waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+				controllerWaits++
+				return nil
+			}
+
+			requests := 0
+			oldRequest := controllerStopRequestForCommand
+			controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+				requests++
+				assertSameTestPath(t, path, cityPath)
+				if !force {
+					t.Fatal("force unregister sent ordinary stop")
+				}
+				return tt.result
+			}
+			t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+			storeOpens := 0
+			oldOpen := openCityStoreForStop
+			openCityStoreForStop = func(string) (beads.Store, error) {
+				storeOpens++
+				return beads.NewMemStore(), nil
+			}
+			t.Cleanup(func() { openCityStoreForStop = oldOpen })
+
+			providerConstructions := 0
+			oldProvider := sessionProviderForStopCity
+			sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+				providerConstructions++
+				return runtime.NewFake()
+			}
+			t.Cleanup(func() { sessionProviderForStopCity = oldProvider })
+
+			storeShutdowns := 0
+			overrideShutdownBeadsProviderForStop(t, func(string) error {
+				storeShutdowns++
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, true)
+
+			if code != 1 {
+				t.Fatalf("cmdStop(force) = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if requests != 1 {
+				t.Fatalf("controller stop requests = %d, want 1", requests)
+			}
+			if aliveCalls != 1 {
+				t.Fatalf("supervisor liveness probes = %d, want 1", aliveCalls)
+			}
+			if reloads != 0 || cityWaits != 0 || controllerWaits != 0 {
+				t.Fatalf("post-ambiguity supervisor effects = reloads:%d city waits:%d controller waits:%d, want all zero", reloads, cityWaits, controllerWaits)
+			}
+			if storeOpens != 0 || providerConstructions != 0 || storeShutdowns != 0 {
+				t.Fatalf("post-ambiguity cleanup effects = store opens:%d provider constructions:%d store shutdowns:%d, want all zero", storeOpens, providerConstructions, storeShutdowns)
+			}
+			entries, err := reg.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
+				t.Fatalf("registration changed after uncertain stop: %v", entries)
+			}
+			if got, ok, err := reg.ConsumePendingCityRequestID(cityPath); err != nil {
+				t.Fatal(err)
+			} else if !ok || got != pendingRequestID {
+				t.Fatalf("pending API request after uncertain stop = (%q, %t), want (%q, true)", got, ok, pendingRequestID)
+			}
+			if strings.Contains(stdout.String(), "City stopped") {
+				t.Fatalf("stdout reports false success: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCmdStopRegisteredCityWithAbsentSupervisorClassifiesBeforeUnregister(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := setupCity(t, "registered-standalone")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "registered-standalone"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityPath)
+		if force {
+			t.Fatal("ordinary stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	storeOpens := 0
+	oldOpen := openCityStoreForStop
+	openCityStoreForStop = func(string) (beads.Store, error) {
+		storeOpens++
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() { openCityStoreForStop = oldOpen })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want exactly 1", requests)
+	}
+	if reloads != 0 || storeOpens != 0 {
+		t.Fatalf("post-ambiguity effects = reloads:%d store opens:%d, want zero", reloads, storeOpens)
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
+		t.Fatalf("registration changed before transport became authoritative: %v", entries)
+	}
+	if strings.Contains(stdout.String(), "Unregistered") || strings.Contains(stdout.String(), "City stopped") {
+		t.Fatalf("stdout reports a mutation or false success: %q", stdout.String())
+	}
+}
+
+func TestCmdStopRegisteredInvalidConfigWithAbsentSupervisorClassifiesBeforeUnregister(t *testing.T) {
+	resetFlags(t)
+	cityPath := setupInvalidConfigManagedRuntime(t)
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "registered-invalid-standalone"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(path string, force bool) controllerStopResult {
+		requests++
+		assertSameTestPath(t, path, cityPath)
+		if force {
+			t.Fatal("ordinary invalid-config stop requested force transport")
+		}
+		return classifiedControllerStopResult(
+			controllerStopMayHaveEntered,
+			"test acknowledgement loss",
+			errors.New("reply lost"),
+		)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	storeShutdowns := 0
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		storeShutdowns++
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("controller stop requests = %d, want exactly 1", requests)
+	}
+	if reloads != 0 || storeShutdowns != 0 {
+		t.Fatalf("post-ambiguity effects = reloads:%d store shutdowns:%d, want zero", reloads, storeShutdowns)
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityPath) {
+		t.Fatalf("registration changed before transport became authoritative: %v", entries)
+	}
+	if strings.Contains(stdout.String(), "Unregistered") || strings.Contains(stdout.String(), "City stopped") {
+		t.Fatalf("stdout reports a mutation or false success: %q", stdout.String())
+	}
+}
+
+func TestCmdStopConsumesManagedUnregisterResultWithoutSupervisorReprobe(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := setupCity(t, "managed-stop")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "managed-stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	aliveCalls := 0
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int {
+			aliveCalls++
+			return 4242
+		},
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	cityWaits := 0
+	controllerWaits := 0
+	waitForSupervisorCityHook = func(string, bool, time.Duration, io.Writer) error {
+		cityWaits++
+		return nil
+	}
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		controllerWaits++
+		return nil
+	}
+
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(string, bool) controllerStopResult {
+		t.Fatal("managed unregister issued an alternate controller stop request")
+		return controllerStopResult{}
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if aliveCalls != 1 {
+		t.Fatalf("supervisor liveness probes = %d, want exactly 1", aliveCalls)
+	}
+	if reloads != 1 || cityWaits != 1 || controllerWaits != 1 {
+		t.Fatalf("managed unregister effects = reloads:%d city waits:%d controller waits:%d, want 1 each", reloads, cityWaits, controllerWaits)
+	}
+}
+
+func TestCmdStopFailsClosedWhenSupervisorRegistryLookupFails(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := setupCity(t, "registry-read-failure")
+
+	oldRegistry := newSupervisorRegistry
+	newSupervisorRegistry = func() supervisorRegistry {
+		return &erroringSupervisorRegistry{err: errors.New("registry read failed")}
+	}
+	t.Cleanup(func() { newSupervisorRegistry = oldRegistry })
+
+	requests := 0
+	oldRequest := controllerStopRequestForCommand
+	controllerStopRequestForCommand = func(string, bool) controllerStopResult {
+		requests++
+		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "test", os.ErrNotExist)
+	}
+	t.Cleanup(func() { controllerStopRequestForCommand = oldRequest })
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityPath}, &stdout, &stderr, time.Second, false)
+
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 0 {
+		t.Fatalf("controller stop requests after registry lookup failure = %d, want 0", requests)
+	}
+	if !strings.Contains(stderr.String(), "registry read failed") {
+		t.Fatalf("stderr = %q, want registry read error", stderr.String())
 	}
 }
 
@@ -1412,6 +1920,85 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	}
 	if payload.RequestID != "req-test-unregister" {
 		t.Fatalf("payload.RequestID = %q, want req-test-unregister", payload.RequestID)
+	}
+}
+
+func TestReconcileCitiesDoesNotMisclassifyGenericPendingRequestWithoutRuntime(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "create-never-started")
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-generic-create"); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, io.Discard, io.Discard)
+
+	if len(supRec.Events) != 0 {
+		t.Fatalf("generic pending request was misclassified as unregister: %#v", supRec.Events)
+	}
+	if got, ok, err := registry.ConsumePendingRequestID(cityPath); err != nil {
+		t.Fatal(err)
+	} else if !ok || got != "req-generic-create" {
+		t.Fatalf("generic pending request = (%q, %t), want preserved", got, ok)
+	}
+}
+
+func TestReconcileCitiesDeletedPathPreservesManagedStopFailure(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := t.TempDir()
+	if err := os.RemoveAll(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-test-unregister-running"); err != nil {
+		t.Fatal(err)
+	}
+	registry.Add(cityPath, &managedCity{
+		name:    "managed-before-delete",
+		started: true,
+		cancel:  func() {},
+		done:    make(chan struct{}),
+		cr: &CityRuntime{
+			cfg:    &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "0s"}},
+			sp:     runtime.NewFake(),
+			rec:    events.Discard,
+			stdout: io.Discard,
+			stderr: io.Discard,
+		},
+	})
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	if len(supRec.Events) != 1 {
+		t.Fatalf("recorded %d events, want one failed terminal result; stdout=%q stderr=%q", len(supRec.Events), stdout.String(), stderr.String())
+	}
+	got := supRec.Events[0]
+	if got.Type != events.RequestFailed {
+		t.Fatalf("event.Type = %q, want %q; event=%#v", got.Type, events.RequestFailed, got)
+	}
+	var payload api.RequestFailedPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.RequestID != "req-test-unregister-running" || payload.Operation != api.RequestOperationCityUnregister {
+		t.Fatalf("payload = %#v, want correlated unregister failure", payload)
+	}
+	if !strings.Contains(payload.ErrorMessage, "did not exit") {
+		t.Fatalf("failure detail = %q, want owner-exit failure", payload.ErrorMessage)
+	}
+	for _, event := range supRec.Events {
+		if event.Type == events.RequestResultCityUnregister {
+			t.Fatalf("managed cleanup failure was overwritten by success: %#v", supRec.Events)
+		}
 	}
 }
 
@@ -1723,63 +2310,115 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
-func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+func TestReconcileCitiesNameDriftStopsManagedProviderBeforeReplacement(t *testing.T) {
+	cityPath, reg, registry := newSupervisorManagedStartFixture(t)
 
-	root, err := os.MkdirTemp("", "gc-drift-")
-	if err != nil {
-		t.Fatal(err)
+	type lifecycleObservation struct {
+		operation string
+		path      string
+		published bool
 	}
-	t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
-
-	cityPath := filepath.Join(root, "city")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
+	var observationsMu sync.Mutex
+	var observations []lifecycleObservation
+	record := func(observation lifecycleObservation) {
+		observationsMu.Lock()
+		observations = append(observations, observation)
+		observationsMu.Unlock()
+	}
+	acquire := func(path string) (*controllerLockLease, error) {
+		record(lifecycleObservation{operation: "acquire", path: path})
+		return acquireControllerLock(path)
+	}
+	shutdownProvider := func(path string) error {
+		published := false
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			_, published = cities[canonicalTestPath(path)]
+		})
+		record(lifecycleObservation{operation: "provider-shutdown", path: path, published: published})
+		return nil
 	}
 
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	var stdout bytes.Buffer
+	var stderr lockedBuffer
+	reconcileCitiesWithControllerLock(
+		reg,
+		registry,
+		supervisor.PublicationConfig{},
+		&stdout,
+		&stderr,
+		acquire,
+		shutdownProvider,
+	)
+	oldOwner := managedCityForPath(t, registry, cityPath)
+	if oldOwner.name != "test-city" {
+		t.Fatalf("initial managed city name = %q, want test-city", oldOwner.name)
+	}
+	t.Cleanup(func() {
+		var current *managedCity
+		registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			current = cities[canonicalTestPath(cityPath)]
+		})
+		if current != nil {
+			_ = stopManagedCity(current, cityPath, io.Discard)
+		}
+	})
 
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	observationsMu.Lock()
+	observations = nil
+	observationsMu.Unlock()
 	if err := reg.Register(cityPath, "new-name"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("rename registered city: %v", err)
 	}
 
-	cfg := config.DefaultCity("old-name")
-	sp := runtime.NewFake()
-	var cityOut, cityErr bytes.Buffer
-	cr := newTestCityRuntime(t, CityRuntimeParams{
-		CityPath: cityPath,
-		CityName: "old-name",
-		Cfg:      &cfg,
-		SP:       sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
-			return DesiredStateResult{}
-		},
-		Rec:    events.Discard,
-		Stdout: &cityOut,
-		Stderr: &cityErr,
-	})
+	reconcileCitiesWithControllerLock(
+		reg,
+		registry,
+		supervisor.PublicationConfig{},
+		&stdout,
+		&stderr,
+		acquire,
+		shutdownProvider,
+	)
 
-	done := make(chan struct{})
-	close(done)
-	registry := newCityRegistry()
-	registry.Add(cityPath, &managedCity{
-		cr:      cr,
-		name:    "old-name",
-		started: true,
-		cancel:  func() {},
-		done:    done,
-	})
-	var stdout, stderr bytes.Buffer
+	select {
+	case <-oldOwner.done:
+	default:
+		t.Fatal("name-drifted managed owner did not finish cleanup")
+	}
+	observationsMu.Lock()
+	driftObservations := append([]lifecycleObservation(nil), observations...)
+	observationsMu.Unlock()
+	if len(driftObservations) != 2 {
+		t.Fatalf("name-drift lifecycle observations = %#v, want provider shutdown then replacement acquire", driftObservations)
+	}
+	if got := driftObservations[0]; got.operation != "provider-shutdown" ||
+		!samePath(got.path, cityPath) || got.published {
+		t.Fatalf("first name-drift lifecycle observation = %#v, want unpublished provider shutdown for %s", got, cityPath)
+	}
+	if got := driftObservations[1]; got.operation != "acquire" || !samePath(got.path, cityPath) {
+		t.Fatalf("second name-drift lifecycle observation = %#v, want replacement acquire for %s", got, cityPath)
+	}
 
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
-
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
+	replacement := managedCityForPath(t, registry, cityPath)
+	if replacement == oldOwner {
+		t.Fatal("name drift republished the old managed owner")
+	}
+	if replacement.name != "new-name" {
+		t.Fatalf("replacement managed city name = %q, want new-name", replacement.name)
+	}
+	if err := stopManagedCity(replacement, cityPath, &stderr); err != nil {
+		t.Fatalf("stop replacement managed city: %v; stderr=%q", err, stderr.String())
+	}
 }
 
 func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {

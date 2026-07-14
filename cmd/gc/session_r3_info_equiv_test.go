@@ -175,21 +175,114 @@ func TestHealStateWithRollbackInfoClosedGuardAndWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed, _ = store.Get(closed.ID)
-	if batch := healStateWithRollbackInfo(sessiontest.SeedBead(t, closed), false, sessionFrontDoor(store), clk, 0, true); batch != nil {
-		t.Fatalf("closed bead heal batch = %#v, want nil (terminal beads must not move)", batch)
+	if result := healStateWithRollbackInfo(sessiontest.SeedBead(t, closed), false, sessionFrontDoor(store), clk, 0, true); result.Applied != nil || result.Err != nil {
+		t.Fatalf("closed bead heal result = %#v, want no applied patch or error (terminal beads must not move)", result)
 	}
 
-	live, err := store.Create(beads.Bead{Title: "w", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"state": "active"}})
+	live, err := store.Create(beads.Bead{Title: "w", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"state":                                  "active",
+		"session_key":                            "conversation-1",
+		"started_config_hash":                    "config-1",
+		sessionpkg.PrimedAtMetadataKey:           "2026-03-08T11:00:00Z",
+		sessionpkg.PrimingAttemptedAtMetadataKey: "2026-03-08T10:59:00Z",
+		sessionpkg.PromptHashMetadataKey:         "prompt-1",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch := healStateWithRollbackInfo(sessiontest.SeedBead(t, live), false, sessionFrontDoor(store), clk, 0, true)
+	input := sessiontest.SeedBead(t, live)
+	recorder := &legacyWriteRecorder{}
+	if !convergeGlobalRecorder.CompareAndSwap(nil, recorder) {
+		t.Fatal("converge recorder already installed")
+	}
+	t.Cleanup(func() {
+		if !convergeGlobalRecorder.CompareAndSwap(recorder, nil) {
+			t.Error("converge recorder ownership changed during test")
+		}
+	})
+	result := healStateWithRollbackInfo(input, false, sessionFrontDoor(store), clk, 0, true)
+	if result.Err != nil {
+		t.Fatalf("heal error: %v", result.Err)
+	}
+	batch := result.Applied
 	if batch["state"] != "asleep" {
 		t.Fatalf("heal batch = %#v, want state=asleep", batch)
 	}
 	got, _ := store.Get(live.ID)
 	if got.Metadata["state"] != "asleep" {
 		t.Fatalf("persisted state = %q, want asleep (front-door write must land)", got.Metadata["state"])
+	}
+	if want := input.ApplyPatch(batch); !reflect.DeepEqual(result.Info, want) {
+		t.Fatalf("returned Info differs from local fold:\n got = %#v\nwant = %#v", result.Info, want)
+	}
+	if want := sessiontest.SeedBead(t, got); !reflect.DeepEqual(result.Info, want) {
+		t.Fatalf("returned Info differs from persisted reprojection:\n got = %#v\nwant = %#v", result.Info, want)
+	}
+	writes := recorder.forSession(live.ID)
+	if len(writes) != 3 {
+		t.Fatalf("successful heal recorded writes = %#v, want three priming clears", writes)
+	}
+}
+
+func TestHealStateWithRollbackInfoFailurePreservesInputAndRecordsNothing(t *testing.T) {
+	base := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	bead, err := base.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"state":               "active",
+			"session_key":         "conversation-1",
+			"started_config_hash": "config-1",
+			"primed_at":           "2026-03-08T11:00:00Z",
+			"prompt_hash":         "prompt-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	input := sessiontest.SeedBead(t, bead)
+	preimage, err := base.Get(input.ID)
+	if err != nil {
+		t.Fatalf("Get preimage: %v", err)
+	}
+	wantErr := errors.New("ambiguous metadata commit")
+	failing := &failSetMetadataBatchStore{Store: base, err: wantErr}
+
+	recorder := &legacyWriteRecorder{}
+	if !convergeGlobalRecorder.CompareAndSwap(nil, recorder) {
+		t.Fatal("converge recorder already installed")
+	}
+	t.Cleanup(func() {
+		if !convergeGlobalRecorder.CompareAndSwap(recorder, nil) {
+			t.Error("converge recorder ownership changed during test")
+		}
+	})
+
+	result := healStateWithRollbackInfo(input, false, sessionFrontDoor(failing), clk, 0, true)
+	if !errors.Is(result.Err, wantErr) {
+		t.Fatalf("error = %v, want original %v", result.Err, wantErr)
+	}
+	if !reflect.DeepEqual(result.Info, input) {
+		t.Fatalf("failed heal changed Info:\n got = %#v\nwant = %#v", result.Info, input)
+	}
+	if result.Applied != nil {
+		t.Fatalf("failed heal applied patch = %#v, want nil", result.Applied)
+	}
+	if writes := recorder.forSession(input.ID); len(writes) != 0 {
+		t.Fatalf("failed heal recorded differential writes: %#v", writes)
+	}
+	if failing.calls != 1 {
+		t.Fatalf("heal write attempts = %d, want 1", failing.calls)
+	}
+	persisted, err := base.Get(input.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !reflect.DeepEqual(persisted, preimage) {
+		t.Fatalf("failed heal changed persisted bead:\n got = %#v\nwant = %#v", persisted, preimage)
 	}
 }
 

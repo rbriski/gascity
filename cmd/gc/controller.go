@@ -37,9 +37,10 @@ import (
 )
 
 var (
-	errControllerAlreadyRunning = errors.New("controller already running")
-	errControllerUnavailable    = errors.New("controller unavailable")
-	errControllerUnresponsive   = errors.New("controller unresponsive")
+	errControllerAlreadyRunning          = errors.New("controller already running")
+	errControllerUnavailable             = errors.New("controller unavailable")
+	errControllerUnresponsive            = errors.New("controller unresponsive")
+	errControllerStopRequiresTypedClient = errors.New("controller stop requires typed stop client")
 )
 
 type controllerCommandError struct {
@@ -99,22 +100,6 @@ func controllerSocketPath(cityPath string) string {
 	}
 	sum := sha256.Sum256([]byte(canonicalCityPath))
 	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
-}
-
-// acquireControllerLock takes an exclusive flock on .gc/controller.lock.
-// Returns the locked file (caller must defer Close) or an error if another
-// controller is already running.
-func acquireControllerLock(cityPath string) (*os.File, error) {
-	path := filepath.Join(cityPath, ".gc", "controller.lock")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("opening controller lock: %w", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close() //nolint:errcheck // closing after flock failure
-		return nil, errControllerAlreadyRunning
-	}
-	return f, nil
 }
 
 // startControllerSocket listens on a Unix socket at .gc/controller.sock.
@@ -520,6 +505,14 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 }
 
 func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
+	firstLine := command
+	if newline := strings.IndexByte(firstLine, '\n'); newline >= 0 {
+		firstLine = firstLine[:newline]
+	}
+	firstLine = strings.TrimSuffix(firstLine, "\r")
+	if firstLine == "stop" || firstLine == "stop-force" {
+		return nil, errControllerStopRequiresTypedClient
+	}
 	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
@@ -983,7 +976,7 @@ func gracefulStopAll(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	_ = gracefulStopAllWithOwnership(names, sp, timeout, rec, cfg, store, stdout, stderr, nil, false, nil)
 }
 
 func gracefulStopAllWithForceSignal(
@@ -996,26 +989,63 @@ func gracefulStopAllWithForceSignal(
 	stdout, stderr io.Writer,
 	forceStopRequested func() bool,
 ) {
+	_ = gracefulStopAllWithOwnership(names, sp, timeout, rec, cfg, store, stdout, stderr, forceStopRequested, false, nil)
+}
+
+func gracefulStopAllWithOwnership(
+	names []string,
+	sp runtime.Provider,
+	timeout time.Duration,
+	rec events.Recorder,
+	cfg *config.City,
+	store beads.SessionStore,
+	stdout, stderr io.Writer,
+	forceStopRequested func() bool,
+	retainEntered bool,
+	budget *stopCompletionBudget,
+) error {
+	if !stopEffectAdmitted(budget) {
+		return errStopCompletionDeadline
+	}
 	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
 		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store.Store, stderr), cfg, store.Store, sp, rec, "gc", stdout, stderr)
-		return
+		targets, err := stopTargetsForNamesWithBudget(names, cfg, store.Store, stderr, budget)
+		if err != nil {
+			return err
+		}
+		_, err = stopTargetsBoundedWithOwnershipAndBudget(targets, cfg, store.Store, sp, rec, "gc", stdout, stderr, retainEntered, budget)
+		return err
 	}
-	targets := stopTargetsForNames(names, cfg, store.Store, stderr)
+	targets, err := stopTargetsForNamesWithBudget(names, cfg, store.Store, stderr, budget)
+	if err != nil {
+		return err
+	}
 	targetByName := make(map[string]stopTarget, len(targets))
 	for _, target := range targets {
 		targetByName[target.name] = target
 	}
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
-	// This is intentionally flat: interrupts are a best-effort graceful hint,
-	// while pass 2 keeps reverse dependency ordering for any survivors.
+	// This is intentionally flat: interrupts remain a best-effort graceful hint
+	// for controller-owned shutdown, while pass 2 keeps reverse dependency
+	// ordering for survivors. A direct owner that retains entered calls keeps a
+	// per-target timeout as a sticky command failure even if pass 2 later stops
+	// the target; exceeding the inner cap cannot be rewritten into exit zero.
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
+	var sent int
+	var interruptErr error
+	if retainEntered {
+		sent, interruptErr = interruptTargetsBoundedRetainingEnteredWithBudget(targets, cfg, store.Store, sp, stderr, budget)
+	} else {
+		sent = interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
+	}
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
+	if !stopEffectAdmitted(budget) {
+		return errors.Join(interruptErr, errStopCompletionDeadline)
+	}
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
 	pollInterval := 500 * time.Millisecond
@@ -1024,15 +1054,27 @@ func gracefulStopAllWithForceSignal(
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if !stopEffectAdmitted(budget) {
+			return errors.Join(interruptErr, errStopCompletionDeadline)
+		}
 		if stopForceRequested(forceStopRequested) {
 			break
 		}
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(interruptErr, errStopCompletionDeadline)
+			}
 			allExited = len(runningSet) == 0
 		} else {
 			for _, name := range names {
+				if !stopEffectAdmitted(budget) {
+					return errors.Join(interruptErr, errStopCompletionDeadline)
+				}
 				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+				if !stopEffectAdmitted(budget) {
+					return errors.Join(interruptErr, errStopCompletionDeadline)
+				}
 				if err == nil && running {
 					allExited = false
 					break
@@ -1043,6 +1085,9 @@ func gracefulStopAllWithForceSignal(
 			break
 		}
 		remaining := time.Until(deadline)
+		if budget != nil && budget.remaining() < remaining {
+			remaining = budget.remaining()
+		}
 		if remaining <= 0 {
 			break
 		}
@@ -1054,18 +1099,38 @@ func gracefulStopAllWithForceSignal(
 	}
 
 	// Pass 2: kill survivors.
+	if !stopEffectAdmitted(budget) {
+		return errors.Join(interruptErr, errStopCompletionDeadline)
+	}
 	var survivors []string
+	cleanupErr := interruptErr
 	runningSet, listed := runningSessionSet(sp, names)
+	if !stopEffectAdmitted(budget) {
+		return errors.Join(cleanupErr, errStopCompletionDeadline)
+	}
 	for _, name := range names {
+		if !stopEffectAdmitted(budget) {
+			return errors.Join(cleanupErr, errStopCompletionDeadline)
+		}
 		running := false
 		if listed {
 			running = runningSet[name]
 		} else {
 			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
+			}
 		}
 		if !running {
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
+			}
 			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 				fmt.Fprintf(stderr, "cleaning exited agent '%s': %v\n", name, err) //nolint:errcheck // best-effort stderr
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
 			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
@@ -1085,20 +1150,36 @@ func gracefulStopAllWithForceSignal(
 				}
 				template = target.template
 				agentIdentity = target.agentName
-				if cityStopSessionMarked(store.Store, target.sessionID) {
-					markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+				if budget == nil {
+					if cityStopSessionMarked(store.Store, target.sessionID) {
+						markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+					}
+				} else {
+					marked, markerErr := cityStopSessionMarkedWithBudget(store.Store, target.sessionID, budget)
+					if markerErr != nil {
+						cleanupErr = errors.Join(cleanupErr, markerErr)
+					} else if marked {
+						cleanupErr = errors.Join(cleanupErr, markCityStopSessionAsAsleepWithBudget(sessionFrontDoor(store.Store), target.sessionID, stderr, budget))
+					}
 				}
+			}
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
 			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
+			if !stopEffectAdmitted(budget) {
+				return errors.Join(cleanupErr, errStopCompletionDeadline)
+			}
 			telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(agentIdentity, template), "graceful-exit", nil)
 			continue
 		}
 		survivors = append(survivors, name)
 	}
-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr)
+	_, stopErr := stopTargetsBoundedWithOwnershipAndBudget(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr, retainEntered, budget)
+	return errors.Join(cleanupErr, stopErr)
 }
 
 func stopForceRequested(forceStopRequested func() bool) bool {
@@ -1231,6 +1312,8 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 // opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
 // paths to watch for config changes (from initial provenance).
+//
+//nolint:unparam // compatibility/test callers retain the owned runner's complete signature
 func runController(
 	cityPath string,
 	tomlPath string,
@@ -1252,7 +1335,35 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	defer lock.Close() //nolint:errcheck // best-effort cleanup
+	return runControllerWithLease(lock, cityPath, tomlPath, cfg, configRev, buildFn, buildFnWithSessionBeads, sp,
+		dops, poolSessions, poolDeathHandlers, initialWatchTargets, rec, eventProv, stdout, stderr)
+}
+
+// runControllerWithLease runs the persistent controller under an already-held
+// same-path lease. The caller must transfer or acquire that exact lease before
+// any startup materialization; this function never closes and reacquires it.
+func runControllerWithLease(
+	lock *controllerLockLease,
+	cityPath string,
+	tomlPath string,
+	cfg *config.City,
+	configRev string,
+	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
+	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult,
+	sp runtime.Provider,
+	dops drainOps,
+	poolSessions map[string]time.Duration,
+	poolDeathHandlers map[string]poolDeathInfo,
+	initialWatchTargets []config.WatchTarget,
+	rec events.Recorder,
+	eventProv events.Provider,
+	stdout, stderr io.Writer,
+) int {
+	defer lock.Close() //nolint:errcheck // ownership must unwind on every return, including validation failure
+	if err := validateControllerRuntimeLease(lock, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1400,6 +1511,22 @@ func runController(
 	telemetry.RecordControllerLifecycle(context.Background(), "stopped")
 	fmt.Fprintln(stdout, "Controller stopped.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func validateControllerRuntimeLease(lock *controllerLockLease, cityPath string) error {
+	if lock == nil {
+		return fmt.Errorf("controller ownership: %w", errControllerLockLeaseClosed)
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	wantPath := filepath.Clean(controllerLockPath(cityPath))
+	if lock.closed || lock.transferred || lock.file == nil {
+		return fmt.Errorf("controller ownership for %q: %w", wantPath, errControllerLockLeaseClosed)
+	}
+	if gotPath := filepath.Clean(lock.path); gotPath != wantPath {
+		return fmt.Errorf("controller ownership path %q does not match %q", gotPath, wantPath)
+	}
+	return nil
 }
 
 // singleCityStateResolver adapts a single api.State into an api.CityResolver

@@ -1744,7 +1744,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			heal := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			if heal.Err != nil {
+				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, heal.Err) //nolint:errcheck
+				if shadowTick != nil {
+					shadowTick.markSkip(id, skipHealWriteFailed)
+				}
+				continue
+			}
 			traceHealClearedPendingCreateLeaseInfo(
 				trace,
 				infoByID[id],
@@ -1755,30 +1762,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				pendingCreateStartedAtBeforeHeal,
 				lastWokeAtBeforeHeal,
 				providerAlive,
-				healBatch,
+				heal.Applied,
 			)
-			// Post-heal refresh: healStateWithRollbackInfo (above) persists healBatch
-			// via sessFront.ApplyPatch and returns it, but does NOT mirror onto the raw
-			// *session bead (WI-6 R3 dropped the raw-bead mirror). The top-of-loop
-			// `info` (from the snapshot at loop entry) is now stale for this switch, and
-			// nothing updates the raw bead post-heal — so this write-returns-Info fold
-			// (Step 6d) is the ONLY same-tick source of the healed state.
-			// healStateWithRollbackInfo returns exactly the batch it persisted, and nil
-			// when it healed nothing (ApplyPatch(nil) is a no-op). infoByID[id]
-			// is coherent here: the top-of-loop snapshot entry, unmutated on the path
-			// that reaches the heal (the pre-heal checkRateLimitStability/rollback/
-			// failed-create-close sites all `continue`). The trace call above takes
-			// the bead by value (cannot mutate), and Go switch cases do not fall
-			// through, so both the preserveNamed body and the
-			// pendingCreateSessionStillLeasedInfo guard/body below read the same
-			// post-heal snapshot. This fold is LOAD-BEARING: the
-			// pendingCreateSessionStillLeasedInfo guard below reads the healed
-			// MetadataState off infoPostHeal, and the downstream zombie refresh is
-			// ApplyPatch(terminalErrBatch) — a no-op when there is no terminal error —
-			// so the healed state must reach that guard (and the post-zombie rollback
-			// read on the preserveNamed fall-through) through this fold alone. Guarded
-			// by TestReconcileSessionBeads_HealStateReflectedOnSnapshot.
-			tick.apply(id, healBatch)
+			// The helper returns a folded Info only after a proven commit. Installing
+			// that exact result is the sole same-pass source of healed state; failures
+			// continue above before any trace, close, start, stop, or identity decision.
+			tick.set(id, heal.Info)
 			infoPostHeal := infoByID[id]
 			switch {
 			case preserveNamed:
@@ -2478,7 +2467,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		heal := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		if heal.Err != nil {
+			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, heal.Err) //nolint:errcheck
+			if shadowTick != nil {
+				shadowTick.markSkip(id, skipHealWriteFailed)
+			}
+			continue
+		}
 		traceHealClearedPendingCreateLeaseInfo(
 			trace,
 			infoByID[id],
@@ -2489,16 +2485,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			pendingCreateStartedAtBeforeHeal,
 			lastWokeAtBeforeHeal,
 			alive,
-			healBatch,
+			heal.Applied,
 		)
-		// Fold heal#2's batch onto the snapshot (Step 6d write-returns-Info),
-		// identical to the heal#1 fold above (~1713): healStateWithRollback returns
-		// exactly the batch it mirrored (nil ⇒ ApplyPatch no-op). The base is
-		// coherent here — the pre-heal rate-limit gate `continue`s on hit and the
-		// restart/drain-ack blocks above either `continue` or self-refresh. This is
-		// one of the forward-pass writers the blanket pre-pass still masks; folding it
-		// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
-		tick.apply(id, healBatch)
+		// Match the orphan path above: install only the helper's proven committed
+		// projection. A failed/ambiguous heal has already yielded this session.
+		tick.set(id, heal.Info)
 		if recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk) {
 			alive = false
 			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).

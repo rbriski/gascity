@@ -843,20 +843,17 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 // resolve its exact global top-N by selecting ids in one SQL statement (then
 // hydrating only those ids). It is restricted to the shapes whose result is
 // fully determined by SQL-expressible predicates and the standard
-// (created_at, id) sort, so the SQL LIMIT is exact. A custom orderBy, caller
-// extraWhere, or a ParentID/metadata/before-time filter all need post-SQL Go
-// work that a bounded SQL selection could truncate incorrectly, so those fall
-// back to the full-read merge.
+// (created_at, id) sort, so the SQL LIMIT is exact. The order-independent
+// exact parent+metadata ambiguity probe is also safe: both predicates are
+// pushed into every union leg and a candidate-boundary mismatch fails closed
+// after exact metadata decoding. Other parent/metadata shapes, custom orderBy,
+// caller extraWhere, and before-time filters fall back to the full-read merge.
 func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extraWhere string, limit int, orderBy string) bool {
-	return limit > 0 &&
-		len(sets) > 1 &&
-		orderBy == "" &&
-		extraWhere == "" &&
-		query.ParentID == "" &&
-		len(query.Metadata) == 0 &&
-		query.CreatedBefore.IsZero() &&
-		query.UpdatedBefore.IsZero() &&
-		query.SeekAfter == nil
+	if limit <= 0 || len(sets) <= 1 || orderBy != "" || extraWhere != "" || !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() || query.SeekAfter != nil {
+		return false
+	}
+	return query.isBoundedExactParentMetadataLookup() ||
+		(query.ParentID == "" && len(query.Metadata) == 0)
 }
 
 // queryBoundedTopN resolves a bounded multi-table read by selecting the exact
@@ -872,6 +869,11 @@ func (s *DoltliteReadStore) queryBoundedTopN(query ListQuery, sets []doltliteTab
 	merged, err := s.hydrateBeadsByID(query, sets, ids)
 	if err != nil {
 		return nil, err
+	}
+	merged = filterDoltliteMetadata(merged, query.Metadata)
+	merged = filterDoltliteBeforeTimes(merged, query)
+	if query.isBoundedExactParentMetadataLookup() && len(ids) >= limit && len(merged) < query.Limit {
+		return nil, fmt.Errorf("doltlite: physical limit %d reached before exact parent/metadata lookup was complete", limit)
 	}
 	sortBeadsForQuery(merged, doltliteSortOrder(query.Sort))
 	if limit > 0 && len(merged) > limit {
@@ -894,6 +896,10 @@ func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltlit
 	if err != nil {
 		return nil, err
 	}
+	issuesParentJoin := ""
+	if query.ParentID != "" {
+		issuesParentJoin = issuesTQ.parentJoin
+	}
 	unionParts := make([]string, 0, len(sets))
 	args := make([]any, 0)
 	for _, tables := range sets {
@@ -913,7 +919,7 @@ func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltlit
 		legWhere := append([]string{}, tq.where...)
 		legArgs := append([]any{}, tq.args...)
 		if tables.wisps && !issuesTQ.skipTable {
-			antiJoin, antiArgs := doltliteMatchingIssuesAntiJoin(issuesTQ.where, issuesTQ.args)
+			antiJoin, antiArgs := doltliteMatchingIssuesAntiJoin(issuesParentJoin, issuesTQ.where, issuesTQ.args)
 			legWhere = append(legWhere, antiJoin)
 			legArgs = append(legArgs, antiArgs...)
 		}
@@ -921,7 +927,11 @@ func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltlit
 		// text: the outer LIMIT must cut on the same second-granular key the Go
 		// merge and post-hydration re-sort compare, or the bounded prefix can
 		// diverge from the unbounded merge for same-second rows (#3449 review).
-		leg := "SELECT i.id AS id, " + doltliteCreatedAtSortKey("i") + " AS created_at FROM " + tables.issues + " i"
+		parentJoin := ""
+		if query.ParentID != "" {
+			parentJoin = tq.parentJoin
+		}
+		leg := "SELECT i.id AS id, " + doltliteCreatedAtSortKey("i") + " AS created_at FROM " + tables.issues + " i" + parentJoin
 		if len(legWhere) > 0 {
 			leg += " WHERE " + strings.Join(legWhere, " AND ")
 		}
@@ -1045,8 +1055,8 @@ func doltliteCreatedAtSortKey(alias string) string {
 // filter, because List dedupes wisps against the merged issues set before
 // excludeTypes runs (#3449 review). Shared by the bounded List id selection and
 // countDurableWisps so the dedupe shape has one source of truth.
-func doltliteMatchingIssuesAntiJoin(issuesWhere []string, issuesArgs []any) (string, []any) {
-	dedupe := "SELECT i.id FROM " + doltliteIssueTables.issues + " i"
+func doltliteMatchingIssuesAntiJoin(parentJoin string, issuesWhere []string, issuesArgs []any) (string, []any) {
+	dedupe := "SELECT i.id FROM " + doltliteIssueTables.issues + " i" + parentJoin
 	if len(issuesWhere) > 0 {
 		dedupe += " WHERE " + strings.Join(issuesWhere, " AND ")
 	}

@@ -185,7 +185,13 @@ func resolveCityNameRef(name string) (registeredPath string, useLocal bool, err 
 // local-city-vs-registration guard. Requiring the directory to exist keeps a
 // bare registered name typed from inside an unrelated ancestor rig scope on the
 // registry branch (and avoids the rig probe entirely on that common path).
+type rigPathContextResolver func(string) (resolvedContext, bool, error)
+
 func resolveCityNameContext(name string, localPathResolve func(string) (resolvedContext, error)) (resolvedContext, error) {
+	return resolveCityNameContextWithRigResolver(name, localPathResolve, resolveRigPathToContext)
+}
+
+func resolveCityNameContextWithRigResolver(name string, localPathResolve func(string) (resolvedContext, error), resolveRigPath rigPathContextResolver) (resolvedContext, error) {
 	f, err := lookupCityNameFacts(name)
 	if err != nil {
 		return resolvedContext{}, err
@@ -202,7 +208,7 @@ func resolveCityNameContext(name string, localPathResolve func(string) (resolved
 	// registered city wins without an extra registry scan, exactly as before.
 	localRigDir := isExistingDir(f.localDir)
 	if localRigDir || !f.registered {
-		ctx, isRig, rigErr := resolveRigPathToContext(f.localDir)
+		ctx, isRig, rigErr := resolveRigPath(f.localDir)
 		if rigErr != nil {
 			return resolvedContext{}, rigErr
 		}

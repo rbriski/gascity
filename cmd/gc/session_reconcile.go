@@ -954,33 +954,37 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 	return emptyNil(batch)
 }
 
-// healStateWithRollbackInfo is the session.Info sibling of healStateWithRollback:
-// it reads its heal decision off the coherent infoByID snapshot entry instead of
-// the raw *session bead, persists the batch through sessFront.ApplyPatch, and
-// returns the batch for the reconciler to fold onto infoByID via ApplyPatchInfo.
-// Unlike the raw form it does NOT mirror onto a raw bead — the snapshot fold is
-// the single source of truth for the same-tick downstream readers (which now
-// also read Info), so the two transitional W6 lockstep mirrors are gone.
-func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+type healStateResult struct {
+	Info    sessionpkg.Info
+	Applied sessionpkg.MetadataPatch
+	Err     error
+}
+
+// healStateWithRollbackInfo is the session.Info sibling of healStateWithRollback.
+// It advances Info and reports an applied patch only after ApplyPatchInfo proves
+// the persistence succeeded. A failed or commit-ambiguous write returns the
+// byte-identical input projection and leaves same-pass callers nothing to fold.
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) healStateResult {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
 	// Info.Closed is the projected mirror).
 	if info.Closed {
-		return nil
+		return healStateResult{Info: info}
 	}
 	batch := healStatePatchWithRollbackInfo(info, alive, clk, startupTimeout, rollbackAvailable)
 	if len(batch) == 0 {
-		return nil
+		return healStateResult{Info: info}
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
-		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
+	next, err := sessFront.ApplyPatchInfo(info, batch)
+	if err != nil {
+		return healStateResult{Info: info, Err: err}
 	}
 	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
 	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
+	// ApplyPatchInfo so a pure builder (healStatePatchWithRollbackInfo) invoked only for
 	// inspection never records a write that never happened.
 	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
-	return batch
+	return healStateResult{Info: next, Applied: sessionpkg.MetadataPatch(batch)}
 }
 
 // clearPendingCreateLeaseInfo is the Info-form counterpart of

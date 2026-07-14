@@ -3,6 +3,7 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -23,6 +24,29 @@ func setupReconciler(t *testing.T) (*Reconciler, *fakeStore, *fakeEmitter) {
 		Clock:   time.Now,
 	}
 	return &Reconciler{Handler: handler}, store, emitter
+}
+
+func completeEmptyStateMetadata() map[string]string {
+	return map[string]string{
+		FieldFormula:           "test-formula",
+		FieldTarget:            "test-agent",
+		FieldMaxIterations:     "5",
+		FieldIteration:         "1",
+		FieldGateMode:          GateModeManual,
+		FieldGateCondition:     "",
+		FieldGateTimeout:       "",
+		FieldGateTimeoutAction: "",
+		FieldTrigger:           TriggerNone,
+		FieldTriggerCondition:  "",
+	}
+}
+
+func cloneMetadata(meta map[string]string) map[string]string {
+	cloned := make(map[string]string, len(meta))
+	for key, value := range meta {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // --- Path 3t: waiting_trigger ---
@@ -81,12 +105,8 @@ func TestReconcile_WaitingTrigger_CompletesInterruptedStop(t *testing.T) {
 func TestReconcile_MissingState_NoWisps_PoursFirst(t *testing.T) {
 	rec, store, _ := setupReconciler(t)
 
-	// Root bead with no convergence.state set.
-	store.addBead("root-1", "in_progress", "", "", map[string]string{
-		FieldFormula:       "test-formula",
-		FieldMaxIterations: "5",
-		FieldTarget:        "test-agent",
-	})
+	// Root bead with complete creation metadata but no convergence.state set.
+	store.addBead("root-1", "in_progress", "", "", completeEmptyStateMetadata())
 
 	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
 	if err != nil {
@@ -123,15 +143,15 @@ func TestReconcile_MissingState_NoWisps_PoursFirst(t *testing.T) {
 func TestReconcile_MissingState_WispExists_Adopts(t *testing.T) {
 	rec, store, _ := setupReconciler(t)
 
-	store.addBead("root-1", "in_progress", "", "", map[string]string{
-		FieldFormula:       "test-formula",
-		FieldMaxIterations: "5",
-		FieldTarget:        "test-agent",
-	})
+	store.addBead("root-1", "in_progress", "", "", completeEmptyStateMetadata())
 
 	// Pre-existing wisp for iteration 1.
 	key1 := IdempotencyKey("root-1", 1)
 	store.addBead("existing-wisp", "in_progress", "root-1", key1, nil)
+	store.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+		t.Fatal("complete empty-state recovery must adopt the existing iteration-1 wisp, not pour")
+		return "", nil
+	}
 
 	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
 	if err != nil {
@@ -152,6 +172,382 @@ func TestReconcile_MissingState_WispExists_Adopts(t *testing.T) {
 	}
 	if meta[FieldActiveWisp] != "existing-wisp" {
 		t.Errorf("active_wisp = %q, want %q", meta[FieldActiveWisp], "existing-wisp")
+	}
+}
+
+func TestReconcile_ActiveWithoutMarkerAdoptsEarliestClosedChild(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:         StateActive,
+		FieldIteration:     "0",
+		FieldMaxIterations: "5",
+		FieldFormula:       "test-formula",
+		FieldTarget:        "test-agent",
+		FieldGateMode:      GateModeManual,
+	})
+	store.addBead("wisp-iter-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+	store.PourWispFunc = func(_, _, key string, _ map[string]string, _ string) (string, error) {
+		t.Fatalf("marker-less recovery must adopt earliest closed child, not pour %q", key)
+		return "", nil
+	}
+	store.ActivateWispFunc = func(id string) error {
+		t.Fatalf("closed child %q must not be activated", id)
+		return nil
+	}
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Errors != 0 || report.Details[0].Action != ActionAdoptedWisp {
+		t.Fatalf("report = %+v, want closed-child adoption", report)
+	}
+	meta, err := store.GetMetadata("root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta[FieldActiveWisp] != "wisp-iter-1" || meta[FieldLastProcessedWisp] != "" || meta[FieldState] != StateActive {
+		t.Fatalf("metadata after adoption = %#v, want closed iteration 1 left for legacy tick owner", meta)
+	}
+}
+
+func TestReconcile_ActiveWithoutMarkerRejectsIterationGap(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:         StateActive,
+		FieldIteration:     "0",
+		FieldMaxIterations: "5",
+		FieldFormula:       "test-formula",
+		FieldTarget:        "test-agent",
+		FieldGateMode:      GateModeManual,
+	})
+	store.addBead("wisp-iter-2", "closed", "root-1", IdempotencyKey("root-1", 2), nil)
+	store.PourWispFunc = func(_, _, key string, _ map[string]string, _ string) (string, error) {
+		t.Fatalf("marker-less recovery with an iteration gap must fail closed, not pour %q", key)
+		return "", nil
+	}
+	store.ActivateWispFunc = func(id string) error {
+		t.Fatalf("marker-less recovery with an iteration gap must not activate %q", id)
+		return nil
+	}
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Errors != 1 || report.Details[0].Error == nil || !strings.Contains(report.Details[0].Error.Error(), "iteration gap") {
+		t.Fatalf("report = %+v, want iteration-gap corruption error", report)
+	}
+	meta, err := store.GetMetadata("root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta[FieldActiveWisp] != "" || meta[FieldLastProcessedWisp] != "" || meta[FieldState] != StateActive {
+		t.Fatalf("metadata after rejected gap = %#v, want unchanged active root", meta)
+	}
+}
+
+func TestReconcile_MissingState_IncompleteCreationMetadataTerminatesWithoutPour(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{name: "missing formula", mutate: func(meta map[string]string) { delete(meta, FieldFormula) }},
+		{name: "empty formula", mutate: func(meta map[string]string) { meta[FieldFormula] = "" }},
+		{name: "missing target", mutate: func(meta map[string]string) { delete(meta, FieldTarget) }},
+		{name: "empty target", mutate: func(meta map[string]string) { meta[FieldTarget] = "" }},
+		{name: "missing max iterations", mutate: func(meta map[string]string) { delete(meta, FieldMaxIterations) }},
+		{name: "invalid max iterations", mutate: func(meta map[string]string) { meta[FieldMaxIterations] = "many" }},
+		{name: "zero max iterations", mutate: func(meta map[string]string) { meta[FieldMaxIterations] = "0" }},
+		{name: "negative max iterations", mutate: func(meta map[string]string) { meta[FieldMaxIterations] = "-1" }},
+		{name: "missing iteration", mutate: func(meta map[string]string) { delete(meta, FieldIteration) }},
+		{name: "invalid iteration", mutate: func(meta map[string]string) { meta[FieldIteration] = "first" }},
+		{name: "negative iteration", mutate: func(meta map[string]string) { meta[FieldIteration] = "-1" }},
+		{name: "iteration exceeds max", mutate: func(meta map[string]string) { meta[FieldIteration] = "6" }},
+		{name: "missing gate mode", mutate: func(meta map[string]string) { delete(meta, FieldGateMode) }},
+		{name: "empty gate mode", mutate: func(meta map[string]string) { meta[FieldGateMode] = "" }},
+		{name: "invalid gate mode", mutate: func(meta map[string]string) { meta[FieldGateMode] = "automatic" }},
+		{name: "missing gate condition", mutate: func(meta map[string]string) { delete(meta, FieldGateCondition) }},
+		{name: "missing gate timeout", mutate: func(meta map[string]string) { delete(meta, FieldGateTimeout) }},
+		{name: "invalid gate timeout", mutate: func(meta map[string]string) { meta[FieldGateTimeout] = "eventually" }},
+		{name: "missing gate timeout action", mutate: func(meta map[string]string) { delete(meta, FieldGateTimeoutAction) }},
+		{name: "invalid gate timeout action", mutate: func(meta map[string]string) { meta[FieldGateTimeoutAction] = "ignore" }},
+		{name: "missing trigger", mutate: func(meta map[string]string) { delete(meta, FieldTrigger) }},
+		{name: "invalid trigger", mutate: func(meta map[string]string) { meta[FieldTrigger] = "timer" }},
+		{name: "missing trigger condition", mutate: func(meta map[string]string) { delete(meta, FieldTriggerCondition) }},
+		{name: "event trigger without condition", mutate: func(meta map[string]string) { meta[FieldTrigger] = TriggerEvent }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, store, _ := setupReconciler(t)
+			meta := cloneMetadata(completeEmptyStateMetadata())
+			tt.mutate(meta)
+			store.addBead("root-1", "in_progress", "", "", meta)
+
+			store.FindByIdempotencyKeyFunc = func(string) (string, bool, error) {
+				t.Fatal("incomplete creation metadata must be classified before wisp lookup")
+				return "", false, nil
+			}
+			store.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+				t.Fatal("incomplete creation metadata must not pour a wisp")
+				return "", nil
+			}
+
+			report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+			if err != nil {
+				t.Fatalf("ReconcileBeads: %v", err)
+			}
+			if report.Errors != 0 || report.Recovered != 1 {
+				t.Fatalf("report = %+v, want one successful recovery", report)
+			}
+			detail := report.Details[0]
+			if detail.Action != ActionCompletedTerminal || detail.Error != nil {
+				t.Fatalf("detail = %+v, want completed_terminal without error", detail)
+			}
+
+			gotMeta, getErr := store.GetMetadata("root-1")
+			if getErr != nil {
+				t.Fatalf("GetMetadata(root-1): %v", getErr)
+			}
+			if gotMeta[FieldState] != StateTerminated {
+				t.Errorf("state = %q, want %q", gotMeta[FieldState], StateTerminated)
+			}
+			if gotMeta[FieldTerminalReason] != TerminalPartialCreation {
+				t.Errorf("terminal_reason = %q, want %q", gotMeta[FieldTerminalReason], TerminalPartialCreation)
+			}
+			info, getErr := store.GetBead("root-1")
+			if getErr != nil {
+				t.Fatalf("GetBead(root-1): %v", getErr)
+			}
+			if info.Status != "closed" {
+				t.Errorf("status = %q, want closed", info.Status)
+			}
+		})
+	}
+}
+
+func TestReconcile_MissingState_FreshReconcilerHealsDoubleStateWriteFailure(t *testing.T) {
+	store := newFakeStore()
+	emitter := &fakeEmitter{}
+	initialStateErr := errors.New("initial creating-state write failed")
+	rollbackStateErr := errors.New("rollback terminated-state write failed")
+	stateWrites := 0
+	store.SetMetadataErrFunc = func(key string) error {
+		if key != FieldState {
+			return nil
+		}
+		stateWrites++
+		if stateWrites == 1 {
+			return initialStateErr
+		}
+		return rollbackStateErr
+	}
+	pourCalls := 0
+	store.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+		pourCalls++
+		return "unexpected-wisp", nil
+	}
+
+	creator := &Handler{Store: store, Emitter: emitter, Clock: time.Now}
+	_, createErr := creator.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 5,
+		GateMode:      GateModeManual,
+	})
+	if !errors.Is(createErr, initialStateErr) || !errors.Is(createErr, rollbackStateErr) {
+		t.Fatalf("create error = %v, want both initial and rollback state failures", createErr)
+	}
+	if stateWrites != 2 {
+		t.Fatalf("state write attempts = %d, want 2", stateWrites)
+	}
+	beforeMeta, err := store.GetMetadata("conv-1")
+	if err != nil {
+		t.Fatalf("GetMetadata(conv-1) before recovery: %v", err)
+	}
+	if len(beforeMeta) != 0 {
+		t.Fatalf("metadata before recovery = %#v, want empty after double fault", beforeMeta)
+	}
+
+	store.SetMetadataErrFunc = nil
+	freshHandler := &Handler{Store: store, Emitter: &fakeEmitter{}, Clock: time.Now}
+	freshReconciler := &Reconciler{Handler: freshHandler}
+	report, err := freshReconciler.ReconcileBeads(context.Background(), []string{"conv-1"})
+	if err != nil {
+		t.Fatalf("ReconcileBeads: %v", err)
+	}
+	if report.Errors != 0 || report.Recovered != 1 || report.Details[0].Action != ActionCompletedTerminal {
+		t.Fatalf("report = %+v, want completed terminal recovery", report)
+	}
+	if pourCalls != 0 {
+		t.Fatalf("wisp pours = %d, want zero across create and fresh recovery", pourCalls)
+	}
+	meta, err := store.GetMetadata("conv-1")
+	if err != nil {
+		t.Fatalf("GetMetadata(conv-1) after recovery: %v", err)
+	}
+	if meta[FieldState] != StateTerminated || meta[FieldTerminalReason] != TerminalPartialCreation {
+		t.Fatalf("metadata after recovery = %#v, want terminated partial_creation", meta)
+	}
+	info, err := store.GetBead("conv-1")
+	if err != nil {
+		t.Fatalf("GetBead(conv-1): %v", err)
+	}
+	if info.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", info.Status)
+	}
+}
+
+func TestReconcile_MissingState_TransientWispEvidenceErrorsDoNotMutate(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*fakeStore, error)
+	}{
+		{
+			name: "lookup",
+			configure: func(store *fakeStore, transientErr error) {
+				store.FindByIdempotencyKeyFunc = func(string) (string, bool, error) {
+					return "", false, transientErr
+				}
+			},
+		},
+		{
+			name: "get bead",
+			configure: func(store *fakeStore, transientErr error) {
+				store.FindByIdempotencyKeyFunc = func(string) (string, bool, error) {
+					return "existing-wisp", true, nil
+				}
+				store.GetBeadFunc = func(string) (BeadInfo, error) {
+					return BeadInfo{}, transientErr
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, store, _ := setupReconciler(t)
+			store.addBead("root-1", "in_progress", "", "", completeEmptyStateMetadata())
+			transientErr := errors.New("store temporarily unavailable")
+			tt.configure(store, transientErr)
+			store.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+				t.Fatal("uncertain wisp evidence must not pour")
+				return "", nil
+			}
+			store.CloseBeadFunc = func(_, _ string) error {
+				t.Fatal("uncertain wisp evidence must not terminalize")
+				return nil
+			}
+
+			report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+			if err != nil {
+				t.Fatalf("ReconcileBeads: %v", err)
+			}
+			if report.Errors != 1 || !errors.Is(report.Details[0].Error, transientErr) {
+				t.Fatalf("report = %+v, want transient evidence error", report)
+			}
+			meta, getErr := store.GetMetadata("root-1")
+			if getErr != nil {
+				t.Fatalf("GetMetadata(root-1): %v", getErr)
+			}
+			if meta[FieldState] != "" || meta[FieldActiveWisp] != "" {
+				t.Fatalf("metadata after transient error = %#v, want no recovery mutation", meta)
+			}
+		})
+	}
+}
+
+func TestReconcile_MissingState_MismatchedWispEvidenceDoesNotMutate(t *testing.T) {
+	key1 := IdempotencyKey("root-1", 1)
+	tests := []struct {
+		name      string
+		foundID   string
+		found     bool
+		wispInfo  BeadInfo
+		wantError string
+	}{
+		{
+			name:      "ID without found evidence",
+			foundID:   "existing-wisp",
+			found:     false,
+			wispInfo:  BeadInfo{},
+			wantError: "without found evidence",
+		},
+		{
+			name:      "empty found ID",
+			foundID:   "",
+			found:     true,
+			wispInfo:  BeadInfo{},
+			wantError: "empty bead ID",
+		},
+		{
+			name:      "returned bead ID differs",
+			foundID:   "existing-wisp",
+			found:     true,
+			wispInfo:  BeadInfo{ID: "other-wisp", Status: "in_progress", ParentID: "root-1", IdempotencyKey: key1},
+			wantError: "returned bead ID",
+		},
+		{
+			name:      "wrong parent",
+			foundID:   "existing-wisp",
+			found:     true,
+			wispInfo:  BeadInfo{ID: "existing-wisp", Status: "in_progress", ParentID: "other-root", IdempotencyKey: key1},
+			wantError: "parent",
+		},
+		{
+			name:      "wrong idempotency key",
+			foundID:   "existing-wisp",
+			found:     true,
+			wispInfo:  BeadInfo{ID: "existing-wisp", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)},
+			wantError: "idempotency key",
+		},
+		{
+			name:      "invalid status",
+			foundID:   "existing-wisp",
+			found:     true,
+			wispInfo:  BeadInfo{ID: "existing-wisp", Status: "deleted", ParentID: "root-1", IdempotencyKey: key1},
+			wantError: "status",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, store, _ := setupReconciler(t)
+			store.addBead("root-1", "in_progress", "", "", completeEmptyStateMetadata())
+			store.FindByIdempotencyKeyFunc = func(string) (string, bool, error) {
+				return tt.foundID, tt.found, nil
+			}
+			store.GetBeadFunc = func(string) (BeadInfo, error) {
+				return tt.wispInfo, nil
+			}
+			store.PourWispFunc = func(_, _, _ string, _ map[string]string, _ string) (string, error) {
+				t.Fatal("mismatched wisp evidence must not pour")
+				return "", nil
+			}
+			store.CloseBeadFunc = func(_, _ string) error {
+				t.Fatal("mismatched wisp evidence must not terminalize")
+				return nil
+			}
+
+			report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+			if err != nil {
+				t.Fatalf("ReconcileBeads: %v", err)
+			}
+			if report.Errors != 1 || report.Details[0].Error == nil {
+				t.Fatalf("report = %+v, want evidence mismatch error", report)
+			}
+			if !strings.Contains(report.Details[0].Error.Error(), tt.wantError) {
+				t.Fatalf("error = %q, want substring %q", report.Details[0].Error, tt.wantError)
+			}
+			meta, getErr := store.GetMetadata("root-1")
+			if getErr != nil {
+				t.Fatalf("GetMetadata(root-1): %v", getErr)
+			}
+			if meta[FieldState] != "" || meta[FieldActiveWisp] != "" {
+				t.Fatalf("metadata after mismatch = %#v, want no recovery mutation", meta)
+			}
+		})
 	}
 }
 
@@ -396,17 +792,17 @@ func TestReconcile_WaitingManual_GenuineHold_NoStateChange(t *testing.T) {
 func TestReconcile_WaitingManual_GenuineHold_RepairsLastProcessedWisp(t *testing.T) {
 	rec, store, _ := setupReconciler(t)
 
-	// last_processed_wisp is stale (points to wisp-0, but wisp-1 is the
+	// last_processed_wisp is stale (points to wisp-1, but wisp-2 is the
 	// highest closed wisp).
 	store.addBead("root-1", "in_progress", "", "", map[string]string{
 		FieldState:             StateWaitingManual,
 		FieldWaitingReason:     WaitManual,
-		FieldLastProcessedWisp: "wisp-0",
+		FieldLastProcessedWisp: "wisp-1",
 		FieldFormula:           "test-formula",
 	})
 
-	store.addBead("wisp-0", "closed", "root-1", IdempotencyKey("root-1", 0), nil)
 	store.addBead("wisp-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+	store.addBead("wisp-2", "closed", "root-1", IdempotencyKey("root-1", 2), nil)
 
 	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
 	if err != nil {
@@ -419,8 +815,8 @@ func TestReconcile_WaitingManual_GenuineHold_RepairsLastProcessedWisp(t *testing
 	}
 
 	meta, _ := store.GetMetadata("root-1")
-	if meta[FieldLastProcessedWisp] != "wisp-1" {
-		t.Errorf("last_processed_wisp = %q, want %q", meta[FieldLastProcessedWisp], "wisp-1")
+	if meta[FieldLastProcessedWisp] != "wisp-2" {
+		t.Errorf("last_processed_wisp = %q, want %q", meta[FieldLastProcessedWisp], "wisp-2")
 	}
 }
 
@@ -693,9 +1089,10 @@ func TestReconcile_Active_EmptyActiveWisp_PoursNext(t *testing.T) {
 	rec, store, _ := setupReconciler(t)
 
 	store.addBead("root-1", "in_progress", "", "", map[string]string{
-		FieldState:      StateActive,
-		FieldActiveWisp: "",
-		FieldFormula:    "test-formula",
+		FieldState:             StateActive,
+		FieldActiveWisp:        "",
+		FieldLastProcessedWisp: "wisp-1",
+		FieldFormula:           "test-formula",
 	})
 
 	// One closed wisp from iteration 1.
@@ -724,9 +1121,10 @@ func TestReconcile_Active_EmptyActiveWisp_AdoptsExisting(t *testing.T) {
 	rec, store, _ := setupReconciler(t)
 
 	store.addBead("root-1", "in_progress", "", "", map[string]string{
-		FieldState:      StateActive,
-		FieldActiveWisp: "",
-		FieldFormula:    "test-formula",
+		FieldState:             StateActive,
+		FieldActiveWisp:        "",
+		FieldLastProcessedWisp: "wisp-1",
+		FieldFormula:           "test-formula",
 	})
 
 	// One closed wisp from iteration 1.
@@ -883,13 +1281,16 @@ func TestReconcile_RecoveryEventsHaveRecoveryFlag(t *testing.T) {
 
 func TestDeriveIterationFromChildren(t *testing.T) {
 	children := []BeadInfo{
-		{ID: "w1", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 1)},
-		{ID: "w2", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 2)},
-		{ID: "w3", Status: "in_progress", IdempotencyKey: IdempotencyKey("root-1", 3)},
+		{ID: "w1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+		{ID: "w2", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)},
+		{ID: "w3", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)},
 		{ID: "other", Status: "closed", IdempotencyKey: "unrelated-key"},
 	}
 
-	got := deriveIterationFromChildren(children, "root-1")
+	got, err := deriveIterationFromChildren(children, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != 2 {
 		t.Errorf("deriveIterationFromChildren = %d, want 2", got)
 	}
@@ -897,13 +1298,16 @@ func TestDeriveIterationFromChildren(t *testing.T) {
 
 func TestHighestClosedWisp(t *testing.T) {
 	children := []BeadInfo{
-		{ID: "w1", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 1)},
-		{ID: "w3", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 3)},
-		{ID: "w2", Status: "closed", IdempotencyKey: IdempotencyKey("root-1", 2)},
-		{ID: "w4", Status: "in_progress", IdempotencyKey: IdempotencyKey("root-1", 4)},
+		{ID: "w1", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
+		{ID: "w3", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 3)},
+		{ID: "w2", Status: "closed", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 2)},
+		{ID: "w4", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 4)},
 	}
 
-	best, iter, found := highestClosedWisp(children, "root-1")
+	best, iter, found, err := highestClosedWisp(children, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !found {
 		t.Fatal("expected to find a closed wisp")
 	}
@@ -917,10 +1321,13 @@ func TestHighestClosedWisp(t *testing.T) {
 
 func TestHighestClosedWisp_NoneFound(t *testing.T) {
 	children := []BeadInfo{
-		{ID: "w1", Status: "in_progress", IdempotencyKey: IdempotencyKey("root-1", 1)},
+		{ID: "w1", Status: "in_progress", ParentID: "root-1", IdempotencyKey: IdempotencyKey("root-1", 1)},
 	}
 
-	_, _, found := highestClosedWisp(children, "root-1")
+	_, _, found, err := highestClosedWisp(children, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if found {
 		t.Error("expected not to find a closed wisp")
 	}

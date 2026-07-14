@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"golang.org/x/term"
 )
@@ -82,7 +84,7 @@ var newSupervisorRegistry = func() supervisorRegistry {
 
 func supervisorCityStartTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadSupervisorIntentConfig(cityPath)
 	if err != nil {
 		return timeout
 	}
@@ -104,7 +106,7 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 
 func supervisorCityStopTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityStopTimeoutFloor
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadSupervisorIntentConfig(cityPath)
 	if err != nil {
 		return timeout
 	}
@@ -115,11 +117,33 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 }
 
 func effectiveCityName(cityPath string) (string, error) {
-	cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
+	cfg, err := loadSupervisorIntentConfig(cityPath)
 	if err != nil {
 		return "", err
 	}
 	return config.EffectiveCityName(cfg, filepath.Base(filepath.Clean(cityPath))), nil
+}
+
+// existingConfigComposeFS delegates reads to the host filesystem but is
+// deliberately not the concrete fsys.OSFS type. Config composition can expand
+// already-present local and cached includes through this facade without
+// entering the OSFS-only builtin cache hydration path.
+type existingConfigComposeFS struct{ fsys.FS }
+
+// loadSupervisorIntentConfig composes registration and timeout intent from
+// already-present files. It intentionally does not hydrate caches or apply
+// process-global runtime feature flags; those effects belong to the managed
+// controller after it acquires controller.lock.
+func loadSupervisorIntentConfig(cityPath string) (*config.City, error) {
+	cfg, _, err := config.LoadWithIncludesOptions(
+		existingConfigComposeFS{FS: fsys.OSFS{}},
+		filepath.Join(cityPath, "city.toml"),
+		config.LoadOptions{AllowMissingProviderReferences: true},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func registeredCityName(cityPath, nameOverride string) (string, error) {
@@ -146,11 +170,14 @@ func normalizeRegisteredCityPath(cityPath string) (string, error) {
 }
 
 func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
+	return registeredCityEntryFrom(newSupervisorRegistry(), cityPath)
+}
+
+func registeredCityEntryFrom(reg supervisorRegistry, cityPath string) (supervisor.CityEntry, bool, error) {
 	normalized, err := normalizeRegisteredCityPath(cityPath)
 	if err != nil {
 		return supervisor.CityEntry{}, false, err
 	}
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	entries, err := reg.List()
 	if err != nil {
 		return supervisor.CityEntry{}, false, err
@@ -349,14 +376,6 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 			}
 			return 1
 		}
-	}
-	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := EnsureBuiltinRuntimeAssets(cityPath, os.Stderr); err != nil {
-		fmt.Fprintf(stderr, "%s: materializing builtin packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 	name, err := registeredCityName(cityPath, nameOverride)
 	if err != nil {
@@ -577,6 +596,144 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 	}
 }
 
+func waitForSupervisorCityUntil(cityPath string, wantRunning bool, deadline time.Time, timeoutLabel time.Duration, stdout io.Writer) error {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	var lastStatus string
+	for {
+		if err := ctx.Err(); err != nil {
+			if wantRunning {
+				return fmt.Errorf("city did not become ready under supervisor within %s", timeoutLabel)
+			}
+			return fmt.Errorf("city did not stop under supervisor within %s", timeoutLabel)
+		}
+		running, status, known := supervisorCityRunningContext(ctx, cityPath)
+		switch {
+		case known && running == wantRunning:
+			return nil
+		case known && !wantRunning:
+			return fmt.Errorf("city is still running under supervisor")
+		case known && wantRunning && status == "init_failed":
+			return fmt.Errorf("city failed to start under supervisor")
+		case !known && !wantRunning:
+			return nil
+		case !known && supervisorAliveUntil(deadline) == 0:
+			if ctx.Err() != nil {
+				continue
+			}
+			return fmt.Errorf("supervisor stopped before city became ready")
+		}
+		if stdout != nil && status != "" && status != lastStatus {
+			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+			lastStatus = status
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			continue
+		}
+		delay := supervisorCityPollInterval
+		if delay > remaining {
+			delay = remaining
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+func supervisorAliveUntil(deadline time.Time) int {
+	for _, sockPath := range supervisorSocketPathCandidates() {
+		if !time.Now().Before(deadline) {
+			return 0
+		}
+		if pid := supervisorAliveAtPathUntil(sockPath, deadline); pid != 0 {
+			return pid
+		}
+	}
+	return 0
+}
+
+func reloadSupervisorUntil(stdout, stderr io.Writer, deadline time.Time) int {
+	var sockPath string
+	for _, candidate := range supervisorSocketPathCandidates() {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		if supervisorAliveAtPathUntil(candidate, deadline) != 0 {
+			sockPath = candidate
+			break
+		}
+	}
+	if sockPath == "" {
+		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running or the completion deadline expired") //nolint:errcheck
+		return 1
+	}
+	return reloadSupervisorAtPathUntil(sockPath, stdout, stderr, deadline, time.Now, net.DialTimeout)
+}
+
+func reloadSupervisorAtPathUntil(sockPath string, stdout, stderr io.Writer, deadline time.Time, now func() time.Time, dial func(string, string, time.Duration) (net.Conn, error)) int {
+	remaining := deadline.Sub(now())
+	if remaining <= 0 {
+		fmt.Fprintln(stderr, "gc supervisor reload: completion deadline expired before reload") //nolint:errcheck
+		return 1
+	}
+	dialTimeout := 2 * time.Second
+	if dialTimeout > remaining {
+		dialTimeout = remaining
+	}
+	conn, err := dial("unix", sockPath, dialTimeout)
+	if err != nil {
+		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
+		return 1
+	}
+	defer conn.Close() //nolint:errcheck
+	if !now().Before(deadline) {
+		fmt.Fprintln(stderr, "gc supervisor reload: completion deadline expired before writing reload") //nolint:errcheck
+		return 1
+	}
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor reload: setting write deadline: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if !now().Before(deadline) {
+		fmt.Fprintln(stderr, "gc supervisor reload: completion deadline expired before writing reload") //nolint:errcheck
+		return 1
+	}
+	command := []byte("reload\n")
+	n, err := conn.Write(command)
+	if err != nil || n != len(command) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		fmt.Fprintf(stderr, "gc supervisor reload: writing reload command: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor reload: setting read deadline: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	reply, err := bufio.NewReader(io.LimitReader(conn, 65)).ReadString('\n')
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor reload: reading reload acknowledgement: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	switch strings.TrimSpace(reply) {
+	case "ok":
+		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
+		return 0
+	case "busy":
+		fmt.Fprintln(stderr, "gc supervisor reload: reconcile queue is busy; try again shortly") //nolint:errcheck
+	case "timeout":
+		fmt.Fprintln(stderr, "gc supervisor reload: reconcile did not finish before timeout") //nolint:errcheck
+	default:
+		fmt.Fprintln(stderr, "gc supervisor reload: supervisor not responding (may be shutting down); try 'gc supervisor start'") //nolint:errcheck
+	}
+	return 1
+}
+
 // supervisorCityError fetches the error message for a city from the supervisor API.
 func supervisorCityError(cityPath string) string {
 	baseURL, err := supervisorAPIBaseURL()
@@ -620,40 +777,181 @@ func statusDisplayText(status string) string {
 }
 
 type supervisorUnregisterOptions struct {
-	Force bool
+	Force                  bool
+	ClassifyStandaloneStop bool
+	Deadline               time.Time
+	TimeoutLabel           time.Duration
+	DeadlineOps            *supervisorUnregisterDeadlineOps
+}
+
+type supervisorUnregisterDeadlineOps struct {
+	now              func() time.Time
+	supervisorAlive  func(time.Time) int
+	requestStop      func(string, bool, time.Time) controllerStopResult
+	reload           func(io.Writer, io.Writer, time.Time) int
+	waitCity         func(string, bool, time.Time, time.Duration, io.Writer) error
+	acquireOwnership func(string, time.Time, time.Duration) (*controllerLockLease, error)
+}
+
+var stopSupervisorUnregisterDeadlineOps = supervisorUnregisterDeadlineOps{
+	now:             time.Now,
+	supervisorAlive: supervisorAliveUntil,
+	requestStop: func(cityPath string, force bool, deadline time.Time) controllerStopResult {
+		return controllerStopRequestUntilForCommand(cityPath, force, deadline)
+	},
+	reload:           reloadSupervisorUntil,
+	waitCity:         waitForSupervisorCityUntil,
+	acquireOwnership: waitForSupervisorControllerOwnershipUntil,
+}
+
+type supervisorUnregisterState uint8
+
+const (
+	supervisorUnregisterInvalid supervisorUnregisterState = iota
+	supervisorUnregisterNotRegistered
+	supervisorUnregisterManagedCleanupComplete
+	supervisorUnregisterDirectFallbackRequired
+	supervisorUnregisterFailed
+)
+
+type supervisorUnregisterResult struct {
+	state         supervisorUnregisterState
+	registered    bool
+	stopResult    controllerStopResult
+	hasStopResult bool
+	ownership     *controllerLockLease
+}
+
+func (r supervisorUnregisterResult) legacy() (bool, int) {
+	switch r.state {
+	case supervisorUnregisterNotRegistered:
+		return false, 0
+	case supervisorUnregisterManagedCleanupComplete, supervisorUnregisterDirectFallbackRequired:
+		return true, 0
+	case supervisorUnregisterFailed:
+		return r.registered, 1
+	case supervisorUnregisterInvalid:
+		return false, 1
+	default:
+		return false, 1
+	}
 }
 
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
 	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
-func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
-	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
-		Force: force,
+func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
+	return unregisterCityFromSupervisorWithOptionsResult(cityPath, stdout, stderr, commandName, opts).legacy()
+}
+
+func unregisterCityFromSupervisorWithForceResult(cityPath string, stdout, stderr io.Writer, commandName string, force bool) supervisorUnregisterResult {
+	return unregisterCityFromSupervisorWithOptionsResult(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force:                  force,
+		ClassifyStandaloneStop: true,
 	})
 }
 
-func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
+func unregisterCityFromSupervisorWithForceResultUntil(cityPath string, stdout, stderr io.Writer, commandName string, force bool, deadline time.Time, timeoutLabel time.Duration) supervisorUnregisterResult {
+	return unregisterCityFromSupervisorWithOptionsResult(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force:                  force,
+		ClassifyStandaloneStop: true,
+		Deadline:               deadline,
+		TimeoutLabel:           timeoutLabel,
+		DeadlineOps:            &stopSupervisorUnregisterDeadlineOps,
+	})
+}
+
+func unregisterCityFromSupervisorWithOptionsResult(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) supervisorUnregisterResult {
+	deadlineExpired := func() bool {
+		return opts.DeadlineOps != nil && (opts.Deadline.IsZero() || !opts.DeadlineOps.now().Before(opts.Deadline))
+	}
+	if deadlineExpired() {
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed}
+	}
 	cityPath = normalizePathForCompare(cityPath)
-	entry, registered, err := registeredCityEntry(cityPath)
+	reg := newSupervisorRegistry()
+	entry, registered, err := registeredCityEntryFrom(reg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return false, 1
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed}
 	}
 	if !registered {
-		return false, 0
+		return supervisorUnregisterResult{state: supervisorUnregisterNotRegistered}
+	}
+	if deadlineExpired() {
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 	}
 
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if opts.Force && supervisorAliveHook() != 0 {
-		tryStopControllerWithForce(cityPath, io.Discard, true)
+	supervisorWasAlive := false
+	if opts.ClassifyStandaloneStop || opts.Force {
+		if opts.DeadlineOps != nil {
+			supervisorWasAlive = opts.DeadlineOps.supervisorAlive(opts.Deadline) != 0
+		} else {
+			supervisorWasAlive = supervisorAliveHook() != 0
+		}
+		if deadlineExpired() {
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+	}
+	var standaloneStopResult controllerStopResult
+	hasStandaloneStopResult := false
+	if opts.ClassifyStandaloneStop && !supervisorWasAlive {
+		if opts.DeadlineOps != nil {
+			standaloneStopResult = opts.DeadlineOps.requestStop(cityPath, opts.Force, opts.Deadline)
+		} else {
+			standaloneStopResult = controllerStopRequestForCommand(cityPath, opts.Force)
+		}
+		switch standaloneStopResult.outcome {
+		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+			hasStandaloneStopResult = true
+		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, standaloneStopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		default:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, standaloneStopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+		if deadlineExpired() {
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+	}
+	if opts.Force && supervisorWasAlive {
+		var stopResult controllerStopResult
+		if opts.DeadlineOps != nil {
+			stopResult = opts.DeadlineOps.requestStop(cityPath, true, opts.Deadline)
+		} else {
+			stopResult = controllerStopRequestForCommand(cityPath, true)
+		}
+		switch stopResult.outcome {
+		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+			// The supervisor reconcile remains the managed unregister owner.
+		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		default:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+		if deadlineExpired() {
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+	}
+	if deadlineExpired() {
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return true, 1
+		return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 	}
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
+	if !opts.ClassifyStandaloneStop {
+		// Plain gc unregister has no prior stop acknowledgement to preserve.
+		// Probe after the registry mutation so a concurrently starting
+		// supervisor that observed the old entry is reloaded and awaited.
+		supervisorWasAlive = supervisorAliveHook() != 0
+	}
 
 	// If the city directory is gone, there's nothing to wait on or restore.
 	// Skip the supervisor-side probes that would otherwise spew
@@ -661,28 +959,83 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	// (the unregister itself already succeeded; the supervisor's next
 	// reconcile will drop the dead city).
 	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
-		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
-			return true, 1
+		reloadCode := 0
+		if supervisorWasAlive {
+			if opts.DeadlineOps != nil {
+				reloadCode = opts.DeadlineOps.reload(stdout, stderr, opts.Deadline)
+			} else {
+				reloadCode = reloadSupervisorHook(stdout, stderr)
+			}
 		}
-		return true, 0
+		if supervisorWasAlive && reloadCode != 0 {
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+		if deadlineExpired() {
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+		if supervisorWasAlive {
+			return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true}
+		}
+		return supervisorUnregisterResult{
+			state:         supervisorUnregisterDirectFallbackRequired,
+			registered:    true,
+			stopResult:    standaloneStopResult,
+			hasStopResult: hasStandaloneStopResult,
+		}
 	}
 
-	if supervisorAliveHook() != 0 {
-		if reloadSupervisorHook(stdout, stderr) != 0 {
+	if supervisorWasAlive {
+		reloadCode := 0
+		if opts.DeadlineOps != nil {
+			reloadCode = opts.DeadlineOps.reload(stdout, stderr, opts.Deadline)
+		} else {
+			reloadCode = reloadSupervisorHook(stdout, stderr)
+		}
+		if reloadCode != 0 || deadlineExpired() {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
 				fmt.Fprintf(stderr, "%s: reconcile failed and restore failed for '%s': %v\n", commandName, entry.EffectiveName(), reErr) //nolint:errcheck
 			} else {
 				fmt.Fprintf(stderr, "%s: reconcile failed; restored registration for '%s'\n", commandName, entry.EffectiveName()) //nolint:errcheck
 			}
-			return true, 1
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
-		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+		var waitErr error
+		if opts.DeadlineOps != nil {
+			waitErr = opts.DeadlineOps.waitCity(cityPath, false, opts.Deadline, opts.TimeoutLabel, nil)
+		} else {
+			waitErr = waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil)
+		}
+		if waitErr != nil || deadlineExpired() {
+			if waitErr == nil {
+				waitErr = errStopCompletionDeadline
 			}
-			return true, 1
+			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, waitErr, entry.EffectiveName(), reErr) //nolint:errcheck
+			} else {
+				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, waitErr, entry.EffectiveName()) //nolint:errcheck
+			}
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+		}
+		if opts.DeadlineOps != nil {
+			ownership, ownershipErr := opts.DeadlineOps.acquireOwnership(cityPath, opts.Deadline, opts.TimeoutLabel)
+			if ownershipErr == nil && deadlineExpired() {
+				_ = ownership.Close()
+				ownership = nil
+				ownershipErr = errStopCompletionDeadline
+			}
+			if ownershipErr != nil {
+				if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+					fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, ownershipErr, entry.EffectiveName(), reErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, ownershipErr, entry.EffectiveName()) //nolint:errcheck
+				}
+				return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+			}
+			if ownership == nil {
+				fmt.Fprintf(stderr, "%s: supervisor cleanup returned no controller ownership\n", commandName) //nolint:errcheck
+				return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
+			}
+			return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true, ownership: ownership}
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
@@ -690,10 +1043,16 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			} else {
 				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			}
-			return true, 1
+			return supervisorUnregisterResult{state: supervisorUnregisterFailed, registered: true}
 		}
+		return supervisorUnregisterResult{state: supervisorUnregisterManagedCleanupComplete, registered: true}
 	}
-	return true, 0
+	return supervisorUnregisterResult{
+		state:         supervisorUnregisterDirectFallbackRequired,
+		registered:    true,
+		stopResult:    standaloneStopResult,
+		hasStopResult: hasStandaloneStopResult,
+	}
 }
 
 var waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
@@ -736,12 +1095,16 @@ func supervisorCityRunning(cityPath string) (running bool, status string, known 
 	if supervisorAliveHook() == 0 {
 		return false, "", false
 	}
+	return supervisorCityRunningContext(context.Background(), cityPath)
+}
+
+func supervisorCityRunningContext(ctx context.Context, cityPath string) (running bool, status string, known bool) {
 	baseURL, err := supervisorAPIBaseURL()
 	if err != nil {
 		return false, "", false
 	}
 	client := api.NewClient(baseURL)
-	cities, err := client.ListCities()
+	cities, err := client.ListCitiesContext(ctx)
 	if err != nil {
 		return false, "", false
 	}

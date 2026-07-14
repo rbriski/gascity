@@ -102,6 +102,16 @@ func (s convergenceListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, s.err
 }
 
+type convergenceListCaptureStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *convergenceListCaptureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.Store.List(query)
+}
+
 type getPanicStore struct {
 	beads.Store
 }
@@ -341,6 +351,58 @@ func TestConvergence_StartupReconcile(t *testing.T) {
 	adapter := hqScope(t, cr).adapter
 	if adapter.activeIndex == nil {
 		t.Error("active index should be populated after startup reconcile")
+	}
+}
+
+// This is a P1.1A characterization, not RC-CRASH-002 evidence. Normal startup
+// discovery currently excludes closed convergence roots; P1.1B must add a
+// bounded durable transition index before empty-memory repair can be claimed.
+func TestConvergence_StartupReconcileExcludesClosedIncompleteRoot(t *testing.T) {
+	cr, store := setupConvergenceRuntime(t)
+
+	root, err := store.Create(beads.Bead{
+		Title:  "closed incomplete convergence root",
+		Type:   "convergence",
+		Status: "in_progress",
+	})
+	if err != nil {
+		t.Fatalf("creating convergence root: %v", err)
+	}
+	if err := store.SetMetadata(root.ID, convergence.FieldState, convergence.StateCreating); err != nil {
+		t.Fatalf("setting interrupted state: %v", err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("closing convergence root: %v", err)
+	}
+
+	capture := &convergenceListCaptureStore{Store: store}
+	scope := hqScope(t, cr)
+	scope.store = capture
+	scope.adapter.store = capture
+
+	cr.convergenceStartupReconcile(context.Background())
+
+	if len(capture.queries) == 0 {
+		t.Fatal("startup reconciliation issued no convergence query")
+	}
+	for i, query := range capture.queries {
+		if query.Type != "convergence" {
+			t.Fatalf("startup query %d type = %q, want convergence", i, query.Type)
+		}
+		if query.IncludeClosed {
+			t.Fatalf("startup query %d unexpectedly includes closed roots", i)
+		}
+	}
+
+	got, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("getting closed convergence root: %v", err)
+	}
+	if got.Metadata[convergence.FieldState] != convergence.StateCreating {
+		t.Fatalf("state = %q, want unchanged %q", got.Metadata[convergence.FieldState], convergence.StateCreating)
+	}
+	if got.Metadata[convergence.FieldTerminalReason] != "" {
+		t.Fatalf("terminal reason = %q, want unrepaired closed-root evidence", got.Metadata[convergence.FieldTerminalReason])
 	}
 }
 
@@ -984,6 +1046,338 @@ func TestConvergence_EnqueueTimeout(t *testing.T) {
 	// Drain the channel.
 	for len(cr.convergenceReqCh) > 0 {
 		<-cr.convergenceReqCh
+	}
+}
+
+func TestConvergenceStoreExplicitIDRecoveryFindsClosedPolicyTierChild(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	adapter := newConvergenceStoreAdapter(store, nil)
+
+	root, err := backing.Create(beads.Bead{
+		Title:  "convergence root",
+		Type:   "convergence",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			convergence.FieldState:          convergence.StateTerminated,
+			convergence.FieldTerminalReason: convergence.TerminalStopped,
+			convergence.FieldTerminalActor:  "operator:alice",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating convergence root: %v", err)
+	}
+	key := convergence.IdempotencyKey(root.ID, 1)
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "closed ephemeral wisp",
+		ParentID:  root.ID,
+		Ephemeral: true,
+		NoHistory: false,
+		Status:    "in_progress",
+		Metadata:  map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatalf("creating convergence wisp: %v", err)
+	}
+	if err := backing.Close(wisp.ID); err != nil {
+		t.Fatalf("closing convergence wisp: %v", err)
+	}
+	if err := backing.Close(root.ID); err != nil {
+		t.Fatalf("closing convergence root: %v", err)
+	}
+
+	reconciler := &convergence.Reconciler{
+		Handler: &convergence.Handler{Store: adapter},
+	}
+	report, err := reconciler.ReconcileBeads(context.Background(), []string{root.ID})
+	if err != nil {
+		t.Fatalf("reconciling explicit root ID: %v", err)
+	}
+	if report.Errors != 0 || len(report.Details) != 1 || report.Details[0].Action != convergence.ActionCompletedTerminal {
+		t.Fatalf("reconcile report = %+v, want completed terminal repair", report)
+	}
+	meta, err := adapter.GetMetadata(root.ID)
+	if err != nil {
+		t.Fatalf("reading repaired root metadata: %v", err)
+	}
+	if got := meta[convergence.FieldLastProcessedWisp]; got != wisp.ID {
+		t.Fatalf("last_processed_wisp = %q, want closed wisp %q", got, wisp.ID)
+	}
+}
+
+func TestConvergenceStoreFindByIdempotencyKeyFindsClosedPolicyTierChild(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	adapter := newConvergenceStoreAdapter(store, nil)
+
+	root, err := backing.Create(beads.Bead{Title: "convergence root", Type: "convergence"})
+	if err != nil {
+		t.Fatalf("creating convergence root: %v", err)
+	}
+	otherRoot, err := backing.Create(beads.Bead{Title: "other root", Type: "convergence"})
+	if err != nil {
+		t.Fatalf("creating other root: %v", err)
+	}
+	key := convergence.IdempotencyKey(root.ID, 1)
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "closed ephemeral wisp",
+		ParentID:  root.ID,
+		Ephemeral: true,
+		Status:    "in_progress",
+		Metadata:  map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatalf("creating convergence wisp: %v", err)
+	}
+	if err := backing.Close(wisp.ID); err != nil {
+		t.Fatalf("closing convergence wisp: %v", err)
+	}
+	other, err := backing.Create(beads.Bead{
+		Title:     "same-key child of another root",
+		ParentID:  otherRoot.ID,
+		Ephemeral: true,
+		Status:    "in_progress",
+		Metadata:  map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatalf("creating unrelated wisp: %v", err)
+	}
+	if err := backing.Close(other.ID); err != nil {
+		t.Fatalf("closing unrelated wisp: %v", err)
+	}
+
+	gotID, found, err := adapter.FindByIdempotencyKey(key)
+	if err != nil {
+		t.Fatalf("finding closed convergence wisp: %v", err)
+	}
+	if !found || gotID != wisp.ID {
+		t.Fatalf("FindByIdempotencyKey = (%q, %t), want (%q, true)", gotID, found, wisp.ID)
+	}
+}
+
+func TestConvergenceStoreFindByIdempotencyKeyPreservesLegacyFallbackAndEmbeddedMarkerParents(t *testing.T) {
+	tests := []struct {
+		name      string
+		parentID  string
+		key       string
+		ephemeral bool
+		close     bool
+	}{
+		{
+			name:     "legacy fallback keeps prior open durable scope",
+			parentID: "legacy-parent",
+			key:      "legacy-convergence-key",
+		},
+		{
+			name:      "canonical key whose parent contains iteration marker",
+			parentID:  "gc-root:iter:embedded",
+			key:       convergence.IdempotencyKey("gc-root:iter:embedded", 2),
+			ephemeral: true,
+			close:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			store := wrapStoreWithBeadPolicies(backing, &config.City{})
+			adapter := newConvergenceStoreAdapter(store, nil)
+
+			wisp, err := backing.Create(beads.Bead{
+				Title:     "convergence wisp",
+				ParentID:  tt.parentID,
+				Ephemeral: tt.ephemeral,
+				Metadata:  map[string]string{"idempotency_key": tt.key},
+			})
+			if err != nil {
+				t.Fatalf("creating convergence wisp: %v", err)
+			}
+			if tt.close {
+				if err := backing.Close(wisp.ID); err != nil {
+					t.Fatalf("closing convergence wisp: %v", err)
+				}
+			}
+
+			gotID, found, err := adapter.FindByIdempotencyKey(tt.key)
+			if err != nil {
+				t.Fatalf("FindByIdempotencyKey(%q): %v", tt.key, err)
+			}
+			if !found || gotID != wisp.ID {
+				t.Fatalf("FindByIdempotencyKey(%q) = (%q, %t), want (%q, true)", tt.key, gotID, found, wisp.ID)
+			}
+		})
+	}
+}
+
+func TestConvergenceStoreFindByIdempotencyKeyUsesBoundedExactParentQuery(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	capture := &convergenceListCaptureStore{Store: store}
+	adapter := newConvergenceStoreAdapter(capture, nil)
+
+	root, err := backing.Create(beads.Bead{Title: "convergence root", Type: "convergence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := convergence.IdempotencyKey(root.ID, 1)
+	wisp, err := backing.Create(beads.Bead{
+		Title: "closed ephemeral wisp", ParentID: root.ID, Ephemeral: true,
+		Metadata: map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(wisp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, found, err := adapter.FindByIdempotencyKey(key)
+	if err != nil || !found || gotID != wisp.ID {
+		t.Fatalf("FindByIdempotencyKey = (%q, %t, %v), want (%q, true, nil)", gotID, found, err, wisp.ID)
+	}
+	if len(capture.queries) != 1 {
+		t.Fatalf("list queries = %d, want exactly one", len(capture.queries))
+	}
+	query := capture.queries[0]
+	if query.ParentID != root.ID || !query.IncludeClosed || query.TierMode != beads.TierBoth || query.Limit != 2 || query.Sort != beads.SortDefault || query.Metadata["idempotency_key"] != key {
+		t.Fatalf("idempotency query = %+v, want exact parent/key, both tiers, closed rows, limit 2", query)
+	}
+}
+
+func TestConvergenceStoreFindByIdempotencyKeyRejectsDuplicateExactMatches(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	adapter := newConvergenceStoreAdapter(store, nil)
+	root, err := backing.Create(beads.Bead{Title: "convergence root", Type: "convergence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := convergence.IdempotencyKey(root.ID, 1)
+	for i := 0; i < 2; i++ {
+		if _, err := backing.Create(beads.Bead{
+			Title: "duplicate convergence wisp", ParentID: root.ID,
+			Metadata: map[string]string{"idempotency_key": key},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gotID, found, err := adapter.FindByIdempotencyKey(key)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("FindByIdempotencyKey = (%q, %t, %v), want ambiguous duplicate error", gotID, found, err)
+	}
+}
+
+func TestConvergenceStoreBdLookupBoundsWorkAndDetectsDuplicateExactMatches(t *testing.T) {
+	const (
+		parentID = "root-1"
+		key      = "converge:root-1:iter:2"
+	)
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		calls = append(calls, command)
+		switch {
+		case strings.HasPrefix(command, "bd list "):
+			return []byte(`[
+				{"id":"dup-a","title":"a","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:00Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:2"}},
+				{"id":"dup-b","title":"b","status":"closed","issue_type":"molecule","created_at":"2026-07-13T00:00:01Z","parent":"root-1","metadata":{"idempotency_key":"converge:root-1:iter:2"}}
+			]`), nil
+		case strings.HasPrefix(command, "bd query "):
+			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected bd command: " + command)
+		}
+	}
+	adapter := newConvergenceStoreAdapter(beads.NewBdStore("/city", runner), nil)
+
+	_, found, err := adapter.FindByIdempotencyKey(key)
+	if err == nil || found || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("FindByIdempotencyKey = (found=%t, err=%v), want bounded ambiguity error", found, err)
+	}
+	for _, prefix := range []string{"bd list ", "bd query "} {
+		command := ""
+		for _, call := range calls {
+			if strings.HasPrefix(call, prefix) {
+				command = call
+				break
+			}
+		}
+		if !strings.Contains(command, "--limit 2") {
+			t.Fatalf("%s command = %q, want physical limit 2; calls=%v", strings.TrimSpace(prefix), command, calls)
+		}
+	}
+}
+
+func TestConvergenceStoreFindByIdempotencyKeyRejectsMalformedConvergenceKey(t *testing.T) {
+	adapter := newConvergenceStoreAdapter(beads.NewMemStore(), nil)
+	for _, key := range []string{
+		"converge:root-1:iter:not-a-number",
+		"converge:root-1:iter:0",
+		"converge::iter:1",
+	} {
+		t.Run(key, func(t *testing.T) {
+			if _, _, err := adapter.FindByIdempotencyKey(key); err == nil || !strings.Contains(err.Error(), "malformed") {
+				t.Fatalf("FindByIdempotencyKey(%q) error = %v, want malformed-key refusal", key, err)
+			}
+		})
+	}
+}
+
+func TestConvergenceStoreLegacyFallbackDoesNotScanClosedPolicyTierHistory(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	capture := &convergenceListCaptureStore{Store: store}
+	adapter := newConvergenceStoreAdapter(capture, nil)
+	key := "legacy-convergence-key"
+	wisp, err := backing.Create(beads.Bead{
+		Title: "closed ephemeral legacy wisp", Ephemeral: true,
+		Metadata: map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(wisp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, found, err := adapter.FindByIdempotencyKey(key)
+	if err != nil || found || gotID != "" {
+		t.Fatalf("legacy closed-history lookup = (%q, %t, %v), want no match", gotID, found, err)
+	}
+	if len(capture.queries) != 1 {
+		t.Fatalf("legacy fallback queries = %d, want one", len(capture.queries))
+	}
+	query := capture.queries[0]
+	if query.IncludeClosed || query.TierMode != beads.TierIssues {
+		t.Fatalf("legacy fallback query = %+v, must not expand into closed/two-tier history", query)
+	}
+}
+
+func TestConvergenceEventEmitterPreservesCurrentWireAndDoesNotPersistLogicalEventID(t *testing.T) {
+	recorder := events.NewFake()
+	emitter := &convergenceEventEmitter{rec: recorder}
+	payload := json.RawMessage(`{"terminal_reason":"stopped"}`)
+	logicalEventID := "converge:root-1:terminated"
+
+	emitter.Emit(convergence.EventTerminated, logicalEventID, "root-1", payload, true)
+
+	if len(recorder.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1", len(recorder.Events))
+	}
+	got := recorder.Events[0]
+	if got.Type != convergence.EventTerminated || got.Actor != "convergence" || got.Subject != "root-1" {
+		t.Fatalf("recorded envelope = %+v, want current convergence type/actor/subject", got)
+	}
+	if got.Message != string(payload) || len(got.Payload) != 0 {
+		t.Fatalf("recorded payload projection = message %q payload %q, want JSON in Message only", got.Message, got.Payload)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshaling recorded event: %v", err)
+	}
+	if bytes.Contains(encoded, []byte(logicalEventID)) {
+		t.Fatalf("current production event unexpectedly persisted internal logical event ID %q: %s", logicalEventID, encoded)
 	}
 }
 

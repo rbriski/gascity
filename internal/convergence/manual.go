@@ -40,35 +40,41 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 		)
 	}
 
-	// Derive iteration count from children for event payload.
-	iterationCount, err := h.deriveIterationCount(beadID)
+	// One checked child snapshot supplies the iteration count, duration, and
+	// applicable terminal marker. In particular, waiting_manual may be durable
+	// while its trailing last_processed_wisp write is still stale after a crash.
+	children, err := h.Store.Children(beadID)
 	if err != nil {
-		return HandlerResult{}, fmt.Errorf("deriving iteration count for bead %q: %w", beadID, err)
+		return HandlerResult{}, fmt.Errorf("listing children for terminal proof on bead %q: %w", beadID, err)
 	}
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("validating child evidence for terminal proof on bead %q: %w", beadID, err)
+	}
+	iterationCount := stats.ClosedCount
 
 	// Read the last active wisp for event payload.
 	activeWisp := meta[FieldActiveWisp]
 	lastProcessedWisp := meta[FieldLastProcessedWisp]
+	terminalMarker := lastProcessedWisp
+	if stats.HighestClosedFound {
+		terminalMarker = stats.HighestClosed.ID
+	}
 	// Use the most recent wisp reference for the event.
-	eventWispID := lastProcessedWisp
+	eventWispID := terminalMarker
 	if activeWisp != "" {
 		eventWispID = activeWisp
 	}
 
-	// Compute cumulative duration for terminated event.
-	_, cumDur := h.computeDurations(beadID, eventWispID)
-
-	// Emit EventTerminated BEFORE CloseBead — TierCritical requires at-least-once
-	// delivery, so it must be emitted while the bead is still open for reconciliation
-	// replay if the controller crashes before CloseBead completes.
+	// Prepare terminal payloads before commit, but publish them only after state,
+	// close, and last_processed_wisp are all durable.
 	termPayload := TerminatedPayload{
 		TerminalReason:       TerminalApproved,
 		TotalIterations:      iterationCount,
 		FinalStatus:          "closed",
 		Actor:                actor,
-		CumulativeDurationMs: cumDur.Milliseconds(),
+		CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 	}
-	// Emit ManualApprove AFTER CloseBead — TierBestEffort, fire-and-forget.
 	approvePayload := ManualActionPayload{
 		Actor:      actor,
 		PriorState: StateWaitingManual,
@@ -78,8 +84,7 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 	}
 
 	// Write ordering: terminal_reason, terminal_actor, clear waiting_reason,
-	// then state=terminated, then EventTerminated (TierCritical, before CloseBead),
-	// then CloseBead, then ManualApprove (TierBestEffort), then last_processed_wisp LAST.
+	// state=terminated, CloseBead, then last_processed_wisp LAST.
 	if err := h.commit(beadID,
 		[]metaWrite{
 			{FieldTerminalReason, TerminalApproved, "setting terminal reason"},
@@ -88,17 +93,18 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 			{FieldState, StateTerminated, "setting state to terminated"},
 		},
 		func() error {
-			h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 			if err := h.Store.CloseBead(beadID, CloseReasonManualApprove); err != nil {
 				return fmt.Errorf("closing bead %q: %w", beadID, err)
 			}
-			h.emitEvent(EventManualApprove, EventIDManualApprove(beadID), beadID, approvePayload)
 			return nil
 		},
-		metaWrite{FieldLastProcessedWisp, lastProcessedWisp, "setting last processed wisp"},
+		metaWrite{FieldLastProcessedWisp, terminalMarker, "setting last processed wisp"},
 	); err != nil {
 		return HandlerResult{}, err
 	}
+
+	h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
+	h.emitEvent(EventManualApprove, EventIDManualApprove(beadID), beadID, approvePayload)
 
 	return HandlerResult{
 		Action:    ActionApproved,
@@ -129,27 +135,30 @@ func (h *Handler) IterateHandler(_ context.Context, beadID, username, _ string) 
 		)
 	}
 
-	// Check iteration < max_iterations.
-	iterationCount, err := h.deriveIterationCount(beadID)
+	// Derive the next iteration from the durable marker. A closed successor may
+	// already exist after an ambiguous prior pour; total closed-child count would
+	// skip that successor and create duplicate work.
+	children, err := h.Store.Children(beadID)
 	if err != nil {
-		return HandlerResult{}, fmt.Errorf("deriving iteration count for bead %q: %w", beadID, err)
+		return HandlerResult{}, fmt.Errorf("listing children for bead %q: %w", beadID, err)
+	}
+	lastProcessedWisp := meta[FieldLastProcessedWisp]
+	nextIteration, err := nextIterationAfterLastProcessed(beadID, lastProcessedWisp, children)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("deriving next iteration for bead %q: %w", beadID, err)
 	}
 	maxIterations, _ := DecodeInt(meta[FieldMaxIterations])
-	if iterationCount >= maxIterations {
+	if nextIteration > maxIterations {
 		return HandlerResult{}, fmt.Errorf(
 			"cannot iterate bead %q: at max iterations (%d/%d)",
-			beadID, iterationCount, maxIterations,
+			beadID, nextIteration-1, maxIterations,
 		)
 	}
 
 	actor := "operator:" + username
 
-	// Read the last processed wisp for verdict scoping.
-	lastProcessedWisp := meta[FieldLastProcessedWisp]
-
 	// Pour next wisp with idempotency key BEFORE any state mutations.
 	// If PourWisp fails, the bead stays in waiting_manual (safe to retry).
-	nextIteration := iterationCount + 1
 	nextKey := IdempotencyKey(beadID, nextIteration)
 	formula := meta[FieldFormula]
 	vars := ExtractVars(meta)
@@ -164,6 +173,9 @@ func (h *Handler) IterateHandler(_ context.Context, beadID, username, _ string) 
 		} else {
 			return HandlerResult{}, fmt.Errorf("pouring next wisp for bead %q: %w", beadID, err)
 		}
+	}
+	if _, err := h.exactWispEvidence(beadID, nextKey, nextWispID); err != nil {
+		return HandlerResult{}, fmt.Errorf("validating next wisp for bead %q: %w", beadID, err)
 	}
 
 	// PourWisp succeeded — now mutate state.
@@ -189,7 +201,6 @@ func (h *Handler) IterateHandler(_ context.Context, beadID, username, _ string) 
 	if err := h.Store.SetMetadata(beadID, FieldActiveWisp, nextWispID); err != nil {
 		return HandlerResult{}, fmt.Errorf("setting active wisp: %w", err)
 	}
-
 	// Emit ConvergenceManualIterate event.
 	iterPayload := ManualActionPayload{
 		Actor:      actor,
@@ -220,11 +231,10 @@ func (h *Handler) IterateHandler(_ context.Context, beadID, username, _ string) 
 //  4. Derive iteration count (after force-close so count is accurate)
 //  5. Clear stale verdicts — prevent interrupted wisp's verdict from leaking
 //  6. Write terminal state metadata
-//     7a. Emit synthetic ConvergenceIteration for force-closed wisp BEFORE CloseBead (TierCritical)
-//     7b. Emit EventTerminated BEFORE CloseBead (TierCritical)
-//  8. CloseBead
-//  9. Emit ManualStop AFTER CloseBead (TierBestEffort)
-//  10. Write last_processed_wisp LAST (dedup marker)
+//  7. CloseBead
+//  8. Write last_processed_wisp LAST (dedup marker)
+//  9. Emit the synthetic stopped iteration, terminated, and manual-stop events
+//     only after all terminal proof is durable
 //
 // Idempotent: if the bead is already terminated with reason=stopped,
 // returns a no-op result without error.
@@ -278,6 +288,11 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 				wispInfo = recoveredWisp
 			}
 		}
+		if activeWisp != "" {
+			if err := validateCanonicalWispEvidence(beadID, activeWisp, wispInfo); err != nil {
+				return HandlerResult{}, fmt.Errorf("validating active wisp %q before stop: %w", activeWisp, err)
+			}
+		}
 
 		if activeWisp != "" && wispInfo.Status == "closed" {
 			// Drain: process the completed wisp through the normal handler.
@@ -302,6 +317,21 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			state = meta[FieldState]
 			activeWisp = meta[FieldActiveWisp]
 			lastProcessedWisp = meta[FieldLastProcessedWisp]
+			if activeWisp != "" && activeWisp != lastProcessedWisp {
+				successor, err := h.Store.GetBead(activeWisp)
+				if err != nil {
+					return HandlerResult{}, fmt.Errorf("reading adopted successor %q after drain: %w", activeWisp, err)
+				}
+				if err := validateCanonicalWispEvidence(beadID, activeWisp, successor); err != nil {
+					return HandlerResult{}, fmt.Errorf("validating adopted successor %q after drain: %w", activeWisp, err)
+				}
+				if successor.Status == "closed" {
+					return HandlerResult{
+						Action:     ActionSkipped,
+						NextWispID: activeWisp,
+					}, fmt.Errorf("closed successor %q awaits convergence tick owner before stop can continue", activeWisp)
+				}
+			}
 		}
 	}
 
@@ -323,6 +353,11 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 				wispInfo = recoveredWisp
 			}
 		}
+		if activeWisp != "" {
+			if err := validateCanonicalWispEvidence(beadID, activeWisp, wispInfo); err != nil {
+				return HandlerResult{}, fmt.Errorf("validating active wisp %q before force-close: %w", activeWisp, err)
+			}
+		}
 		if activeWisp != "" && wispInfo.Status != "closed" {
 			if err := h.Store.CloseBead(activeWisp, CloseReasonManualSupersede); err != nil {
 				return HandlerResult{}, fmt.Errorf("force-closing active wisp %q: %w", activeWisp, err)
@@ -331,12 +366,18 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		}
 	}
 
-	// Step 4: Derive iteration count from children (after force-close so
-	// the count includes the force-closed wisp).
-	iterationCount, err := h.deriveIterationCount(beadID)
+	// Step 4: Take one checked child snapshot after force-close. It supplies
+	// event totals and the applicable marker, repairing a stale marker left by
+	// an interrupted waiting transition before terminal events are published.
+	children, err := h.Store.Children(beadID)
 	if err != nil {
-		return HandlerResult{}, fmt.Errorf("deriving iteration count for bead %q: %w", beadID, err)
+		return HandlerResult{}, fmt.Errorf("listing children for terminal proof on bead %q: %w", beadID, err)
 	}
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("validating child evidence for terminal proof on bead %q: %w", beadID, err)
+	}
+	iterationCount := stats.ClosedCount
 
 	// Step 5: Clear stale verdicts — prevent an interrupted wisp's verdict
 	// from leaking into a future retry.
@@ -347,16 +388,19 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		return HandlerResult{}, fmt.Errorf("clearing stale agent verdict wisp: %w", err)
 	}
 
+	// The highest closed convergence child is the terminal dedup proof. Preserve
+	// the existing marker only for the legitimate no-closed-child case.
+	finalLPW := lastProcessedWisp
+	if stats.HighestClosedFound {
+		finalLPW = stats.HighestClosed.ID
+	}
+
 	// Use the best available wisp reference for event payloads.
-	eventWispID := lastProcessedWisp
+	eventWispID := finalLPW
 	if activeWisp != "" {
 		eventWispID = activeWisp
 	}
 
-	// Compute cumulative duration for terminated event.
-	_, cumDur := h.computeDurations(beadID, eventWispID)
-
-	// Step 9: ManualStop is emitted AFTER CloseBead — TierBestEffort, fire-and-forget.
 	stopPayload := ManualActionPayload{
 		Actor:      actor,
 		PriorState: state,
@@ -365,16 +409,38 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		WispID:     NullableString(eventWispID),
 	}
 
-	// Step 10: after force-close, the force-closed wisp becomes the highest
-	// closed wisp, so it is the dedup marker.
-	finalLPW := lastProcessedWisp
+	var stoppedIterationPayload *IterationPayload
 	if forceClosedWisp && activeWisp != "" {
-		finalLPW = activeWisp
+		wispIteration := iterationCount
+		var iterationDurationMs int64
+		for _, child := range children {
+			if child.ID == activeWisp && !child.CreatedAt.IsZero() && !child.ClosedAt.IsZero() {
+				iterationDurationMs = child.ClosedAt.Sub(child.CreatedAt).Milliseconds()
+				break
+			}
+		}
+		gateMode := meta[FieldGateMode]
+		if gateMode == "" {
+			gateMode = GateModeManual
+		}
+		stoppedIterationPayload = &IterationPayload{
+			Iteration:            wispIteration,
+			WispID:               activeWisp,
+			Action:               string(ActionStopped),
+			GateMode:             gateMode,
+			IterationDurationMs:  iterationDurationMs,
+			CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
+		}
+	}
+	termPayload := TerminatedPayload{
+		TerminalReason:       TerminalStopped,
+		TotalIterations:      iterationCount,
+		FinalStatus:          "closed",
+		Actor:                actor,
+		CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 	}
 
-	// Steps 6-10 commit: terminal_reason, terminal_actor, clear waiting_reason,
-	// state=terminated; then (7a synthetic iteration, 7b EventTerminated,
-	// 8 CloseBead, 9 ManualStop) before the dedup marker; last_processed_wisp LAST.
+	// Commit terminal state, close the root, and stamp the dedup marker last.
 	if err := h.commit(beadID,
 		[]metaWrite{
 			{FieldTerminalReason, TerminalStopped, "setting terminal reason"},
@@ -383,51 +449,21 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			{FieldState, StateTerminated, "setting state to terminated"},
 		},
 		func() error {
-			// Step 7a: Emit synthetic ConvergenceIteration for force-closed wisp
-			// BEFORE CloseBead — TierCritical requires at-least-once delivery.
-			if forceClosedWisp && activeWisp != "" {
-				wispIteration := iterationCount // force-closed wisp is the latest
-				iterDur, synthCumDur := h.computeDurations(beadID, activeWisp)
-				gateMode := meta[FieldGateMode]
-				if gateMode == "" {
-					gateMode = GateModeManual
-				}
-				synthPayload := IterationPayload{
-					Iteration:            wispIteration,
-					WispID:               activeWisp,
-					Action:               string(ActionStopped),
-					GateMode:             gateMode,
-					IterationDurationMs:  iterDur.Milliseconds(),
-					CumulativeDurationMs: synthCumDur.Milliseconds(),
-				}
-				h.emitEvent(EventIteration, EventIDIteration(beadID, wispIteration), beadID, synthPayload)
-			}
-
-			// Step 7b: Emit EventTerminated BEFORE CloseBead — TierCritical requires
-			// at-least-once delivery, so it must be emitted while the bead is still
-			// open for reconciliation replay if the controller crashes.
-			termPayload := TerminatedPayload{
-				TerminalReason:       TerminalStopped,
-				TotalIterations:      iterationCount,
-				FinalStatus:          "closed",
-				Actor:                actor,
-				CumulativeDurationMs: cumDur.Milliseconds(),
-			}
-			h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
-
-			// Step 8: CloseBead.
 			if err := h.Store.CloseBead(beadID, CloseReasonManualStop); err != nil {
 				return fmt.Errorf("closing bead %q: %w", beadID, err)
 			}
-
-			// Step 9: Emit ManualStop AFTER CloseBead.
-			h.emitEvent(EventManualStop, EventIDManualStop(beadID), beadID, stopPayload)
 			return nil
 		},
 		metaWrite{FieldLastProcessedWisp, finalLPW, "setting last processed wisp"},
 	); err != nil {
 		return HandlerResult{}, err
 	}
+
+	if stoppedIterationPayload != nil {
+		h.emitEvent(EventIteration, EventIDIteration(beadID, stoppedIterationPayload.Iteration), beadID, *stoppedIterationPayload)
+	}
+	h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
+	h.emitEvent(EventManualStop, EventIDManualStop(beadID), beadID, stopPayload)
 
 	return HandlerResult{
 		Action:    ActionStopped,
@@ -441,47 +477,66 @@ func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (Be
 		return BeadInfo{}, false, fmt.Errorf("listing children for stale active wisp recovery: %w", err)
 	}
 
-	nextIter := 0
-	haveNextIter := false
 	if lastProcessedWisp != "" {
 		lastProcessedInfo, err := h.Store.GetBead(lastProcessedWisp)
 		if err != nil {
-			if !errors.Is(err, beads.ErrNotFound) {
-				return BeadInfo{}, false, fmt.Errorf("reading last processed wisp %q: %w", lastProcessedWisp, err)
-			}
-		} else if iter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey); ok {
-			nextIter = iter + 1
-			haveNextIter = true
+			return BeadInfo{}, false, fmt.Errorf("reading last processed wisp %q: %w", lastProcessedWisp, err)
 		}
-	}
-
-	if haveNextIter {
+		processedIter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey)
+		if !ok || processedIter < 1 {
+			return BeadInfo{}, false, fmt.Errorf("last processed wisp %q has invalid idempotency key %q", lastProcessedWisp, lastProcessedInfo.IdempotencyKey)
+		}
+		if err := validateExactWispEvidence(beadID, IdempotencyKey(beadID, processedIter), lastProcessedWisp, lastProcessedInfo); err != nil {
+			return BeadInfo{}, false, fmt.Errorf("validating last processed wisp: %w", err)
+		}
+		if lastProcessedInfo.Status != "closed" {
+			return BeadInfo{}, false, fmt.Errorf("last processed wisp %q has status %q, want closed", lastProcessedWisp, lastProcessedInfo.Status)
+		}
+		nextIter, err := nextIterationAfterLastProcessed(beadID, lastProcessedWisp, children)
+		if err != nil {
+			return BeadInfo{}, false, fmt.Errorf("deriving replacement active iteration: %w", err)
+		}
+		if nextIter != processedIter+1 {
+			return BeadInfo{}, false, fmt.Errorf(
+				"last processed wisp %q point read at iteration %d disagrees with checked child snapshot iteration %d",
+				lastProcessedWisp, processedIter, nextIter-1,
+			)
+		}
 		nextKey := IdempotencyKey(beadID, nextIter)
 		candidateID, found, err := h.Store.FindByIdempotencyKey(nextKey)
 		if err != nil {
 			return BeadInfo{}, false, fmt.Errorf("looking up replacement active wisp %q: %w", nextKey, err)
 		}
-		if found {
-			wispInfo, err := h.Store.GetBead(candidateID)
-			if err != nil {
-				if errors.Is(err, beads.ErrNotFound) {
-					return BeadInfo{}, false, nil
-				}
-				return BeadInfo{}, false, fmt.Errorf("reading replacement active wisp %q: %w", candidateID, err)
+		if !found {
+			if candidateID != "" {
+				return BeadInfo{}, false, fmt.Errorf("replacement lookup for %q returned bead ID %q without found evidence", nextKey, candidateID)
 			}
-			return wispInfo, true, nil
+			return BeadInfo{}, false, nil
 		}
-		return BeadInfo{}, false, nil
+		if candidateID == "" {
+			return BeadInfo{}, false, fmt.Errorf("replacement lookup for %q returned found with an empty bead ID", nextKey)
+		}
+		wispInfo, err := h.Store.GetBead(candidateID)
+		if err != nil {
+			return BeadInfo{}, false, fmt.Errorf("reading replacement active wisp %q: %w", candidateID, err)
+		}
+		if err := validateExactWispEvidence(beadID, nextKey, candidateID, wispInfo); err != nil {
+			return BeadInfo{}, false, fmt.Errorf("validating replacement active wisp: %w", err)
+		}
+		return wispInfo, true, nil
 	}
 
-	// Fall back to the highest-iteration open wisp, then the highest-iteration
-	// closed wisp, among the convergence children.
-	stats := childStats(children, beadID)
-	if stats.HighestOpenFound {
-		return stats.HighestOpen, true, nil
+	// With no marker, only canonical iteration 1 is actionable. Selecting a
+	// later child would silently skip the missing prefix of the chain.
+	nextIter, err := nextIterationAfterLastProcessed(beadID, "", children)
+	if err != nil {
+		return BeadInfo{}, false, fmt.Errorf("deriving marker-less replacement iteration: %w", err)
 	}
-	if stats.HighestClosedFound {
-		return stats.HighestClosed, true, nil
+	nextKey := IdempotencyKey(beadID, nextIter)
+	for _, child := range children {
+		if child.IdempotencyKey == nextKey {
+			return child, true, nil
+		}
 	}
 	return BeadInfo{}, false, nil
 }

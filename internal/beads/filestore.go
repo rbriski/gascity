@@ -104,6 +104,26 @@ func (fs *FileStore) SetLocker(l Locker) {
 	fs.locker = l
 }
 
+// ReadyDemandStoreIdentity returns a stable physical identity for OS-backed
+// file-store handles. Independently opened handles for the same JSON file must
+// share one reconciler snapshot generation so a write through one handle
+// cannot leave another handle's pre-write demand view live in the same pass.
+// Non-OS filesystems return no identity because equal path strings can name
+// different in-memory filesystem instances.
+func (fs *FileStore) ReadyDemandStoreIdentity() string {
+	if fs == nil {
+		return ""
+	}
+	if _, ok := fs.fs.(fsys.OSFS); !ok {
+		return ""
+	}
+	absPath, err := filepath.Abs(fs.path)
+	if err != nil {
+		return filepath.Clean(fs.path)
+	}
+	return filepath.Clean(absPath)
+}
+
 // reloadFromDisk re-reads the store file and replaces the in-memory state.
 // Must be called with fmu held. Used after acquiring a cross-process flock to
 // pick up changes made by other processes since we last read.

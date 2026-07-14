@@ -1,24 +1,15 @@
 package convergence
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
 
-// ChildStats holds the projections derived from a bead's children, filtered
-// to convergence wisps (children whose idempotency key carries the bead's
-// convergence prefix). It is computed once from a single Children() fetch so
-// the scan sites that used to re-derive these values independently share one
-// filter definition.
-//
-// The per-projection filters intentionally differ, and those differences are
-// load-bearing (they predate this consolidation):
-//
-//   - ClosedCount and CumulativeDur count every closed convergence child,
-//     including wisps whose iteration number does not parse.
-//   - HighestClosed and HighestOpen additionally require a parseable
-//     iteration number, since their whole purpose is to pick the
-//     highest-iteration wisp.
+// ChildStats holds the projections derived from a bead's validated convergence
+// children. Non-convergence children are ignored. Every convergence-looking
+// child must carry exact canonical identity, parent, iteration, and lifecycle
+// evidence before any count or marker projection is returned.
 type ChildStats struct {
 	// ClosedCount is the number of closed convergence wisps.
 	ClosedCount int
@@ -44,15 +35,37 @@ type ChildStats struct {
 // childStats derives every convergence child projection from a single
 // pre-fetched child list. It is pure: it performs no store I/O, so callers can
 // fetch Children() once per transition and read the fields they need.
-func childStats(children []BeadInfo, beadID string) ChildStats {
-	prefix := IdempotencyKeyPrefix(beadID)
+func childStats(children []BeadInfo, beadID string) (ChildStats, error) {
 	stats := ChildStats{HighestClosedIter: -1, HighestOpenIter: -1}
+	seenIDs := make(map[string]int)
+	seenIterations := make(map[int]string)
+	highestIteration := 0
 
 	for _, child := range children {
-		if !strings.HasPrefix(child.IdempotencyKey, prefix) {
+		if !strings.HasPrefix(child.IdempotencyKey, "converge:") {
 			continue
 		}
-		iter, iterOK := ParseIterationFromKey(child.IdempotencyKey)
+		iter, ok := ParseIterationFromKey(child.IdempotencyKey)
+		if !ok || iter < 1 || child.IdempotencyKey != IdempotencyKey(beadID, iter) {
+			return ChildStats{}, fmt.Errorf("child wisp %q has noncanonical idempotency key %q for root %q", child.ID, child.IdempotencyKey, beadID)
+		}
+		if child.ID == "" {
+			return ChildStats{}, fmt.Errorf("iteration %d has an empty child wisp ID", iter)
+		}
+		if child.ParentID != beadID {
+			return ChildStats{}, fmt.Errorf("child wisp %q has parent %q, want %q", child.ID, child.ParentID, beadID)
+		}
+		if priorIter, duplicate := seenIDs[child.ID]; duplicate {
+			return ChildStats{}, fmt.Errorf("child wisp ID %q is duplicated at iterations %d and %d", child.ID, priorIter, iter)
+		}
+		if priorID, duplicate := seenIterations[iter]; duplicate {
+			return ChildStats{}, fmt.Errorf("iteration %d has duplicate child wisps %q and %q", iter, priorID, child.ID)
+		}
+		seenIDs[child.ID] = iter
+		seenIterations[iter] = child.ID
+		if iter > highestIteration {
+			highestIteration = iter
+		}
 
 		switch child.Status {
 		case "closed":
@@ -60,19 +73,34 @@ func childStats(children []BeadInfo, beadID string) ChildStats {
 			if !child.ClosedAt.IsZero() && !child.CreatedAt.IsZero() {
 				stats.CumulativeDur += child.ClosedAt.Sub(child.CreatedAt)
 			}
-			if iterOK && iter > stats.HighestClosedIter {
+			if iter > stats.HighestClosedIter {
 				stats.HighestClosed = child
 				stats.HighestClosedIter = iter
 				stats.HighestClosedFound = true
 			}
 		case "open", "in_progress":
-			if iterOK && iter > stats.HighestOpenIter {
+			if iter > stats.HighestOpenIter {
 				stats.HighestOpen = child
 				stats.HighestOpenIter = iter
 				stats.HighestOpenFound = true
 			}
+		default:
+			return ChildStats{}, fmt.Errorf("child wisp %q has unsupported status %q", child.ID, child.Status)
 		}
 	}
+	// Positive, unique iterations form a complete 1..N chain exactly when the
+	// highest observed iteration equals the number of observed iterations. A
+	// gap is corrupt evidence: counts and highest-wisp markers must never skip
+	// missing work.
+	if highestIteration != len(seenIterations) {
+		missing := 1
+		for ; missing <= len(seenIterations); missing++ {
+			if _, ok := seenIterations[missing]; !ok {
+				break
+			}
+		}
+		return ChildStats{}, fmt.Errorf("iteration gap: missing child iteration %d before observed iteration %d", missing, highestIteration)
+	}
 
-	return stats
+	return stats, nil
 }

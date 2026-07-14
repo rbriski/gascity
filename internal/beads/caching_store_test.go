@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -479,6 +480,104 @@ func TestCachingStoreParentListRefreshesReparentedChildren(t *testing.T) {
 	}
 	if len(labeled) != 1 || labeled[0].ParentID != newParent.ID {
 		t.Fatalf("cached label result = %#v, want parent %s", labeled, newParent.ID)
+	}
+}
+
+func TestCachingStoreFilteredUnboundedParentListRefreshesReparentedChildren(t *testing.T) {
+	mem := beads.NewMemStore()
+	oldParent, err := mem.Create(beads.Bead{Title: "old-parent"})
+	if err != nil {
+		t.Fatalf("Create(old parent): %v", err)
+	}
+	newParent, err := mem.Create(beads.Bead{Title: "new-parent"})
+	if err != nil {
+		t.Fatalf("Create(new parent): %v", err)
+	}
+	const key = "converge:root-1:iter:1"
+	child, err := mem.Create(beads.Bead{
+		Title:    "child",
+		ParentID: oldParent.ID,
+		Metadata: map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := mem.Update(child.ID, beads.UpdateOpts{ParentID: &newParent.ID}); err != nil {
+		t.Fatalf("backing Update(parent): %v", err)
+	}
+
+	children, err := cs.List(beads.ListQuery{
+		ParentID: oldParent.ID,
+		Metadata: map[string]string{"idempotency_key": key},
+	})
+	if err != nil {
+		t.Fatalf("List(filtered old parent): %v", err)
+	}
+	if len(children) != 0 {
+		t.Fatalf("filtered old parent children = %#v, want empty after reparent", children)
+	}
+
+	byKey, err := cs.List(beads.ListQuery{Metadata: map[string]string{"idempotency_key": key}})
+	if err != nil {
+		t.Fatalf("List(metadata): %v", err)
+	}
+	if len(byKey) != 1 || byKey[0].ParentID != newParent.ID {
+		t.Fatalf("cached metadata result = %#v, want parent %s", byKey, newParent.ID)
+	}
+}
+
+func TestCachingStoreBoundedParentMetadataListDoesNotRefreshOmittedSiblings(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	parent, err := mem.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	const siblingCount = 64
+	targetKey := "converge:root-1:iter:32"
+	var targetID string
+	for i := 0; i < siblingCount; i++ {
+		key := "converge:root-1:iter:" + strconv.Itoa(i+1)
+		child, createErr := mem.Create(beads.Bead{
+			Title:    "child-" + strconv.Itoa(i+1),
+			ParentID: parent.ID,
+			Metadata: map[string]string{"idempotency_key": key},
+		})
+		if createErr != nil {
+			t.Fatalf("Create(child %d): %v", i+1, createErr)
+		}
+		if key == targetKey {
+			targetID = child.ID
+		}
+	}
+
+	backing := &countingGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.resetGets()
+
+	got, err := cs.List(beads.ListQuery{
+		ParentID:      parent.ID,
+		Metadata:      map[string]string{"idempotency_key": targetKey},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Limit:         2,
+	})
+	if err != nil {
+		t.Fatalf("List(bounded parent metadata): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != targetID {
+		t.Fatalf("List(bounded parent metadata) = %#v, want target %q", got, targetID)
+	}
+	if gets := backing.getCount(); gets != 0 {
+		t.Fatalf("backing Get calls = %d, want 0 for omitted siblings in a bounded result", gets)
 	}
 }
 

@@ -876,11 +876,12 @@ func compactSessionAssignmentIdentifiers(raw []string) []string {
 
 // classStoreCandidate is one store in a per-class candidate fan-out, paired
 // with the store-ref label the controller records for beads it owns. The empty
-// ref is the city's canonical store-ref for assigned-work index alignment; the
-// session and unassigned-routed arms label the city store "city".
+// ref is the caller-selected output label; readyScope is the unambiguous typed
+// identity used internally even when a real rig is named "city" or "rig:foo".
 type classStoreCandidate struct {
-	store beads.Store
-	ref   string
+	store      beads.Store
+	ref        string
+	readyScope readyDemandStoreScope
 }
 
 // coordClassStoreCandidates builds the index-aligned per-class candidate
@@ -890,11 +891,10 @@ type classStoreCandidate struct {
 // candidate list that the session-iteration arm and the work-collection arms
 // each build; both arms feed the same store today (identity), but expressing
 // them through one named builder keeps the work-vs-session split structurally
-// explicit and the workBeads/workStores slices per-bead aligned. cityRef
-// distinguishes the assigned-work arm (which records the city store under the
-// empty ref) from the session and unassigned arms (which label it "city").
+// explicit and the workBeads/workStores slices per-bead aligned. cityRef is an
+// outward-facing label only; readyScope always preserves typed city identity.
 func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, cityRef string) []classStoreCandidate {
-	candidates := []classStoreCandidate{{store: cityStore, ref: cityRef}}
+	candidates := []classStoreCandidate{{store: cityStore, ref: cityRef, readyScope: readyDemandCityStoreScope()}}
 	if cfg == nil {
 		return candidates
 	}
@@ -903,7 +903,7 @@ func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStore
 			continue
 		}
 		if s, ok := rigStores[rig.Name]; ok {
-			candidates = append(candidates, classStoreCandidate{store: s, ref: rig.Name})
+			candidates = append(candidates, classStoreCandidate{store: s, ref: rig.Name, readyScope: readyDemandRigStoreScope(rig.Name)})
 		}
 	}
 	return candidates

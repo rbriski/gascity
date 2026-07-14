@@ -126,6 +126,14 @@ func (r *Reconciler) reconcileState(ctx context.Context, beadID string) (Reconci
 // --- Path 1: Missing/empty state ---
 
 func (r *Reconciler) reconcileMissingState(ctx context.Context, beadID string, meta map[string]string) (ReconcileAction, error) {
+	// CreateHandler writes this metadata before a loop can safely run. An
+	// empty state without the full, valid creation envelope is the durable
+	// footprint left when both the initial creating-state write and its
+	// rollback state write fail. Never pour work from that partial root.
+	if !hasCompleteCreationMetadata(meta) {
+		return r.reconcileCreating(beadID)
+	}
+
 	// Check if there is already a wisp for iteration 1 (idempotency key
 	// lookup).
 	key1 := IdempotencyKey(beadID, 1)
@@ -133,12 +141,22 @@ func (r *Reconciler) reconcileMissingState(ctx context.Context, beadID string, m
 	if err != nil {
 		return ActionNoAction, fmt.Errorf("looking up iter-1 wisp: %w", err)
 	}
+	if !found && existingID != "" {
+		return ActionNoAction, fmt.Errorf("looking up iter-1 wisp returned bead ID %q without found evidence", existingID)
+	}
 
 	if found {
+		if existingID == "" {
+			return ActionNoAction, fmt.Errorf("looking up iter-1 wisp returned found with an empty bead ID")
+		}
+
 		// Wisp exists — adopt it, but check if it's already closed.
 		wispInfo, err := r.Handler.Store.GetBead(existingID)
 		if err != nil {
-			return ActionAdoptedWisp, fmt.Errorf("reading wisp %q info: %w", existingID, err)
+			return ActionNoAction, fmt.Errorf("reading wisp %q info: %w", existingID, err)
+		}
+		if err := validateExactWispEvidence(beadID, key1, existingID, wispInfo); err != nil {
+			return ActionNoAction, err
 		}
 
 		if err := r.Handler.Store.SetMetadata(beadID, FieldActiveWisp, existingID); err != nil {
@@ -192,6 +210,50 @@ func (r *Reconciler) reconcileMissingState(ctx context.Context, beadID string, m
 	return ActionPouredWisp, nil
 }
 
+// hasCompleteCreationMetadata reports whether an empty-state root retains the
+// complete, valid creation envelope that CreateHandler durably writes. Empty
+// values are legitimate for some gate and trigger fields, so completeness is
+// checked separately from their canonical parsers.
+func hasCompleteCreationMetadata(meta map[string]string) bool {
+	if meta[FieldFormula] == "" || meta[FieldTarget] == "" {
+		return false
+	}
+
+	maxIterations, ok := DecodeInt(meta[FieldMaxIterations])
+	if !ok || maxIterations <= 0 {
+		return false
+	}
+	iteration, ok := DecodeInt(meta[FieldIteration])
+	if !ok || iteration < 0 || iteration > maxIterations {
+		return false
+	}
+
+	for _, field := range []string{
+		FieldGateMode,
+		FieldGateCondition,
+		FieldGateTimeout,
+		FieldGateTimeoutAction,
+		FieldTrigger,
+		FieldTriggerCondition,
+	} {
+		if _, present := meta[field]; !present {
+			return false
+		}
+	}
+	// CreateHandler resolves the empty gate-mode default before persisting it.
+	if meta[FieldGateMode] == "" {
+		return false
+	}
+	if _, err := ParseGateConfig(meta); err != nil {
+		return false
+	}
+	if _, err := ParseTriggerConfig(meta); err != nil {
+		return false
+	}
+
+	return true
+}
+
 // --- Path 1b: state=creating (partial creation) ---
 
 func (r *Reconciler) reconcileCreating(beadID string) (ReconcileAction, error) {
@@ -213,34 +275,56 @@ func (r *Reconciler) reconcileCreating(beadID string) (ReconcileAction, error) {
 // --- Path 2: state=terminated but bead not closed ---
 
 func (r *Reconciler) reconcileTerminatedNotClosed(beadID string, meta map[string]string) (ReconcileAction, error) {
-	// Check if the bead is actually already closed.
-	beadInfo, err := r.Handler.Store.GetBead(beadID)
-	if err != nil {
-		return ActionNoAction, fmt.Errorf("reading bead info: %w", err)
-	}
-	if beadInfo.Status == "closed" {
-		// Already fully terminated.
-		return ActionNoAction, nil
-	}
-
-	// Backfill terminal_actor if missing.
-	if err := r.backfillTerminalActor(beadID, meta); err != nil {
-		return ActionCompletedTerminal, fmt.Errorf("backfilling terminal_actor: %w", err)
-	}
-
-	// Derive iteration count and cumulative duration for the terminated event
-	// from a single child fetch (best-effort: zeros on error).
-	children, _ := r.Handler.Store.Children(beadID)
-	stats := childStats(children, beadID)
-
-	// Emit ConvergenceTerminated (recovery).
+	repaired := false
 	reason := meta[FieldTerminalReason]
 	if reason == "" {
-		reason = TerminalNoConvergence // safe default
+		// Every normal/manual terminal path persists its reason before state.
+		// A terminated root without one is therefore a partial-create rollback.
+		reason = TerminalPartialCreation
+		if err := r.Handler.Store.SetMetadata(beadID, FieldTerminalReason, reason); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("backfilling terminal_reason: %w", err)
+		}
+		repaired = true
 	}
 	actor := meta[FieldTerminalActor]
 	if actor == "" {
 		actor = "recovery"
+		if err := r.Handler.Store.SetMetadata(beadID, FieldTerminalActor, actor); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("backfilling terminal_actor: %w", err)
+		}
+		repaired = true
+	}
+
+	// Child evidence is part of terminal proof because it determines the
+	// applicable dedup marker and event totals. A transient query cannot be
+	// treated as an empty child set.
+	children, err := r.Handler.Store.Children(beadID)
+	if err != nil {
+		return ActionCompletedTerminal, fmt.Errorf("listing children for terminal proof: %w", err)
+	}
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return ActionCompletedTerminal, fmt.Errorf("validating child evidence for terminal proof: %w", err)
+	}
+
+	beadInfo, err := r.Handler.Store.GetBead(beadID)
+	if err != nil {
+		return ActionCompletedTerminal, fmt.Errorf("reading bead info: %w", err)
+	}
+	if beadInfo.Status != "closed" {
+		if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("closing bead: %w", err)
+		}
+		repaired = true
+	}
+	if stats.HighestClosedFound && meta[FieldLastProcessedWisp] != stats.HighestClosed.ID {
+		if err := r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, stats.HighestClosed.ID); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("setting last_processed_wisp: %w", err)
+		}
+		repaired = true
+	}
+	if !repaired {
+		return ActionNoAction, nil
 	}
 
 	termPayload := TerminatedPayload{
@@ -251,11 +335,6 @@ func (r *Reconciler) reconcileTerminatedNotClosed(beadID string, meta map[string
 		CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 	}
 	r.emitRecoveryEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
-
-	// Close the bead.
-	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
-		return ActionCompletedTerminal, fmt.Errorf("closing bead: %w", err)
-	}
 
 	return ActionCompletedTerminal, nil
 }
@@ -282,7 +361,13 @@ func (r *Reconciler) reconcileWaitingManual(beadID string, meta map[string]strin
 		// One child fetch feeds both the cumulative duration (best-effort:
 		// zero on error) and the last_processed_wisp repair below.
 		children, childErr := r.Handler.Store.Children(beadID)
-		stats := childStats(children, beadID)
+		if childErr != nil {
+			return ActionNoAction, fmt.Errorf("listing children: %w", childErr)
+		}
+		stats, err := childStats(children, beadID)
+		if err != nil {
+			return ActionNoAction, fmt.Errorf("validating child evidence: %w", err)
+		}
 		wmPayload := WaitingManualPayload{
 			Iteration:            iteration,
 			WispID:               wispID,
@@ -296,9 +381,6 @@ func (r *Reconciler) reconcileWaitingManual(beadID string, meta map[string]strin
 		// closed wisp and ensure last_processed_wisp points to it.
 		// S31 single-fetch: childErr/stats come from the Children() call above;
 		// no redundant re-fetch. S33 flattened (action, error) return shape.
-		if childErr != nil {
-			return ActionNoAction, fmt.Errorf("listing children: %w", childErr)
-		}
 		if stats.HighestClosedFound && meta[FieldLastProcessedWisp] != stats.HighestClosed.ID {
 			if err := r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, stats.HighestClosed.ID); err != nil {
 				return ActionRepairedState, fmt.Errorf("repairing last_processed_wisp: %w", err)
@@ -315,7 +397,11 @@ func (r *Reconciler) reconcileWaitingManual(beadID string, meta map[string]strin
 	if err != nil {
 		return ActionNoAction, fmt.Errorf("listing children: %w", err)
 	}
-	if childStats(children, beadID).HighestClosedFound {
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return ActionNoAction, fmt.Errorf("validating child evidence: %w", err)
+	}
+	if stats.HighestClosedFound {
 		// There are closed wisps but no waiting_reason — set a default.
 		if err := r.Handler.Store.SetMetadata(beadID, FieldWaitingReason, WaitManual); err != nil {
 			return ActionRepairedState, fmt.Errorf("setting default waiting_reason: %w", err)
@@ -374,15 +460,48 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 			}
 		}
 		if activeWispID != "" {
+			if err := validateCanonicalWispEvidence(beadID, activeWispID, wispInfo); err != nil {
+				return ActionNoAction, fmt.Errorf("validating active wisp %q: %w", activeWispID, err)
+			}
 			if recoveredActiveWisp {
 				if err := r.Handler.Store.SetMetadata(beadID, FieldActiveWisp, activeWispID); err != nil {
 					return ActionRepairedState, fmt.Errorf("setting recovered active wisp %q: %w", activeWispID, err)
 				}
 			}
+			clearedPending := false
+			if meta[FieldPendingNextWisp] == activeWispID {
+				lastProcessedID := meta[FieldLastProcessedWisp]
+				if lastProcessedID == "" {
+					return ActionNoAction, fmt.Errorf("cannot prove pending successor %q without last_processed_wisp", activeWispID)
+				}
+				lastProcessedInfo, err := r.Handler.Store.GetBead(lastProcessedID)
+				if err != nil {
+					return ActionNoAction, fmt.Errorf("reading last processed wisp %q for pending proof: %w", lastProcessedID, err)
+				}
+				processedIter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey)
+				if !ok || lastProcessedInfo.IdempotencyKey != IdempotencyKey(beadID, processedIter) {
+					return ActionNoAction, fmt.Errorf("last processed wisp %q has invalid idempotency key %q", lastProcessedID, lastProcessedInfo.IdempotencyKey)
+				}
+				if err := validateExactWispEvidence(beadID, lastProcessedInfo.IdempotencyKey, lastProcessedID, lastProcessedInfo); err != nil {
+					return ActionNoAction, fmt.Errorf("validating last processed wisp for pending proof: %w", err)
+				}
+				if lastProcessedInfo.Status != "closed" {
+					return ActionNoAction, fmt.Errorf("last processed wisp %q has status %q, want closed", lastProcessedID, lastProcessedInfo.Status)
+				}
+				expectedNextKey := IdempotencyKey(beadID, processedIter+1)
+				if err := validateExactWispEvidence(beadID, expectedNextKey, activeWispID, wispInfo); err != nil {
+					return ActionNoAction, fmt.Errorf("validating adopted pending successor: %w", err)
+				}
+				if err := r.Handler.clearPendingNextWisp(beadID); err != nil {
+					return ActionRepairedState, fmt.Errorf("repairing adopted pending next wisp: %w", err)
+				}
+				clearedPending = true
+			}
+
 			switch wispInfo.Status {
 			case "open", "in_progress":
 				// Wisp still running — nothing to do.
-				if recoveredActiveWisp {
+				if recoveredActiveWisp || clearedPending {
 					return ActionRepairedState, nil
 				}
 				return ActionNoAction, nil
@@ -394,6 +513,9 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 					// Already processed — check if the commit completed.
 					// The commit was done because last_processed_wisp is
 					// set (it is always the last write). Nothing to do.
+					if clearedPending {
+						return ActionRepairedState, nil
+					}
 					return ActionNoAction, nil
 				}
 
@@ -402,9 +524,6 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 					return ActionRepairedState, fmt.Errorf("replaying wisp_closed for %q: %w", activeWispID, err)
 				}
 				return ActionRepairedState, nil
-
-			default:
-				return ActionNoAction, fmt.Errorf("active wisp %q has unexpected status %q", activeWispID, wispInfo.Status)
 			}
 		}
 	}
@@ -416,14 +535,21 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 		return ActionNoAction, fmt.Errorf("listing children: %w", err)
 	}
 
-	closedIter := childStats(children, beadID).ClosedCount
-	nextIter := closedIter + 1
+	nextIter, err := nextIterationAfterLastProcessed(beadID, meta[FieldLastProcessedWisp], children)
+	if err != nil {
+		return ActionNoAction, fmt.Errorf("deriving next iteration: %w", err)
+	}
 	nextKey := IdempotencyKey(beadID, nextIter)
 
 	var wispID string
 	action := ActionAdoptedWisp
 
-	if pendingID := r.Handler.validPendingNextWisp(beadID, nextKey, meta[FieldPendingNextWisp]); pendingID != "" {
+	pendingID, err := r.Handler.validPendingNextWisp(beadID, nextKey, meta[FieldPendingNextWisp])
+	if err != nil {
+		return ActionNoAction, fmt.Errorf("resolving pending next wisp: %w", err)
+	}
+	pendingCleanupRequired := pendingID != ""
+	if pendingID != "" {
 		wispID = pendingID
 	} else {
 		// Check if a wisp for the next iteration already exists.
@@ -448,15 +574,24 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 		}
 	}
 
-	if err := r.Handler.Store.ActivateWisp(wispID); err != nil {
-		return action, fmt.Errorf("activating wisp %q: %w", wispID, err)
+	wispInfo, err := r.Handler.exactWispEvidence(beadID, nextKey, wispID)
+	if err != nil {
+		return action, fmt.Errorf("validating next wisp: %w", err)
+	}
+	if wispInfo.Status != "closed" {
+		if err := r.Handler.Store.ActivateWisp(wispID); err != nil {
+			return action, fmt.Errorf("activating wisp %q: %w", wispID, err)
+		}
 	}
 
 	if err := r.Handler.Store.SetMetadata(beadID, FieldActiveWisp, wispID); err != nil {
 		return action, fmt.Errorf("setting active_wisp: %w", err)
 	}
-	_ = r.Handler.Store.SetMetadata(beadID, FieldPendingNextWisp, "")
-
+	if pendingCleanupRequired {
+		if err := r.Handler.clearPendingNextWisp(beadID); err != nil {
+			return action, fmt.Errorf("post-adoption cleanup: %w", err)
+		}
+	}
 	return action, nil
 }
 
@@ -476,12 +611,42 @@ func (r *Reconciler) completeTerminalTransition(beadID string, meta map[string]s
 		actor = "recovery"
 	}
 
-	// One child fetch feeds the iteration count, cumulative duration, and the
-	// last_processed_wisp repair below. The intervening writes only touch the
-	// parent bead's metadata/status, not its children, so the highest closed
-	// wisp is unchanged by the time we write it (best-effort: zeros on error).
-	children, _ := r.Handler.Store.Children(beadID)
-	stats := childStats(children, beadID)
+	// One checked child fetch feeds both event totals and the applicable dedup
+	// marker. Treating a transient error as no children could publish false
+	// terminal proof.
+	children, err := r.Handler.Store.Children(beadID)
+	if err != nil {
+		return ActionCompletedTerminal, fmt.Errorf("listing children for terminal proof: %w", err)
+	}
+	stats, err := childStats(children, beadID)
+	if err != nil {
+		return ActionCompletedTerminal, fmt.Errorf("validating child evidence for terminal proof: %w", err)
+	}
+
+	// Write state=terminated if not already set.
+	if meta[FieldState] != StateTerminated {
+		if err := r.Handler.Store.SetMetadata(beadID, FieldState, StateTerminated); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("setting state to terminated: %w", err)
+		}
+	}
+
+	beadInfo, err := r.Handler.Store.GetBead(beadID)
+	if err != nil {
+		return ActionCompletedTerminal, fmt.Errorf("reading bead info: %w", err)
+	}
+	if beadInfo.Status != "closed" {
+		if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("closing bead: %w", err)
+		}
+	}
+
+	// Write last_processed_wisp if there is a highest closed wisp
+	// (write ordering: always last).
+	if stats.HighestClosedFound {
+		if err := r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, stats.HighestClosed.ID); err != nil {
+			return ActionCompletedTerminal, fmt.Errorf("setting last_processed_wisp: %w", err)
+		}
+	}
 
 	termPayload := TerminatedPayload{
 		TerminalReason:       reason,
@@ -491,24 +656,6 @@ func (r *Reconciler) completeTerminalTransition(beadID string, meta map[string]s
 		CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 	}
 	r.emitRecoveryEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
-
-	// Write state=terminated if not already set.
-	if meta[FieldState] != StateTerminated {
-		if err := r.Handler.Store.SetMetadata(beadID, FieldState, StateTerminated); err != nil {
-			return ActionCompletedTerminal, fmt.Errorf("setting state to terminated: %w", err)
-		}
-	}
-
-	// Close the bead.
-	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
-		return ActionCompletedTerminal, fmt.Errorf("closing bead: %w", err)
-	}
-
-	// Write last_processed_wisp if there is a highest closed wisp
-	// (write ordering: always last).
-	if stats.HighestClosedFound {
-		_ = r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, stats.HighestClosed.ID)
-	}
 
 	return ActionCompletedTerminal, nil
 }
@@ -524,15 +671,16 @@ func (r *Reconciler) backfillTerminalActor(beadID string, meta map[string]string
 
 // deriveIterationFromChildren counts closed convergence wisps among the
 // children of beadID. Thin accessor over childStats for the closed-wisp count.
-func deriveIterationFromChildren(children []BeadInfo, beadID string) int {
-	return childStats(children, beadID).ClosedCount
+func deriveIterationFromChildren(children []BeadInfo, beadID string) (int, error) {
+	stats, err := childStats(children, beadID)
+	return stats.ClosedCount, err
 }
 
 // highestClosedWisp finds the closed convergence wisp with the highest
 // iteration number among the children of beadID. Thin accessor over childStats.
-func highestClosedWisp(children []BeadInfo, beadID string) (BeadInfo, int, bool) {
-	s := childStats(children, beadID)
-	return s.HighestClosed, s.HighestClosedIter, s.HighestClosedFound
+func highestClosedWisp(children []BeadInfo, beadID string) (BeadInfo, int, bool, error) {
+	stats, err := childStats(children, beadID)
+	return stats.HighestClosed, stats.HighestClosedIter, stats.HighestClosedFound, err
 }
 
 // emitRecoveryEvent emits a convergence event with the recovery flag

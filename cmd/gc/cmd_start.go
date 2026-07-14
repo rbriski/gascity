@@ -515,10 +515,6 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
 
-	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -585,7 +581,7 @@ func resolveStartDir(args []string) (string, error) {
 // requireBootstrappedCity.
 func resolveStartDirRef(ref string) (string, error) {
 	if classifyCityRef(ref) == cityRefName {
-		ctx, err := resolveCityNameContext(ref, resolveContextFromPath)
+		ctx, err := resolveCityNameContextWithRigResolver(ref, resolveStartContextFromPath, resolveStartRigPathToContext)
 		if err != nil {
 			return "", err
 		}
@@ -595,7 +591,7 @@ func resolveStartDirRef(ref string) (string, error) {
 }
 
 func requireBootstrappedCity(dir string) (string, error) {
-	ctx, err := resolveContextFromPath(dir)
+	ctx, err := resolveStartContextFromPath(dir)
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
@@ -608,6 +604,40 @@ func requireBootstrappedCity(dir string) (string, error) {
 		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
 	}
 	return cityPath, nil
+}
+
+// resolveStartContextFromPath resolves only the owning city needed by start.
+// It deliberately composes registered rig bindings through the read-only
+// supervisor intent loader: controller.lock has not been acquired yet, so path
+// discovery may not hydrate packs or mutate process-global feature flags.
+func resolveStartContextFromPath(path string) (resolvedContext, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return resolvedContext{CityPath: cityPath}, nil
+	}
+	ctx, ok, err := resolveStartRigPathToContext(abs)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ok {
+		return ctx, nil
+	}
+	cityPath, err := findCity(abs)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	return resolvedContext{CityPath: cityPath}, nil
+}
+
+func resolveStartRigPathToContext(dir string) (resolvedContext, bool, error) {
+	return resolveRigPathToContextWithConfigLoader(dir, loadStartIntentConfig)
+}
+
+func loadStartIntentConfig(cityPath string, _ ...io.Writer) (*config.City, error) {
+	return loadSupervisorIntentConfig(cityPath)
 }
 
 // doStartStandalone boots an existing city in the legacy per-city mode.
@@ -638,6 +668,15 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			fmt.Fprintf(stderr, "gc start: city is registered with the supervisor; run \"gc unregister %s\" before using --foreground\n", cityPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+	}
+	var controllerLockSource *controllerLockLease
+	if controllerMode {
+		controllerLockSource, err = acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLockSource.Close() //nolint:errcheck // no-op after exact ownership transfer
 	}
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -856,7 +895,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+		controllerLock, transferErr := controllerLockSource.Transfer()
+		if transferErr != nil {
+			fmt.Fprintf(stderr, "gc start: transferring controller ownership: %v\n", transferErr) //nolint:errcheck
+			return 1
+		}
+		return runControllerWithLease(controllerLock, cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
 			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
 	}
 

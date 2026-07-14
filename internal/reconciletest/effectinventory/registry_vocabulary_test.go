@@ -231,6 +231,29 @@ func TestValidateRegistryRejectsMalformedGeneratedAndSpecialTargets(t *testing.T
 	})
 }
 
+func TestValidateRegistryRejectsImpossibleDirectAndBatchTargetSlots(t *testing.T) {
+	t.Run("direct result cannot identify a pre-existing mutation target", func(t *testing.T) {
+		registry := validRegistry()
+		firstRoute(&registry).Target.Identities[0].BoundarySlot = ValueSlot{Kind: SlotResult, Index: 1}
+		assertErrorContains(
+			t,
+			validateRegistry(registry, validationDate()),
+			"direct target identity must use a receiver or parameter slot",
+		)
+	})
+
+	t.Run("batch receiver cannot identify the addressed record collection", func(t *testing.T) {
+		target := batchTarget(TargetCardinalitySet)
+		target.Identities[0].BoundarySlot = ValueSlot{Kind: SlotReceiver}
+		registry := registryForTarget(KindStoreMutation, AccessStoreAdapter, StoreDomainMaintenance, target)
+		assertErrorContains(
+			t,
+			validateRegistry(registry, validationDate()),
+			"batch target identity must use a parameter slot",
+		)
+	})
+}
+
 func TestValidateRegistryAcceptsPermanentStoreAdapterWithoutException(t *testing.T) {
 	registry := validRegistry()
 	route := firstRoute(&registry)

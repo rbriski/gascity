@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -176,9 +175,6 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	}
 	cleanupMu.Lock()
 	startedPGID = cmd.Process.Pid
-	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
-		startedPGID = pgid
-	}
 	cleanupMu.Unlock()
 
 	err := cmd.Wait()

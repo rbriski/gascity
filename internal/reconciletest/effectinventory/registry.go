@@ -4,6 +4,7 @@
 package effectinventory
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"path"
 	"sort"
@@ -324,13 +325,20 @@ type BoundaryDefinition struct {
 	Output ValueSlot
 }
 
-// Site is one physical boundary crossing, deduplicated across routes.
-type Site struct {
-	ID            string
-	BoundaryID    string
-	StoreDomain   StoreDomain
-	Matcher       OperationSite
+// SiteRegistration is one exact physical boundary crossing. Its identity is
+// derived from BoundaryID and Matcher during compilation; authors never name
+// physical sites. Cases classify the profiles in which discovery found it.
+type SiteRegistration struct {
+	BoundaryID string
+	Matcher    OperationSite
+	Cases      []ProfileCase
+}
+
+// ProfileCase is the one classification that applies to a physical site in
+// each listed build profile. A case may have several logical ownership routes.
+type ProfileCase struct {
 	BuildProfiles []BuildProfileID
+	Routes        []Route
 }
 
 // ValueSlot is one-based for parameters/results and index-free otherwise.
@@ -409,11 +417,10 @@ type TemporaryException struct {
 	OwningTest   TestRef
 }
 
-// Route classifies one logical origin and its exact call path to a Site.
+// Route classifies one logical origin and its exact call path to a registered
+// physical site.
 type Route struct {
-	ID               string
-	SiteID           string
-	BuildProfiles    []BuildProfileID
+	StoreDomain      StoreDomain
 	ActionFamily     ActionFamily
 	ExecutingProcess ExecutingProcess
 	LogicalOwner     FunctionRef
@@ -431,9 +438,42 @@ type Route struct {
 // Registry is the single typed source of discovery boundaries, sites, and
 // ownership routes.
 type Registry struct {
-	Boundaries []BoundaryDefinition
-	Sites      []Site
-	Routes     []Route
+	Boundaries    []BoundaryDefinition
+	Registrations []SiteRegistration
+}
+
+// SiteRegistrationID is the content-derived identity of one physical site.
+type SiteRegistrationID string
+
+// RouteID is the content-derived identity of one logical ownership route.
+type RouteID string
+
+// CompiledRegistry is a validated, discovery-complete, canonically ordered
+// registry. It is produced only when catalog and analyzer results agree in
+// both directions.
+type CompiledRegistry struct {
+	Boundaries    []BoundaryDefinition
+	Registrations []CompiledSiteRegistration
+}
+
+// CompiledSiteRegistration is one physical registration with a derived ID.
+type CompiledSiteRegistration struct {
+	ID         SiteRegistrationID
+	BoundaryID string
+	Matcher    OperationSite
+	Cases      []CompiledProfileCase
+}
+
+// CompiledProfileCase is one canonically ordered profile classification.
+type CompiledProfileCase struct {
+	BuildProfiles []BuildProfileID
+	Routes        []CompiledRoute
+}
+
+// CompiledRoute is one logical route with a derived ID.
+type CompiledRoute struct {
+	ID         RouteID
+	Definition Route
 }
 
 type fencePolicy struct {
@@ -446,14 +486,16 @@ type fencePolicy struct {
 	RequiresToken          bool
 }
 
-type seenRoute struct {
-	id       string
-	profiles map[BuildProfileID]bool
+type validatedRegistration struct {
+	id           SiteRegistrationID
+	registration SiteRegistration
+	profiles     map[BuildProfileID]int
 }
 
-// ValidateRegistry rejects incomplete, ambiguous, duplicate, or expired
-// classifications and returns every problem in deterministic order.
-func ValidateRegistry(registry Registry, asOf time.Time) error {
+// CompileRegistry rejects incomplete, ambiguous, duplicate, stale, unknown, or
+// expired classifications. It compiles only when discovery and registration
+// cover the same exact physical sites in every build profile.
+func CompileRegistry(registry Registry, observed []ObservedSite, asOf time.Time) (CompiledRegistry, error) {
 	var problems []string
 	validDate := !asOf.IsZero()
 	if !validDate {
@@ -462,23 +504,27 @@ func ValidateRegistry(registry Registry, asOf time.Time) error {
 	if len(registry.Boundaries) == 0 {
 		problems = append(problems, "registry has no boundaries")
 	}
-	if len(registry.Sites) == 0 {
-		problems = append(problems, "registry has no sites")
-	}
-	if len(registry.Routes) == 0 {
-		problems = append(problems, "registry has no routes")
+	if len(registry.Registrations) == 0 {
+		problems = append(problems, "registry has no site registrations")
 	}
 
 	boundaries := validateBoundaries(registry.Boundaries, &problems)
-	sites := validateSites(registry.Sites, boundaries, &problems)
-	validateRoutes(registry.Routes, sites, boundaries, asOf, validDate, &problems)
-	validateCoverage(registry.Sites, registry.Routes, &problems)
+	registrations := validateRegistrations(registry.Registrations, boundaries, asOf, validDate, &problems)
+	reconcileDiscovery(registrations, observed, boundaries, &problems)
 
 	if len(problems) == 0 {
-		return nil
+		return compileValidatedRegistry(registry.Boundaries, registrations), nil
 	}
 	sort.Strings(problems)
-	return validationError(problems)
+	problems = compactStrings(problems)
+	return CompiledRegistry{}, validationError(problems)
+}
+
+// ValidateRegistry validates and reconciles a registry against exact analyzer
+// observations without retaining the compiled representation.
+func ValidateRegistry(registry Registry, observed []ObservedSite, asOf time.Time) error {
+	_, err := CompileRegistry(registry, observed, asOf)
+	return err
 }
 
 func validateBoundaries(definitions []BoundaryDefinition, problems *[]string) map[string]BoundaryDefinition {
@@ -535,127 +581,284 @@ func validateBoundaries(definitions []BoundaryDefinition, problems *[]string) ma
 	return byID
 }
 
-func validateSites(siteList []Site, boundaries map[string]BoundaryDefinition, problems *[]string) map[string]Site {
-	byID := make(map[string]Site, len(siteList))
-	matchers := make(map[string]string, len(siteList))
-	for index, site := range siteList {
-		scope := fmt.Sprintf("site[%d]", index)
-		if strings.TrimSpace(site.ID) == "" {
-			addProblem(problems, scope, "site id is required")
-		}
-		boundary, boundaryExists := boundaries[site.BoundaryID]
+func validateRegistrations(registrations []SiteRegistration, boundaries map[string]BoundaryDefinition, asOf time.Time, validDate bool, problems *[]string) []validatedRegistration {
+	result := make([]validatedRegistration, 0, len(registrations))
+	physicalSites := make(map[string]SiteRegistrationID, len(registrations))
+	totalRoutes := 0
+	for _, registration := range registrations {
+		registrationID := deriveSiteRegistrationID(registration.BoundaryID, registration.Matcher)
+		scope := fmt.Sprintf("registration %q", registrationID)
+		boundary, boundaryExists := boundaries[registration.BoundaryID]
 		if !boundaryExists {
-			addProblem(problems, scope, "site %q references unknown boundary %q", site.ID, site.BoundaryID)
+			addProblem(problems, scope, "references unknown boundary %q", registration.BoundaryID)
 		}
-		validateOperationSite(site.Matcher, scope+" matcher", problems)
-		validateProfileSet(site.BuildProfiles, scope, "site", problems)
+		validateOperationSite(registration.Matcher, scope+" matcher", problems)
 		if boundaryExists {
-			validateSiteBoundaryCompatibility(site, boundary, scope, problems)
+			validateSiteBoundaryCompatibility(registration.Matcher, boundary, scope, problems)
 		}
-		if previous, exists := byID[site.ID]; exists {
-			addProblem(problems, scope, "duplicate site id %q (first boundary %q)", site.ID, previous.BoundaryID)
-		} else if site.ID != "" {
-			byID[site.ID] = site
-		}
-		matcherKey := site.BoundaryID + "|" + site.Matcher.key()
-		if previous, exists := matchers[matcherKey]; exists {
-			addProblem(problems, scope, "duplicate physical site matcher in %q and %q", previous, site.ID)
+
+		physicalKey := registrationPhysicalKey(registration.BoundaryID, registration.Matcher)
+		if previous, exists := physicalSites[physicalKey]; exists {
+			addProblem(problems, scope, "duplicates physical site registration %q", previous)
 		} else {
-			matchers[matcherKey] = site.ID
+			physicalSites[physicalKey] = registrationID
 		}
+
+		profileCounts := make(map[BuildProfileID]int)
+		if len(registration.Cases) == 0 {
+			addProblem(problems, scope, "at least one profile classification case is required")
+		}
+		for _, profileCase := range registration.Cases {
+			caseScope := fmt.Sprintf("%s case[%s]", scope, canonicalProfileKey(profileCase.BuildProfiles))
+			validateProfileSet(profileCase.BuildProfiles, caseScope, "case", problems)
+			for _, profile := range profileCase.BuildProfiles {
+				profileCounts[profile]++
+				if profileCounts[profile] == 2 {
+					addProblem(problems, scope, "build profile %q has multiple classification cases", profile)
+				}
+			}
+			if len(profileCase.Routes) == 0 {
+				addProblem(problems, caseScope, "at least one logical route is required")
+			}
+			totalRoutes += len(profileCase.Routes)
+			semanticRoutes := make(map[string]RouteID, len(profileCase.Routes))
+			for _, route := range profileCase.Routes {
+				routeID := deriveRouteID(registrationID, route)
+				routeScope := fmt.Sprintf("%s route %q", caseScope, routeID)
+				validateRoute(route, registration.Matcher, boundary, boundaryExists, routeScope, asOf, validDate, problems)
+				semanticKey := route.semanticKey()
+				if previous, exists := semanticRoutes[semanticKey]; exists {
+					addProblem(problems, caseScope, "logical route %q is classified more than once", previous)
+				} else {
+					semanticRoutes[semanticKey] = routeID
+				}
+			}
+		}
+		result = append(result, validatedRegistration{
+			id:           registrationID,
+			registration: registration,
+			profiles:     profileCounts,
+		})
 	}
-	return byID
+	if totalRoutes == 0 {
+		*problems = append(*problems, "registry has no routes")
+	}
+	return result
 }
 
-func validateSiteBoundaryCompatibility(site Site, boundary BoundaryDefinition, scope string, problems *[]string) {
-	isChannelOperation := oneOf(site.Matcher.Operation, OperationChannelSend, OperationChannelReceive, OperationSelectSend, OperationSelectReceive)
+func validateSiteBoundaryCompatibility(matcher OperationSite, boundary BoundaryDefinition, scope string, problems *[]string) {
+	isChannelOperation := oneOf(matcher.Operation, OperationChannelSend, OperationChannelReceive, OperationSelectSend, OperationSelectReceive)
 	if boundary.Match == ObjectMatchChannel && !isChannelOperation {
 		addProblem(problems, scope, "channel boundary requires a channel operation")
 	}
 	if boundary.Match != ObjectMatchChannel && isChannelOperation {
 		addProblem(problems, scope, "call boundary cannot use a channel operation")
 	}
-	if boundary.Kind == KindStoreMutation {
-		if !knownStoreDomain(site.StoreDomain) {
-			if site.StoreDomain == "" {
+}
+
+func validateRoute(route Route, matcher OperationSite, boundary BoundaryDefinition, boundaryExists bool, scope string, asOf time.Time, validDate bool, problems *[]string) {
+	boundaryKind := EffectKind("")
+	if boundaryExists {
+		boundaryKind = boundary.Kind
+		validateStoreDomain(route.StoreDomain, boundaryKind, scope, problems)
+	}
+	if !knownActionFamily(route.ActionFamily) {
+		addProblem(problems, scope, "unknown action family %q", route.ActionFamily)
+	}
+	if !oneOf(route.ExecutingProcess, ProcessController, ProcessAPIInController, ProcessForegroundCLI, ProcessSidecarPoller, ProcessProviderChild) {
+		addProblem(problems, scope, "unknown executing process %q", route.ExecutingProcess)
+	}
+	validateFunction(route.LogicalOwner, scope+" logical owner", problems)
+	validateTarget(route.Target, scope, problems)
+	validateFences(route.Fences, scope, problems)
+	validateGate(route.CurrentGate, scope, problems)
+	validateDisposition(route.Disposition, scope, problems)
+	if !knownAccessPath(route.AccessPath) {
+		addProblem(problems, scope, "unknown access path %q", route.AccessPath)
+	}
+	validateContinuation(route.Continuation, scope, problems)
+	validateRouteHops(route, matcher, scope, problems)
+	validateTests(route.OwningTests, scope, problems)
+	if boundaryExists {
+		validateAccessKind(route.AccessPath, boundaryKind, scope, problems)
+	}
+	validateException(route, boundaryKind, scope, asOf, validDate, problems)
+}
+
+func validateStoreDomain(domain StoreDomain, boundaryKind EffectKind, scope string, problems *[]string) {
+	if boundaryKind == KindStoreMutation {
+		if !knownStoreDomain(domain) {
+			if domain == "" {
 				addProblem(problems, scope, "store domain is required")
 			} else {
-				addProblem(problems, scope, "unknown store domain %q", site.StoreDomain)
+				addProblem(problems, scope, "unknown store domain %q", domain)
 			}
 		}
-	} else if site.StoreDomain != "" {
+		return
+	}
+	if domain != "" {
 		addProblem(problems, scope, "store domain is only valid for store mutations")
 	}
 }
 
-func validateRoutes(routes []Route, sites map[string]Site, boundaries map[string]BoundaryDefinition, asOf time.Time, validDate bool, problems *[]string) {
-	ids := make(map[string]int, len(routes))
-	semanticRoutes := make(map[string]seenRoute, len(routes))
-	for index, route := range routes {
-		scope := fmt.Sprintf("route[%d]", index)
-		if strings.TrimSpace(route.ID) == "" {
-			addProblem(problems, scope, "route id is required")
+func reconcileDiscovery(registrations []validatedRegistration, observed []ObservedSite, boundaries map[string]BoundaryDefinition, problems *[]string) {
+	registrationsByPhysical := make(map[string][]validatedRegistration, len(registrations))
+	classificationCounts := make(map[string]int)
+	for _, registration := range registrations {
+		physicalKey := registrationPhysicalKey(registration.registration.BoundaryID, registration.registration.Matcher)
+		registrationsByPhysical[physicalKey] = append(registrationsByPhysical[physicalKey], registration)
+		for profile, count := range registration.profiles {
+			classificationCounts[siteProfileKey(physicalKey, profile)] += count
 		}
-		if previous, exists := ids[route.ID]; exists {
-			addProblem(problems, scope, "duplicate route id %q (first at route[%d])", route.ID, previous)
-		} else if route.ID != "" {
-			ids[route.ID] = index
-		}
-		site, siteExists := sites[route.SiteID]
-		if !siteExists {
-			addProblem(problems, scope, "route %q references unknown site %q", route.ID, route.SiteID)
-		}
-		validateProfileSet(route.BuildProfiles, scope, "route", problems)
-		if siteExists {
-			validateRouteProfiles(route, site, scope, problems)
-		}
-		if !knownActionFamily(route.ActionFamily) {
-			addProblem(problems, scope, "unknown action family %q", route.ActionFamily)
-		}
-		if !oneOf(route.ExecutingProcess, ProcessController, ProcessAPIInController, ProcessForegroundCLI, ProcessSidecarPoller, ProcessProviderChild) {
-			addProblem(problems, scope, "unknown executing process %q", route.ExecutingProcess)
-		}
-		validateFunction(route.LogicalOwner, scope+" logical owner", problems)
-		validateTarget(route.Target, scope, problems)
-		validateFences(route.Fences, scope, problems)
-		validateGate(route.CurrentGate, scope, problems)
-		validateDisposition(route.Disposition, scope, problems)
-		if !knownAccessPath(route.AccessPath) {
-			addProblem(problems, scope, "unknown access path %q", route.AccessPath)
-		}
-		validateContinuation(route.Continuation, scope, problems)
-		validateRouteHops(route, site, siteExists, scope, problems)
-		validateTests(route.OwningTests, scope, problems)
-		boundaryKind := EffectKind("")
-		if siteExists {
-			boundaryKind = boundaries[site.BoundaryID].Kind
-			validateAccessKind(route.AccessPath, boundaryKind, scope, problems)
-		}
-		validateException(route, boundaryKind, scope, asOf, validDate, problems)
+	}
 
-		semanticKey := route.semanticKey()
-		if previous, exists := semanticRoutes[semanticKey]; exists {
-			overlap := overlappingProfiles(previous.profiles, route.BuildProfiles)
-			if len(overlap) > 0 {
-				addProblem(problems, scope, "route %q duplicates semantic route %q in build profiles %q", route.ID, previous.id, overlap)
+	observedCounts := make(map[string]int, len(observed))
+	for _, site := range observed {
+		registrationID := deriveSiteRegistrationID(site.BoundaryID, site.Matcher)
+		scope := fmt.Sprintf("discovered site %q in build profile %q", registrationID, site.Profile)
+		boundary, boundaryExists := boundaries[site.BoundaryID]
+		if !boundaryExists {
+			addProblem(problems, scope, "references unknown boundary %q", site.BoundaryID)
+		}
+		validateOperationSite(site.Matcher, scope+" matcher", problems)
+		if !knownBuildProfile(site.Profile) {
+			addProblem(problems, scope, "unknown build profile %q", site.Profile)
+		}
+		if boundaryExists {
+			validateSiteBoundaryCompatibility(site.Matcher, boundary, scope, problems)
+		}
+
+		physicalKey := registrationPhysicalKey(site.BoundaryID, site.Matcher)
+		key := siteProfileKey(physicalKey, site.Profile)
+		observedCounts[key]++
+		if observedCounts[key] == 2 {
+			addProblem(problems, scope, "was reported more than once by discovery")
+		}
+		matching := registrationsByPhysical[physicalKey]
+		if len(matching) == 0 {
+			addProblem(problems, scope, "has no registration")
+			continue
+		}
+		if classificationCounts[key] == 0 {
+			addProblem(problems, scope, "has no classification case")
+		}
+	}
+
+	for _, registration := range registrations {
+		physicalKey := registrationPhysicalKey(registration.registration.BoundaryID, registration.registration.Matcher)
+		profiles := make([]BuildProfileID, 0, len(registration.profiles))
+		for profile := range registration.profiles {
+			profiles = append(profiles, profile)
+		}
+		sort.Slice(profiles, func(i, j int) bool { return profiles[i] < profiles[j] })
+		for _, profile := range profiles {
+			if observedCounts[siteProfileKey(physicalKey, profile)] == 0 {
+				*problems = append(*problems, fmt.Sprintf("stale registration %q in build profile %q: site was not discovered", registration.id, profile))
 			}
-			for _, profile := range route.BuildProfiles {
-				previous.profiles[profile] = true
-			}
-			semanticRoutes[semanticKey] = previous
-		} else {
-			semanticRoutes[semanticKey] = seenRoute{id: route.ID, profiles: profileSet(route.BuildProfiles)}
 		}
 	}
 }
 
-func validateRouteProfiles(route Route, site Site, scope string, problems *[]string) {
-	siteProfiles := stringSet(site.BuildProfiles)
-	for _, profile := range route.BuildProfiles {
-		if !siteProfiles[string(profile)] {
-			addProblem(problems, scope, "route build profile %q is not present on site %q", profile, site.ID)
-		}
+func compileValidatedRegistry(boundaries []BoundaryDefinition, registrations []validatedRegistration) CompiledRegistry {
+	compiled := CompiledRegistry{
+		Boundaries:    append([]BoundaryDefinition(nil), boundaries...),
+		Registrations: make([]CompiledSiteRegistration, 0, len(registrations)),
 	}
+	sort.Slice(compiled.Boundaries, func(i, j int) bool {
+		return compiled.Boundaries[i].ID < compiled.Boundaries[j].ID
+	})
+	for _, validated := range registrations {
+		registration := validated.registration
+		compiledRegistration := CompiledSiteRegistration{
+			ID:         validated.id,
+			BoundaryID: registration.BoundaryID,
+			Matcher:    cloneOperationSite(registration.Matcher),
+			Cases:      make([]CompiledProfileCase, 0, len(registration.Cases)),
+		}
+		for _, profileCase := range registration.Cases {
+			compiledCase := CompiledProfileCase{
+				BuildProfiles: append([]BuildProfileID(nil), profileCase.BuildProfiles...),
+				Routes:        make([]CompiledRoute, 0, len(profileCase.Routes)),
+			}
+			for _, route := range profileCase.Routes {
+				compiledCase.Routes = append(compiledCase.Routes, CompiledRoute{
+					ID:         deriveRouteID(validated.id, route),
+					Definition: cloneRoute(route),
+				})
+			}
+			sort.Slice(compiledCase.Routes, func(i, j int) bool {
+				return compiledCase.Routes[i].ID < compiledCase.Routes[j].ID
+			})
+			compiledRegistration.Cases = append(compiledRegistration.Cases, compiledCase)
+		}
+		sort.Slice(compiledRegistration.Cases, func(i, j int) bool {
+			return canonicalProfileKey(compiledRegistration.Cases[i].BuildProfiles) < canonicalProfileKey(compiledRegistration.Cases[j].BuildProfiles)
+		})
+		compiled.Registrations = append(compiled.Registrations, compiledRegistration)
+	}
+	sort.Slice(compiled.Registrations, func(i, j int) bool {
+		return compiled.Registrations[i].ID < compiled.Registrations[j].ID
+	})
+	return compiled
+}
+
+func cloneRoute(route Route) Route {
+	clone := route
+	clone.LogicalOwner.ClosurePath = append([]int(nil), route.LogicalOwner.ClosurePath...)
+	clone.Fences = append([]Fence(nil), route.Fences...)
+	clone.Disposition.Gates = append([]TaskRef(nil), route.Disposition.Gates...)
+	clone.Hops = append([]RouteHop(nil), route.Hops...)
+	for index := range clone.Hops {
+		clone.Hops[index].Site.Enclosing.ClosurePath = append([]int(nil), route.Hops[index].Site.Enclosing.ClosurePath...)
+		clone.Hops[index].Callee.ClosurePath = append([]int(nil), route.Hops[index].Callee.ClosurePath...)
+	}
+	clone.OwningTests = append([]TestRef(nil), route.OwningTests...)
+	if route.Exception != nil {
+		exception := *route.Exception
+		exception.RemovalTasks = append([]TaskRef(nil), route.Exception.RemovalTasks...)
+		clone.Exception = &exception
+	}
+	return clone
+}
+
+func cloneOperationSite(site OperationSite) OperationSite {
+	clone := site
+	clone.Enclosing.ClosurePath = append([]int(nil), site.Enclosing.ClosurePath...)
+	return clone
+}
+
+func deriveSiteRegistrationID(boundaryID string, matcher OperationSite) SiteRegistrationID {
+	return SiteRegistrationID(deriveContentID("site-v1-", registrationPhysicalKey(boundaryID, matcher)))
+}
+
+func deriveRouteID(registrationID SiteRegistrationID, route Route) RouteID {
+	return RouteID(deriveContentID("route-v1-", string(registrationID)+"\x00"+route.semanticKey()))
+}
+
+func deriveContentID(prefix, canonical string) string {
+	digest := sha256.Sum256([]byte(canonical))
+	return prefix + fmt.Sprintf("%x", digest)
+}
+
+func registrationPhysicalKey(boundaryID string, matcher OperationSite) string {
+	return boundaryID + "|" + matcher.key()
+}
+
+func siteProfileKey(physicalKey string, profile BuildProfileID) string {
+	return physicalKey + "|" + string(profile)
+}
+
+func canonicalProfileKey(profiles []BuildProfileID) string {
+	values := append([]BuildProfileID(nil), profiles...)
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	parts := make([]string, len(values))
+	for index, profile := range values {
+		parts[index] = string(profile)
+	}
+	if len(parts) == 0 {
+		return "<none>"
+	}
+	return strings.Join(parts, ",")
 }
 
 func validateTarget(target TargetRef, scope string, problems *[]string) {
@@ -821,7 +1024,7 @@ func validateContinuation(continuation Continuation, scope string, problems *[]s
 	}
 }
 
-func validateRouteHops(route Route, site Site, siteExists bool, scope string, problems *[]string) {
+func validateRouteHops(route Route, matcher OperationSite, scope string, problems *[]string) {
 	for index, hop := range route.Hops {
 		hopScope := fmt.Sprintf("%s hop[%d]", scope, index)
 		validateOperationSite(hop.Site, hopScope+" site", problems)
@@ -833,11 +1036,8 @@ func validateRouteHops(route Route, site Site, siteExists bool, scope string, pr
 		}
 		validateFunction(hop.Callee, hopScope+" callee", problems)
 	}
-	if !siteExists {
-		return
-	}
 	if len(route.Hops) == 0 {
-		if !route.LogicalOwner.equal(site.Matcher.Enclosing) {
+		if !route.LogicalOwner.equal(matcher.Enclosing) {
 			addProblem(problems, scope, "logical owner is not present in the exact route chain")
 		}
 		return
@@ -847,7 +1047,7 @@ func validateRouteHops(route Route, site Site, siteExists bool, scope string, pr
 			addProblem(problems, scope, "route hop %d callee does not equal hop %d enclosing function", index-1, index)
 		}
 	}
-	if !route.Hops[len(route.Hops)-1].Callee.equal(site.Matcher.Enclosing) {
+	if !route.Hops[len(route.Hops)-1].Callee.equal(matcher.Enclosing) {
 		addProblem(problems, scope, "last route hop must reach the physical site enclosing function")
 	}
 	if !routeContainsFunction(route, route.LogicalOwner) {
@@ -975,29 +1175,6 @@ func validateAccessKind(access AccessPath, kind EffectKind, scope string, proble
 	case AccessManagerBypass:
 		if !oneOf(kind, KindStoreMutation, KindProviderMutation, KindProcessMutation) {
 			addProblem(problems, scope, "manager-bypass requires a store/provider/process boundary")
-		}
-	}
-}
-
-func validateCoverage(sites []Site, routes []Route, problems *[]string) {
-	routeProfiles := make(map[string]map[BuildProfileID]bool, len(sites))
-	for _, site := range sites {
-		routeProfiles[site.ID] = make(map[BuildProfileID]bool)
-	}
-	for _, route := range routes {
-		profiles := routeProfiles[route.SiteID]
-		if profiles == nil {
-			continue
-		}
-		for _, profile := range route.BuildProfiles {
-			profiles[profile] = true
-		}
-	}
-	for _, site := range sites {
-		for _, profile := range site.BuildProfiles {
-			if !routeProfiles[site.ID][profile] {
-				*problems = append(*problems, fmt.Sprintf("site %q has no ownership route in build profile %q", site.ID, profile))
-			}
 		}
 	}
 }
@@ -1241,33 +1418,6 @@ func dayUTC(value time.Time) time.Time {
 	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-func stringSet[T ~string](values []T) map[string]bool {
-	result := make(map[string]bool, len(values))
-	for _, value := range values {
-		result[string(value)] = true
-	}
-	return result
-}
-
-func profileSet(values []BuildProfileID) map[BuildProfileID]bool {
-	result := make(map[BuildProfileID]bool, len(values))
-	for _, value := range values {
-		result[value] = true
-	}
-	return result
-}
-
-func overlappingProfiles(existing map[BuildProfileID]bool, candidates []BuildProfileID) []BuildProfileID {
-	var overlap []BuildProfileID
-	for _, candidate := range candidates {
-		if existing[candidate] {
-			overlap = append(overlap, candidate)
-		}
-	}
-	sort.Slice(overlap, func(i, j int) bool { return overlap[i] < overlap[j] })
-	return overlap
-}
-
 func oneOf[T comparable](value T, candidates ...T) bool {
 	for _, candidate := range candidates {
 		if value == candidate {
@@ -1283,7 +1433,7 @@ func (route Route) semanticKey() string {
 		hops[index] = hop.key()
 	}
 	return strings.Join([]string{
-		route.SiteID,
+		string(route.StoreDomain),
 		string(route.ActionFamily),
 		string(route.ExecutingProcess),
 		route.LogicalOwner.key(),

@@ -1,31 +1,32 @@
 package effectinventory
 
 import (
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestValidateRegistryAcceptsCompleteDirectRoute(t *testing.T) {
-	if err := ValidateRegistry(validRegistry(), validationDate()); err != nil {
+	if err := validateRegistry(validRegistry(), validationDate()); err != nil {
 		t.Fatalf("ValidateRegistry() rejected a complete registry: %v", err)
 	}
 }
 
 func TestValidateRegistryAcceptsProfileSpecificRoutesToSharedSite(t *testing.T) {
 	registry := validRegistry()
-	controller := registry.Routes[0]
-	controller.BuildProfiles = []BuildProfileID{
+	controller := registry.Registrations[0].Cases[0].Routes[0]
+	controllerCase := ProfileCase{BuildProfiles: []BuildProfileID{
 		BuildDarwinDefault,
 		BuildDarwinNative,
-	}
+	}, Routes: []Route{controller}}
 	api := controller
-	api.ID = "api.route-recovery.store-write"
-	api.BuildProfiles = []BuildProfileID{
+	apiCase := ProfileCase{BuildProfiles: []BuildProfileID{
 		BuildLinuxDefault,
 		BuildLinuxNative,
 		BuildWindowsCompile,
-	}
+	}, Routes: []Route{api}}
 	api.ExecutingProcess = ProcessAPIInController
 	api.LogicalOwner = functionRef("github.com/gastownhall/gascity/internal/api", "internal/api/routes.go", "recoverRoute")
 	api.Hops = []RouteHop{{
@@ -35,29 +36,29 @@ func TestValidateRegistryAcceptsProfileSpecificRoutesToSharedSite(t *testing.T) 
 			Ordinal:   1,
 		},
 		Dispatch: HopDispatchExact,
-		Callee:   registry.Sites[0].Matcher.Enclosing,
+		Callee:   registry.Registrations[0].Matcher.Enclosing,
 	}}
-	registry.Routes = []Route{controller, api}
+	apiCase.Routes[0] = api
+	registry.Registrations[0].Cases = []ProfileCase{controllerCase, apiCase}
 
-	if err := ValidateRegistry(registry, validationDate()); err != nil {
+	if err := validateRegistry(registry, validationDate()); err != nil {
 		t.Fatalf("ValidateRegistry() rejected profile-specific routes to one site: %v", err)
 	}
 }
 
 func TestValidateRegistryAcceptsDisjointProfileSafetyClassifications(t *testing.T) {
 	registry := validRegistry()
-	darwin := registry.Routes[0]
-	darwin.BuildProfiles = []BuildProfileID{
+	darwin := registry.Registrations[0].Cases[0].Routes[0]
+	darwinCase := ProfileCase{BuildProfiles: []BuildProfileID{
 		BuildDarwinDefault,
 		BuildDarwinNative,
-	}
+	}, Routes: []Route{darwin}}
 	linux := darwin
-	linux.ID = "controller.route-recovery.store-write.linux"
-	linux.BuildProfiles = []BuildProfileID{
+	linuxCase := ProfileCase{BuildProfiles: []BuildProfileID{
 		BuildLinuxDefault,
 		BuildLinuxNative,
 		BuildWindowsCompile,
-	}
+	}, Routes: []Route{linux}}
 	linux.Fences = []Fence{{Kind: FenceNone}}
 	linux.CurrentGate = GateRef{
 		Kind:      GatePredicate,
@@ -69,9 +70,10 @@ func TestValidateRegistryAcceptsDisjointProfileSafetyClassifications(t *testing.
 		Gates:  []TaskRef{"P2.0", "P2.10A"},
 		Reason: "remove the legacy route after the conditional writer is live",
 	}
-	registry.Routes = []Route{darwin, linux}
+	linuxCase.Routes[0] = linux
+	registry.Registrations[0].Cases = []ProfileCase{darwinCase, linuxCase}
 
-	if err := ValidateRegistry(registry, validationDate()); err != nil {
+	if err := validateRegistry(registry, validationDate()); err != nil {
 		t.Fatalf("ValidateRegistry() rejected disjoint profile safety classifications: %v", err)
 	}
 }
@@ -82,7 +84,7 @@ func TestValidateRegistryRejectsBoundaryDrift(t *testing.T) {
 		mutate func(*Registry)
 		want   string
 	}{
-		{"unknown site boundary", func(r *Registry) { r.Sites[0].BoundaryID = "missing" }, `references unknown boundary "missing"`},
+		{"unknown site boundary", func(r *Registry) { r.Registrations[0].BoundaryID = "missing" }, `references unknown boundary "missing"`},
 		{"duplicate boundary id", func(r *Registry) { r.Boundaries = append(r.Boundaries, r.Boundaries[0]) }, "duplicate boundary id"},
 		{"duplicate boundary object", func(r *Registry) {
 			extra := r.Boundaries[0]
@@ -104,7 +106,7 @@ func TestValidateRegistryRejectsBoundaryDrift(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
 			tt.mutate(&registry)
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -116,22 +118,19 @@ func TestValidateRegistryAcceptsUnusedDiscoveryBoundary(t *testing.T) {
 	extra.Object.Name = "Update"
 	registry.Boundaries = append(registry.Boundaries, extra)
 
-	if err := ValidateRegistry(registry, validationDate()); err != nil {
+	if err := validateRegistry(registry, validationDate()); err != nil {
 		t.Fatalf("ValidateRegistry() rejected an unused discovery seed: %v", err)
 	}
 }
 
 func TestValidateRegistryRejectsDuplicateSiteAndRouteIdentity(t *testing.T) {
 	registry := validRegistry()
-	duplicateSite := registry.Sites[0]
-	duplicateSite.ID = "route-recovery.store-write-copy"
-	registry.Sites = append(registry.Sites, duplicateSite)
-	duplicateRoute := registry.Routes[0]
-	duplicateRoute.ID = "controller.route-recovery.store-write-copy"
-	registry.Routes = append(registry.Routes, duplicateRoute)
+	registry.Registrations = append(registry.Registrations, registry.Registrations[0])
+	duplicateRoute := registry.Registrations[0].Cases[0].Routes[0]
+	registry.Registrations[0].Cases[0].Routes = append(registry.Registrations[0].Cases[0].Routes, duplicateRoute)
 
-	err := ValidateRegistry(registry, validationDate())
-	assertErrorContains(t, err, "duplicate physical site matcher", "duplicates semantic route")
+	err := validateRegistry(registry, validationDate())
+	assertErrorContains(t, err, "duplicates physical site registration", "logical route", "classified more than once")
 }
 
 func TestValidateRegistryRejectsRouteProfileMismatch(t *testing.T) {
@@ -140,15 +139,14 @@ func TestValidateRegistryRejectsRouteProfileMismatch(t *testing.T) {
 		mutate func(*Registry)
 		want   string
 	}{
-		{"empty", func(r *Registry) { r.Routes[0].BuildProfiles = nil }, "route build profiles are required"},
-		{"unknown", func(r *Registry) { r.Routes[0].BuildProfiles = []BuildProfileID{"plan9/amd64/default"} }, `unknown build profile "plan9/amd64/default"`},
-		{"outside site", func(r *Registry) {
-			r.Sites[0].BuildProfiles = []BuildProfileID{BuildLinuxDefault}
-			r.Routes[0].BuildProfiles = []BuildProfileID{BuildDarwinDefault}
-		}, `is not present on site`},
-		{"coverage gap", func(r *Registry) { r.Routes[0].BuildProfiles = []BuildProfileID{BuildDarwinDefault} }, "has no ownership route in build profile"},
+		{"empty", func(r *Registry) { r.Registrations[0].Cases[0].BuildProfiles = nil }, "case build profiles are required"},
+		{"unknown", func(r *Registry) { r.Registrations[0].Cases[0].BuildProfiles = []BuildProfileID{"plan9/amd64/default"} }, `unknown build profile "plan9/amd64/default"`},
+		{"overlap", func(r *Registry) {
+			r.Registrations[0].Cases = append(r.Registrations[0].Cases, r.Registrations[0].Cases[0])
+		}, `has multiple classification cases`},
+		{"missing routes", func(r *Registry) { r.Registrations[0].Cases[0].Routes = nil }, "at least one logical route is required"},
 		{"unsorted", func(r *Registry) {
-			r.Routes[0].BuildProfiles = []BuildProfileID{BuildWindowsCompile, BuildLinuxDefault}
+			r.Registrations[0].Cases[0].BuildProfiles = []BuildProfileID{BuildWindowsCompile, BuildLinuxDefault}
 		}, "build profiles must be sorted"},
 	}
 
@@ -156,7 +154,7 @@ func TestValidateRegistryRejectsRouteProfileMismatch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
 			tt.mutate(&registry)
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -195,9 +193,9 @@ func TestFencePolicyDerivesScopeAndExclusion(t *testing.T) {
 
 func TestValidateRegistryRejectsProviderBypassOnNonProviderBoundary(t *testing.T) {
 	registry := validRegistry()
-	registry.Routes[0].AccessPath = AccessProviderBypass
+	firstRoute(&registry).AccessPath = AccessProviderBypass
 
-	assertErrorContains(t, ValidateRegistry(registry, validationDate()), "provider-bypass requires a provider-mutation boundary")
+	assertErrorContains(t, validateRegistry(registry, validationDate()), "provider-bypass requires a provider-mutation boundary")
 }
 
 func TestValidateRegistryRejectsFenceEvidenceThatDoesNotMatchMechanism(t *testing.T) {
@@ -217,11 +215,11 @@ func TestValidateRegistryRejectsFenceEvidenceThatDoesNotMatchMechanism(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
 			if tt.name == "duplicate" {
-				registry.Routes[0].Fences = []Fence{tt.fence, tt.fence}
+				firstRoute(&registry).Fences = []Fence{tt.fence, tt.fence}
 			} else {
-				registry.Routes[0].Fences = []Fence{tt.fence}
+				firstRoute(&registry).Fences = []Fence{tt.fence}
 			}
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -241,8 +239,8 @@ func TestValidateRegistryRejectsUntypedTargetSource(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			tt.mutate(&registry.Routes[0].Target)
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			tt.mutate(&firstRoute(&registry).Target)
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -262,8 +260,8 @@ func TestValidateRegistryRejectsUnverifiableCurrentGate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			registry.Routes[0].CurrentGate = tt.gate
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			firstRoute(&registry).CurrentGate = tt.gate
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -283,8 +281,8 @@ func TestValidateRegistryRejectsInvalidRemovalDisposition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			registry.Routes[0].Disposition = tt.disposition
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			firstRoute(&registry).Disposition = tt.disposition
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -304,8 +302,8 @@ func TestValidateRegistryRejectsImpossibleContinuation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			registry.Routes[0].Continuation = tt.continuation
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			firstRoute(&registry).Continuation = tt.continuation
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -313,7 +311,7 @@ func TestValidateRegistryRejectsImpossibleContinuation(t *testing.T) {
 func TestValidateRegistryRejectsBrokenExactRouteChain(t *testing.T) {
 	registry := validRegistry()
 	origin := functionRef("example/controller", "controller.go", "run")
-	registry.Routes[0].Hops = []RouteHop{{
+	firstRoute(&registry).Hops = []RouteHop{{
 		Site: OperationSite{
 			Operation: OperationCall,
 			Enclosing: origin,
@@ -323,20 +321,20 @@ func TestValidateRegistryRejectsBrokenExactRouteChain(t *testing.T) {
 		Callee:   functionRef("example/controller", "controller.go", "wrongLeaf"),
 	}}
 
-	assertErrorContains(t, ValidateRegistry(registry, validationDate()), "last route hop must reach the physical site enclosing function")
+	assertErrorContains(t, validateRegistry(registry, validationDate()), "last route hop must reach the physical site enclosing function")
 }
 
 func TestValidateRegistryRejectsInventedLogicalOwner(t *testing.T) {
 	registry := validRegistry()
-	registry.Routes[0].LogicalOwner = functionRef("example/unrelated", "unrelated.go", "owner")
+	firstRoute(&registry).LogicalOwner = functionRef("example/unrelated", "unrelated.go", "owner")
 
-	assertErrorContains(t, ValidateRegistry(registry, validationDate()), "logical owner is not present in the exact route chain")
+	assertErrorContains(t, validateRegistry(registry, validationDate()), "logical owner is not present in the exact route chain")
 }
 
 func TestValidateRegistryRequiresBoundedExceptionForDirectBypasses(t *testing.T) {
 	registry := validRegistry()
-	registry.Routes[0].Exception = nil
-	assertErrorContains(t, ValidateRegistry(registry, validationDate()), "raw-store-bypass requires a temporary exception")
+	firstRoute(&registry).Exception = nil
+	assertErrorContains(t, validateRegistry(registry, validationDate()), "raw-store-bypass requires a temporary exception")
 
 	tests := []struct {
 		name   string
@@ -352,8 +350,8 @@ func TestValidateRegistryRequiresBoundedExceptionForDirectBypasses(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			tt.mutate(registry.Routes[0].Exception)
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			tt.mutate(firstRoute(&registry).Exception)
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
@@ -361,17 +359,17 @@ func TestValidateRegistryRequiresBoundedExceptionForDirectBypasses(t *testing.T)
 func TestValidateRegistryRejectsPermanentOrMismatchedBypassException(t *testing.T) {
 	t.Run("retained bypass", func(t *testing.T) {
 		registry := validRegistry()
-		registry.Routes[0].Disposition = Disposition{
+		firstRoute(&registry).Disposition = Disposition{
 			Kind:   DispositionRetainBoundary,
 			Reason: "incorrectly retain a bypass",
 		}
-		assertErrorContains(t, ValidateRegistry(registry, validationDate()), "expiring bypass cannot retain its ownership route")
+		assertErrorContains(t, validateRegistry(registry, validationDate()), "expiring bypass cannot retain its ownership route")
 	})
 
 	t.Run("removal tasks differ", func(t *testing.T) {
 		registry := validRegistry()
-		registry.Routes[0].Exception.RemovalTasks = []TaskRef{"P2.0"}
-		assertErrorContains(t, ValidateRegistry(registry, validationDate()), "exception removal tasks must equal disposition gates")
+		firstRoute(&registry).Exception.RemovalTasks = []TaskRef{"P2.0"}
+		assertErrorContains(t, validateRegistry(registry, validationDate()), "exception removal tasks must equal disposition gates")
 	})
 }
 
@@ -393,125 +391,42 @@ func TestValidateRegistryRejectsExceptionKindWithoutRequiredSeam(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			tt.mutate(&registry.Routes[0])
-			assertErrorContains(t, ValidateRegistry(registry, validationDate()), tt.want)
+			tt.mutate(firstRoute(&registry))
+			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}
 }
 
 func TestValidateRegistryRejectsZeroValidationDate(t *testing.T) {
-	assertErrorContains(t, ValidateRegistry(validRegistry(), time.Time{}), "validation date is required")
+	assertErrorContains(t, validateRegistry(validRegistry(), time.Time{}), "validation date is required")
 }
 
 func TestValidateRegistryRejectsEmptyRegistry(t *testing.T) {
-	err := ValidateRegistry(Registry{}, validationDate())
-	assertErrorContains(t, err, "registry has no boundaries", "registry has no sites", "registry has no routes")
+	err := validateRegistry(Registry{}, validationDate())
+	assertErrorContains(t, err, "registry has no boundaries", "registry has no site registrations", "registry has no routes")
 }
 
 func TestValidateRegistryReturnsProblemsInDeterministicOrder(t *testing.T) {
 	registry := validRegistry()
-	registry.Sites[0].ID = ""
-	registry.Routes[0].ID = ""
+	registry.Registrations[0].Matcher.Ordinal = 0
+	firstRoute(&registry).ActionFamily = ""
 
-	err := ValidateRegistry(registry, validationDate())
+	err := validateRegistry(registry, validationDate())
 	if err == nil {
 		t.Fatal("ValidateRegistry() returned nil")
 	}
-	first := strings.Index(err.Error(), "route id is required")
-	second := strings.Index(err.Error(), "site id is required")
-	if first < 0 || second < 0 || first >= second {
+	lines := strings.Split(strings.TrimPrefix(err.Error(), "effect registry validation failed:\n- "), "\n- ")
+	sorted := append([]string(nil), lines...)
+	sort.Strings(sorted)
+	if !reflect.DeepEqual(lines, sorted) {
 		t.Fatalf("ValidateRegistry() error is not sorted:\n%s", err)
 	}
 }
 
 func validRegistry() Registry {
-	leaf := functionRef(
-		"github.com/gastownhall/gascity/cmd/gc",
-		"cmd/gc/route_recovery.go",
-		"restoreCarriedWorkRoutes",
-	)
-	profiles := allBuildProfiles()
-	return Registry{
-		Boundaries: []BoundaryDefinition{{
-			ID:   "beads.store.set-metadata",
-			Kind: KindStoreMutation,
-			Object: ObjectRef{
-				Package:  "github.com/gastownhall/gascity/internal/beads",
-				Receiver: "Store",
-				Name:     "SetMetadata",
-			},
-			Match: ObjectMatchInterfaceImplementors,
-		}},
-		Sites: []Site{{
-			ID:          "route-recovery.store-write",
-			BoundaryID:  "beads.store.set-metadata",
-			StoreDomain: StoreDomainRouteRecovery,
-			Matcher: OperationSite{
-				Operation: OperationCall,
-				Enclosing: leaf,
-				Ordinal:   1,
-			},
-			BuildProfiles: profiles,
-		}},
-		Routes: []Route{{
-			ID:               "controller.route-recovery.store-write",
-			SiteID:           "route-recovery.store-write",
-			BuildProfiles:    profiles,
-			ActionFamily:     FamilyRouteRecovery,
-			ExecutingProcess: ProcessController,
-			LogicalOwner:     leaf,
-			Target: TargetRef{
-				Kind:   TargetDurableRecord,
-				Sink:   ValueSlot{Kind: SlotParameter, Index: 1},
-				Source: TargetSourceStoreLiveReread,
-				SourceObject: ObjectRef{
-					Package:  "github.com/gastownhall/gascity/internal/beads",
-					Receiver: "Store",
-					Name:     "Get",
-				},
-				SourceSlot: ValueSlot{Kind: SlotResult, Index: 1},
-				Detail:     "snapshot bead ID revalidated by cache-bypassing live read",
-			},
-			Fences: []Fence{{
-				Kind: FenceLiveRereadNonCAS,
-				Source: ObjectRef{
-					Package:  "github.com/gastownhall/gascity/internal/beads",
-					Receiver: "Store",
-					Name:     "Get",
-				},
-			}},
-			CurrentGate: GateRef{Kind: GateUnconditionalLegacy},
-			Disposition: Disposition{
-				Kind:   DispositionReplaceAtGate,
-				Gates:  []TaskRef{"P2.0", "P2.10A"},
-				Reason: "move route recovery to the conditional shared writer",
-			},
-			AccessPath: AccessRawStoreBypass,
-			Continuation: Continuation{
-				Locus:      ContinuationInline,
-				Completion: CompletionSynchronous,
-			},
-			OwningTests: []TestRef{{
-				Package: "github.com/gastownhall/gascity/cmd/gc",
-				Name:    "TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead",
-			}},
-			Exception: &TemporaryException{
-				Kind:         ExceptionWeakFence,
-				Reason:       "live reread is not atomic with the following metadata write",
-				OwnerTask:    "P0.1",
-				RemovalTasks: []TaskRef{"P2.0", "P2.10A"},
-				Anchor: VersionAnchor{
-					Kind:  AnchorGitCommit,
-					Value: "7378aa936f449566657d7a7c6e49a1ff88b29373",
-				},
-				Expires: "2026-08-31",
-				OwningTest: TestRef{
-					Package: "github.com/gastownhall/gascity/cmd/gc",
-					Name:    "TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead",
-				},
-			},
-		}},
-	}
+	registry := compileRegistryFixture()
+	registry.Registrations[0].Cases[0].BuildProfiles = allBuildProfiles()
+	return registry
 }
 
 func allBuildProfiles() []BuildProfileID {
@@ -532,6 +447,14 @@ func functionRef(packagePath, file, name string) FunctionRef {
 
 func objectRef(packagePath, receiver, name string) ObjectRef {
 	return ObjectRef{Package: packagePath, Receiver: receiver, Name: name}
+}
+
+func firstRoute(registry *Registry) *Route {
+	return &registry.Registrations[0].Cases[0].Routes[0]
+}
+
+func validateRegistry(registry Registry, asOf time.Time) error {
+	return ValidateRegistry(registry, observedForRegistry(registry), asOf)
 }
 
 func validationDate() time.Time {

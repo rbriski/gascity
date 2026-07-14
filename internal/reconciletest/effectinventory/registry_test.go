@@ -243,19 +243,19 @@ func TestValidateRegistryRejectsFenceEvidenceThatDoesNotMatchMechanism(t *testin
 func TestValidateRegistryRejectsUntypedTargetSource(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*TargetRef)
+		mutate func(*TargetIdentityRef)
 		want   string
 	}{
-		{"unknown", func(target *TargetRef) { target.Source = TargetSourceKind("derived") }, `unknown target source "derived"`},
-		{"bad sink slot", func(target *TargetRef) { target.Sink = ValueSlot{Kind: SlotParameter} }, "parameter slot index must be positive"},
-		{"missing source object", func(target *TargetRef) { target.SourceObject = ObjectRef{} }, "target source object package is required"},
-		{"bad result slot", func(target *TargetRef) { target.SourceSlot = ValueSlot{Kind: SlotResult} }, "result slot index must be positive"},
+		{"unknown", func(identity *TargetIdentityRef) { identity.Source = TargetSourceKind("derived") }, `unknown target source "derived"`},
+		{"bad sink slot", func(identity *TargetIdentityRef) { identity.BoundarySlot = ValueSlot{Kind: SlotParameter} }, "parameter slot index must be positive"},
+		{"missing source object", func(identity *TargetIdentityRef) { identity.SourceObject = ObjectRef{} }, "source object package is required"},
+		{"bad result slot", func(identity *TargetIdentityRef) { identity.SourceSlot = ValueSlot{Kind: SlotResult} }, "result slot index must be positive"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := validRegistry()
-			tt.mutate(&firstRoute(&registry).Target)
+			tt.mutate(&firstRoute(&registry).Target.Identities[0])
 			assertErrorContains(t, validateRegistry(registry, validationDate()), tt.want)
 		})
 	}

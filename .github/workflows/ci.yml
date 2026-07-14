@@ -176,9 +176,21 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+      - name: Reconciler execution binding trust anchor
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          test "$(git hash-object --no-filters test/docsync/reconciler_execution_binding_test.go)" = "5140eb232fafd5fc398d2ee17991a6b8ec01d01f"
+          test "$(sha256sum test/docsync/reconciler_execution_binding_test.go | awk '{print $1}')" = "4de52f48aaaf7ae9c1f1666e0ab4b400a6983abc1c56ea37ed54ddb730249ab4"
+          GC_BINDING_AUTHORITATIVE=1 GOWORK=off GOFLAGS= GOENV=off GOTOOLCHAIN=local CGO_ENABLED=0 \
+            go test -mod=readonly -count=1 \
+              test/docsync/reconciler_execution_binding_test.go \
+              -run '^(TestReconciler.*|TestScrubBindingGitEnvironment)$'
       - name: go.mod replace guard
         run: make check-gomod-replace
       - name: Native dependency surface guard

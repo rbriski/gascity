@@ -1,0 +1,296 @@
+{
+  "schema_version": 2,
+  "kind": "reconciler-pre-g0-execution-binding",
+  "status": "bootstrap-approved-default-inert",
+  "hash_algorithm": "sha256",
+  "canonicalization": "go-encoding-json-v2-binding-digest-omitted",
+  "predecessor": {
+    "path": "engdocs/plans/reconciler-redesign/PRE_G0_CANDIDATE_MANIFEST.json",
+    "blob_oid": "87e2f7acd36bdca96fcfecd090257409d8e31ea5",
+    "sha256": "4f944f3c23a63308478fa09d8186b7512a2c68d7e7cfed25779ac18ff6bae10a",
+    "candidate_digest": "351f8a2f24a29087e4f6286af177569421eea10cb54e102c8768e711df281c26"
+  },
+  "lineage": {
+    "repository": "gastownhall/gascity",
+    "predecessor_execution_base": {
+      "commit": "5774497b00ecd0a6c072058069b77fc5874268f2",
+      "tree": "41eb14d20527ca0f89677e9e91c9e4ace04a0b70"
+    },
+    "approved_execution_base": {
+      "commit": "d36a8ccadf63c9c782b799e2a02ffbfce12c7dd4",
+      "tree": "ce562d1f935593ed592bad70a93fa73a9f8dc25f"
+    },
+    "execution_base_delta": {
+      "from_commit": "5774497b00ecd0a6c072058069b77fc5874268f2",
+      "to_commit": "d36a8ccadf63c9c782b799e2a02ffbfce12c7dd4",
+      "commit_count": 64
+    },
+    "candidate_source": {
+      "remote_ref": "refs/heads/feature/reconciler-keyed-preg0-final-20260713",
+      "commit": "8f46e6ed3930f32e2ec59ac0a70b7328558bfa41",
+      "tree": "63102fb1015f61c042025da9ee51d4f3d5d16b9a"
+    },
+    "bootstrap": {
+      "commit": "614a8ebd62cf230de226213f302ed3002dddea61",
+      "tree": "2c1c9d4a2aeaf8188793a26554ec7ea5f9b7cc48",
+      "ordered_parents": [
+        "d36a8ccadf63c9c782b799e2a02ffbfce12c7dd4",
+        "8f46e6ed3930f32e2ec59ac0a70b7328558bfa41"
+      ],
+      "merge_base": {
+        "commit": "4e90d8378949e3bf73b4e67f0f61e5130a87b91e",
+        "tree": "fc55f8cb98a3c197bf345ebf91ac2462af52386b"
+      }
+    },
+    "unincorporated_upstream": {
+      "mutable_ref": "refs/remotes/origin/main",
+      "approval_observed_tip": "c93a05d21296d2277d2479b486015aad0c6b6a53",
+      "approval_observed_tip_tree": "154e7814023682048db22cab90a89a0bf4d878b2",
+      "binding_observed_tip": "5e2fa2872a6dc0de996397f6face30893a4c14da",
+      "binding_observed_tip_tree": "253a681ac6ea22265b13f961d4d415de18287418",
+      "commits_after_approved_base": 6,
+      "merge_base": "d36a8ccadf63c9c782b799e2a02ffbfce12c7dd4",
+      "incorporated": false,
+      "policy": "record-only; incorporating any post-d36a8cca upstream commit requires expanded approval"
+    }
+  },
+  "immutable_v1_files": [
+    {
+      "path": ".github/CODEOWNERS",
+      "blob_oid": "675e7f1cff3ee31e70f7e31d8d5363a85e88d781",
+      "sha256": "a349ea38b1e043cffd57726cf3ec64e1214abad92be219f02b8997b4b123d6b8"
+    },
+    {
+      "path": "engdocs/plans/reconciler-redesign/PRE_G0_CANDIDATE_MANIFEST.json",
+      "blob_oid": "87e2f7acd36bdca96fcfecd090257409d8e31ea5",
+      "sha256": "4f944f3c23a63308478fa09d8186b7512a2c68d7e7cfed25779ac18ff6bae10a"
+    },
+    {
+      "path": "engdocs/plans/reconciler-redesign/POST_INTEGRATION_REVIEW.md",
+      "blob_oid": "295d7112e248c68ba0dbedb55352d5bc345b3f2c",
+      "sha256": "eda1522421c01ca746993525ab46899d22bb11c242c8d62bc45e8d38cc8244aa"
+    },
+    {
+      "path": "test/docsync/reconciler_candidate_manifest_test.go",
+      "blob_oid": "07496a454de90bf1f1cc6727f9ba754ced644ec8",
+      "sha256": "4acb3bf7228925b15b8fa7d98147a2a3e9b4099aefd59da97e541455f55b71b7"
+    }
+  ],
+  "conflict_resolutions": [
+    {
+      "path": "TESTING.md",
+      "ancestor_blob_oid": "afc9ba5f2c872df7db65adc465f4b04d70300d64",
+      "parent1_blob_oid": "706bac70bc853f50caea1dd16b9c1c72c0de6c6e",
+      "parent2_blob_oid": "b07a2a6fd6804fd7e5cb8108199d0f3fd901e2f6",
+      "result_blob_oid": "62ac13ec9fc3897b01269ee377a7c84fe3e65f3a",
+      "sha256": "47b70db4d2559af3e378339b758a644f0d72a7a32fe91e56a64018bb6ec7a73f",
+      "resolution": "regenerate-from-combined-tree"
+    },
+    {
+      "path": "internal/bdflags/bdflags.go",
+      "ancestor_blob_oid": "51b0dce94fa53c00faf51002a5ab62e886528d32",
+      "parent1_blob_oid": "c033c24662ddb07e0420dfadb8296815b9c84053",
+      "parent2_blob_oid": "a5b3e4fb4701627ffaa65711df26e0161dedbe8d",
+      "result_blob_oid": "a5b3e4fb4701627ffaa65711df26e0161dedbe8d",
+      "sha256": "b27235f7eda058a3d47b1a8734d09d5bb4cbb36a6e4ecdcd1127f77e1dc760ed",
+      "resolution": "retain-reviewed-source"
+    },
+    {
+      "path": "internal/testpolicy/resourcecensus/census.go",
+      "ancestor_blob_oid": "75a350f64da03dc317acec60de3ae1d0e7b26b27",
+      "parent1_blob_oid": "6cab055d15bf7ccf2c57e2d64342ade1ce6a1753",
+      "parent2_blob_oid": "a7376a05ff0774557dbafbaf29ea65efd0e41cb9",
+      "result_blob_oid": "cf2ad511ce76cc0630edff2ec0b9f46e952db487",
+      "sha256": "643cc7993bba8602fafa5a615d79bd29c9fe5bf99dc7deeade10d498076d1ca0",
+      "resolution": "regenerate-from-combined-tree"
+    },
+    {
+      "path": "test/test-resources.toml",
+      "ancestor_blob_oid": "5160f48b3a017f9b1c47da9446e04e2a1fdf8e3a",
+      "parent1_blob_oid": "5ef568691aa6a47e25eecdaae4f2e736e82620b5",
+      "parent2_blob_oid": "dfba27db72bec536df0b102cd052812446ef1991",
+      "result_blob_oid": "5450456ff422c2b0374245dd89d71b2482a4ecc0",
+      "sha256": "4fdbdc31e9cb084207afc88bce1771dd84a9a09ffa7efcd10099589a14ae1a4b",
+      "resolution": "regenerate-from-combined-tree"
+    }
+  ],
+  "clean_merge_retention": {
+    "path": "internal/bdflags/bdflags_test.go",
+    "ancestor_blob_oid": "fbd4136e694a0e438e5106e1332089a1515aa86e",
+    "parent1_blob_oid": "03e41c3ad1f38e012078f837d9d786edfcb64f05",
+    "parent2_blob_oid": "a7d6303916ac4a445839de2834f88addcd371e42",
+    "result_blob_oid": "a7d6303916ac4a445839de2834f88addcd371e42",
+    "sha256": "ddca2e0fbae5ff8bf216189e0214848cfaf72d1e471deca7366721f847efcbe9",
+    "failure_mode": "automatic-merge-produces-duplicate-test-symbol",
+    "resolution": "retain-stronger-reviewed-source-test"
+  },
+  "combined_tree_census": [
+    {"class": "audit", "resource": "subprocess", "calls": 492, "files": 137},
+    {"class": "audit", "resource": "fixed_sleep", "calls": 438, "files": 153},
+    {"class": "source-debt", "resource": "subprocess", "calls": 375, "files": 98},
+    {"class": "source-debt", "resource": "fixed_sleep", "calls": 286, "files": 110},
+    {"class": "source-debt", "resource": "environment", "calls": 4173, "files": 185},
+    {"class": "source-debt", "resource": "cwd", "calls": 210, "files": 40},
+    {"class": "source-debt", "resource": "slow_process_gate", "calls": 77, "files": 26},
+    {"class": "source-debt", "resource": "http_test_server", "calls": 256, "files": 56},
+    {"class": "small-debt", "resource": "subprocess", "calls": 375, "files": 98},
+    {"class": "small-debt", "resource": "fixed_sleep", "calls": 286, "files": 110},
+    {"class": "small-debt", "resource": "environment", "calls": 4167, "files": 185},
+    {"class": "small-debt", "resource": "cwd", "calls": 210, "files": 40},
+    {"class": "small-debt", "resource": "slow_process_gate", "calls": 77, "files": 26},
+    {"class": "small-debt", "resource": "http_test_server", "calls": 256, "files": 56}
+  ],
+  "bootstrap_review": {
+    "path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md",
+    "blob_oid": "5581a1721c41f28535ca70d6e150527e388205f0",
+    "sha256": "623677b07336fbefc8abd0567b823ee3d1eeb87885cf7654beb67904be8f0110",
+    "reviewed_commit": "614a8ebd62cf230de226213f302ed3002dddea61",
+    "reviewed_tree": "2c1c9d4a2aeaf8188793a26554ec7ea5f9b7cc48",
+    "reviewer": "independent-ga-f7v2ft.12",
+    "verdict": "approve",
+    "independent": true
+  },
+  "gate_artifacts": [
+    {
+      "path": "test/docsync/reconciler_execution_binding_test.go",
+      "blob_oid": "5140eb232fafd5fc398d2ee17991a6b8ec01d01f",
+      "sha256": "4de52f48aaaf7ae9c1f1666e0ab4b400a6983abc1c56ea37ed54ddb730249ab4",
+      "role": "strict-binding-verifier",
+      "expected_outcome": "pass"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "blob_oid": "9371bdd7705bd2bd3e943a440682c01353b00525",
+      "sha256": "78d7cad8f6397c5153f847602353668b3f22cc35d522c99ce3ff368bc203361c",
+      "role": "protected-authoritative-history-and-trust-anchor",
+      "expected_outcome": "pass"
+    },
+    {
+      "path": "TESTING.md",
+      "blob_oid": "7beda8543dd0571e4c51f6e26126fab4b23fbe44",
+      "sha256": "39511fb3f4a2ad92465847184e29c9780be775051518f88209df4354971af719",
+      "role": "checked-resource-ledger-table",
+      "expected_outcome": "pass"
+    },
+    {
+      "path": "internal/testpolicy/resourcecensus/census.go",
+      "blob_oid": "5141e35c358672ae439e8c73c52c781911da037a",
+      "sha256": "e922cd5f4ae519797ff02f1c0972751ed3debec793355c3ab2e965814e74f146",
+      "role": "checked-resource-ledger-policy",
+      "expected_outcome": "pass"
+    },
+    {
+      "path": "test/test-resources.toml",
+      "blob_oid": "ae949b46f2dfe7cef9a8039511168531aa043a5b",
+      "sha256": "928f3f7d307eb3f5b4c607faf60af82a8fee1e48a989db38679f77f5ce4c888f",
+      "role": "checked-resource-ledger-manifest",
+      "expected_outcome": "pass"
+    }
+  ],
+  "gate_attestations": [
+    {
+      "id": "candidate-manifest",
+      "command": "go test -mod=readonly -count=1 ./test/docsync -run '^TestReconcilerPreG0CandidateManifest$'",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    },
+    {
+      "id": "resource-census",
+      "command": "go test -mod=readonly -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$'",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    },
+    {
+      "id": "bdflags",
+      "command": "go test -mod=readonly -count=1 ./internal/bdflags",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    },
+    {
+      "id": "fast-unit",
+      "command": "make test-fast-parallel",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    },
+    {
+      "id": "cmd-gc-process",
+      "command": "make test-cmd-gc-process-parallel",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    },
+    {
+      "id": "vet",
+      "command": "go vet ./...",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    },
+    {
+      "id": "pre-commit",
+      "command": ".githooks/pre-commit",
+      "outcome": "pass",
+      "evidence_path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"
+    }
+  ],
+  "introduction_contract": {
+    "parent_commit": "614a8ebd62cf230de226213f302ed3002dddea61",
+    "changed_paths": [
+      {"status": "A", "path": ".github/reconciler-contract/PRE_G0_EXECUTION_BINDING_V2.json"},
+      {"status": "A", "path": ".github/reconciler-contract/POST_BOOTSTRAP_REVIEW.md"},
+      {"status": "M", "path": ".github/workflows/ci.yml"},
+      {"status": "M", "path": "TESTING.md"},
+      {"status": "M", "path": "internal/testpolicy/resourcecensus/census.go"},
+      {"status": "A", "path": "test/docsync/reconciler_execution_binding_test.go"},
+      {"status": "M", "path": "test/test-resources.toml"}
+    ],
+    "ci_history": {
+      "full_history_workflows": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "jobs": ["preflight-static"]
+        }
+      ],
+      "authoritative_workflow": ".github/workflows/ci.yml",
+      "authoritative_job": "preflight-static",
+      "trust_anchor": "protected-early-single-file-stdlib-verifier-runs-uncached",
+      "shallow_non_authoritative_policy": "skip-exact-ancestry-roots-run-current-artifact-checks",
+      "fetch_depth": 0
+    },
+    "introduction_commit": "derived-not-embedded",
+    "forbid_post_introduction_mutation": true,
+    "implementation_base_precondition": "independent-ga-f7v2ft.13-approve"
+  },
+  "authorization": {
+    "identity": "workspace-user",
+    "date": "2026-07-14",
+    "evidence": "Thread message: I approve. Let's make it happen!",
+    "approval_subject": "exact-pinned-bootstrap-and-default-inert-phase-0-evidence",
+    "approved_bootstrap_commit": "614a8ebd62cf230de226213f302ed3002dddea61",
+    "exact_approval": true,
+    "cryptographic_signature": "not-collected-execution-binding",
+    "binding_introduction_commit_approval": false,
+    "authorized_scopes": [
+      "append-only-bootstrap",
+      "default-inert-phase-0-evidence"
+    ],
+    "excluded_scopes": [
+      "operational-g0",
+      "production-owner-cutover",
+      "provider-effects",
+      "runtime-action-concurrency",
+      "schema-mutation"
+    ]
+  },
+  "trust_boundary": {
+    "observed_at": "2026-07-14",
+    "codeowners_advisory": true,
+    "required_code_owner_reviews": false,
+    "enforce_admins": false,
+    "required_aggregate_context": "Check",
+    "preflight_indirectly_required": true,
+    "required_post_introduction_review": "ga-f7v2ft.13",
+    "post_introduction_review_status": "pending-at-introduction",
+    "final_tamper_control_claimed": false,
+    "replacement_owner": "P0.16"
+  },
+  "binding_digest": "41a41195d4cccf9d616ea1a9e4015b7058ba4a0732c3cf3bab15f74716af9754"
+}

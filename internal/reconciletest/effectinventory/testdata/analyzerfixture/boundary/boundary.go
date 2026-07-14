@@ -74,6 +74,10 @@ func (Unrelated) Mutate(int) {}
 // Emit is the fixture's exact free-function side-effect boundary.
 func Emit(Target) {}
 
+// StringEffect is an exact function boundary whose signature collides with
+// os.Chdir, an uncovered dependency target used by VTA proof fixtures.
+func StringEffect(string) error { return nil }
+
 // EffectFunc is the typed function form of Emit.
 type EffectFunc func(Target)
 

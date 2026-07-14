@@ -222,7 +222,7 @@ func (analysis *loadedAnalysis) observeCallInstruction(function *ssa.Function, c
 		problems = append(problems, fmt.Sprintf("%s: call matches multiple boundaries: %s", ref.key(), strings.Join(matches, ", ")))
 		return nil, problems
 	}
-	if unresolvedEffectCall(call, callees, boundaries) {
+	if analysis.unresolvedEffectCall(call, callees, boundaries) {
 		problems = append(problems, fmt.Sprintf("%s: unresolved effect-compatible dynamic call", ref.key()))
 	}
 	if len(matches) == 0 {
@@ -561,20 +561,27 @@ func functionMatchesBoundary(function *types.Func, boundary resolvedBoundary) bo
 	return receiverImplements(signature.Recv().Type(), boundary.interfaceType)
 }
 
-func unresolvedEffectCall(call ssa.CallInstruction, callees []*ssa.Function, boundaries []resolvedBoundary) bool {
+func (analysis *loadedAnalysis) unresolvedEffectCall(call ssa.CallInstruction, callees []*ssa.Function, boundaries []resolvedBoundary) bool {
 	common := call.Common()
 	if _, builtin := common.Value.(*ssa.Builtin); builtin {
 		return false
 	}
 	if common.Method != nil {
-		for _, boundary := range boundaries {
-			if functionMatchesBoundary(common.Method, boundary) {
-				return false
-			}
-		}
+		// Invokes retain the exact selected interface method object. Boundary
+		// matching above already accepts that object, a concrete VTA target, or
+		// an implementing receiver. A different interface method with the same
+		// signature is not itself an inventoried boundary.
+		return false
 	}
 	static := common.StaticCallee()
+	closedVTA := analysis.callableVTATargetSetClosed(call, callees)
 	for _, boundary := range boundaries {
+		if boundary.definition.Match == ObjectMatchChannel {
+			// Channel calls have slot- and provenance-sensitive diagnostics in
+			// the channel analyzer. Signature-only callable reasoning would both
+			// duplicate those diagnostics and discard the selected input/result.
+			continue
+		}
 		if !callMayReachBoundary(common, boundary) {
 			continue
 		}
@@ -584,7 +591,7 @@ func unresolvedEffectCall(call ssa.CallInstruction, callees []*ssa.Function, bou
 		if static != nil {
 			continue
 		}
-		if len(callees) == 0 || hasOpenWorldFunctionSource(common.Value, make(map[ssa.Value]bool)) {
+		if !closedVTA {
 			return true
 		}
 	}

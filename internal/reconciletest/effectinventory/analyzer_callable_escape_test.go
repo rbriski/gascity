@@ -256,6 +256,80 @@ func TestDiscoverProfileAcceptsClosedCallableValues(t *testing.T) {
 	})
 }
 
+func TestDiscoverProfileAcceptsClosedExactObjectVTATargets(t *testing.T) {
+	const packageName = "callescape/closed"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	boundaries := []BoundaryDefinition{
+		{
+			ID:   "callescape.closed.exact-method",
+			Kind: KindProviderMutation,
+			Object: ObjectRef{
+				Package:  fixtureModulePath + "/" + packageName,
+				Receiver: "Impl",
+				Name:     "Mutate",
+			},
+			Match: ObjectMatchExact,
+		},
+		{
+			ID:     "callescape.closed.emit",
+			Kind:   KindProviderMutation,
+			Object: ObjectRef{Package: fixtureModulePath + "/boundary", Name: "Emit"},
+			Match:  ObjectMatchExact,
+		},
+	}
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), boundaries)
+	if err != nil {
+		t.Fatalf("discoverProfile() error: %v", err)
+	}
+	assertObservedSites(t, observed, []observedKey{
+		fixtureCall(boundaries[0].ID, packageName, "closed.go", "BoundConcreteMethod", nil, OperationCall, 1),
+		fixtureCall(boundaries[1].ID, packageName, "closed.go", "LocalFunctionSlot", nil, OperationCall, 1),
+	})
+}
+
+func TestDiscoverProfileRejectsOpenOrUncoveredVTATargetSets(t *testing.T) {
+	const packageName = "callescape/vtaopen"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	boundaries := []BoundaryDefinition{
+		{
+			ID:     "callescape.vtaopen.emit",
+			Kind:   KindProviderMutation,
+			Object: ObjectRef{Package: fixtureModulePath + "/boundary", Name: "Emit"},
+			Match:  ObjectMatchExact,
+		},
+		{
+			ID:     "callescape.vtaopen.string-effect",
+			Kind:   KindProviderMutation,
+			Object: ObjectRef{Package: fixtureModulePath + "/boundary", Name: "StringEffect"},
+			Match:  ObjectMatchExact,
+		},
+	}
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), boundaries)
+	if err == nil {
+		t.Fatal("discoverProfile() error = nil, want open and uncovered VTA diagnostics")
+	}
+	if observed != nil {
+		t.Fatalf("discoverProfile() observed = %#v, want nil", observed)
+	}
+	for _, owner := range []string{
+		"OpenParameterCall",
+		"ExportedGlobalCall",
+		"EscapedGlobalCall",
+		"EscapedSetterCaptureCall",
+		"MixedCoveredCall",
+	} {
+		if !strings.Contains(err.Error(), owner) {
+			t.Errorf("discoverProfile() error = %q, want %q", err, owner)
+		}
+	}
+}
+
 func assertCallableEscapeRejected(t *testing.T, observed []ObservedSite, err error, owner string) {
 	t.Helper()
 	if err == nil {

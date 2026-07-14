@@ -1,6 +1,12 @@
 package dolttest
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/doltorphan"
+)
 
 func TestDoltConfigPath(t *testing.T) {
 	cases := []struct {
@@ -85,5 +91,33 @@ func TestOwnerPIDFromRunDir(t *testing.T) {
 	}
 	if _, ok := ownerPIDFromRunDir("gcac-notapid-x", "gcac-"); ok {
 		t.Fatalf("non-numeric pid should not parse")
+	}
+}
+
+func TestSweepOrphanStoreDirsForwardsToDoltorphanSweep(t *testing.T) {
+	restore := sweepOrphanStores
+	defer func() { sweepOrphanStores = restore }()
+
+	var gotCfg doltorphan.SweepConfig
+	fakeResult := doltorphan.Result{Removed: []string{"/tmp/fake-orphan"}}
+	sweepOrphanStores = func(cfg doltorphan.SweepConfig) doltorphan.Result {
+		gotCfg = cfg
+		return fakeResult
+	}
+
+	roots := []string{"/tmp/a", "/tmp/b"}
+	got := SweepOrphanStoreDirs(roots, 10*time.Minute)
+
+	if !reflect.DeepEqual(gotCfg.Roots, roots) {
+		t.Fatalf("Roots = %v, want %v", gotCfg.Roots, roots)
+	}
+	if gotCfg.MinAge != 10*time.Minute {
+		t.Fatalf("MinAge = %v, want %v", gotCfg.MinAge, 10*time.Minute)
+	}
+	if gotCfg.Now != nil || gotCfg.RunLsof != nil || gotCfg.RemoveAll != nil {
+		t.Fatalf("expected nil injection fields so doltorphan.Sweep uses its production defaults")
+	}
+	if !reflect.DeepEqual(got, fakeResult) {
+		t.Fatalf("SweepOrphanStoreDirs() = %+v, want %+v", got, fakeResult)
 	}
 }

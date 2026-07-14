@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltorphan"
 )
 
 // reap sends SIGTERM, then SIGKILL to survivors, to every `dolt sql-server`
@@ -86,6 +88,26 @@ func Guard(runDir string) (stop func()) {
 		close(done)
 		reap(runDir)
 	}
+}
+
+// sweepOrphanStores is swapped in tests to observe the SweepConfig built by
+// SweepOrphanStoreDirs without depending on a real lsof scan.
+var sweepOrphanStores = doltorphan.Sweep
+
+// SweepOrphanStoreDirs removes orphaned Dolt store directories under roots:
+// directories bearing a .dolt marker within 3 levels, older than minAge, and
+// not held open by any process per a single lsof -w scan. It wraps
+// doltorphan.Sweep with this package's production defaults (real clock, real
+// lsof, real RemoveAll) so non-main test packages get the same fallback
+// cmd/gc's own leak-guard uses, without linking package main. Call at suite
+// startup alongside SweepStale: SweepStale reaps prior-run orphaned
+// *processes* matched by run-dir naming, while this reaps orphaned *store
+// directories* by symptom regardless of which run created them.
+func SweepOrphanStoreDirs(roots []string, minAge time.Duration) doltorphan.Result {
+	return sweepOrphanStores(doltorphan.SweepConfig{
+		Roots:  roots,
+		MinAge: minAge,
+	})
 }
 
 // scanDoltSQLServers returns pid->cmdline for every running `dolt sql-server`.

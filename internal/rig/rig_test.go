@@ -8,13 +8,17 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-type noopStoreInitializer struct{}
+type noopStoreProvisioner struct{}
 
-func (noopStoreInitializer) InitRigStore(string, string, string) (bool, error) {
+func (noopStoreProvisioner) InitRigStore(string, string, string) (bool, error) {
 	return false, nil
 }
 
-var _ StoreInitializer = noopStoreInitializer{}
+func (noopStoreProvisioner) PrepareAdoptedRigStore(string, string) error { return nil }
+
+func (noopStoreProvisioner) InitAndHookRigStore(string, string, string) error { return nil }
+
+var _ StoreProvisioner = noopStoreProvisioner{}
 
 // stubDeps returns a Deps with all required infra + required funcs filled with
 // no-op stubs, so validation passes and Provision reaches its core.
@@ -26,10 +30,9 @@ func stubDeps(cityPath string) Deps {
 		ComposePacks: func(string, []config.BoundImport) ([]config.BoundImport, func() error, error) {
 			return nil, nil, nil
 		},
-		InitAndHook: func(string, string, string) error { return nil },
 		WriteRoutes: func(string, *config.City) error { return nil },
 	}
-	return deps.WithStoreInitializer(noopStoreInitializer{})
+	return deps.WithStoreProvisioner(noopStoreProvisioner{})
 }
 
 func TestValidateDepsRequiresInfra(t *testing.T) {
@@ -42,8 +45,7 @@ func TestValidateDepsRequiresInfra(t *testing.T) {
 		"missing CityPath":     without(func(d *Deps) { d.CityPath = "" }),
 		"missing Cfg":          without(func(d *Deps) { d.Cfg = nil }),
 		"missing ComposePacks": without(func(d *Deps) { d.ComposePacks = nil }),
-		"missing InitStore":    without(func(d *Deps) { d.storeInitializer = nil }),
-		"missing InitAndHook":  without(func(d *Deps) { d.InitAndHook = nil }),
+		"missing provisioner":  without(func(d *Deps) { d.storeProvisioner = nil }),
 		"missing WriteRoutes":  without(func(d *Deps) { d.WriteRoutes = nil }),
 	}
 	for name, d := range cases {

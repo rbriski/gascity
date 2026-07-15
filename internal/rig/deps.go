@@ -18,11 +18,14 @@ import (
 // already URL-redacted by git.Clone before it reaches this wrapper.
 var ErrCloneFailed = errors.New("git clone failed")
 
-// StoreInitializer initializes one rig bead store. The narrow operation keeps
-// provisioning independent of the CLI and controller implementations while
-// giving each production caller an explicit, statically typed adapter.
-type StoreInitializer interface {
+// StoreProvisioner owns the bead-store lifecycle operations used while adding
+// one rig. The narrow boundary keeps provisioning independent of the CLI and
+// controller implementations while giving each production caller an explicit,
+// statically typed adapter.
+type StoreProvisioner interface {
 	InitRigStore(cityPath, dir, prefix string) (deferred bool, err error)
+	PrepareAdoptedRigStore(cityPath, rigPath string) error
+	InitAndHookRigStore(cityPath, dir, prefix string) error
 }
 
 // Deps carries everything the provisioning core needs. It follows the
@@ -31,10 +34,10 @@ type StoreInitializer interface {
 // controllerState can drive the same core without internal/rig importing
 // package main.
 //
-// validateDeps requires the three infra fields (FS, CityPath, Cfg) plus the
-// four funcs every successful provision reaches (ComposePacks, InitStore,
-// InitAndHook, WriteRoutes) — the last of these runs AFTER the config write, so
-// a nil there would panic past the rollback and strand half-written topology.
+// validateDeps requires the three infra fields (FS, CityPath, Cfg), the store
+// provisioner, and the two funcs every successful provision reaches
+// (ComposePacks, WriteRoutes) — the last of these runs AFTER the config write,
+// so a nil there would panic past the rollback and strand half-written topology.
 // The remaining funcs are nil-optional ("nil = skip"), matching sling's
 // convention; NormalizeScopes is checked at the config-write step because a
 // plain re-add skips writing.
@@ -46,15 +49,10 @@ type Deps struct {
 	// Cfg is the city config the caller loaded for edit.
 	Cfg *config.City
 
-	// storeInitializer initializes the rig's bead store. It
-	// returns deferred=true when live init is punted to the controller/startup.
-	// Required and configured through WithStoreInitializer.
-	storeInitializer StoreInitializer
-	// InitAndHook is the deferred-fallback deeper store init (cmd/gc
-	// initAndHookDir); its error is intentionally swallowed (reported as
-	// "deferred to controller"). Required — it is reached whenever InitStore
-	// defers and the store is not GC_DOLT=skip, a path a caller cannot predict.
-	InitAndHook func(cityPath, dir, prefix string) error
+	// storeProvisioner owns initial store setup, adopted-store preparation, and
+	// the deferred-fallback init-and-hook operation. Required and configured
+	// through WithStoreProvisioner.
+	storeProvisioner StoreProvisioner
 	// ComposePacks resolves the rig's bundled imports and returns a commit closure
 	// that writes packs.lock only AFTER the city.toml append (cmd/gc
 	// ensureBundledRigImportsInstalled), preserving the "city.toml written last"
@@ -82,9 +80,6 @@ type Deps struct {
 	// rollback protection. nil = fatal at the config-write step for callers that
 	// write config.
 	NormalizeScopes func(cityPath string, cfg *config.City) error
-	// PrepareAdopt readies provider state for --adopt (cmd/gc
-	// prepareRigAdoptProviderState). nil = skip; only consulted when req.Adopt.
-	PrepareAdopt func(cityPath, rigPath string) error
 	// StoreContract reports whether the city uses the bd store contract (cmd/gc
 	// cityUsesBdStoreContract). It is a func, not a bool, because InitStore can
 	// seed provider state mid-flow and the flow re-evaluates it after init. nil =
@@ -105,9 +100,9 @@ type Deps struct {
 	OnStep func(step ProvisionStep)
 }
 
-// WithStoreInitializer returns d with the required bead-store initializer.
-func (d Deps) WithStoreInitializer(initializer StoreInitializer) Deps {
-	d.storeInitializer = initializer
+// WithStoreProvisioner returns d with the required bead-store provisioner.
+func (d Deps) WithStoreProvisioner(provisioner StoreProvisioner) Deps {
+	d.storeProvisioner = provisioner
 	return d
 }
 
@@ -205,11 +200,8 @@ func validateDeps(d Deps) error {
 	if d.ComposePacks == nil {
 		return depErr("ComposePacks")
 	}
-	if d.storeInitializer == nil {
-		return depErr("InitStore")
-	}
-	if d.InitAndHook == nil {
-		return depErr("InitAndHook")
+	if d.storeProvisioner == nil {
+		return depErr("StoreProvisioner")
 	}
 	if d.WriteRoutes == nil {
 		return depErr("WriteRoutes")

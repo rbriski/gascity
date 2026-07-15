@@ -2,19 +2,35 @@ package main
 
 import "github.com/gastownhall/gascity/internal/rig"
 
-type cliRigStoreInitializer struct{}
+type cliRigStoreProvisioner struct{}
 
-func (cliRigStoreInitializer) InitRigStore(cityPath, dir, prefix string) (bool, error) {
+func (cliRigStoreProvisioner) InitRigStore(cityPath, dir, prefix string) (bool, error) {
 	return initDirIfReady(cityPath, dir, prefix)
 }
 
-type controllerRigStoreInitializer struct{}
+func (cliRigStoreProvisioner) PrepareAdoptedRigStore(cityPath, rigPath string) error {
+	return prepareRigAdoptProviderState(cityPath, rigPath)
+}
 
-func (controllerRigStoreInitializer) InitRigStore(cityPath, dir, prefix string) (bool, error) {
+func (cliRigStoreProvisioner) InitAndHookRigStore(cityPath, dir, prefix string) error {
+	return initAndHookDir(cityPath, dir, prefix)
+}
+
+type controllerRigStoreProvisioner struct{}
+
+func (controllerRigStoreProvisioner) InitRigStore(cityPath, dir, prefix string) (bool, error) {
 	return controllerStateInitRigDirIfReady(cityPath, dir, prefix)
 }
 
+func (controllerRigStoreProvisioner) PrepareAdoptedRigStore(cityPath, rigPath string) error {
+	return prepareRigAdoptProviderState(cityPath, rigPath)
+}
+
+func (controllerRigStoreProvisioner) InitAndHookRigStore(cityPath, dir, prefix string) error {
+	return initAndHookDir(cityPath, dir, prefix)
+}
+
 var (
-	_ rig.StoreInitializer = cliRigStoreInitializer{}
-	_ rig.StoreInitializer = controllerRigStoreInitializer{}
+	_ rig.StoreProvisioner = cliRigStoreProvisioner{}
+	_ rig.StoreProvisioner = controllerRigStoreProvisioner{}
 )

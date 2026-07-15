@@ -297,7 +297,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		FS:           fs,
 		CityPath:     cityPath,
 		Cfg:          cfg,
-		InitAndHook:  initAndHookDir,
 		ComposePacks: ensureBundledRigImportsInstalled,
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
@@ -306,7 +305,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt:  prepareRigAdoptProviderState,
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		PostProvision: func(pc rig.ProvisionContext) error {
@@ -358,7 +356,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			}
 		},
 	}
-	deps = deps.WithStoreInitializer(cliRigStoreInitializer{})
+	deps = deps.WithStoreProvisioner(cliRigStoreProvisioner{})
 
 	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
 		Name:           name,

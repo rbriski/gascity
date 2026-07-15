@@ -2224,7 +2224,6 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		FS:           fsys.OSFS{},
 		CityPath:     cs.cityPath,
 		Cfg:          editCfg,
-		InitAndHook:  initAndHookDir,
 		ComposePacks: ensureBundledRigImportsInstalled,
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
@@ -2233,7 +2232,6 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt:  prepareRigAdoptProviderState,
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		OnStep:        depOnStep,
@@ -2242,7 +2240,7 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 			return nil
 		},
 	}
-	return deps.WithStoreInitializer(controllerRigStoreInitializer{})
+	return deps.WithStoreProvisioner(controllerRigStoreProvisioner{})
 }
 
 // rigPostProvisionLocal runs the rig-local infrastructure the CLI installs after a

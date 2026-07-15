@@ -755,13 +755,17 @@ type commandRepositoryReadTx interface {
 	GetMetadata(string) (string, error)
 }
 
+type commandRepositoryMetadataReader interface {
+	GetMetadata(string) (string, error)
+}
+
 func atomicCommandRepositoryRead(ctx context.Context, store beads.AtomicReadWriteStore, commitMessage string, fn func(commandRepositoryReadTx) error) error {
 	return store.AtomicReadWrite(ctx, commitMessage, func(tx beads.AtomicReadWriteTx) error {
 		return fn(tx)
 	})
 }
 
-func readCommandRepositoryState(tx commandRepositoryReadTx) (CommandRepositoryState, error) {
+func readCommandRepositoryState(tx commandRepositoryMetadataReader) (CommandRepositoryState, error) {
 	state, present, err := readOptionalCommandRepositoryState(tx)
 	if err != nil {
 		return CommandRepositoryState{}, err
@@ -772,7 +776,7 @@ func readCommandRepositoryState(tx commandRepositoryReadTx) (CommandRepositorySt
 	return state, nil
 }
 
-func readOptionalCommandRepositoryState(tx commandRepositoryReadTx) (CommandRepositoryState, bool, error) {
+func readOptionalCommandRepositoryState(tx commandRepositoryMetadataReader) (CommandRepositoryState, bool, error) {
 	keys := []string{
 		commandRepositorySchemaVersionMetadataKey,
 		commandRepositoryWriterVersionMetadataKey,

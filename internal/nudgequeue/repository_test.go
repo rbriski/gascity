@@ -1156,6 +1156,8 @@ type repositoryAtomicTestStore struct {
 	setMetadataCalls    int
 	prepareCalls        int
 	prepareErr          error
+	snapshotPageLimits  []int
+	afterSnapshotPage   func()
 }
 
 func (s *repositoryAtomicTestStore) PrepareAtomicReadSnapshot(ctx context.Context) error {
@@ -1180,6 +1182,16 @@ func (s *repositoryAtomicTestStore) AtomicReadSnapshot(ctx context.Context, fn f
 		rows:     cloneRepositoryRows(s.rows),
 		metadata: cloneRepositoryMetadata(s.metadata),
 		now:      s.nextClock,
+		onSnapshotPage: func(query beads.AtomicReadSnapshotPageQuery) {
+			s.mu.Lock()
+			s.snapshotPageLimits = append(s.snapshotPageLimits, query.Limit)
+			after := s.afterSnapshotPage
+			s.afterSnapshotPage = nil
+			s.mu.Unlock()
+			if after != nil {
+				after()
+			}
+		},
 	}
 	s.mu.Unlock()
 	if err := fn(tx); err != nil {
@@ -1361,12 +1373,13 @@ func (s *repositoryAtomicTestStore) seedCommands(t *testing.T, state CommandRepo
 }
 
 type repositoryAtomicTestTx struct {
-	rows          map[string]beads.Bead
-	metadata      map[string]string
-	now           time.Time
-	afterList     func()
-	onCreate      func()
-	onSetMetadata func()
+	rows           map[string]beads.Bead
+	metadata       map[string]string
+	now            time.Time
+	afterList      func()
+	onCreate       func()
+	onSetMetadata  func()
+	onSnapshotPage func(beads.AtomicReadSnapshotPageQuery)
 }
 
 func (tx *repositoryAtomicTestTx) GetIssue(id string) (beads.Bead, error) {
@@ -1418,6 +1431,9 @@ func (tx *repositoryAtomicTestTx) ListHistory(query beads.AtomicReadWriteList) (
 }
 
 func (tx *repositoryAtomicTestTx) ListHistoryPage(query beads.AtomicReadSnapshotPageQuery) (beads.AtomicReadSnapshotPage, error) {
+	if tx.onSnapshotPage != nil {
+		tx.onSnapshotPage(query)
+	}
 	if query.Limit <= 0 || query.Limit > beads.MaxAtomicReadSnapshotPageSize || query.IDPrefix == "" || query.Status == "" {
 		return beads.AtomicReadSnapshotPage{}, beads.ErrAtomicReadSnapshotQuery
 	}
@@ -1459,6 +1475,12 @@ func (tx *repositoryAtomicTestTx) ListHistoryPage(query beads.AtomicReadSnapshot
 		}
 	}
 	return page, nil
+}
+
+func (s *repositoryAtomicTestStore) snapshotPageLimitsForTest() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.snapshotPageLimits...)
 }
 
 func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {

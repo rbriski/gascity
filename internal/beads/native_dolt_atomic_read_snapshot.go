@@ -9,13 +9,28 @@ import (
 	"strings"
 )
 
-const nativeDoltStatusIDSnapshotIndex = "gc_idx_issues_status_id"
+const (
+	nativeDoltStatusIDSnapshotIndex         = "gc_idx_issues_status_id"
+	nativeDoltAssigneeStatusIDSnapshotIndex = "gc_idx_issues_assignee_status_id"
+)
 
-// PrepareAtomicReadSnapshot installs the Gas City-owned `(status,id)`
-// companion index used for bounded current-state and partition-prefix reads.
-// It is deliberately separate from AtomicReadSnapshot so read paths remain
-// side-effect free. An index with the owned name but different columns is
-// schema skew and fails closed.
+type nativeDoltSnapshotIndexSpec struct {
+	name    string
+	columns string
+}
+
+func nativeDoltOwnedSnapshotIndexSpecs() [2]nativeDoltSnapshotIndexSpec {
+	return [2]nativeDoltSnapshotIndexSpec{
+		{name: nativeDoltStatusIDSnapshotIndex, columns: "status,id"},
+		{name: nativeDoltAssigneeStatusIDSnapshotIndex, columns: "assignee,status,id"},
+	}
+}
+
+// PrepareAtomicReadSnapshot installs the Gas City-owned companion indexes used
+// for bounded global and exact-assignee current-state reads. It is deliberately
+// separate from AtomicReadSnapshot so read paths remain side-effect free. An
+// index with an owned name but different columns is schema skew and fails
+// closed.
 func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) error {
 	if parent == nil {
 		return errors.New("preparing beads atomic read snapshot: nil context")
@@ -35,25 +50,27 @@ func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) erro
 		return err
 	}
 	defer func() { _ = cleanup() }()
-	columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltStatusIDSnapshotIndex)
-	if err != nil {
-		return fmt.Errorf("checking NativeDolt atomic snapshot paging index %q: %w", nativeDoltStatusIDSnapshotIndex, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
-	}
-	if present {
-		if columns != "status,id" {
-			return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want status,id: %w", nativeDoltStatusIDSnapshotIndex, columns, ErrAtomicReadSnapshotUnsupported)
+	for _, index := range nativeDoltOwnedSnapshotIndexSpecs() {
+		columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, index.name)
+		if err != nil {
+			return fmt.Errorf("checking NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS "+nativeDoltStatusIDSnapshotIndex+" ON issues (status, id)"); err != nil {
-		return fmt.Errorf("installing NativeDolt atomic snapshot paging index %q: %w", nativeDoltStatusIDSnapshotIndex, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
-	}
-	columns, present, err = nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltStatusIDSnapshotIndex)
-	if err != nil {
-		return fmt.Errorf("verifying installed NativeDolt atomic snapshot paging index %q: %w", nativeDoltStatusIDSnapshotIndex, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
-	}
-	if !present || columns != "status,id" {
-		return fmt.Errorf("installed NativeDolt atomic snapshot paging index %q columns = %q, want status,id: %w", nativeDoltStatusIDSnapshotIndex, columns, ErrAtomicReadSnapshotUnsupported)
+		if present {
+			if columns != index.columns {
+				return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns, index.columns, ErrAtomicReadSnapshotUnsupported)
+			}
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS "+index.name+" ON issues ("+index.columns+")"); err != nil {
+			return fmt.Errorf("installing NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+		}
+		columns, present, err = nativeDoltSnapshotIndexColumns(ctx, db, index.name)
+		if err != nil {
+			return fmt.Errorf("verifying installed NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+		}
+		if !present || columns != index.columns {
+			return fmt.Errorf("installed NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns, index.columns, ErrAtomicReadSnapshotUnsupported)
+		}
 	}
 	return nil
 }
@@ -140,13 +157,11 @@ func nativeDoltSnapshotIndexColumns(ctx context.Context, queryer nativeDoltSnaps
 }
 
 func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndexes() error {
-	indexes := []struct {
-		name    string
-		columns string
-	}{
+	indexes := []nativeDoltSnapshotIndexSpec{
 		{name: "idx_issues_status_updated_at", columns: "status,updated_at"},
-		{name: nativeDoltStatusIDSnapshotIndex, columns: "status,id"},
 	}
+	ownedIndexes := nativeDoltOwnedSnapshotIndexSpecs()
+	indexes = append(indexes, ownedIndexes[:]...)
 	for _, index := range indexes {
 		columns, present, err := nativeDoltSnapshotIndexColumns(t.ctx, t.tx, index.name)
 		if err != nil {
@@ -164,7 +179,8 @@ func (t *nativeDoltAtomicReadSnapshotTx) GetIssue(id string) (Bead, error) {
 		return Bead{}, fmt.Errorf("snapshot exact id is empty: %w", ErrAtomicReadSnapshotQuery)
 	}
 	row := t.tx.QueryRowContext(t.ctx, `
-		SELECT id, title, status, issue_type, created_at, updated_at, metadata,
+		SELECT id, title, status, issue_type, created_at, updated_at,
+		       COALESCE(assignee, ''), metadata,
 		       COALESCE(ephemeral, 0), COALESCE(no_history, 0)
 		FROM issues
 		WHERE id = ?
@@ -186,11 +202,17 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 	if err := validateAtomicReadSnapshotPageQuery(query); err != nil {
 		return AtomicReadSnapshotPage{}, err
 	}
-	args := []any{query.Status, query.IDPrefix + "%"}
+	var args []any
 	var indexName, keysetSQL, orderSQL string
 	switch query.Order {
 	case AtomicReadSnapshotOrderID:
-		indexName = nativeDoltStatusIDSnapshotIndex
+		if query.Assignee == "" {
+			indexName = nativeDoltStatusIDSnapshotIndex
+			args = []any{query.Status, query.IDPrefix + "%"}
+		} else {
+			indexName = nativeDoltAssigneeStatusIDSnapshotIndex
+			args = []any{query.Assignee, query.Status, query.IDPrefix + "%"}
+		}
 		orderSQL = "id ASC"
 		if query.After != (AtomicReadSnapshotCursor{}) {
 			keysetSQL = "AND id > ?"
@@ -198,6 +220,7 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 		}
 	case AtomicReadSnapshotOrderUpdatedAtID:
 		indexName = "idx_issues_status_updated_at"
+		args = []any{query.Status, query.IDPrefix + "%"}
 		orderSQL = "updated_at ASC, id ASC"
 		if query.After != (AtomicReadSnapshotCursor{}) {
 			keysetSQL = "AND (updated_at, id) > (?, ?)"
@@ -207,17 +230,22 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 		return AtomicReadSnapshotPage{}, fmt.Errorf("unsupported NativeDolt snapshot order %d: %w", query.Order, ErrAtomicReadSnapshotQuery)
 	}
 	args = append(args, query.Limit)
-	// IDPrefix rejects LIKE metacharacters, and every value remains bound. The
-	// forced index makes absence/skew fail loudly instead of degrading into a
-	// lifetime-sized scan.
+	selectorSQL := "status = ? AND id LIKE ?"
+	if query.Assignee != "" {
+		selectorSQL = "assignee = ? AND status = ? AND id LIKE ?"
+	}
+	// IDPrefix rejects LIKE metacharacters, Assignee is exact, and every value
+	// remains bound. The forced index makes absence/skew fail loudly instead of
+	// degrading into a lifetime-sized scan.
 	querySQL := fmt.Sprintf(`
-		SELECT id, title, status, issue_type, created_at, updated_at, metadata,
+		SELECT id, title, status, issue_type, created_at, updated_at,
+		       COALESCE(assignee, ''), metadata,
 		       COALESCE(ephemeral, 0), COALESCE(no_history, 0)
 		FROM issues FORCE INDEX (%s)
-		WHERE status = ? AND id LIKE ? %s
+		WHERE %s %s
 		ORDER BY %s
 		LIMIT ?
-	`, indexName, keysetSQL, orderSQL)
+	`, indexName, selectorSQL, keysetSQL, orderSQL)
 	rows, err := t.tx.QueryContext(t.ctx, querySQL, args...)
 	if err != nil {
 		return AtomicReadSnapshotPage{}, fmt.Errorf("listing NativeDolt atomic snapshot page: %w", err)
@@ -280,6 +308,7 @@ func scanNativeDoltAtomicSnapshotBead(scanner nativeDoltAtomicSnapshotScanner) (
 		&bead.Type,
 		&bead.CreatedAt,
 		&bead.UpdatedAt,
+		&bead.Assignee,
 		&metadata,
 		&ephemeral,
 		&noHistory,

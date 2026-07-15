@@ -110,6 +110,73 @@ func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T
 	}
 }
 
+func TestNativeDoltAtomicReadSnapshotFiltersExactAssigneeWithOwnedIndex(t *testing.T) {
+	ctx := t.Context()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "partition-snapshot", "gc")
+	if err := store.PrepareAtomicReadSnapshot(ctx); err != nil {
+		t.Fatalf("PrepareAtomicReadSnapshot: %v", err)
+	}
+
+	db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
+	if err != nil {
+		t.Fatalf("open snapshot database for index verification: %v", err)
+	}
+	columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltAssigneeStatusIDSnapshotIndex)
+	if err != nil {
+		t.Fatalf("read partition snapshot index: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close snapshot database after index verification: %v", err)
+	}
+	if !present || columns != "assignee,status,id" {
+		t.Fatalf("partition snapshot index present/columns = %t/%q, want true/assignee,status,id", present, columns)
+	}
+
+	for _, bead := range []Bead{
+		{ID: "gc-partition-a-foreign", Title: "foreign", Assignee: "partition-foreign"},
+		{ID: "gc-partition-b-owned", Title: "owned", Assignee: "partition-owned"},
+		{ID: "gc-partition-c-foreign", Title: "foreign", Assignee: "partition-foreign"},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatalf("Create %s: %v", bead.ID, err)
+		}
+	}
+	query := AtomicReadSnapshotPageQuery{
+		IDPrefix: "gc-partition-",
+		Status:   "open",
+		Order:    AtomicReadSnapshotOrderID,
+		Limit:    2,
+	}
+	setAtomicSnapshotAssigneeForTest(t, &query, "partition-owned")
+	if err := store.AtomicReadSnapshot(ctx, func(tx AtomicReadSnapshotTx) error {
+		page, err := tx.ListHistoryPage(query)
+		if err != nil {
+			return err
+		}
+		if len(page.Rows) != 1 || page.Rows[0].ID != "gc-partition-b-owned" || page.Rows[0].Assignee != "partition-owned" {
+			return fmt.Errorf("exact-assignee page = %#v, want only owned row", page)
+		}
+		if page.Next != (AtomicReadSnapshotCursor{}) {
+			return fmt.Errorf("exact-assignee page continuation = %#v, want exhausted", page.Next)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("AtomicReadSnapshot exact assignee: %v", err)
+	}
+}
+
 func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) {
 	tests := map[string]struct {
 		index       string
@@ -119,6 +186,13 @@ func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) 
 		"wrong updated-at columns":      {index: "idx_issues_status_updated_at", replacement: "CREATE INDEX idx_issues_status_updated_at ON issues (status)"},
 		"missing status-id index":       {index: nativeDoltStatusIDSnapshotIndex},
 		"wrong status-id index columns": {index: nativeDoltStatusIDSnapshotIndex, replacement: "CREATE INDEX " + nativeDoltStatusIDSnapshotIndex + " ON issues (id)"},
+		"missing assignee-status-id index": {
+			index: nativeDoltAssigneeStatusIDSnapshotIndex,
+		},
+		"wrong assignee-status-id index columns": {
+			index:       nativeDoltAssigneeStatusIDSnapshotIndex,
+			replacement: "CREATE INDEX " + nativeDoltAssigneeStatusIDSnapshotIndex + " ON issues (status, id)",
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -48,12 +48,15 @@ const (
 )
 
 // AtomicReadSnapshotPageQuery selects one bounded page through standard,
-// indexed issue columns. IDPrefix and Status are both mandatory. Metadata is
+// indexed issue columns. IDPrefix and Status are both mandatory. Assignee is
+// an optional exact selector supported only by ID ordering, where a dedicated
+// `(assignee,status,id)` index makes partition reads bounded. Metadata is
 // deliberately absent because JSON metadata equality is not an indexed scale
 // contract in the supported NativeDolt schema.
 type AtomicReadSnapshotPageQuery struct {
 	IDPrefix string
 	Status   string
+	Assignee string
 	Order    AtomicReadSnapshotOrder
 	After    AtomicReadSnapshotCursor
 	Limit    int
@@ -121,6 +124,14 @@ func validateAtomicReadSnapshotPageQuery(query AtomicReadSnapshotPageQuery) erro
 	if err := validateAtomicReadSnapshotSelector("status", query.Status); err != nil {
 		return err
 	}
+	if query.Assignee != "" {
+		if err := validateAtomicReadSnapshotSelector("assignee", query.Assignee); err != nil {
+			return err
+		}
+		if query.Order != AtomicReadSnapshotOrderID {
+			return fmt.Errorf("snapshot exact-assignee selector requires status/id order: %w", ErrAtomicReadSnapshotQuery)
+		}
+	}
 	if query.Order != AtomicReadSnapshotOrderID && query.Order != AtomicReadSnapshotOrderUpdatedAtID {
 		return fmt.Errorf("snapshot order %d is unsupported: %w", query.Order, ErrAtomicReadSnapshotQuery)
 	}
@@ -172,6 +183,9 @@ func validateAtomicReadSnapshotPage(query AtomicReadSnapshotPageQuery, page Atom
 		}
 		if row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) {
 			return fmt.Errorf("snapshot page row %q violates status/prefix selectors: %w", row.ID, ErrAtomicReadSnapshotQuery)
+		}
+		if query.Assignee != "" && row.Assignee != query.Assignee {
+			return fmt.Errorf("snapshot page row %q violates exact assignee selector: %w", row.ID, ErrAtomicReadSnapshotQuery)
 		}
 		if row.UpdatedAt.IsZero() || row.UpdatedAt.Location() != time.UTC {
 			return fmt.Errorf("snapshot page row %q has zero or non-UTC updated_at: %w", row.ID, ErrAtomicReadSnapshotQuery)

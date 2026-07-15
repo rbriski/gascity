@@ -47,6 +47,12 @@ func TestAtomicReadSnapshotPageQueryRequiresExactAssigneeSelectorWhenPresent(t *
 	if err := validateAtomicReadSnapshotPageQuery(query); !errors.Is(err, ErrAtomicReadSnapshotQuery) {
 		t.Fatalf("non-canonical assignee selector error = %v, want ErrAtomicReadSnapshotQuery", err)
 	}
+
+	setAtomicSnapshotAssigneeForTest(t, &query, atomicSnapshotPartitionRouteForTest)
+	query.Order = AtomicReadSnapshotOrderUpdatedAtID
+	if err := validateAtomicReadSnapshotPageQuery(query); !errors.Is(err, ErrAtomicReadSnapshotQuery) {
+		t.Fatalf("exact-assignee updated-at query error = %v, want ErrAtomicReadSnapshotQuery", err)
+	}
 }
 
 func setAtomicSnapshotAssigneeForTest(t *testing.T, query *AtomicReadSnapshotPageQuery, assignee string) {

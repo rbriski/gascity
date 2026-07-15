@@ -603,6 +603,12 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+		// A foreground supervisor already running in this exact GC_HOME and
+		// runtime scope needs no platform-service installation. This is the
+		// supported isolated path advertised by gc start --help.
+		if supervisor.UsesIsolatedGCHomeOverride() && supervisorAliveHook() != 0 {
+			return 0
+		}
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}

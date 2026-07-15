@@ -4011,6 +4011,53 @@ func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	}
 }
 
+func TestEnsureSupervisorRunningAllowsLiveForegroundWithHomeOverride(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no platform-start diagnostic for a live foreground supervisor", stderr.String())
+	}
+}
+
+func TestEnsureSupervisorRunningRejectsLiveSharedScopeWithHomeOverride(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 1 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance for a shared supervisor scope", stderr.String())
+	}
+}
+
 func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	oldAlive := supervisorAliveHook
 	oldTimeout := supervisorReadyTimeout

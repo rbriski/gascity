@@ -94,9 +94,10 @@ type CommandIndexSnapshot struct {
 	SequenceHighWater uint64
 }
 
-// CommandIndexPartitionGap certifies that one sequence is represented by a
-// command outside this reader's trusted city partition. It deliberately
-// carries no foreign command identity, target, content, or authorization data.
+// CommandIndexPartitionGap certifies that independent authority resolved one
+// sequence to a foreign trusted city partition. It is disjoint from local
+// terminal/tombstone coverage and deliberately carries no foreign command
+// identity, target, content, or authorization data.
 type CommandIndexPartitionGap struct {
 	Sequence uint64
 }

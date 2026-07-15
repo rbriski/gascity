@@ -12,7 +12,7 @@ import (
 const (
 	wakeScaffoldFingerprint      = "a12c326a68cbbd1fd33088b0ccca306ec53042595ad5c9c8d99a4477f7559958"
 	wakeSemanticFingerprint      = "83dee76c3904d814c5abc3fee833b7224a0d9ebf53997f89af462f1a0a4a130e"
-	wakeExplicitRouteFingerprint = "6f2fca5dcbc0d5410f9872b4f15a3ff7a2ad8353595f3030a0235c082fdfe1e7"
+	wakeExplicitRouteFingerprint = "7601613241a309de90bd47ee4e524d5cf078380e20ec46fa21c7a27364b1b060"
 )
 
 func TestWakeCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {

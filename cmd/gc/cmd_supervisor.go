@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -2283,6 +2284,29 @@ func startManagedCity(
 		return
 	}
 
+	var bootRolloutFlags rollout.Flags
+	var nudgeEffectSelection nudgeEffectStartupSelection
+	if err := runPostPrepareStep("selecting_nudge_effect_owner", func() error {
+		var err error
+		bootRolloutFlags, nudgeEffectSelection, err = resolveNudgeEffectStartup(context.Background(), cfg, sp)
+		return err
+	}); err != nil {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "nudge_effect_owner_refused", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("nudge effect owner: %v", err))
+		return
+	}
+	if nudgeEffectSelection.Notice != "" {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': nudge effect owner: %s\n", cityName, nudgeEffectSelection.Notice) //nolint:errcheck
+	}
+
 	rec := events.Discard
 	var eventProv events.Provider
 	evPath := filepath.Join(path, ".gc", "events.jsonl")
@@ -2331,6 +2355,7 @@ func startManagedCity(
 			ConvergenceReqCh:        convergenceReqCh,
 			PokeCh:                  pokeCh,
 			ControlDispatcherCh:     controlDispatcherCh,
+			NudgeEffectOwnership:    nudgeEffectSelection.Ownership,
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
 					m.started = true
@@ -2357,7 +2382,7 @@ func startManagedCity(
 	// Wire API state.
 	var cs *controllerState
 	if err := runPostPrepareStep("opening_controller_state", func() error {
-		cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
+		cs = newControllerStateWithRolloutFlags(cityCtx, cfg, sp, eventProv, cityName, path, bootRolloutFlags)
 		return nil
 	}); err != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)

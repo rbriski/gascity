@@ -21,6 +21,7 @@ config-valid
 legacy-suspended-field
 rollout:beads.conditional_writes
 rollout:daemon.formula_v2
+rollout:daemon.nudge_effect_owner
 config-refs
 stale-local-pack-dirs
 pre-start-scripts

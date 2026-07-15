@@ -1339,17 +1339,17 @@ func TestSupervisorManagedStartAcquiresBeforeEffectsAndTransfersOnce(t *testing.
 	}
 
 	firstEffects := map[string]bool{
-		"ensureLegacyNamedPacksCached":  true,
-		"loadSupervisorCityConfig":      true,
-		"prepareCityForSupervisor":      true,
-		"newSessionProviderFromContext": true,
-		"checkAgentImages":              true,
-		"newFileEventsRecorder":         true,
-		"newControllerState":            true,
-		"startBeadEventWatcher":         true,
-		"startMaintenanceLoop":          true,
-		"runPoolOnBoot":                 true,
-		"startControllerSocket":         true,
+		"ensureLegacyNamedPacksCached":       true,
+		"loadSupervisorCityConfig":           true,
+		"prepareCityForSupervisor":           true,
+		"newSessionProviderFromContext":      true,
+		"checkAgentImages":                   true,
+		"newFileEventsRecorder":              true,
+		"newControllerStateWithRolloutFlags": true,
+		"startBeadEventWatcher":              true,
+		"startMaintenanceLoop":               true,
+		"runPoolOnBoot":                      true,
+		"startControllerSocket":              true,
 	}
 	var acquirePos, publishPos, transferPos, launchPos, startedPublicationPos, runtimeRunPos token.Pos
 	transferCalls := 0

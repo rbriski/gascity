@@ -45,6 +45,43 @@ type nudgeEffectStartupRefusal struct {
 	cause   error
 }
 
+// resolveBootRolloutFlags produces the one immutable process-lifetime gate
+// snapshot shared by startup selection and controller state.
+func resolveBootRolloutFlags(cfg *config.City) (rollout.Flags, error) {
+	return rollout.Resolve(cfg, rollout.ResolveOptions{})
+}
+
+// resolveNudgeEffectStartup resolves the boot latch once, then selects nudge
+// effect ownership from current production evidence without re-reading config.
+func resolveNudgeEffectStartup(
+	ctx context.Context,
+	cfg *config.City,
+	sp runtime.Provider,
+) (rollout.Flags, nudgeEffectStartupSelection, error) {
+	flags, err := resolveBootRolloutFlags(cfg)
+	if err != nil {
+		profile := nudgequeue.CommandSecurityProfile("")
+		if cfg != nil {
+			profile = nudgequeue.CommandSecurityProfile(cfg.Beads.CommandSecurityProfile)
+		}
+		return rollout.Flags{}, nudgeEffectStartupSelection{}, newNudgeEffectStartupRefusal(
+			rollout.ModeUnset,
+			profile,
+			"resolving boot rollout gates: "+err.Error(),
+			err,
+		)
+	}
+	selection, err := selectNudgeEffectOwnership(
+		ctx,
+		flags,
+		cfg.Beads.CommandSecurityProfile,
+		func(context.Context) nudgeEffectStartupCapabilities {
+			return currentProductionNudgeEffectStartupCapabilities(cfg, sp)
+		},
+	)
+	return flags, selection, err
+}
+
 func (e *nudgeEffectStartupRefusal) Error() string {
 	if e == nil {
 		return errNudgeEffectStartupRefused.Error()

@@ -62,6 +62,10 @@ func (tx *cachingAtomicReadWriteTx) GetIssue(id string) (Bead, error) {
 	return tx.backing.GetIssue(id)
 }
 
+func (tx *cachingAtomicReadWriteTx) ListHistory(query AtomicReadWriteList) ([]Bead, error) {
+	return tx.backing.ListHistory(query)
+}
+
 func (tx *cachingAtomicReadWriteTx) Create(b Bead) (Bead, error) {
 	created, err := tx.backing.Create(b)
 	if err != nil {

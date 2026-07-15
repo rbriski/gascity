@@ -1419,6 +1419,48 @@ func (t *nativeDoltAtomicReadWriteTx) GetIssue(id string) (Bead, error) {
 	return bead, nil
 }
 
+func (t *nativeDoltAtomicReadWriteTx) ListHistory(query AtomicReadWriteList) ([]Bead, error) {
+	if err := validateAtomicReadWriteList(query); err != nil {
+		return nil, err
+	}
+	issueType := beadslib.IssueType(strings.TrimSpace(query.IssueType))
+	persistent := false
+	filter := beadslib.IssueFilter{
+		IDs:            append([]string(nil), query.IDs...),
+		IDPrefix:       strings.TrimSpace(query.IDPrefix),
+		Limit:          query.Limit,
+		MetadataFields: make(map[string]string, len(query.Metadata)),
+		Ephemeral:      &persistent,
+		SkipWisps:      true,
+		SortBy:         "id",
+	}
+	if issueType != "" {
+		filter.IssueType = &issueType
+	}
+	for key, value := range query.Metadata {
+		filter.MetadataFields[key] = value
+	}
+	issues, err := t.tx.SearchIssues(t.ctx, "", filter)
+	if err != nil {
+		return nil, fmt.Errorf("listing history rows in atomic read/write: %w", err)
+	}
+	rows := make([]Bead, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			return nil, fmt.Errorf("history query returned a nil issue: %w", ErrAtomicReadWriteQuery)
+		}
+		row, err := beadFromNativeIssue(issue)
+		if err != nil {
+			return nil, fmt.Errorf("decoding atomic history row: %w", err)
+		}
+		rows = append(rows, row)
+	}
+	if err := validateAtomicReadWriteListResult(query, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (t *nativeDoltAtomicReadWriteTx) Create(b Bead) (Bead, error) {
 	if err := requireAtomicReadWriteHistory(b); err != nil {
 		return Bead{}, err

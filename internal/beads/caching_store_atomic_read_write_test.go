@@ -33,6 +33,17 @@ func TestCachingStoreAtomicReadWriteHandleUsesOneBackingTransactionAndLiveReads(
 	}
 	commitsBefore := storage.commits
 	if err := capability.AtomicReadWrite(t.Context(), "claim command", func(tx AtomicReadWriteTx) error {
+		listed, err := tx.ListHistory(AtomicReadWriteList{
+			IssueType: "task",
+			Metadata:  map[string]string{"state": "pending"},
+			Limit:     1,
+		})
+		if err != nil {
+			return err
+		}
+		if len(listed) != 1 || listed[0].Title != "backing truth" {
+			t.Fatalf("transactional ListHistory = %#v, want live backing truth", listed)
+		}
 		live, err := tx.GetIssue(seed.ID)
 		if err != nil {
 			return err

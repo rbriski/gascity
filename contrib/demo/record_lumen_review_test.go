@@ -1020,6 +1020,27 @@ func TestRecorderSecuresEvidenceAndWaitsForTheContinuousRecorder(t *testing.T) {
 	}
 }
 
+func TestRecorderSocketFitsUnixPathLimit(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("record-lumen-review.sh")
+	if err != nil {
+		t.Fatalf("reading recorder: %v", err)
+	}
+	if !strings.Contains(string(data), `recorder_socket="recorder"`) {
+		t.Fatal("recorder socket name is not the pinned short name")
+	}
+
+	defaultRoot := filepath.Join(
+		"/data/tmp/lumen-review-real",
+		"run-20060102T150405Z-4194304-XXXXXX",
+	)
+	socketPath := filepath.Join(defaultRoot, "runtime", "tmux", "tmux-4294967295", "recorder")
+	if len(socketPath) >= 104 {
+		t.Fatalf("default recorder socket path is %d bytes, want fewer than 104: %s", len(socketPath), socketPath)
+	}
+}
+
 func TestRecorderPrivilegedShebangDoesNotSourceBashEnv(t *testing.T) {
 	t.Parallel()
 

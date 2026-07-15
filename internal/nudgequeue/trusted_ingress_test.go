@@ -185,24 +185,32 @@ func TestTrustedNudgeIngressResolvesCommitResponseLossWithoutSecondCommand(t *te
 }
 
 const (
-	testNudgePrincipalID = "principal-123"
-	testNudgeCityScope   = "tenant-123/city-456"
+	testNudgePrincipalID   = "principal-123"
+	testNudgeCityScope     = "tenant-123/city-456"
+	testClaimDecisionID    = "claim-decision-current"
+	testClaimPolicyVersion = "policy-v2"
 )
 
 type testNudgeAuthority struct {
-	mu          sync.Mutex
-	references  map[string]NudgeAuthorization
-	mutate      func(*NudgeAuthorization)
-	disposition NudgeAuthorizationDisposition
-	schema      uint32
-	calls       int
+	mu               sync.Mutex
+	references       map[string]NudgeAuthorization
+	mutate           func(*NudgeAuthorization)
+	disposition      NudgeAuthorizationDisposition
+	schema           uint32
+	calls            int
+	claimDisposition NudgeAuthorizationDisposition
+	claimSchema      uint32
+	claimErr         error
+	claimRequests    []NudgeClaimAuthorizationRequest
 }
 
 func newTestNudgeAuthority() *testNudgeAuthority {
 	return &testNudgeAuthority{
-		references:  make(map[string]NudgeAuthorization),
-		disposition: NudgeAuthorizationAllowed,
-		schema:      NudgePrincipalSchemaVersion,
+		references:       make(map[string]NudgeAuthorization),
+		disposition:      NudgeAuthorizationAllowed,
+		schema:           NudgePrincipalSchemaVersion,
+		claimDisposition: NudgeAuthorizationAllowed,
+		claimSchema:      NudgePrincipalSchemaVersion,
 	}
 }
 
@@ -252,6 +260,77 @@ func (a *testNudgeAuthority) authorizeCalls() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls
+}
+
+func (a *testNudgeAuthority) AuthorizeNudgeClaim(_ context.Context, request NudgeClaimAuthorizationRequest) (NudgeClaimAuthorization, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.claimRequests = append(a.claimRequests, request)
+	if a.claimErr != nil {
+		return NudgeClaimAuthorization{}, a.claimErr
+	}
+	disposition := a.claimDisposition
+	stored, found := a.references[request.Command.TrustedIngress.ReferenceID]
+	if !found || stored.Reference != request.Command.TrustedIngress {
+		disposition = NudgeAuthorizationDenied
+	}
+	if disposition == NudgeAuthorizationUnknown {
+		return NudgeClaimAuthorization{Disposition: disposition}, nil
+	}
+	return NudgeClaimAuthorization{
+		Disposition:            disposition,
+		PrincipalSchemaVersion: a.claimSchema,
+		DecisionID:             testClaimDecisionID,
+		PolicyVersion:          testClaimPolicyVersion,
+		Reference:              request.Command.TrustedIngress,
+	}, nil
+}
+
+func (a *testNudgeAuthority) setClaimDisposition(disposition NudgeAuthorizationDisposition) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.claimDisposition = disposition
+}
+
+func (a *testNudgeAuthority) setClaimError(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.claimErr = err
+}
+
+func (a *testNudgeAuthority) setClaimSchema(schema uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.claimSchema = schema
+}
+
+func (a *testNudgeAuthority) forgetReference(referenceID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.references, referenceID)
+}
+
+func (a *testNudgeAuthority) expireReference(referenceID string, expiresAt time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	authorization := a.references[referenceID]
+	authorization.Reference.ExpiresAt = expiresAt
+	a.references[referenceID] = authorization
+}
+
+func (a *testNudgeAuthority) claimCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.claimRequests)
+}
+
+func (a *testNudgeAuthority) lastClaimRequest() NudgeClaimAuthorizationRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.claimRequests) == 0 {
+		return NudgeClaimAuthorizationRequest{}
+	}
+	return a.claimRequests[len(a.claimRequests)-1]
 }
 
 func validNudgeIngressRequest(now time.Time) NudgeIngressRequest {

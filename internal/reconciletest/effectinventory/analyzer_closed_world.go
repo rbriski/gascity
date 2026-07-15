@@ -319,8 +319,24 @@ func (tracer *callableTargetTracer) callableFieldUsesClosed(object *types.Var) b
 	if object == nil || !callableFieldType(object.Type()) {
 		return false
 	}
+	addresses := tracer.analysis.fieldAddresses[object]
+	if !fieldAddressesHaveDirectUsesOnly(addresses) {
+		return false
+	}
 	_, isCallableSlice := types.Unalias(object.Type()).Underlying().(*types.Slice)
-	for _, address := range tracer.analysis.fieldAddresses[object] {
+	for _, address := range addresses {
+		for _, referrer := range *address.Referrers() {
+			load, ok := referrer.(*ssa.UnOp)
+			if ok && isCallableSlice && !callableSliceUsesClosed(load, object, make(map[ssa.Value]bool)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func fieldAddressesHaveDirectUsesOnly(addresses []*ssa.FieldAddr) bool {
+	for _, address := range addresses {
 		if address == nil || address.Referrers() == nil {
 			return false
 		}
@@ -332,9 +348,6 @@ func (tracer *callableTargetTracer) callableFieldUsesClosed(object *types.Var) b
 				}
 			case *ssa.UnOp:
 				if referrer.X != address || referrer.Op != token.MUL {
-					return false
-				}
-				if isCallableSlice && !callableSliceUsesClosed(referrer, object, make(map[ssa.Value]bool)) {
 					return false
 				}
 			case *ssa.DebugRef:
@@ -459,10 +472,8 @@ func callableAppendStoredBackInField(call *ssa.Call, field *types.Var) bool {
 }
 
 func (tracer *callableTargetTracer) traceField(containerType types.Type, field int) callableTargetResult {
-	object := fieldObject(containerType, field)
-	if object == nil || object.Exported() || object.Pkg() == nil ||
-		(object.Pkg().Path() != tracer.analysis.config.ModulePath &&
-			!strings.HasPrefix(object.Pkg().Path(), tracer.analysis.config.ModulePath+"/")) {
+	object := tracer.analysis.privateModuleField(containerType, field)
+	if object == nil {
 		return callableTargetResult{}
 	}
 	if !tracer.callableFieldUsesClosed(object) {
@@ -473,6 +484,16 @@ func (tracer *callableTargetTracer) traceField(containerType types.Type, field i
 		return closedEmptyCallableTargets()
 	}
 	return tracer.traceAll(stores)
+}
+
+func (analysis *loadedAnalysis) privateModuleField(containerType types.Type, field int) *types.Var {
+	object := fieldObject(containerType, field)
+	if object == nil || object.Exported() || object.Pkg() == nil ||
+		(object.Pkg().Path() != analysis.config.ModulePath &&
+			!strings.HasPrefix(object.Pkg().Path(), analysis.config.ModulePath+"/")) {
+		return nil
+	}
+	return object
 }
 
 func closedEmptyCallableTargets() callableTargetResult {

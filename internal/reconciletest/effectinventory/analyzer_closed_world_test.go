@@ -161,6 +161,50 @@ func TestDiscoverClosedWorldProfileRejectsAliasedPrivateFieldWrite(t *testing.T)
 	}
 }
 
+func TestDiscoverClosedWorldProfileTracesPrivateChannelFieldStores(t *testing.T) {
+	const packageName = "closedworld/channelfield"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := BoundaryDefinition{
+		ID:     "closed-world.private-channel-field",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "Approved"},
+		Match:  ObjectMatchChannel,
+	}
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err != nil {
+		t.Fatalf("discoverProfile() error: %v", err)
+	}
+	assertObservedSites(t, observed, []observedKey{
+		fixtureCall(boundary.ID, packageName, "main.go", "main", nil, OperationSelectReceive, 1),
+	})
+}
+
+func TestDiscoverClosedWorldProfileRejectsAliasedPrivateChannelFieldWrite(t *testing.T) {
+	const packageName = "closedworld/channelalias"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := BoundaryDefinition{
+		ID:     "closed-world.private-channel-field-alias",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "Approved"},
+		Match:  ObjectMatchChannel,
+	}
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err == nil {
+		t.Fatalf("discoverProfile() observed = %#v, want aliased private-field diagnostic", observed)
+	}
+	if !strings.Contains(err.Error(), "open-world provenance") {
+		t.Fatalf("discoverProfile() error = %q, want open-world provenance diagnostic", err)
+	}
+}
+
 func closedWorldFixtureBoundaries(packageName string) []BoundaryDefinition {
 	packagePath := fixtureModulePath + "/" + packageName
 	return []BoundaryDefinition{

@@ -728,6 +728,11 @@ func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindin
 		}
 	}
 	if !local {
+		if tracer.analysis.config.closedWorld {
+			if stored, closed := tracer.tracePrivateChannelField(base.Type(), field, bindings); closed {
+				return stored
+			}
+		}
 		provenance.merge(tracer.trace(base, bindings))
 		if len(provenance.matches) == 0 && !provenance.unsafe {
 			provenance.openWorld = true
@@ -778,6 +783,27 @@ func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindin
 		provenance.openWorld = true
 	}
 	return provenance
+}
+
+func (tracer *channelTracer) tracePrivateChannelField(containerType types.Type, field int, bindings map[*ssa.Parameter]ssa.Value) (channelProvenance, bool) {
+	provenance := newChannelProvenance()
+	object := tracer.analysis.privateModuleField(containerType, field)
+	if object == nil || !fieldAddressesHaveDirectUsesOnly(tracer.analysis.fieldAddresses[object]) {
+		return provenance, false
+	}
+	stores := tracer.analysis.fieldStores[object]
+	if len(stores) == 0 {
+		// A private field with no reachable stores retains its zero nil value.
+		provenance.grounded = true
+		return provenance, true
+	}
+	for _, stored := range stores {
+		provenance.merge(tracer.trace(stored, bindings))
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
+	}
+	return provenance, true
 }
 
 func (tracer *channelTracer) traceChannelStores(allocation *ssa.Alloc, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {

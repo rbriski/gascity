@@ -17,6 +17,15 @@ const (
 	nudgeKeyQueueDelayClockRegressed = telemetry.NudgeKeyQueueDelayClockRegressed
 )
 
+type nudgeWakeIngressDisposition = telemetry.NudgeWakeIngressDisposition
+
+const (
+	nudgeWakeIngressValid     = telemetry.NudgeWakeIngressValid
+	nudgeWakeIngressFallback  = telemetry.NudgeWakeIngressFallback
+	nudgeWakeIngressMalformed = telemetry.NudgeWakeIngressMalformed
+	nudgeWakeIngressSaturated = telemetry.NudgeWakeIngressSaturated
+)
+
 type nudgeKeyScopeCertification uint8
 
 const nudgeKeyScopeStoreLineageVerified nudgeKeyScopeCertification = 1
@@ -119,5 +128,54 @@ func recordNudgeKeySchedulingObservation(ctx context.Context, observation nudgeK
 		WorkqueueReplay: observation.WorkqueueReplay,
 		QueueDelay:      observation.QueueDelay,
 		QueueDelayState: observation.QueueDelayState,
+	})
+}
+
+type nudgeWakeIngressEmitter func(context.Context, nudgeWakeIngressDisposition) error
+
+func observeNudgeWakeIngress(ctx context.Context, disposition nudgeWakeIngressDisposition, warnings *nudgeWakeIngressWarnings) {
+	emitNudgeWakeIngress(ctx, disposition, warnings, recordNudgeWakeIngress)
+}
+
+func emitNudgeWakeIngress(ctx context.Context, disposition nudgeWakeIngressDisposition, warnings *nudgeWakeIngressWarnings, emit nudgeWakeIngressEmitter) {
+	if invokeNudgeWakeIngressEmitter(ctx, disposition, emit) {
+		warnings.warn()
+	}
+}
+
+func invokeNudgeWakeIngressEmitter(ctx context.Context, disposition nudgeWakeIngressDisposition, emit nudgeWakeIngressEmitter) (failed bool) {
+	defer func() {
+		if recover() != nil {
+			failed = true
+		}
+	}()
+	if emit == nil {
+		return true
+	}
+	return emit(ctx, disposition) != nil
+}
+
+func recordNudgeWakeIngress(ctx context.Context, disposition nudgeWakeIngressDisposition) error {
+	return telemetry.RecordNudgeWakeIngress(ctx, telemetry.NudgeWakeIngressRecord{Disposition: disposition})
+}
+
+type nudgeWakeIngressWarnings struct {
+	once   sync.Once
+	stderr io.Writer
+}
+
+func newNudgeWakeIngressWarnings(stderr io.Writer) *nudgeWakeIngressWarnings {
+	return &nudgeWakeIngressWarnings{stderr: stderr}
+}
+
+func (warnings *nudgeWakeIngressWarnings) warn() {
+	if warnings == nil {
+		return
+	}
+	warnings.once.Do(func() {
+		defer func() { _ = recover() }()
+		if warnings.stderr != nil {
+			_, _ = io.WriteString(warnings.stderr, "nudge exact-wake ingress observation failed\n")
+		}
 	})
 }

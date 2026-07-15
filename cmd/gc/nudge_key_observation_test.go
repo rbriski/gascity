@@ -26,7 +26,59 @@ import (
 const (
 	testNudgeKeySchedulingTotalMetric = "gc.reconcile.nudge_shadow.scheduling.total"
 	testNudgeKeyQueueDelayMetric      = "gc.reconcile.nudge_shadow.queue_delay_ms"
+	testNudgeWakeIngressTotalMetric   = "gc.reconcile.nudge_shadow.wake_ingress.total"
 )
+
+func TestObserveNudgeWakeIngressRecordsOneBoundedIdentityFreeDisposition(t *testing.T) {
+	reader := installNudgeKeyObservationMetricReader(t)
+	var stderr bytes.Buffer
+	warnings := newNudgeWakeIngressWarnings(&stderr)
+	for _, disposition := range []nudgeWakeIngressDisposition{
+		nudgeWakeIngressValid,
+		nudgeWakeIngressFallback,
+		nudgeWakeIngressMalformed,
+		nudgeWakeIngressSaturated,
+	} {
+		observeNudgeWakeIngress(context.Background(), disposition, warnings)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no ingress observation warning", stderr.String())
+	}
+
+	metrics := collectNudgeKeyObservationMetrics(t, reader)
+	counter := findNudgeKeyObservationCounter(t, metrics, testNudgeWakeIngressTotalMetric)
+	if len(counter.DataPoints) != 4 {
+		t.Fatalf("ingress counter datapoints = %+v, want four dispositions", counter.DataPoints)
+	}
+	seen := make(map[string]int64, 4)
+	for _, point := range counter.DataPoints {
+		attrs := point.Attributes.ToSlice()
+		if len(attrs) != 1 || attrs[0].Key != "disposition" {
+			t.Fatalf("ingress attributes = %+v, want only bounded disposition", attrs)
+		}
+		seen[attrs[0].Value.AsString()] += point.Value
+	}
+	for _, label := range []string{"valid", "fallback", "malformed", "saturated"} {
+		if seen[label] != 1 {
+			t.Errorf("disposition %q count = %d, want 1", label, seen[label])
+		}
+	}
+}
+
+func TestNudgeWakeIngressObservationContainsTelemetryFailures(t *testing.T) {
+	var stderr bytes.Buffer
+	warnings := newNudgeWakeIngressWarnings(&stderr)
+	emit := func(context.Context, nudgeWakeIngressDisposition) error {
+		panic("session-secret command-secret message-secret")
+	}
+	for i := 0; i < 10; i++ {
+		emitNudgeWakeIngress(context.Background(), nudgeWakeIngressValid, warnings, emit)
+	}
+	const warning = "nudge exact-wake ingress observation failed\n"
+	if got := stderr.String(); got != warning {
+		t.Fatalf("stderr = %q, want one static warning %q", got, warning)
+	}
+}
 
 func TestNewNudgeKeySchedulingObservationPreservesBoundedSchedulingFacts(t *testing.T) {
 	firstReady := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)

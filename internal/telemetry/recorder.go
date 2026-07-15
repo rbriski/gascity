@@ -91,6 +91,7 @@ func ResetInstrumentsForTest() {
 	instOnce = sync.Once{}
 	invInstOnce = sync.Once{}
 	resetNudgeKeySchedulingInstruments()
+	resetNudgeWakeIngressInstruments()
 }
 
 // initInstruments registers all recorder metric instruments against the current

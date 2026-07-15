@@ -300,6 +300,10 @@ func TestNudgeKeySchedulingObserverIsIdentityFreeAndEffectFree(t *testing.T) {
 		"emit":                               true,
 		"telemetry.RecordNudgeKeyScheduling": true,
 		"telemetry.NudgeKeySchedulingRecord": true,
+		"emitNudgeWakeIngress":               true,
+		"invokeNudgeWakeIngressEmitter":      true,
+		"telemetry.RecordNudgeWakeIngress":   true,
+		"telemetry.NudgeWakeIngressRecord":   true,
 	}
 	assertASTCallsOnly(t, fset, file, "nudge keyed scheduling observer", allowedCalls)
 	assertASTHasNoCapabilityEscape(t, fset, file, "nudge keyed scheduling observer", map[string]bool{
@@ -378,11 +382,19 @@ func TestNudgeKeySchedulingTelemetryRecorderIsTheSoleCapabilityBoundary(t *testi
 		"wrapNudgeKeySchedulingInstrumentError":           true,
 		"nudgeKeySchedulingInstrumentState.current.Store": true,
 		"fmt.Errorf":                                      true,
+		"nudgeWakeIngressDispositionLabel":                true,
+		"loadNudgeWakeIngressInstrument":                  true,
+		"snapshot.total.Add":                              true,
+		"nudgeWakeIngressInstrumentState.current.Load":    true,
+		"nudgeWakeIngressInstrumentState.mu.Lock":         true,
+		"nudgeWakeIngressInstrumentState.mu.Unlock":       true,
+		"nudgeWakeIngressInstrumentState.current.Store":   true,
 	})
 
 	type caller struct {
-		path  string
-		owner string
+		path   string
+		owner  string
+		record string
 	}
 	var callers []caller
 	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
@@ -433,7 +445,7 @@ func TestNudgeKeySchedulingTelemetryRecorderIsTheSoleCapabilityBoundary(t *testi
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			selector, ok := node.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != "RecordNudgeKeyScheduling" {
+			if !ok || (selector.Sel.Name != "RecordNudgeKeyScheduling" && selector.Sel.Name != "RecordNudgeWakeIngress") {
 				return true
 			}
 			base, ok := selector.X.(*ast.Ident)
@@ -445,7 +457,7 @@ func TestNudgeKeySchedulingTelemetryRecorderIsTheSoleCapabilityBoundary(t *testi
 				t.Errorf("Rel(%q): %v", path, relErr)
 				return true
 			}
-			callers = append(callers, caller{path: filepath.ToSlash(relative), owner: ownerAt(selector.Pos())})
+			callers = append(callers, caller{path: filepath.ToSlash(relative), owner: ownerAt(selector.Pos()), record: selector.Sel.Name})
 			return true
 		})
 		return nil
@@ -453,8 +465,18 @@ func TestNudgeKeySchedulingTelemetryRecorderIsTheSoleCapabilityBoundary(t *testi
 	if err != nil {
 		t.Fatalf("walking production callers: %v", err)
 	}
-	if len(callers) != 1 || callers[0].path != "cmd/gc/nudge_key_observation.go" || callers[0].owner != "recordNudgeKeySchedulingObservation" {
-		t.Fatalf("production RecordNudgeKeyScheduling callers = %+v, want only cmd/gc/nudge_key_observation.go:recordNudgeKeySchedulingObservation", callers)
+	wantCallers := map[string]string{
+		"RecordNudgeKeyScheduling": "recordNudgeKeySchedulingObservation",
+		"RecordNudgeWakeIngress":   "recordNudgeWakeIngress",
+	}
+	if len(callers) != len(wantCallers) {
+		t.Fatalf("production nudge telemetry callers = %+v, want exactly %d recorders", callers, len(wantCallers))
+	}
+	for _, got := range callers {
+		wantOwner, ok := wantCallers[got.record]
+		if !ok || got.path != "cmd/gc/nudge_key_observation.go" || got.owner != wantOwner {
+			t.Errorf("production %s caller = %+v, want cmd/gc/nudge_key_observation.go:%s", got.record, got, wantOwner)
+		}
 	}
 }
 

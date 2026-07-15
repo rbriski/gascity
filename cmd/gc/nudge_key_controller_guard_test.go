@@ -325,6 +325,72 @@ func TestNudgeKeySchedulingObserverIsIdentityFreeAndEffectFree(t *testing.T) {
 	}
 }
 
+func TestNudgeKeyBacklogObservationHasOneIdentityFreeRegistrationBoundary(t *testing.T) {
+	fset, file := parseGCTestSource(t, "nudge_key_backlog_observation.go")
+	wantImports := map[string]bool{
+		"io":   true,
+		"sync": true,
+		"github.com/gastownhall/gascity/internal/telemetry": true,
+	}
+	for _, imported := range file.Imports {
+		path := strings.Trim(imported.Path.Value, "\"")
+		if !wantImports[path] {
+			t.Errorf("nudge keyed backlog observer imports unapproved capability %q at %s", path, fset.Position(imported.Pos()))
+		}
+		delete(wantImports, path)
+	}
+	for missing := range wantImports {
+		t.Errorf("nudge keyed backlog observer allowlist is stale: expected import %q is absent", missing)
+	}
+
+	start := findGCFunction(t, file, "startNudgeKeyBacklogObservation")
+	registrationRefs := 0
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.SelectorExpr:
+			if selectorPath(typed) == "telemetry.RegisterNudgeKeyBacklogObserver" {
+				registrationRefs++
+				if typed.Pos() < start.Pos() || typed.Pos() > start.End() {
+					t.Errorf("backlog metric registration escapes the reviewed lifecycle adapter at %s", fset.Position(typed.Pos()))
+				}
+			}
+		case *ast.CallExpr:
+			path := selectorPath(typed.Fun)
+			parts := strings.Split(path, ".")
+			last := parts[len(parts)-1]
+			if map[string]bool{
+				"Create": true, "Update": true, "Delete": true, "Close": true,
+				"SetMetadata": true, "AtomicReadWrite": true,
+				"Nudge": true, "Start": true, "Stop": true,
+			}[last] {
+				t.Errorf("nudge keyed backlog observer calls effect capability %q at %s", path, fset.Position(typed.Pos()))
+			}
+		case *ast.GoStmt:
+			t.Errorf("nudge keyed backlog observer starts a goroutine at %s", fset.Position(typed.Pos()))
+		case *ast.SendStmt:
+			t.Errorf("nudge keyed backlog observer sends on a channel at %s", fset.Position(typed.Pos()))
+		}
+		return true
+	})
+	if registrationRefs != 1 {
+		t.Fatalf("production backlog metric registration references = %d, want exactly one reviewed adapter", registrationRefs)
+	}
+
+	_, lifecycleFile := parseGCTestSource(t, "city_runtime.go")
+	lifecycle := findGCFunction(t, lifecycleFile, "runNudgeKeyShadowLifecycle")
+	registrationStarts := 0
+	ast.Inspect(lifecycle.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if ok && selectorPath(call.Fun) == "startNudgeKeyBacklogObservation" {
+			registrationStarts++
+		}
+		return true
+	})
+	if registrationStarts != 2 {
+		t.Fatalf("keyed lifecycle backlog registration sites = %d, want initial and transient-install paths", registrationStarts)
+	}
+}
+
 func TestNudgeKeySchedulingTelemetryRecorderIsTheSoleCapabilityBoundary(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {

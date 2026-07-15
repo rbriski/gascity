@@ -1039,6 +1039,9 @@ func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
 func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted chan<- struct{}) {
 	ctx, cancelLifecycle := context.WithCancel(ctx)
 	defer cancelLifecycle()
+	backlogWarnings := newNudgeKeyBacklogWarnings(cr.stderr)
+	stopBacklogObservation := func() {}
+	defer func() { stopBacklogObservation() }()
 	var bootOnce sync.Once
 	markBooted := func() { bootOnce.Do(func() { close(booted) }) }
 	defer markBooted()
@@ -1097,6 +1100,7 @@ func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted ch
 	controller, _, _, _ := cr.nudgeKeyShadowState()
 	var controllerDone <-chan error
 	if controller != nil {
+		stopBacklogObservation = startNudgeKeyBacklogObservation(controller, backlogWarnings)
 		var started bool
 		controllerDone, started = cr.launchNudgeKeyController(ctx, cancelLifecycle, controller)
 		if !started {
@@ -1153,6 +1157,7 @@ func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted ch
 			if controller == nil {
 				return
 			}
+			stopBacklogObservation = startNudgeKeyBacklogObservation(controller, backlogWarnings)
 			var started bool
 			controllerDone, started = cr.launchNudgeKeyController(ctx, cancelLifecycle, controller)
 			if !started {

@@ -130,6 +130,7 @@ city="$root/city"
 # the isolated City directory basename for its per-City tmux socket.
 city_tmux_socket="${city##*/}"
 repo_snapshot="$root/repository"
+init_template="$root/init-template"
 gc_bin="$root/gc"
 evidence="$repo/reports/lumen-demo/real-review/$run_id"
 evidence_parent="$repo/reports/lumen-demo/real-review"
@@ -698,8 +699,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+init_template_source="$repo_snapshot/examples/lumen/review-quorum-live"
+init_template_source_sha256="$(lumen_demo_tree_sha256 "$init_template_source")" ||
+  die "could not hash the committed init template"
+cp -a -- "$repo_snapshot/examples/lumen/review-quorum-live" "$init_template"
+[[ "$(lumen_demo_tree_sha256 "$init_template")" == "$init_template_source_sha256" ]] ||
+  die "staged init template does not match the committed snapshot"
+chmod -R u+w "$init_template"
 timeout --kill-after=10s 5m "$gc_bin" init \
-  --from "$repo_snapshot/examples/lumen/review-quorum-live" \
+  --from "$init_template" \
   --skip-provider-readiness \
   --no-start \
   "$city"

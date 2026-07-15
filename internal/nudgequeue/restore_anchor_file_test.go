@@ -242,6 +242,42 @@ func TestLoadRestoreAnchorBoundsPhysicalRead(t *testing.T) {
 	}
 }
 
+func TestAcquireRestoreAnchorLockRejectsSymlinkInstalledAfterMissingCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink race contract")
+	}
+	path := RestoreAnchorPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	victim := filepath.Join(filepath.Dir(path), "victim")
+	if err := os.WriteFile(victim, []byte("must not become a lock"), 0o600); err != nil {
+		t.Fatalf("WriteFile victim: %v", err)
+	}
+	ops := osRestoreAnchorLockOps
+	ops.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if err := os.Symlink(victim, name); err != nil {
+			return nil, err
+		}
+		return os.OpenFile(name, flag, perm)
+	}
+	lock, err := acquireRestoreAnchorLockWithOps(path, ops)
+	if lock != nil {
+		_ = lock.Close()
+		t.Fatal("acquireRestoreAnchorLockWithOps returned a lock through a raced symlink")
+	}
+	if !errors.Is(err, ErrRestoreAnchorUnsafePath) {
+		t.Fatalf("acquireRestoreAnchorLockWithOps error = %v, want ErrRestoreAnchorUnsafePath", err)
+	}
+	got, readErr := os.ReadFile(victim)
+	if readErr != nil {
+		t.Fatalf("ReadFile victim: %v", readErr)
+	}
+	if string(got) != "must not become a lock" {
+		t.Fatalf("victim content changed through lock symlink: %q", got)
+	}
+}
+
 func TestRestoreAnchorFileExplicitLifecycle(t *testing.T) {
 	cityPath := t.TempDir()
 	path := RestoreAnchorPath(cityPath)

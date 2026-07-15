@@ -59,6 +59,11 @@ type restoreAnchorFileOps struct {
 	syncDirectory func(string) error
 }
 
+type restoreAnchorLockOps struct {
+	lstat    func(string) (os.FileInfo, error)
+	openFile func(string, int, os.FileMode) (*os.File, error)
+}
+
 var osRestoreAnchorFileOps = restoreAnchorFileOps{
 	syncFile: func(file *os.File) error {
 		return file.Sync()
@@ -73,6 +78,11 @@ var osRestoreAnchorFileOps = restoreAnchorFileOps{
 		closeErr := directory.Close()
 		return errors.Join(syncErr, closeErr)
 	},
+}
+
+var osRestoreAnchorLockOps = restoreAnchorLockOps{
+	lstat:    os.Lstat,
+	openFile: os.OpenFile,
 }
 
 // RestoreAnchorPath returns the canonical independent local anchor path for a
@@ -395,8 +405,15 @@ func validateRestoreAnchorFileInfo(info os.FileInfo) error {
 }
 
 func acquireRestoreAnchorLock(path string) (*os.File, error) {
+	return acquireRestoreAnchorLockWithOps(path, osRestoreAnchorLockOps)
+}
+
+func acquireRestoreAnchorLockWithOps(path string, ops restoreAnchorLockOps) (*os.File, error) {
+	if ops.lstat == nil || ops.openFile == nil {
+		return nil, errors.New("writing nudge command restore anchor: lock filesystem seam is incomplete")
+	}
 	lockPath := path + ".lock"
-	before, statErr := os.Lstat(lockPath)
+	before, statErr := ops.lstat(lockPath)
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("writing nudge command restore anchor: lstat lock: %w", statErr)
 	}
@@ -405,8 +422,15 @@ func acquireRestoreAnchorLock(path string) (*os.File, error) {
 			return nil, fmt.Errorf("writing nudge command restore anchor: unsafe lock: %w", err)
 		}
 	}
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	openFlags := os.O_CREATE | os.O_RDWR
+	if errors.Is(statErr, os.ErrNotExist) {
+		openFlags |= os.O_EXCL
+	}
+	lock, err := ops.openFile(lockPath, openFlags, 0o600)
 	if err != nil {
+		if errors.Is(statErr, os.ErrNotExist) && errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("writing nudge command restore anchor: %w: lock appeared during creation", ErrRestoreAnchorUnsafePath)
+		}
 		return nil, fmt.Errorf("writing nudge command restore anchor: open lock: %w", err)
 	}
 	if err := lock.Chmod(0o600); err != nil {
@@ -418,9 +442,18 @@ func acquireRestoreAnchorLock(path string) (*os.File, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("writing nudge command restore anchor: stat lock: %w", err)
 	}
-	if statErr == nil && !os.SameFile(before, opened) {
+	live, err := ops.lstat(lockPath)
+	if err != nil {
 		_ = lock.Close()
-		return nil, fmt.Errorf("writing nudge command restore anchor: %w: lock changed during open", ErrRestoreAnchorUnsafePath)
+		return nil, fmt.Errorf("writing nudge command restore anchor: %w: lstat live lock: %w", ErrRestoreAnchorUnsafePath, err)
+	}
+	if err := validateRestoreAnchorFileInfo(live); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("writing nudge command restore anchor: unsafe live lock: %w", err)
+	}
+	if !os.SameFile(live, opened) || statErr == nil && !os.SameFile(before, live) {
+		_ = lock.Close()
+		return nil, fmt.Errorf("writing nudge command restore anchor: %w: lock pathname and opened file differ", ErrRestoreAnchorUnsafePath)
 	}
 	acquired, err := filelock.TryLock(lock, filelock.Exclusive)
 	if err != nil {

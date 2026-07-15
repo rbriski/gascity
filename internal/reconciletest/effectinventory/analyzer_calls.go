@@ -204,7 +204,7 @@ func (analysis *loadedAnalysis) observeCallInstruction(function *ssa.Function, c
 			return nil, []string{fmt.Sprintf("%s: unsupported close operation has unresolved or unsafe channel provenance", ref.key())}
 		}
 	}
-	callees := resolvedCallees(analysis.callGraph, function, call)
+	callees := analysis.closedWorldCallees(function, call)
 	var problems []string
 	if reflection := reflectionTarget(callees); reflection != "" {
 		problems = append(problems, fmt.Sprintf("%s: reflective execution through %s cannot be inventoried statically", ref.key(), reflection))

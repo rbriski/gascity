@@ -422,7 +422,7 @@ func routeHopAuthoredDispatchSteps(analysis *loadedAnalysis, index *routeHopFunc
 			steps = append(steps, routeHopDispatchStep{callee: static, dispatch: HopDispatchVTA})
 			continue
 		}
-		for _, candidate := range resolvedCallees(analysis.callGraph, variant.enclosing, variant.call) {
+		for _, candidate := range analysis.closedWorldCallees(variant.enclosing, variant.call) {
 			steps = append(steps, routeHopDispatchStep{callee: candidate, dispatch: HopDispatchVTA})
 		}
 	}
@@ -436,7 +436,7 @@ func routeHopDispatchSteps(analysis *loadedAnalysis, enclosing *ssa.Function, ca
 	if static := call.Common().StaticCallee(); static != nil {
 		return []routeHopDispatchStep{{callee: static, dispatch: HopDispatchExact}}
 	}
-	callees := resolvedCallees(analysis.callGraph, enclosing, call)
+	callees := analysis.closedWorldCallees(enclosing, call)
 	steps := make([]routeHopDispatchStep, len(callees))
 	for index, callee := range callees {
 		steps[index] = routeHopDispatchStep{callee: callee, dispatch: HopDispatchVTA}

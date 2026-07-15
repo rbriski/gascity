@@ -152,6 +152,9 @@ func (proof *callableSourceProof) parameterClosed(parameter *ssa.Parameter) bool
 	}
 	found := false
 	for _, edge := range node.In {
+		if edge != nil && edge.Caller != nil && edge.Caller.Func != nil && proof.analysis.config.closedWorld && !proof.analysis.executionFunction(edge.Caller.Func) {
+			continue
+		}
 		if edge == nil || edge.Site == nil || edge.Caller == nil || edge.Caller.Func == nil {
 			return false
 		}
@@ -414,7 +417,7 @@ func (proof *callableSourceProof) inspectCallResult(call *ssa.Call, resultIndex 
 	if parent == nil {
 		return false
 	}
-	callees := resolvedCallees(proof.analysis.callGraph, parent, call)
+	callees := proof.analysis.closedWorldCallees(parent, call)
 	if len(callees) == 0 || reflectionTarget(callees) != "" {
 		return false
 	}

@@ -115,10 +115,10 @@ func (analysis *loadedAnalysis) calleeCoveredByAuthoredSource(function *ssa.Func
 	if function == nil || visiting[function] {
 		return false
 	}
-	if analysis.sourceFuncs[function] && len(function.Blocks) != 0 {
+	if analysis.authoredSourceFunction(function) && len(function.Blocks) != 0 {
 		return true
 	}
-	if origin := function.Origin(); origin != nil && analysis.sourceFuncs[origin] && len(origin.Blocks) != 0 {
+	if origin := function.Origin(); origin != nil && analysis.authoredSourceFunction(origin) && len(origin.Blocks) != 0 {
 		return true
 	}
 	if !dispatchOnlySynthetic(function.Synthetic) {

@@ -140,7 +140,7 @@ func scanRawProcessEffects(analysis *loadedAnalysis) ([]rawProcessObservation, e
 				if !ok {
 					continue
 				}
-				callees := resolvedCallees(analysis.callGraph, function, call)
+				callees := analysis.closedWorldCallees(function, call)
 				matches := rawProcessMatches(call, callees, targets, analysis)
 				if len(matches) == 0 {
 					continue

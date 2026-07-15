@@ -12,10 +12,11 @@ import (
 	"testing"
 )
 
-// TestNudgeKeyControllerProductionActivationIsExactlyShadow pins the read-only
-// production activation boundary. Exactly one reviewed CityRuntime method may
-// construct the controller, and its callback must be the certified reader.
-func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
+// TestNudgeKeyControllerProductionActivationUsesClosedOwnershipSelection pins
+// the production activation boundary. Exactly one reviewed CityRuntime method
+// may construct the controller, and its local callback must select only the
+// certified read shadow or the keyed effect owner.
+func TestNudgeKeyControllerProductionActivationUsesClosedOwnershipSelection(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -28,8 +29,11 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 
 	constructorLiterals := 0
 	constructorReferences := 0
-	allowedShadowReferences := 0
-	certifiedReaderCallbacks := 0
+	allowedActivationReferences := 0
+	selectedControllerCallbacks := 0
+	certifiedReaderSelections := 0
+	certifiedOwnerSelections := 0
+	effectOwnerReferences := 0
 	constructorCallbackBindings := 0
 	fset := token.NewFileSet()
 	for _, entry := range entries {
@@ -47,12 +51,16 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 			t.Fatalf("ParseFile(%q): %v", path, err)
 		}
 		var constructorDeclaration token.Pos
+		var effectOwnerDeclaration token.Pos
 		var functions []*ast.FuncDecl
 		for _, declaration := range file.Decls {
 			if fn, ok := declaration.(*ast.FuncDecl); ok {
 				functions = append(functions, fn)
 				if fn.Name.Name == "newNudgeKeyController" {
 					constructorDeclaration = fn.Name.Pos()
+				}
+				if fn.Name.Name == "newNudgeKeyEffectOwner" {
+					effectOwnerDeclaration = fn.Name.Pos()
 				}
 			}
 		}
@@ -66,7 +74,25 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch typed := node.(type) {
+			case *ast.ValueSpec:
+				if name == "city_runtime.go" && ownerAt(typed.Pos()) == "installNudgeKeyShadow" && len(typed.Names) == 1 && len(typed.Values) == 1 && typed.Names[0].Name == "reconcile" {
+					if selected := selectorPath(typed.Values[0]); selected != "reader.reconcile" {
+						t.Errorf("city_runtime.go initializes keyed callback from %q at %s, want reader.reconcile", selected, fset.Position(typed.Values[0].Pos()))
+					} else {
+						certifiedReaderSelections++
+					}
+				}
 			case *ast.AssignStmt:
+				if name == "city_runtime.go" && ownerAt(typed.Pos()) == "installNudgeKeyShadow" && len(typed.Lhs) == 1 && len(typed.Rhs) == 1 && selectorPath(typed.Lhs[0]) == "reconcile" {
+					switch selectorPath(typed.Rhs[0]) {
+					case "reader.reconcile":
+						certifiedReaderSelections++
+					case "owner.reconcile":
+						certifiedOwnerSelections++
+					default:
+						t.Errorf("city_runtime.go selects unreviewed keyed callback %q at %s", selectorPath(typed.Rhs[0]), fset.Position(typed.Rhs[0].Pos()))
+					}
+				}
 				for _, lhs := range typed.Lhs {
 					indexed, indexedOK := lhs.(*ast.IndexExpr)
 					if indexedOK && selectorPath(indexed.X) == "c.pending" &&
@@ -79,13 +105,19 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 					}
 				}
 			case *ast.Ident:
+				if typed.Name == "newNudgeKeyEffectOwner" && typed.Pos() != effectOwnerDeclaration {
+					effectOwnerReferences++
+					if name != "city_runtime.go" || ownerAt(typed.Pos()) != "installNudgeKeyShadow" {
+						t.Errorf("%s references the nudge keyed effect owner from %s at %s; only city_runtime.go:installNudgeKeyShadow may activate it", name, ownerAt(typed.Pos()), fset.Position(typed.Pos()))
+					}
+				}
 				if typed.Name == "newNudgeKeyController" && typed.Pos() != constructorDeclaration {
 					constructorReferences++
 					owner := ownerAt(typed.Pos())
 					if name == "city_runtime.go" && owner == "installNudgeKeyShadow" {
-						allowedShadowReferences++
+						allowedActivationReferences++
 					} else {
-						t.Errorf("%s references the nudge keyed controller constructor from %s at %s; only city_runtime.go:installNudgeKeyShadow may activate the read-only shadow", name, owner, fset.Position(typed.Pos()))
+						t.Errorf("%s references the nudge keyed controller constructor from %s at %s; only city_runtime.go:installNudgeKeyShadow may activate it", name, owner, fset.Position(typed.Pos()))
 					}
 				}
 			case *ast.CompositeLit:
@@ -138,11 +170,11 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 						t.Errorf("shadow constructor warning sink at %s is not the normalized stderr", fset.Position(typed.Args[2].Pos()))
 						break
 					}
-					if selectorPath(typed.Args[1]) != "reader.reconcile" {
-						t.Errorf("shadow constructor callback at %s is %q, want certified reader.reconcile", fset.Position(typed.Args[1].Pos()), selectorPath(typed.Args[1]))
+					if selectorPath(typed.Args[1]) != "reconcile" {
+						t.Errorf("controller callback at %s is %q, want closed local selection reconcile", fset.Position(typed.Args[1].Pos()), selectorPath(typed.Args[1]))
 						break
 					}
-					certifiedReaderCallbacks++
+					selectedControllerCallbacks++
 				}
 				builtin, ok := typed.Fun.(*ast.Ident)
 				if !ok || builtin.Name != "new" || len(typed.Args) != 1 {
@@ -159,11 +191,17 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 	if constructorLiterals != 1 {
 		t.Fatalf("production nudgeKeyController composite literals = %d, want only the constructor-owned literal", constructorLiterals)
 	}
-	if constructorReferences != 1 || allowedShadowReferences != 1 {
-		t.Fatalf("production nudge keyed constructor references = %d (allowed shadow = %d), want exactly one reviewed shadow activation", constructorReferences, allowedShadowReferences)
+	if constructorReferences != 1 || allowedActivationReferences != 1 {
+		t.Fatalf("production nudge keyed constructor references = %d (allowed activation = %d), want exactly one reviewed activation", constructorReferences, allowedActivationReferences)
 	}
-	if certifiedReaderCallbacks != 1 {
-		t.Fatalf("certified production nudge reader callbacks = %d, want exactly one", certifiedReaderCallbacks)
+	if selectedControllerCallbacks != 1 {
+		t.Fatalf("selected production nudge controller callbacks = %d, want exactly one", selectedControllerCallbacks)
+	}
+	if certifiedReaderSelections != 1 || certifiedOwnerSelections != 1 {
+		t.Fatalf("production nudge callback selections = reader:%d owner:%d, want exactly one of each closed branch", certifiedReaderSelections, certifiedOwnerSelections)
+	}
+	if effectOwnerReferences != 1 {
+		t.Fatalf("production nudge keyed effect-owner references = %d, want exactly one reviewed activation", effectOwnerReferences)
 	}
 	if constructorCallbackBindings != 1 {
 		t.Fatalf("nudge keyed constructor callback field bindings = %d, want direct parameter binding", constructorCallbackBindings)

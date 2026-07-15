@@ -130,8 +130,8 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
-	// nudgeKeyController is a domain-local keyed child. Production installs only
-	// a read-only shadow backed by a verified durable command repository.
+	// nudgeKeyController is a domain-local keyed child. Cold ownership decides
+	// whether its callback is a read-only shadow or the sole durable effect owner.
 	nudgeKeyController *nudgeKeyController
 	// nudgeKeyShadowScope is derived only from the repository's certified
 	// store_uuid + restore_epoch binding. It is never synthesized from city,
@@ -143,6 +143,8 @@ type CityRuntime struct {
 	nudgeCommandSourceOpener      nudgeCommandSourceOpener
 	nudgeCityPartition            nudgequeue.TrustedCityPartition
 	nudgeCityPartitionResolver    nudgequeue.TrustedCityPartitionResolver
+	nudgeEffectOwnership          nudgeEffectOwnership
+	nudgeClaimAuthorizer          nudgequeue.NudgeClaimAuthorizer
 	nudgeKeyInstallRetry          bool
 	nudgeKeyTickerFactory         nudgeKeyPeriodicTickerFactory
 	nudgeKeyRetryTimerFactory     nudgeKeyPeriodicTickerFactory
@@ -233,6 +235,12 @@ type CityRuntimeParams struct {
 	// ingress installs non-self-asserted city authority.
 	NudgeCityPartition         nudgequeue.TrustedCityPartition
 	NudgeCityPartitionResolver nudgequeue.TrustedCityPartitionResolver
+	// NudgeEffectOwnership is a cold, process-lifetime owner selection. Its zero
+	// value preserves the legacy dispatcher; keyed ownership must be explicit.
+	NudgeEffectOwnership nudgeEffectOwnership
+	// NudgeClaimAuthorizer is required only by explicit keyed ownership and is
+	// never synthesized from command data or local store credentials.
+	NudgeClaimAuthorizer nudgequeue.NudgeClaimAuthorizer
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -384,6 +392,8 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		nudgeCommandSourceOpener:   openProductionNudgeCommandSource,
 		nudgeCityPartition:         p.NudgeCityPartition,
 		nudgeCityPartitionResolver: p.NudgeCityPartitionResolver,
+		nudgeEffectOwnership:       p.NudgeEffectOwnership,
+		nudgeClaimAuthorizer:       p.NudgeClaimAuthorizer,
 		logPrefix:                  logPrefix,
 		stdout:                     p.Stdout,
 		stderr:                     p.Stderr,
@@ -682,13 +692,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
-	// Install and start the read-only keyed shadow before readiness is published.
-	// Unsupported or unverified repositories leave it inert; legacy remains the
-	// sole dispatcher effect owner in every case.
+	// Install and start the keyed child before readiness is published. Legacy
+	// ownership installs only a read shadow. Explicit keyed ownership requires a
+	// complete effect-capable source and stays effect-free on any install failure.
 	// The defer is registered after run's shutdown defer, so LIFO ordering stops
 	// queue admission and workers before shutdown inspects live sessions.
 	if err := cr.installNudgeKeyShadow(ctx); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow unavailable at startup: %v\n", cr.logPrefix, err) //nolint:errcheck // transient failures retain periodic retry; legacy remains authoritative
+		fmt.Fprintf(cr.stderr, "%s: nudge keyed controller unavailable at startup: %v\n", cr.logPrefix, err) //nolint:errcheck // transient failures retain periodic retry; cold ownership never changes in-process
 	}
 	stopNudgeKeyController := cr.startNudgeKeyController(ctx)
 	defer stopNudgeKeyController()
@@ -837,10 +847,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 }
 
 // installNudgeKeyShadow installs the sole production keyed-controller
-// construction. It requires a verified durable source, builds its complete
-// command index before publication, and installs a read-only callback. It makes
-// no delivery or cutover claim; legacy remains the only store/provider effect
-// owner.
+// construction. It requires a verified durable source and builds its complete
+// command index before publication. Legacy ownership installs a read-only
+// callback; explicit keyed ownership installs the durable effect callback only
+// after every dependency is complete.
 func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if cr == nil || cr.cityPath == "" || !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return nil
@@ -851,6 +861,9 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if cr.nudgeEffectOwnership != nudgeEffectOwnershipLegacy && cr.nudgeEffectOwnership != nudgeEffectOwnershipKeyed {
+		return fmt.Errorf("installing keyed nudge controller: unknown cold ownership %d", cr.nudgeEffectOwnership)
+	}
 	cr.nudgeKeyInstallMu.Lock()
 	defer cr.nudgeKeyInstallMu.Unlock()
 	cr.nudgeKeyShadowMu.RLock()
@@ -858,6 +871,25 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	cr.nudgeKeyShadowMu.RUnlock()
 	if alreadyInstalled {
 		return nil
+	}
+	var effectSessionStore beads.Store
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+		if cr.nudgeClaimAuthorizer == nil {
+			failure := errors.New("installing keyed nudge effect owner: claim authorizer is nil")
+			cr.recordNudgeKeyInstallFailure(failure)
+			return failure
+		}
+		effectSessionStore = cr.sessionsBeadStore().Store
+		if effectSessionStore == nil {
+			failure := errors.New("installing keyed nudge effect owner: session store is nil")
+			cr.recordNudgeKeyInstallFailure(failure)
+			return failure
+		}
+		if cr.sp == nil {
+			failure := errors.New("installing keyed nudge effect owner: runtime provider is nil")
+			cr.recordNudgeKeyInstallFailure(failure)
+			return failure
+		}
 	}
 	opener := cr.nudgeCommandSourceOpener
 	if opener == nil {
@@ -873,6 +905,9 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if err != nil {
 		if errors.Is(err, errNudgeCommandSourceUnverified) {
 			cr.recordNudgeKeyInstallFailure(nil)
+			if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+				return fmt.Errorf("installing keyed nudge effect owner: verified durable source is unavailable: %w", err)
+			}
 			cr.warnNudgeKeySourceUnavailable()
 			return nil
 		}
@@ -882,8 +917,30 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	}
 	if source == nil {
 		cr.recordNudgeKeyInstallFailure(nil)
+		if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+			return errors.New("installing keyed nudge effect owner: durable source is nil")
+		}
 		cr.warnNudgeKeySourceUnavailable()
 		return nil
+	}
+	var effectSource nudgeCommandEffectSource
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+		var ok bool
+		effectSource, ok = source.(nudgeCommandEffectSource)
+		if !ok {
+			failure := errors.New("installing keyed nudge effect owner: durable source is not effect-capable")
+			cr.recordNudgeKeyInstallFailure(failure)
+			return failure
+		}
+	}
+	ownerID := ""
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+		var idErr error
+		ownerID, idErr = newProductionNudgeEffectID("owner")
+		if idErr != nil {
+			cr.recordNudgeKeyInstallFailure(idErr)
+			return idErr
+		}
 	}
 	stderr := cr.stderr
 	if stderr == nil {
@@ -895,7 +952,30 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 		cr.recordNudgeKeyInstallFailure(err)
 		return err
 	}
-	controller, err := newNudgeKeyController(1, reader.reconcile, stderr)
+	var reconcile nudgeReconcileFunc = reader.reconcile
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+		owner, ownerErr := newNudgeKeyEffectOwner(nudgeKeyEffectOwnerConfig{
+			reader:     reader,
+			source:     effectSource,
+			authorizer: cr.nudgeClaimAuthorizer,
+			targets: &productionNudgeEffectTargets{
+				store: sessionFrontDoor(effectSessionStore),
+			},
+			handles: &productionNudgeEffectHandles{
+				provider: cr.sp,
+				recorder: cr.rec,
+			},
+			ownerID: ownerID,
+			now:     time.Now,
+			newID:   newProductionNudgeEffectID,
+		})
+		if ownerErr != nil {
+			cr.recordNudgeKeyInstallFailure(ownerErr)
+			return ownerErr
+		}
+		reconcile = owner.reconcile
+	}
+	controller, err := newNudgeKeyController(1, reconcile, stderr)
 	if err != nil {
 		cr.recordNudgeKeyInstallFailure(err)
 		return err
@@ -1011,8 +1091,8 @@ func (cr *CityRuntime) warnNudgeKeyHintDiagnostic(err error) {
 	})
 }
 
-// startNudgeKeyController starts the optional read-only keyed nudge child and
-// its single global anti-entropy loop, and returns an idempotent stop function.
+// startNudgeKeyController starts the optional keyed nudge child and its single
+// global anti-entropy loop, and returns an idempotent stop function.
 // A transient startup failure retains this lifecycle so a later bounded tick
 // can install the child; an invariant or unsupported source stays inert.
 func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
@@ -3410,7 +3490,7 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 // at the end of each patrol tick so a missed wake doesn't strand a queue
 // item past the patrol interval.
 func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
-	if !nudgeDispatcherIsSupervisor(cr.cfg) {
+	if cr == nil || cr.nudgeEffectOwnership != nudgeEffectOwnershipLegacy || !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return
 	}
 	// Nudge ops route through the nudges accessor; the session snapshot it pairs

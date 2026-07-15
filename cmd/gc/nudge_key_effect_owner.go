@@ -405,6 +405,8 @@ type nudgeEffectTarget struct {
 	intentGeneration     uint64
 	continuationIdentity string
 	launchIdentity       string
+	provider             string
+	transport            string
 	closed               bool
 }
 

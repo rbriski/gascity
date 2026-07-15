@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,8 @@ const (
 	nudgeKeySchedulingTotalMetric = "gc.reconcile.nudge_shadow.scheduling.total"
 	nudgeKeyQueueDelayMetric      = "gc.reconcile.nudge_shadow.queue_delay_ms"
 	nudgeWakeIngressTotalMetric   = "gc.reconcile.nudge_shadow.wake_ingress.total"
+	nudgeKeyBacklogDepthMetric    = "gc.reconcile.nudge_shadow.backlog.keys"
+	nudgeKeyBacklogAgeMetric      = "gc.reconcile.nudge_shadow.backlog.oldest_age_ms"
 )
 
 // NudgeWakeIngressDisposition is the closed, identity-free classification of
@@ -40,6 +43,37 @@ const (
 type NudgeWakeIngressRecord struct {
 	Disposition NudgeWakeIngressDisposition
 }
+
+// NudgeKeyBacklogAgeState classifies whether the oldest dirty-key age is exact.
+type NudgeKeyBacklogAgeState uint8
+
+const (
+	// NudgeKeyBacklogAgeEmpty means no dirty keys are waiting or deferred.
+	NudgeKeyBacklogAgeEmpty NudgeKeyBacklogAgeState = iota + 1
+	// NudgeKeyBacklogAgeObserved means OldestAge is an exact nonnegative age.
+	NudgeKeyBacklogAgeObserved
+	// NudgeKeyBacklogAgeUnavailable means at least one dirty replay lacks an
+	// authoritative admission timestamp, so no oldest age may be invented.
+	NudgeKeyBacklogAgeUnavailable
+	// NudgeKeyBacklogAgeClockRegressed means the observation clock preceded an
+	// admitted key timestamp.
+	NudgeKeyBacklogAgeClockRegressed
+)
+
+// NudgeKeyBacklogRecord is one identity-free scheduler-owned snapshot.
+type NudgeKeyBacklogRecord struct {
+	Depth     int64
+	OldestAge time.Duration
+	AgeState  NudgeKeyBacklogAgeState
+}
+
+// NudgeKeyBacklogObserver returns one instantaneous scheduler snapshot. It is
+// invoked only during metric collection and must be safe for concurrent use.
+type NudgeKeyBacklogObserver func() NudgeKeyBacklogRecord
+
+// NudgeKeyBacklogUnregister removes one observer. It is idempotent and safe for
+// concurrent use.
+type NudgeKeyBacklogUnregister func() error
 
 // NudgeKeyQueueDelayState classifies whether a scheduling delay is measurable.
 // Its numeric representation bounds the caller-controlled value space.
@@ -86,6 +120,221 @@ type nudgeWakeIngressInstrumentSnapshot struct {
 var nudgeWakeIngressInstrumentState struct {
 	mu      sync.Mutex
 	current atomic.Pointer[nudgeWakeIngressInstrumentSnapshot]
+}
+
+type nudgeKeyBacklogInstrumentSnapshot struct {
+	depth        metric.Int64ObservableGauge
+	oldestAge    metric.Float64ObservableGauge
+	registration metric.Registration
+	err          error
+}
+
+var nudgeKeyBacklogInstrumentState struct {
+	mu        sync.Mutex
+	current   *nudgeKeyBacklogInstrumentSnapshot
+	nextID    uint64
+	observers map[uint64]NudgeKeyBacklogObserver
+}
+
+// RegisterNudgeKeyBacklogObserver adds one scheduler-owned source to the
+// process aggregate. Collection sums depth and reports the maximum exact age;
+// no city, store, command, or session identity becomes a metric label.
+func RegisterNudgeKeyBacklogObserver(observer NudgeKeyBacklogObserver) (NudgeKeyBacklogUnregister, error) {
+	if observer == nil {
+		return nil, errors.New("registering keyed nudge backlog observer: observer is nil")
+	}
+	nudgeKeyBacklogInstrumentState.mu.Lock()
+	snapshot := loadNudgeKeyBacklogInstrumentsLocked()
+	if snapshot.err != nil {
+		nudgeKeyBacklogInstrumentState.mu.Unlock()
+		return nil, snapshot.err
+	}
+	if nudgeKeyBacklogInstrumentState.nextID == ^uint64(0) {
+		nudgeKeyBacklogInstrumentState.mu.Unlock()
+		return nil, errors.New("registering keyed nudge backlog observer: observer id space exhausted")
+	}
+	nudgeKeyBacklogInstrumentState.nextID++
+	id := nudgeKeyBacklogInstrumentState.nextID
+	if nudgeKeyBacklogInstrumentState.observers == nil {
+		nudgeKeyBacklogInstrumentState.observers = make(map[uint64]NudgeKeyBacklogObserver)
+	}
+	nudgeKeyBacklogInstrumentState.observers[id] = observer
+	nudgeKeyBacklogInstrumentState.mu.Unlock()
+
+	var once sync.Once
+	return func() error {
+		once.Do(func() {
+			nudgeKeyBacklogInstrumentState.mu.Lock()
+			delete(nudgeKeyBacklogInstrumentState.observers, id)
+			nudgeKeyBacklogInstrumentState.mu.Unlock()
+		})
+		return nil
+	}, nil
+}
+
+func loadNudgeKeyBacklogInstrumentsLocked() *nudgeKeyBacklogInstrumentSnapshot {
+	if nudgeKeyBacklogInstrumentState.current != nil {
+		return nudgeKeyBacklogInstrumentState.current
+	}
+	meter := otel.GetMeterProvider().Meter(meterRecorderName)
+	depth, depthErr := meter.Int64ObservableGauge(
+		nudgeKeyBacklogDepthMetric,
+		metric.WithDescription("Dirty keyed nudge sessions waiting or deferred across active city controllers"),
+	)
+	oldestAge, ageErr := meter.Float64ObservableGauge(
+		nudgeKeyBacklogAgeMetric,
+		metric.WithDescription("Oldest scheduler-owned keyed nudge admission age across active city controllers"),
+		metric.WithUnit("ms"),
+	)
+	snapshot := &nudgeKeyBacklogInstrumentSnapshot{
+		depth:     depth,
+		oldestAge: oldestAge,
+		err: errors.Join(
+			wrapNudgeKeySchedulingInstrumentError("backlog-depth gauge", depthErr),
+			wrapNudgeKeySchedulingInstrumentError("backlog-age gauge", ageErr),
+		),
+	}
+	if snapshot.err == nil {
+		snapshot.registration, snapshot.err = meter.RegisterCallback(
+			observeNudgeKeyBacklog,
+			depth,
+			oldestAge,
+		)
+		if snapshot.err != nil {
+			snapshot.err = fmt.Errorf("registering keyed nudge backlog metric callback: %w", snapshot.err)
+		}
+	}
+	nudgeKeyBacklogInstrumentState.current = snapshot
+	return snapshot
+}
+
+func observeNudgeKeyBacklog(_ context.Context, observer metric.Observer) error {
+	record, err := aggregateNudgeKeyBacklog()
+	nudgeKeyBacklogInstrumentState.mu.Lock()
+	snapshot := nudgeKeyBacklogInstrumentState.current
+	nudgeKeyBacklogInstrumentState.mu.Unlock()
+	if snapshot == nil || snapshot.err != nil {
+		return errors.Join(err, errors.New("observing keyed nudge backlog: instruments are unavailable"))
+	}
+	observer.ObserveInt64(snapshot.depth, record.Depth)
+	observer.ObserveFloat64(
+		snapshot.oldestAge,
+		float64(record.OldestAge)/float64(time.Millisecond),
+		metric.WithAttributes(attribute.String("state", nudgeKeyBacklogAgeStateLabel(record.AgeState))),
+	)
+	return err
+}
+
+func aggregateNudgeKeyBacklog() (NudgeKeyBacklogRecord, error) {
+	nudgeKeyBacklogInstrumentState.mu.Lock()
+	ids := make([]uint64, 0, len(nudgeKeyBacklogInstrumentState.observers))
+	for id := range nudgeKeyBacklogInstrumentState.observers {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	observers := make([]NudgeKeyBacklogObserver, 0, len(ids))
+	for _, id := range ids {
+		observers = append(observers, nudgeKeyBacklogInstrumentState.observers[id])
+	}
+	nudgeKeyBacklogInstrumentState.mu.Unlock()
+
+	aggregate := NudgeKeyBacklogRecord{AgeState: NudgeKeyBacklogAgeEmpty}
+	var failures []error
+	hasUnavailable := false
+	hasClockRegression := false
+	for _, observer := range observers {
+		record, err := invokeNudgeKeyBacklogObserver(observer)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if err := validateNudgeKeyBacklogRecord(record); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if record.Depth > int64(^uint64(0)>>1)-aggregate.Depth {
+			failures = append(failures, errors.New("aggregating keyed nudge backlog: depth overflow"))
+			continue
+		}
+		aggregate.Depth += record.Depth
+		if record.Depth == 0 {
+			continue
+		}
+		switch record.AgeState {
+		case NudgeKeyBacklogAgeObserved:
+			if record.OldestAge > aggregate.OldestAge {
+				aggregate.OldestAge = record.OldestAge
+			}
+		case NudgeKeyBacklogAgeUnavailable:
+			hasUnavailable = true
+		case NudgeKeyBacklogAgeClockRegressed:
+			hasClockRegression = true
+		}
+	}
+	switch {
+	case aggregate.Depth == 0:
+		aggregate.OldestAge = 0
+		aggregate.AgeState = NudgeKeyBacklogAgeEmpty
+	case hasUnavailable:
+		aggregate.OldestAge = 0
+		aggregate.AgeState = NudgeKeyBacklogAgeUnavailable
+	case hasClockRegression:
+		aggregate.OldestAge = 0
+		aggregate.AgeState = NudgeKeyBacklogAgeClockRegressed
+	default:
+		aggregate.AgeState = NudgeKeyBacklogAgeObserved
+	}
+	return aggregate, errors.Join(failures...)
+}
+
+func invokeNudgeKeyBacklogObserver(observer NudgeKeyBacklogObserver) (record NudgeKeyBacklogRecord, err error) {
+	defer func() {
+		if recover() != nil {
+			record = NudgeKeyBacklogRecord{}
+			err = errors.New("keyed nudge backlog observer failed")
+		}
+	}()
+	return observer(), nil
+}
+
+func validateNudgeKeyBacklogRecord(record NudgeKeyBacklogRecord) error {
+	if record.Depth < 0 {
+		return errors.New("keyed nudge backlog observer returned negative depth")
+	}
+	if record.Depth == 0 {
+		if record.OldestAge != 0 || record.AgeState != NudgeKeyBacklogAgeEmpty {
+			return errors.New("keyed nudge backlog observer returned inconsistent empty state")
+		}
+		return nil
+	}
+	switch record.AgeState {
+	case NudgeKeyBacklogAgeObserved:
+		if record.OldestAge < 0 {
+			return errors.New("keyed nudge backlog observer returned negative age")
+		}
+	case NudgeKeyBacklogAgeUnavailable, NudgeKeyBacklogAgeClockRegressed:
+		if record.OldestAge != 0 {
+			return errors.New("keyed nudge backlog observer returned unprovable age")
+		}
+	default:
+		return errors.New("keyed nudge backlog observer returned invalid age state")
+	}
+	return nil
+}
+
+func nudgeKeyBacklogAgeStateLabel(state NudgeKeyBacklogAgeState) string {
+	switch state {
+	case NudgeKeyBacklogAgeEmpty:
+		return "empty"
+	case NudgeKeyBacklogAgeObserved:
+		return "observed"
+	case NudgeKeyBacklogAgeUnavailable:
+		return "unavailable"
+	case NudgeKeyBacklogAgeClockRegressed:
+		return "clock_regressed"
+	default:
+		return "invalid"
+	}
 }
 
 // RecordNudgeWakeIngress records exactly one bounded classification for an
@@ -229,4 +478,16 @@ func resetNudgeWakeIngressInstruments() {
 	nudgeWakeIngressInstrumentState.mu.Lock()
 	nudgeWakeIngressInstrumentState.current.Store(nil)
 	nudgeWakeIngressInstrumentState.mu.Unlock()
+}
+
+func resetNudgeKeyBacklogInstruments() {
+	nudgeKeyBacklogInstrumentState.mu.Lock()
+	snapshot := nudgeKeyBacklogInstrumentState.current
+	nudgeKeyBacklogInstrumentState.current = nil
+	nudgeKeyBacklogInstrumentState.nextID = 0
+	nudgeKeyBacklogInstrumentState.observers = nil
+	nudgeKeyBacklogInstrumentState.mu.Unlock()
+	if snapshot != nil && snapshot.registration != nil {
+		_ = snapshot.registration.Unregister()
+	}
 }

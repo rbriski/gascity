@@ -12,6 +12,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -21,7 +22,7 @@ const (
 	commandRepositoryCheckpointID                = "gc-control-command-checkpoint"
 	commandRepositoryCheckpointTitle             = "durable control command checkpoint"
 	commandRepositoryCheckpointKindMetadataValue = "checkpoint"
-	commandRepositoryCheckpointWireMetadataKey   = "gc.control.checkpoint_wire"
+	commandRepositoryCheckpointWireMetadataKey   = beadmeta.ControlCheckpointWireMetadataKey
 	commandRepositoryCheckpointFingerprintDomain = "gascity.command-repository.checkpoint.v1"
 	maxCommandRepositoryCheckpointWireBytes      = 1 << 20
 )

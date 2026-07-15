@@ -52,6 +52,7 @@ const (
 	CityPathMetadataKey                  = "gc.city_path"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
+	ControlCheckpointWireMetadataKey     = "gc.control.checkpoint_wire"
 	ControlCommandKindMetadataKey        = "gc.control.command_kind"
 	ControlCommandRequestIDMetadataKey   = "gc.control.command_request_id"
 	ControlCommandWireMetadataKey        = "gc.control.command_wire"
@@ -309,6 +310,7 @@ var KnownMetadataKeys = []string{
 	CityPathMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
+	ControlCheckpointWireMetadataKey,
 	ControlCommandKindMetadataKey,
 	ControlCommandRequestIDMetadataKey,
 	ControlCommandWireMetadataKey,

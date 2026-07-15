@@ -155,7 +155,10 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 	}
 	state, err := i.repository.State(ctx)
 	if err != nil {
-		return NudgeIngressResult{}, err
+		state, err = i.repository.RepairLineage(ctx)
+		if err != nil {
+			return NudgeIngressResult{}, err
+		}
 	}
 	commandID := CommandIDForRequest(state.Store, request.RequestID)
 	if commandID == "" {
@@ -163,7 +166,13 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 	}
 	existing, err := i.repository.Get(ctx, commandID)
 	if err != nil {
-		return NudgeIngressResult{}, err
+		if _, repairErr := i.repository.RepairLineage(ctx); repairErr != nil {
+			return NudgeIngressResult{}, errors.Join(err, repairErr)
+		}
+		existing, err = i.repository.Get(ctx, commandID)
+		if err != nil {
+			return NudgeIngressResult{}, err
+		}
 	}
 	if existing.Found {
 		if existing.Entry.Command == nil || !nudgeIngressRequestMatchesCommand(request, *existing.Entry.Command) {
@@ -233,6 +242,9 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 	})
 	if err != nil {
 		if errors.Is(err, ErrNudgeAuthorizationInvalid) || errors.Is(err, ErrNudgeAuthorizationDenied) || errors.Is(err, ErrNudgeAuthorizationUnknown) {
+			return NudgeIngressResult{}, err
+		}
+		if errors.Is(err, ErrLocalNudgeAuthorityConflict) {
 			return NudgeIngressResult{}, err
 		}
 		return NudgeIngressResult{}, fmt.Errorf("%w: trusted ingress authority failed: %w", ErrNudgeAuthorizationUnknown, err)
@@ -356,6 +368,9 @@ func (i *TrustedNudgeIngress) recordAdmission(ctx context.Context, command Comma
 		Sequence:           command.Order.Sequence,
 		Partition:          partition,
 	}); err != nil {
+		if errors.Is(err, ErrLocalNudgeAuthorityConflict) || errors.Is(err, ErrNudgeAuthorizationInvalid) || errors.Is(err, ErrNudgeAuthorizationDenied) {
+			return fmt.Errorf("publishing trusted command partition admission: %w", err)
+		}
 		return fmt.Errorf("%w: publishing trusted command partition admission: %w", ErrNudgeAuthorizationUnknown, err)
 	}
 	return nil
@@ -369,6 +384,9 @@ func (i *TrustedNudgeIngress) ResolveCommandPartition(ctx context.Context, refer
 	}
 	authorization, err := i.authority.ResolveTrustedNudgeIngress(ctx, reference)
 	if err != nil {
+		if errors.Is(err, ErrLocalNudgeAuthorityConflict) || errors.Is(err, ErrNudgeAuthorizationInvalid) || errors.Is(err, ErrNudgeAuthorizationDenied) {
+			return TrustedCityPartition{}, fmt.Errorf("resolving trusted ingress: %w", err)
+		}
 		return TrustedCityPartition{}, fmt.Errorf("%w: resolving trusted ingress: %w", ErrNudgeAuthorizationUnknown, err)
 	}
 	if err := classifyNudgeAuthorization(authorization); err != nil {

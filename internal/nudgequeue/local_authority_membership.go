@@ -7,6 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
+)
+
+const (
+	localAuthorityRecoveryPageSize    = 256
+	localAuthorityActiveCoverageQuery = `SELECT command_id, sequence FROM memberships
+		WHERE partition_id = ? AND admission_revision <= ? AND sequence <= ? AND terminal_revision IS NULL
+		ORDER BY sequence LIMIT ?`
+	localAuthorityHistoricalCoverageQuery = `SELECT command_id, sequence FROM memberships
+		WHERE partition_id = ? AND terminal_revision > ? AND admission_revision <= ? AND sequence <= ?
+		ORDER BY terminal_revision, sequence LIMIT ?`
 )
 
 // RecordCommandPartitionAdmission durably publishes one exact command
@@ -39,15 +50,32 @@ func (a *LocalNudgeAuthority) RecordCommandPartitionAdmission(ctx context.Contex
 	if err != nil {
 		return err
 	}
+	prepared, err := localAuthorityAdmissionPreparationExists(ctx, tx, admission.CommandID)
+	if err != nil {
+		return err
+	}
 	if found {
 		if existing.sequence != admission.Sequence || existing.admissionRevision != admission.RepositoryRevision || existing.partition != admission.Partition {
 			return fmt.Errorf("%w: conflicting admission membership", ErrLocalNudgeAuthorityConflict)
 		}
+		if prepared {
+			return fmt.Errorf("%w: admitted command retains an admission preparation", ErrLocalNudgeAuthorityConflict)
+		}
 		return nil
+	}
+	if !prepared {
+		return fmt.Errorf("%w: admission has no write-ahead preparation", ErrLocalNudgeAuthorityConflict)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO memberships (command_id, sequence, admission_revision, partition_id) VALUES (?, ?, ?, ?)`,
 		admission.CommandID, encodeLocalAuthorityUint64(admission.Sequence), encodeLocalAuthorityUint64(admission.RepositoryRevision), admission.Partition.identity[:]); err != nil {
 		return fmt.Errorf("%w: inserting command admission: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	deleted, err := tx.ExecContext(ctx, `DELETE FROM admission_preparations WHERE command_id = ?`, admission.CommandID)
+	if err != nil {
+		return fmt.Errorf("%w: consuming command admission preparation: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	if affected, err := deleted.RowsAffected(); err != nil || affected != 1 {
+		return fmt.Errorf("%w: command admission preparation consumption affected %d rows: %w", ErrLocalNudgeAuthorityConflict, affected, err)
 	}
 	if err := advanceLocalAuthorityDensePrefix(ctx, tx); err != nil {
 		return err
@@ -150,11 +178,19 @@ func (a *LocalNudgeAuthority) ResolveCommandPartitionCoverage(ctx context.Contex
 		return CommandPartitionCoverage{}, err
 	}
 	defer release()
+	if request.MaxCommands <= 0 || request.MaxCommands > MaxCommandRepositorySnapshotCommands {
+		return CommandPartitionCoverage{}, fmt.Errorf("coverage command bound %d is outside 1..%d: %w", request.MaxCommands, MaxCommandRepositorySnapshotCommands, ErrCommandRepositorySnapshotLimit)
+	}
 	if request.Store != a.store || !request.Partition.valid() {
 		return CommandPartitionCoverage{}, fmt.Errorf("%w: invalid coverage request", ErrLocalNudgeAuthorityConflict)
 	}
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return CommandPartitionCoverage{}, fmt.Errorf("resolving local partition coverage: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	var denseWire []byte
-	if err := a.db.QueryRowContext(ctx, `SELECT dense_admission_high_water FROM authority_meta WHERE singleton = 1`).Scan(&denseWire); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT dense_admission_high_water FROM authority_meta WHERE singleton = 1`).Scan(&denseWire); err != nil {
 		return CommandPartitionCoverage{}, fmt.Errorf("resolving local partition coverage: %w", err)
 	}
 	dense, err := decodeLocalAuthorityUint64(denseWire)
@@ -164,34 +200,60 @@ func (a *LocalNudgeAuthority) ResolveCommandPartitionCoverage(ctx context.Contex
 	if dense < request.SequenceHighWater {
 		return CommandPartitionCoverage{}, fmt.Errorf("%w: authority admission prefix %d is behind repository sequence %d", ErrLocalNudgeAuthorityConflict, dense, request.SequenceHighWater)
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT command_id, sequence FROM memberships
-		WHERE partition_id = ? AND admission_revision <= ? AND sequence <= ?
-		AND (terminal_revision IS NULL OR terminal_revision > ?) ORDER BY sequence`,
-		request.Partition.identity[:], encodeLocalAuthorityUint64(request.RepositoryRevision), encodeLocalAuthorityUint64(request.SequenceHighWater), encodeLocalAuthorityUint64(request.RepositoryRevision))
+	overflowBound := request.MaxCommands + 1
+	active, err := queryLocalAuthorityCoverageEntries(ctx, tx, localAuthorityActiveCoverageQuery, request.Partition.identity[:], encodeLocalAuthorityUint64(request.RepositoryRevision),
+		encodeLocalAuthorityUint64(request.SequenceHighWater), overflowBound)
 	if err != nil {
-		return CommandPartitionCoverage{}, fmt.Errorf("resolving local partition coverage: %w", err)
+		return CommandPartitionCoverage{}, err
 	}
-	defer func() { _ = rows.Close() }()
-	var active []CommandPartitionCoverageEntry
-	for rows.Next() {
-		var commandID string
-		var sequenceWire []byte
-		if err := rows.Scan(&commandID, &sequenceWire); err != nil {
-			return CommandPartitionCoverage{}, fmt.Errorf("resolving local partition coverage: %w", err)
-		}
-		sequence, err := decodeLocalAuthorityUint64(sequenceWire)
-		if err != nil {
-			return CommandPartitionCoverage{}, err
-		}
-		active = append(active, CommandPartitionCoverageEntry{CommandID: commandID, Sequence: sequence})
+	if len(active) > request.MaxCommands {
+		return CommandPartitionCoverage{}, fmt.Errorf("trusted partition contains more than %d active commands: %w", request.MaxCommands, ErrCommandRepositorySnapshotLimit)
 	}
-	if err := rows.Err(); err != nil {
-		return CommandPartitionCoverage{}, fmt.Errorf("resolving local partition coverage: %w", err)
+	historical, err := queryLocalAuthorityCoverageEntries(ctx, tx, localAuthorityHistoricalCoverageQuery, request.Partition.identity[:], encodeLocalAuthorityUint64(request.RepositoryRevision),
+		encodeLocalAuthorityUint64(request.RepositoryRevision), encodeLocalAuthorityUint64(request.SequenceHighWater), overflowBound-len(active))
+	if err != nil {
+		return CommandPartitionCoverage{}, err
+	}
+	active = append(active, historical...)
+	if len(active) > request.MaxCommands {
+		return CommandPartitionCoverage{}, fmt.Errorf("trusted partition contains more than %d active commands: %w", request.MaxCommands, ErrCommandRepositorySnapshotLimit)
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].Sequence < active[j].Sequence })
+	if err := tx.Commit(); err != nil {
+		return CommandPartitionCoverage{}, fmt.Errorf("resolving local partition coverage: commit read snapshot: %w", err)
 	}
 	return CommandPartitionCoverage{
 		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater,
 		AdmittedCount: request.SequenceHighWater, Partition: request.Partition, ActiveEntries: active,
 	}, nil
+}
+
+func queryLocalAuthorityCoverageEntries(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]CommandPartitionCoverageEntry, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("resolving local partition coverage: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var entries []CommandPartitionCoverageEntry
+	for rows.Next() {
+		var commandID string
+		var sequenceWire []byte
+		if err := rows.Scan(&commandID, &sequenceWire); err != nil {
+			return nil, fmt.Errorf("resolving local partition coverage: %w", err)
+		}
+		sequence, err := decodeLocalAuthorityUint64(sequenceWire)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, CommandPartitionCoverageEntry{CommandID: commandID, Sequence: sequence})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolving local partition coverage: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("resolving local partition coverage: close rows: %w", err)
+	}
+	return entries, nil
 }
 
 // ResolveCommandPartitionMembership returns exact historical membership for a
@@ -513,71 +575,126 @@ func (a *LocalNudgeAuthority) RepairCommandPartitionAdmissions(ctx context.Conte
 	if err := a.validateRecoveryState(state); err != nil {
 		return err
 	}
+	for {
+		commandIDs, more, err := a.localAuthorityPreparationPage(ctx, `SELECT command_id FROM admission_preparations ORDER BY command_id LIMIT ?`)
+		if err != nil {
+			return fmt.Errorf("repairing local command admissions: %w", err)
+		}
+		if len(commandIDs) == 0 {
+			return nil
+		}
+		for _, commandID := range commandIDs {
+			resolution, err := reader.Get(ctx, commandID)
+			if err != nil {
+				return fmt.Errorf("repairing local admission %q: %w", commandID, err)
+			}
+			if resolution.Store != a.store || resolution.Revision < state.Revision {
+				return fmt.Errorf("%w: admission command %q was read from inconsistent repository authority", ErrLocalNudgeAuthorityConflict, commandID)
+			}
+			if !resolution.Found {
+				if err := a.consumeAbsentLocalNudgeAdmissionPreparation(ctx, commandID); err != nil {
+					return err
+				}
+				continue
+			}
+			if resolution.Entry.Command == nil {
+				return fmt.Errorf("%w: admission command %q is opaque", ErrLocalNudgeAuthorityConflict, commandID)
+			}
+			command := *resolution.Entry.Command
+			release, err := a.begin(ctx)
+			if err != nil {
+				return err
+			}
+			grant, found, grantErr := localNudgeGrantByCommandID(ctx, a.db, commandID)
+			release()
+			if grantErr != nil || !found {
+				return fmt.Errorf("%w: admission grant %q disappeared", ErrLocalNudgeAuthorityConflict, commandID)
+			}
+			if err := a.validatePersistedGrant(grant); err != nil {
+				return err
+			}
+			if !commandIsPristinePending(command) || command.Store != a.store || command.ID != commandID || command.Order.Revision > resolution.Revision ||
+				command.TrustedIngress != grant.reference ||
+				command.TrustedIngress.PayloadDigest != ComputeCommandPayloadDigest(command) {
+				return fmt.Errorf("%w: admission command %q differs from prepared grant", ErrLocalNudgeAuthorityConflict, commandID)
+			}
+			if err := a.RecordCommandPartitionAdmission(ctx, CommandPartitionAdmission{
+				Store: command.Store, RepositoryRevision: command.Order.Revision, CommandID: command.ID,
+				Sequence: command.Order.Sequence, Partition: trustedCityPartitionFromAuthority(command.TrustedIngress),
+			}); err != nil {
+				return err
+			}
+		}
+		if !more {
+			return nil
+		}
+	}
+}
+
+func (a *LocalNudgeAuthority) consumeAbsentLocalNudgeAdmissionPreparation(ctx context.Context, commandID string) error {
 	release, err := a.begin(ctx)
 	if err != nil {
 		return err
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT g.command_id FROM ingress_grants g LEFT JOIN memberships m ON m.command_id = g.command_id WHERE m.command_id IS NULL ORDER BY g.command_id`)
+	defer release()
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
-		release()
-		return fmt.Errorf("repairing local command admissions: %w", err)
+		return fmt.Errorf("consuming absent local admission preparation: begin: %w", err)
 	}
-	var commandIDs []string
+	defer func() { _ = tx.Rollback() }()
+	grant, found, err := localNudgeGrantByCommandID(ctx, tx, commandID)
+	if err != nil || !found {
+		return fmt.Errorf("%w: absent admission grant %q disappeared", ErrLocalNudgeAuthorityConflict, commandID)
+	}
+	if err := a.validatePersistedGrant(grant); err != nil {
+		return err
+	}
+	if _, found, err := localAuthorityMembershipByCommand(ctx, tx, commandID); err != nil || found {
+		return fmt.Errorf("%w: absent admission %q acquired membership during recovery", ErrLocalNudgeAuthorityConflict, commandID)
+	}
+	deleted, err := tx.ExecContext(ctx, `DELETE FROM admission_preparations WHERE command_id = ?`, commandID)
+	if err != nil {
+		return fmt.Errorf("consuming absent local admission preparation: %w", err)
+	}
+	if affected, err := deleted.RowsAffected(); err != nil || affected != 1 {
+		return fmt.Errorf("%w: absent admission preparation consumption affected %d rows: %w", ErrLocalNudgeAuthorityConflict, affected, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("consuming absent local admission preparation: commit: %w", err)
+	}
+	return nil
+}
+
+func (a *LocalNudgeAuthority) localAuthorityPreparationPage(ctx context.Context, query string) ([]string, bool, error) {
+	release, err := a.begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+	rows, err := a.db.QueryContext(ctx, query, localAuthorityRecoveryPageSize+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = rows.Close() }()
+	commandIDs := make([]string, 0, localAuthorityRecoveryPageSize+1)
 	for rows.Next() {
 		var commandID string
 		if err := rows.Scan(&commandID); err != nil {
-			_ = rows.Close()
-			release()
-			return err
+			return nil, false, err
 		}
 		commandIDs = append(commandIDs, commandID)
 	}
-	rowsErr := rows.Err()
-	closeErr := rows.Close()
-	release()
-	if rowsErr != nil || closeErr != nil {
-		return errors.Join(rowsErr, closeErr)
+	if err := rows.Err(); err != nil {
+		return nil, false, err
 	}
-	for _, commandID := range commandIDs {
-		resolution, err := reader.Get(ctx, commandID)
-		if err != nil {
-			return fmt.Errorf("repairing local admission %q: %w", commandID, err)
-		}
-		if resolution.Store != a.store || resolution.Revision < state.Revision {
-			return fmt.Errorf("%w: admission command %q was read from inconsistent repository authority", ErrLocalNudgeAuthorityConflict, commandID)
-		}
-		if !resolution.Found {
-			continue
-		}
-		if resolution.Entry.Command == nil {
-			return fmt.Errorf("%w: admission command %q is opaque", ErrLocalNudgeAuthorityConflict, commandID)
-		}
-		command := *resolution.Entry.Command
-		release, err := a.begin(ctx)
-		if err != nil {
-			return err
-		}
-		grant, found, grantErr := localNudgeGrantByCommandID(ctx, a.db, commandID)
-		release()
-		if grantErr != nil || !found {
-			return fmt.Errorf("%w: admission grant %q disappeared", ErrLocalNudgeAuthorityConflict, commandID)
-		}
-		if err := a.validatePersistedGrant(grant); err != nil {
-			return err
-		}
-		if !commandIsPristinePending(command) || command.Store != a.store || command.ID != commandID || command.Order.Revision > resolution.Revision ||
-			command.TrustedIngress != grant.reference ||
-			command.TrustedIngress.PayloadDigest != ComputeCommandPayloadDigest(command) {
-			return fmt.Errorf("%w: admission command %q differs from prepared grant", ErrLocalNudgeAuthorityConflict, commandID)
-		}
-		if err := a.RecordCommandPartitionAdmission(ctx, CommandPartitionAdmission{
-			Store: command.Store, RepositoryRevision: command.Order.Revision, CommandID: command.ID,
-			Sequence: command.Order.Sequence, Partition: trustedCityPartitionFromAuthority(command.TrustedIngress),
-		}); err != nil {
-			return err
-		}
+	if err := rows.Close(); err != nil {
+		return nil, false, err
 	}
-	return nil
+	more := len(commandIDs) > localAuthorityRecoveryPageSize
+	if more {
+		commandIDs = commandIDs[:localAuthorityRecoveryPageSize]
+	}
+	return commandIDs, more, nil
 }
 
 // RepairCommandPartitionTerminals resolves every outstanding preparation
@@ -598,76 +715,62 @@ func (a *LocalNudgeAuthority) RepairCommandPartitionTerminals(ctx context.Contex
 	if err := a.validateRecoveryState(state); err != nil {
 		return err
 	}
-	release, err := a.begin(ctx)
-	if err != nil {
-		return err
-	}
-	rows, err := a.db.QueryContext(ctx, `SELECT command_id FROM terminal_preparations ORDER BY command_id`)
-	if err != nil {
-		release()
-		return fmt.Errorf("repairing local terminal preparations: %w", err)
-	}
-	var commandIDs []string
-	for rows.Next() {
-		var commandID string
-		if err := rows.Scan(&commandID); err != nil {
-			_ = rows.Close()
-			release()
-			return err
-		}
-		commandIDs = append(commandIDs, commandID)
-	}
-	rowsErr := rows.Err()
-	closeErr := rows.Close()
-	release()
-	if rowsErr != nil || closeErr != nil {
-		return errors.Join(rowsErr, closeErr)
-	}
-	for _, commandID := range commandIDs {
-		release, err := a.begin(ctx)
+	for {
+		commandIDs, more, err := a.localAuthorityPreparationPage(ctx, `SELECT command_id FROM terminal_preparations ORDER BY command_id LIMIT ?`)
 		if err != nil {
-			return err
+			return fmt.Errorf("repairing local terminal preparations: %w", err)
 		}
-		intent, found, intentErr := localAuthorityPreparationByCommand(ctx, a.db, a.store, commandID)
-		release()
-		if intentErr != nil || !found {
-			return fmt.Errorf("%w: terminal preparation %q disappeared", ErrLocalNudgeAuthorityConflict, commandID)
+		if len(commandIDs) == 0 {
+			return nil
 		}
-		resolution, err := reader.Get(ctx, commandID)
-		if err != nil || !resolution.Found || resolution.Entry.Command == nil {
-			return fmt.Errorf("%w: prepared terminal command %q is unavailable: %w", ErrLocalNudgeAuthorityConflict, commandID, err)
-		}
-		if resolution.Store != a.store || resolution.Revision < state.Revision {
-			return fmt.Errorf("%w: prepared terminal command %q was read from inconsistent repository authority", ErrLocalNudgeAuthorityConflict, commandID)
-		}
-		command := *resolution.Entry.Command
-		wire, err := EncodeCommandV1(command)
-		if err != nil {
-			return err
-		}
-		digest := sha256.Sum256(wire)
-		if command.Terminal != nil && commandIsTerminalState(command.State) {
-			if command.Store != intent.Store || command.ID != intent.CommandID || command.Order.Sequence != intent.Sequence ||
-				command.Order.Revision != intent.RepositoryRevision || digest != intent.CommandDigest || resolution.Revision < intent.RepositoryRevision {
-				return fmt.Errorf("%w: prepared terminal after-state differs", ErrLocalNudgeAuthorityConflict)
-			}
-			if err := a.RecordCommandPartitionTerminal(ctx, CommandPartitionTerminal{
-				Store: intent.Store, RepositoryRevision: intent.RepositoryRevision, CommandID: intent.CommandID,
-				Sequence: intent.Sequence, Partition: intent.Partition,
-			}); err != nil {
+		for _, commandID := range commandIDs {
+			release, err := a.begin(ctx)
+			if err != nil {
 				return err
 			}
-			continue
+			intent, found, intentErr := localAuthorityPreparationByCommand(ctx, a.db, a.store, commandID)
+			release()
+			if intentErr != nil || !found {
+				return fmt.Errorf("%w: terminal preparation %q disappeared", ErrLocalNudgeAuthorityConflict, commandID)
+			}
+			resolution, err := reader.Get(ctx, commandID)
+			if err != nil || !resolution.Found || resolution.Entry.Command == nil {
+				return fmt.Errorf("%w: prepared terminal command %q is unavailable: %w", ErrLocalNudgeAuthorityConflict, commandID, err)
+			}
+			if resolution.Store != a.store || resolution.Revision < state.Revision {
+				return fmt.Errorf("%w: prepared terminal command %q was read from inconsistent repository authority", ErrLocalNudgeAuthorityConflict, commandID)
+			}
+			command := *resolution.Entry.Command
+			wire, err := EncodeCommandV1(command)
+			if err != nil {
+				return err
+			}
+			digest := sha256.Sum256(wire)
+			if command.Terminal != nil && commandIsTerminalState(command.State) {
+				if command.Store != intent.Store || command.ID != intent.CommandID || command.Order.Sequence != intent.Sequence ||
+					command.Order.Revision != intent.RepositoryRevision || digest != intent.CommandDigest || resolution.Revision < intent.RepositoryRevision {
+					return fmt.Errorf("%w: prepared terminal after-state differs", ErrLocalNudgeAuthorityConflict)
+				}
+				if err := a.RecordCommandPartitionTerminal(ctx, CommandPartitionTerminal{
+					Store: intent.Store, RepositoryRevision: intent.RepositoryRevision, CommandID: intent.CommandID,
+					Sequence: intent.Sequence, Partition: intent.Partition,
+				}); err != nil {
+					return err
+				}
+				continue
+			}
+			if command.Store != intent.Store || command.ID != intent.CommandID || command.Order.Sequence != intent.Sequence ||
+				digest != intent.BeforeCommandDigest || resolution.Revision != intent.RepositoryBeforeRevision {
+				return fmt.Errorf("%w: prepared terminal before-state is not safely abortable", ErrLocalNudgeAuthorityConflict)
+			}
+			if err := a.AbortCommandPartitionTerminal(ctx, intent); err != nil {
+				return err
+			}
 		}
-		if command.Store != intent.Store || command.ID != intent.CommandID || command.Order.Sequence != intent.Sequence ||
-			digest != intent.BeforeCommandDigest || resolution.Revision != intent.RepositoryBeforeRevision {
-			return fmt.Errorf("%w: prepared terminal before-state is not safely abortable", ErrLocalNudgeAuthorityConflict)
-		}
-		if err := a.AbortCommandPartitionTerminal(ctx, intent); err != nil {
-			return err
+		if !more {
+			return nil
 		}
 	}
-	return nil
 }
 
 func (a *LocalNudgeAuthority) validateRecoveryState(state CommandRepositoryState) error {

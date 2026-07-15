@@ -57,6 +57,7 @@ type CommandPartitionCoverageRequest struct {
 	Store              CommandStoreBinding
 	RepositoryRevision uint64
 	SequenceHighWater  uint64
+	MaxCommands        int
 	Partition          TrustedCityPartition
 }
 
@@ -386,12 +387,12 @@ func (r *CommandPartitionReader) Snapshot(ctx context.Context, maxCommands int) 
 }
 
 func (r *CommandPartitionReader) verifySnapshotCoverage(ctx context.Context, snapshot CommandIndexSnapshot, maxCommands int) error {
-	request := commandPartitionCoverageRequest(snapshot, r.partition)
+	request := commandPartitionCoverageRequest(snapshot, r.partition, maxCommands)
 	coverage, err := r.coverage.ResolveCommandPartitionCoverage(ctx, request)
 	if err != nil {
 		return &CommandRepositoryPartitionError{Operation: "snapshot coverage", Err: err}
 	}
-	if err := validateCommandPartitionCoverage(request, coverage, maxCommands); err != nil {
+	if err := validateCommandPartitionCoverage(request, coverage); err != nil {
 		return &CommandRepositoryPartitionError{Operation: "snapshot coverage", Err: err}
 	}
 	actual := make([]CommandPartitionCoverageEntry, 0, len(snapshot.Entries))
@@ -456,23 +457,27 @@ func commandPartitionProjection(row beads.Bead) (string, error) {
 	return route, nil
 }
 
-func commandPartitionCoverageRequest(snapshot CommandIndexSnapshot, partition TrustedCityPartition) CommandPartitionCoverageRequest {
+func commandPartitionCoverageRequest(snapshot CommandIndexSnapshot, partition TrustedCityPartition, maxCommands int) CommandPartitionCoverageRequest {
 	return CommandPartitionCoverageRequest{
 		Store:              snapshot.Store,
 		RepositoryRevision: snapshot.Revision,
 		SequenceHighWater:  snapshot.SequenceHighWater,
+		MaxCommands:        maxCommands,
 		Partition:          partition,
 	}
 }
 
-func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, coverage CommandPartitionCoverage, maxCommands int) error {
+func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, coverage CommandPartitionCoverage) error {
+	if request.MaxCommands <= 0 || request.MaxCommands > MaxCommandRepositorySnapshotCommands {
+		return fmt.Errorf("trusted coverage command bound %d is outside 1..%d: %w", request.MaxCommands, MaxCommandRepositorySnapshotCommands, ErrCommandRepositorySnapshotLimit)
+	}
 	if coverage.Store != request.Store || coverage.RepositoryRevision != request.RepositoryRevision ||
 		coverage.SequenceHighWater != request.SequenceHighWater || coverage.AdmittedCount != request.SequenceHighWater ||
 		coverage.Partition != request.Partition {
 		return errors.New("trusted coverage is not bound to the exact repository snapshot")
 	}
-	if len(coverage.ActiveEntries) > maxCommands {
-		return fmt.Errorf("trusted partition contains more than %d active commands: %w", maxCommands, ErrCommandRepositorySnapshotLimit)
+	if len(coverage.ActiveEntries) > request.MaxCommands {
+		return fmt.Errorf("trusted partition contains more than %d active commands: %w", request.MaxCommands, ErrCommandRepositorySnapshotLimit)
 	}
 	var previous uint64
 	seenIDs := make(map[string]struct{}, len(coverage.ActiveEntries))

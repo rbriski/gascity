@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ func TestLocalNudgeAuthorityMaintainsHistoricalMembershipAndTerminalDigest(t *te
 	}
 
 	active, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
-		Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, Partition: partition,
+		Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, MaxCommands: 1, Partition: partition,
 	})
 	if err != nil || active.AdmittedCount != 1 || len(active.ActiveEntries) != 1 || active.ActiveEntries[0] != (CommandPartitionCoverageEntry{CommandID: commandID, Sequence: 1}) {
 		t.Fatalf("active coverage = %#v, err=%v", active, err)
@@ -152,13 +153,13 @@ func TestLocalNudgeAuthorityMaintainsHistoricalMembershipAndTerminalDigest(t *te
 		t.Fatalf("VerifyCommandPartitionTerminal finalized after reopen: %v", err)
 	}
 	atAdmission, err := reopened.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
-		Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, Partition: partition,
+		Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, MaxCommands: 1, Partition: partition,
 	})
 	if err != nil || len(atAdmission.ActiveEntries) != 1 {
 		t.Fatalf("historical admission coverage = %#v, err=%v", atAdmission, err)
 	}
 	afterTerminal, err := reopened.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
-		Store: state.Store, RepositoryRevision: 2, SequenceHighWater: 1, Partition: partition,
+		Store: state.Store, RepositoryRevision: 2, SequenceHighWater: 1, MaxCommands: 1, Partition: partition,
 	})
 	if err != nil || len(afterTerminal.ActiveEntries) != 0 {
 		t.Fatalf("terminal coverage = %#v, err=%v", afterTerminal, err)
@@ -336,6 +337,36 @@ func TestLocalNudgeAuthorityRecoversGrantOnlyIngressWithOriginalCreationTime(t *
 	}
 	if !recovered.Entry.Command.CreatedAt.Equal(firstNow) || !recovered.Entry.Command.TrustedIngress.IssuedAt.Equal(firstNow) {
 		t.Fatalf("recovered times = created %v issued %v, want %v", recovered.Entry.Command.CreatedAt, recovered.Entry.Command.TrustedIngress.IssuedAt, firstNow)
+	}
+}
+
+func TestLocalNudgeAuthorityClassifiesGrantConflictAsPermanentIdempotencyFailure(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	state, err := repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("repository State: %v", err)
+	}
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	now := time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC)
+	ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+	}
+	request := validNudgeIngressRequest(now)
+	ctx := WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester())
+	store.failNext = errors.New("injected repository commit failure")
+	if _, err := ingress.Admit(ctx, request); err == nil {
+		t.Fatal("first Admit error = nil, want repository failure after grant")
+	}
+	request.Message = "different immutable command"
+	if _, err := ingress.Admit(ctx, request); !errors.Is(err, ErrLocalNudgeAuthorityConflict) ||
+		!errors.Is(err, ErrCommandRepositoryIdempotencyConflict) || errors.Is(err, ErrNudgeAuthorizationUnknown) {
+		t.Fatalf("conflicting Admit error = %v, want permanent idempotency conflict", err)
 	}
 }
 
@@ -551,7 +582,7 @@ func TestLocalNudgeAuthorityAdvancesDensePrefixAfterOutOfOrderAdmissions(t *test
 		}
 	}
 	coverageRequest := CommandPartitionCoverageRequest{
-		Store: state.Store, RepositoryRevision: 3, SequenceHighWater: 3, Partition: admissions[0].Partition,
+		Store: state.Store, RepositoryRevision: 3, SequenceHighWater: 3, MaxCommands: 3, Partition: admissions[0].Partition,
 	}
 	for _, index := range []int{2, 0} {
 		if err := authority.RecordCommandPartitionAdmission(t.Context(), admissions[index]); err != nil {
@@ -567,6 +598,143 @@ func TestLocalNudgeAuthorityAdvancesDensePrefixAfterOutOfOrderAdmissions(t *test
 	coverage, err := authority.ResolveCommandPartitionCoverage(t.Context(), coverageRequest)
 	if err != nil || coverage.AdmittedCount != 3 || len(coverage.ActiveEntries) != 3 {
 		t.Fatalf("coverage after closing sequence gap = %#v, err=%v", coverage, err)
+	}
+}
+
+func TestLocalNudgeAuthorityBoundsCoverageBeforeReturningEntries(t *testing.T) {
+	state := localAuthorityRepositoryState()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	ctx := WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester())
+	var partition TrustedCityPartition
+	for sequence := uint64(1); sequence <= 3; sequence++ {
+		request := localAuthorityIngressRequest()
+		request.RequestID = fmt.Sprintf("request-coverage-bound-%d", sequence)
+		request.IntentDigest = fmt.Sprintf("%064x", sequence)
+		request.PayloadDigest = fmt.Sprintf("%064x", sequence+10)
+		authorized, err := authority.AuthorizeNudgeIngress(ctx, request)
+		if err != nil {
+			t.Fatalf("AuthorizeNudgeIngress(%d): %v", sequence, err)
+		}
+		partition = trustedCityPartitionFromAuthority(authorized.Reference)
+		if err := authority.RecordCommandPartitionAdmission(t.Context(), CommandPartitionAdmission{
+			Store: state.Store, RepositoryRevision: sequence, CommandID: CommandIDForRequest(state.Store, request.RequestID),
+			Sequence: sequence, Partition: partition,
+		}); err != nil {
+			t.Fatalf("RecordCommandPartitionAdmission(%d): %v", sequence, err)
+		}
+	}
+	for _, limit := range []int{0, -1, MaxCommandRepositorySnapshotCommands + 1} {
+		_, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
+			Store: state.Store, RepositoryRevision: 3, SequenceHighWater: 3, MaxCommands: limit, Partition: partition,
+		})
+		if !errors.Is(err, ErrCommandRepositorySnapshotLimit) {
+			t.Fatalf("ResolveCommandPartitionCoverage(limit=%d) error = %v, want snapshot limit", limit, err)
+		}
+	}
+	if _, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
+		Store: state.Store, RepositoryRevision: 3, SequenceHighWater: 3, MaxCommands: 2, Partition: partition,
+	}); !errors.Is(err, ErrCommandRepositorySnapshotLimit) {
+		t.Fatalf("ResolveCommandPartitionCoverage overflow error = %v, want snapshot limit", err)
+	}
+	coverage, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
+		Store: state.Store, RepositoryRevision: 3, SequenceHighWater: 3, MaxCommands: 3, Partition: partition,
+	})
+	if err != nil || len(coverage.ActiveEntries) != 3 {
+		t.Fatalf("ResolveCommandPartitionCoverage exact bound = %#v, err=%v", coverage, err)
+	}
+}
+
+func TestLocalNudgeAuthorityCoverageQueriesUseBoundedIndexesWithoutTempSort(t *testing.T) {
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), localAuthorityRepositoryState(), localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	partition := make([]byte, sha256.Size)
+	bound := encodeLocalAuthorityUint64(10)
+	for _, test := range []struct {
+		name  string
+		query string
+		index string
+		args  []any
+	}{
+		{name: "current active", query: localAuthorityActiveCoverageQuery, index: "memberships_partition_active", args: []any{partition, bound, bound, 11}},
+		{name: "historical active", query: localAuthorityHistoricalCoverageQuery, index: "memberships_partition_terminal", args: []any{partition, bound, bound, bound, 11}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := authority.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN `+test.query, test.args...)
+			if err != nil {
+				t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+			}
+			var details []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					_ = rows.Close()
+					t.Fatalf("scan query plan: %v", err)
+				}
+				details = append(details, detail)
+			}
+			rowsErr := rows.Err()
+			closeErr := rows.Close()
+			if rowsErr != nil || closeErr != nil {
+				t.Fatalf("read query plan: %v", errors.Join(rowsErr, closeErr))
+			}
+			plan := strings.Join(details, "\n")
+			if !strings.Contains(plan, test.index) || strings.Contains(plan, "TEMP B-TREE") {
+				t.Fatalf("query plan = %q, want index %q and no temp sort", plan, test.index)
+			}
+		})
+	}
+}
+
+func TestLocalNudgeAuthorityAdmissionRecoveryScalesWithOutstandingPreparations(t *testing.T) {
+	state := localAuthorityRepositoryState()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	ctx := WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester())
+	requests := make([]NudgeIngressAuthorizationRequest, localAuthorityRecoveryPageSize+1)
+	for index := range requests {
+		request := localAuthorityIngressRequest()
+		request.RequestID = fmt.Sprintf("request-preparation-%02d", index)
+		request.IntentDigest = fmt.Sprintf("%064x", index+1)
+		request.PayloadDigest = fmt.Sprintf("%064x", index+101)
+		if _, err := authority.AuthorizeNudgeIngress(ctx, request); err != nil {
+			t.Fatalf("AuthorizeNudgeIngress(%d): %v", index, err)
+		}
+		requests[index] = request
+	}
+	reader := &countingLocalAuthorityRecoveryReader{localAuthorityRecoveryReader: localAuthorityRecoveryReader{state: state, entries: map[string]CommandIndexResolution{}}}
+	if err := authority.RepairCommandPartitionAdmissions(t.Context(), reader); err != nil {
+		t.Fatalf("RepairCommandPartitionAdmissions first: %v", err)
+	}
+	if reader.gets != len(requests) {
+		t.Fatalf("first recovery Get calls = %d, want %d outstanding grants", reader.gets, len(requests))
+	}
+	if err := authority.RepairCommandPartitionAdmissions(t.Context(), reader); err != nil {
+		t.Fatalf("RepairCommandPartitionAdmissions settled: %v", err)
+	}
+	if reader.gets != len(requests) {
+		t.Fatalf("settled recovery added Get calls: got %d, want %d", reader.gets, len(requests))
+	}
+	for _, request := range requests[:2] {
+		if _, err := authority.AuthorizeNudgeIngress(ctx, request); err != nil {
+			t.Fatalf("rearm AuthorizeNudgeIngress(%q): %v", request.RequestID, err)
+		}
+	}
+	if err := authority.RepairCommandPartitionAdmissions(t.Context(), reader); err != nil {
+		t.Fatalf("RepairCommandPartitionAdmissions rearmed: %v", err)
+	}
+	if reader.gets != len(requests)+2 {
+		t.Fatalf("rearmed recovery Get calls = %d, want %d", reader.gets, len(requests)+2)
 	}
 }
 
@@ -618,7 +786,7 @@ func TestLocalNudgeAuthorityRepairsOnlyExactPristineAdmission(t *testing.T) {
 			t.Fatalf("RepairCommandPartitionAdmissions: %v", err)
 		}
 		coverage, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
-			Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, Partition: partition,
+			Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, MaxCommands: 1, Partition: partition,
 		})
 		if err != nil || coverage.AdmittedCount != 1 || len(coverage.ActiveEntries) != 1 || coverage.ActiveEntries[0].CommandID != pending.ID {
 			t.Fatalf("recovered admission coverage = %#v, err=%v", coverage, err)
@@ -1138,6 +1306,16 @@ func TestLocalNudgeAuthorityClaimBindsExactCommandAndStore(t *testing.T) {
 type localAuthorityRecoveryReader struct {
 	state   CommandRepositoryState
 	entries map[string]CommandIndexResolution
+}
+
+type countingLocalAuthorityRecoveryReader struct {
+	localAuthorityRecoveryReader
+	gets int
+}
+
+func (r *countingLocalAuthorityRecoveryReader) Get(ctx context.Context, commandID string) (CommandIndexResolution, error) {
+	r.gets++
+	return r.localAuthorityRecoveryReader.Get(ctx, commandID)
 }
 
 func (r localAuthorityRecoveryReader) State(context.Context) (CommandRepositoryState, error) {

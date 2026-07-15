@@ -396,6 +396,9 @@ var localNudgeAuthoritySchemaStatements = []localNudgeAuthoritySchemaStatement{
 		policy_decision_id TEXT NOT NULL, action TEXT NOT NULL, target_session_id TEXT NOT NULL,
 		payload_digest TEXT NOT NULL, command_created_at TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL
 	)`},
+	{objectType: "table", name: "admission_preparations", tableName: "admission_preparations", sql: `CREATE TABLE admission_preparations (
+		command_id TEXT PRIMARY KEY REFERENCES ingress_grants(command_id)
+	)`},
 	{objectType: "table", name: "memberships", tableName: "memberships", sql: `CREATE TABLE memberships (
 		command_id TEXT PRIMARY KEY REFERENCES ingress_grants(command_id), sequence BLOB NOT NULL UNIQUE CHECK (length(sequence) = 8),
 		admission_revision BLOB NOT NULL CHECK (length(admission_revision) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
@@ -408,7 +411,7 @@ var localNudgeAuthoritySchemaStatements = []localNudgeAuthoritySchemaStatement{
 		before_digest BLOB NOT NULL CHECK (length(before_digest) = 32), terminal_revision BLOB NOT NULL CHECK (length(terminal_revision) = 8),
 		terminal_digest BLOB NOT NULL CHECK (length(terminal_digest) = 32)
 	)`},
-	{objectType: "index", name: "memberships_partition_active", tableName: "memberships", sql: `CREATE INDEX memberships_partition_active ON memberships(partition_id, admission_revision, sequence) WHERE terminal_revision IS NULL`},
+	{objectType: "index", name: "memberships_partition_active", tableName: "memberships", sql: `CREATE INDEX memberships_partition_active ON memberships(partition_id, sequence, admission_revision) WHERE terminal_revision IS NULL`},
 	{objectType: "index", name: "memberships_partition_terminal", tableName: "memberships", sql: `CREATE INDEX memberships_partition_terminal ON memberships(partition_id, terminal_revision, sequence) WHERE terminal_revision IS NOT NULL`},
 }
 
@@ -567,7 +570,10 @@ func (a *LocalNudgeAuthority) AuthorizeNudgeIngress(ctx context.Context, request
 			return NudgeAuthorization{}, err
 		}
 		if existing.fingerprint != fingerprint || existing.commandID != commandID {
-			return NudgeAuthorization{}, fmt.Errorf("%w: request id is bound to different authenticated content", ErrLocalNudgeAuthorityConflict)
+			return NudgeAuthorization{}, localNudgeAuthorityRequestConflict()
+		}
+		if err := rearmLocalNudgeAdmissionPreparation(ctx, a.db, request.RequestID, fingerprint, commandID); err != nil {
+			return NudgeAuthorization{}, err
 		}
 		return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: existing.principalSchema, CommandCreatedAt: existing.commandCreatedAt, Reference: existing.reference}, nil
 	}
@@ -591,12 +597,16 @@ func (a *LocalNudgeAuthority) AuthorizeNudgeIngress(ctx context.Context, request
 		return NudgeAuthorization{}, err
 	}
 	if !found || persisted.fingerprint != fingerprint || persisted.commandID != commandID {
-		return NudgeAuthorization{}, fmt.Errorf("%w: concurrent request id is bound to different authenticated content", ErrLocalNudgeAuthorityConflict)
+		return NudgeAuthorization{}, localNudgeAuthorityRequestConflict()
 	}
 	if err := a.validatePersistedGrant(persisted); err != nil {
 		return NudgeAuthorization{}, err
 	}
 	return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: persisted.principalSchema, CommandCreatedAt: persisted.commandCreatedAt, Reference: persisted.reference}, nil
+}
+
+func localNudgeAuthorityRequestConflict() error {
+	return fmt.Errorf("%w: request id is bound to different authenticated content: %w", ErrLocalNudgeAuthorityConflict, ErrCommandRepositoryIdempotencyConflict)
 }
 
 func validateAuthenticatedNudgeRequester(requester AuthenticatedNudgeRequester) error {
@@ -799,7 +809,12 @@ func (a *LocalNudgeAuthority) validatePersistedGrant(grant localNudgeGrant) erro
 }
 
 func insertLocalNudgeGrant(ctx context.Context, db *sql.DB, requestID string, fingerprint [sha256.Size]byte, commandID string, commandCreatedAt time.Time, reference TrustedIngressReference) error {
-	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO ingress_grants (
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: inserting local nudge grant: begin: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ingress_grants (
 		reference_id, request_id, request_fingerprint, command_id, principal_schema, issuer, principal_id,
 		tenant_scope, city_scope, credential_class, policy_version, policy_decision_id, action,
 		target_session_id, payload_digest, command_created_at, issued_at, expires_at
@@ -811,7 +826,78 @@ func insertLocalNudgeGrant(ctx context.Context, db *sql.DB, requestID string, fi
 	if err != nil {
 		return fmt.Errorf("%w: inserting local nudge grant: %w", ErrLocalNudgeAuthorityConflict, err)
 	}
+	if err := ensureLocalNudgeAdmissionPreparation(ctx, tx, requestID, fingerprint, commandID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: inserting local nudge grant: commit: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
 	return nil
+}
+
+type localNudgeAdmissionPreparationQueryer interface {
+	localAuthorityQueryer
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func rearmLocalNudgeAdmissionPreparation(ctx context.Context, db *sql.DB, requestID string, fingerprint [sha256.Size]byte, commandID string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: rearming local nudge admission: begin: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := ensureLocalNudgeAdmissionPreparation(ctx, tx, requestID, fingerprint, commandID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: rearming local nudge admission: commit: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	return nil
+}
+
+func ensureLocalNudgeAdmissionPreparation(ctx context.Context, queryer localNudgeAdmissionPreparationQueryer, requestID string, fingerprint [sha256.Size]byte, commandID string) error {
+	grant, found, err := scanLocalNudgeGrant(queryer.QueryRowContext(ctx, `SELECT reference_id, request_fingerprint, command_id, principal_schema, issuer,
+		principal_id, tenant_scope, city_scope, credential_class, policy_version, policy_decision_id,
+		action, target_session_id, payload_digest, command_created_at, issued_at, expires_at FROM ingress_grants WHERE request_id = ?`, requestID))
+	if err != nil {
+		return err
+	}
+	if !found || grant.fingerprint != fingerprint || grant.commandID != commandID {
+		return localNudgeAuthorityRequestConflict()
+	}
+	membership, admitted, err := localAuthorityMembershipByCommand(ctx, queryer, commandID)
+	if err != nil {
+		return err
+	}
+	prepared, err := localAuthorityAdmissionPreparationExists(ctx, queryer, commandID)
+	if err != nil {
+		return err
+	}
+	if admitted {
+		if membership.commandID != commandID || prepared {
+			return fmt.Errorf("%w: admitted command retains an admission preparation", ErrLocalNudgeAuthorityConflict)
+		}
+		return nil
+	}
+	if prepared {
+		return nil
+	}
+	if _, err := queryer.ExecContext(ctx, `INSERT INTO admission_preparations (command_id) VALUES (?)`, commandID); err != nil {
+		return fmt.Errorf("%w: preparing local nudge admission: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	return nil
+}
+
+func localAuthorityAdmissionPreparationExists(ctx context.Context, queryer localAuthorityQueryer, commandID string) (bool, error) {
+	var found int
+	err := queryer.QueryRowContext(ctx, `SELECT 1 FROM admission_preparations WHERE command_id = ?`, commandID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading local admission preparation: %w", err)
+	}
+	return found == 1, nil
 }
 
 // ResolveTrustedNudgeIngress resolves an exact immutable reference from the

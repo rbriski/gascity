@@ -214,7 +214,7 @@ func TestRunProjectorConcurrentCallersShareOneColdLoad(t *testing.T) {
 		}(i)
 	}
 
-	time.Sleep(50 * time.Millisecond) // let all callers reach the shared wait
+	<-time.After(50 * time.Millisecond) // let all callers reach the shared wait
 	close(release)
 	wg.Wait()
 
@@ -267,7 +267,7 @@ func TestRunProjectorRotationReset(t *testing.T) {
 		if len(got) == 2 {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 	seen := map[string]bool{}
 	for _, id := range got {
@@ -307,7 +307,7 @@ func TestRunProjectorTruncationReset(t *testing.T) {
 		if len(got) == 1 {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 	if len(got) != 1 || got[0] != "run-a" {
 		t.Fatalf("post-truncation runs = %v, want just [run-a] (the rebuild must reflect the truncated log)", got)
@@ -472,7 +472,7 @@ func TestRunProjectorRetriesAfterColdLoadFailure(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 	if len(got) != 1 || got[0] != "run-a" {
 		t.Fatalf("after retry runs = %v, want [run-a] (a failed cold load must recover)", got)

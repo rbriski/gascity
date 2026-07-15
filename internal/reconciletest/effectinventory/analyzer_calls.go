@@ -575,6 +575,9 @@ func (analysis *loadedAnalysis) unresolvedEffectCall(call ssa.CallInstruction, c
 	}
 	static := common.StaticCallee()
 	closedVTA := analysis.callableVTATargetSetClosed(call, callees)
+	if analysis.config.closedWorld && static == nil {
+		closedVTA = newCallableTargetTracer(analysis).trace(common.Value).closed
+	}
 	for _, boundary := range boundaries {
 		if boundary.definition.Match == ObjectMatchChannel {
 			// Channel calls have slot- and provenance-sensitive diagnostics in
@@ -585,7 +588,8 @@ func (analysis *loadedAnalysis) unresolvedEffectCall(call ssa.CallInstruction, c
 		if !callMayReachBoundary(common, boundary) {
 			continue
 		}
-		if boundClosureOpenForBoundary(common.Value, boundary, make(map[ssa.Value]bool)) {
+		if boundClosureOpenForBoundary(common.Value, boundary, make(map[ssa.Value]bool)) &&
+			(!analysis.config.closedWorld || !closedVTA) {
 			return true
 		}
 		if static != nil {

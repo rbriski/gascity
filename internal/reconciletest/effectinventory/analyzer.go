@@ -60,6 +60,8 @@ type loadedAnalysis struct {
 	channelInputs     map[ssa.Value]map[string]bool
 	channelTracer     *channelTracer
 	globalUses        map[*ssa.Global][]ssa.Instruction
+	fieldStores       map[*types.Var][]ssa.Value
+	fieldAddresses    map[*types.Var][]*ssa.FieldAddr
 }
 
 type resolvedBoundary struct {
@@ -243,6 +245,7 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	}
 
 	resolvedGraph := vta.CallGraph(graphFunctions, chaGraph)
+	fieldEvidence := collectSourceFieldEvidence(sourceFuncs)
 	analysis := &loadedAnalysis{
 		config:            analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...), closedWorld: config.closedWorld},
 		profile:           profile,
@@ -255,6 +258,8 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 		effectFuncs:       sourceFuncs,
 		executionFuncs:    graphFunctions,
 		globalUses:        collectSourceGlobalUses(sourceFuncs),
+		fieldStores:       fieldEvidence.stores,
+		fieldAddresses:    fieldEvidence.addresses,
 		callGraph:         resolvedGraph,
 		selectOps:         collectSelectOperations(sourcePackages),
 		receivers:         collectSelectionReceivers(sourcePackages),
@@ -265,6 +270,9 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 		refineClosedWorldExecution(analysis, ssaPackagesForRoots(roots, program))
 		analysis.effectFuncs = sourceFunctionsInSet(analysis.executionFuncs, sourceFuncs)
 		analysis.globalUses = collectSourceGlobalUses(analysis.effectFuncs)
+		fieldEvidence = collectSourceFieldEvidence(analysis.effectFuncs)
+		analysis.fieldStores = fieldEvidence.stores
+		analysis.fieldAddresses = fieldEvidence.addresses
 		analysis.initReachable = functionsReachableFromEntries(analysis, rootEntryFunctions(ssaPackagesForRoots(roots, program), false))
 	}
 	return analysis, nil

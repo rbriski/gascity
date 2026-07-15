@@ -79,7 +79,7 @@ func (proof *callableSourceProof) inspect(value ssa.Value) bool {
 		return value.IsNil()
 	case *ssa.MakeClosure:
 		function, _ := value.Fn.(*ssa.Function)
-		return function != nil && proof.analysis.calleeCoveredByAuthoredSource(function, make(map[*ssa.Function]bool))
+		return function != nil && (proof.analysis.config.closedWorld || proof.analysis.calleeCoveredByAuthoredSource(function, make(map[*ssa.Function]bool)))
 	case *ssa.Parameter:
 		return proof.parameterClosed(value)
 	case *ssa.FreeVar:
@@ -133,7 +133,7 @@ func (proof *callableSourceProof) allClosed(values []ssa.Value) bool {
 
 func (proof *callableSourceProof) parameterClosed(parameter *ssa.Parameter) bool {
 	parent := parameter.Parent()
-	if parent == nil || functionExternallyNameable(parent) || functionValueEscapesAuthoredUniverse(parent, proof.analysis) {
+	if parent == nil || (!proof.analysis.config.closedWorld && functionExternallyNameable(parent)) || functionValueEscapesAuthoredUniverse(parent, proof.analysis) {
 		return false
 	}
 	index := -1
@@ -190,6 +190,9 @@ func functionValueEscapesAuthoredUniverse(function *ssa.Function, analysis *load
 		return false
 	}
 	for _, instruction := range *referrers {
+		if analysis.config.closedWorld && instruction.Parent() != nil && !analysis.executionFunction(instruction.Parent()) {
+			continue
+		}
 		switch instruction := instruction.(type) {
 		case ssa.CallInstruction:
 			common := instruction.Common()
@@ -221,6 +224,9 @@ func callableValueEscapesAuthoredUniverse(value ssa.Value, analysis *loadedAnaly
 	}
 	foundUse := false
 	for _, instruction := range *value.Referrers() {
+		if analysis.config.closedWorld && instruction.Parent() != nil && !analysis.executionFunction(instruction.Parent()) {
+			continue
+		}
 		switch instruction := instruction.(type) {
 		case ssa.CallInstruction:
 			common := instruction.Common()
@@ -307,6 +313,43 @@ func collectSourceGlobalUses(functions map[*ssa.Function]bool) map[*ssa.Global][
 		}
 	}
 	return uses
+}
+
+type sourceFieldEvidence struct {
+	stores    map[*types.Var][]ssa.Value
+	addresses map[*types.Var][]*ssa.FieldAddr
+}
+
+func collectSourceFieldEvidence(functions map[*ssa.Function]bool) sourceFieldEvidence {
+	evidence := sourceFieldEvidence{
+		stores:    make(map[*types.Var][]ssa.Value),
+		addresses: make(map[*types.Var][]*ssa.FieldAddr),
+	}
+	for function := range functions {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				address, ok := instruction.(*ssa.FieldAddr)
+				if !ok {
+					continue
+				}
+				field := fieldObject(address.X.Type(), address.Field)
+				if field == nil {
+					continue
+				}
+				evidence.addresses[field] = append(evidence.addresses[field], address)
+				if address.Referrers() == nil {
+					continue
+				}
+				for _, referrer := range *address.Referrers() {
+					store, ok := referrer.(*ssa.Store)
+					if ok && store.Addr == address {
+						evidence.stores[field] = append(evidence.stores[field], store.Val)
+					}
+				}
+			}
+		}
+	}
+	return evidence
 }
 
 func (proof *callableSourceProof) allocationClosed(allocation *ssa.Alloc) bool {

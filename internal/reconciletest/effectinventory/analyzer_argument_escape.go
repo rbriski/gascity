@@ -172,6 +172,9 @@ func (analysis *loadedAnalysis) collectEscapedArgumentBoundaries(argument ssa.Va
 	}
 
 	openWorld := hasOpenWorldFunctionSource(argument, make(map[ssa.Value]bool))
+	if analysis.config.closedWorld && newCallableTargetTracer(analysis).trace(argument).closed {
+		openWorld = false
+	}
 	for _, boundary := range boundaries {
 		if boundary.definition.Match == ObjectMatchChannel || !analysis.callableValueCompatibleWithBoundary(argument, boundary, make(map[ssa.Value]bool)) {
 			continue

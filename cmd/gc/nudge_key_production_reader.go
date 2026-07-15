@@ -54,13 +54,10 @@ type nudgeCommandSourceErrorClassifier interface {
 	ClassifyNudgeCommandSourceError(error) nudgeCommandSourceErrorClass
 }
 
-// openProductionNudgeCommandSource is replaced by the certified repository
-// adapter when its independent restore-lineage verifier is available. The
-// default is deliberately fail-closed: neither a store path nor project
-// identity can certify a restored store incarnation.
-var openProductionNudgeCommandSource nudgeCommandSourceOpener = func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
-	return nil, errNudgeCommandSourceUnverified
-}
+// openProductionNudgeCommandSource is the certified repository adapter. Tests
+// may replace the CityRuntime-local opener; production never derives store
+// identity from city, project, path, or config identity.
+var openProductionNudgeCommandSource nudgeCommandSourceOpener = openVerifiedProductionNudgeCommandSource
 
 // nudgeKeyReadShadow owns only a reconstructable read projection. It has no
 // store writer, runtime provider, worker handle, or effect executor; the legacy

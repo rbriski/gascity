@@ -504,7 +504,7 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 	}
 	allowedCalls := map[string]bool{
 		"<func>": true,
-		"make":   true, "len": true, "uint8": true, "close": true, "clear": true, "delete": true, "recover": true,
+		"make":   true, "len": true, "uint8": true, "int64": true, "close": true, "clear": true, "delete": true, "recover": true,
 		"cancelWorkers": true, "onClosed": true,
 		"fmt.Errorf": true, "fmt.Fprintf": true, "context.WithCancel": true, "debug.Stack": true,
 		"workqueue.NewTypedItemExponentialFailureRateLimiter": true, "workqueue.NewTypedRateLimitingQueue": true,
@@ -519,6 +519,8 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 		"c.limiter.When": true, "c.logTransient": true,
 		"failed.FirstEnqueuedAt.IsZero": true, "failed.FirstEnqueuedAt.Before": true,
 		"pending.FirstEnqueuedAt.IsZero": true, "now.Before": true, "now.Add": true,
+		"batch.FirstEnqueuedAt.IsZero": true, "batch.FirstEnqueuedAt.Before": true,
+		"oldest.IsZero": true, "time.Now": true, "now.Sub": true,
 	}
 	assertASTCallsOnly(t, fset, file, "nudge keyed core", allowedCalls)
 }

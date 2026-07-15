@@ -64,6 +64,104 @@ func TestNudgeKeyControllerCoalescesDuplicateCausesBeforeStart(t *testing.T) {
 	waitControllerStopped(t, done)
 }
 
+func TestNudgeKeyBacklogSnapshotPreservesOldestAdmissionAcrossDuplicates(t *testing.T) {
+	first := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	second := first.Add(40 * time.Millisecond)
+	observedAt := first.Add(125 * time.Millisecond)
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	firstKey := mustNudgeReconcileKey(t, "scope", "first")
+	secondKey := mustNudgeReconcileKey(t, "scope", "second")
+	controller.now = func() time.Time { return first }
+	if err := controller.Enqueue(firstKey, nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+	controller.now = func() time.Time { return second }
+	if err := controller.Enqueue(firstKey, nudgeCauseProviderResult); err != nil {
+		t.Fatalf("duplicate Enqueue: %v", err)
+	}
+	if err := controller.Enqueue(secondKey, nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("second-key Enqueue: %v", err)
+	}
+	controller.now = func() time.Time { return observedAt }
+
+	got := controller.backlogSnapshot()
+	if got.Depth != 2 || got.OldestAge != observedAt.Sub(first) || got.AgeState != nudgeKeyBacklogAgeObserved {
+		t.Fatalf("backlog snapshot = %+v, want depth 2 oldest age %v observed", got, observedAt.Sub(first))
+	}
+}
+
+func TestNudgeKeyBacklogSnapshotClassifiesEmptyReplayAndClockRegression(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	if got := controller.backlogSnapshot(); got.Depth != 0 || got.OldestAge != 0 || got.AgeState != nudgeKeyBacklogAgeEmpty {
+		t.Fatalf("empty backlog snapshot = %+v, want empty zero", got)
+	}
+
+	key := mustNudgeReconcileKey(t, "scope", "replay")
+	controller.restoreBatch(key, nudgeReconcileBatch{WorkqueueReplay: true})
+	if got := controller.backlogSnapshot(); got.Depth != 1 || got.OldestAge != 0 || got.AgeState != nudgeKeyBacklogAgeUnavailable {
+		t.Fatalf("cause-free replay snapshot = %+v, want depth 1 unavailable", got)
+	}
+
+	controller.mu.Lock()
+	controller.pending[key] = nudgeReconcileBatch{Causes: nudgeCauseAudit, FirstEnqueuedAt: now.Add(time.Millisecond)}
+	controller.mu.Unlock()
+	if got := controller.backlogSnapshot(); got.Depth != 1 || got.OldestAge != 0 || got.AgeState != nudgeKeyBacklogAgeClockRegressed {
+		t.Fatalf("regressed backlog snapshot = %+v, want depth 1 clock-regressed", got)
+	}
+}
+
+func TestNudgeKeyBacklogSnapshotAgesWhileWorkerIsStarvedAndClearsOnShutdown(t *testing.T) {
+	first := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	now := first
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		close(callbackStarted)
+		<-releaseCallback
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Enqueue(mustNudgeReconcileKey(t, "scope", "blocking"), nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("blocking Enqueue: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runNudgeKeyController(ctx, t, controller)
+	receiveBeforeDeadline(t, callbackStarted)
+
+	now = first.Add(20 * time.Millisecond)
+	if err := controller.Enqueue(mustNudgeReconcileKey(t, "scope", "starved"), nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("starved Enqueue: %v", err)
+	}
+	now = first.Add(220 * time.Millisecond)
+	if got := controller.backlogSnapshot(); got.Depth != 1 || got.OldestAge != 200*time.Millisecond || got.AgeState != nudgeKeyBacklogAgeObserved {
+		t.Fatalf("starved backlog snapshot = %+v, want one key aged 200ms", got)
+	}
+
+	cancel()
+	close(releaseCallback)
+	if err := receiveBeforeDeadline(t, done); err != nil {
+		t.Fatalf("controller.Run: %v", err)
+	}
+	if got := controller.backlogSnapshot(); got.Depth != 0 || got.AgeState != nudgeKeyBacklogAgeEmpty {
+		t.Fatalf("shutdown backlog snapshot = %+v, want empty", got)
+	}
+}
+
 func TestNudgeKeyControllerSerializesOneKeyAndRunsIndependentKeysConcurrently(t *testing.T) {
 	keyA := testSessionReconcileKey(t, "session-a")
 	keyB := testSessionReconcileKey(t, "session-b")

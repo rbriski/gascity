@@ -41,6 +41,24 @@ type nudgeReconcileBatch struct {
 	WorkqueueReplay bool
 }
 
+type nudgeKeyBacklogAgeState uint8
+
+const (
+	nudgeKeyBacklogAgeEmpty nudgeKeyBacklogAgeState = iota + 1
+	nudgeKeyBacklogAgeObserved
+	nudgeKeyBacklogAgeUnavailable
+	nudgeKeyBacklogAgeClockRegressed
+)
+
+// nudgeKeyBacklogSnapshot is an identity-free instantaneous view of dirty keys
+// waiting or deferred in the scheduler. A key executing in a worker is not
+// backlog; a duplicate admission remains one key with its original age.
+type nudgeKeyBacklogSnapshot struct {
+	Depth     int64
+	OldestAge time.Duration
+	AgeState  nudgeKeyBacklogAgeState
+}
+
 // nudgeReconcileDisposition is the closed scheduling vocabulary returned by a
 // keyed callback. A callback cannot smuggle queue policy through arbitrary
 // durations or booleans: the controller owns every follow-up admission.
@@ -203,6 +221,36 @@ func normalizeNudgeKeyControllerOptions(supplied []nudgeKeyControllerOptions) (n
 		return nudgeKeyControllerOptions{}, fmt.Errorf("creating nudge keyed reconciler: retry max delay %s is below base delay %s", options.retryMaxDelay, options.retryBaseDelay)
 	}
 	return options, nil
+}
+
+func (c *nudgeKeyController) backlogSnapshot() nudgeKeyBacklogSnapshot {
+	if c == nil {
+		return nudgeKeyBacklogSnapshot{AgeState: nudgeKeyBacklogAgeEmpty}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	depth := len(c.pending)
+	if depth == 0 {
+		return nudgeKeyBacklogSnapshot{AgeState: nudgeKeyBacklogAgeEmpty}
+	}
+	var oldest time.Time
+	for _, batch := range c.pending {
+		if batch.FirstEnqueuedAt.IsZero() {
+			return nudgeKeyBacklogSnapshot{Depth: int64(depth), AgeState: nudgeKeyBacklogAgeUnavailable}
+		}
+		if oldest.IsZero() || batch.FirstEnqueuedAt.Before(oldest) {
+			oldest = batch.FirstEnqueuedAt
+		}
+	}
+	now := time.Now()
+	if c.now != nil {
+		now = c.now()
+	}
+	age := now.Sub(oldest)
+	if age < 0 {
+		return nudgeKeyBacklogSnapshot{Depth: int64(depth), AgeState: nudgeKeyBacklogAgeClockRegressed}
+	}
+	return nudgeKeyBacklogSnapshot{Depth: int64(depth), OldestAge: age, AgeState: nudgeKeyBacklogAgeObserved}
 }
 
 // Enqueue marks one stable target dirty and merges the typed cause before the

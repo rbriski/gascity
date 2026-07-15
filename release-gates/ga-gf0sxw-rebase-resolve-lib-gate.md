@@ -4,9 +4,31 @@
 - Source review bead: `ga-ohb1ru`
 - Source branch: `origin/builder/ga-yvrg05.1-rebase-resolve-lib-port`
 - Final deploy branch: `deploy/ga-gf0sxw-rebase-resolve-lib-port-20260715083438`
-- Base: `origin/main` at `3cb8d2d4bf17ac007cd56e48bafa79d4acee5e96`
+- Original gate base: `origin/main` at `3cb8d2d4bf17ac007cd56e48bafa79d4acee5e96`
 - Rebased candidate head before gate file: `150afca8a983b1f81aed026d1960e95caae96da2`
+- Current deploy follow-up bead: `ga-dfhdvu`
+- Current base: `origin/main` at `081efc705c661905d7bf095052f30af6c7354e8e`
+- Current PR head before this refresh: `5f3ee5e25f9f25ac46bcc49d9d639f3441a0310b`
 - Release criteria source: `docs/PROJECT_MANIFEST.md` is not present in this checkout, so this gate applies the active deployer prompt release criteria plus the repo guidance in `TESTING.md`.
+
+## Current Refresh
+
+PASS on 2026-07-15 for deploy follow-up `ga-dfhdvu`.
+
+Evidence from `/var/tmp/gascity-deployer-ga-dfhdvu-gate-20260715051447`:
+
+- `git rev-parse HEAD`: `5f3ee5e25f9f25ac46bcc49d9d639f3441a0310b`
+- `git rev-parse origin/main`: `081efc705c661905d7bf095052f30af6c7354e8e`
+- `git rev-list --left-right --count origin/main...HEAD`: `0 3`
+- `git merge-tree --write-tree origin/main HEAD`: `fc42b2f92581c2c9ab4c83670d654179fd7e49cc`
+- `make test-fast-parallel`: PASS (`All fast jobs passed`)
+- `bash scripts/test-rebase-resolve.sh`: PASS (`pass=22 fail=0`)
+- `go test ./scripts/... -run RebaseResolve -v`: PASS
+- `go test ./internal/testpolicy/resourcecensus/...`: PASS
+- `shellcheck scripts/rebase-resolve-lib.sh scripts/test-rebase-resolve.sh`: clean
+- `gofmt -l scripts/rebase_resolve_lib_test.go`: clean
+- `go vet ./...`: clean
+- `go build ./...`: clean
 
 ## Scope
 
@@ -52,4 +74,3 @@ Evidence:
 - `gofmt -l scripts/rebase_resolve_lib_test.go`: no output
 - `go vet ./...`: clean
 - `go build ./...`: clean
-

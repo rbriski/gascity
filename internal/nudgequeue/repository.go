@@ -229,17 +229,19 @@ func (e *CommandRepositoryRecordError) Unwrap() []error {
 // CommandRepository persists and reads one durable nudge command ledger. It
 // owns no provider effects and never reads the legacy file queue.
 type CommandRepository struct {
-	reader commandRepositoryReader
-	writer CommandRepositoryLineageWriter
-	random io.Reader
+	reader   commandRepositoryReader
+	writer   CommandRepositoryLineageWriter
+	preparer beads.AtomicReadSnapshotPreparer
+	random   io.Reader
 }
 
 // commandRepositoryReader contains no lineage writer capability. Keeping the
 // complete State/Get/Snapshot implementations on this type makes durable
 // lineage mutation unavailable to read paths by construction.
 type commandRepositoryReader struct {
-	store    beads.AtomicReadWriteStore
-	verifier CommandRepositoryLineageVerifier
+	store     beads.AtomicReadWriteStore
+	snapshots beads.AtomicReadSnapshotStore
+	verifier  CommandRepositoryLineageVerifier
 }
 
 // NewCommandRepository constructs a repository only for a store with the
@@ -259,6 +261,14 @@ func newCommandRepositoryWithRandom(store beads.Store, controller CommandReposit
 		}
 		return nil, &CommandRepositoryUnsupportedError{StoreType: storeType}
 	}
+	snapshotStore, ok := beads.AtomicReadSnapshotFor(store)
+	if !ok {
+		storeType := "<nil>"
+		if store != nil {
+			storeType = reflect.TypeOf(store).String()
+		}
+		return nil, &CommandRepositoryUnsupportedError{StoreType: storeType}
+	}
 	if isNilRepositoryDependency(controller) {
 		return nil, &CommandRepositoryLineageError{Operation: "construction", Err: errors.New("independent lineage controller is required")}
 	}
@@ -266,8 +276,12 @@ func newCommandRepositoryWithRandom(store beads.Store, controller CommandReposit
 		return nil, &CommandRepositoryLineageError{Operation: "construction", Err: errors.New("cryptographic random source is required")}
 	}
 	return &CommandRepository{
-		reader: commandRepositoryReader{store: atomicStore, verifier: controller},
+		reader: commandRepositoryReader{store: atomicStore, snapshots: snapshotStore, verifier: controller},
 		writer: controller,
+		preparer: func() beads.AtomicReadSnapshotPreparer {
+			preparer, _ := snapshotStore.(beads.AtomicReadSnapshotPreparer)
+			return preparer
+		}(),
 		random: random,
 	}, nil
 }
@@ -464,6 +478,11 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 func (r *CommandRepository) Provision(ctx context.Context) (CommandRepositoryState, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandRepositoryState{}, err
+	}
+	if r.preparer != nil {
+		if err := r.preparer.PrepareAtomicReadSnapshot(ctx); err != nil {
+			return CommandRepositoryState{}, fmt.Errorf("preparing durable nudge command snapshot capability: %w", err)
+		}
 	}
 	state, initializedHere, evidence, err := r.provisionState(ctx)
 	if err != nil {

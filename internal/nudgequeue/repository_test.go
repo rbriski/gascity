@@ -582,6 +582,43 @@ func TestCommandRepositoryRejectsUnsupportedSchemaSkewAndLineage(t *testing.T) {
 	}
 }
 
+func TestCommandRepositoryRequiresStableSnapshotCapability(t *testing.T) {
+	t.Parallel()
+
+	atomic := newRepositoryAtomicTestStore()
+	readWriteOnly := &repositoryAtomicReadWriteOnlyStore{Store: atomic.Store, atomic: atomic}
+	if _, err := NewCommandRepository(readWriteOnly, &repositoryLineageTestVerifier{}); !errors.Is(err, ErrCommandRepositoryUnsupported) {
+		t.Fatalf("NewCommandRepository(read/write only) error = %v, want unsupported stable snapshot", err)
+	}
+}
+
+func TestCommandRepositoryProvisionPreparesPagingBeforeAuthority(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("index installation failed")
+	store := newRepositoryAtomicTestStore()
+	store.prepareErr = wantErr
+	repo, err := NewCommandRepository(store, &repositoryLineageTestVerifier{})
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+	if _, err := repo.Provision(t.Context()); !errors.Is(err, wantErr) {
+		t.Fatalf("Provision preparation error = %v, want %v", err, wantErr)
+	}
+	if store.prepareCalls != 1 || len(store.metadataSnapshot()) != 0 || store.hasAnyRows() {
+		t.Fatalf("failed preparation calls=%d metadata=%#v rows=%v", store.prepareCalls, store.metadataSnapshot(), store.hasAnyRows())
+	}
+	store.mu.Lock()
+	store.prepareErr = nil
+	store.mu.Unlock()
+	if _, err := repo.Provision(t.Context()); err != nil {
+		t.Fatalf("Provision retry: %v", err)
+	}
+	if store.prepareCalls != 2 {
+		t.Fatalf("preparation calls after retry = %d, want 2", store.prepareCalls)
+	}
+}
+
 func TestCommandRepositoryCancellationDoesNotInitializeOrAdmit(t *testing.T) {
 	t.Parallel()
 
@@ -1117,6 +1154,47 @@ type repositoryAtomicTestStore struct {
 	afterList           func()
 	createCalls         int
 	setMetadataCalls    int
+	prepareCalls        int
+	prepareErr          error
+}
+
+func (s *repositoryAtomicTestStore) PrepareAtomicReadSnapshot(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prepareCalls++
+	return s.prepareErr
+}
+
+func (s *repositoryAtomicTestStore) AtomicReadSnapshot(ctx context.Context, fn func(beads.AtomicReadSnapshotTx) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if fn == nil {
+		return errors.New("nil atomic snapshot callback")
+	}
+	s.mu.Lock()
+	tx := &repositoryAtomicTestTx{
+		rows:     cloneRepositoryRows(s.rows),
+		metadata: cloneRepositoryMetadata(s.metadata),
+		now:      s.nextClock,
+	}
+	s.mu.Unlock()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+type repositoryAtomicReadWriteOnlyStore struct {
+	beads.Store
+	atomic *repositoryAtomicTestStore
+}
+
+func (s *repositoryAtomicReadWriteOnlyStore) AtomicReadWrite(ctx context.Context, commitMessage string, fn func(beads.AtomicReadWriteTx) error) error {
+	return s.atomic.AtomicReadWrite(ctx, commitMessage, fn)
 }
 
 func newRepositoryAtomicTestStore() *repositoryAtomicTestStore {
@@ -1239,6 +1317,7 @@ func (s *repositoryAtomicTestStore) seedRawCommand(t *testing.T, state CommandRe
 		Status:    "open",
 		Type:      commandRecordBeadType,
 		CreatedAt: s.nextClock,
+		UpdatedAt: s.nextClock,
 		Metadata: map[string]string{
 			commandRecordKindMetadataKey:        commandRecordKindMetadataValue,
 			commandRecordCommandKindMetadataKey: commandRecordCommandKindMetadataValue,
@@ -1267,6 +1346,7 @@ func (s *repositoryAtomicTestStore) seedCommands(t *testing.T, state CommandRepo
 		s.rows[command.ID] = beads.Bead{
 			ID: command.ID, Title: commandRecordTitle, Status: "open", Type: commandRecordBeadType,
 			CreatedAt: s.nextClock.Add(time.Duration(i) * time.Nanosecond),
+			UpdatedAt: s.nextClock.Add(time.Duration(i) * time.Nanosecond),
 			Metadata: map[string]string{
 				commandRecordKindMetadataKey:        commandRecordKindMetadataValue,
 				commandRecordCommandKindMetadataKey: commandRecordCommandKindMetadataValue,
@@ -1335,6 +1415,50 @@ func (tx *repositoryAtomicTestTx) ListHistory(query beads.AtomicReadWriteList) (
 		tx.afterList = nil
 	}
 	return rows, nil
+}
+
+func (tx *repositoryAtomicTestTx) ListHistoryPage(query beads.AtomicReadSnapshotPageQuery) (beads.AtomicReadSnapshotPage, error) {
+	if query.Limit <= 0 || query.Limit > beads.MaxAtomicReadSnapshotPageSize || query.IDPrefix == "" || query.Status == "" {
+		return beads.AtomicReadSnapshotPage{}, beads.ErrAtomicReadSnapshotQuery
+	}
+	rows := make([]beads.Bead, 0, min(len(tx.rows), query.Limit))
+	for _, row := range tx.rows {
+		if row.Ephemeral || row.NoHistory || row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) {
+			continue
+		}
+		cursor := beads.AtomicReadSnapshotCursor{ID: row.ID}
+		if query.Order == beads.AtomicReadSnapshotOrderUpdatedAtID {
+			cursor.UpdatedAt = row.UpdatedAt
+		}
+		if query.After != (beads.AtomicReadSnapshotCursor{}) {
+			advances := cursor.ID > query.After.ID
+			if query.Order == beads.AtomicReadSnapshotOrderUpdatedAtID {
+				advances = cursor.UpdatedAt.After(query.After.UpdatedAt) || cursor.UpdatedAt.Equal(query.After.UpdatedAt) && cursor.ID > query.After.ID
+			}
+			if !advances {
+				continue
+			}
+		}
+		rows = append(rows, cloneRepositoryRow(row))
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if query.Order == beads.AtomicReadSnapshotOrderUpdatedAtID && !rows[i].UpdatedAt.Equal(rows[j].UpdatedAt) {
+			return rows[i].UpdatedAt.Before(rows[j].UpdatedAt)
+		}
+		return rows[i].ID < rows[j].ID
+	})
+	if len(rows) > query.Limit {
+		rows = rows[:query.Limit]
+	}
+	page := beads.AtomicReadSnapshotPage{Rows: rows}
+	if len(rows) == query.Limit {
+		last := rows[len(rows)-1]
+		page.Next = beads.AtomicReadSnapshotCursor{ID: last.ID}
+		if query.Order == beads.AtomicReadSnapshotOrderUpdatedAtID {
+			page.Next.UpdatedAt = last.UpdatedAt
+		}
+	}
+	return page, nil
 }
 
 func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {

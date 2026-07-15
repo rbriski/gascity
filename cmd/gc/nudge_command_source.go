@@ -13,10 +13,16 @@ import (
 // two read operations available to the keyed shadow. Provisioning and lineage
 // repair happen only during the explicit opener below.
 type productionNudgeCommandSource struct {
-	repository *nudgequeue.CommandRepository
+	repository *nudgequeue.CommandPartitionReader
 }
 
-func openVerifiedProductionNudgeCommandSource(ctx context.Context, cityPath string, store beads.Store) (nudgeCommandSource, error) {
+func openVerifiedProductionNudgeCommandSource(
+	ctx context.Context,
+	cityPath string,
+	store beads.Store,
+	partition nudgequeue.TrustedCityPartition,
+	resolver nudgequeue.TrustedCityPartitionResolver,
+) (nudgeCommandSource, error) {
 	verifier := nudgequeue.NewRestoreAnchorRepositoryVerifier(cityPath)
 	repository, err := nudgequeue.NewCommandRepository(store, verifier)
 	if err != nil {
@@ -25,7 +31,7 @@ func openVerifiedProductionNudgeCommandSource(ctx context.Context, cityPath stri
 		}
 		return nil, fmt.Errorf("constructing durable nudge command repository: %w", err)
 	}
-	source := &productionNudgeCommandSource{repository: repository}
+	source := &productionNudgeCommandSource{}
 	if _, err := repository.Provision(ctx); err != nil {
 		// A command commit can become durable before its independent anchor
 		// advance is acknowledged. This is an explicit writer path, so it may
@@ -42,6 +48,11 @@ func openVerifiedProductionNudgeCommandSource(ctx context.Context, cityPath stri
 			return nil, failure
 		}
 	}
+	partitioned, err := nudgequeue.NewCommandPartitionReader(repository, partition, resolver)
+	if err != nil {
+		return nil, errors.Join(errNudgeCommandSourceUnverified, err)
+	}
+	source.repository = partitioned
 	return source, nil
 }
 

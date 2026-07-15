@@ -208,7 +208,7 @@ func TestExactWakeAdmissionRecordsProductionKeySchedulingWithoutPatrol(t *testin
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: beads.NewMemStore(),
 		stderr:              &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			return source, nil
 		},
 	}

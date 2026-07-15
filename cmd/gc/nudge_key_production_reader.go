@@ -51,7 +51,13 @@ type nudgeCommandSource interface {
 // repository snapshot supplies the sole binding. An adapter must wrap only
 // positively retryable Provision/open failures with
 // retryableNudgeCommandSourceFailure; unknown errors fail closed.
-type nudgeCommandSourceOpener func(context.Context, string, beads.Store) (nudgeCommandSource, error)
+type nudgeCommandSourceOpener func(
+	context.Context,
+	string,
+	beads.Store,
+	nudgequeue.TrustedCityPartition,
+	nudgequeue.TrustedCityPartitionResolver,
+) (nudgeCommandSource, error)
 
 type nudgeCommandSourceErrorClass uint8
 

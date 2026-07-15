@@ -389,9 +389,9 @@ func TestCmdStopAcquiresOwnershipBeforeCleanupAndRetainsItThroughRelease(t *test
 			openCalls++
 			return beads.NewMemStore(), nil
 		}
-		sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+		sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
 			providerCalls++
-			return runtime.NewFake()
+			return runtime.NewFake(), nil
 		}
 		shutdownBeadsProviderForStop = func(string) error { shutdownCalls++; return nil }
 		t.Cleanup(func() {
@@ -447,7 +447,7 @@ func TestCmdStopAcquiresOwnershipBeforeCleanupAndRetainsItThroughRelease(t *test
 		oldShutdown := shutdownBeadsProviderForStop
 		oldCloseRecorder := closeEventRecorderForStop
 		openCityStoreForStop = func(string) (beads.Store, error) { return store, nil }
-		sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return provider }
+		sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return provider, nil }
 		shutdownBeadsProviderForStop = func(string) error { assertLeaseHeld("bead provider shutdown"); return nil }
 		closeEventRecorderForStop = func(events.Recorder) error { assertLeaseHeld("event recorder close"); return nil }
 		t.Cleanup(func() {
@@ -496,7 +496,7 @@ func TestCmdStopAcquiresOwnershipBeforeCleanupAndRetainsItThroughRelease(t *test
 		oldProvider := sessionProviderForStopCity
 		oldShutdown := shutdownBeadsProviderForStop
 		openCityStoreForStop = func(string) (beads.Store, error) { return beads.NewMemStore(), nil }
-		sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return runtime.NewFake() }
+		sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
 		shutdownBeadsProviderForStop = func(string) error { return nil }
 		t.Cleanup(func() {
 			openCityStoreForStop = oldOpen
@@ -581,9 +581,9 @@ func TestCmdStopSupervisorRouteCarriesOriginalDeadlineAndReturnsOwnership(t *tes
 		t.Fatal("managed stop opened a direct store")
 		return nil, nil
 	}
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
 		t.Fatal("managed stop constructed a direct provider")
-		return nil
+		return nil, nil
 	}
 	shutdownBeadsProviderForStop = func(string) error {
 		t.Fatal("CLI repeated supervisor-owned provider shutdown")
@@ -933,9 +933,9 @@ func TestCmdStopDirectResourceAdmissionAndCleanupAreFailClosed(t *testing.T) {
 		providerCalls := 0
 		shutdownCalls := 0
 		openCityStoreForStop = func(string) (beads.Store, error) { return nil, wantErr }
-		sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+		sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
 			providerCalls++
-			return runtime.NewFake()
+			return runtime.NewFake(), nil
 		}
 		shutdownBeadsProviderForStop = func(string) error { shutdownCalls++; return nil }
 		t.Cleanup(func() {
@@ -963,7 +963,7 @@ func TestCmdStopDirectResourceAdmissionAndCleanupAreFailClosed(t *testing.T) {
 		oldProvider := sessionProviderForStopCity
 		oldShutdown := shutdownBeadsProviderForStop
 		openCityStoreForStop = func(string) (beads.Store, error) { return store, nil }
-		sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return runtime.NewFake() }
+		sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
 		shutdownBeadsProviderForStop = func(string) error { return wantErr }
 		t.Cleanup(func() {
 			openCityStoreForStop = oldOpen

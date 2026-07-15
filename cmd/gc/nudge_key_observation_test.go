@@ -493,12 +493,18 @@ type failingNudgeKeyMeter struct {
 	histogramCalls int
 }
 
-func (meter *failingNudgeKeyMeter) Int64Counter(string, ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+func (meter *failingNudgeKeyMeter) Int64Counter(name string, _ ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	if name != testNudgeKeySchedulingTotalMetric {
+		return noop.Int64Counter{}, nil
+	}
 	meter.counterCalls++
 	return noop.Int64Counter{}, meter.counterErr
 }
 
-func (meter *failingNudgeKeyMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+func (meter *failingNudgeKeyMeter) Float64Histogram(name string, _ ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	if name != testNudgeKeyQueueDelayMetric {
+		return noop.Float64Histogram{}, nil
+	}
 	meter.histogramCalls++
 	return noop.Float64Histogram{}, meter.histogramErr
 }

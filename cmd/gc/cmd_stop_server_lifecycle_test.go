@@ -256,7 +256,7 @@ func TestCmdStopBodyClosesEventRecorderBeforeBeadsShutdown(t *testing.T) {
 		return nil
 	})
 	oldFactory := sessionProviderForStopCity
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return runtime.NewFake() }
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 
 	var stdout, stderr lockedBuffer
@@ -286,7 +286,7 @@ func TestCmdStopBodyRecorderCloseErrorIsFatal(t *testing.T) {
 	t.Cleanup(func() { closeEventRecorderForStop = oldCloseRecorder })
 	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
 	oldFactory := sessionProviderForStopCity
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return runtime.NewFake() }
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 
 	var stdout, stderr lockedBuffer

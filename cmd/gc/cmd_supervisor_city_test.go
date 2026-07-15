@@ -1453,9 +1453,9 @@ func TestCmdStopForceUnregisterFailsClosedOnUncertainControllerStop(t *testing.T
 
 			providerConstructions := 0
 			oldProvider := sessionProviderForStopCity
-			sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+			sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
 				providerConstructions++
-				return runtime.NewFake()
+				return runtime.NewFake(), nil
 			}
 			t.Cleanup(func() { sessionProviderForStopCity = oldProvider })
 

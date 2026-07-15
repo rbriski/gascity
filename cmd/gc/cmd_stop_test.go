@@ -308,7 +308,7 @@ func TestCmdStopCompletionDeadlineRetainsEnteredInterrupt(t *testing.T) {
 		return started
 	}
 	interruptPerTargetTimeoutMargin = 0
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
 	t.Cleanup(func() {
 		sp.release()
 		sessionProviderForStopCity = oldFactory
@@ -388,7 +388,7 @@ func TestCmdStopRetainedInterruptTimeoutRemainsFailureBeforeOuterDeadline(t *tes
 	oldFactory := sessionProviderForStopCity
 	oldMargin := interruptPerTargetTimeoutMargin
 	interruptPerTargetTimeoutMargin = 0
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
 	t.Cleanup(func() {
 		sp.release()
 		sessionProviderForStopCity = oldFactory
@@ -632,9 +632,9 @@ func TestCmdStopFailsClosedOnUncertainControllerStopBeforeSideEffects(t *testing
 
 			providerConstructions := 0
 			oldProvider := sessionProviderForStopCity
-			sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+			sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
 				providerConstructions++
-				return runtime.NewFake()
+				return runtime.NewFake(), nil
 			}
 			t.Cleanup(func() { sessionProviderForStopCity = oldProvider })
 

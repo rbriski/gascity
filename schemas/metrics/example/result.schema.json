@@ -204,7 +204,8 @@
               "context-use",
               "login",
               "logout",
-              "whoami"
+              "whoami",
+              "worktree-hq"
             ]
           },
           "event_id": {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 195,
+  "next_id": 196,
   "permanent_ids": [
     {
       "name": "help",
@@ -4380,6 +4380,39 @@
       "owner": "immediate",
       "id": 41,
       "canonical_target": "gc convoy reopen-source"
+    },
+    {
+      "path": "gc worktree",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable-group",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "unknown",
+      "canonical_target": "@unknown",
+      "owner": "deferred",
+      "resolver": "group-dispatch",
+      "deferred_default": "unknown",
+      "id": 3
+    },
+    {
+      "path": "gc worktree hq",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-hq",
+      "owner": "immediate",
+      "id": 195
     }
   ],
   "synthetic": [

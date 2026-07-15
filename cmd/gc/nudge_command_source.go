@@ -9,11 +9,14 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
-// productionNudgeCommandSource narrows the writable durable repository to the
-// two read operations available to the keyed shadow. Provisioning and lineage
-// repair happen only during the explicit opener below.
+// productionNudgeCommandSource keeps read projection and write authority as
+// separate capabilities. Its opaque partition is captured only by the trusted
+// opener and injected into claims internally; an effect callback cannot choose
+// or forge city authority.
 type productionNudgeCommandSource struct {
-	repository *nudgequeue.CommandPartitionReader
+	repository *nudgequeue.CommandRepository
+	reader     *nudgequeue.CommandPartitionReader
+	partition  nudgequeue.TrustedCityPartition
 }
 
 func openVerifiedProductionNudgeCommandSource(
@@ -31,7 +34,7 @@ func openVerifiedProductionNudgeCommandSource(
 		}
 		return nil, fmt.Errorf("constructing durable nudge command repository: %w", err)
 	}
-	source := &productionNudgeCommandSource{}
+	source := &productionNudgeCommandSource{repository: repository, partition: partition}
 	if _, err := repository.Provision(ctx); err != nil {
 		// A command commit can become durable before its independent anchor
 		// advance is acknowledged. This is an explicit writer path, so it may
@@ -48,26 +51,81 @@ func openVerifiedProductionNudgeCommandSource(
 			return nil, failure
 		}
 	}
+	if err := publishNudgeCommandCheckpoints(ctx, repository); err != nil {
+		failure := fmt.Errorf("publishing durable nudge command checkpoint before snapshot: %w", err)
+		if source.ClassifyNudgeCommandSourceError(failure) == nudgeCommandSourceErrorTransient {
+			return nil, retryableNudgeCommandSourceFailure(failure)
+		}
+		return nil, failure
+	}
 	partitioned, err := nudgequeue.NewCommandPartitionReader(repository, partition, resolver)
 	if err != nil {
 		return nil, errors.Join(errNudgeCommandSourceUnverified, err)
 	}
-	source.repository = partitioned
+	source.reader = partitioned
 	return source, nil
 }
 
 func (s *productionNudgeCommandSource) Snapshot(ctx context.Context, limit int) (nudgequeue.CommandIndexSnapshot, error) {
-	if s == nil || s.repository == nil {
-		return nudgequeue.CommandIndexSnapshot{}, errors.New("snapshotting production nudge command source: repository is nil")
+	if s == nil || s.reader == nil {
+		return nudgequeue.CommandIndexSnapshot{}, errors.New("snapshotting production nudge command source: partition reader is nil")
 	}
-	return s.repository.Snapshot(ctx, limit)
+	return s.reader.Snapshot(ctx, limit)
 }
 
 func (s *productionNudgeCommandSource) Get(ctx context.Context, commandID string) (nudgequeue.CommandIndexResolution, error) {
-	if s == nil || s.repository == nil {
-		return nudgequeue.CommandIndexResolution{}, errors.New("reading production nudge command source: repository is nil")
+	if s == nil || s.reader == nil {
+		return nudgequeue.CommandIndexResolution{}, errors.New("reading production nudge command source: partition reader is nil")
 	}
-	return s.repository.Get(ctx, commandID)
+	return s.reader.Get(ctx, commandID)
+}
+
+func (s *productionNudgeCommandSource) ClaimAuthorized(ctx context.Context, request nudgeEffectClaimRequest, authorizer nudgequeue.NudgeClaimAuthorizer) (nudgequeue.CommandClaimResult, error) {
+	if s == nil || s.repository == nil || s.reader == nil {
+		return nudgequeue.CommandClaimResult{}, errors.New("claiming production nudge command: source is not fully bound")
+	}
+	return s.repository.ClaimAuthorized(ctx, nudgequeue.CommandClaimRequest{
+		CommandID:           request.commandID,
+		ClaimID:             request.claimID,
+		OwnerID:             request.ownerID,
+		AttemptID:           request.attemptID,
+		BoundLaunchIdentity: request.boundLaunchIdentity,
+		Partition:           s.partition,
+		ClaimedAt:           request.claimedAt,
+		LeaseUntil:          request.leaseUntil,
+	}, authorizer)
+}
+
+func (s *productionNudgeCommandSource) CompleteProviderAttempt(ctx context.Context, request nudgequeue.CommandCompletionRequest) (nudgequeue.CommandCompletionResult, error) {
+	if s == nil || s.repository == nil || s.reader == nil {
+		return nudgequeue.CommandCompletionResult{}, errors.New("completing production nudge command: source is not fully bound")
+	}
+	result, err := s.repository.CompleteProviderAttempt(ctx, request)
+	if err != nil {
+		return result, err
+	}
+	// One bounded page keeps the terminal tail below Snapshot's fail-closed
+	// checkpoint gate without turning completion into an unbounded maintenance
+	// loop. Startup performs the full catch-up before publishing any reader.
+	if _, _, checkpointErr := s.repository.PublishCheckpoint(ctx, beads.MaxAtomicReadSnapshotPageSize); checkpointErr != nil {
+		return result, fmt.Errorf("publishing durable nudge command checkpoint after completion: %w", checkpointErr)
+	}
+	return result, nil
+}
+
+func publishNudgeCommandCheckpoints(ctx context.Context, repository *nudgequeue.CommandRepository) error {
+	if repository == nil {
+		return errors.New("command repository is nil")
+	}
+	for {
+		_, caughtUp, err := repository.PublishCheckpoint(ctx, beads.MaxAtomicReadSnapshotPageSize)
+		if err != nil {
+			return err
+		}
+		if caughtUp {
+			return nil
+		}
+	}
 }
 
 func (s *productionNudgeCommandSource) ClassifyNudgeCommandSourceError(err error) nudgeCommandSourceErrorClass {
@@ -82,5 +140,6 @@ func (s *productionNudgeCommandSource) ClassifyNudgeCommandSourceError(err error
 
 var (
 	_ nudgeCommandSource                = (*productionNudgeCommandSource)(nil)
+	_ nudgeCommandEffectSource          = (*productionNudgeCommandSource)(nil)
 	_ nudgeCommandSourceErrorClassifier = (*productionNudgeCommandSource)(nil)
 )

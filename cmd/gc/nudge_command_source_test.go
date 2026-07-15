@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -61,11 +62,74 @@ func TestOpenProductionNudgeCommandSourceWrapsKnownTransientProvisionFailure(t *
 	}
 }
 
-func TestProductionNudgeCommandSourceCanHoldOnlyPartitionedRepositoryReader(t *testing.T) {
+func TestOpenProductionNudgeCommandSourceCatchesUpTerminalCheckpointBeforeSnapshot(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	claimed := fixture.claimDirect(t, "claim-before-reopen", "attempt-before-reopen")
+	if _, err := fixture.repository.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claimed, fixture.now.Add(3*time.Second))); err != nil {
+		t.Fatalf("CompleteProviderAttempt: %v", err)
+	}
+	if _, err := fixture.repository.Snapshot(t.Context(), 1); !errors.Is(err, nudgequeue.ErrCommandRepositoryCheckpointRequired) {
+		t.Fatalf("Snapshot before reopen error = %v, want checkpoint-required", err)
+	}
+
+	source, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	snapshot, err := source.Snapshot(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("Snapshot after opener checkpoint catch-up: %v", err)
+	}
+	if len(snapshot.Entries) != 0 || snapshot.Coverage == nil || snapshot.Coverage.TerminalCount != 1 {
+		t.Fatalf("snapshot after checkpoint catch-up = %#v, want one compacted terminal", snapshot)
+	}
+}
+
+func TestProductionNudgeCommandSourceInjectsBoundPartitionAndMaintainsCheckpoint(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source, ok := opened.(*productionNudgeCommandSource)
+	if !ok {
+		t.Fatalf("opened source = %T, want *productionNudgeCommandSource", opened)
+	}
+	claimRequest := nudgeEffectClaimRequest{
+		commandID:           fixture.command.ID,
+		claimID:             "claim-through-bound-source",
+		ownerID:             "owner-through-bound-source",
+		attemptID:           "attempt-through-bound-source",
+		boundLaunchIdentity: "production-launch",
+		claimedAt:           fixture.now.Add(2 * time.Second),
+		leaseUntil:          fixture.now.Add(time.Minute),
+	}
+	claim, err := source.ClaimAuthorized(t.Context(), claimRequest, fixture.authority)
+	if err != nil || claim.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", claim, err)
+	}
+	if got := fixture.authority.lastClaimPartition(); got != fixture.partition {
+		t.Fatalf("claim partition = %#v, want opener-bound partition", got)
+	}
+	if _, err := source.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claim.Command, fixture.now.Add(3*time.Second))); err != nil {
+		t.Fatalf("CompleteProviderAttempt: %v", err)
+	}
+	if _, err := source.Snapshot(t.Context(), 1); err != nil {
+		t.Fatalf("Snapshot after bounded checkpoint maintenance: %v", err)
+	}
+}
+
+func TestProductionNudgeCommandSourceSeparatesReadCapabilityFromCityBoundWrites(t *testing.T) {
 	typ := reflect.TypeOf(productionNudgeCommandSource{})
-	field, ok := typ.FieldByName("repository")
-	if !ok || field.Type != reflect.TypeOf((*nudgequeue.CommandPartitionReader)(nil)) {
-		t.Fatalf("production source repository field = %#v, want *nudgequeue.CommandPartitionReader", field)
+	for name, want := range map[string]reflect.Type{
+		"repository": reflect.TypeOf((*nudgequeue.CommandRepository)(nil)),
+		"reader":     reflect.TypeOf((*nudgequeue.CommandPartitionReader)(nil)),
+		"partition":  reflect.TypeOf(nudgequeue.TrustedCityPartition{}),
+	} {
+		field, ok := typ.FieldByName(name)
+		if !ok || field.Type != want {
+			t.Errorf("production source %s field = %#v, want %v", name, field, want)
+		}
 	}
 }
 
@@ -81,6 +145,124 @@ func TestProductionNudgeCommandSourceClassifiesOnlyKnownRetryableFailures(t *tes
 			t.Errorf("ClassifyNudgeCommandSourceError(%v) = %d, want invariant", err, got)
 		}
 	}
+}
+
+type productionNudgeCommandFixture struct {
+	cityPath   string
+	store      *nudgeCommandSourceAtomicStore
+	repository *nudgequeue.CommandRepository
+	authority  *productionNudgeTestAuthority
+	ingress    *nudgequeue.TrustedNudgeIngress
+	partition  nudgequeue.TrustedCityPartition
+	command    nudgequeue.Command
+	now        time.Time
+}
+
+func newProductionNudgeCommandFixture(t *testing.T) productionNudgeCommandFixture {
+	t.Helper()
+	cityPath := t.TempDir()
+	store := newNudgeCommandSourceAtomicStore()
+	repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(cityPath))
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+	if _, err := repository.Provision(t.Context()); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	authority := &productionNudgeTestAuthority{references: make(map[string]nudgequeue.NudgeAuthorization)}
+	ingress, err := nudgequeue.NewTrustedNudgeIngress(repository, authority)
+	if err != nil {
+		t.Fatalf("NewTrustedNudgeIngress: %v", err)
+	}
+	now := time.Now().UTC()
+	admitted, err := ingress.Admit(t.Context(), nudgequeue.NudgeIngressRequest{
+		RequestID: "production-source-request",
+		Mode:      nudgequeue.DeliveryModeQueue,
+		Target: nudgequeue.CommandTarget{
+			SessionID:            "production-session",
+			IntentGeneration:     1,
+			ContinuationIdentity: "production-continuation",
+			Policy:               nudgequeue.TargetPolicyContinuation,
+		},
+		Source:       nudgequeue.CommandSourceSession,
+		Message:      "production adapter proof",
+		DeliverAfter: now.Add(time.Second),
+		ExpiresAt:    now.Add(time.Hour),
+	})
+	if err != nil || admitted.Entry.Command == nil {
+		t.Fatalf("Admit = %#v, err=%v", admitted, err)
+	}
+	return productionNudgeCommandFixture{
+		cityPath: cityPath, store: store, repository: repository, authority: authority,
+		ingress: ingress, partition: admitted.Partition, command: *admitted.Entry.Command, now: now,
+	}
+}
+
+func (f productionNudgeCommandFixture) claimDirect(t *testing.T, claimID, attemptID string) nudgequeue.Command {
+	t.Helper()
+	result, err := f.repository.ClaimAuthorized(t.Context(), nudgequeue.CommandClaimRequest{
+		CommandID: f.command.ID, ClaimID: claimID, OwnerID: "direct-owner", AttemptID: attemptID,
+		BoundLaunchIdentity: "production-launch", Partition: f.partition,
+		ClaimedAt: f.now.Add(2 * time.Second), LeaseUntil: f.now.Add(time.Minute),
+	}, f.authority)
+	if err != nil || result.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", result, err)
+	}
+	return result.Command
+}
+
+func deliveredNudgeCompletion(command nudgequeue.Command, completedAt time.Time) nudgequeue.CommandCompletionRequest {
+	return nudgequeue.CommandCompletionRequest{
+		CommandID: command.ID, ClaimID: command.Claim.ID, OperationID: command.Claim.OperationID,
+		AttemptID: command.Claim.AttemptID, CompletedAt: completedAt,
+		ActionResult:  nudgequeue.CommandActionResultDelivered,
+		ProviderStage: nudgequeue.ProviderStageAccepted, Completion: nudgequeue.CompletionStateCompleted,
+	}
+}
+
+type productionNudgeTestAuthority struct {
+	mu         sync.Mutex
+	references map[string]nudgequeue.NudgeAuthorization
+	partition  nudgequeue.TrustedCityPartition
+}
+
+func (a *productionNudgeTestAuthority) AuthorizeNudgeIngress(_ context.Context, request nudgequeue.NudgeIngressAuthorizationRequest) (nudgequeue.NudgeAuthorization, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	authorization := nudgequeue.NudgeAuthorization{
+		Disposition: nudgequeue.NudgeAuthorizationAllowed, PrincipalSchemaVersion: nudgequeue.NudgePrincipalSchemaVersion,
+		Reference: nudgequeue.TrustedIngressReference{
+			Issuer: "production-test-authority", ReferenceID: "authority/" + request.RequestID,
+			PrincipalID: "principal-1", TenantScope: "tenant-1", CityScope: "city-1",
+			CredentialClass: "controller", PolicyVersion: "policy-v1", PolicyDecisionID: "ingress-decision-1",
+			Action: request.Action, TargetSessionID: request.Target.SessionID, PayloadDigest: request.PayloadDigest,
+			IssuedAt: request.RequestedAt.Add(-time.Second), ExpiresAt: request.RequestedAt.Add(time.Hour),
+		},
+	}
+	a.references[authorization.Reference.ReferenceID] = authorization
+	return authorization, nil
+}
+
+func (a *productionNudgeTestAuthority) ResolveTrustedNudgeIngress(_ context.Context, reference nudgequeue.TrustedIngressReference) (nudgequeue.NudgeAuthorization, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.references[reference.ReferenceID], nil
+}
+
+func (a *productionNudgeTestAuthority) AuthorizeNudgeClaim(_ context.Context, request nudgequeue.NudgeClaimAuthorizationRequest) (nudgequeue.NudgeClaimAuthorization, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.partition = request.Partition
+	return nudgequeue.NudgeClaimAuthorization{
+		Disposition: nudgequeue.NudgeAuthorizationAllowed, PrincipalSchemaVersion: nudgequeue.NudgePrincipalSchemaVersion,
+		DecisionID: "claim-decision-1", PolicyVersion: "policy-v2", Reference: request.Command.TrustedIngress,
+	}, nil
+}
+
+func (a *productionNudgeTestAuthority) lastClaimPartition() nudgequeue.TrustedCityPartition {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.partition
 }
 
 type nudgeCommandSourceAtomicStore struct {
@@ -127,6 +309,21 @@ func (s *nudgeCommandSourceAtomicStore) AtomicReadWrite(ctx context.Context, _ s
 	s.rows = tx.rows
 	s.metadataWrites = tx.metadataWrites
 	return nil
+}
+
+func (s *nudgeCommandSourceAtomicStore) AtomicReadSnapshot(ctx context.Context, fn func(beads.AtomicReadSnapshotTx) error) error {
+	if ctx == nil {
+		return errors.New("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fn(&nudgeCommandSourceAtomicTx{
+		metadata: cloneNudgeCommandSourceStrings(s.metadata),
+		rows:     cloneNudgeCommandSourceRows(s.rows),
+	})
 }
 
 func (s *nudgeCommandSourceAtomicStore) metadataWriteCount() int {
@@ -185,10 +382,54 @@ func (tx *nudgeCommandSourceAtomicTx) ListHistory(query beads.AtomicReadWriteLis
 	return rows, nil
 }
 
+func (tx *nudgeCommandSourceAtomicTx) ListHistoryPage(query beads.AtomicReadSnapshotPageQuery) (beads.AtomicReadSnapshotPage, error) {
+	rows := make([]beads.Bead, 0, len(tx.rows))
+	for _, row := range tx.rows {
+		if row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) {
+			continue
+		}
+		after := query.After == (beads.AtomicReadSnapshotCursor{})
+		switch query.Order {
+		case beads.AtomicReadSnapshotOrderID:
+			after = after || row.ID > query.After.ID
+		case beads.AtomicReadSnapshotOrderUpdatedAtID:
+			after = after || row.UpdatedAt.After(query.After.UpdatedAt) ||
+				(row.UpdatedAt.Equal(query.After.UpdatedAt) && row.ID > query.After.ID)
+		default:
+			return beads.AtomicReadSnapshotPage{}, errors.New("unsupported snapshot order")
+		}
+		if after {
+			rows = append(rows, cloneNudgeCommandSourceRow(row))
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if query.Order == beads.AtomicReadSnapshotOrderUpdatedAtID && !rows[i].UpdatedAt.Equal(rows[j].UpdatedAt) {
+			return rows[i].UpdatedAt.Before(rows[j].UpdatedAt)
+		}
+		return rows[i].ID < rows[j].ID
+	})
+	page := beads.AtomicReadSnapshotPage{}
+	if len(rows) <= query.Limit {
+		page.Rows = rows
+		return page, nil
+	}
+	page.Rows = rows[:query.Limit]
+	last := page.Rows[len(page.Rows)-1]
+	page.Next.ID = last.ID
+	if query.Order == beads.AtomicReadSnapshotOrderUpdatedAtID {
+		page.Next.UpdatedAt = last.UpdatedAt
+	}
+	return page, nil
+}
+
 func (tx *nudgeCommandSourceAtomicTx) Create(row beads.Bead) (beads.Bead, error) {
 	if _, exists := tx.rows[row.ID]; exists {
 		return beads.Bead{}, errors.New("duplicate row")
 	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	row.UpdatedAt = row.CreatedAt
 	tx.rows[row.ID] = cloneNudgeCommandSourceRow(row)
 	return cloneNudgeCommandSourceRow(row), nil
 }
@@ -209,6 +450,7 @@ func (tx *nudgeCommandSourceAtomicTx) Update(id string, opts beads.UpdateOpts) e
 			row.Metadata[key] = value
 		}
 	}
+	row.UpdatedAt = time.Now().UTC()
 	tx.rows[id] = row
 	return nil
 }

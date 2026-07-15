@@ -138,6 +138,12 @@ func canonicalBoundaries() []BoundaryDefinition {
 	addChannelResult("wake.time.after", "time", "", "After", 1)
 	addChannelResult("wake.context.done", "context", "Context", "Done", 1)
 	addChannelInput("wake.signal.notify", "os/signal", "", "Notify", 1)
+	definitions = append(definitions, BoundaryDefinition{
+		ID:     "wake.signal.notify-context",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: "os/signal", Name: "NotifyContext"},
+		Match:  ObjectMatchExact,
+	})
 
 	return definitions
 }

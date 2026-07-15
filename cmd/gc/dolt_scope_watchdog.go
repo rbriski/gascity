@@ -27,6 +27,7 @@ package main
 // watchdog dies with its server.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -213,6 +214,12 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// Register before publishing the child handshake. Once the parent learns
+	// the watchdog PID it may immediately ask it to terminate; installing the
+	// subscription first closes the gap where that SIGTERM would take the
+	// watchdog's default action and orphan the child.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	// Report the dolt child's PID and OS start identity to the parent BEFORE the
 	// reap goroutine below can Wait() the child and free its numeric PID.
 	// Snapshotting here — while the watchdog still holds the un-reaped child — is
@@ -237,17 +244,13 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr io.Writer) int {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	goneStreak := 0
 	for {
 		select {
-		case sig := <-signals:
-			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, cmd.Process.Pid) //nolint:errcheck
+		case <-signalCtx.Done():
+			fmt.Fprintf(logFile, "gc scope watchdog: received termination signal; terminating dolt sql-server pid %d\n", cmd.Process.Pid) //nolint:errcheck
 			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
 			<-done
 			return 0

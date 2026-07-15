@@ -343,6 +343,21 @@ func cleanupManagedDoltTestPID(t *testing.T, pid int) {
 	_ = terminateManagedDoltTestPID(pid)
 }
 
+func waitForManagedDoltWatchdogPIDExit(t *testing.T, pid int, label string) {
+	t.Helper()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for pidAlive(pid) {
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("%s pid %d did not exit", label, pid)
+		}
+	}
+}
+
 func TestConfigureManagedDoltSQLServerProcessProductionDetaches(t *testing.T) {
 	withManagedDoltTestMode(t, false)
 	t.Setenv(managedDoltTestModeEnv, "")
@@ -570,6 +585,19 @@ func TestManagedDoltWatchdogExternalParentSurvivesSpawnerExit(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+
+	// The external-parent handoff publishes both PIDs only after the watchdog
+	// is ready. An immediate termination request must be consumed and forwarded
+	// without leaving either the dolt process group or watchdog behind.
+	watchdog, err := os.FindProcess(watchdogPID)
+	if err != nil {
+		t.Fatalf("find watchdog pid %d: %v", watchdogPID, err)
+	}
+	if err := watchdog.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal watchdog pid %d: %v", watchdogPID, err)
+	}
+	waitForManagedDoltWatchdogPIDExit(t, doltPID, "test watchdog dolt child")
+	waitForManagedDoltWatchdogPIDExit(t, watchdogPID, "test watchdog")
 }
 
 func TestManagedDoltWatchdogExternalParentHelper(t *testing.T) {

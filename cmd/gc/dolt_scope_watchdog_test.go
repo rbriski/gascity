@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -277,6 +278,26 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	if ticks == 0 && identity == "" {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("scope watchdog reported no start identity (ticks=%d identity=%q); PID-reuse guard disabled; log:\n%s", ticks, identity, logData)
+	}
+
+	// The PID handoff is also the point at which callers may begin signaling
+	// the watchdog. Signal immediately and require both processes to exit so
+	// the handoff cannot race signal subscription setup and orphan the child.
+	watchdog, err := os.FindProcess(watchdogPID)
+	if err != nil {
+		t.Fatalf("find watchdog pid %d: %v", watchdogPID, err)
+	}
+	if err := watchdog.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal watchdog pid %d: %v", watchdogPID, err)
+	}
+	waitForManagedDoltWatchdogPIDExit(t, doltPID, "scope watchdog dolt child")
+	waitForManagedDoltWatchdogPIDExit(t, watchdogPID, "scope watchdog")
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read watchdog log: %v", err)
+	}
+	if !strings.Contains(string(logData), "received termination signal; terminating dolt sql-server") {
+		t.Fatalf("watchdog log missing signal-forward decision:\n%s", logData)
 	}
 }
 

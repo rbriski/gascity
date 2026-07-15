@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -1172,20 +1173,21 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// Install signal handling before publishing the child PID. The parent can
+	// signal this watchdog as soon as it reads stdout, so the subscription must
+	// already own SIGINT/SIGTERM before that handoff becomes visible.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	fmt.Fprintf(stdout, "%d\n", cmd.Process.Pid) //nolint:errcheck
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-signals:
+		case <-signalCtx.Done():
 			_ = terminateManagedDoltPID("", cmd.Process.Pid)
 			<-done
 			return 0

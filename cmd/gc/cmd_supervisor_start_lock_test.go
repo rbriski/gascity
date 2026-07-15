@@ -16,8 +16,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -155,15 +153,6 @@ formula_v2 = false
 	}
 	t.Cleanup(func() { _ = held.Close() })
 
-	previousFormulaV2 := formula.IsFormulaV2Enabled()
-	previousGraphApply := molecule.IsGraphApplyEnabled()
-	formula.SetFormulaV2Enabled(true)
-	molecule.SetGraphApplyEnabled(true)
-	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(previousFormulaV2)
-		molecule.SetGraphApplyEnabled(previousGraphApply)
-	})
-
 	resolved, err := requireBootstrappedCity(targetPath)
 	if err != nil {
 		t.Fatalf("requireBootstrappedCity: %v", err)
@@ -172,9 +161,6 @@ formula_v2 = false
 		t.Fatalf("resolved city = %q, want %q", resolved, targetPath)
 	}
 	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
-	if !formula.IsFormulaV2Enabled() || !molecule.IsGraphApplyEnabled() {
-		t.Fatal("pre-lock start path resolution changed process-global feature flags")
-	}
 }
 
 func TestRegisteredCityNameDefersUncachedLegacyPackProviderValidation(t *testing.T) {

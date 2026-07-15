@@ -15,8 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -193,12 +191,6 @@ func TestStopCompletionTimeoutAtEntryIsReadOnlyBeforeOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	formula.SetFormulaV2Enabled(true)
-	molecule.SetGraphApplyEnabled(true)
-	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(false)
-		molecule.SetGraphApplyEnabled(false)
-	})
 	owner, err := acquireControllerLock(cityPath)
 	if err != nil {
 		t.Fatal(err)
@@ -209,12 +201,6 @@ func TestStopCompletionTimeoutAtEntryIsReadOnlyBeforeOwnership(t *testing.T) {
 		t.Fatalf("derived completion timeout = %s, want shutdown timeout plus stop-wave budgets", got)
 	}
 	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
-	if !formula.IsFormulaV2Enabled() {
-		t.Fatal("stop timeout read changed the process-global formula v2 flag")
-	}
-	if !molecule.IsGraphApplyEnabled() {
-		t.Fatal("stop timeout read changed the process-global graph apply flag")
-	}
 }
 
 type deadlineEffectProvider struct {

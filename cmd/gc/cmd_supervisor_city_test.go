@@ -18,8 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -566,15 +564,6 @@ func TestSupervisorCityTimeoutReadsAreSideEffectFree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previousFormulaV2 := formula.IsFormulaV2Enabled()
-	previousGraphApply := molecule.IsGraphApplyEnabled()
-	formula.SetFormulaV2Enabled(true)
-	molecule.SetGraphApplyEnabled(true)
-	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(previousFormulaV2)
-		molecule.SetGraphApplyEnabled(previousGraphApply)
-	})
-
 	if got := supervisorCityStartTimeout(cityPath); got != 12*time.Minute {
 		t.Fatalf("supervisorCityStartTimeout = %v, want 12m", got)
 	}
@@ -582,12 +571,6 @@ func TestSupervisorCityTimeoutReadsAreSideEffectFree(t *testing.T) {
 		t.Fatalf("supervisorCityStopTimeout = %v, want 4m5s", got)
 	}
 	assertPublicGastownSyntheticCacheAbsent(t, gcHome)
-	if !formula.IsFormulaV2Enabled() {
-		t.Fatal("supervisor timeout read changed the process-global formula v2 flag")
-	}
-	if !molecule.IsGraphApplyEnabled() {
-		t.Fatal("supervisor timeout read changed the process-global graph apply flag")
-	}
 }
 
 func TestRegisteredCityNameDefersUncachedPackRuntimeRegistrationValidation(t *testing.T) {

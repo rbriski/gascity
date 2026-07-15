@@ -38,7 +38,7 @@ func TestClaimAuthorizedDirectStoreWriterCannotSelfAuthorize(t *testing.T) {
 		LeaseUntil:          command.DeliverAfter.Add(time.Second),
 	}
 
-	result, err := repository.ClaimAuthorized(t.Context(), request, authority)
+	result, err := repository.ClaimAuthorized(t.Context(), request, authority, authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestClaimAuthorizedCopiedStampCannotAuthorizeDifferentPayload(t *testing.T)
 		LeaseUntil:          forged.DeliverAfter.Add(time.Second),
 	}
 
-	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestClaimAuthorizedRejectsUnsupportedClaimPrincipalSchemaWithoutMutation(t 
 		fixture.authority.setClaimSchema(schema)
 		request := fixture.claimRequest("claim-schema-skew", "owner-schema", "attempt-schema", fixture.now.Add(time.Second))
 
-		result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+		result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 		if !errors.Is(err, ErrNudgeAuthorizationInvalid) || result != (CommandClaimResult{}) {
 			t.Fatalf("schema %d result = %#v, err=%v; want fail-closed invalid evidence", schema, result, err)
 		}
@@ -131,7 +131,7 @@ func TestClaimAuthorizedExactLaunchSubstitutionDenies(t *testing.T) {
 		LeaseUntil:          now.Add(2 * time.Second),
 	}
 
-	claimed, err := repository.ClaimAuthorized(t.Context(), claim, authority)
+	claimed, err := repository.ClaimAuthorized(t.Context(), claim, authority, authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestClaimAuthorizedLocalPeerSubstitutionIsPolicyDenied(t *testing.T) {
 		fixture := newAuthorizedClaimFixture(t)
 		authorizer := peerBoundClaimAuthorizer{delegate: fixture.authority, required: "verified-peer"}
 		ctx := context.WithValue(t.Context(), peerContextKey{}, peer)
-		result, err := fixture.repository.ClaimAuthorized(ctx, fixture.claimRequest("claim-peer", "owner-peer", "attempt-peer", fixture.now.Add(time.Second)), authorizer)
+		result, err := fixture.repository.ClaimAuthorized(ctx, fixture.claimRequest("claim-peer", "owner-peer", "attempt-peer", fixture.now.Add(time.Second)), authorizer, fixture.authority)
 		if err != nil {
 			t.Fatalf("peer %q ClaimAuthorized: %v", peer, err)
 		}
@@ -177,7 +177,7 @@ func TestClaimAuthorizationRunsInsideDurableReadWriteTransaction(t *testing.T) {
 		ClaimedAt: now.Add(time.Second), LeaseUntil: now.Add(2 * time.Second),
 	}
 
-	result, err := repository.ClaimAuthorized(t.Context(), claim, authorizer)
+	result, err := repository.ClaimAuthorized(t.Context(), claim, authorizer, authority)
 	if err != nil || result.Disposition != CommandClaimAllowed {
 		t.Fatalf("ClaimAuthorized = %#v, err=%v", result, err)
 	}

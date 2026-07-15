@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"reflect"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
@@ -62,10 +64,10 @@ func TestOpenProductionNudgeCommandSourceWrapsKnownTransientProvisionFailure(t *
 	}
 }
 
-func TestOpenProductionNudgeCommandSourceCatchesUpTerminalCheckpointBeforeSnapshot(t *testing.T) {
+func TestOpenProductionNudgeCommandSourceUsesSparseAuthorityWithoutGlobalCheckpoint(t *testing.T) {
 	fixture := newProductionNudgeCommandFixture(t)
 	claimed := fixture.claimDirect(t, "claim-before-reopen", "attempt-before-reopen")
-	completed, err := fixture.repository.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claimed, fixture.now.Add(3*time.Second)))
+	completed, err := fixture.repository.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claimed, fixture.now.Add(3*time.Second)), fixture.partition, fixture.ingress)
 	if err != nil {
 		t.Fatalf("CompleteProviderAttempt: %v", err)
 	}
@@ -85,14 +87,14 @@ func TestOpenProductionNudgeCommandSourceCatchesUpTerminalCheckpointBeforeSnapsh
 	}
 	snapshot, err := source.Snapshot(t.Context(), 1)
 	if err != nil {
-		t.Fatalf("Snapshot after opener checkpoint catch-up: %v", err)
+		t.Fatalf("Snapshot after sparse opener: %v", err)
 	}
-	if len(snapshot.Entries) != 0 || snapshot.Coverage == nil || snapshot.Coverage.TerminalCount != 1 {
-		t.Fatalf("snapshot after checkpoint catch-up = %#v, want one compacted terminal", snapshot)
+	if len(snapshot.Entries) != 0 || snapshot.Coverage != nil || len(snapshot.PartitionGaps) != 0 {
+		t.Fatalf("sparse snapshot after terminal = %#v, want empty authority-proven partition", snapshot)
 	}
 }
 
-func TestProductionNudgeCommandSourceInjectsBoundPartitionAndMaintainsCheckpoint(t *testing.T) {
+func TestProductionNudgeCommandSourceInjectsBoundPartitionAndMaintainsMembership(t *testing.T) {
 	fixture := newProductionNudgeCommandFixture(t)
 	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
 	if err != nil {
@@ -122,11 +124,11 @@ func TestProductionNudgeCommandSourceInjectsBoundPartitionAndMaintainsCheckpoint
 		t.Fatalf("CompleteProviderAttempt: %v", err)
 	}
 	if _, err := source.Snapshot(t.Context(), 1); err != nil {
-		t.Fatalf("Snapshot after bounded checkpoint maintenance: %v", err)
+		t.Fatalf("Snapshot after terminal membership publication: %v", err)
 	}
 }
 
-func TestProductionNudgeCommandSourceClaimTerminalMaintainsCheckpoint(t *testing.T) {
+func TestProductionNudgeCommandSourceClaimTerminalMaintainsMembership(t *testing.T) {
 	fixture := newProductionNudgeCommandFixture(t)
 	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
 	if err != nil {
@@ -146,8 +148,283 @@ func TestProductionNudgeCommandSourceClaimTerminalMaintainsCheckpoint(t *testing
 	if err != nil {
 		t.Fatalf("Snapshot after claim-time terminal: %v", err)
 	}
-	if len(snapshot.Entries) != 0 || snapshot.Coverage == nil || snapshot.Coverage.TerminalCount != 1 {
-		t.Fatalf("snapshot after claim-time terminal = %#v, want one compacted terminal", snapshot)
+	if len(snapshot.Entries) != 0 || snapshot.Coverage != nil || len(snapshot.PartitionGaps) != 0 {
+		t.Fatalf("snapshot after claim-time terminal = %#v, want empty authority-proven partition", snapshot)
+	}
+}
+
+func TestNudgeCommandResultPublicFieldsCannotMintTerminalTransitionWitness(t *testing.T) {
+	terminal := nudgequeue.Command{State: nudgequeue.CommandStateExpired, Terminal: &nudgequeue.CommandTerminal{ActionResult: nudgequeue.CommandActionResultExpired}}
+	claim := nudgequeue.CommandClaimResult{Disposition: nudgequeue.CommandClaimDenied, Command: terminal}
+	completion := nudgequeue.CommandCompletionResult{Disposition: nudgequeue.CommandCompletionRecorded, Command: terminal}
+	if claim.HasTerminalTransitionWitness() || completion.HasTerminalTransitionWitness() {
+		t.Fatal("public result fields minted a repository-owned terminal-transition witness")
+	}
+}
+
+func TestProductionNudgeCommandSourceDoesNotLaunderForgedTerminalMembership(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+
+	forged := fixture.command
+	forged.State = nudgequeue.CommandStateExpired
+	forged.Terminal = &nudgequeue.CommandTerminal{
+		At:            forged.ExpiresAt,
+		ActionResult:  nudgequeue.CommandActionResultExpired,
+		ErrorClass:    nudgequeue.CommandErrorClassExpired,
+		Detail:        "forged terminal row",
+		ProviderStage: nudgequeue.ProviderStageNotEntered,
+		Completion:    nudgequeue.CompletionStateNotCompleted,
+	}
+	wire, err := nudgequeue.EncodeCommandV1(forged)
+	if err != nil {
+		t.Fatalf("EncodeCommandV1 forged terminal: %v", err)
+	}
+	fixture.store.mu.Lock()
+	row := fixture.store.rows[forged.ID]
+	row.Status = "closed"
+	row.Metadata[beadmeta.ControlCommandWireMetadataKey] = string(wire)
+	fixture.store.rows[forged.ID] = row
+	fixture.store.mu.Unlock()
+
+	claimedAt := forged.ExpiresAt.Add(time.Second)
+	result, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: forged.ID, claimID: "claim-forged-terminal",
+		ownerID: "owner-forged-terminal", attemptID: "attempt-forged-terminal",
+		boundLaunchIdentity: "production-launch", claimedAt: claimedAt, leaseUntil: claimedAt.Add(time.Minute),
+	}, fixture.authority)
+	if !errors.Is(err, nudgequeue.ErrCommandPartitionTerminalIntent) || result != (nudgequeue.CommandClaimResult{}) {
+		t.Fatalf("ClaimAuthorized forged terminal = %#v, err=%v; want missing write-ahead intent refusal", result, err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 0 {
+		t.Fatalf("terminal membership publications = %d, want zero for a pre-existing store terminal", calls)
+	}
+}
+
+func TestProductionNudgeCommandSourceDoesNotPublishUnrelatedTerminalFromStaleCompletion(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	claim, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-stale-completion",
+		ownerID: "owner-stale-completion", attemptID: "attempt-recorded",
+		boundLaunchIdentity: "production-launch", claimedAt: fixture.now.Add(2 * time.Second), leaseUntil: fixture.now.Add(time.Minute),
+	}, fixture.authority)
+	if err != nil || claim.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", claim, err)
+	}
+	if _, err := fixture.repository.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claim.Command, fixture.now.Add(3*time.Second)), fixture.partition, fixture.ingress); err != nil {
+		t.Fatalf("CompleteProviderAttempt direct terminal: %v", err)
+	}
+
+	stale := deliveredNudgeCompletion(claim.Command, fixture.now.Add(4*time.Second))
+	stale.AttemptID = "attempt-unrelated"
+	result, err := source.CompleteProviderAttempt(t.Context(), stale)
+	if err != nil || result.Disposition != nudgequeue.CommandCompletionStale || result.Command.Terminal == nil {
+		t.Fatalf("CompleteProviderAttempt stale = %#v, err=%v", result, err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 0 {
+		t.Fatalf("terminal membership publications = %d, want zero for an unrelated stale completion", calls)
+	}
+}
+
+func TestProductionNudgeCommandSourceRepairsPreexistingPreparedAttemptTerminal(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	claim, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-preexisting-exact",
+		ownerID: "owner-preexisting-exact", attemptID: "attempt-preexisting-exact",
+		boundLaunchIdentity: "production-launch", claimedAt: fixture.now.Add(2 * time.Second), leaseUntil: fixture.now.Add(time.Minute),
+	}, fixture.authority)
+	if err != nil || claim.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", claim, err)
+	}
+	request := deliveredNudgeCompletion(claim.Command, fixture.now.Add(3*time.Second))
+	if _, err := fixture.repository.CompleteProviderAttempt(t.Context(), request, fixture.partition, fixture.ingress); err != nil {
+		t.Fatalf("CompleteProviderAttempt direct terminal: %v", err)
+	}
+
+	repeated, err := source.CompleteProviderAttempt(t.Context(), request)
+	if err != nil || repeated.Disposition != nudgequeue.CommandCompletionAlreadyRecorded || !repeated.HasTerminalTransitionWitness() {
+		t.Fatalf("CompleteProviderAttempt preexisting exact = %#v, err=%v", repeated, err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 1 {
+		t.Fatalf("terminal membership publications = %d, want one prepared-terminal repair", calls)
+	}
+	if _, err := source.Get(t.Context(), fixture.command.ID); err != nil {
+		t.Fatalf("Get repaired exact terminal: %v", err)
+	}
+}
+
+func TestProductionNudgeCommandSourcePublishesRecoveredClaimTerminalIdempotently(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	fixture.store.mu.Lock()
+	fixture.store.failAfterCommitNext = errors.New("lost claim terminal response")
+	fixture.store.mu.Unlock()
+	claimedAt := fixture.command.ExpiresAt
+	request := nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-recovered-terminal",
+		ownerID: "owner-recovered-terminal", attemptID: "attempt-recovered-terminal",
+		boundLaunchIdentity: "production-launch", claimedAt: claimedAt, leaseUntil: claimedAt.Add(time.Minute),
+	}
+
+	first, err := source.ClaimAuthorized(t.Context(), request, fixture.authority)
+	if err != nil || first.Disposition != nudgequeue.CommandClaimDenied || first.Command.Terminal == nil {
+		t.Fatalf("ClaimAuthorized recovered terminal = %#v, err=%v", first, err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 1 {
+		t.Fatalf("terminal membership publications after recovery = %d, want one", calls)
+	}
+	repeated, err := source.ClaimAuthorized(t.Context(), request, fixture.authority)
+	if err != nil || repeated.Disposition != nudgequeue.CommandClaimDenied || !reflect.DeepEqual(repeated.Command, first.Command) {
+		t.Fatalf("ClaimAuthorized repeated terminal = %#v, err=%v; want %#v", repeated, err, first.Command)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 2 {
+		t.Fatalf("terminal membership publication attempts after duplicate = %d, want two", calls)
+	}
+	if terminals := fixture.authority.terminalMembershipCount(); terminals != 1 {
+		t.Fatalf("durable terminal memberships after duplicate = %d, want one", terminals)
+	}
+	if _, err := source.Snapshot(t.Context(), 1); err != nil {
+		t.Fatalf("Snapshot after recovered claim terminal membership: %v", err)
+	}
+}
+
+func TestProductionNudgeCommandSourceRepairsTerminalPublicationAfterRestart(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	claim, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-terminal-repair",
+		ownerID: "owner-terminal-repair", attemptID: "attempt-terminal-repair",
+		boundLaunchIdentity: "production-launch", claimedAt: fixture.now.Add(2 * time.Second), leaseUntil: fixture.now.Add(time.Minute),
+	}, fixture.authority)
+	if err != nil || claim.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", claim, err)
+	}
+	request := deliveredNudgeCompletion(claim.Command, fixture.now.Add(3*time.Second))
+	fixture.authority.failNextTerminalRecord(errors.New("terminal authority unavailable after command commit"))
+
+	first, err := source.CompleteProviderAttempt(t.Context(), request)
+	if err == nil || first.Command.Terminal == nil {
+		t.Fatalf("CompleteProviderAttempt first = %#v, err=%v; want committed terminal plus publication failure", first, err)
+	}
+
+	reopened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("reopen production source: %v", err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 2 {
+		t.Fatalf("terminal membership publication attempts after reopen = %d, want failed attempt plus startup repair", calls)
+	}
+	if _, err := reopened.(*productionNudgeCommandSource).Get(t.Context(), fixture.command.ID); err != nil {
+		t.Fatalf("Get after terminal publication repair: %v", err)
+	}
+	idempotent, err := reopened.(*productionNudgeCommandSource).CompleteProviderAttempt(t.Context(), request)
+	if err != nil || idempotent.Disposition != nudgequeue.CommandCompletionAlreadyRecorded || !idempotent.HasTerminalTransitionWitness() {
+		t.Fatalf("CompleteProviderAttempt finalized replay = %#v, err=%v", idempotent, err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 3 {
+		t.Fatalf("terminal membership publication attempts after finalized replay = %d, want three", calls)
+	}
+}
+
+func TestProductionNudgeCommandSourceAbortsRolledBackPreparationOnRestart(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	claim, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-prepare-rollback",
+		ownerID: "owner-prepare-rollback", attemptID: "attempt-prepare-rollback",
+		boundLaunchIdentity: "production-launch", claimedAt: fixture.now.Add(2 * time.Second), leaseUntil: fixture.now.Add(time.Minute),
+	}, fixture.authority)
+	if err != nil || claim.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", claim, err)
+	}
+	request := deliveredNudgeCompletion(claim.Command, fixture.now.Add(3*time.Second))
+	fixture.authority.failNextPrepareAfterPut(errors.New("lost terminal prepare response"))
+
+	if _, err := source.CompleteProviderAttempt(t.Context(), request); !errors.Is(err, nudgequeue.ErrCommandPartitionTerminalIntent) {
+		t.Fatalf("CompleteProviderAttempt prepare error = %v, want terminal-intent uncertainty", err)
+	}
+	if intents := fixture.authority.terminalIntentCount(); intents != 1 {
+		t.Fatalf("terminal intents after lost prepare response = %d, want one", intents)
+	}
+
+	reopened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("reopen production source: %v", err)
+	}
+	if intents := fixture.authority.terminalIntentCount(); intents != 0 {
+		t.Fatalf("terminal intents after exact before-state recovery = %d, want zero", intents)
+	}
+	repaired, err := reopened.(*productionNudgeCommandSource).CompleteProviderAttempt(t.Context(), request)
+	if err != nil || repaired.Disposition != nudgequeue.CommandCompletionRecorded {
+		t.Fatalf("CompleteProviderAttempt after preparation abort = %#v, err=%v", repaired, err)
+	}
+}
+
+func TestProductionNudgeCommandSourceRejectsStoreRewriteAfterTerminalFinalization(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	claim, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-terminal-rewrite",
+		ownerID: "owner-terminal-rewrite", attemptID: "attempt-terminal-rewrite",
+		boundLaunchIdentity: "production-launch", claimedAt: fixture.now.Add(2 * time.Second), leaseUntil: fixture.now.Add(time.Minute),
+	}, fixture.authority)
+	if err != nil || claim.Disposition != nudgequeue.CommandClaimAllowed {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", claim, err)
+	}
+	request := deliveredNudgeCompletion(claim.Command, fixture.now.Add(3*time.Second))
+	completed, err := source.CompleteProviderAttempt(t.Context(), request)
+	if err != nil || completed.Command.Terminal == nil {
+		t.Fatalf("CompleteProviderAttempt = %#v, err=%v", completed, err)
+	}
+
+	tampered := completed.Command
+	tampered.Terminal.At = tampered.Terminal.At.Add(time.Nanosecond)
+	wire, err := nudgequeue.EncodeCommandV1(tampered)
+	if err != nil {
+		t.Fatalf("EncodeCommandV1 tampered terminal: %v", err)
+	}
+	fixture.store.mu.Lock()
+	row := fixture.store.rows[tampered.ID]
+	row.Metadata[beadmeta.ControlCommandWireMetadataKey] = string(wire)
+	fixture.store.rows[tampered.ID] = row
+	fixture.store.mu.Unlock()
+
+	result, err := source.CompleteProviderAttempt(t.Context(), request)
+	if !errors.Is(err, nudgequeue.ErrCommandPartitionTerminalIntent) || result != (nudgequeue.CommandCompletionResult{}) {
+		t.Fatalf("CompleteProviderAttempt after store rewrite = %#v, err=%v; want finalized digest mismatch", result, err)
+	}
+	if calls := fixture.authority.terminalRecordCount(); calls != 1 {
+		t.Fatalf("terminal membership publications after store rewrite = %d, want one original finalization", calls)
 	}
 }
 
@@ -205,6 +482,8 @@ func newProductionNudgeCommandFixture(t *testing.T) productionNudgeCommandFixtur
 		references: make(map[string]nudgequeue.NudgeAuthorization),
 		admissions: make(map[string]nudgequeue.CommandPartitionAdmission),
 		terminals:  make(map[string]nudgequeue.CommandPartitionTerminal),
+		intents:    make(map[nudgequeue.CommandPartitionTerminalIntent]struct{}),
+		finalized:  make(map[string]nudgequeue.CommandPartitionTerminalResolution),
 	}
 	ingress, err := nudgequeue.NewTrustedNudgeIngress(repository, authority)
 	if err != nil {
@@ -240,7 +519,7 @@ func (f productionNudgeCommandFixture) claimDirect(t *testing.T, claimID, attemp
 		CommandID: f.command.ID, ClaimID: claimID, OwnerID: "direct-owner", AttemptID: attemptID,
 		BoundLaunchIdentity: "production-launch", Partition: f.partition,
 		ClaimedAt: f.now.Add(2 * time.Second), LeaseUntil: f.now.Add(time.Minute),
-	}, f.authority)
+	}, f.authority, f.ingress)
 	if err != nil || result.Disposition != nudgequeue.CommandClaimAllowed {
 		t.Fatalf("ClaimAuthorized = %#v, err=%v", result, err)
 	}
@@ -257,11 +536,16 @@ func deliveredNudgeCompletion(command nudgequeue.Command, completedAt time.Time)
 }
 
 type productionNudgeTestAuthority struct {
-	mu         sync.Mutex
-	references map[string]nudgequeue.NudgeAuthorization
-	partition  nudgequeue.TrustedCityPartition
-	admissions map[string]nudgequeue.CommandPartitionAdmission
-	terminals  map[string]nudgequeue.CommandPartitionTerminal
+	mu                  sync.Mutex
+	references          map[string]nudgequeue.NudgeAuthorization
+	partition           nudgequeue.TrustedCityPartition
+	admissions          map[string]nudgequeue.CommandPartitionAdmission
+	terminals           map[string]nudgequeue.CommandPartitionTerminal
+	intents             map[nudgequeue.CommandPartitionTerminalIntent]struct{}
+	finalized           map[string]nudgequeue.CommandPartitionTerminalResolution
+	terminalRecordCalls int
+	failTerminalRecord  error
+	failPrepareAfterPut error
 }
 
 func (a *productionNudgeTestAuthority) AuthorizeNudgeIngress(_ context.Context, request nudgequeue.NudgeIngressAuthorizationRequest) (nudgequeue.NudgeAuthorization, error) {
@@ -300,9 +584,37 @@ func (a *productionNudgeTestAuthority) RecordCommandPartitionAdmission(_ context
 func (a *productionNudgeTestAuthority) RecordCommandPartitionTerminal(_ context.Context, terminal nudgequeue.CommandPartitionTerminal) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.terminalRecordCalls++
+	if a.failTerminalRecord != nil {
+		err := a.failTerminalRecord
+		a.failTerminalRecord = nil
+		return err
+	}
 	admission, found := a.admissions[terminal.CommandID]
 	if !found || admission.Store != terminal.Store || admission.Sequence != terminal.Sequence || admission.Partition != terminal.Partition {
 		return errors.New("terminal has no matching production-test partition admission")
+	}
+	var prepared *nudgequeue.CommandPartitionTerminalIntent
+	for intent := range a.intents {
+		if intent.Store == terminal.Store && intent.RepositoryRevision == terminal.RepositoryRevision &&
+			intent.CommandID == terminal.CommandID && intent.Sequence == terminal.Sequence && intent.Partition == terminal.Partition {
+			preparedIntent := intent
+			prepared = &preparedIntent
+			break
+		}
+	}
+	if prepared == nil {
+		finalized, found := a.finalized[terminal.CommandID]
+		if !found || finalized.Store != terminal.Store || finalized.RepositoryRevision != terminal.RepositoryRevision ||
+			finalized.Sequence != terminal.Sequence || finalized.Partition != terminal.Partition {
+			return errors.New("terminal has no matching production-test write-ahead intent")
+		}
+	} else {
+		a.finalized[terminal.CommandID] = nudgequeue.CommandPartitionTerminalResolution{
+			Store: prepared.Store, RepositoryRevision: prepared.RepositoryRevision, CommandID: prepared.CommandID,
+			Sequence: prepared.Sequence, Partition: prepared.Partition, CommandDigest: prepared.CommandDigest,
+		}
+		delete(a.intents, *prepared)
 	}
 	if existing, found := a.terminals[terminal.CommandID]; found && existing != terminal {
 		return errors.New("conflicting production-test partition terminal")
@@ -311,14 +623,143 @@ func (a *productionNudgeTestAuthority) RecordCommandPartitionTerminal(_ context.
 	return nil
 }
 
+func (a *productionNudgeTestAuthority) PrepareCommandPartitionTerminal(_ context.Context, intent nudgequeue.CommandPartitionTerminalIntent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	admission, found := a.admissions[intent.CommandID]
+	if !found || admission.Store != intent.Store || admission.Sequence != intent.Sequence || admission.Partition != intent.Partition ||
+		intent.RepositoryRevision <= admission.RepositoryRevision {
+		return errors.New("terminal intent has no matching production-test partition admission")
+	}
+	for existing := range a.intents {
+		if existing.CommandID == intent.CommandID {
+			if existing == intent {
+				return nil
+			}
+			return errors.New("conflicting production-test terminal intent")
+		}
+	}
+	a.intents[intent] = struct{}{}
+	if a.failPrepareAfterPut != nil {
+		err := a.failPrepareAfterPut
+		a.failPrepareAfterPut = nil
+		return err
+	}
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) AbortCommandPartitionTerminal(_ context.Context, intent nudgequeue.CommandPartitionTerminalIntent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, found := a.intents[intent]; found {
+		delete(a.intents, intent)
+		return nil
+	}
+	if _, finalized := a.finalized[intent.CommandID]; finalized {
+		return errors.New("production-test terminal intent is already finalized")
+	}
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) VerifyCommandPartitionTerminal(_ context.Context, resolution nudgequeue.CommandPartitionTerminalResolution) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for intent := range a.intents {
+		if intent.Store == resolution.Store && intent.RepositoryRevision == resolution.RepositoryRevision &&
+			intent.CommandID == resolution.CommandID && intent.Sequence == resolution.Sequence &&
+			intent.Partition == resolution.Partition && intent.CommandDigest == resolution.CommandDigest {
+			return nil
+		}
+	}
+	if finalized, found := a.finalized[resolution.CommandID]; !found || finalized != resolution {
+		return errors.New("production-test terminal intent or finalized digest is missing")
+	}
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) failNextTerminalRecord(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.failTerminalRecord = err
+}
+
+func (a *productionNudgeTestAuthority) failNextPrepareAfterPut(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.failPrepareAfterPut = err
+}
+
+func (a *productionNudgeTestAuthority) terminalRecordCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.terminalRecordCalls
+}
+
+func (a *productionNudgeTestAuthority) terminalMembershipCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.terminals)
+}
+
+func (a *productionNudgeTestAuthority) terminalIntentCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.intents)
+}
+
+func (a *productionNudgeTestAuthority) RepairCommandPartitionTerminals(ctx context.Context, reader nudgequeue.CommandPartitionTerminalRecoveryReader) error {
+	state, err := reader.State(ctx)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	intents := make([]nudgequeue.CommandPartitionTerminalIntent, 0, len(a.intents))
+	for intent := range a.intents {
+		intents = append(intents, intent)
+	}
+	a.mu.Unlock()
+	for _, intent := range intents {
+		resolution, err := reader.Get(ctx, intent.CommandID)
+		if err != nil || !resolution.Found || resolution.Entry.Command == nil {
+			return errors.New("production-test terminal recovery command is unavailable")
+		}
+		command := *resolution.Entry.Command
+		wire, err := nudgequeue.EncodeCommandV1(command)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(wire)
+		if command.Terminal != nil {
+			if command.Store != intent.Store || command.Order.Revision != intent.RepositoryRevision || command.ID != intent.CommandID ||
+				command.Order.Sequence != intent.Sequence || digest != intent.CommandDigest || state.Revision < intent.RepositoryRevision {
+				return errors.New("production-test terminal recovery after-state differs")
+			}
+			if err := a.RecordCommandPartitionTerminal(ctx, nudgequeue.CommandPartitionTerminal{
+				Store: intent.Store, RepositoryRevision: intent.RepositoryRevision, CommandID: intent.CommandID,
+				Sequence: intent.Sequence, Partition: intent.Partition,
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		if command.Store != intent.Store || command.ID != intent.CommandID || command.Order.Sequence != intent.Sequence ||
+			digest != intent.BeforeCommandDigest || state.Revision != intent.RepositoryBeforeRevision {
+			return errors.New("production-test terminal recovery before-state is not safely abortable")
+		}
+		if err := a.AbortCommandPartitionTerminal(ctx, intent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *productionNudgeTestAuthority) ResolveCommandPartitionCoverage(_ context.Context, request nudgequeue.CommandPartitionCoverageRequest) (nudgequeue.CommandPartitionCoverage, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var (
-		highWater         uint64
-		admittedCount     uint64
-		terminalSequences []uint64
-		active            []nudgequeue.CommandPartitionCoverageEntry
+		highWater     uint64
+		admittedCount uint64
+		active        []nudgequeue.CommandPartitionCoverageEntry
 	)
 	for id, admission := range a.admissions {
 		if admission.Store != request.Store || admission.RepositoryRevision > request.RepositoryRevision {
@@ -328,7 +769,6 @@ func (a *productionNudgeTestAuthority) ResolveCommandPartitionCoverage(_ context
 		highWater = max(highWater, admission.Sequence)
 		terminal, closed := a.terminals[id]
 		if closed && terminal.RepositoryRevision <= request.RepositoryRevision {
-			terminalSequences = append(terminalSequences, admission.Sequence)
 			continue
 		}
 		if admission.Partition == request.Partition {
@@ -336,15 +776,12 @@ func (a *productionNudgeTestAuthority) ResolveCommandPartitionCoverage(_ context
 		}
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].Sequence < active[j].Sequence })
-	sort.Slice(terminalSequences, func(i, j int) bool { return terminalSequences[i] < terminalSequences[j] })
-	ranges := productionNudgeTerminalRanges(terminalSequences)
-	if highWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater || uint64(len(terminalSequences)) != request.TerminalCount || !reflect.DeepEqual(ranges, request.TerminalRanges) {
+	if highWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater {
 		return nudgequeue.CommandPartitionCoverage{}, errors.New("production-test authority coverage differs from repository snapshot")
 	}
 	return nudgequeue.CommandPartitionCoverage{
 		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater, AdmittedCount: admittedCount,
-		TerminalRanges: append([]nudgequeue.CommandIndexSequenceRange(nil), request.TerminalRanges...),
-		TerminalCount:  request.TerminalCount, Partition: request.Partition, ActiveEntries: active,
+		Partition: request.Partition, ActiveEntries: active,
 	}, nil
 }
 
@@ -366,19 +803,6 @@ func (a *productionNudgeTestAuthority) ResolveCommandPartitionMembership(_ conte
 	return result, nil
 }
 
-func productionNudgeTerminalRanges(sequences []uint64) []nudgequeue.CommandIndexSequenceRange {
-	var ranges []nudgequeue.CommandIndexSequenceRange
-	for _, sequence := range sequences {
-		last := len(ranges) - 1
-		if last >= 0 && ranges[last].LastSequence+1 == sequence {
-			ranges[last].LastSequence = sequence
-			continue
-		}
-		ranges = append(ranges, nudgequeue.CommandIndexSequenceRange{FirstSequence: sequence, LastSequence: sequence})
-	}
-	return ranges
-}
-
 func (a *productionNudgeTestAuthority) AuthorizeNudgeClaim(_ context.Context, request nudgequeue.NudgeClaimAuthorizationRequest) (nudgequeue.NudgeClaimAuthorization, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -398,11 +822,12 @@ func (a *productionNudgeTestAuthority) lastClaimPartition() nudgequeue.TrustedCi
 type nudgeCommandSourceAtomicStore struct {
 	beads.Store
 
-	mu             sync.Mutex
-	metadata       map[string]string
-	rows           map[string]beads.Bead
-	metadataWrites int
-	failNext       error
+	mu                  sync.Mutex
+	metadata            map[string]string
+	rows                map[string]beads.Bead
+	metadataWrites      int
+	failNext            error
+	failAfterCommitNext error
 }
 
 func newNudgeCommandSourceAtomicStore() *nudgeCommandSourceAtomicStore {
@@ -438,6 +863,11 @@ func (s *nudgeCommandSourceAtomicStore) AtomicReadWrite(ctx context.Context, _ s
 	s.metadata = tx.metadata
 	s.rows = tx.rows
 	s.metadataWrites = tx.metadataWrites
+	if s.failAfterCommitNext != nil {
+		err := s.failAfterCommitNext
+		s.failAfterCommitNext = nil
+		return err
+	}
 	return nil
 }
 

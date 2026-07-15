@@ -457,25 +457,31 @@ func (r commandRepositoryReader) snapshotPartition(ctx context.Context, maxComma
 		if err := validateCommandRepositoryStateAdvance(before, state); err != nil {
 			return err
 		}
-		checkpoint, found, err := readCommandRepositoryCheckpointFromSnapshot(tx, state)
-		if err != nil {
-			return err
-		}
-		tailQuery := beads.AtomicReadSnapshotPageQuery{
-			IDPrefix: commandIDPrefix,
-			Status:   "closed",
-			Order:    beads.AtomicReadSnapshotOrderUpdatedAtID,
-			Limit:    1,
-		}
-		if found {
-			tailQuery.After = beads.AtomicReadSnapshotCursor{UpdatedAt: checkpoint.TerminalCursor.UpdatedAt, ID: checkpoint.TerminalCursor.ID}
-		}
-		tail, err := tx.ListHistoryPage(tailQuery)
-		if err != nil {
-			return fmt.Errorf("checking durable nudge command terminal tail: %w", err)
-		}
-		if len(tail.Rows) != 0 {
-			return fmt.Errorf("terminal command %q follows the published checkpoint: %w", tail.Rows[0].ID, ErrCommandRepositoryCheckpointRequired)
+		var (
+			checkpoint commandRepositoryCheckpoint
+			found      bool
+		)
+		if partitionRoute == "" {
+			checkpoint, found, err = readCommandRepositoryCheckpointFromSnapshot(tx, state)
+			if err != nil {
+				return err
+			}
+			tailQuery := beads.AtomicReadSnapshotPageQuery{
+				IDPrefix: commandIDPrefix,
+				Status:   "closed",
+				Order:    beads.AtomicReadSnapshotOrderUpdatedAtID,
+				Limit:    1,
+			}
+			if found {
+				tailQuery.After = beads.AtomicReadSnapshotCursor{UpdatedAt: checkpoint.TerminalCursor.UpdatedAt, ID: checkpoint.TerminalCursor.ID}
+			}
+			tail, err := tx.ListHistoryPage(tailQuery)
+			if err != nil {
+				return fmt.Errorf("checking durable nudge command terminal tail: %w", err)
+			}
+			if len(tail.Rows) != 0 {
+				return fmt.Errorf("terminal command %q follows the published checkpoint: %w", tail.Rows[0].ID, ErrCommandRepositoryCheckpointRequired)
+			}
 		}
 
 		entries := make([]CommandIndexEntry, 0, min(maxCommands, beads.MaxAtomicReadSnapshotPageSize))
@@ -541,11 +547,10 @@ func (r commandRepositoryReader) snapshotPartition(ctx context.Context, maxComma
 			Revision:          state.Revision,
 			SequenceHighWater: state.SequenceHighWater,
 		}
-		if partitionRoute != "" {
-			snapshot.PartitionGaps = commandPartitionSequenceComplement(snapshot.SequenceHighWater, snapshot.Coverage, snapshot.Entries)
-		}
-		if _, err := BuildCommandIndex(snapshot); err != nil {
-			return &CommandRepositoryRecordError{Err: err}
+		if partitionRoute == "" {
+			if _, err := BuildCommandIndex(snapshot); err != nil {
+				return &CommandRepositoryRecordError{Err: err}
+			}
 		}
 		return nil
 	})

@@ -25,12 +25,15 @@ func TestClaimAuthorizedReturnsExactAuthoritativeClaimedCommand(t *testing.T) {
 	fixture := newAuthorizedClaimFixture(t)
 	request := fixture.claimRequest("claim-1", "owner-1", "attempt-1", fixture.now.Add(time.Second))
 
-	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
 	if result.Disposition != CommandClaimAllowed {
 		t.Fatalf("disposition = %q, want allowed", result.Disposition)
+	}
+	if result.HasTerminalTransitionWitness() {
+		t.Fatal("allowed nonterminal claim unexpectedly carries a terminal-transition witness")
 	}
 	claimed := result.Command
 	if claimed.State != CommandStateInFlight || claimed.Claim == nil || claimed.Retry == nil || claimed.Binding == nil {
@@ -64,11 +67,20 @@ func TestClaimAuthorizedRevocationDeniesDurablyBeforeProviderEntry(t *testing.T)
 		t.Fatalf("Get command row before denial: %v", err)
 	}
 
-	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
 	assertAuthorizationDeniedCommand(t, result)
+	if !result.HasTerminalTransitionWitness() {
+		t.Fatal("committed authorization denial is missing its terminal-transition witness")
+	}
+	tampered := result
+	tampered.Command = cloneCommandValue(result.Command)
+	tampered.Command.Terminal.Detail += " tampered"
+	if tampered.HasTerminalTransitionWitness() {
+		t.Fatal("terminal-transition witness remained valid after returned command mutation")
+	}
 	afterRow, err := fixture.store.Get(fixture.command.ID)
 	if err != nil {
 		t.Fatalf("Get command row after denial: %v", err)
@@ -80,13 +92,58 @@ func TestClaimAuthorizedRevocationDeniesDurablyBeforeProviderEntry(t *testing.T)
 		t.Fatalf("claim authorization calls = %d, want one", calls)
 	}
 
-	retry, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	retry, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized denied retry: %v", err)
 	}
 	assertAuthorizationDeniedCommand(t, retry)
+	if !retry.HasTerminalTransitionWitness() {
+		t.Fatal("prepared authorization denial retry is missing its repair witness")
+	}
 	if calls := fixture.authority.claimCalls(); calls != 1 {
 		t.Fatalf("denied retry re-entered policy: calls=%d", calls)
+	}
+}
+
+func TestClaimAuthorizedAbortsTerminalIntentOnDefiniteCallbackRollback(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	fixture.authority.setClaimDisposition(NudgeAuthorizationDenied)
+	fixture.store.failNextCommandUpdate(errors.New("injected denial update failure"))
+	request := fixture.claimRequest("claim-denied-rollback", "owner-rollback", "attempt-rollback", fixture.now.Add(time.Second))
+
+	if _, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority); err == nil {
+		t.Fatal("ClaimAuthorized error = nil, want update failure")
+	}
+	if count := fixture.authority.terminalIntentCount(); count != 0 {
+		t.Fatalf("terminal preparations after definite claim rollback = %d, want zero", count)
+	}
+	resolved, err := fixture.repository.Get(t.Context(), fixture.command.ID)
+	if err != nil || resolved.Entry.Command == nil || resolved.Entry.Command.State != CommandStatePending {
+		t.Fatalf("command after definite claim rollback = %#v, err=%v", resolved, err)
+	}
+}
+
+func TestClaimAuthorizedRepairsPreparedTerminalAfterLineageAdvanceFailure(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	fixture.authority.setClaimDisposition(NudgeAuthorizationDenied)
+	verifier, ok := fixture.repository.writer.(*repositoryLineageTestVerifier)
+	if !ok {
+		t.Fatalf("repository writer = %T, want test verifier", fixture.repository.writer)
+	}
+	verifier.failNextAdvance(errors.New("lineage authority temporarily unavailable"))
+	request := fixture.claimRequest("claim-denied-lineage", "owner-lineage", "attempt-lineage", fixture.now.Add(time.Second))
+
+	first, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err == nil || first != (CommandClaimResult{}) {
+		t.Fatalf("ClaimAuthorized first = %#v, err=%v; want post-commit lineage failure", first, err)
+	}
+	if count := fixture.authority.terminalIntentCount(); count != 1 {
+		t.Fatalf("terminal preparations after lineage failure = %d, want one retained", count)
+	}
+
+	repaired, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err != nil || repaired.Disposition != CommandClaimDenied || !repaired.HasTerminalTransitionWitness() {
+		t.Fatalf("ClaimAuthorized lineage repair = %#v, err=%v", repaired, err)
 	}
 }
 
@@ -99,7 +156,7 @@ func TestClaimAuthorizedUnknownParksWithoutMutation(t *testing.T) {
 		t.Fatalf("State before: %v", err)
 	}
 
-	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
@@ -120,7 +177,7 @@ func TestClaimAuthorizedAuthorityOutageReturnsParkedCommandAndTypedError(t *test
 	fixture.authority.setClaimError(errors.New("policy unavailable"))
 	request := fixture.claimRequest("claim-outage", "owner-1", "attempt-outage", fixture.now.Add(time.Second))
 
-	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if !errors.Is(err, ErrNudgeAuthorizationUnknown) {
 		t.Fatalf("ClaimAuthorized error = %v, want authorization unknown", err)
 	}
@@ -144,7 +201,7 @@ func TestClaimAuthorizedRejectsDirectStoreStampAndCrossCityReplay(t *testing.T) 
 			if scenario == "cross city" {
 				request.Partition = trustedCityPartitionForTest("foreign-city")
 			}
-			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 			if err != nil {
 				t.Fatalf("ClaimAuthorized: %v", err)
 			}
@@ -169,7 +226,7 @@ func TestClaimAuthorizedExpiredIngressDeniesAndExpiredCommandTerminalizes(t *tes
 				claimAt = fixture.command.ExpiresAt
 			}
 			request := fixture.claimRequest("claim-expired", "owner-1", "attempt-expired", claimAt)
-			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 			if err != nil {
 				t.Fatalf("ClaimAuthorized: %v", err)
 			}
@@ -200,16 +257,39 @@ func TestClaimAuthorizedCommitResponseLossAndDuplicateRetryConverge(t *testing.T
 	fixture.store.failAfterCommitNext = errors.New("lost claim commit response")
 	fixture.store.mu.Unlock()
 
-	first, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	first, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil || first.Disposition != CommandClaimAllowed {
 		t.Fatalf("ClaimAuthorized lost response = %#v, err=%v", first, err)
 	}
-	second, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+	second, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 	if err != nil || second.Disposition != CommandClaimAllowed || !reflect.DeepEqual(second.Command, first.Command) {
 		t.Fatalf("ClaimAuthorized duplicate = %#v, err=%v; want %#v", second, err, first)
 	}
 	if second.Command.Retry == nil || second.Command.Retry.AttemptCount != 1 {
 		t.Fatalf("duplicate attempt evidence = %#v, want one attempt", second.Command.Retry)
+	}
+}
+
+func TestClaimAuthorizedRecoversExactTerminalTransitionWitnessAfterCommitResponseLoss(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	request := fixture.claimRequest("claim-lost-terminal-response", "owner-1", "attempt-1", fixture.command.ExpiresAt)
+	fixture.store.mu.Lock()
+	fixture.store.failAfterCommitNext = errors.New("lost terminal claim commit response")
+	fixture.store.mu.Unlock()
+
+	first, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err != nil || first.Disposition != CommandClaimDenied || first.Command.Terminal == nil {
+		t.Fatalf("ClaimAuthorized lost terminal response = %#v, err=%v", first, err)
+	}
+	if !first.HasTerminalTransitionWitness() {
+		t.Fatal("recovered terminal transition is missing its causal witness")
+	}
+	second, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err != nil || second.Disposition != CommandClaimDenied || !reflect.DeepEqual(second.Command, first.Command) {
+		t.Fatalf("ClaimAuthorized terminal duplicate = %#v, err=%v; want %#v", second, err, first)
+	}
+	if !second.HasTerminalTransitionWitness() {
+		t.Fatal("prepared terminal duplicate is missing its repair witness")
 	}
 }
 
@@ -227,7 +307,7 @@ func TestClaimAuthorizedLeaseRaceHasOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
+			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
 			results <- result
 			errs <- err
 		}()
@@ -252,14 +332,14 @@ func TestClaimAuthorizedLeaseRaceHasOneWinner(t *testing.T) {
 func TestClaimAuthorizedExpiredInFlightLeaseRemainsBusyWithoutDefiniteNotEnteredEvidence(t *testing.T) {
 	fixture := newAuthorizedClaimFixture(t)
 	firstRequest := fixture.claimRequest("claim-first", "owner-first", "attempt-first", fixture.now.Add(time.Second))
-	first, err := fixture.repository.ClaimAuthorized(t.Context(), firstRequest, fixture.authority)
+	first, err := fixture.repository.ClaimAuthorized(t.Context(), firstRequest, fixture.authority, fixture.authority)
 	if err != nil || first.Disposition != CommandClaimAllowed {
 		t.Fatalf("first ClaimAuthorized = %#v, err=%v; want allowed", first, err)
 	}
 
 	reclaimAt := firstRequest.LeaseUntil.Add(time.Second)
 	replacementRequest := fixture.claimRequest("claim-replacement", "owner-replacement", "attempt-replacement", reclaimAt)
-	replacement, err := fixture.repository.ClaimAuthorized(t.Context(), replacementRequest, fixture.authority)
+	replacement, err := fixture.repository.ClaimAuthorized(t.Context(), replacementRequest, fixture.authority, fixture.authority)
 	if err != nil {
 		t.Fatalf("replacement ClaimAuthorized: %v", err)
 	}
@@ -279,7 +359,7 @@ func TestClaimAuthorizedAcceptsCurrentAndPreviousPrincipalSchema(t *testing.T) {
 	for _, schema := range []uint32{NudgePrincipalSchemaVersion, NudgePrincipalSchemaVersion - 1} {
 		fixture := newAuthorizedClaimFixture(t)
 		fixture.authority.setClaimSchema(schema)
-		result, err := fixture.repository.ClaimAuthorized(t.Context(), fixture.claimRequest("claim-schema", "owner", "attempt", fixture.now.Add(time.Second)), fixture.authority)
+		result, err := fixture.repository.ClaimAuthorized(t.Context(), fixture.claimRequest("claim-schema", "owner", "attempt", fixture.now.Add(time.Second)), fixture.authority, fixture.authority)
 		if err != nil || result.Disposition != CommandClaimAllowed {
 			t.Fatalf("schema %d result = %#v, err=%v", schema, result, err)
 		}

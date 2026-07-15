@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestCommandPartitionReaderCompressesForeignSequenceComplement(t *testing.T) {
+func TestCommandPartitionReaderKeepsSparseHighWaterWithoutForeignSequenceMaterialization(t *testing.T) {
 	store := newRepositoryAtomicTestStore()
 	verifier := &repositoryLineageTestVerifier{}
 	repository, err := NewCommandRepository(store, verifier)
@@ -54,13 +54,12 @@ func TestCommandPartitionReaderCompressesForeignSequenceComplement(t *testing.T)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if len(snapshot.PartitionGaps) != 1 {
-		t.Fatalf("partition gap ranges = %#v, want one compressed complement", snapshot.PartitionGaps)
+	if snapshot.SequenceHighWater != sequenceHighWater || snapshot.Coverage != nil || len(snapshot.PartitionGaps) != 0 {
+		t.Fatalf("sparse partition snapshot high-water/coverage = %d/%#v/%#v, want %d/nil/empty", snapshot.SequenceHighWater, snapshot.Coverage, snapshot.PartitionGaps, sequenceHighWater)
 	}
-	if got := snapshot.PartitionGaps[0]; got.FirstSequence != 1 || got.LastSequence != sequenceHighWater-1 {
-		t.Fatalf("partition gap = %#v, want [1,%d]", got, sequenceHighWater-1)
-	}
-	if _, err := BuildCommandIndex(snapshot); err != nil {
-		t.Fatalf("BuildCommandIndex compressed partition snapshot: %v", err)
+	if index, err := BuildCommandIndex(snapshot); err != nil {
+		t.Fatalf("BuildCommandIndex sparse partition snapshot: %v", err)
+	} else if resolved, err := index.Resolve(admitted.Entry.Command.ID); err != nil || !resolved.Found {
+		t.Fatalf("Resolve sparse owned command = %#v, err=%v", resolved, err)
 	}
 }

@@ -1,7 +1,10 @@
 package nudgequeue
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"math"
@@ -84,8 +87,51 @@ type NudgeClaimAuthorizer interface {
 // command for a total disposition. An allowed result is still pre-provider;
 // the effect runner must next pass the separate provider-entry CAS.
 type CommandClaimResult struct {
-	Disposition CommandClaimDisposition
-	Command     Command
+	Disposition               CommandClaimDisposition
+	Command                   Command
+	terminalTransitionWitness commandTerminalTransitionWitness
+}
+
+type commandTerminalTransitionWitness struct {
+	kind   uint8
+	digest [sha256.Size]byte
+}
+
+const (
+	commandTerminalTransitionUnwitnessed uint8 = iota
+	commandTerminalTransitionCommitted
+	commandTerminalTransitionRecovered
+)
+
+// HasTerminalTransitionWitness reports whether this repository call committed
+// or exactly recovered the returned terminal transition. The causal witness is
+// private so callers cannot mint publication authority from public result
+// fields or from a terminal value read out of the command store.
+func (r CommandClaimResult) HasTerminalTransitionWitness() bool {
+	return r.Disposition == CommandClaimDenied && r.Command.Terminal != nil && r.terminalTransitionWitness.provesTransition(r.Command)
+}
+
+func newCommandTerminalTransitionWitness(kind uint8, command Command) commandTerminalTransitionWitness {
+	if kind != commandTerminalTransitionCommitted && kind != commandTerminalTransitionRecovered {
+		return commandTerminalTransitionWitness{}
+	}
+	wire, err := EncodeCommandV1(command)
+	if err != nil {
+		return commandTerminalTransitionWitness{}
+	}
+	return commandTerminalTransitionWitness{kind: kind, digest: sha256.Sum256(wire)}
+}
+
+func (w commandTerminalTransitionWitness) provesTransition(command Command) bool {
+	if w.kind != commandTerminalTransitionCommitted && w.kind != commandTerminalTransitionRecovered {
+		return false
+	}
+	wire, err := EncodeCommandV1(command)
+	if err != nil {
+		return false
+	}
+	digest := sha256.Sum256(wire)
+	return subtle.ConstantTimeCompare(w.digest[:], digest[:]) == 1
 }
 
 // ClaimAuthorized atomically re-reads one durable command, revalidates current
@@ -95,12 +141,15 @@ type CommandClaimResult struct {
 // committed Claim+Retry is durable may-enter permission: a crash can occur
 // after provider entry but before later evidence is recorded, so lease expiry
 // alone never releases the in-flight command for an automatic competing claim.
-func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request CommandClaimRequest, authorizer NudgeClaimAuthorizer) (CommandClaimResult, error) {
+func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request CommandClaimRequest, authorizer NudgeClaimAuthorizer, terminalAuthority TrustedCommandPartitionTerminalIntentAuthority) (CommandClaimResult, error) {
 	if r == nil || isNilRepositoryDependency(r.reader.store) || isNilRepositoryDependency(r.reader.verifier) {
 		return CommandClaimResult{}, fmt.Errorf("%w: command repository is not fully bound", ErrCommandClaimInvalid)
 	}
 	if isNilRepositoryDependency(authorizer) {
 		return CommandClaimResult{}, fmt.Errorf("%w: claim authorizer is required", ErrCommandClaimInvalid)
+	}
+	if isNilRepositoryDependency(terminalAuthority) {
+		return CommandClaimResult{}, fmt.Errorf("%w: terminal intent authority is required", ErrCommandClaimInvalid)
 	}
 	if err := validateCommandClaimRequest(request); err != nil {
 		return CommandClaimResult{}, err
@@ -150,6 +199,12 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 
 		if disposition, done := existingCommandClaimDisposition(command, request); done {
 			result.Disposition = disposition
+			if disposition == CommandClaimDenied && command.Terminal != nil {
+				if err := verifyCommandPartitionTerminal(ctx, terminalAuthority, command, request.Partition); err != nil {
+					return err
+				}
+				result.terminalTransitionWitness = newCommandTerminalTransitionWitness(commandTerminalTransitionRecovered, command)
+			}
 			return nil
 		}
 		if command.State != CommandStatePending {
@@ -166,9 +221,18 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 			if err != nil {
 				return err
 			}
-			updated, err := writeCommandTransition(tx, state, row, terminalized)
+			if state.Revision == math.MaxUint64 {
+				return &CommandRepositorySchemaSkewError{Field: "repository revision", Found: fmt.Sprint(state.Revision), Want: "allocatable uint64"}
+			}
+			terminalized.Order.Revision = state.Revision + 1
+			intent, err := prepareCommandPartitionTerminal(ctx, terminalAuthority, state.Revision, command, terminalized, request.Partition)
 			if err != nil {
 				return err
+			}
+			updated, err := writeCommandTransition(tx, state, row, terminalized)
+			if err != nil {
+				abortErr := abortCommandPartitionTerminal(context.WithoutCancel(ctx), terminalAuthority, intent)
+				return errors.Join(err, abortErr)
 			}
 			result = CommandClaimResult{Disposition: CommandClaimDenied, Command: updated}
 			mutated = true
@@ -217,9 +281,18 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 			if err != nil {
 				return err
 			}
-			updated, err := writeCommandTransition(tx, state, row, terminalized)
+			if state.Revision == math.MaxUint64 {
+				return &CommandRepositorySchemaSkewError{Field: "repository revision", Found: fmt.Sprint(state.Revision), Want: "allocatable uint64"}
+			}
+			terminalized.Order.Revision = state.Revision + 1
+			intent, err := prepareCommandPartitionTerminal(ctx, terminalAuthority, state.Revision, command, terminalized, request.Partition)
 			if err != nil {
 				return err
+			}
+			updated, err := writeCommandTransition(tx, state, row, terminalized)
+			if err != nil {
+				abortErr := abortCommandPartitionTerminal(context.WithoutCancel(ctx), terminalAuthority, intent)
+				return errors.Join(err, abortErr)
 			}
 			result = CommandClaimResult{Disposition: CommandClaimDenied, Command: updated}
 			mutated = true
@@ -239,14 +312,19 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 		return nil
 	})
 	if err != nil {
-		if recovered, ok := r.resolveAmbiguousClaim(ctx, request); ok {
-			return recovered, nil
+		if mutated {
+			if recovered, ok := r.resolveAmbiguousClaim(ctx, result); ok {
+				return recovered, nil
+			}
 		}
 		return CommandClaimResult{}, err
 	}
 	if mutated {
 		if _, err := r.repairLineage(ctx, "post-claim lineage advance"); err != nil {
 			return CommandClaimResult{}, err
+		}
+		if result.Command.Terminal != nil {
+			result.terminalTransitionWitness = newCommandTerminalTransitionWitness(commandTerminalTransitionCommitted, result.Command)
 		}
 	}
 	if authorityErr != nil {
@@ -453,20 +531,35 @@ func writeCommandTransition(tx beads.AtomicReadWriteTx, state CommandRepositoryS
 	return cloneCommandValue(*entry.Command), nil
 }
 
-func (r *CommandRepository) resolveAmbiguousClaim(ctx context.Context, request CommandClaimRequest) (CommandClaimResult, bool) {
+func (r *CommandRepository) resolveAmbiguousClaim(ctx context.Context, expected CommandClaimResult) (CommandClaimResult, bool) {
 	if _, err := r.repairLineage(ctx, "ambiguous claim lineage repair"); err != nil {
 		return CommandClaimResult{}, false
 	}
-	resolution, err := r.Get(ctx, request.CommandID)
+	resolution, err := r.Get(ctx, expected.Command.ID)
 	if err != nil || !resolution.Found || resolution.Entry.Command == nil {
 		return CommandClaimResult{}, false
 	}
 	command := cloneCommandValue(*resolution.Entry.Command)
-	disposition, done := existingCommandClaimDisposition(command, request)
-	if !done {
+	if !sameCommandTransition(command, expected.Command) {
 		return CommandClaimResult{}, false
 	}
-	return CommandClaimResult{Disposition: disposition, Command: command}, true
+	expected.Command = command
+	if command.Terminal != nil {
+		expected.terminalTransitionWitness = newCommandTerminalTransitionWitness(commandTerminalTransitionRecovered, command)
+	}
+	return expected, true
+}
+
+func sameCommandTransition(left, right Command) bool {
+	leftWire, err := EncodeCommandV1(left)
+	if err != nil {
+		return false
+	}
+	rightWire, err := EncodeCommandV1(right)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(leftWire, rightWire)
 }
 
 func cloneCommandValue(command Command) Command {

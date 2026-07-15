@@ -109,6 +109,46 @@ func TestCommandPartitionReaderPushesRouteBelowGlobalActiveBound(t *testing.T) {
 	}
 }
 
+func TestCommandPartitionReaderDoesNotReadGlobalTerminalHistory(t *testing.T) {
+	store := &partitionIndexContractStore{
+		repositoryAtomicTestStore: newRepositoryAtomicTestStore(),
+	}
+	repository := newVerifiedCommandRepository(t, store)
+	authority := newTestNudgeAuthority()
+	now := time.Date(2026, 7, 15, 12, 45, 0, 0, time.UTC)
+	ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+	}
+	admitted, err := ingress.Admit(t.Context(), validNudgeIngressRequest(now))
+	if err != nil || admitted.Entry.Command == nil {
+		t.Fatalf("Admit = %#v, err=%v", admitted, err)
+	}
+
+	reader, err := NewCommandPartitionReader(repository, admitted.Partition, ingress)
+	if err != nil {
+		t.Fatalf("NewCommandPartitionReader: %v", err)
+	}
+	snapshot, err := reader.Snapshot(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if checkpointReads, terminalPages := store.globalTerminalHistoryReadStats(); checkpointReads != 0 || terminalPages != 0 {
+		t.Fatalf("city-local snapshot global terminal reads = checkpoint:%d pages:%d, want zero", checkpointReads, terminalPages)
+	}
+	if snapshot.Coverage != nil || len(snapshot.PartitionGaps) != 0 {
+		t.Fatalf("city-local snapshot copied global dense coverage: coverage=%#v gaps=%#v", snapshot.Coverage, snapshot.PartitionGaps)
+	}
+	if _, err := BuildCommandIndex(snapshot); err != nil {
+		t.Fatalf("BuildCommandIndex(trusted sparse partition snapshot): %v", err)
+	}
+	tampered := snapshot
+	tampered.SequenceHighWater++
+	if _, err := BuildCommandIndex(tampered); err == nil {
+		t.Fatal("BuildCommandIndex accepted a sparse partition snapshot changed after authority verification")
+	}
+}
+
 func TestCommandPartitionReaderRejectsStoreForgedPartitionProjection(t *testing.T) {
 	store := newRepositoryAtomicTestStore()
 	repository := newVerifiedCommandRepository(t, store)
@@ -219,6 +259,7 @@ func TestCommandPartitionReaderExactReadRejectsUnpublishedTerminalTransition(t *
 	result, err := fixture.repository.ClaimAuthorized(
 		t.Context(),
 		fixture.claimRequest("claim-unpublished-terminal", "owner-unpublished-terminal", "attempt-unpublished-terminal", fixture.now.Add(time.Second)),
+		fixture.authority,
 		fixture.authority,
 	)
 	if err != nil || result.Disposition != CommandClaimDenied || result.Command.Terminal == nil {
@@ -391,6 +432,8 @@ type partitionIndexContractStore struct {
 	unscopedActivePages  int
 	scopedActivePages    int
 	materializedRows     int
+	checkpointReads      int
+	terminalPages        int
 }
 
 func (s *partitionIndexContractStore) AtomicReadSnapshot(ctx context.Context, fn func(beads.AtomicReadSnapshotTx) error) error {
@@ -405,12 +448,32 @@ func (s *partitionIndexContractStore) partitionReadStats() (unscoped, scoped, ma
 	return s.unscopedActivePages, s.scopedActivePages, s.materializedRows
 }
 
+func (s *partitionIndexContractStore) globalTerminalHistoryReadStats() (checkpointReads, terminalPages int) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	return s.checkpointReads, s.terminalPages
+}
+
 type partitionIndexContractTx struct {
 	beads.AtomicReadSnapshotTx
 	store *partitionIndexContractStore
 }
 
+func (tx *partitionIndexContractTx) GetIssue(id string) (beads.Bead, error) {
+	if id == commandRepositoryCheckpointID {
+		tx.store.statsMu.Lock()
+		tx.store.checkpointReads++
+		tx.store.statsMu.Unlock()
+	}
+	return tx.AtomicReadSnapshotTx.GetIssue(id)
+}
+
 func (tx *partitionIndexContractTx) ListHistoryPage(query beads.AtomicReadSnapshotPageQuery) (beads.AtomicReadSnapshotPage, error) {
+	if query.Status == "closed" {
+		tx.store.statsMu.Lock()
+		tx.store.terminalPages++
+		tx.store.statsMu.Unlock()
+	}
 	if query.Status != "open" {
 		return tx.AtomicReadSnapshotTx.ListHistoryPage(query)
 	}

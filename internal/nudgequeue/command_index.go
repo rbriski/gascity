@@ -3,6 +3,7 @@ package nudgequeue
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,7 +20,8 @@ const (
 	MaxCommandIndexPageSize = 256
 	// MaxCommandIndexReplayHistory bounds the in-memory duplicate-detection
 	// window. Older replays fail closed and require an independent audit.
-	MaxCommandIndexReplayHistory = 256
+	MaxCommandIndexReplayHistory        = 256
+	commandIndexPartitionSnapshotDomain = "gascity.command-index.trusted-partition-snapshot.v1"
 )
 
 var (
@@ -85,9 +87,11 @@ type CommandIndexResolution struct {
 	Found                  bool
 }
 
-// CommandIndexSnapshot is the complete authoritative input to an independent
-// rebuild. SequenceHighWater and typed tombstones keep deleted identities and
-// sequences from becoming reusable after reconstruction.
+// CommandIndexSnapshot is the authoritative input to an independent rebuild.
+// Repository snapshots are globally dense. A CommandPartitionReader instead
+// returns only its authority-proven active set and seals that exact sparse
+// projection with a private witness; global terminal history and foreign
+// sequence gaps never enter the city-local hot path.
 type CommandIndexSnapshot struct {
 	Store             CommandStoreBinding
 	Entries           []CommandIndexEntry
@@ -96,6 +100,7 @@ type CommandIndexSnapshot struct {
 	Coverage          *CommandIndexCompactedCoverage
 	Revision          uint64
 	SequenceHighWater uint64
+	partitionWitness  [sha256.Size]byte
 }
 
 // CommandIndexPartitionGap certifies one inclusive range of sequences owned by
@@ -201,8 +206,56 @@ func BuildCommandIndex(snapshot CommandIndexSnapshot) (*CommandIndex, error) {
 	}, nil
 }
 
+func sealCommandIndexPartitionSnapshot(snapshot CommandIndexSnapshot) (CommandIndexSnapshot, error) {
+	if snapshot.Coverage != nil || len(snapshot.Tombstones) != 0 || len(snapshot.PartitionGaps) != 0 {
+		return CommandIndexSnapshot{}, errors.New("trusted sparse partition snapshot carries global coverage")
+	}
+	digest, err := commandIndexPartitionSnapshotDigest(snapshot)
+	if err != nil {
+		return CommandIndexSnapshot{}, err
+	}
+	snapshot.partitionWitness = digest
+	return snapshot, nil
+}
+
+func validateCommandIndexPartitionSnapshot(snapshot CommandIndexSnapshot) (bool, error) {
+	if snapshot.partitionWitness == ([sha256.Size]byte{}) {
+		return false, nil
+	}
+	if snapshot.Coverage != nil || len(snapshot.Tombstones) != 0 || len(snapshot.PartitionGaps) != 0 {
+		return false, errors.New("trusted sparse partition snapshot carries global coverage")
+	}
+	digest, err := commandIndexPartitionSnapshotDigest(snapshot)
+	if err != nil {
+		return false, err
+	}
+	if subtle.ConstantTimeCompare(snapshot.partitionWitness[:], digest[:]) != 1 {
+		return false, errors.New("trusted sparse partition snapshot changed after authority verification")
+	}
+	return true, nil
+}
+
+func commandIndexPartitionSnapshotDigest(snapshot CommandIndexSnapshot) ([sha256.Size]byte, error) {
+	snapshot.partitionWitness = [sha256.Size]byte{}
+	wire, err := json.Marshal(snapshot)
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("fingerprinting trusted sparse partition snapshot: %w", err)
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(commandIndexPartitionSnapshotDomain))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(wire)
+	var result [sha256.Size]byte
+	copy(result[:], digest.Sum(nil))
+	return result, nil
+}
+
 func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexProjection, error) {
 	if err := ValidateCommandStoreBinding(snapshot.Store); err != nil {
+		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
+	}
+	sparsePartition, err := validateCommandIndexPartitionSnapshot(snapshot)
+	if err != nil {
 		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
 	}
 	projection := commandIndexProjection{
@@ -213,9 +266,11 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		replays:        make(map[uint64][sha256.Size]byte, min(len(snapshot.Entries)+len(snapshot.Tombstones), MaxCommandIndexReplayHistory)),
 		coverage:       cloneCommandIndexCoverage(snapshot.Coverage),
 	}
-	_, err := validateCommandIndexCoverage(snapshot.Coverage, snapshot.Revision, snapshot.SequenceHighWater)
-	if err != nil {
-		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
+	if !sparsePartition {
+		_, err := validateCommandIndexCoverage(snapshot.Coverage, snapshot.Revision, snapshot.SequenceHighWater)
+		if err != nil {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
+		}
 	}
 	exactSequenceOwner := make(map[uint64]string, len(snapshot.Entries)+len(snapshot.Tombstones))
 	intervals := make([]commandIndexSequenceInterval, 0, len(snapshot.Entries)+len(snapshot.Tombstones)+len(snapshot.PartitionGaps)+len(commandIndexCoverageRanges(snapshot.Coverage)))
@@ -301,8 +356,10 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 	if maxSequence > snapshot.SequenceHighWater {
 		return commandIndexProjection{}, fmt.Errorf("building nudge command index: record sequence %d exceeds authoritative high-water %d", maxSequence, snapshot.SequenceHighWater)
 	}
-	if err := validateDenseCommandIndexIntervals(intervals, snapshot.SequenceHighWater); err != nil {
-		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
+	if !sparsePartition {
+		if err := validateDenseCommandIndexIntervals(intervals, snapshot.SequenceHighWater); err != nil {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
+		}
 	}
 	trimCommandIndexReplays(projection.replays, snapshot.Revision)
 	return projection, nil
@@ -1117,6 +1174,7 @@ func (idx *CommandIndex) CompleteAudit(expectedRevision uint64, snapshot Command
 	if err != nil {
 		return false, fmt.Errorf("completing nudge command index audit: %w", err)
 	}
+	sparsePartition := snapshot.partitionWitness != ([sha256.Size]byte{})
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -1158,6 +1216,9 @@ func (idx *CommandIndex) CompleteAudit(expectedRevision uint64, snapshot Command
 			continue
 		}
 		if current.Command != nil && commandIsTerminalState(current.Command.State) && commandIndexCoverageContainsSequence(projection.coverage, current.Command.Order.Sequence) {
+			continue
+		}
+		if sparsePartition {
 			continue
 		}
 		return false, fmt.Errorf("completing nudge command index audit: command %q disappeared without a tombstone", commandID)

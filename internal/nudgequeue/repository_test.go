@@ -1154,6 +1154,7 @@ type repositoryAtomicTestStore struct {
 	metadata            map[string]string
 	failNext            error
 	failAfterCommitNext error
+	failNextUpdate      error
 	nextClock           time.Time
 	afterList           func()
 	createCalls         int
@@ -1244,6 +1245,11 @@ func (s *repositoryAtomicTestStore) AtomicReadWrite(ctx context.Context, _ strin
 		onSetMetadata: func() {
 			s.setMetadataCalls++
 		},
+		onUpdate: func() error {
+			err := s.failNextUpdate
+			s.failNextUpdate = nil
+			return err
+		},
 	}
 	if err := fn(tx); err != nil {
 		return err
@@ -1295,6 +1301,12 @@ func (s *repositoryAtomicTestStore) failNextCommit(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failNext = err
+}
+
+func (s *repositoryAtomicTestStore) failNextCommandUpdate(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failNextUpdate = err
 }
 
 func (s *repositoryAtomicTestStore) hasRow(id string) bool {
@@ -1388,6 +1400,7 @@ type repositoryAtomicTestTx struct {
 	afterList      func()
 	onCreate       func()
 	onSetMetadata  func()
+	onUpdate       func() error
 	onSnapshotPage func(beads.AtomicReadSnapshotPageQuery)
 }
 
@@ -1522,6 +1535,11 @@ func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {
 }
 
 func (tx *repositoryAtomicTestTx) Update(id string, opts beads.UpdateOpts) error {
+	if tx.onUpdate != nil {
+		if err := tx.onUpdate(); err != nil {
+			return err
+		}
+	}
 	row, ok := tx.rows[id]
 	if !ok {
 		return beads.ErrNotFound

@@ -42,12 +42,12 @@ func TestCommandPartitionReaderIsolatesTwoCitiesSharingOneRepository(t *testing.
 	if err != nil {
 		t.Fatalf("city A Snapshot: %v", err)
 	}
-	assertPartitionSnapshot(t, snapshotA, []string{commandA1.ID, commandA2.ID}, []uint64{commandB.Order.Sequence})
+	assertSparsePartitionSnapshot(t, snapshotA, []string{commandA1.ID, commandA2.ID})
 	snapshotB, err := readerB.Snapshot(t.Context(), 3)
 	if err != nil {
 		t.Fatalf("city B Snapshot: %v", err)
 	}
-	assertPartitionSnapshot(t, snapshotB, []string{commandB.ID}, []uint64{commandA1.Order.Sequence, commandA2.Order.Sequence})
+	assertSparsePartitionSnapshot(t, snapshotB, []string{commandB.ID})
 
 	if index, err := BuildCommandIndex(snapshotA); err != nil {
 		t.Fatalf("BuildCommandIndex(city A): %v", err)
@@ -70,7 +70,7 @@ func TestCommandPartitionReaderIsolatesTwoCitiesSharingOneRepository(t *testing.
 	}
 }
 
-func TestCommandPartitionReaderPreservesCompactedCoverageAcrossCities(t *testing.T) {
+func TestCommandPartitionReaderOmitsGlobalCompactedCoverageAcrossCities(t *testing.T) {
 	store := newRepositoryAtomicTestStore()
 	repo := newVerifiedCommandRepository(t, store)
 	state, err := repo.State(t.Context())
@@ -115,7 +115,7 @@ func TestCommandPartitionReaderPreservesCompactedCoverageAcrossCities(t *testing
 	}
 
 	commandA := createPartitionedCommandForTest(t, repo, state.Store, resolver, cityA, "request-a", "session-a", "caller-city-a")
-	commandB := createPartitionedCommandForTest(t, repo, state.Store, resolver, cityB, "request-b", "session-b", "caller-city-b")
+	_ = createPartitionedCommandForTest(t, repo, state.Store, resolver, cityB, "request-b", "session-b", "caller-city-b")
 	readerA, err := NewCommandPartitionReader(repo, cityA, resolver)
 	if err != nil {
 		t.Fatalf("NewCommandPartitionReader(city A): %v", err)
@@ -124,10 +124,7 @@ func TestCommandPartitionReaderPreservesCompactedCoverageAcrossCities(t *testing
 	if err != nil {
 		t.Fatalf("city A Snapshot: %v", err)
 	}
-	assertPartitionSnapshot(t, snapshot, []string{commandA.ID}, []uint64{commandB.Order.Sequence})
-	if snapshot.Coverage == nil || snapshot.Coverage.TerminalCount != 1 || len(snapshot.Coverage.Ranges) != 1 || snapshot.Coverage.Ranges[0] != (CommandIndexSequenceRange{FirstSequence: terminal.Order.Sequence, LastSequence: terminal.Order.Sequence}) {
-		t.Fatalf("city A compacted coverage = %#v, want terminal sequence %d", snapshot.Coverage, terminal.Order.Sequence)
-	}
+	assertSparsePartitionSnapshot(t, snapshot, []string{commandA.ID})
 }
 
 func TestCommandPartitionReaderSameTrustedCityReopenIsStable(t *testing.T) {
@@ -512,7 +509,7 @@ func createPartitionedCommandForTest(t *testing.T, repo *CommandRepository, bind
 	return *entry.Command
 }
 
-func assertPartitionSnapshot(t *testing.T, snapshot CommandIndexSnapshot, wantIDs []string, wantGaps []uint64) {
+func assertSparsePartitionSnapshot(t *testing.T, snapshot CommandIndexSnapshot, wantIDs []string) {
 	t.Helper()
 	gotIDs := make([]string, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
@@ -521,17 +518,11 @@ func assertPartitionSnapshot(t *testing.T, snapshot CommandIndexSnapshot, wantID
 		}
 		gotIDs = append(gotIDs, entry.Command.ID)
 	}
-	gotGaps := make([]uint64, 0, len(snapshot.PartitionGaps))
-	for _, gap := range snapshot.PartitionGaps {
-		for sequence := gap.FirstSequence; sequence <= gap.LastSequence; sequence++ {
-			gotGaps = append(gotGaps, sequence)
-			if sequence == ^uint64(0) {
-				break
-			}
-		}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("partition snapshot IDs = %v, want %v", gotIDs, wantIDs)
 	}
-	if !reflect.DeepEqual(gotIDs, wantIDs) || !reflect.DeepEqual(gotGaps, wantGaps) {
-		t.Fatalf("partition snapshot IDs/gaps = %v/%v, want %v/%v", gotIDs, gotGaps, wantIDs, wantGaps)
+	if snapshot.Coverage != nil || len(snapshot.Tombstones) != 0 || len(snapshot.PartitionGaps) != 0 {
+		t.Fatalf("partition snapshot carries global coverage: coverage=%#v tombstones=%#v gaps=%#v", snapshot.Coverage, snapshot.Tombstones, snapshot.PartitionGaps)
 	}
 }
 
@@ -612,8 +603,6 @@ func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionCoverage(ctx
 	defer l.mu.Unlock()
 	var (
 		sequenceHighWater uint64
-		terminalRanges    []CommandIndexSequenceRange
-		terminalCount     uint64
 		admittedCount     uint64
 		active            []CommandPartitionCoverageEntry
 	)
@@ -625,11 +614,6 @@ func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionCoverage(ctx
 		sequenceHighWater = max(sequenceHighWater, record.sequence)
 		terminal := record.terminalRevision != 0 && record.terminalRevision <= request.RepositoryRevision
 		if terminal {
-			var added bool
-			terminalRanges, added = addCommandRepositoryCheckpointSequence(terminalRanges, record.sequence)
-			if added {
-				terminalCount++
-			}
 			continue
 		}
 		if record.partition == request.Partition {
@@ -640,16 +624,13 @@ func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionCoverage(ctx
 	if l.syntheticAdmittedCount != 0 {
 		admittedCount = l.syntheticAdmittedCount
 	}
-	if sequenceHighWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater || terminalCount != request.TerminalCount ||
-		!reflect.DeepEqual(terminalRanges, request.TerminalRanges) {
+	if sequenceHighWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater {
 		return CommandPartitionCoverage{}, errors.New("test authority coverage does not match repository snapshot")
 	}
 	return CommandPartitionCoverage{
 		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
 		SequenceHighWater: request.SequenceHighWater, AdmittedCount: admittedCount,
-		TerminalRanges: append([]CommandIndexSequenceRange(nil), request.TerminalRanges...),
-		TerminalCount:  request.TerminalCount, Partition: request.Partition,
-		ActiveEntries: active,
+		Partition: request.Partition, ActiveEntries: active,
 	}, nil
 }
 

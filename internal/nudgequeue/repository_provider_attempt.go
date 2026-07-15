@@ -49,15 +49,25 @@ type CommandCompletionRequest struct {
 // CommandCompletionResult returns the authoritative command observed or
 // committed by [CommandRepository.CompleteProviderAttempt].
 type CommandCompletionResult struct {
-	Disposition CommandCompletionDisposition
-	Command     Command
+	Disposition               CommandCompletionDisposition
+	Command                   Command
+	terminalTransitionWitness commandTerminalTransitionWitness
+}
+
+// HasTerminalTransitionWitness reports whether this repository call committed
+// or exactly recovered the returned provider-attempt terminal. The private
+// witness prevents callers from turning public result fields into publication
+// authority.
+func (r CommandCompletionResult) HasTerminalTransitionWitness() bool {
+	return (r.Disposition == CommandCompletionRecorded || r.Disposition == CommandCompletionAlreadyRecorded) &&
+		r.Command.Terminal != nil && r.terminalTransitionWitness.provesTransition(r.Command)
 }
 
 // CompleteProviderAttempt atomically makes an exact in-flight provider result
 // terminal. The command wire, closed-row status, and repository revision share
 // one backing transaction; a response-loss retry resolves the existing result
 // instead of writing a second terminal outcome.
-func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request CommandCompletionRequest) (CommandCompletionResult, error) {
+func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request CommandCompletionRequest, partition TrustedCityPartition, terminalAuthority TrustedCommandPartitionTerminalIntentAuthority) (CommandCompletionResult, error) {
 	if r == nil {
 		return CommandCompletionResult{}, fmt.Errorf("%w: repository is nil", ErrCommandProviderAttemptInvalid)
 	}
@@ -66,6 +76,12 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 	}
 	if err := validateCommandCompletionRequest(request); err != nil {
 		return CommandCompletionResult{}, err
+	}
+	if !partition.valid() {
+		return CommandCompletionResult{}, fmt.Errorf("%w: trusted city partition is required", ErrCommandProviderAttemptInvalid)
+	}
+	if isNilRepositoryDependency(terminalAuthority) {
+		return CommandCompletionResult{}, fmt.Errorf("%w: terminal intent authority is required", ErrCommandProviderAttemptInvalid)
 	}
 	before, err := r.State(ctx)
 	if err != nil {
@@ -105,6 +121,10 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 		command := *entry.Command
 		if commandTerminalAttemptMatches(command, request) {
 			result = CommandCompletionResult{Disposition: CommandCompletionAlreadyRecorded, Command: command}
+			if err := verifyCommandPartitionTerminal(ctx, terminalAuthority, command, partition); err != nil {
+				return err
+			}
+			result.terminalTransitionWitness = newCommandTerminalTransitionWitness(commandTerminalTransitionRecovered, command)
 			return nil
 		}
 		if !commandInFlightAttemptMatches(command, request) {
@@ -142,6 +162,10 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrCommandProviderAttemptInvalid, err)
 		}
+		intent, err := prepareCommandPartitionTerminal(ctx, terminalAuthority, state.Revision, command, completed, partition)
+		if err != nil {
+			return err
+		}
 		closed := "closed"
 		if err := tx.Update(completed.ID, beads.UpdateOpts{
 			Status: &closed,
@@ -149,18 +173,26 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 				commandRecordWireMetadataKey: string(wire),
 			},
 		}); err != nil {
-			return fmt.Errorf("updating terminal provider-attempt command %q: %w", completed.ID, err)
+			abortErr := abortCommandPartitionTerminal(context.WithoutCancel(ctx), terminalAuthority, intent)
+			return errors.Join(fmt.Errorf("updating terminal provider-attempt command %q: %w", completed.ID, err), abortErr)
 		}
 		if err := setCommandRepositoryHighWaters(tx, completed.Order.Revision, state.SequenceHighWater); err != nil {
-			return err
+			abortErr := abortCommandPartitionTerminal(context.WithoutCancel(ctx), terminalAuthority, intent)
+			return errors.Join(err, abortErr)
 		}
 		mutated = true
-		result = CommandCompletionResult{Disposition: CommandCompletionRecorded, Command: completed}
+		result = CommandCompletionResult{
+			Disposition:               CommandCompletionRecorded,
+			Command:                   completed,
+			terminalTransitionWitness: newCommandTerminalTransitionWitness(commandTerminalTransitionCommitted, completed),
+		}
 		return nil
 	})
 	if err != nil {
-		if recovered, ok := r.resolveCompletedProviderAttempt(ctx, request); ok {
-			return recovered, nil
+		if mutated {
+			if recovered, ok := r.resolveCompletedProviderAttempt(ctx, result); ok {
+				return recovered, nil
+			}
 		}
 		return CommandCompletionResult{}, err
 	}
@@ -237,17 +269,21 @@ func commandTerminalAttemptMatches(command Command, request CommandCompletionReq
 		command.Retry.AttemptID == request.AttemptID
 }
 
-func (r *CommandRepository) resolveCompletedProviderAttempt(ctx context.Context, request CommandCompletionRequest) (CommandCompletionResult, bool) {
+func (r *CommandRepository) resolveCompletedProviderAttempt(ctx context.Context, expected CommandCompletionResult) (CommandCompletionResult, bool) {
 	if _, err := r.repairLineage(ctx, "ambiguous completion lineage repair"); err != nil {
 		return CommandCompletionResult{}, false
 	}
-	resolved, err := r.Get(ctx, request.CommandID)
+	resolved, err := r.Get(ctx, expected.Command.ID)
 	if err != nil || !resolved.Found || resolved.Entry.Command == nil {
 		return CommandCompletionResult{}, false
 	}
 	command := *resolved.Entry.Command
-	if !commandTerminalAttemptMatches(command, request) {
+	if !sameCommandTransition(command, expected.Command) {
 		return CommandCompletionResult{}, false
 	}
-	return CommandCompletionResult{Disposition: CommandCompletionAlreadyRecorded, Command: command}, true
+	return CommandCompletionResult{
+		Disposition:               CommandCompletionAlreadyRecorded,
+		Command:                   command,
+		terminalTransitionWitness: newCommandTerminalTransitionWitness(commandTerminalTransitionRecovered, command),
+	}, true
 }

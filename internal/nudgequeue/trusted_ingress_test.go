@@ -2,7 +2,9 @@ package nudgequeue
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -203,6 +205,8 @@ type testNudgeAuthority struct {
 	claimErr         error
 	claimRequests    []NudgeClaimAuthorizationRequest
 	coverage         *testCommandPartitionCoverageLedger
+	terminalIntents  map[CommandPartitionTerminalIntent]struct{}
+	finalized        map[string]CommandPartitionTerminalResolution
 }
 
 func newTestNudgeAuthority() *testNudgeAuthority {
@@ -213,6 +217,8 @@ func newTestNudgeAuthority() *testNudgeAuthority {
 		claimDisposition: NudgeAuthorizationAllowed,
 		claimSchema:      NudgePrincipalSchemaVersion,
 		coverage:         newTestCommandPartitionCoverageLedger(),
+		terminalIntents:  make(map[CommandPartitionTerminalIntent]struct{}),
+		finalized:        make(map[string]CommandPartitionTerminalResolution),
 	}
 }
 
@@ -263,7 +269,128 @@ func (a *testNudgeAuthority) RecordCommandPartitionAdmission(ctx context.Context
 }
 
 func (a *testNudgeAuthority) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
-	return a.coverage.RecordCommandPartitionTerminal(ctx, terminal)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var prepared *CommandPartitionTerminalIntent
+	for intent := range a.terminalIntents {
+		if intent.Store == terminal.Store && intent.RepositoryRevision == terminal.RepositoryRevision &&
+			intent.CommandID == terminal.CommandID && intent.Sequence == terminal.Sequence && intent.Partition == terminal.Partition {
+			preparedIntent := intent
+			prepared = &preparedIntent
+			break
+		}
+	}
+	if prepared == nil {
+		finalized, found := a.finalized[terminal.CommandID]
+		if !found || finalized.Store != terminal.Store || finalized.RepositoryRevision != terminal.RepositoryRevision ||
+			finalized.Sequence != terminal.Sequence || finalized.Partition != terminal.Partition {
+			return errors.New("test terminal has no exact prepared intent")
+		}
+		return a.coverage.RecordCommandPartitionTerminal(ctx, terminal)
+	}
+	if err := a.coverage.RecordCommandPartitionTerminal(ctx, terminal); err != nil {
+		return err
+	}
+	a.finalized[terminal.CommandID] = CommandPartitionTerminalResolution{
+		Store: prepared.Store, RepositoryRevision: prepared.RepositoryRevision, CommandID: prepared.CommandID,
+		Sequence: prepared.Sequence, Partition: prepared.Partition, CommandDigest: prepared.CommandDigest,
+	}
+	delete(a.terminalIntents, *prepared)
+	return nil
+}
+
+func (a *testNudgeAuthority) PrepareCommandPartitionTerminal(_ context.Context, intent CommandPartitionTerminalIntent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for existing := range a.terminalIntents {
+		if existing.CommandID == intent.CommandID {
+			if existing == intent {
+				return nil
+			}
+			return errors.New("conflicting test terminal intent")
+		}
+	}
+	a.terminalIntents[intent] = struct{}{}
+	return nil
+}
+
+func (a *testNudgeAuthority) AbortCommandPartitionTerminal(_ context.Context, intent CommandPartitionTerminalIntent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, found := a.terminalIntents[intent]; found {
+		delete(a.terminalIntents, intent)
+		return nil
+	}
+	if _, found := a.finalized[intent.CommandID]; found {
+		return errors.New("test terminal intent already finalized")
+	}
+	return nil
+}
+
+func (a *testNudgeAuthority) VerifyCommandPartitionTerminal(_ context.Context, resolution CommandPartitionTerminalResolution) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for intent := range a.terminalIntents {
+		if intent.Store == resolution.Store && intent.RepositoryRevision == resolution.RepositoryRevision &&
+			intent.CommandID == resolution.CommandID && intent.Sequence == resolution.Sequence &&
+			intent.Partition == resolution.Partition && intent.CommandDigest == resolution.CommandDigest {
+			return nil
+		}
+	}
+	if finalized, found := a.finalized[resolution.CommandID]; !found || finalized != resolution {
+		return errors.New("test terminal intent or finalized digest is missing")
+	}
+	return nil
+}
+
+func (a *testNudgeAuthority) terminalIntentCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.terminalIntents)
+}
+
+func (a *testNudgeAuthority) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionTerminalRecoveryReader) error {
+	state, err := reader.State(ctx)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	intents := make([]CommandPartitionTerminalIntent, 0, len(a.terminalIntents))
+	for intent := range a.terminalIntents {
+		intents = append(intents, intent)
+	}
+	a.mu.Unlock()
+	for _, intent := range intents {
+		resolution, err := reader.Get(ctx, intent.CommandID)
+		if err != nil || !resolution.Found || resolution.Entry.Command == nil {
+			return fmt.Errorf("repairing test terminal intent %q: command unavailable: %w", intent.CommandID, err)
+		}
+		command := *resolution.Entry.Command
+		if command.Terminal != nil && commandIsTerminalState(command.State) {
+			after, err := terminalResolutionForCommand(command, intent.Partition)
+			if err != nil || after.Store != intent.Store || after.RepositoryRevision != intent.RepositoryRevision ||
+				after.CommandID != intent.CommandID || after.Sequence != intent.Sequence || after.CommandDigest != intent.CommandDigest ||
+				state.Revision < intent.RepositoryRevision {
+				return fmt.Errorf("repairing test terminal intent %q: terminal after-state differs", intent.CommandID)
+			}
+			if err := a.RecordCommandPartitionTerminal(ctx, CommandPartitionTerminal{
+				Store: intent.Store, RepositoryRevision: intent.RepositoryRevision, CommandID: intent.CommandID,
+				Sequence: intent.Sequence, Partition: intent.Partition,
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		wire, err := EncodeCommandV1(command)
+		if err != nil || command.Store != intent.Store || command.ID != intent.CommandID || command.Order.Sequence != intent.Sequence ||
+			sha256.Sum256(wire) != intent.BeforeCommandDigest || state.Revision != intent.RepositoryBeforeRevision {
+			return fmt.Errorf("repairing test terminal intent %q: before-state is not safely abortable", intent.CommandID)
+		}
+		if err := a.AbortCommandPartitionTerminal(ctx, intent); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *testNudgeAuthority) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
@@ -372,4 +499,5 @@ var (
 	_ TrustedCityPartitionResolver              = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionCoverageResolver   = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionMembershipRecorder = (*TrustedNudgeIngress)(nil)
+	_ TrustedCommandPartitionTerminalRecovery   = (*TrustedNudgeIngress)(nil)
 )

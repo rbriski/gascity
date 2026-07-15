@@ -71,6 +71,8 @@ type TrustedNudgeAuthority interface {
 	ResolveTrustedNudgeIngress(context.Context, TrustedIngressReference) (NudgeAuthorization, error)
 	TrustedCommandPartitionCoverageResolver
 	TrustedCommandPartitionMembershipRecorder
+	TrustedCommandPartitionTerminalIntentAuthority
+	TrustedCommandPartitionTerminalRecovery
 }
 
 // NudgeIngressRequest is the complete caller-owned nudge payload. Authority and
@@ -303,6 +305,45 @@ func (i *TrustedNudgeIngress) RecordCommandPartitionTerminal(ctx context.Context
 		return fmt.Errorf("%w: trusted ingress membership recorder is not fully bound", ErrNudgeAuthorizationUnknown)
 	}
 	return i.authority.RecordCommandPartitionTerminal(ctx, terminal)
+}
+
+// PrepareCommandPartitionTerminal delegates an exact authority-owned
+// write-ahead terminal intent before the command-store transition commits.
+func (i *TrustedNudgeIngress) PrepareCommandPartitionTerminal(ctx context.Context, intent CommandPartitionTerminalIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress terminal intent authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.PrepareCommandPartitionTerminal(ctx, intent)
+}
+
+// VerifyCommandPartitionTerminal revalidates a durable write-ahead intent for
+// an exact terminal command. It never derives intent from the command store.
+func (i *TrustedNudgeIngress) VerifyCommandPartitionTerminal(ctx context.Context, resolution CommandPartitionTerminalResolution) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress terminal intent authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.VerifyCommandPartitionTerminal(ctx, resolution)
+}
+
+// AbortCommandPartitionTerminal removes an exact preparation only after the
+// repository proves its command-store callback rolled back.
+func (i *TrustedNudgeIngress) AbortCommandPartitionTerminal(ctx context.Context, intent CommandPartitionTerminalIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress terminal intent authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.AbortCommandPartitionTerminal(ctx, intent)
+}
+
+// RepairCommandPartitionTerminals resolves authority-owned preparations before
+// a production partition reader or writer is published.
+func (i *TrustedNudgeIngress) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionTerminalRecoveryReader) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress terminal recovery is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	if isNilRepositoryDependency(reader) {
+		return fmt.Errorf("%w: command repository recovery reader is required", ErrNudgeAuthorizationInvalid)
+	}
+	return i.authority.RepairCommandPartitionTerminals(ctx, reader)
 }
 
 func classifyNudgeAuthorization(authorization NudgeAuthorization) error {

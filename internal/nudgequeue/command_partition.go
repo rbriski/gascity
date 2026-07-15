@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -20,6 +19,11 @@ const (
 // ErrCommandRepositoryPartition reports that a read could not prove which
 // trusted city partition owns a command before exposing it to an index.
 var ErrCommandRepositoryPartition = errors.New("durable nudge command city partition is unverified")
+
+// ErrCommandPartitionTerminalIntent reports missing, conflicting, or
+// unavailable authority-owned intent for a terminal store transition. A
+// terminal command row alone is never sufficient to publish membership.
+var ErrCommandPartitionTerminalIntent = errors.New("durable nudge command terminal intent is unverified")
 
 // TrustedCityPartition is an opaque capability produced only by trusted
 // ingress authority. Its identity has no exported field or constructor, so a
@@ -47,14 +51,12 @@ type TrustedCityPartitionResolver interface {
 }
 
 // CommandPartitionCoverageRequest binds an authority proof to one exact
-// transaction-consistent repository snapshot. TerminalRanges is the canonical
-// compacted terminal sequence set visible in that snapshot.
+// transaction-consistent repository snapshot without copying global terminal
+// history into the partition-local read path.
 type CommandPartitionCoverageRequest struct {
 	Store              CommandStoreBinding
 	RepositoryRevision uint64
 	SequenceHighWater  uint64
-	TerminalRanges     []CommandIndexSequenceRange
-	TerminalCount      uint64
 	Partition          TrustedCityPartition
 }
 
@@ -67,14 +69,14 @@ type CommandPartitionCoverageEntry struct {
 
 // CommandPartitionCoverage is the independently retained, complete active set
 // for one partition. Every snapshot identity field must exactly echo the
-// request; ActiveEntries must be complete and ordered by sequence.
+// request. AdmittedCount proves the authority journal is dense through the
+// repository sequence high-water; ActiveEntries is the complete partition set
+// ordered by sequence.
 type CommandPartitionCoverage struct {
 	Store              CommandStoreBinding
 	RepositoryRevision uint64
 	SequenceHighWater  uint64
 	AdmittedCount      uint64
-	TerminalRanges     []CommandIndexSequenceRange
-	TerminalCount      uint64
 	Partition          TrustedCityPartition
 	ActiveEntries      []CommandPartitionCoverageEntry
 }
@@ -130,6 +132,147 @@ type CommandPartitionTerminal struct {
 	CommandID          string
 	Sequence           uint64
 	Partition          TrustedCityPartition
+}
+
+// CommandPartitionTerminalIntent is the authority-owned write-ahead proof for
+// one exact terminal command transition. CommandDigest is SHA-256 over the
+// canonical command wire including the resulting repository revision. The
+// intent must be durable before the command-store transaction may commit.
+type CommandPartitionTerminalIntent struct {
+	Store                    CommandStoreBinding
+	RepositoryBeforeRevision uint64
+	RepositoryRevision       uint64
+	CommandID                string
+	Sequence                 uint64
+	Partition                TrustedCityPartition
+	BeforeCommandDigest      [sha256.Size]byte
+	CommandDigest            [sha256.Size]byte
+}
+
+// CommandPartitionTerminalResolution is the exact after-state evidence used
+// to recover a prepared or already-finalized transition after response loss or
+// restart. It intentionally cannot authorize preparation or abort.
+type CommandPartitionTerminalResolution struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	CommandID          string
+	Sequence           uint64
+	Partition          TrustedCityPartition
+	CommandDigest      [sha256.Size]byte
+}
+
+// TrustedCommandPartitionTerminalIntentAuthority durably prepares and later
+// verifies exact terminal-transition intent independently of the command
+// store. Prepare is idempotent for one exact intent and must reject a competing
+// unresolved intent for the same command. Abort removes only the exact intent
+// after the caller has proved the store transaction rolled back. Verify accepts
+// only an exact prepared or exact already-finalized digest and never derives
+// authority from a terminal row.
+type TrustedCommandPartitionTerminalIntentAuthority interface {
+	PrepareCommandPartitionTerminal(context.Context, CommandPartitionTerminalIntent) error
+	AbortCommandPartitionTerminal(context.Context, CommandPartitionTerminalIntent) error
+	VerifyCommandPartitionTerminal(context.Context, CommandPartitionTerminalResolution) error
+}
+
+// CommandPartitionTerminalRecoveryReader is the narrow unpartitioned store
+// view used only to resolve authority-owned preparations before a production
+// partition reader or writer becomes reachable.
+type CommandPartitionTerminalRecoveryReader interface {
+	State(context.Context) (CommandRepositoryState, error)
+	Get(context.Context, string) (CommandIndexResolution, error)
+}
+
+// TrustedCommandPartitionTerminalRecovery resolves every outstanding terminal
+// preparation against exact store bytes during startup. Implementations may
+// finalize an exact prepared after-state or abort an exact before-state only at
+// its unchanged repository revision; all other states must fail closed.
+type TrustedCommandPartitionTerminalRecovery interface {
+	RepairCommandPartitionTerminals(context.Context, CommandPartitionTerminalRecoveryReader) error
+}
+
+func terminalResolutionForCommand(command Command, partition TrustedCityPartition) (CommandPartitionTerminalResolution, error) {
+	if !partition.valid() || command.Terminal == nil || !commandIsTerminalState(command.State) ||
+		validateCommandRepositoryBinding(command.Store) != nil || command.ID == "" ||
+		command.Order.Sequence == 0 || command.Order.Revision == 0 {
+		return CommandPartitionTerminalResolution{}, fmt.Errorf("%w: terminal command identity is incomplete", ErrCommandPartitionTerminalIntent)
+	}
+	wire, err := EncodeCommandV1(command)
+	if err != nil {
+		return CommandPartitionTerminalResolution{}, fmt.Errorf("%w: encoding exact terminal command: %w", ErrCommandPartitionTerminalIntent, err)
+	}
+	return CommandPartitionTerminalResolution{
+		Store:              command.Store,
+		RepositoryRevision: command.Order.Revision,
+		CommandID:          command.ID,
+		Sequence:           command.Order.Sequence,
+		Partition:          partition,
+		CommandDigest:      sha256.Sum256(wire),
+	}, nil
+}
+
+func terminalIntentForTransition(repositoryBeforeRevision uint64, before, after Command, partition TrustedCityPartition) (CommandPartitionTerminalIntent, error) {
+	resolution, err := terminalResolutionForCommand(after, partition)
+	if err != nil {
+		return CommandPartitionTerminalIntent{}, err
+	}
+	if before.Store != after.Store || before.ID != after.ID || before.Order.Sequence != after.Order.Sequence ||
+		repositoryBeforeRevision == 0 || repositoryBeforeRevision == ^uint64(0) || before.Order.Revision == 0 ||
+		before.Order.Revision > repositoryBeforeRevision || after.Order.Revision != repositoryBeforeRevision+1 ||
+		before.Terminal != nil || commandIsTerminalState(before.State) {
+		return CommandPartitionTerminalIntent{}, fmt.Errorf("%w: terminal before-state is inconsistent", ErrCommandPartitionTerminalIntent)
+	}
+	wire, err := EncodeCommandV1(before)
+	if err != nil {
+		return CommandPartitionTerminalIntent{}, fmt.Errorf("%w: encoding exact pre-terminal command: %w", ErrCommandPartitionTerminalIntent, err)
+	}
+	return CommandPartitionTerminalIntent{
+		Store:                    resolution.Store,
+		RepositoryBeforeRevision: repositoryBeforeRevision,
+		RepositoryRevision:       resolution.RepositoryRevision,
+		CommandID:                resolution.CommandID,
+		Sequence:                 resolution.Sequence,
+		Partition:                resolution.Partition,
+		BeforeCommandDigest:      sha256.Sum256(wire),
+		CommandDigest:            resolution.CommandDigest,
+	}, nil
+}
+
+func prepareCommandPartitionTerminal(ctx context.Context, authority TrustedCommandPartitionTerminalIntentAuthority, repositoryBeforeRevision uint64, before, after Command, partition TrustedCityPartition) (CommandPartitionTerminalIntent, error) {
+	if isNilRepositoryDependency(authority) {
+		return CommandPartitionTerminalIntent{}, fmt.Errorf("%w: terminal intent authority is required", ErrCommandPartitionTerminalIntent)
+	}
+	intent, err := terminalIntentForTransition(repositoryBeforeRevision, before, after, partition)
+	if err != nil {
+		return CommandPartitionTerminalIntent{}, err
+	}
+	if err := authority.PrepareCommandPartitionTerminal(ctx, intent); err != nil {
+		return CommandPartitionTerminalIntent{}, fmt.Errorf("%w: preparing exact terminal transition: %w", ErrCommandPartitionTerminalIntent, err)
+	}
+	return intent, nil
+}
+
+func verifyCommandPartitionTerminal(ctx context.Context, authority TrustedCommandPartitionTerminalIntentAuthority, command Command, partition TrustedCityPartition) error {
+	if isNilRepositoryDependency(authority) {
+		return fmt.Errorf("%w: terminal intent authority is required", ErrCommandPartitionTerminalIntent)
+	}
+	resolution, err := terminalResolutionForCommand(command, partition)
+	if err != nil {
+		return err
+	}
+	if err := authority.VerifyCommandPartitionTerminal(ctx, resolution); err != nil {
+		return fmt.Errorf("%w: verifying exact terminal transition: %w", ErrCommandPartitionTerminalIntent, err)
+	}
+	return nil
+}
+
+func abortCommandPartitionTerminal(ctx context.Context, authority TrustedCommandPartitionTerminalIntentAuthority, intent CommandPartitionTerminalIntent) error {
+	if isNilRepositoryDependency(authority) {
+		return fmt.Errorf("%w: terminal intent authority is required", ErrCommandPartitionTerminalIntent)
+	}
+	if err := authority.AbortCommandPartitionTerminal(ctx, intent); err != nil {
+		return fmt.Errorf("%w: aborting rolled-back terminal transition: %w", ErrCommandPartitionTerminalIntent, err)
+	}
+	return nil
 }
 
 // TrustedCommandPartitionMembershipRecorder owns the independent membership
@@ -224,6 +367,13 @@ func (r *CommandPartitionReader) Snapshot(ctx context.Context, maxCommands int) 
 	if err := r.verifySnapshotCoverage(ctx, snapshot, maxCommands); err != nil {
 		return CommandIndexSnapshot{}, err
 	}
+	snapshot, err = sealCommandIndexPartitionSnapshot(snapshot)
+	if err != nil {
+		return CommandIndexSnapshot{}, &CommandRepositoryPartitionError{Operation: "snapshot coverage", Err: err}
+	}
+	if _, err := BuildCommandIndex(snapshot); err != nil {
+		return CommandIndexSnapshot{}, &CommandRepositoryPartitionError{Operation: "snapshot coverage", Err: err}
+	}
 	return snapshot, nil
 }
 
@@ -298,68 +448,25 @@ func commandPartitionProjection(row beads.Bead) (string, error) {
 	return route, nil
 }
 
-func commandPartitionSequenceComplement(sequenceHighWater uint64, coverage *CommandIndexCompactedCoverage, entries []CommandIndexEntry) []CommandIndexPartitionGap {
-	occupied := make([]commandIndexSequenceInterval, 0, len(commandIndexCoverageRanges(coverage))+len(entries))
-	for _, sequenceRange := range commandIndexCoverageRanges(coverage) {
-		occupied = append(occupied, commandIndexSequenceInterval{first: sequenceRange.FirstSequence, last: sequenceRange.LastSequence})
-	}
-	for _, entry := range entries {
-		sequence := commandIndexEntryRouting(entry).Sequence
-		occupied = append(occupied, commandIndexSequenceInterval{first: sequence, last: sequence})
-	}
-	sort.Slice(occupied, func(i, j int) bool {
-		if occupied[i].first != occupied[j].first {
-			return occupied[i].first < occupied[j].first
-		}
-		return occupied[i].last < occupied[j].last
-	})
-
-	next := uint64(1)
-	gaps := make([]CommandIndexPartitionGap, 0, len(occupied)+1)
-	for _, interval := range occupied {
-		if interval.first > next {
-			gaps = append(gaps, CommandIndexPartitionGap{FirstSequence: next, LastSequence: interval.first - 1})
-		}
-		if interval.last == ^uint64(0) {
-			next = 0
-			break
-		}
-		if interval.last >= next {
-			next = interval.last + 1
-		}
-	}
-	if next != 0 && next <= sequenceHighWater {
-		gaps = append(gaps, CommandIndexPartitionGap{FirstSequence: next, LastSequence: sequenceHighWater})
-	}
-	return gaps
-}
-
 func commandPartitionCoverageRequest(snapshot CommandIndexSnapshot, partition TrustedCityPartition) CommandPartitionCoverageRequest {
-	request := CommandPartitionCoverageRequest{
+	return CommandPartitionCoverageRequest{
 		Store:              snapshot.Store,
 		RepositoryRevision: snapshot.Revision,
 		SequenceHighWater:  snapshot.SequenceHighWater,
 		Partition:          partition,
 	}
-	if snapshot.Coverage != nil {
-		request.TerminalRanges = append([]CommandIndexSequenceRange(nil), snapshot.Coverage.Ranges...)
-		request.TerminalCount = snapshot.Coverage.TerminalCount
-	}
-	return request
 }
 
 func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, coverage CommandPartitionCoverage, maxCommands int) error {
 	if coverage.Store != request.Store || coverage.RepositoryRevision != request.RepositoryRevision ||
 		coverage.SequenceHighWater != request.SequenceHighWater || coverage.AdmittedCount != request.SequenceHighWater ||
-		coverage.TerminalCount != request.TerminalCount ||
-		coverage.Partition != request.Partition || !commandPartitionRangesEqual(coverage.TerminalRanges, request.TerminalRanges) {
+		coverage.Partition != request.Partition {
 		return errors.New("trusted coverage is not bound to the exact repository snapshot")
 	}
 	if len(coverage.ActiveEntries) > maxCommands {
 		return fmt.Errorf("trusted partition contains more than %d active commands: %w", maxCommands, ErrCommandRepositorySnapshotLimit)
 	}
 	var previous uint64
-	terminalRangeIndex := 0
 	seenIDs := make(map[string]struct{}, len(coverage.ActiveEntries))
 	for index, entry := range coverage.ActiveEntries {
 		if validateCommandIdentity("trusted coverage command id", entry.CommandID) != nil || !strings.HasPrefix(entry.CommandID, commandIDPrefix) ||
@@ -369,12 +476,6 @@ func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, c
 		if index > 0 && entry.Sequence <= previous {
 			return errors.New("trusted coverage active entries are not strictly ordered by sequence")
 		}
-		for terminalRangeIndex < len(request.TerminalRanges) && request.TerminalRanges[terminalRangeIndex].LastSequence < entry.Sequence {
-			terminalRangeIndex++
-		}
-		if terminalRangeIndex < len(request.TerminalRanges) && request.TerminalRanges[terminalRangeIndex].FirstSequence <= entry.Sequence {
-			return fmt.Errorf("trusted coverage active sequence %d is terminal", entry.Sequence)
-		}
 		if _, duplicate := seenIDs[entry.CommandID]; duplicate {
 			return fmt.Errorf("trusted coverage repeats command %q", entry.CommandID)
 		}
@@ -382,18 +483,6 @@ func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, c
 		previous = entry.Sequence
 	}
 	return nil
-}
-
-func commandPartitionRangesEqual(left, right []CommandIndexSequenceRange) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 // Get returns an exact command only when independent authority resolves it to

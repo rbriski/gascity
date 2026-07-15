@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,8 +24,14 @@ const (
 	// nudgeKeyReadMaxPagesPerCallback bounds stack-local continuation work.
 	nudgeKeyReadMaxPagesPerCallback = 4
 	// nudgeKeyReadMaxSlice bounds CPU residency without scheduling a follow-up
-	// for unchanged read-only work.
+	// for unchanged read-only work. A cursor retained below makes that follow-up
+	// continue from the last completely evaluated page.
 	nudgeKeyReadMaxSlice = 25 * time.Millisecond
+	// nudgeKeyContinuationCapacity covers every distinct active key representable
+	// by one complete repository snapshot while placing a hard ceiling on
+	// advisory cursor memory. Eviction is safe: the next callback restarts that
+	// key from sequence zero.
+	nudgeKeyContinuationCapacity = nudgeCommandStartupSnapshotLimit
 )
 
 var errNudgeCommandSourceUnverified = errors.New("verified durable nudge command source unavailable")
@@ -36,8 +46,11 @@ type nudgeCommandSource interface {
 }
 
 // nudgeCommandSourceOpener receives cityPath only so the production adapter can
-// locate independent restore-anchor evidence. The path is never command-store
-// identity; the opened repository snapshot supplies the sole binding.
+// run its explicit Provision/restore-anchor admission path before returning a
+// read-only source. The path is never command-store identity; the opened
+// repository snapshot supplies the sole binding. An adapter must wrap only
+// positively retryable Provision/open failures with
+// retryableNudgeCommandSourceFailure; unknown errors fail closed.
 type nudgeCommandSourceOpener func(context.Context, string, beads.Store) (nudgeCommandSource, error)
 
 type nudgeCommandSourceErrorClass uint8
@@ -63,16 +76,115 @@ var openProductionNudgeCommandSource nudgeCommandSourceOpener = openVerifiedProd
 // store writer, runtime provider, worker handle, or effect executor; the legacy
 // dispatcher remains the sole delivery owner.
 type nudgeKeyReadShadow struct {
-	source     nudgeCommandSource
-	index      *nudgequeue.CommandIndex
-	reconciler *nudgeKeyReconciler
-	store      nudgequeue.CommandStoreBinding
-	warnings   *nudgeKeyObservationWarnings
-	now        func() time.Time
-	maxPages   int
-	sliceLimit time.Duration
+	source        nudgeCommandSource
+	index         *nudgequeue.CommandIndex
+	reconciler    *nudgeKeyReconciler
+	store         nudgequeue.CommandStoreBinding
+	startup       []string
+	continuations *nudgeKeyContinuationCache
+	warnings      *nudgeKeyObservationWarnings
+	now           func() time.Time
+	maxPages      int
+	sliceLimit    time.Duration
 
-	auditRequired atomic.Bool
+	auditRequired      atomic.Bool
+	auditRetryRequired atomic.Bool
+}
+
+type nudgeKeyContinuationEntry struct {
+	key           reconcilekey.Session
+	token         uint64
+	afterSequence uint64
+	element       *list.Element
+}
+
+// nudgeKeyContinuationCache is bounded, reconstructable advisory state. A
+// token prevents an in-flight page walk from restoring a cursor after an exact
+// update or audit reset made that walk stale.
+type nudgeKeyContinuationCache struct {
+	mu        sync.Mutex
+	capacity  int
+	nextToken uint64
+	entries   map[reconcilekey.Session]*nudgeKeyContinuationEntry
+	order     list.List
+}
+
+func newNudgeKeyContinuationCache(capacity int) *nudgeKeyContinuationCache {
+	return &nudgeKeyContinuationCache{
+		capacity: capacity,
+		entries:  make(map[reconcilekey.Session]*nudgeKeyContinuationEntry, capacity),
+	}
+}
+
+func (c *nudgeKeyContinuationCache) begin(key reconcilekey.Session) (uint64, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry := c.entries[key]; entry != nil {
+		c.order.MoveToBack(entry.element)
+		return entry.token, entry.afterSequence
+	}
+	if len(c.entries) >= c.capacity {
+		oldest := c.order.Front()
+		if oldest != nil {
+			entry := oldest.Value.(*nudgeKeyContinuationEntry)
+			delete(c.entries, entry.key)
+			c.order.Remove(oldest)
+		}
+	}
+	c.nextToken++
+	if c.nextToken == 0 {
+		// Token wrap is practically unreachable, but clearing first preserves the
+		// stale-writer fence without relying on that assumption.
+		clear(c.entries)
+		c.order.Init()
+		c.nextToken = 1
+	}
+	entry := &nudgeKeyContinuationEntry{key: key, token: c.nextToken}
+	entry.element = c.order.PushBack(entry)
+	c.entries[key] = entry
+	return entry.token, 0
+}
+
+func (c *nudgeKeyContinuationCache) advance(key reconcilekey.Session, token, afterSequence uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || entry.token != token {
+		return false
+	}
+	entry.afterSequence = afterSequence
+	c.order.MoveToBack(entry.element)
+	return true
+}
+
+func (c *nudgeKeyContinuationCache) finish(key reconcilekey.Session, token uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || entry.token != token {
+		return false
+	}
+	delete(c.entries, key)
+	c.order.Remove(entry.element)
+	return true
+}
+
+func (c *nudgeKeyContinuationCache) reset(key reconcilekey.Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil {
+		return
+	}
+	delete(c.entries, key)
+	c.order.Remove(entry.element)
+}
+
+func (c *nudgeKeyContinuationCache) resetAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	clear(c.entries)
+	c.order.Init()
 }
 
 func newNudgeKeyReadShadow(ctx context.Context, source nudgeCommandSource, pageLimit int, warnings *nudgeKeyObservationWarnings) (*nudgeKeyReadShadow, error) {
@@ -90,7 +202,7 @@ func newNudgeKeyReadShadow(ctx context.Context, source nudgeCommandSource, pageL
 		return nil, ctxErr
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading keyed nudge startup snapshot: %w", err)
+		return nil, newNudgeCommandSourceFailure(source, fmt.Errorf("reading keyed nudge startup snapshot: %w", err))
 	}
 	index, err := nudgequeue.BuildCommandIndex(snapshot)
 	if err != nil {
@@ -100,22 +212,28 @@ func newNudgeKeyReadShadow(ctx context.Context, source nudgeCommandSource, pageL
 	if err != nil {
 		return nil, err
 	}
+	startup, err := activeNudgeCommandSessions(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("enumerating keyed nudge startup sessions: %w", err)
+	}
 	return &nudgeKeyReadShadow{
-		source:     source,
-		index:      index,
-		reconciler: reconciler,
-		store:      snapshot.Store,
-		warnings:   warnings,
-		now:        time.Now,
-		maxPages:   nudgeKeyReadMaxPagesPerCallback,
-		sliceLimit: nudgeKeyReadMaxSlice,
+		source:        source,
+		index:         index,
+		reconciler:    reconciler,
+		store:         snapshot.Store,
+		startup:       startup,
+		continuations: newNudgeKeyContinuationCache(nudgeKeyContinuationCapacity),
+		warnings:      warnings,
+		now:           time.Now,
+		maxPages:      nudgeKeyReadMaxPagesPerCallback,
+		sliceLimit:    nudgeKeyReadMaxSlice,
 	}, nil
 }
 
 // reconcile observes scheduling first, repairs an explicitly requested audit
-// from a fresh complete snapshot, and follows stack-local page continuations
-// only within a fixed slice. Remaining unchanged read-only work is forgotten:
-// starting again after 10ms would be a treadmill rather than convergence.
+// from a fresh complete snapshot, and follows page continuations within a fixed
+// slice. Remaining work retains only a bounded advisory cursor and returns the
+// controller-owned Continue disposition.
 func (r *nudgeKeyReadShadow) reconcile(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 	if r == nil {
 		return nudgeReconcileInvariant(errors.New("keyed nudge read shadow is nil"))
@@ -140,7 +258,7 @@ func (r *nudgeKeyReadShadow) reconcile(ctx context.Context, key reconcilekey.Ses
 		if err != nil {
 			var sourceFailure nudgeCommandSourceFailure
 			if errors.As(err, &sourceFailure) {
-				return r.sourceFailureOutcome(sourceFailure.err)
+				return r.sourceFailureOutcome(sourceFailure)
 			}
 			return nudgeReconcileInvariant(err)
 		}
@@ -155,7 +273,7 @@ func (r *nudgeKeyReadShadow) reconcile(ctx context.Context, key reconcilekey.Ses
 	}
 
 	started := now
-	afterSequence := uint64(0)
+	token, afterSequence := r.continuations.begin(key)
 	for pageNumber := 0; pageNumber < r.maxPages; pageNumber++ {
 		result, err := r.reconciler.ReconcilePage(ctx, key, afterSequence)
 		if ctx.Err() != nil {
@@ -166,10 +284,16 @@ func (r *nudgeKeyReadShadow) reconcile(ctx context.Context, key reconcilekey.Ses
 		}
 		switch result.Disposition {
 		case nudgeKeyPageAuditNeeded:
+			r.continuations.reset(key)
 			return nudgeReconcileAudit()
 		case nudgeKeyPageEvaluated:
 			if !result.Continuation.Required {
-				return nudgeReconcileSuccess()
+				if r.continuations.finish(key, token) {
+					return nudgeReconcileSuccess()
+				}
+				// An exact update or audit invalidated this walk while it was in
+				// flight. Revisit from zero rather than acknowledging stale work.
+				return nudgeReconcileContinue()
 			}
 		default:
 			return nudgeReconcileInvariant(fmt.Errorf("keyed nudge read shadow returned unknown page disposition %d", result.Disposition))
@@ -180,22 +304,27 @@ func (r *nudgeKeyReadShadow) reconcile(ctx context.Context, key reconcilekey.Ses
 			current = r.now()
 		}
 		if pageNumber+1 >= r.maxPages || current.Sub(started) >= r.sliceLimit {
-			return nudgeReconcileSuccess()
+			if !r.continuations.advance(key, token, afterSequence) {
+				// The cursor was reset by newer evidence. Continue is still needed,
+				// but the next callback safely begins at zero.
+				return nudgeReconcileContinue()
+			}
+			return nudgeReconcileContinue()
 		}
 	}
-	return nudgeReconcileSuccess()
+	return nudgeReconcileContinue()
 }
 
-func (r *nudgeKeyReadShadow) sourceFailureOutcome(err error) nudgeReconcileOutcome {
-	classifier, ok := r.source.(nudgeCommandSourceErrorClassifier)
-	if ok && classifier.ClassifyNudgeCommandSourceError(err) == nudgeCommandSourceErrorTransient {
-		return nudgeReconcileTransient(err)
+func (r *nudgeKeyReadShadow) sourceFailureOutcome(failure nudgeCommandSourceFailure) nudgeReconcileOutcome {
+	if failure.class == nudgeCommandSourceErrorTransient {
+		return nudgeReconcileTransient(failure.err)
 	}
-	return nudgeReconcileInvariant(err)
+	return nudgeReconcileInvariant(failure.err)
 }
 
 type nudgeCommandSourceFailure struct {
-	err error
+	err   error
+	class nudgeCommandSourceErrorClass
 }
 
 func (e nudgeCommandSourceFailure) Error() string {
@@ -206,23 +335,67 @@ func (e nudgeCommandSourceFailure) Unwrap() error {
 	return e.err
 }
 
+func newNudgeCommandSourceFailure(source nudgeCommandSource, err error) nudgeCommandSourceFailure {
+	class := nudgeCommandSourceErrorInvariant
+	if classifier, ok := source.(nudgeCommandSourceErrorClassifier); ok &&
+		classifier.ClassifyNudgeCommandSourceError(err) == nudgeCommandSourceErrorTransient {
+		class = nudgeCommandSourceErrorTransient
+	}
+	if errors.Is(err, nudgequeue.ErrRestoreAnchorBusy) ||
+		errors.Is(err, nudgequeue.ErrRestoreAnchorConflict) ||
+		errors.Is(err, nudgequeue.ErrRestoreAnchorDurabilityUncertain) {
+		class = nudgeCommandSourceErrorTransient
+	}
+	return nudgeCommandSourceFailure{err: err, class: class}
+}
+
+func retryableNudgeCommandSourceFailure(err error) error {
+	if err == nil {
+		return errors.New("classifying retryable nudge command source failure: error is nil")
+	}
+	return nudgeCommandSourceFailure{err: err, class: nudgeCommandSourceErrorTransient}
+}
+
 func (r *nudgeKeyReadShadow) completeAudit(ctx context.Context) (bool, error) {
+	_, completed, err := r.auditSnapshot(ctx)
+	return completed, err
+}
+
+// auditSnapshot performs exactly one complete repository read, conditionally
+// installs it, and returns the active keys discovered by that same read. It is
+// shared by explicit repair and periodic anti-entropy so an interval never
+// fans out into one snapshot per key.
+func (r *nudgeKeyReadShadow) auditSnapshot(ctx context.Context) ([]string, bool, error) {
 	status := r.index.Status()
 	snapshot, err := r.source.Snapshot(ctx, nudgeCommandStartupSnapshotLimit)
 	if err != nil {
-		return false, nudgeCommandSourceFailure{err: fmt.Errorf("reading keyed nudge audit snapshot: %w", err)}
+		return nil, false, newNudgeCommandSourceFailure(r.source, fmt.Errorf("reading keyed nudge audit snapshot: %w", err))
 	}
 	if err := ctx.Err(); err != nil {
-		return false, nudgeCommandSourceFailure{err: err}
+		return nil, false, newNudgeCommandSourceFailure(r.source, err)
 	}
 	if snapshot.Store != r.store {
-		return false, fmt.Errorf("keyed nudge audit snapshot lineage %#v does not match installed lineage %#v", snapshot.Store, r.store)
+		return nil, false, fmt.Errorf("keyed nudge audit snapshot lineage %#v does not match installed lineage %#v", snapshot.Store, r.store)
+	}
+	active, err := activeNudgeCommandSessions(snapshot)
+	if err != nil {
+		return nil, false, fmt.Errorf("enumerating keyed nudge audit sessions: %w", err)
 	}
 	completed, err := r.index.CompleteAudit(status.Revision, snapshot)
 	if err != nil {
-		return false, fmt.Errorf("installing keyed nudge audit snapshot: %w", err)
+		return nil, false, fmt.Errorf("installing keyed nudge audit snapshot: %w", err)
 	}
-	return completed, nil
+	if completed {
+		r.continuations.resetAll()
+		r.auditRequired.Store(false)
+		r.auditRetryRequired.Store(false)
+	} else {
+		// A concurrent exact update won the compare-and-install edge. The
+		// projection may be healthy, but this independent reconstruction was not
+		// certified, so the global lifecycle retains a bounded retry explicitly.
+		r.auditRetryRequired.Store(true)
+	}
+	return active, completed, nil
 }
 
 // acceptCommandHint rereads durable authority by command ID only. The socket's
@@ -245,7 +418,7 @@ func (r *nudgeKeyReadShadow) acceptCommandHint(ctx context.Context, commandID st
 	}
 	sourceUnsynced := errors.Is(err, nudgequeue.ErrCommandIndexUnsynced)
 	if err != nil && !sourceUnsynced {
-		return "", false, fmt.Errorf("rereading exact durable nudge command: %w", err)
+		return "", false, newNudgeCommandSourceFailure(r.source, fmt.Errorf("rereading exact durable nudge command: %w", err))
 	}
 	if resolution.Store != r.store {
 		return "", false, fmt.Errorf("exact durable nudge resolution lineage %#v does not match installed lineage %#v", resolution.Store, r.store)
@@ -271,6 +444,33 @@ func (r *nudgeKeyReadShadow) acceptCommandHint(ctx context.Context, commandID st
 		return "", false, fmt.Errorf("exact durable nudge command revision %d is outside repository revision %d", facts.revision, resolution.Revision)
 	}
 	entry := resolution.Entry
+	current, currentErr := r.index.Resolve(commandID)
+	if currentErr != nil && !errors.Is(currentErr, nudgequeue.ErrCommandIndexUnsynced) {
+		return "", false, fmt.Errorf("resolving indexed exact durable nudge command: %w", currentErr)
+	}
+	if currentErr == nil && current.Found {
+		currentFacts, err := inspectNudgeKeyPageEntry(current.Entry)
+		if err != nil {
+			return "", false, fmt.Errorf("validating indexed exact durable nudge command: %w", err)
+		}
+		if facts.revision < currentFacts.revision {
+			return "", false, fmt.Errorf("exact durable nudge command revision %d rewinds indexed record revision %d", facts.revision, currentFacts.revision)
+		}
+		if facts.revision == currentFacts.revision {
+			equal, err := equalNudgeCommandIndexEntry(current.Entry, entry)
+			if err != nil {
+				return "", false, fmt.Errorf("comparing exact durable nudge command replay: %w", err)
+			}
+			if !equal {
+				return "", false, fmt.Errorf("exact durable nudge command conflicts with indexed content at revision %d", facts.revision)
+			}
+			if sourceUnsynced {
+				r.auditRequired.Store(true)
+				r.continuations.resetAll()
+			}
+			return facts.sessionID, true, nil
+		}
+	}
 	mutation := nudgequeue.CommandIndexMutation{
 		Store:    r.store,
 		Revision: facts.revision,
@@ -281,11 +481,73 @@ func (r *nudgeKeyReadShadow) acceptCommandHint(ctx context.Context, commandID st
 			return "", false, fmt.Errorf("applying exact durable nudge command to index: %w", err)
 		}
 		r.auditRequired.Store(true)
+		r.continuations.resetAll()
+	} else {
+		key, keyErr := r.key(facts.sessionID)
+		if keyErr != nil {
+			return "", false, fmt.Errorf("resetting exact durable nudge continuation: %w", keyErr)
+		}
+		r.continuations.reset(key)
 	}
 	if sourceUnsynced {
 		r.auditRequired.Store(true)
+		r.continuations.resetAll()
 	}
 	return facts.sessionID, true, nil
+}
+
+func (r *nudgeKeyReadShadow) key(sessionID string) (reconcilekey.Session, error) {
+	key, err := reconcilekey.NewSession(r.reconciler.keyScope, sessionID)
+	if err != nil {
+		return reconcilekey.Session{}, err
+	}
+	return key, nil
+}
+
+func equalNudgeCommandIndexEntry(left, right nudgequeue.CommandIndexEntry) (bool, error) {
+	switch {
+	case left.Command != nil && right.Command != nil:
+		leftWire, err := nudgequeue.EncodeCommandV1(*left.Command)
+		if err != nil {
+			return false, err
+		}
+		rightWire, err := nudgequeue.EncodeCommandV1(*right.Command)
+		if err != nil {
+			return false, err
+		}
+		return bytes.Equal(leftWire, rightWire), nil
+	case left.Opaque != nil && right.Opaque != nil:
+		return left.Opaque.Version == right.Opaque.Version &&
+			left.Opaque.Routing == right.Opaque.Routing &&
+			bytes.Equal(left.Opaque.Raw, right.Opaque.Raw), nil
+	default:
+		return false, nil
+	}
+}
+
+func activeNudgeCommandSessions(snapshot nudgequeue.CommandIndexSnapshot) ([]string, error) {
+	// This read-only shadow is deliberately repository-wide. TrustedIngress
+	// CityScope is authorization evidence, not a filter this projection may
+	// interpret. Effect-owner cutover is forbidden until the production source
+	// provides an authoritative city partition and a shared-store two-city test
+	// proves that foreign session IDs cannot cross it.
+	active := make(map[string]struct{})
+	for position, entry := range snapshot.Entries {
+		facts, err := inspectNudgeKeyPageEntry(entry)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot entry %d: %w", position, err)
+		}
+		switch facts.state {
+		case nudgequeue.CommandStatePending, nudgequeue.CommandStateInFlight, nudgequeue.CommandStateUpgradeRequired:
+			active[facts.sessionID] = struct{}{}
+		}
+	}
+	sessions := make([]string, 0, len(active))
+	for sessionID := range active {
+		sessions = append(sessions, sessionID)
+	}
+	sort.Strings(sessions)
+	return sessions, nil
 }
 
 func nudgeCommandEntryID(entry nudgequeue.CommandIndexEntry) string {

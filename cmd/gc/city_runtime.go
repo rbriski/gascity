@@ -47,6 +47,29 @@ var newCityRuntimeOpenSweepStore = openStoreAtForCity
 // cannot wait long enough.
 const reloadOrderDrainTimeout = 1 * time.Second
 
+const (
+	defaultNudgeKeyAntiEntropyInterval = 30 * time.Second
+	defaultNudgeKeyAuditRetryBaseDelay = 100 * time.Millisecond
+	defaultNudgeKeyAuditRetryMaxDelay  = 30 * time.Second
+)
+
+type nudgeKeyPeriodicTicker struct {
+	ticks <-chan time.Time
+	stop  func()
+}
+
+type nudgeKeyPeriodicTickerFactory func(time.Duration) nudgeKeyPeriodicTicker
+
+func newNudgeKeyPeriodicTicker(interval time.Duration) nudgeKeyPeriodicTicker {
+	ticker := time.NewTicker(interval)
+	return nudgeKeyPeriodicTicker{ticks: ticker.C, stop: ticker.Stop}
+}
+
+func newNudgeKeyRetryTimer(delay time.Duration) nudgeKeyPeriodicTicker {
+	timer := time.NewTimer(delay)
+	return nudgeKeyPeriodicTicker{ticks: timer.C, stop: func() { timer.Stop() }}
+}
+
 var orderRescanInterval = time.Minute
 
 // CityRuntime holds all running state for a single city's reconciliation
@@ -113,11 +136,17 @@ type CityRuntime struct {
 	// nudgeKeyShadowScope is derived only from the repository's certified
 	// store_uuid + restore_epoch binding. It is never synthesized from city,
 	// project, path, or config identity.
-	nudgeKeyShadowScope        string
-	nudgeKeyReader             *nudgeKeyReadShadow
-	nudgeCommandSourceOpener   nudgeCommandSourceOpener
-	nudgeKeyUnavailableOnce    sync.Once
-	nudgeKeyHintDiagnosticOnce sync.Once
+	nudgeKeyShadowMu              sync.RWMutex
+	nudgeKeyInstallMu             sync.Mutex
+	nudgeKeyShadowScope           string
+	nudgeKeyReader                *nudgeKeyReadShadow
+	nudgeCommandSourceOpener      nudgeCommandSourceOpener
+	nudgeKeyInstallRetry          bool
+	nudgeKeyTickerFactory         nudgeKeyPeriodicTickerFactory
+	nudgeKeyRetryTimerFactory     nudgeKeyPeriodicTickerFactory
+	nudgeKeyUnavailableOnce       sync.Once
+	nudgeKeyHintDiagnosticOnce    sync.Once
+	nudgeKeyEntropyDiagnosticOnce sync.Once
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -651,7 +680,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// The defer is registered after run's shutdown defer, so LIFO ordering stops
 	// queue admission and workers before shutdown inspects live sessions.
 	if err := cr.installNudgeKeyShadow(ctx); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // legacy dispatcher remains authoritative
+		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow unavailable at startup: %v\n", cr.logPrefix, err) //nolint:errcheck // transient failures retain periodic retry; legacy remains authoritative
 	}
 	stopNudgeKeyController := cr.startNudgeKeyController(ctx)
 	defer stopNudgeKeyController()
@@ -805,7 +834,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 // no delivery or cutover claim; legacy remains the only store/provider effect
 // owner.
 func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
-	if cr == nil || cr.nudgeKeyController != nil || cr.cityPath == "" || !nudgeDispatcherIsSupervisor(cr.cfg) {
+	if cr == nil || cr.cityPath == "" || !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return nil
 	}
 	if ctx == nil {
@@ -814,6 +843,14 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	cr.nudgeKeyInstallMu.Lock()
+	defer cr.nudgeKeyInstallMu.Unlock()
+	cr.nudgeKeyShadowMu.RLock()
+	alreadyInstalled := cr.nudgeKeyController != nil
+	cr.nudgeKeyShadowMu.RUnlock()
+	if alreadyInstalled {
+		return nil
+	}
 	opener := cr.nudgeCommandSourceOpener
 	if opener == nil {
 		opener = openProductionNudgeCommandSource
@@ -821,12 +858,16 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	source, err := opener(ctx, cr.cityPath, cr.nudgesBeadStore().Store)
 	if err != nil {
 		if errors.Is(err, errNudgeCommandSourceUnverified) {
+			cr.recordNudgeKeyInstallFailure(nil)
 			cr.warnNudgeKeySourceUnavailable()
 			return nil
 		}
-		return fmt.Errorf("opening verified durable nudge command source: %w", err)
+		failure := classifyNudgeCommandSourceFailure(nil, fmt.Errorf("opening verified durable nudge command source: %w", err))
+		cr.recordNudgeKeyInstallFailure(failure)
+		return failure
 	}
 	if source == nil {
+		cr.recordNudgeKeyInstallFailure(nil)
 		cr.warnNudgeKeySourceUnavailable()
 		return nil
 	}
@@ -837,16 +878,59 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	warnings := newNudgeKeyObservationWarnings(stderr)
 	reader, err := newNudgeKeyReadShadow(ctx, source, nudgequeue.MaxCommandIndexPageSize, warnings)
 	if err != nil {
+		cr.recordNudgeKeyInstallFailure(err)
 		return err
 	}
 	controller, err := newNudgeKeyController(1, reader.reconcile, stderr)
 	if err != nil {
+		cr.recordNudgeKeyInstallFailure(err)
 		return err
 	}
-	cr.nudgeKeyShadowScope = nudgeCommandReconcileScope(reader.store)
+	scope := nudgeCommandReconcileScope(reader.store)
+	for _, sessionID := range reader.startup {
+		key, err := reader.key(sessionID)
+		if err != nil {
+			cr.recordNudgeKeyInstallFailure(err)
+			return fmt.Errorf("mapping keyed nudge startup session: %w", err)
+		}
+		if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+			cr.recordNudgeKeyInstallFailure(err)
+			return fmt.Errorf("admitting keyed nudge startup session: %w", err)
+		}
+	}
+	reader.startup = nil
+	cr.nudgeKeyShadowMu.Lock()
+	cr.nudgeKeyShadowScope = scope
 	cr.nudgeKeyReader = reader
 	cr.nudgeKeyController = controller
+	cr.nudgeKeyInstallRetry = false
+	cr.nudgeKeyShadowMu.Unlock()
 	return nil
+}
+
+func classifyNudgeCommandSourceFailure(source nudgeCommandSource, err error) nudgeCommandSourceFailure {
+	var classified nudgeCommandSourceFailure
+	if errors.As(err, &classified) {
+		return classified
+	}
+	return newNudgeCommandSourceFailure(source, err)
+}
+
+func (cr *CityRuntime) recordNudgeKeyInstallFailure(err error) {
+	retry := false
+	if err != nil {
+		var failure nudgeCommandSourceFailure
+		retry = errors.As(err, &failure) && failure.class == nudgeCommandSourceErrorTransient
+	}
+	cr.nudgeKeyShadowMu.Lock()
+	cr.nudgeKeyInstallRetry = retry
+	cr.nudgeKeyShadowMu.Unlock()
+}
+
+func (cr *CityRuntime) nudgeKeyShadowState() (*nudgeKeyController, *nudgeKeyReadShadow, string, bool) {
+	cr.nudgeKeyShadowMu.RLock()
+	defer cr.nudgeKeyShadowMu.RUnlock()
+	return cr.nudgeKeyController, cr.nudgeKeyReader, cr.nudgeKeyShadowScope, cr.nudgeKeyInstallRetry
 }
 
 func (cr *CityRuntime) warnNudgeKeySourceUnavailable() {
@@ -863,24 +947,32 @@ func (cr *CityRuntime) warnNudgeKeySourceUnavailable() {
 // shadow key. It performs no alias resolution, fleet scan, or provider
 // operation.
 func (cr *CityRuntime) enqueueNudgeKeyShadow(sessionID string) error {
-	if cr == nil || cr.nudgeKeyController == nil || cr.nudgeKeyShadowScope == "" {
+	if cr == nil {
 		return nil
 	}
-	key, err := reconcilekey.NewSession(cr.nudgeKeyShadowScope, sessionID)
+	controller, _, scope, _ := cr.nudgeKeyShadowState()
+	if controller == nil || scope == "" {
+		return nil
+	}
+	key, err := reconcilekey.NewSession(scope, sessionID)
 	if err != nil {
 		return fmt.Errorf("mapping exact nudge wake: %w", err)
 	}
-	if err := cr.nudgeKeyController.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+	if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
 		return fmt.Errorf("enqueueing exact nudge wake: %w", err)
 	}
 	return nil
 }
 
 func (cr *CityRuntime) acceptNudgeKeyShadowHint(ctx context.Context, hint nudgeWakeHint) {
-	if cr == nil || cr.nudgeKeyReader == nil || ctx == nil || ctx.Err() != nil {
+	if cr == nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
-	sessionID, accepted, err := cr.nudgeKeyReader.acceptCommandHint(ctx, hint.CommandID)
+	_, reader, _, _ := cr.nudgeKeyShadowState()
+	if reader == nil {
+		return
+	}
+	sessionID, accepted, err := reader.acceptCommandHint(ctx, hint.CommandID)
 	if err != nil {
 		if ctx.Err() == nil {
 			cr.warnNudgeKeyHintDiagnostic(err)
@@ -906,25 +998,26 @@ func (cr *CityRuntime) warnNudgeKeyHintDiagnostic(err error) {
 }
 
 // startNudgeKeyController starts the optional read-only keyed nudge child and
-// returns an idempotent stop function. A nil child is intentionally inert.
+// its single global anti-entropy loop, and returns an idempotent stop function.
+// A transient startup failure retains this lifecycle so a later bounded tick
+// can install the child; an invariant or unsupported source stays inert.
 func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
-	if cr.nudgeKeyController == nil {
+	if cr == nil || parent == nil {
+		return func() {}
+	}
+	controller, _, _, retryInstall := cr.nudgeKeyShadowState()
+	if controller == nil && !retryInstall {
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(parent)
+	booted := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := cr.nudgeKeyController.Run(ctx); err != nil {
-			stderr := cr.stderr
-			if stderr == nil {
-				stderr = io.Discard
-			}
-			fmt.Fprintf(stderr, "%s: nudge keyed reconciler: %v\n", cr.logPrefix, err) //nolint:errcheck // child failure is surfaced; legacy remains owner
-		}
+		cr.runNudgeKeyShadowLifecycle(ctx, booted)
 	}()
 	select {
-	case <-cr.nudgeKeyController.ready:
+	case <-booted:
 	case <-done:
 	}
 	var once sync.Once
@@ -933,11 +1026,235 @@ func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
 			// Linearize admission closure before cancellation. An enqueue that
 			// returns success therefore happened before the shutdown boundary;
 			// later enqueues are rejected rather than acknowledged then cleared.
-			cr.nudgeKeyController.closeAdmission()
+			controller, _, _, _ := cr.nudgeKeyShadowState()
+			if controller != nil {
+				controller.closeAdmission()
+			}
 			cancel()
 			<-done
 		})
 	}
+}
+
+func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted chan<- struct{}) {
+	ctx, cancelLifecycle := context.WithCancel(ctx)
+	defer cancelLifecycle()
+	var bootOnce sync.Once
+	markBooted := func() { bootOnce.Do(func() { close(booted) }) }
+	defer markBooted()
+
+	factory := cr.nudgeKeyTickerFactory
+	if factory == nil {
+		factory = newNudgeKeyPeriodicTicker
+	}
+	ticker := factory(defaultNudgeKeyAntiEntropyInterval)
+	if ticker.stop == nil || ticker.ticks == nil {
+		controller, _, _, _ := cr.nudgeKeyShadowState()
+		if controller != nil {
+			controller.closeAdmission()
+		}
+		cr.logNudgeKeyLifecycleError(errors.New("anti-entropy ticker is invalid"))
+		return
+	}
+	defer ticker.stop()
+	retryFactory := cr.nudgeKeyRetryTimerFactory
+	if retryFactory == nil {
+		retryFactory = newNudgeKeyRetryTimer
+	}
+	var retryTicks <-chan time.Time
+	var retryStop func()
+	retryDelay := defaultNudgeKeyAuditRetryBaseDelay
+	stopRetry := func() {
+		if retryStop != nil {
+			retryStop()
+		}
+		retryStop = nil
+		retryTicks = nil
+	}
+	defer stopRetry()
+	resetRetry := func() {
+		stopRetry()
+		retryDelay = defaultNudgeKeyAuditRetryBaseDelay
+	}
+	armRetry := func() error {
+		if retryTicks != nil {
+			return nil
+		}
+		timer := retryFactory(retryDelay)
+		if timer.stop == nil || timer.ticks == nil {
+			return errors.New("anti-entropy retry timer is invalid")
+		}
+		retryStop = timer.stop
+		retryTicks = timer.ticks
+		if retryDelay < defaultNudgeKeyAuditRetryMaxDelay/2 {
+			retryDelay *= 2
+		} else {
+			retryDelay = defaultNudgeKeyAuditRetryMaxDelay
+		}
+		return nil
+	}
+
+	controller, _, _, _ := cr.nudgeKeyShadowState()
+	var controllerDone <-chan error
+	if controller != nil {
+		var started bool
+		controllerDone, started = cr.launchNudgeKeyController(ctx, cancelLifecycle, controller)
+		if !started {
+			return
+		}
+	} else if err := armRetry(); err != nil {
+		cr.logNudgeKeyLifecycleError(err)
+		return
+	}
+	markBooted()
+
+	for {
+		retryWake := false
+		select {
+		case <-ctx.Done():
+			controller, _, _, _ := cr.nudgeKeyShadowState()
+			if controller != nil {
+				controller.closeAdmission()
+			}
+			if controllerDone != nil {
+				<-controllerDone
+			}
+			return
+		case err := <-controllerDone:
+			if err != nil {
+				cr.logNudgeKeyLifecycleError(err)
+			}
+			return
+		case <-ticker.ticks:
+		case <-retryTicks:
+			retryWake = true
+		}
+		if retryWake {
+			stopRetry()
+		}
+		if controller == nil {
+			_, _, _, retryInstall := cr.nudgeKeyShadowState()
+			if !retryInstall {
+				return
+			}
+			if err := cr.installNudgeKeyShadow(ctx); err != nil {
+				if nudgeCommandSourceFailureIsTransient(err) {
+					cr.warnNudgeKeyEntropyDiagnostic(err)
+					if timerErr := armRetry(); timerErr != nil {
+						cr.logNudgeKeyLifecycleError(timerErr)
+						return
+					}
+					continue
+				}
+				cr.logNudgeKeyLifecycleError(err)
+				return
+			}
+			controller, _, _, _ = cr.nudgeKeyShadowState()
+			if controller == nil {
+				return
+			}
+			var started bool
+			controllerDone, started = cr.launchNudgeKeyController(ctx, cancelLifecycle, controller)
+			if !started {
+				return
+			}
+			resetRetry()
+			continue
+		}
+
+		_, reader, _, _ := cr.nudgeKeyShadowState()
+		completed, err := cr.runNudgeKeyAntiEntropy(ctx, controller, reader)
+		if err != nil {
+			if ctx.Err() != nil {
+				continue
+			}
+			if nudgeCommandSourceFailureIsTransient(err) {
+				cr.warnNudgeKeyEntropyDiagnostic(err)
+				if timerErr := armRetry(); timerErr != nil {
+					controller.reportFailure(fmt.Errorf("nudge keyed anti-entropy retry invariant failed: %w", timerErr))
+				}
+				continue
+			}
+			controller.reportFailure(fmt.Errorf("nudge keyed anti-entropy invariant failed: %w", err))
+			continue
+		}
+		if !completed {
+			if timerErr := armRetry(); timerErr != nil {
+				controller.reportFailure(fmt.Errorf("nudge keyed anti-entropy retry invariant failed: %w", timerErr))
+			}
+			continue
+		}
+		resetRetry()
+	}
+}
+
+func (cr *CityRuntime) launchNudgeKeyController(ctx context.Context, cancelLifecycle context.CancelFunc, controller *nudgeKeyController) (<-chan error, bool) {
+	done := make(chan error, 1)
+	go func() {
+		err := controller.Run(ctx)
+		done <- err
+		cancelLifecycle()
+		close(done)
+	}()
+	select {
+	case <-controller.ready:
+		return done, true
+	case err := <-done:
+		if err != nil {
+			cr.logNudgeKeyLifecycleError(err)
+		}
+		return nil, false
+	case <-ctx.Done():
+		controller.closeAdmission()
+		<-done
+		return nil, false
+	}
+}
+
+func (cr *CityRuntime) runNudgeKeyAntiEntropy(ctx context.Context, controller *nudgeKeyController, reader *nudgeKeyReadShadow) (bool, error) {
+	if controller == nil || reader == nil {
+		return false, errors.New("keyed nudge anti-entropy has no installed controller and reader")
+	}
+	sessions, completed, err := reader.auditSnapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !completed {
+		return false, nil
+	}
+	for _, sessionID := range sessions {
+		key, err := reader.key(sessionID)
+		if err != nil {
+			return false, fmt.Errorf("mapping keyed nudge anti-entropy session: %w", err)
+		}
+		if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+			return false, fmt.Errorf("admitting keyed nudge anti-entropy session: %w", err)
+		}
+	}
+	return true, nil
+}
+
+func nudgeCommandSourceFailureIsTransient(err error) bool {
+	var failure nudgeCommandSourceFailure
+	return errors.As(err, &failure) && failure.class == nudgeCommandSourceErrorTransient
+}
+
+func (cr *CityRuntime) warnNudgeKeyEntropyDiagnostic(err error) {
+	cr.nudgeKeyEntropyDiagnosticOnce.Do(func() {
+		stderr := cr.stderr
+		if stderr == nil {
+			stderr = io.Discard
+		}
+		fmt.Fprintf(stderr, "%s: nudge keyed read-only source transiently unavailable; retry retained: %v\n", cr.logPrefix, err) //nolint:errcheck // one-shot diagnostic; periodic retry retains the error path
+	})
+}
+
+func (cr *CityRuntime) logNudgeKeyLifecycleError(err error) {
+	stderr := cr.stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	fmt.Fprintf(stderr, "%s: nudge keyed reconciler: %v\n", cr.logPrefix, err) //nolint:errcheck // child failure is surfaced; legacy remains owner
 }
 
 // safeTick runs fn with panic recovery. A panic inside fn is logged to

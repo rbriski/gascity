@@ -159,9 +159,10 @@ func TestNudgeKeyShadowMapperHasNoEffectfulCalls(t *testing.T) {
 	fset, file := parseGCTestSource(t, "city_runtime.go")
 	fn := findGCFunction(t, file, "enqueueNudgeKeyShadow")
 	wantCalls := map[string]int{
-		"fmt.Errorf":                    2,
-		"reconcilekey.NewSession":       1,
-		"cr.nudgeKeyController.Enqueue": 1,
+		"fmt.Errorf":              2,
+		"cr.nudgeKeyShadowState":  1,
+		"reconcilekey.NewSession": 1,
+		"controller.Enqueue":      1,
 	}
 	gotCalls := make(map[string]int)
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
@@ -185,6 +186,12 @@ func TestNudgeKeyShadowMapperHasNoEffectfulCalls(t *testing.T) {
 			t.Errorf("enqueueNudgeKeyShadow call count %s = %d, want %d", name, got, want)
 		}
 	}
+	state := findGCFunction(t, file, "nudgeKeyShadowState")
+	assertASTCallsOnly(t, fset, state, "nudge keyed shadow state read", map[string]bool{
+		"cr.nudgeKeyShadowMu.RLock":   true,
+		"cr.nudgeKeyShadowMu.RUnlock": true,
+	})
+	assertASTHasNoCapabilityEscape(t, fset, state, "nudge keyed shadow state read", nil)
 }
 
 func TestNudgeKeyReadShadowConstructionUsesNudgeClassAndDurableBinding(t *testing.T) {
@@ -219,7 +226,8 @@ func TestNudgeKeyReadShadowConstructionUsesNudgeClassAndDurableBinding(t *testin
 
 	readerFSet, readerFile := parseGCTestSource(t, "nudge_key_production_reader.go")
 	allowedImports := map[string]bool{
-		"context": true, "errors": true, "fmt": true, "sync/atomic": true, "time": true,
+		"bytes": true, "container/list": true, "context": true, "errors": true, "fmt": true,
+		"sort": true, "sync": true, "sync/atomic": true, "time": true,
 		"github.com/gastownhall/gascity/internal/beads":        true,
 		"github.com/gastownhall/gascity/internal/nudgequeue":   true,
 		"github.com/gastownhall/gascity/internal/reconcilekey": true,
@@ -521,13 +529,26 @@ func TestNudgeExactIngressCallGraphRemainsReadOnly(t *testing.T) {
 	assertASTHasNoCapabilityEscape(t, cityFSet, onExact, "CityRuntime exact ingress", nil)
 	accept := findGCFunction(t, cityFile, "acceptNudgeKeyShadowHint")
 	assertASTCallsOnly(t, cityFSet, accept, "CityRuntime exact admission", map[string]bool{
-		"ctx.Err":                             true,
-		"cr.nudgeKeyReader.acceptCommandHint": true,
-		"cr.warnNudgeKeyHintDiagnostic":       true,
-		"cr.enqueueNudgeKeyShadow":            true,
+		"ctx.Err":                       true,
+		"cr.nudgeKeyShadowState":        true,
+		"reader.acceptCommandHint":      true,
+		"cr.warnNudgeKeyHintDiagnostic": true,
+		"cr.enqueueNudgeKeyShadow":      true,
 	})
 	assertASTHasNoCapabilityEscape(t, cityFSet, accept, "CityRuntime exact admission", map[string]bool{
-		"sessionID": true, "accepted": true, "err": true,
+		"_": true, "reader": true, "sessionID": true, "accepted": true, "err": true,
+	})
+
+	antiEntropy := findGCFunction(t, cityFile, "runNudgeKeyAntiEntropy")
+	assertASTCallsOnly(t, cityFSet, antiEntropy, "CityRuntime nudge anti-entropy", map[string]bool{
+		"errors.New":           true,
+		"reader.auditSnapshot": true,
+		"reader.key":           true,
+		"fmt.Errorf":           true,
+		"controller.Enqueue":   true,
+	})
+	assertASTHasNoCapabilityEscape(t, cityFSet, antiEntropy, "CityRuntime nudge anti-entropy", map[string]bool{
+		"_": true, "sessions": true, "completed": true, "err": true, "sessionID": true, "key": true,
 	})
 
 	dispatchFSet, dispatchFile := parseGCTestSource(t, "nudge_dispatcher.go")

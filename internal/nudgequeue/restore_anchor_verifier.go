@@ -93,7 +93,7 @@ func (v *RestoreAnchorRepositoryVerifier) verifyLocked(ctx context.Context, stat
 		switch decision.Disposition {
 		case RestoreAnchorEqual:
 			if !v.anchorDurabilityKnown(persisted, confirmed) {
-				if err := writeRestoreAnchor(ctx, v.path, &persisted, persisted, RestoreAnchorWriteAdvance, v.ops); err != nil {
+				if err := writeRestoreAnchor(ctx, v.path, &persisted, persisted, RestoreAnchorWriteAdvance, 0, v.ops); err != nil {
 					if errors.Is(err, ErrRestoreAnchorBusy) || errors.Is(err, ErrRestoreAnchorConflict) {
 						continue
 					}
@@ -117,7 +117,7 @@ func (v *RestoreAnchorRepositoryVerifier) verifyLocked(ctx context.Context, stat
 				return errors.Join(decision.AdmissionError(), errors.New("restore anchor advance has no exact candidate or prior"))
 			}
 			candidate := *decision.Candidate
-			if err := writeRestoreAnchor(ctx, v.path, persistedPtr, candidate, RestoreAnchorWriteAdvance, v.ops); err != nil {
+			if err := writeRestoreAnchor(ctx, v.path, persistedPtr, candidate, RestoreAnchorWriteAdvance, 0, v.ops); err != nil {
 				if errors.Is(err, ErrRestoreAnchorBusy) || errors.Is(err, ErrRestoreAnchorConflict) {
 					continue
 				}
@@ -138,7 +138,7 @@ func (v *RestoreAnchorRepositoryVerifier) verifyLocked(ctx context.Context, stat
 				return errors.Join(decision.AdmissionError(), errors.New("restore anchor provisioning has no exact missing-to-present transition"))
 			}
 			candidate := *decision.Candidate
-			if err := writeRestoreAnchor(ctx, v.path, nil, candidate, RestoreAnchorWriteInitialize, v.ops); err != nil {
+			if err := writeRestoreAnchor(ctx, v.path, nil, candidate, RestoreAnchorWriteInitialize, 0, v.ops); err != nil {
 				if errors.Is(err, ErrRestoreAnchorBusy) || errors.Is(err, ErrRestoreAnchorConflict) {
 					continue
 				}

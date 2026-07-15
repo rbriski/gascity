@@ -68,7 +68,7 @@ func TestWriteRestoreAnchorCrashWindows(t *testing.T) {
 			next.HighestAcceptedRevision++
 			ops := osRestoreAnchorFileOps
 			tc.mutateOps(&ops)
-			err := writeRestoreAnchor(context.Background(), path, &current, next, RestoreAnchorWriteAdvance, ops)
+			err := writeRestoreAnchor(context.Background(), path, &current, next, RestoreAnchorWriteAdvance, 0, ops)
 			if !errors.Is(err, injected) {
 				t.Fatalf("writeRestoreAnchor error = %v, want injected error", err)
 			}
@@ -122,7 +122,7 @@ func TestWriteRestoreAnchorCancellationBeforeRenameKeepsPriorEvidence(t *testing
 		cancel()
 		return nil
 	}
-	err := writeRestoreAnchor(ctx, path, &current, next, RestoreAnchorWriteAdvance, ops)
+	err := writeRestoreAnchor(ctx, path, &current, next, RestoreAnchorWriteAdvance, 0, ops)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("writeRestoreAnchor error = %v, want context.Canceled", err)
 	}
@@ -150,7 +150,7 @@ func TestWriteRestoreAnchorEqualRecordResyncsDurability(t *testing.T) {
 		directorySyncs++
 		return osRestoreAnchorFileOps.syncDirectory(path)
 	}
-	if err := writeRestoreAnchor(context.Background(), path, &anchor, anchor, RestoreAnchorWriteAdvance, ops); err != nil {
+	if err := writeRestoreAnchor(context.Background(), path, &anchor, anchor, RestoreAnchorWriteAdvance, 0, ops); err != nil {
 		t.Fatalf("writeRestoreAnchor equal record: %v", err)
 	}
 	if fileSyncs != 1 || directorySyncs != 1 {
@@ -278,6 +278,49 @@ func TestAcquireRestoreAnchorLockRejectsSymlinkInstalledAfterMissingCheck(t *tes
 	}
 }
 
+func TestAcquireRestoreAnchorLockDoesNotMutateSymlinkTargetInstalledAfterExistingCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink race contract")
+	}
+	path := RestoreAnchorPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	lockPath := path + ".lock"
+	if err := os.WriteFile(lockPath, []byte("original lock"), 0o600); err != nil {
+		t.Fatalf("WriteFile lock: %v", err)
+	}
+	victim := filepath.Join(filepath.Dir(path), "victim-existing")
+	if err := os.WriteFile(victim, []byte("must not be changed"), 0o644); err != nil {
+		t.Fatalf("WriteFile victim: %v", err)
+	}
+	ops := osRestoreAnchorLockOps
+	ops.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if err := os.Remove(name); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(victim, name); err != nil {
+			return nil, err
+		}
+		return os.OpenFile(name, flag, perm)
+	}
+	lock, err := acquireRestoreAnchorLockWithOps(path, ops)
+	if lock != nil {
+		_ = lock.Close()
+		t.Fatal("acquireRestoreAnchorLockWithOps returned a lock through a raced existing symlink")
+	}
+	if !errors.Is(err, ErrRestoreAnchorUnsafePath) {
+		t.Fatalf("acquireRestoreAnchorLockWithOps error = %v, want ErrRestoreAnchorUnsafePath", err)
+	}
+	info, statErr := os.Stat(victim)
+	if statErr != nil {
+		t.Fatalf("Stat victim: %v", statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("victim mode changed through raced lock symlink: got %04o, want 0644", got)
+	}
+}
+
 func TestRestoreAnchorFileExplicitLifecycle(t *testing.T) {
 	cityPath := t.TempDir()
 	path := RestoreAnchorPath(cityPath)
@@ -312,10 +355,39 @@ func TestRestoreAnchorFileExplicitLifecycle(t *testing.T) {
 	recovered.Store.RestoreEpoch = 3
 	recovered.HighestAcceptedRevision = 2
 	recovered.HighestAcceptedSequence = 1
-	if err := WriteRestoreAnchor(context.Background(), path, &advanced, recovered, RestoreAnchorWriteRecovery); err != nil {
+	if err := WriteRestoreAnchorRecovery(context.Background(), path, &advanced, recovered, 3); err != nil {
 		t.Fatalf("recovery re-anchor: %v", err)
 	}
 	assertLoadedRestoreAnchor(t, path, recovered)
+}
+
+func TestWriteRestoreAnchorRecoveryEnforcesObservedEpochFloor(t *testing.T) {
+	path := RestoreAnchorPath(t.TempDir())
+	current := RestoreAnchor{
+		Version:                 RestoreAnchorVersion1,
+		Store:                   CommandStoreBinding{StoreUUID: "store-a", RestoreEpoch: 7},
+		HighestAcceptedRevision: 41,
+		HighestAcceptedSequence: 17,
+	}
+	if err := WriteRestoreAnchor(context.Background(), path, nil, current, RestoreAnchorWriteInitialize); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	tooOld := current
+	tooOld.Store.RestoreEpoch = 8
+	tooOld.HighestAcceptedRevision = 0
+	tooOld.HighestAcceptedSequence = 0
+	if err := WriteRestoreAnchorRecovery(context.Background(), path, &current, tooOld, 101); !errors.Is(err, ErrRestoreAnchorConflict) {
+		t.Fatalf("below-floor recovery error = %v, want ErrRestoreAnchorConflict", err)
+	}
+	if err := WriteRestoreAnchor(context.Background(), path, &current, tooOld, RestoreAnchorWriteRecovery); !errors.Is(err, ErrRestoreAnchorConflict) {
+		t.Fatalf("generic recovery bypass error = %v, want ErrRestoreAnchorConflict", err)
+	}
+	accepted := tooOld
+	accepted.Store.RestoreEpoch = 101
+	if err := WriteRestoreAnchorRecovery(context.Background(), path, &current, accepted, 101); err != nil {
+		t.Fatalf("recovery at observed floor: %v", err)
+	}
+	assertLoadedRestoreAnchor(t, path, accepted)
 }
 
 func TestWriteRestoreAnchorRejectsResetAndStaleExpectations(t *testing.T) {

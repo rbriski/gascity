@@ -168,15 +168,33 @@ func TestDecideRestoreAnchorClassifiesLineageTransitions(t *testing.T) {
 			wantRequiredEpoch:    8,
 		},
 		{
-			name: "anchor read failure",
+			name: "anchor read failure retains the highest observed epoch",
 			check: RestoreAnchorCheck{
 				AnchorReadFailed:          true,
-				DatabaseStore:             anchor.Store,
+				PreviouslyAccepted:        &anchor,
+				DatabaseStore:             CommandStoreBinding{StoreUUID: "store-a", RestoreEpoch: 100},
 				DatabaseRevision:          41,
 				DatabaseSequenceHighWater: 17,
 			},
-			want:        RestoreAnchorInvalid,
-			wantEffects: false,
+			want:                 RestoreAnchorInvalid,
+			wantEffects:          false,
+			wantRetainedRevision: 41,
+			wantRetainedSequence: 17,
+			wantRequiredEpoch:    101,
+		},
+		{
+			name: "anchor read failure at maximum observed epoch has no representable recovery",
+			check: RestoreAnchorCheck{
+				AnchorReadFailed:          true,
+				PreviouslyAccepted:        &anchor,
+				DatabaseStore:             CommandStoreBinding{StoreUUID: "store-a", RestoreEpoch: math.MaxUint64},
+				DatabaseRevision:          41,
+				DatabaseSequenceHighWater: 17,
+			},
+			want:                 RestoreAnchorInvalid,
+			wantEffects:          false,
+			wantRetainedRevision: 41,
+			wantRetainedSequence: 17,
 		},
 	}
 

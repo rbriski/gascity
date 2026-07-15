@@ -156,10 +156,20 @@ func LoadRestoreAnchor(ctx context.Context, path string) (anchor RestoreAnchor, 
 // temporary file before rename and the parent directory afterward. A corrupt
 // or unreadable existing anchor is never overwritten.
 func WriteRestoreAnchor(ctx context.Context, path string, expected *RestoreAnchor, next RestoreAnchor, mode RestoreAnchorWriteMode) error {
-	return writeRestoreAnchor(ctx, path, expected, next, mode, osRestoreAnchorFileOps)
+	if mode == RestoreAnchorWriteRecovery {
+		return fmt.Errorf("writing nudge command restore anchor: %w: recovery requires an observed epoch floor", ErrRestoreAnchorConflict)
+	}
+	return writeRestoreAnchor(ctx, path, expected, next, mode, 0, osRestoreAnchorFileOps)
 }
 
-func writeRestoreAnchor(ctx context.Context, path string, expected *RestoreAnchor, next RestoreAnchor, mode RestoreAnchorWriteMode, ops restoreAnchorFileOps) error {
+// WriteRestoreAnchorRecovery publishes an explicit recovered lineage only when
+// next is at or above the minimum epoch retained by the recovery decision.
+// The caller must quarantine old-epoch work before invoking this function.
+func WriteRestoreAnchorRecovery(ctx context.Context, path string, expected *RestoreAnchor, next RestoreAnchor, minimumEpoch uint64) error {
+	return writeRestoreAnchor(ctx, path, expected, next, RestoreAnchorWriteRecovery, minimumEpoch, osRestoreAnchorFileOps)
+}
+
+func writeRestoreAnchor(ctx context.Context, path string, expected *RestoreAnchor, next RestoreAnchor, mode RestoreAnchorWriteMode, recoveryMinimumEpoch uint64, ops restoreAnchorFileOps) error {
 	if ctx == nil {
 		return errors.New("writing nudge command restore anchor: nil context")
 	}
@@ -204,7 +214,7 @@ func writeRestoreAnchor(ctx context.Context, path string, expected *RestoreAncho
 	if err := validateRestoreAnchorExpected(current, exists, expectedCopy); err != nil {
 		return err
 	}
-	if err := validateRestoreAnchorTransition(current, exists, next, mode); err != nil {
+	if err := validateRestoreAnchorTransition(current, exists, next, mode, recoveryMinimumEpoch); err != nil {
 		return err
 	}
 	if exists && current == next {
@@ -297,21 +307,21 @@ func validateRestoreAnchorExpected(current RestoreAnchor, exists bool, expected 
 	return nil
 }
 
-func validateRestoreAnchorTransition(current RestoreAnchor, exists bool, next RestoreAnchor, mode RestoreAnchorWriteMode) error {
+func validateRestoreAnchorTransition(current RestoreAnchor, exists bool, next RestoreAnchor, mode RestoreAnchorWriteMode, recoveryMinimumEpoch uint64) error {
 	switch mode {
 	case RestoreAnchorWriteInitialize:
-		if exists {
+		if recoveryMinimumEpoch != 0 || exists {
 			return fmt.Errorf("writing nudge command restore anchor: %w: initialization requires a missing anchor", ErrRestoreAnchorConflict)
 		}
 		return nil
 	case RestoreAnchorWriteAdvance:
-		if !exists || next.Store != current.Store || next.HighestAcceptedRevision < current.HighestAcceptedRevision || next.HighestAcceptedSequence < current.HighestAcceptedSequence {
+		if recoveryMinimumEpoch != 0 || !exists || next.Store != current.Store || next.HighestAcceptedRevision < current.HighestAcceptedRevision || next.HighestAcceptedSequence < current.HighestAcceptedSequence {
 			return fmt.Errorf("writing nudge command restore anchor: %w: ordinary advance must retain store lineage and not lower revision or sequence", ErrRestoreAnchorConflict)
 		}
 		return nil
 	case RestoreAnchorWriteRecovery:
-		if !exists || next.Store.StoreUUID != current.Store.StoreUUID || next.Store.RestoreEpoch <= current.Store.RestoreEpoch {
-			return fmt.Errorf("writing nudge command restore anchor: %w: recovery must retain store identity and strictly advance restore epoch", ErrRestoreAnchorConflict)
+		if recoveryMinimumEpoch == 0 || !exists || next.Store.StoreUUID != current.Store.StoreUUID || next.Store.RestoreEpoch <= current.Store.RestoreEpoch || next.Store.RestoreEpoch < recoveryMinimumEpoch {
+			return fmt.Errorf("writing nudge command restore anchor: %w: recovery must retain store identity and advance to at least observed epoch floor %d", ErrRestoreAnchorConflict, recoveryMinimumEpoch)
 		}
 		return nil
 	default:
@@ -432,10 +442,6 @@ func acquireRestoreAnchorLockWithOps(path string, ops restoreAnchorLockOps) (*os
 			return nil, fmt.Errorf("writing nudge command restore anchor: %w: lock appeared during creation", ErrRestoreAnchorUnsafePath)
 		}
 		return nil, fmt.Errorf("writing nudge command restore anchor: open lock: %w", err)
-	}
-	if err := lock.Chmod(0o600); err != nil {
-		_ = lock.Close()
-		return nil, fmt.Errorf("writing nudge command restore anchor: chmod lock: %w", err)
 	}
 	opened, err := lock.Stat()
 	if err != nil {

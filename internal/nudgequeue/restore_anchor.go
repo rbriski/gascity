@@ -133,13 +133,13 @@ func ValidateRestoreAnchor(anchor RestoreAnchor) error {
 // revision and the minimum strictly newer restore epoch required by recovery.
 func DecideRestoreAnchor(check RestoreAnchorCheck) RestoreAnchorDecision {
 	if check.AnchorReadFailed {
-		return invalidRestoreAnchorDecision(check.PreviouslyAccepted)
+		return invalidRestoreAnchorDecisionWithObservedStore(check.PreviouslyAccepted, check.DatabaseStore)
 	}
 	if err := ValidateCommandStoreBinding(check.DatabaseStore); err != nil {
-		return invalidRestoreAnchorDecision(check.PreviouslyAccepted)
+		return invalidRestoreAnchorDecisionWithObservedStore(check.PreviouslyAccepted, check.DatabaseStore)
 	}
 	if check.DatabaseSequenceHighWater > check.DatabaseRevision {
-		return invalidRestoreAnchorDecision(check.PreviouslyAccepted)
+		return invalidRestoreAnchorDecisionWithObservedStore(check.PreviouslyAccepted, check.DatabaseStore)
 	}
 	if check.PreviouslyAccepted != nil {
 		if err := ValidateRestoreAnchor(*check.PreviouslyAccepted); err != nil {
@@ -159,10 +159,10 @@ func DecideRestoreAnchor(check RestoreAnchorCheck) RestoreAnchorDecision {
 	}
 	anchor := *check.Persisted
 	if err := ValidateRestoreAnchor(anchor); err != nil {
-		return invalidRestoreAnchorDecision(check.PreviouslyAccepted)
+		return invalidRestoreAnchorDecisionWithObservedStore(check.PreviouslyAccepted, check.DatabaseStore)
 	}
 	if check.PreviouslyAccepted != nil && restoreAnchorRegressed(anchor, *check.PreviouslyAccepted) {
-		return invalidRestoreAnchorDecision(check.PreviouslyAccepted)
+		return invalidRestoreAnchorDecisionWithObservedStore(check.PreviouslyAccepted, check.DatabaseStore)
 	}
 
 	base := RestoreAnchorDecision{
@@ -230,13 +230,24 @@ func restoreAnchorRegressed(current, prior RestoreAnchor) bool {
 }
 
 func invalidRestoreAnchorDecision(retained *RestoreAnchor) RestoreAnchorDecision {
+	return invalidRestoreAnchorDecisionWithObservedStore(retained, CommandStoreBinding{})
+}
+
+func invalidRestoreAnchorDecisionWithObservedStore(retained *RestoreAnchor, observed CommandStoreBinding) RestoreAnchorDecision {
 	decision := RestoreAnchorDecision{Disposition: RestoreAnchorInvalid}
+	var highestObservedEpoch uint64
 	if retained != nil && ValidateRestoreAnchor(*retained) == nil {
 		decision.RetainedHighestRevision = retained.HighestAcceptedRevision
 		decision.RetainedHighestSequence = retained.HighestAcceptedSequence
-		if epoch, ok := nextRestoreEpoch(retained.Store.RestoreEpoch); ok {
-			decision.MinimumRecoveryEpoch = epoch
+		highestObservedEpoch = retained.Store.RestoreEpoch
+	}
+	if ValidateCommandStoreBinding(observed) == nil && observed.RestoreEpoch > highestObservedEpoch {
+		if retained == nil || retained.Store.StoreUUID == observed.StoreUUID {
+			highestObservedEpoch = observed.RestoreEpoch
 		}
+	}
+	if epoch, ok := nextRestoreEpoch(highestObservedEpoch); ok && highestObservedEpoch != 0 {
+		decision.MinimumRecoveryEpoch = epoch
 	}
 	return decision
 }

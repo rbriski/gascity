@@ -913,8 +913,11 @@ func validateCommandCreateRequest(binding CommandStoreBinding, requestID string,
 	if command.Store != (CommandStoreBinding{}) || command.Order != (CommandOrder{}) {
 		return fmt.Errorf("caller supplied authoritative store/order fields: %w", ErrCommandRepositoryInvalidRequest)
 	}
-	if command.Version != CommandVersion1 || command.State != CommandStatePending || command.Binding != nil || command.Retry != nil || command.Claim != nil || command.Terminal != nil {
+	if command.Version != CommandVersion1 || command.State != CommandStatePending || command.Retry != nil || command.Claim != nil || command.Terminal != nil {
 		return fmt.Errorf("create requires a pristine pending v1 command: %w", ErrCommandRepositoryInvalidRequest)
+	}
+	if command.Target.Policy == TargetPolicyContinuation && command.Binding != nil {
+		return fmt.Errorf("continuation create cannot carry a claim-time launch binding: %w", ErrCommandRepositoryInvalidRequest)
 	}
 	if command.TrustedIngress.PayloadDigest != ComputeCommandPayloadDigest(command) {
 		return fmt.Errorf("trusted-ingress payload digest does not cover the authoritative command id: %w", ErrCommandRepositoryInvalidRequest)

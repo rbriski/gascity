@@ -856,7 +856,7 @@ func TestRecorderRequiresTruthfulRunEvidence(t *testing.T) {
 		"gc_lumen_gateway",
 		"GC_CODEX_INFERENCE_AUTH_OK",
 		"codex-auth-preflight.txt",
-		"timeout --kill-after=5s 2m claude auth status",
+		"timeout --kill-after=5s 30s claude auth status </dev/null",
 		"gateway-token",
 		"model_providers.gc_lumen_gateway.auth",
 		"refresh_interval_ms = 0",

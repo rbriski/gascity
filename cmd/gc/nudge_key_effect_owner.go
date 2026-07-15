@@ -197,6 +197,12 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		if ctx.Err() != nil {
 			return nudgeReconcileSuccess()
 		}
+		if errors.Is(err, nudgequeue.ErrNudgeAuthorizationUnknown) && claimResult.Disposition == nudgequeue.CommandClaimAuthorizationUnknown {
+			if _, _, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr != nil {
+				return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("refreshing authorization-unknown keyed nudge command: %w", refreshErr)))
+			}
+			return nudgeReconcileTransient(fmt.Errorf("claiming keyed nudge command: %w", err))
+		}
 		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("claiming keyed nudge command: %w", err)))
 	}
 	switch claimResult.Disposition {

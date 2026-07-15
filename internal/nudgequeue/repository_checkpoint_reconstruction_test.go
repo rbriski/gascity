@@ -212,6 +212,32 @@ func TestCommandRepositorySnapshotPagesActiveSetDeterministically(t *testing.T) 
 	}
 }
 
+func TestCommandRepositorySnapshotRejectsTerminalWireLeftOpen(t *testing.T) {
+	t.Parallel()
+
+	store := newRepositoryAtomicTestStore()
+	repo := newVerifiedCommandRepository(t, store)
+	state, err := repo.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	seedRepositoryCheckpointCommands(t, store, state, []CommandState{CommandStateDelivered})
+	store.mu.Lock()
+	for id, row := range store.rows {
+		if id != commandRepositoryCheckpointID {
+			row.Status = "open"
+			store.rows[id] = row
+		}
+	}
+	store.mu.Unlock()
+	if _, err := repo.RepairLineage(t.Context()); err != nil {
+		t.Fatalf("RepairLineage after seed: %v", err)
+	}
+	if _, err := repo.Snapshot(t.Context(), 1); !errors.Is(err, ErrCommandRepositoryRecord) {
+		t.Fatalf("Snapshot terminal/open skew error = %v, want record refusal", err)
+	}
+}
+
 func repositoryCheckpointCommandRowForTest(t *testing.T, state CommandRepositoryState, requestID string, commandState CommandState, sequence uint64, updatedAt time.Time) beads.Bead {
 	t.Helper()
 	command := validCommandV1(commandState)

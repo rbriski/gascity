@@ -219,6 +219,11 @@ func decodeCommandRepositoryCheckpointRecord(record beads.Bead) (commandReposito
 	if record.ID != commandRepositoryCheckpointID || record.Title != commandRepositoryCheckpointTitle || record.Status != "open" || record.Type != commandRecordBeadType || record.Ephemeral || record.NoHistory {
 		return commandRepositoryCheckpoint{}, &CommandRepositoryRecordError{CommandID: record.ID, Err: errors.New("checkpoint storage identity is non-canonical")}
 	}
+	if record.Priority != nil || record.Assignee != "" || record.From != "" || record.ParentID != "" || record.Ref != "" ||
+		len(record.Needs) != 0 || record.Description != "" || len(record.Labels) != 0 || len(record.Dependencies) != 0 ||
+		record.DeferUntil != nil || record.IsBlocked != nil {
+		return commandRepositoryCheckpoint{}, &CommandRepositoryRecordError{CommandID: record.ID, Err: errors.New("checkpoint has unrelated bead fields")}
+	}
 	if len(record.Metadata) != 2 || record.Metadata[commandRecordKindMetadataKey] != commandRepositoryCheckpointKindMetadataValue {
 		return commandRepositoryCheckpoint{}, &CommandRepositoryRecordError{CommandID: record.ID, Err: errors.New("checkpoint metadata contract is non-canonical")}
 	}

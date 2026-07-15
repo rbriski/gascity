@@ -120,12 +120,34 @@ func TestCommandRepositoryCheckpointRecordRejectsStorageContractSkew(t *testing.
 		t.Fatalf("commandRepositoryCheckpointRecord: %v", err)
 	}
 	tests := map[string]func(*beads.Bead){
-		"id":         func(record *beads.Bead) { record.ID += "-other" },
-		"title":      func(record *beads.Bead) { record.Title += " other" },
-		"status":     func(record *beads.Bead) { record.Status = "closed" },
-		"type":       func(record *beads.Bead) { record.Type = "message" },
+		"id":     func(record *beads.Bead) { record.ID += "-other" },
+		"title":  func(record *beads.Bead) { record.Title += " other" },
+		"status": func(record *beads.Bead) { record.Status = "closed" },
+		"type":   func(record *beads.Bead) { record.Type = "message" },
+		"priority": func(record *beads.Bead) {
+			priority := 1
+			record.Priority = &priority
+		},
+		"assignee":    func(record *beads.Bead) { record.Assignee = "other" },
+		"from":        func(record *beads.Bead) { record.From = "other" },
+		"parent":      func(record *beads.Bead) { record.ParentID = "other" },
+		"ref":         func(record *beads.Bead) { record.Ref = "other" },
+		"needs":       func(record *beads.Bead) { record.Needs = []string{"other"} },
+		"description": func(record *beads.Bead) { record.Description = "other" },
+		"labels":      func(record *beads.Bead) { record.Labels = []string{"other"} },
+		"dependencies": func(record *beads.Bead) {
+			record.Dependencies = []beads.Dep{{IssueID: record.ID, DependsOnID: "other", Type: "blocks"}}
+		},
 		"ephemeral":  func(record *beads.Bead) { record.Ephemeral = true },
 		"no history": func(record *beads.Bead) { record.NoHistory = true },
+		"defer until": func(record *beads.Bead) {
+			deferUntil := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+			record.DeferUntil = &deferUntil
+		},
+		"blocked projection": func(record *beads.Bead) {
+			blocked := true
+			record.IsBlocked = &blocked
+		},
 		"kind": func(record *beads.Bead) {
 			record.Metadata[commandRecordKindMetadataKey] = commandRecordKindMetadataValue
 		},

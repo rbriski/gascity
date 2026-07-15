@@ -1064,6 +1064,17 @@ func decodeCommandRecord(row beads.Bead, state CommandRepositoryState) (CommandI
 	default:
 		return recordErr(fmt.Errorf("total codec returned unknown disposition %q", decoded.Disposition))
 	}
+	expectedStatus := "open"
+	wireState := "opaque"
+	if entry.Command != nil {
+		wireState = string(entry.Command.State)
+		if commandIsTerminalState(entry.Command.State) {
+			expectedStatus = "closed"
+		}
+	}
+	if row.Status != expectedStatus {
+		return recordErr(fmt.Errorf("record status %q does not mirror wire state %q; want %q", row.Status, wireState, expectedStatus))
+	}
 	routing := commandIndexEntryRouting(entry)
 	if routing.CommandID != row.ID {
 		return recordErr(fmt.Errorf("wire command id %q does not match bead id", routing.CommandID))

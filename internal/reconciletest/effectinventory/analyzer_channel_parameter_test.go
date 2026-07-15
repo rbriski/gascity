@@ -117,6 +117,55 @@ func TestDiscoverProfileTracksLocalChannelRegisteredThroughExactParameter(t *tes
 	})
 }
 
+func TestDiscoverClosedWorldProfileTracksChannelRegisteredThroughClosedGlobalFunction(t *testing.T) {
+	const packageName = "closedworld/signalglobal"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := signalNotifyFixtureBoundary("channelparam.closed-global.signal-notify")
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err != nil {
+		t.Fatalf("discoverProfile() error: %v", err)
+	}
+	assertObservedSites(t, observed, []observedKey{
+		fixtureCall(boundary.ID, packageName, "main.go", "run", nil, OperationSelectReceive, 1),
+	})
+}
+
+func TestDiscoverClosedWorldProfileRejectsChannelRegistrationThroughExportedGlobalFunction(t *testing.T) {
+	const packageName = "closedworld/signalglobalopen"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := signalNotifyFixtureBoundary("channelparam.open-global.signal-notify")
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err == nil {
+		t.Fatal("discoverProfile() error = nil, want exported-global call-provenance diagnostic")
+	}
+	if observed != nil {
+		t.Fatalf("discoverProfile() observed = %#v, want nil", observed)
+	}
+	for _, want := range []string{"run", "ambiguous call provenance"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("discoverProfile() error = %q, want %q", err, want)
+		}
+	}
+}
+
+func signalNotifyFixtureBoundary(id string) BoundaryDefinition {
+	return BoundaryDefinition{
+		ID:     id,
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: "os/signal", Name: "Notify"},
+		Match:  ObjectMatchChannel,
+		Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+	}
+}
+
 func TestDiscoverProfileRejectsAmbiguousChannelRegistrationCallDeterministically(t *testing.T) {
 	const packageName = "channelparam/ambiguous"
 	config := fixtureAnalysisConfig(t, []string{

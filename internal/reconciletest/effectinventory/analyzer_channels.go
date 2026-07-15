@@ -318,7 +318,11 @@ func (analysis *loadedAnalysis) callMatchesChannelInputBoundary(call ssa.CallIns
 	if !matched {
 		return false, false
 	}
-	openWorld := len(callees) == 0 || callHasOpenWorldSyntheticDispatch(common) || hasOpenWorldFunctionSource(common.Value, make(map[ssa.Value]bool))
+	openFunctionSource := hasOpenWorldFunctionSource(common.Value, make(map[ssa.Value]bool))
+	if analysis.config.closedWorld {
+		openFunctionSource = !analysis.callableSourceClosed(common.Value)
+	}
+	openWorld := len(callees) == 0 || callHasOpenWorldSyntheticDispatch(common) || openFunctionSource
 	return true, unmatched || openWorld
 }
 

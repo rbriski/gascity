@@ -23,12 +23,16 @@ func (analysis *loadedAnalysis) callableVTATargetSetClosed(call ssa.CallInstruct
 			return false
 		}
 	}
+	return analysis.callableSourceClosed(call.Common().Value)
+}
+
+func (analysis *loadedAnalysis) callableSourceClosed(value ssa.Value) bool {
 	proof := callableSourceProof{
 		analysis: analysis,
 		states:   make(map[ssa.Value]callableProofState),
 		results:  make(map[callableResult]callableProofState),
 	}
-	return proof.closed(call.Common().Value)
+	return proof.closed(value)
 }
 
 type callableProofState uint8

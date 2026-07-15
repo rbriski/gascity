@@ -7,10 +7,19 @@ const (
 	wakeProfileSetUnix wakeCatalogProfileSet = "unix"
 )
 
+type wakeCatalogTargetShape string
+
+const (
+	wakeTargetControllerChannel wakeCatalogTargetShape = "controller-channel"
+	wakeTargetBoundarySource    wakeCatalogTargetShape = "boundary-source"
+	wakeTargetResultSource      wakeCatalogTargetShape = "result-source"
+)
+
 type wakeCatalogRouteClassSpec struct {
 	ID               catalogRouteClassID
 	ActionFamily     ActionFamily
 	ExecutingProcess ExecutingProcess
+	TargetShape      wakeCatalogTargetShape
 }
 
 type wakeCatalogSiteSpec struct {
@@ -39,20 +48,9 @@ func wakeCatalogRouteClasses() []catalogRouteClass {
 			Definition: Route{
 				ActionFamily:     spec.ActionFamily,
 				ExecutingProcess: spec.ExecutingProcess,
-				Target: TargetRef{
-					Kind:        TargetControllerChannel,
-					Cardinality: TargetCardinalityOne,
-					Identity:    TargetIdentitySingleton,
-					Signature:   TargetSignatureChannel,
-					Identities: []TargetIdentityRef{{
-						Role:         TargetRolePrimary,
-						BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
-						Source:       TargetSourceBoundaryValue,
-					}},
-					Detail: "one registered wake source identified by its canonical boundary object",
-				},
-				Fences:      []Fence{{Kind: FenceNone}},
-				CurrentGate: GateRef{Kind: GateUnconditionalLegacy},
+				Target:           wakeCatalogTarget(spec.TargetShape),
+				Fences:           []Fence{{Kind: FenceNone}},
+				CurrentGate:      GateRef{Kind: GateUnconditionalLegacy},
 				Disposition: Disposition{
 					Kind:   DispositionRetainBoundary,
 					Reason: "retain the canonical typed wake-source boundary",
@@ -70,6 +68,46 @@ func wakeCatalogRouteClasses() []catalogRouteClass {
 		})
 	}
 	return classes
+}
+
+func knownWakeCatalogTargetShape(shape wakeCatalogTargetShape) bool {
+	switch shape {
+	case wakeTargetControllerChannel, wakeTargetBoundarySource, wakeTargetResultSource:
+		return true
+	default:
+		return false
+	}
+}
+
+func wakeCatalogTarget(shape wakeCatalogTargetShape) TargetRef {
+	target := TargetRef{
+		Cardinality: TargetCardinalityOne,
+		Identities: []TargetIdentityRef{{
+			Role:   TargetRolePrimary,
+			Source: TargetSourceBoundaryValue,
+		}},
+	}
+	switch shape {
+	case wakeTargetControllerChannel:
+		target.Kind = TargetControllerChannel
+		target.Identity = TargetIdentitySingleton
+		target.Signature = TargetSignatureChannel
+		target.Identities[0].BoundarySlot = ValueSlot{Kind: SlotBoundaryObject}
+		target.Detail = "one controller-owned channel identified by its registered field"
+	case wakeTargetBoundarySource:
+		target.Kind = TargetWakeSource
+		target.Identity = TargetIdentityExisting
+		target.Signature = TargetSignatureWakeSource
+		target.Identities[0].BoundarySlot = ValueSlot{Kind: SlotBoundaryObject}
+		target.Detail = "one invocation-local timer, cancellation, or signal channel"
+	case wakeTargetResultSource:
+		target.Kind = TargetWakeSource
+		target.Identity = TargetIdentityExisting
+		target.Signature = TargetSignatureWakeSource
+		target.Identities[0].BoundarySlot = ValueSlot{Kind: SlotResult, Index: 1}
+		target.Detail = "one invocation-local wake source returned by the registered boundary"
+	}
+	return target
 }
 
 func wakeCatalogSiteRows() []catalogSiteRow {

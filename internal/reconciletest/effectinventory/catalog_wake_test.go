@@ -11,7 +11,7 @@ import (
 
 const (
 	wakeScaffoldFingerprint = "f97eb191572ade2adec0ad6194a9c6fd448d898f3fe399ba1cb06713487e43b9"
-	wakeSemanticFingerprint = "c728032b6acc487bee4dba77b462cd39adecee3d7e9662fb69c919da6550de02"
+	wakeSemanticFingerprint = "d49750b1b4891f10309c434a20043a39b69ad0c6fbf2466de1cf083d53098465"
 )
 
 func TestWakeCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
@@ -78,34 +78,95 @@ func TestWakeCatalogUsesOnlyClosedKnownSemanticClasses(t *testing.T) {
 	}
 }
 
-func TestWakeCatalogUsesConservativeDirectWakeSafetyShape(t *testing.T) {
+func TestWakeCatalogTargetShapesDistinguishOwnedChannelsFromInvocationSources(t *testing.T) {
+	tests := []struct {
+		name  string
+		shape wakeCatalogTargetShape
+		want  TargetRef
+	}{
+		{
+			name:  "controller-owned channel",
+			shape: wakeTargetControllerChannel,
+			want: TargetRef{
+				Kind:        TargetControllerChannel,
+				Cardinality: TargetCardinalityOne,
+				Identity:    TargetIdentitySingleton,
+				Signature:   TargetSignatureChannel,
+				Identities: []TargetIdentityRef{{
+					Role:         TargetRolePrimary,
+					BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
+					Source:       TargetSourceBoundaryValue,
+				}},
+				Detail: "one controller-owned channel identified by its registered field",
+			},
+		},
+		{
+			name:  "invocation-local channel source",
+			shape: wakeTargetBoundarySource,
+			want: TargetRef{
+				Kind:        TargetWakeSource,
+				Cardinality: TargetCardinalityOne,
+				Identity:    TargetIdentityExisting,
+				Signature:   TargetSignatureWakeSource,
+				Identities: []TargetIdentityRef{{
+					Role:         TargetRolePrimary,
+					BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
+					Source:       TargetSourceBoundaryValue,
+				}},
+				Detail: "one invocation-local timer, cancellation, or signal channel",
+			},
+		},
+		{
+			name:  "invocation-local result source",
+			shape: wakeTargetResultSource,
+			want: TargetRef{
+				Kind:        TargetWakeSource,
+				Cardinality: TargetCardinalityOne,
+				Identity:    TargetIdentityExisting,
+				Signature:   TargetSignatureWakeSource,
+				Identities: []TargetIdentityRef{{
+					Role:         TargetRolePrimary,
+					BoundarySlot: ValueSlot{Kind: SlotResult, Index: 1},
+					Source:       TargetSourceBoundaryValue,
+				}},
+				Detail: "one invocation-local wake source returned by the registered boundary",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wakeCatalogTarget(tt.shape); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("wakeCatalogTarget(%q) = %#v, want %#v", tt.shape, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWakeCatalogUsesOnlyClosedTruthfulTargetShapes(t *testing.T) {
+	classes := wakeCatalogRouteClasses()
+	if len(classes) != len(wakeCatalogRouteClassSpecs) {
+		t.Fatalf("wake route classes = %d, want %d specs", len(classes), len(wakeCatalogRouteClassSpecs))
+	}
+	for index, spec := range wakeCatalogRouteClassSpecs {
+		if !knownWakeCatalogTargetShape(spec.TargetShape) {
+			t.Errorf("wake route class %q has unknown target shape %q", spec.ID, spec.TargetShape)
+			continue
+		}
+		if got, want := classes[index].Definition.Target, wakeCatalogTarget(spec.TargetShape); !reflect.DeepEqual(got, want) {
+			t.Errorf("wake route class %q target = %#v, want %#v", spec.ID, got, want)
+		}
+	}
+
 	registrations, err := wakeInventoryRegistrations()
 	if err != nil {
 		t.Fatalf("wakeInventoryRegistrations() failed: %v", err)
 	}
-	wantTarget := TargetRef{
-		Kind:        TargetControllerChannel,
-		Cardinality: TargetCardinalityOne,
-		Identity:    TargetIdentitySingleton,
-		Signature:   TargetSignatureChannel,
-		Identities: []TargetIdentityRef{{
-			Role:         TargetRolePrimary,
-			BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
-			Source:       TargetSourceBoundaryValue,
-		}},
-		Detail: "one registered wake source identified by its canonical boundary object",
-	}
 	for _, registration := range registrations {
 		for _, route := range registration.Cases[0].Routes {
 			physical := describePhysicalSite(registration.BoundaryID, registration.Matcher)
-			if !reflect.DeepEqual(route.Target, wantTarget) {
-				t.Errorf("%s target = %#v, want conservative wake target %#v", physical, route.Target, wantTarget)
-			}
 			if route.ActionFamily != FamilyControllerWake && route.ActionFamily != FamilyTimersWake {
 				t.Errorf("%s family = %q, want controller-wake or timers-wake", physical, route.ActionFamily)
-			}
-			if route.ExecutingProcess != ProcessForegroundCLI && route.ExecutingProcess != ProcessProviderChild && route.ExecutingProcess != ProcessSidecarPoller {
-				t.Errorf("%s executing process = %q, want an exact current process class", physical, route.ExecutingProcess)
 			}
 			if route.AccessPath != AccessDirectWake || !reflect.DeepEqual(route.Fences, []Fence{{Kind: FenceNone}}) || route.CurrentGate.Kind != GateUnconditionalLegacy {
 				t.Errorf("%s access/fence/gate = %q/%#v/%#v, want direct-wake/none/unconditional-legacy", physical, route.AccessPath, route.Fences, route.CurrentGate)

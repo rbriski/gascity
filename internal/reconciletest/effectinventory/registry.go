@@ -162,6 +162,7 @@ const (
 	TargetProviderServer        TargetKind = "provider-server"
 	TargetEventLog              TargetKind = "event-log"
 	TargetControllerChannel     TargetKind = "controller-channel"
+	TargetWakeSource            TargetKind = "wake-source"
 	TargetOperatorTerminal      TargetKind = "operator-terminal"
 )
 
@@ -206,6 +207,7 @@ const (
 	TargetSignatureGraphPlan      TargetSignatureKind = "graph-plan"
 	TargetSignatureDependencyEdge TargetSignatureKind = "dependency-edge"
 	TargetSignatureChannel        TargetSignatureKind = "channel"
+	TargetSignatureWakeSource     TargetSignatureKind = "wake-source"
 	TargetSignatureProcess        TargetSignatureKind = "process"
 	TargetSignatureEventAppend    TargetSignatureKind = "event-append"
 	TargetSignatureOperatorAttach TargetSignatureKind = "operator-terminal-attach"

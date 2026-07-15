@@ -50,6 +50,26 @@ func TestNewControllerStateLatchesRolloutFlags(t *testing.T) {
 	}
 }
 
+func TestNewControllerStateWithRolloutFlagsUsesCallerBootLatch(t *testing.T) {
+	stubManagedDoltStoreOpeners(t)
+	dir := t.TempDir()
+	cfg := &config.City{Workspace: config.Workspace{Name: "t"}}
+	flags := rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Require))
+
+	cs := newControllerStateWithRolloutFlags(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		"t",
+		dir,
+		flags,
+	)
+	if got := cs.RolloutFlags().BeadsConditionalWrites(); got != rollout.Require {
+		t.Fatalf("provided boot latch = %q, want require", got)
+	}
+}
+
 // TestControllerStateBootResolveErrorZeroFlags proves an out-of-enum config value
 // warns and latches the zero (degraded-safe/legacy) Flags rather than aborting
 // construction.

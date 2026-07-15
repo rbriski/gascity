@@ -1364,6 +1364,14 @@ func runControllerWithLease(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	rolloutFlags, nudgeEffectSelection, err := resolveNudgeEffectStartup(context.Background(), cfg, sp)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: nudge effect owner: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if nudgeEffectSelection.Notice != "" {
+		fmt.Fprintf(stderr, "gc start: nudge effect owner: %s\n", nudgeEffectSelection.Notice) //nolint:errcheck // best-effort stderr
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1436,6 +1444,7 @@ func runControllerWithLease(
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,
+		NudgeEffectOwnership:    nudgeEffectSelection.Ownership,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
@@ -1443,7 +1452,7 @@ func runControllerWithLease(
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for
 	// session-bead sync and rig-scoped wake decisions.
-	cs := newControllerState(ctx, cfg, sp, eventProv, cityName, cityPath)
+	cs := newControllerStateWithRolloutFlags(ctx, cfg, sp, eventProv, cityName, cityPath, rolloutFlags)
 	cs.ct = cr.crashTrack()
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty

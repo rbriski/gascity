@@ -242,6 +242,52 @@ func TestCurrentProductionNudgeEffectStartupCapabilitiesFailClosed(t *testing.T)
 	}
 }
 
+func TestResolveNudgeEffectStartupUsesOneBootLatchAndCurrentEvidence(t *testing.T) {
+	t.Parallel()
+	localProfile := string(nudgequeue.CommandSecurityProfileStoreWriterIsController)
+
+	autoCfg := &config.City{
+		Beads: config.BeadsConfig{CommandSecurityProfile: localProfile},
+		Daemon: config.DaemonConfig{
+			NudgeDispatcher:  "supervisor",
+			NudgeEffectOwner: "auto",
+		},
+	}
+	flags, selection, err := resolveNudgeEffectStartup(context.Background(), autoCfg, runtime.NewFake())
+	if err != nil {
+		t.Fatalf("resolveNudgeEffectStartup auto: %v", err)
+	}
+	if flags.NudgeEffectOwner() != rollout.Auto {
+		t.Fatalf("resolved mode = %q, want auto", flags.NudgeEffectOwner())
+	}
+	if selection.Ownership != nudgeEffectOwnershipLegacy || !strings.Contains(strings.ToLower(selection.Notice), "retaining legacy") {
+		t.Fatalf("auto selection = %#v, want loud retained legacy", selection)
+	}
+
+	requireCfg := *autoCfg
+	requireCfg.Daemon.NudgeEffectOwner = "require"
+	flags, selection, err = resolveNudgeEffectStartup(context.Background(), &requireCfg, runtime.NewFake())
+	if flags.NudgeEffectOwner() != rollout.Require {
+		t.Fatalf("resolved mode = %q, want require", flags.NudgeEffectOwner())
+	}
+	if selection != (nudgeEffectStartupSelection{}) {
+		t.Fatalf("require selection = %#v, want inert zero value", selection)
+	}
+	assertNudgeEffectStartupRefusal(t, err, rollout.Require, nudgequeue.CommandSecurityProfileStoreWriterIsController, "atomic command repository")
+
+	offCfg := &config.City{
+		Beads:  config.BeadsConfig{CommandSecurityProfile: "invalid-but-uninspected"},
+		Daemon: config.DaemonConfig{NudgeEffectOwner: "off"},
+	}
+	flags, selection, err = resolveNudgeEffectStartup(context.Background(), offCfg, nil)
+	if err != nil {
+		t.Fatalf("resolveNudgeEffectStartup off: %v", err)
+	}
+	if flags.NudgeEffectOwner() != rollout.Off || selection.Ownership != nudgeEffectOwnershipLegacy || selection.Notice != "" {
+		t.Fatalf("off result = flags %q selection %#v, want silent legacy", flags.NudgeEffectOwner(), selection)
+	}
+}
+
 func completeNudgeEffectStartupCapabilities() nudgeEffectStartupCapabilities {
 	return nudgeEffectStartupCapabilities{
 		SupervisorDispatcher:         true,

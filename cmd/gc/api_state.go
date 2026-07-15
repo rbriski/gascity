@@ -155,6 +155,26 @@ func newControllerState(
 	ep events.Provider,
 	cityName, cityPath string,
 ) *controllerState {
+	// Preserve the compatibility constructor's best-effort behavior for tests
+	// and non-startup callers. Production startup resolves once before ownership
+	// selection and calls newControllerStateWithRolloutFlags with that same latch.
+	rolloutFlags, rolloutErr := resolveBootRolloutFlags(cfg)
+	if rolloutErr != nil {
+		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
+	}
+	return newControllerStateWithRolloutFlags(ctx, cfg, sp, ep, cityName, cityPath, rolloutFlags)
+}
+
+// newControllerStateWithRolloutFlags creates controller state from the exact
+// boot latch already used by production ownership selection.
+func newControllerStateWithRolloutFlags(
+	ctx context.Context,
+	cfg *config.City,
+	sp runtime.Provider,
+	ep events.Provider,
+	cityName, cityPath string,
+	rolloutFlags rollout.Flags,
+) *controllerState {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -166,14 +186,6 @@ func newControllerState(
 			beadEventStartSeq = seq
 			beadEventStartSeqOK = true
 		}
-	}
-	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
-	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
-	// Flags is degraded-safe (legacy paths), and this constructor returns no
-	// error — mirroring the best-effort city-store warn below.
-	rolloutFlags, rolloutErr := rollout.Resolve(cfg, rollout.ResolveOptions{})
-	if rolloutErr != nil {
-		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
 	cs := &controllerState{
 		cfg:                 cfg,

@@ -107,7 +107,14 @@ type lruSingleFlight[K comparable, V any] struct {
 	cap      int
 	entries  map[K]*list.Element
 	lru      *list.List // front = most recently used
-	inflight map[K]chan struct{}
+	inflight map[K]*lruFlight
+}
+
+// lruFlight is the private completion carrier for one elected build. Keeping
+// the channel behind a semantic field makes ownership explicit: the map stores
+// flights, while callers can only wait for or close that flight's completion.
+type lruFlight struct {
+	done chan struct{}
 }
 
 // lruEntry is one LRU node: the key (so eviction can delete the map entry) and
@@ -123,7 +130,7 @@ func newLRUSingleFlight[K comparable, V any](capacity int) *lruSingleFlight[K, V
 		cap:      capacity,
 		entries:  make(map[K]*list.Element),
 		lru:      list.New(),
-		inflight: make(map[K]chan struct{}),
+		inflight: make(map[K]*lruFlight),
 	}
 }
 
@@ -142,16 +149,16 @@ func (m *lruSingleFlight[K, V]) getOrBuild(key K, build func() (V, error)) (V, e
 			m.mu.Unlock()
 			return v, nil
 		}
-		if wait, building := m.inflight[key]; building {
+		if flight, building := m.inflight[key]; building {
 			m.mu.Unlock()
-			<-wait
+			<-flight.done
 			// Re-loop: read the value the builder stored, or re-elect if the build
 			// failed (or panicked) and left no entry.
 			continue
 		}
 		// We are the elected builder for this key.
-		done := make(chan struct{})
-		m.inflight[key] = done
+		flight := &lruFlight{done: make(chan struct{})}
+		m.inflight[key] = flight
 		m.mu.Unlock()
 
 		var (
@@ -176,7 +183,7 @@ func (m *lruSingleFlight[K, V]) getOrBuild(key K, build func() (V, error)) (V, e
 				}
 				delete(m.inflight, key)
 				m.mu.Unlock()
-				close(done)
+				close(flight.done)
 			}()
 			value, buildErr = build()
 			completed = true

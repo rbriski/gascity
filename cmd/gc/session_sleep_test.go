@@ -234,8 +234,7 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	session.Metadata["last_woke_at"] = ts
 	session.Metadata["detached_at"] = ts
 	env.sp.WaitForIdleErrors["worker"] = nil
-	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
-	env.sp.WaitForIdleGates["worker"] = idleGate
+	idleGate := env.sp.WaitForIdleGate("worker") // see waitForIdleProbeReady godoc
 
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
@@ -1292,7 +1291,7 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 // same reconcile tick that started it — otherwise shouldBeginIdleDrain
 // observes probe.ready=true and its deferred clearIdleProbe removes the
 // probe from the map before this helper can see it. The standard way to
-// enforce that ordering is to set env.sp.WaitForIdleGates[sessionName]
+// enforce that ordering is to call env.sp.WaitForIdleGate(sessionName)
 // to a channel, run the tick (probe goroutine blocks on the gate), then
 // close the gate and call this helper. Without the gate, tests race
 // against goroutine scheduling and flake under -race.

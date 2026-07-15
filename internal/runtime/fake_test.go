@@ -432,8 +432,7 @@ func TestFlattenText_Empty(t *testing.T) {
 func TestFakeWaitForIdleGate_BlocksUntilClosed(t *testing.T) {
 	f := NewFake()
 	f.WaitForIdleErrors["s1"] = nil
-	gate := make(chan struct{})
-	f.WaitForIdleGates["s1"] = gate
+	gate := f.WaitForIdleGate("s1")
 
 	done := make(chan error, 1)
 	go func() {
@@ -461,7 +460,7 @@ func TestFakeWaitForIdleGate_BlocksUntilClosed(t *testing.T) {
 func TestFakeWaitForIdleGate_RespectsContextCancel(t *testing.T) {
 	f := NewFake()
 	f.WaitForIdleErrors["s1"] = nil
-	f.WaitForIdleGates["s1"] = make(chan struct{}) // never closed
+	f.WaitForIdleGate("s1") // never closed
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -491,8 +490,7 @@ func TestFakeWaitForIdleGate_MuReleasedWhileBlocked(t *testing.T) {
 	f := NewFake()
 	_ = f.Start(context.Background(), "s1", Config{WorkDir: "/tmp"})
 	f.WaitForIdleErrors["s1"] = nil
-	gate := make(chan struct{})
-	f.WaitForIdleGates["s1"] = gate
+	gate := f.WaitForIdleGate("s1")
 
 	// Start a gated WaitForIdle in the background.
 	go func() {
@@ -508,6 +506,25 @@ func TestFakeWaitForIdleGate_MuReleasedWhileBlocked(t *testing.T) {
 	}
 
 	close(gate)
+}
+
+func TestFakeWaitForIdleStartedClosesOnceAndIsRemoved(t *testing.T) {
+	f := NewFake()
+	f.WaitForIdleErrors["s1"] = nil
+	started := f.WaitForIdleStartedSignal("s1")
+
+	if err := f.WaitForIdle(context.Background(), "s1", time.Second); err != nil {
+		t.Fatalf("first WaitForIdle() error = %v", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("WaitForIdle did not close the configured started signal")
+	}
+
+	if err := f.WaitForIdle(context.Background(), "s1", time.Second); err != nil {
+		t.Fatalf("second WaitForIdle() error = %v", err)
+	}
 }
 
 func TestFakeFindRuntimesBySessionID_BrokenError(t *testing.T) {

@@ -45,6 +45,55 @@ func TestCommandIndexBuildResolvesEveryCurrentRecordAndPagesOrderingDomain(t *te
 	}
 }
 
+func TestCommandIndexTrustedPartitionGapsPreserveDenseSequenceCoverage(t *testing.T) {
+	owned := indexTestCommand("command-owned", "session-owned", 2, 3, CommandStatePending)
+	index, err := BuildCommandIndex(CommandIndexSnapshot{
+		Store:             indexTestStoreBinding(),
+		Entries:           []CommandIndexEntry{knownIndexTestEntry(owned)},
+		PartitionGaps:     []CommandIndexPartitionGap{{Sequence: 1}, {Sequence: 3}},
+		Revision:          3,
+		SequenceHighWater: 3,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandIndex: %v", err)
+	}
+
+	page, err := index.Page(owned.Target.SessionID, 0, MaxCommandIndexPageSize)
+	if err != nil {
+		t.Fatalf("Page(owned): %v", err)
+	}
+	if got := indexEntryIDs(page.Entries); !reflect.DeepEqual(got, []string{owned.ID}) {
+		t.Fatalf("owned page IDs = %v, want only %q", got, owned.ID)
+	}
+	status := index.Status()
+	if status.SequenceHighWater != 3 || status.Revision != 3 || !status.Synced {
+		t.Fatalf("partitioned status = %#v, want complete global watermark", status)
+	}
+}
+
+func TestCommandIndexTrustedPartitionGapsFailClosedOnInvalidCoverage(t *testing.T) {
+	owned := indexTestCommand("command-owned", "session-owned", 1, 1, CommandStatePending)
+	tests := map[string][]CommandIndexPartitionGap{
+		"zero sequence":        {{Sequence: 0}},
+		"duplicate gap":        {{Sequence: 2}, {Sequence: 2}},
+		"overlaps owned entry": {{Sequence: 1}},
+	}
+	for name, gaps := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := BuildCommandIndex(CommandIndexSnapshot{
+				Store:             indexTestStoreBinding(),
+				Entries:           []CommandIndexEntry{knownIndexTestEntry(owned)},
+				PartitionGaps:     gaps,
+				Revision:          2,
+				SequenceHighWater: 2,
+			})
+			if err == nil {
+				t.Fatal("BuildCommandIndex accepted invalid trusted partition coverage")
+			}
+		})
+	}
+}
+
 func TestCommandIndexRequiresOneExplicitStoreLineage(t *testing.T) {
 	store := indexTestStoreBinding()
 	command := indexTestCommand("command-1", "shared-session", 1, 1, CommandStatePending)

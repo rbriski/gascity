@@ -5,11 +5,153 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
 )
+
+func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T) {
+	ctx := t.Context()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	reader := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-reader", "gc")
+	writer := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-writer", "gc")
+	for _, id := range []string{"gc-snapshot-a", "gc-snapshot-b"} {
+		if _, err := writer.Create(Bead{ID: id, Title: id}); err != nil {
+			t.Fatalf("Create seed %s: %v", id, err)
+		}
+	}
+
+	capability, ok := AtomicReadSnapshotFor(reader)
+	if !ok {
+		t.Fatal("AtomicReadSnapshotFor(real NativeDoltStore) = false, want true")
+	}
+	query := AtomicReadSnapshotPageQuery{IDPrefix: "gc-snapshot-", Status: "open", Limit: 1}
+	var stableIDs []string
+	writeStarted := make(chan struct{})
+	writeResult := make(chan error, 1)
+	if err := capability.AtomicReadSnapshot(ctx, func(tx AtomicReadSnapshotTx) error {
+		page, err := tx.ListHistoryPage(query)
+		if err != nil {
+			return err
+		}
+		if len(page.Rows) != 1 || page.Next == (AtomicReadSnapshotCursor{}) {
+			return fmt.Errorf("first page = %#v, want one row and continuation", page)
+		}
+		stableIDs = append(stableIDs, page.Rows[0].ID)
+
+		go func() {
+			close(writeStarted)
+			_, err := writer.Create(Bead{ID: "gc-snapshot-z", Title: "concurrent"})
+			writeResult <- err
+		}()
+		<-writeStarted
+		for page.Next != (AtomicReadSnapshotCursor{}) {
+			query.After = page.Next
+			page, err = tx.ListHistoryPage(query)
+			if err != nil {
+				return err
+			}
+			for _, row := range page.Rows {
+				stableIDs = append(stableIDs, row.ID)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("AtomicReadSnapshot: %v", err)
+	}
+	if !slices.Equal(stableIDs, []string{"gc-snapshot-a", "gc-snapshot-b"}) {
+		t.Fatalf("stable snapshot IDs = %v, want pre-write rows only", stableIDs)
+	}
+	if err := <-writeResult; err != nil {
+		t.Fatalf("concurrent second-store Create: %v", err)
+	}
+
+	query.After = AtomicReadSnapshotCursor{}
+	var freshIDs []string
+	if err := capability.AtomicReadSnapshot(ctx, func(tx AtomicReadSnapshotTx) error {
+		for {
+			page, err := tx.ListHistoryPage(query)
+			if err != nil {
+				return err
+			}
+			for _, row := range page.Rows {
+				freshIDs = append(freshIDs, row.ID)
+			}
+			if page.Next == (AtomicReadSnapshotCursor{}) {
+				return nil
+			}
+			query.After = page.Next
+		}
+	}); err != nil {
+		t.Fatalf("fresh AtomicReadSnapshot: %v", err)
+	}
+	if !slices.Equal(freshIDs, []string{"gc-snapshot-a", "gc-snapshot-b", "gc-snapshot-z"}) {
+		t.Fatalf("fresh snapshot IDs = %v, want concurrent row visible", freshIDs)
+	}
+}
+
+func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) {
+	tests := map[string]string{
+		"missing":       "",
+		"wrong columns": "CREATE INDEX idx_issues_status_updated_at ON issues (status)",
+	}
+	for name, replacement := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+			if err != nil {
+				t.Skipf("upstream native beads storage unavailable: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := storage.Close(); err != nil {
+					t.Fatalf("close upstream storage: %v", err)
+				}
+			})
+			db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
+			if err != nil {
+				t.Fatalf("open snapshot database for schema skew: %v", err)
+			}
+			if _, err := db.Exec("DROP INDEX idx_issues_status_updated_at ON issues"); err != nil {
+				t.Fatalf("drop paging index: %v", err)
+			}
+			if replacement != "" {
+				if _, err := db.Exec(replacement); err != nil {
+					t.Fatalf("create skewed paging index: %v", err)
+				}
+			}
+			if err := cleanup(); err != nil {
+				t.Fatalf("close snapshot database after schema skew: %v", err)
+			}
+
+			store := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-index-skew", "gc")
+			called := false
+			err = store.AtomicReadSnapshot(ctx, func(AtomicReadSnapshotTx) error {
+				called = true
+				return nil
+			})
+			if !errors.Is(err, ErrAtomicReadSnapshotUnsupported) {
+				t.Fatalf("AtomicReadSnapshot error = %v, want ErrAtomicReadSnapshotUnsupported", err)
+			}
+			if called {
+				t.Fatal("AtomicReadSnapshot called callback with missing/skewed paging index")
+			}
+		})
+	}
+}
 
 // TestNativeDoltStoreRegularUpdateEventRecording verifies that calling
 // SetMetadata on a non-ephemeral bead succeeds. This exercises

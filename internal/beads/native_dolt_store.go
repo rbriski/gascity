@@ -253,6 +253,7 @@ var (
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ AtomicReadWriteStore          = (*NativeDoltStore)(nil)
+	_ AtomicReadSnapshotStore       = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)

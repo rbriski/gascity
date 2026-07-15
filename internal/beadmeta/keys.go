@@ -52,12 +52,16 @@ const (
 	CityPathMetadataKey                  = "gc.city_path"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
+	ControlCommandKindMetadataKey        = "gc.control.command_kind"
+	ControlCommandRequestIDMetadataKey   = "gc.control.command_request_id"
+	ControlCommandWireMetadataKey        = "gc.control.command_wire"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
 	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
 	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
 	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
+	ControlRecordKindMetadataKey         = "gc.control.record_kind"
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
@@ -305,11 +309,15 @@ var KnownMetadataKeys = []string{
 	CityPathMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
+	ControlCommandKindMetadataKey,
+	ControlCommandRequestIDMetadataKey,
+	ControlCommandWireMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,
+	ControlRecordKindMetadataKey,
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,

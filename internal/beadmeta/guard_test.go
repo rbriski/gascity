@@ -39,6 +39,15 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
+	// Durable command repository-wide metadata. These values live in the
+	// history-tracked store metadata table, not in any bead.Metadata map.
+	"gc.control.repository.restore_epoch":       "durable command repository restore lineage metadata (internal/nudgequeue)",
+	"gc.control.repository.revision":            "durable command repository revision metadata (internal/nudgequeue)",
+	"gc.control.repository.schema_version":      "durable command repository schema metadata (internal/nudgequeue)",
+	"gc.control.repository.sequence_high_water": "durable command repository sequence metadata (internal/nudgequeue)",
+	"gc.control.repository.store_uuid":          "durable command repository store identity metadata (internal/nudgequeue)",
+	"gc.control.repository.writer_version":      "durable command repository writer metadata (internal/nudgequeue)",
+
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
 	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",

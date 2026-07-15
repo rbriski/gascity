@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/google/uuid"
 )
@@ -38,12 +39,12 @@ const (
 
 	commandRecordBeadType                 = "task"
 	commandRecordTitle                    = "durable control command"
-	commandRecordKindMetadataKey          = "gc.control.record_kind"
+	commandRecordKindMetadataKey          = beadmeta.ControlRecordKindMetadataKey
 	commandRecordKindMetadataValue        = "command"
-	commandRecordCommandKindMetadataKey   = "gc.control.command_kind"
+	commandRecordCommandKindMetadataKey   = beadmeta.ControlCommandKindMetadataKey
 	commandRecordCommandKindMetadataValue = "nudge"
-	commandRecordRequestIDMetadataKey     = "gc.control.command_request_id"
-	commandRecordWireMetadataKey          = "gc.control.command_wire"
+	commandRecordRequestIDMetadataKey     = beadmeta.ControlCommandRequestIDMetadataKey
+	commandRecordWireMetadataKey          = beadmeta.ControlCommandWireMetadataKey
 
 	commandRequestIDDomainV1 = "gascity.nudge-command.request-id.v1"
 	commandIDPrefix          = "gc-nudge-"

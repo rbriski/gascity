@@ -885,7 +885,7 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 			cr.recordNudgeKeyInstallFailure(failure)
 			return failure
 		}
-		if cr.sp == nil {
+		if cr.currentNudgeRuntimeProvider() == nil {
 			failure := errors.New("installing keyed nudge effect owner: runtime provider is nil")
 			cr.recordNudgeKeyInstallFailure(failure)
 			return failure
@@ -962,8 +962,8 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 				store: sessionFrontDoor(effectSessionStore),
 			},
 			handles: &productionNudgeEffectHandles{
-				provider: cr.sp,
-				recorder: cr.rec,
+				currentProvider: cr.currentNudgeRuntimeProvider,
+				recorder:        cr.rec,
 			},
 			ownerID: ownerID,
 			now:     time.Now,
@@ -1000,6 +1000,18 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	cr.nudgeKeyInstallRetry = false
 	cr.nudgeKeyShadowMu.Unlock()
 	return nil
+}
+
+// currentNudgeRuntimeProvider returns the provider installed for new effects.
+// Config reload replaces this pointer under the same lock, so a long-lived
+// keyed owner never captures and reuses a retired provider.
+func (cr *CityRuntime) currentNudgeRuntimeProvider() runtime.Provider {
+	if cr == nil {
+		return nil
+	}
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
+	return cr.sp
 }
 
 func classifyNudgeCommandSourceFailure(source nudgeCommandSource, err error) nudgeCommandSourceFailure {

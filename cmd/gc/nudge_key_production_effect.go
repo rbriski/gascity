@@ -94,13 +94,21 @@ func (r *productionNudgeEffectTargets) Read(ctx context.Context, sessionID strin
 // the current city runtime provider while retaining persisted provider and
 // transport identity for operation evidence.
 type productionNudgeEffectHandles struct {
-	provider runtime.Provider
-	recorder events.Recorder
+	provider        runtime.Provider
+	currentProvider func() runtime.Provider
+	recorder        events.Recorder
 }
 
 // Handle returns a worker boundary for one fully validated persisted target.
 func (f *productionNudgeEffectHandles) Handle(target nudgeEffectTarget) (worker.Handle, error) {
-	if f == nil || f.provider == nil {
+	if f == nil {
+		return nil, errors.New("constructing production nudge effect handle: runtime provider is nil")
+	}
+	provider := f.provider
+	if f.currentProvider != nil {
+		provider = f.currentProvider()
+	}
+	if provider == nil {
 		return nil, errors.New("constructing production nudge effect handle: runtime provider is nil")
 	}
 	if target.closed || target.intentGeneration == 0 ||
@@ -117,7 +125,7 @@ func (f *productionNudgeEffectHandles) Handle(target nudgeEffectTarget) (worker.
 		recorder = events.Discard
 	}
 	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
-		Provider:     f.provider,
+		Provider:     provider,
 		SessionName:  target.sessionName,
 		ProviderName: target.provider,
 		Transport:    target.transport,

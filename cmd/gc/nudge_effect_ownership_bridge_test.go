@@ -158,6 +158,53 @@ func TestKeyedNudgeOwnershipPublishesCompleteEffectOwnerBeforeFirstClaim(t *test
 	}
 }
 
+func TestKeyedNudgeOwnershipResolvesProviderAfterPublishedRuntimeSwap(t *testing.T) {
+	now := time.Now().UTC()
+	command := immediateNudgeEffectCommand(now)
+	source := newMutexNudgeEffectSource(command)
+	store := newNudgeOwnershipReadCountingStore(nudgeOwnershipSessionStore(command))
+	first := runtime.NewFake()
+	second := runtime.NewFake()
+	for _, provider := range []*runtime.Fake{first, second} {
+		if err := provider.Start(t.Context(), "city--worker-1", runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if err := provider.SetMeta("city--worker-1", "GC_INSTANCE_TOKEN", command.Target.LaunchIdentity); err != nil {
+			t.Fatalf("SetMeta launch identity: %v", err)
+		}
+		provider.NudgeEffectResults["city--worker-1"] = runtime.NudgeEffectResult{
+			Stage:      runtime.NudgeEffectStageAccepted,
+			Completion: runtime.NudgeEffectCompletionCompleted,
+		}
+	}
+	cr := newNudgeOwnershipBridgeRuntime(
+		t,
+		nudgeEffectOwnershipKeyed,
+		source,
+		store,
+		first,
+		allowingNudgeEffectAuthorizer{},
+	)
+	if err := cr.installNudgeKeyShadow(t.Context()); err != nil {
+		t.Fatalf("installNudgeKeyShadow: %v", err)
+	}
+	controller, _, scope, _ := cr.nudgeKeyShadowState()
+
+	cr.serviceStateMu.Lock()
+	cr.sp = second
+	cr.serviceStateMu.Unlock()
+	key := mustNudgeOwnershipBridgeKey(t, scope, command.Target.SessionID)
+	outcome := controller.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+
+	if got := first.CountCalls("NudgeEffect", "city--worker-1"); got != 0 {
+		t.Fatalf("retired provider entries after published swap = %d, want 0", got)
+	}
+	if got := second.CountCalls("NudgeEffect", "city--worker-1"); got != 1 {
+		t.Fatalf("current provider entries after published swap = %d, want 1", got)
+	}
+}
+
 func TestFailedKeyedNudgeInstallationPublishesNothingAndDoesNotFallBack(t *testing.T) {
 	command := immediateNudgeEffectCommand(time.Now().UTC())
 	readOnlySource := &fakeNudgeCommandSource{snapshot: nudgequeue.CommandIndexSnapshot{

@@ -253,6 +253,59 @@ func TestProductionNudgeEffectHandlesUsesRuntimeHandleClassifiedEntry(t *testing
 	}
 }
 
+func TestProductionNudgeEffectHandlesResolvesCurrentProviderForEachEffect(t *testing.T) {
+	const sessionName = "city--worker-7"
+	first := runtime.NewFake()
+	second := runtime.NewFake()
+	for _, provider := range []*runtime.Fake{first, second} {
+		if err := provider.Start(t.Context(), sessionName, runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if err := provider.SetMeta(sessionName, "GC_INSTANCE_TOKEN", "launch-7"); err != nil {
+			t.Fatalf("SetMeta launch identity: %v", err)
+		}
+		provider.NudgeEffectResults[sessionName] = runtime.NudgeEffectResult{
+			Stage:      runtime.NudgeEffectStageAccepted,
+			Completion: runtime.NudgeEffectCompletionCompleted,
+		}
+	}
+	selected := runtime.Provider(first)
+	factory := &productionNudgeEffectHandles{
+		currentProvider: func() runtime.Provider { return selected },
+		recorder:        events.Discard,
+	}
+	target := validProductionNudgeEffectTarget()
+	nudge := func(operationID string) {
+		handle, err := factory.Handle(target)
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if _, err := handle.Nudge(t.Context(), worker.NudgeRequest{
+			Text:     "continue",
+			Delivery: worker.NudgeDeliveryImmediate,
+			Wake:     worker.NudgeWakeLiveOnly,
+			Effect: &runtime.NudgeEffectContract{
+				OperationID:            operationID,
+				ExpectedLaunchIdentity: target.launchIdentity,
+				InteractionPolicy:      runtime.NudgeInteractionRequireUnattachedNormal,
+			},
+		}); err != nil {
+			t.Fatalf("Nudge: %v", err)
+		}
+	}
+
+	nudge("command-before-swap")
+	selected = second
+	nudge("command-after-swap")
+
+	if got := first.CountCalls("NudgeEffect", sessionName); got != 1 {
+		t.Fatalf("retired provider entries = %d, want only the pre-swap effect", got)
+	}
+	if got := second.CountCalls("NudgeEffect", sessionName); got != 1 {
+		t.Fatalf("current provider entries = %d, want the post-swap effect", got)
+	}
+}
+
 func TestProductionNudgeEffectHandlesRejectsIncompleteDependenciesAndTarget(t *testing.T) {
 	tests := []struct {
 		name            string

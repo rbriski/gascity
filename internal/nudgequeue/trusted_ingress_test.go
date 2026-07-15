@@ -202,6 +202,7 @@ type testNudgeAuthority struct {
 	claimSchema      uint32
 	claimErr         error
 	claimRequests    []NudgeClaimAuthorizationRequest
+	coverage         *testCommandPartitionCoverageLedger
 }
 
 func newTestNudgeAuthority() *testNudgeAuthority {
@@ -211,6 +212,7 @@ func newTestNudgeAuthority() *testNudgeAuthority {
 		schema:           NudgePrincipalSchemaVersion,
 		claimDisposition: NudgeAuthorizationAllowed,
 		claimSchema:      NudgePrincipalSchemaVersion,
+		coverage:         newTestCommandPartitionCoverageLedger(),
 	}
 }
 
@@ -254,6 +256,22 @@ func (a *testNudgeAuthority) ResolveTrustedNudgeIngress(_ context.Context, refer
 		return NudgeAuthorization{Disposition: NudgeAuthorizationDenied}, nil
 	}
 	return authorization, nil
+}
+
+func (a *testNudgeAuthority) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {
+	return a.coverage.RecordCommandPartitionAdmission(ctx, admission)
+}
+
+func (a *testNudgeAuthority) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
+	return a.coverage.RecordCommandPartitionTerminal(ctx, terminal)
+}
+
+func (a *testNudgeAuthority) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
+	return a.coverage.ResolveCommandPartitionCoverage(ctx, request)
+}
+
+func (a *testNudgeAuthority) ResolveCommandPartitionMembership(ctx context.Context, request CommandPartitionMembershipRequest) (CommandPartitionMembership, error) {
+	return a.coverage.ResolveCommandPartitionMembership(ctx, request)
 }
 
 func (a *testNudgeAuthority) authorizeCalls() int {
@@ -350,4 +368,8 @@ func validNudgeIngressRequest(now time.Time) NudgeIngressRequest {
 	}
 }
 
-var _ TrustedCityPartitionResolver = (*TrustedNudgeIngress)(nil)
+var (
+	_ TrustedCityPartitionResolver              = (*TrustedNudgeIngress)(nil)
+	_ TrustedCommandPartitionCoverageResolver   = (*TrustedNudgeIngress)(nil)
+	_ TrustedCommandPartitionMembershipRecorder = (*TrustedNudgeIngress)(nil)
+)

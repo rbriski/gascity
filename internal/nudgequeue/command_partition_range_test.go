@@ -41,6 +41,7 @@ func TestCommandPartitionReaderCompressesForeignSequenceComplement(t *testing.T)
 	store.metadata[commandRepositoryRevisionMetadataKey] = "100001"
 	store.metadata[commandRepositorySequenceHighWaterMetadataKey] = "100001"
 	store.mu.Unlock()
+	authority.coverage.rewriteAdmissionForTest(admitted.Entry.Command.ID, sequenceHighWater, sequenceHighWater)
 	if _, err := repository.RepairLineage(t.Context()); err != nil {
 		t.Fatalf("RepairLineage: %v", err)
 	}

@@ -304,6 +304,7 @@ type authorizedClaimFixture struct {
 	repository *CommandRepository
 	store      *repositoryAtomicTestStore
 	authority  *testNudgeAuthority
+	ingress    *TrustedNudgeIngress
 	command    Command
 	partition  TrustedCityPartition
 	now        time.Time
@@ -329,6 +330,7 @@ func newAuthorizedClaimFixture(t *testing.T) *authorizedClaimFixture {
 		repository: repository,
 		store:      store,
 		authority:  authority,
+		ingress:    ingress,
 		command:    *result.Entry.Command,
 		partition:  result.Partition,
 		now:        now,

@@ -17,6 +17,7 @@ type productionNudgeCommandSource struct {
 	repository *nudgequeue.CommandRepository
 	reader     *nudgequeue.CommandPartitionReader
 	partition  nudgequeue.TrustedCityPartition
+	membership nudgequeue.TrustedCommandPartitionMembershipRecorder
 }
 
 func openVerifiedProductionNudgeCommandSource(
@@ -62,7 +63,12 @@ func openVerifiedProductionNudgeCommandSource(
 	if err != nil {
 		return nil, errors.Join(errNudgeCommandSourceUnverified, err)
 	}
+	membership, ok := resolver.(nudgequeue.TrustedCommandPartitionMembershipRecorder)
+	if !ok || membership == nil {
+		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted partition membership recorder is required"))
+	}
 	source.reader = partitioned
+	source.membership = membership
 	return source, nil
 }
 
@@ -81,10 +87,10 @@ func (s *productionNudgeCommandSource) Get(ctx context.Context, commandID string
 }
 
 func (s *productionNudgeCommandSource) ClaimAuthorized(ctx context.Context, request nudgeEffectClaimRequest, authorizer nudgequeue.NudgeClaimAuthorizer) (nudgequeue.CommandClaimResult, error) {
-	if s == nil || s.repository == nil || s.reader == nil {
+	if s == nil || s.repository == nil || s.reader == nil || s.membership == nil {
 		return nudgequeue.CommandClaimResult{}, errors.New("claiming production nudge command: source is not fully bound")
 	}
-	return s.repository.ClaimAuthorized(ctx, nudgequeue.CommandClaimRequest{
+	result, err := s.repository.ClaimAuthorized(ctx, nudgequeue.CommandClaimRequest{
 		CommandID:           request.commandID,
 		ClaimID:             request.claimID,
 		OwnerID:             request.ownerID,
@@ -94,23 +100,60 @@ func (s *productionNudgeCommandSource) ClaimAuthorized(ctx context.Context, requ
 		ClaimedAt:           request.claimedAt,
 		LeaseUntil:          request.leaseUntil,
 	}, authorizer)
+	if err != nil {
+		return result, err
+	}
+	if result.Command.Terminal != nil {
+		if err := s.recordTerminalMembership(ctx, result.Command); err != nil {
+			return result, err
+		}
+		if err := s.publishTerminalCheckpoint(ctx); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
 }
 
 func (s *productionNudgeCommandSource) CompleteProviderAttempt(ctx context.Context, request nudgequeue.CommandCompletionRequest) (nudgequeue.CommandCompletionResult, error) {
-	if s == nil || s.repository == nil || s.reader == nil {
+	if s == nil || s.repository == nil || s.reader == nil || s.membership == nil {
 		return nudgequeue.CommandCompletionResult{}, errors.New("completing production nudge command: source is not fully bound")
 	}
 	result, err := s.repository.CompleteProviderAttempt(ctx, request)
 	if err != nil {
 		return result, err
 	}
+	if result.Command.Terminal != nil {
+		if err := s.recordTerminalMembership(ctx, result.Command); err != nil {
+			return result, err
+		}
+	}
 	// One bounded page keeps the terminal tail below Snapshot's fail-closed
 	// checkpoint gate without turning completion into an unbounded maintenance
 	// loop. Startup performs the full catch-up before publishing any reader.
-	if _, _, checkpointErr := s.repository.PublishCheckpoint(ctx, beads.MaxAtomicReadSnapshotPageSize); checkpointErr != nil {
-		return result, fmt.Errorf("publishing durable nudge command checkpoint after completion: %w", checkpointErr)
+	if err := s.publishTerminalCheckpoint(ctx); err != nil {
+		return result, err
 	}
 	return result, nil
+}
+
+func (s *productionNudgeCommandSource) publishTerminalCheckpoint(ctx context.Context) error {
+	if _, _, err := s.repository.PublishCheckpoint(ctx, beads.MaxAtomicReadSnapshotPageSize); err != nil {
+		return fmt.Errorf("publishing durable nudge command checkpoint after terminal transition: %w", err)
+	}
+	return nil
+}
+
+func (s *productionNudgeCommandSource) recordTerminalMembership(ctx context.Context, command nudgequeue.Command) error {
+	if err := s.membership.RecordCommandPartitionTerminal(ctx, nudgequeue.CommandPartitionTerminal{
+		Store:              command.Store,
+		RepositoryRevision: command.Order.Revision,
+		CommandID:          command.ID,
+		Sequence:           command.Order.Sequence,
+		Partition:          s.partition,
+	}); err != nil {
+		return fmt.Errorf("publishing trusted terminal command membership: %w", err)
+	}
+	return nil
 }
 
 func publishNudgeCommandCheckpoints(ctx context.Context, repository *nudgequeue.CommandRepository) error {

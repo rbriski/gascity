@@ -137,6 +137,145 @@ func TestCommandPartitionReaderRejectsStoreForgedPartitionProjection(t *testing.
 	}
 }
 
+func TestCommandPartitionReaderRejectsStoreCredentialHidingOwnedCommand(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	authority := newTestNudgeAuthority()
+	now := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
+	ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+	}
+	admitted, err := ingress.Admit(t.Context(), validNudgeIngressRequest(now))
+	if err != nil || admitted.Entry.Command == nil {
+		t.Fatalf("Admit = %#v, err=%v", admitted, err)
+	}
+	reader, err := NewCommandPartitionReader(repository, admitted.Partition, ingress)
+	if err != nil {
+		t.Fatalf("NewCommandPartitionReader(original): %v", err)
+	}
+
+	forgedPartition := trustedCityPartitionForTest("store-credential-hidden-city")
+	if forgedPartition == admitted.Partition {
+		t.Fatal("forged partition unexpectedly equals authority partition")
+	}
+	stampCommandPartitionRouteForContractTest(store, admitted.Entry.Command.ID, forgedPartition)
+
+	if _, err := reader.Snapshot(t.Context(), 1); !errors.Is(err, ErrCommandRepositoryPartition) {
+		t.Fatalf("original partition Snapshot after route hiding error = %v, want partition refusal", err)
+	}
+}
+
+func TestCommandPartitionReaderRejectsUnavailableOrStaleTrustedCoverage(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		coverageErr error
+		mutate      func(*CommandPartitionCoverage)
+	}{
+		"unavailable": {coverageErr: errors.New("authority unavailable")},
+		"stale revision": {mutate: func(coverage *CommandPartitionCoverage) {
+			coverage.RepositoryRevision--
+		}},
+		"incomplete admission history": {mutate: func(coverage *CommandPartitionCoverage) {
+			coverage.AdmittedCount--
+		}},
+		"extra command": {mutate: func(coverage *CommandPartitionCoverage) {
+			coverage.ActiveEntries = append(coverage.ActiveEntries, CommandPartitionCoverageEntry{
+				CommandID: "gc-nudge-authority-extra", Sequence: coverage.ActiveEntries[0].Sequence,
+			})
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newRepositoryAtomicTestStore()
+			repository := newVerifiedCommandRepository(t, store)
+			authority := newTestNudgeAuthority()
+			now := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
+			ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+			if err != nil {
+				t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+			}
+			admitted, err := ingress.Admit(t.Context(), validNudgeIngressRequest(now))
+			if err != nil || admitted.Entry.Command == nil {
+				t.Fatalf("Admit = %#v, err=%v", admitted, err)
+			}
+			resolver := &partitionCoverageOverrideResolver{delegate: ingress, coverageErr: testCase.coverageErr, mutate: testCase.mutate}
+			reader, err := NewCommandPartitionReader(repository, admitted.Partition, resolver)
+			if err != nil {
+				t.Fatalf("NewCommandPartitionReader: %v", err)
+			}
+			if _, err := reader.Snapshot(t.Context(), 1); !errors.Is(err, ErrCommandRepositoryPartition) {
+				t.Fatalf("Snapshot error = %v, want partition refusal", err)
+			}
+		})
+	}
+}
+
+func TestCommandPartitionReaderExactReadRejectsUnpublishedTerminalTransition(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	reader, err := NewCommandPartitionReader(fixture.repository, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("NewCommandPartitionReader: %v", err)
+	}
+	fixture.authority.setClaimDisposition(NudgeAuthorizationDenied)
+	result, err := fixture.repository.ClaimAuthorized(
+		t.Context(),
+		fixture.claimRequest("claim-unpublished-terminal", "owner-unpublished-terminal", "attempt-unpublished-terminal", fixture.now.Add(time.Second)),
+		fixture.authority,
+	)
+	if err != nil || result.Disposition != CommandClaimDenied || result.Command.Terminal == nil {
+		t.Fatalf("ClaimAuthorized = %#v, err=%v", result, err)
+	}
+
+	if _, err := reader.Get(t.Context(), fixture.command.ID); !errors.Is(err, ErrCommandRepositoryPartition) {
+		t.Fatalf("Get after unpublished terminal error = %v, want partition refusal", err)
+	}
+}
+
+func TestCommandPartitionReaderUsesHistoricalCoverageForExactSnapshotRevision(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	authority := newTestNudgeAuthority()
+	now := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
+	ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+	}
+	first, err := ingress.Admit(t.Context(), validNudgeIngressRequest(now))
+	if err != nil || first.Entry.Command == nil {
+		t.Fatalf("first Admit = %#v, err=%v", first, err)
+	}
+
+	var once sync.Once
+	var concurrentErr error
+	resolver := &partitionCoverageOverrideResolver{
+		delegate: ingress,
+		before: func() {
+			once.Do(func() {
+				request := validNudgeIngressRequest(now)
+				request.RequestID = "request-concurrent-after-snapshot"
+				_, concurrentErr = ingress.Admit(t.Context(), request)
+			})
+		},
+	}
+	reader, err := NewCommandPartitionReader(repository, first.Partition, resolver)
+	if err != nil {
+		t.Fatalf("NewCommandPartitionReader: %v", err)
+	}
+	snapshot, err := reader.Snapshot(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("Snapshot at historical revision: %v", err)
+	}
+	if concurrentErr != nil {
+		t.Fatalf("concurrent Admit: %v", concurrentErr)
+	}
+	if len(snapshot.Entries) != 1 || snapshot.Entries[0].Command == nil || snapshot.Entries[0].Command.ID != first.Entry.Command.ID || snapshot.Revision != 1 {
+		t.Fatalf("historical snapshot = %#v, want only revision-1 command", snapshot)
+	}
+	state, err := repository.State(t.Context())
+	if err != nil || state.SequenceHighWater != 2 {
+		t.Fatalf("repository after concurrent admission = %#v, err=%v", state, err)
+	}
+}
+
 func TestTrustedNudgeIngressIdempotentRetryRejectsPartitionProjectionTamper(t *testing.T) {
 	store := newRepositoryAtomicTestStore()
 	repository := newVerifiedCommandRepository(t, store)
@@ -311,11 +450,59 @@ type countingPartitionResolverForContractTest struct {
 	calls    int
 }
 
+type partitionCoverageOverrideResolver struct {
+	delegate    *TrustedNudgeIngress
+	before      func()
+	coverageErr error
+	mutate      func(*CommandPartitionCoverage)
+}
+
+func (r *partitionCoverageOverrideResolver) ResolveCommandPartition(ctx context.Context, reference TrustedIngressReference) (TrustedCityPartition, error) {
+	return r.delegate.ResolveCommandPartition(ctx, reference)
+}
+
+func (r *partitionCoverageOverrideResolver) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
+	if r.before != nil {
+		r.before()
+	}
+	if r.coverageErr != nil {
+		return CommandPartitionCoverage{}, r.coverageErr
+	}
+	coverage, err := r.delegate.ResolveCommandPartitionCoverage(ctx, request)
+	if err != nil {
+		return CommandPartitionCoverage{}, err
+	}
+	if r.mutate != nil {
+		r.mutate(&coverage)
+	}
+	return coverage, nil
+}
+
+func (r *partitionCoverageOverrideResolver) ResolveCommandPartitionMembership(ctx context.Context, request CommandPartitionMembershipRequest) (CommandPartitionMembership, error) {
+	return r.delegate.ResolveCommandPartitionMembership(ctx, request)
+}
+
 func (r *countingPartitionResolverForContractTest) ResolveCommandPartition(ctx context.Context, reference TrustedIngressReference) (TrustedCityPartition, error) {
 	r.mu.Lock()
 	r.calls++
 	r.mu.Unlock()
 	return r.delegate.ResolveCommandPartition(ctx, reference)
+}
+
+func (r *countingPartitionResolverForContractTest) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
+	resolver, ok := r.delegate.(TrustedCommandPartitionCoverageResolver)
+	if !ok {
+		return CommandPartitionCoverage{}, errors.New("delegate has no trusted partition coverage")
+	}
+	return resolver.ResolveCommandPartitionCoverage(ctx, request)
+}
+
+func (r *countingPartitionResolverForContractTest) ResolveCommandPartitionMembership(ctx context.Context, request CommandPartitionMembershipRequest) (CommandPartitionMembership, error) {
+	resolver, ok := r.delegate.(TrustedCommandPartitionCoverageResolver)
+	if !ok {
+		return CommandPartitionMembership{}, errors.New("delegate has no trusted partition membership")
+	}
+	return resolver.ResolveCommandPartitionMembership(ctx, request)
 }
 
 func (r *countingPartitionResolverForContractTest) callCount() int {
@@ -325,7 +512,10 @@ func (r *countingPartitionResolverForContractTest) callCount() int {
 }
 
 var (
-	_ beads.AtomicReadSnapshotStore = (*partitionIndexContractStore)(nil)
-	_ beads.AtomicReadSnapshotTx    = (*partitionIndexContractTx)(nil)
-	_ TrustedCityPartitionResolver  = (*countingPartitionResolverForContractTest)(nil)
+	_ beads.AtomicReadSnapshotStore           = (*partitionIndexContractStore)(nil)
+	_ beads.AtomicReadSnapshotTx              = (*partitionIndexContractTx)(nil)
+	_ TrustedCityPartitionResolver            = (*countingPartitionResolverForContractTest)(nil)
+	_ TrustedCommandPartitionCoverageResolver = (*countingPartitionResolverForContractTest)(nil)
+	_ TrustedCityPartitionResolver            = (*partitionCoverageOverrideResolver)(nil)
+	_ TrustedCommandPartitionCoverageResolver = (*partitionCoverageOverrideResolver)(nil)
 )

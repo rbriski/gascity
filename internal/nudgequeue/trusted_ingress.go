@@ -69,6 +69,8 @@ type NudgeIngressAuthorizationRequest struct {
 type TrustedNudgeAuthority interface {
 	AuthorizeNudgeIngress(context.Context, NudgeIngressAuthorizationRequest) (NudgeAuthorization, error)
 	ResolveTrustedNudgeIngress(context.Context, TrustedIngressReference) (NudgeAuthorization, error)
+	TrustedCommandPartitionCoverageResolver
+	TrustedCommandPartitionMembershipRecorder
 }
 
 // NudgeIngressRequest is the complete caller-owned nudge payload. Authority and
@@ -150,6 +152,11 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 		if err != nil {
 			return NudgeIngressResult{}, err
 		}
+		if commandIsPristinePending(*existing.Entry.Command) {
+			if err := i.recordAdmission(ctx, *existing.Entry.Command, partition); err != nil {
+				return NudgeIngressResult{}, err
+			}
+		}
 		reader, err := NewCommandPartitionReader(i.repository, partition, i)
 		if err != nil {
 			return NudgeIngressResult{}, err
@@ -212,7 +219,32 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 	if err != nil {
 		return NudgeIngressResult{}, err
 	}
+	if entry.Command == nil {
+		return NudgeIngressResult{}, fmt.Errorf("%w: admitted command has no supported membership identity", ErrNudgeAuthorizationInvalid)
+	}
+	if created || commandIsPristinePending(*entry.Command) {
+		if err := i.recordAdmission(ctx, *entry.Command, partition); err != nil {
+			return NudgeIngressResult{}, err
+		}
+	}
 	return NudgeIngressResult{Entry: entry, Partition: partition, Created: created}, nil
+}
+
+func commandIsPristinePending(command Command) bool {
+	return command.State == CommandStatePending && command.Claim == nil && command.Retry == nil && command.Terminal == nil
+}
+
+func (i *TrustedNudgeIngress) recordAdmission(ctx context.Context, command Command, partition TrustedCityPartition) error {
+	if err := i.authority.RecordCommandPartitionAdmission(ctx, CommandPartitionAdmission{
+		Store:              command.Store,
+		RepositoryRevision: command.Order.Revision,
+		CommandID:          command.ID,
+		Sequence:           command.Order.Sequence,
+		Partition:          partition,
+	}); err != nil {
+		return fmt.Errorf("%w: publishing trusted command partition admission: %w", ErrNudgeAuthorizationUnknown, err)
+	}
+	return nil
 }
 
 // ResolveCommandPartition revalidates a command's copied ingress reference
@@ -235,6 +267,42 @@ func (i *TrustedNudgeIngress) ResolveCommandPartition(ctx context.Context, refer
 		return TrustedCityPartition{}, fmt.Errorf("%w: durable ingress reference differs from authority", ErrNudgeAuthorizationDenied)
 	}
 	return trustedCityPartitionFromAuthority(authorization.Reference), nil
+}
+
+// ResolveCommandPartitionCoverage delegates the revision-bound completeness
+// proof to the independently retained ingress authority.
+func (i *TrustedNudgeIngress) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return CommandPartitionCoverage{}, fmt.Errorf("%w: trusted ingress coverage resolver is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.ResolveCommandPartitionCoverage(ctx, request)
+}
+
+// ResolveCommandPartitionMembership delegates one revision-bound exact
+// membership proof to the independently retained ingress authority.
+func (i *TrustedNudgeIngress) ResolveCommandPartitionMembership(ctx context.Context, request CommandPartitionMembershipRequest) (CommandPartitionMembership, error) {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return CommandPartitionMembership{}, fmt.Errorf("%w: trusted ingress membership resolver is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.ResolveCommandPartitionMembership(ctx, request)
+}
+
+// RecordCommandPartitionAdmission delegates an idempotent admission
+// publication to the independently retained ingress authority.
+func (i *TrustedNudgeIngress) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress membership recorder is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.RecordCommandPartitionAdmission(ctx, admission)
+}
+
+// RecordCommandPartitionTerminal delegates an idempotent terminal membership
+// publication to the independently retained ingress authority.
+func (i *TrustedNudgeIngress) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress membership recorder is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.RecordCommandPartitionTerminal(ctx, terminal)
 }
 
 func classifyNudgeAuthorization(authorization NudgeAuthorization) error {

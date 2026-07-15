@@ -46,6 +46,99 @@ type TrustedCityPartitionResolver interface {
 	ResolveCommandPartition(context.Context, TrustedIngressReference) (TrustedCityPartition, error)
 }
 
+// CommandPartitionCoverageRequest binds an authority proof to one exact
+// transaction-consistent repository snapshot. TerminalRanges is the canonical
+// compacted terminal sequence set visible in that snapshot.
+type CommandPartitionCoverageRequest struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	SequenceHighWater  uint64
+	TerminalRanges     []CommandIndexSequenceRange
+	TerminalCount      uint64
+	Partition          TrustedCityPartition
+}
+
+// CommandPartitionCoverageEntry is one authority-admitted command that was
+// active in the requested partition at the requested repository revision.
+type CommandPartitionCoverageEntry struct {
+	CommandID string
+	Sequence  uint64
+}
+
+// CommandPartitionCoverage is the independently retained, complete active set
+// for one partition. Every snapshot identity field must exactly echo the
+// request; ActiveEntries must be complete and ordered by sequence.
+type CommandPartitionCoverage struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	SequenceHighWater  uint64
+	AdmittedCount      uint64
+	TerminalRanges     []CommandIndexSequenceRange
+	TerminalCount      uint64
+	Partition          TrustedCityPartition
+	ActiveEntries      []CommandPartitionCoverageEntry
+}
+
+// CommandPartitionMembershipRequest binds one exact command lookup to the
+// transaction-consistent repository revision returned by that lookup.
+type CommandPartitionMembershipRequest struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	CommandID          string
+	Partition          TrustedCityPartition
+}
+
+// CommandPartitionMembership reports whether authority admitted the exact
+// command to this partition and whether it was active at the requested
+// historical revision.
+type CommandPartitionMembership struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	CommandID          string
+	Partition          TrustedCityPartition
+	Found              bool
+	Active             bool
+	Sequence           uint64
+}
+
+// TrustedCommandPartitionCoverageResolver proves that an indexed partition
+// query returned every authority-admitted active command. Implementations must
+// retain historical membership so a concurrent newer publication cannot make
+// an older repository snapshot unverifiable.
+type TrustedCommandPartitionCoverageResolver interface {
+	ResolveCommandPartitionCoverage(context.Context, CommandPartitionCoverageRequest) (CommandPartitionCoverage, error)
+	ResolveCommandPartitionMembership(context.Context, CommandPartitionMembershipRequest) (CommandPartitionMembership, error)
+}
+
+// CommandPartitionAdmission is the authority-side membership fact published
+// after a durable create. RepositoryRevision is the command's admission
+// revision, not a later claim or completion revision.
+type CommandPartitionAdmission struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	CommandID          string
+	Sequence           uint64
+	Partition          TrustedCityPartition
+}
+
+// CommandPartitionTerminal is the authority-side membership fact published
+// after a durable terminal transition. Replays of the exact fact are
+// idempotent; conflicting facts must fail closed.
+type CommandPartitionTerminal struct {
+	Store              CommandStoreBinding
+	RepositoryRevision uint64
+	CommandID          string
+	Sequence           uint64
+	Partition          TrustedCityPartition
+}
+
+// TrustedCommandPartitionMembershipRecorder owns the independent membership
+// history used by TrustedCommandPartitionCoverageResolver.
+type TrustedCommandPartitionMembershipRecorder interface {
+	RecordCommandPartitionAdmission(context.Context, CommandPartitionAdmission) error
+	RecordCommandPartitionTerminal(context.Context, CommandPartitionTerminal) error
+}
+
 // CommandRepositoryPartitionError identifies the exact read boundary that
 // could not prove trusted city ownership. It never copies command content.
 type CommandRepositoryPartitionError struct {
@@ -79,6 +172,7 @@ type CommandPartitionReader struct {
 	repository commandRepositoryReader
 	partition  TrustedCityPartition
 	resolver   TrustedCityPartitionResolver
+	coverage   TrustedCommandPartitionCoverageResolver
 }
 
 // NewCommandPartitionReader binds repository reads to one opaque trusted city
@@ -94,7 +188,11 @@ func NewCommandPartitionReader(repository *CommandRepository, partition TrustedC
 	if isNilRepositoryDependency(resolver) {
 		return nil, &CommandRepositoryPartitionError{Operation: "construction", Err: errors.New("trusted city partition resolver is required")}
 	}
-	return &CommandPartitionReader{repository: repository.reader, partition: partition, resolver: resolver}, nil
+	coverage, ok := resolver.(TrustedCommandPartitionCoverageResolver)
+	if !ok || isNilRepositoryDependency(coverage) {
+		return nil, &CommandRepositoryPartitionError{Operation: "construction", Err: errors.New("trusted partition coverage resolver is required")}
+	}
+	return &CommandPartitionReader{repository: repository.reader, partition: partition, resolver: resolver, coverage: coverage}, nil
 }
 
 // Snapshot returns only commands independently resolved to this reader's
@@ -102,11 +200,11 @@ func NewCommandPartitionReader(repository *CommandRepository, partition TrustedC
 // query; foreign commands are represented by content-free sequence ranges so
 // the global watermark remains dense without materializing foreign rows.
 func (r *CommandPartitionReader) Snapshot(ctx context.Context, maxCommands int) (CommandIndexSnapshot, error) {
-	if r == nil || isNilRepositoryDependency(r.repository.store) || isNilRepositoryDependency(r.repository.verifier) || !r.partition.valid() || isNilRepositoryDependency(r.resolver) {
+	if r == nil || isNilRepositoryDependency(r.repository.store) || isNilRepositoryDependency(r.repository.verifier) || !r.partition.valid() || isNilRepositoryDependency(r.resolver) || isNilRepositoryDependency(r.coverage) {
 		return CommandIndexSnapshot{}, &CommandRepositoryPartitionError{Operation: "snapshot", Err: errors.New("partition reader is not fully bound")}
 	}
 	partitionRoute := commandPartitionRoute(r.partition)
-	return r.repository.snapshotPartition(ctx, maxCommands, partitionRoute, func(ctx context.Context, row beads.Bead, entry CommandIndexEntry) error {
+	snapshot, err := r.repository.snapshotPartition(ctx, maxCommands, partitionRoute, func(ctx context.Context, row beads.Bead, entry CommandIndexEntry) error {
 		partition, err := r.resolveProjectedPartition(ctx, "snapshot", row, entry)
 		if err != nil {
 			return err
@@ -120,6 +218,48 @@ func (r *CommandPartitionReader) Snapshot(ctx context.Context, maxCommands int) 
 		}
 		return nil
 	})
+	if err != nil {
+		return CommandIndexSnapshot{}, err
+	}
+	if err := r.verifySnapshotCoverage(ctx, snapshot, maxCommands); err != nil {
+		return CommandIndexSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func (r *CommandPartitionReader) verifySnapshotCoverage(ctx context.Context, snapshot CommandIndexSnapshot, maxCommands int) error {
+	request := commandPartitionCoverageRequest(snapshot, r.partition)
+	coverage, err := r.coverage.ResolveCommandPartitionCoverage(ctx, request)
+	if err != nil {
+		return &CommandRepositoryPartitionError{Operation: "snapshot coverage", Err: err}
+	}
+	if err := validateCommandPartitionCoverage(request, coverage, maxCommands); err != nil {
+		return &CommandRepositoryPartitionError{Operation: "snapshot coverage", Err: err}
+	}
+	actual := make([]CommandPartitionCoverageEntry, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		routing := commandIndexEntryRouting(entry)
+		actual = append(actual, CommandPartitionCoverageEntry{CommandID: routing.CommandID, Sequence: routing.Sequence})
+	}
+	if !commandPartitionCoverageEntriesEqual(actual, coverage.ActiveEntries) {
+		return &CommandRepositoryPartitionError{
+			Operation: "snapshot coverage",
+			Err:       fmt.Errorf("indexed active set differs from trusted coverage: returned %d commands, authority requires %d", len(actual), len(coverage.ActiveEntries)),
+		}
+	}
+	return nil
+}
+
+func commandPartitionCoverageEntriesEqual(left, right []CommandPartitionCoverageEntry) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *CommandPartitionReader) resolveProjectedPartition(ctx context.Context, operation string, row beads.Bead, entry CommandIndexEntry) (TrustedCityPartition, error) {
@@ -194,6 +334,68 @@ func commandPartitionSequenceComplement(sequenceHighWater uint64, coverage *Comm
 	return gaps
 }
 
+func commandPartitionCoverageRequest(snapshot CommandIndexSnapshot, partition TrustedCityPartition) CommandPartitionCoverageRequest {
+	request := CommandPartitionCoverageRequest{
+		Store:              snapshot.Store,
+		RepositoryRevision: snapshot.Revision,
+		SequenceHighWater:  snapshot.SequenceHighWater,
+		Partition:          partition,
+	}
+	if snapshot.Coverage != nil {
+		request.TerminalRanges = append([]CommandIndexSequenceRange(nil), snapshot.Coverage.Ranges...)
+		request.TerminalCount = snapshot.Coverage.TerminalCount
+	}
+	return request
+}
+
+func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, coverage CommandPartitionCoverage, maxCommands int) error {
+	if coverage.Store != request.Store || coverage.RepositoryRevision != request.RepositoryRevision ||
+		coverage.SequenceHighWater != request.SequenceHighWater || coverage.AdmittedCount != request.SequenceHighWater ||
+		coverage.TerminalCount != request.TerminalCount ||
+		coverage.Partition != request.Partition || !commandPartitionRangesEqual(coverage.TerminalRanges, request.TerminalRanges) {
+		return errors.New("trusted coverage is not bound to the exact repository snapshot")
+	}
+	if len(coverage.ActiveEntries) > maxCommands {
+		return fmt.Errorf("trusted partition contains more than %d active commands: %w", maxCommands, ErrCommandRepositorySnapshotLimit)
+	}
+	var previous uint64
+	terminalRangeIndex := 0
+	seenIDs := make(map[string]struct{}, len(coverage.ActiveEntries))
+	for index, entry := range coverage.ActiveEntries {
+		if validateCommandIdentity("trusted coverage command id", entry.CommandID) != nil || !strings.HasPrefix(entry.CommandID, commandIDPrefix) ||
+			entry.Sequence == 0 || entry.Sequence > request.SequenceHighWater {
+			return fmt.Errorf("trusted coverage entry %d is invalid", index)
+		}
+		if index > 0 && entry.Sequence <= previous {
+			return errors.New("trusted coverage active entries are not strictly ordered by sequence")
+		}
+		for terminalRangeIndex < len(request.TerminalRanges) && request.TerminalRanges[terminalRangeIndex].LastSequence < entry.Sequence {
+			terminalRangeIndex++
+		}
+		if terminalRangeIndex < len(request.TerminalRanges) && request.TerminalRanges[terminalRangeIndex].FirstSequence <= entry.Sequence {
+			return fmt.Errorf("trusted coverage active sequence %d is terminal", entry.Sequence)
+		}
+		if _, duplicate := seenIDs[entry.CommandID]; duplicate {
+			return fmt.Errorf("trusted coverage repeats command %q", entry.CommandID)
+		}
+		seenIDs[entry.CommandID] = struct{}{}
+		previous = entry.Sequence
+	}
+	return nil
+}
+
+func commandPartitionRangesEqual(left, right []CommandIndexSequenceRange) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 // Get returns an exact command only when independent authority resolves it to
 // this reader's partition. A valid foreign command is indistinguishable from a
 // missing ID at this city-local boundary.
@@ -201,13 +403,55 @@ func (r *CommandPartitionReader) Get(ctx context.Context, commandID string) (Com
 	if r == nil || isNilRepositoryDependency(r.repository.store) || isNilRepositoryDependency(r.repository.verifier) || !r.partition.valid() || isNilRepositoryDependency(r.resolver) {
 		return CommandIndexResolution{}, &CommandRepositoryPartitionError{Operation: "exact read", CommandID: commandID, Err: errors.New("partition reader is not fully bound")}
 	}
-	return r.repository.getPartition(ctx, commandID, func(ctx context.Context, row beads.Bead, entry CommandIndexEntry) (bool, error) {
+	resolution, err := r.repository.getPartition(ctx, commandID, func(ctx context.Context, row beads.Bead, entry CommandIndexEntry) (bool, error) {
 		partition, err := r.resolveProjectedPartition(ctx, "exact read", row, entry)
 		if err != nil {
 			return false, err
 		}
 		return partition == r.partition, nil
 	})
+	if err != nil {
+		return CommandIndexResolution{}, err
+	}
+	trusted, err := r.coverage.ResolveCommandPartitionMembership(ctx, CommandPartitionMembershipRequest{
+		Store: resolution.Store, RepositoryRevision: resolution.Revision,
+		CommandID: commandID, Partition: r.partition,
+	})
+	if err != nil {
+		return CommandIndexResolution{}, &CommandRepositoryPartitionError{Operation: "exact read membership", CommandID: commandID, Err: err}
+	}
+	if err := validateCommandPartitionMembership(resolution, commandID, r.partition, trusted); err != nil {
+		return CommandIndexResolution{}, &CommandRepositoryPartitionError{Operation: "exact read membership", CommandID: commandID, Err: err}
+	}
+	return resolution, nil
+}
+
+func validateCommandPartitionMembership(resolution CommandIndexResolution, commandID string, partition TrustedCityPartition, trusted CommandPartitionMembership) error {
+	if trusted.Store != resolution.Store || trusted.RepositoryRevision != resolution.Revision ||
+		trusted.CommandID != commandID || trusted.Partition != partition {
+		return errors.New("trusted membership is not bound to the exact command read")
+	}
+	if !trusted.Found {
+		if trusted.Active || trusted.Sequence != 0 || resolution.Found {
+			return errors.New("repository command exists without trusted partition membership")
+		}
+		return nil
+	}
+	if !resolution.Found || trusted.Sequence == 0 {
+		return errors.New("authority-owned command is absent from the repository read")
+	}
+	routing := commandIndexEntryRouting(resolution.Entry)
+	if routing.CommandID != commandID || routing.Sequence != trusted.Sequence {
+		return errors.New("repository command identity or sequence differs from trusted membership")
+	}
+	if resolution.Entry.Command == nil {
+		return errors.New("authority-owned command has no supported lifecycle state")
+	}
+	active := !commandIsTerminalState(resolution.Entry.Command.State)
+	if active != trusted.Active {
+		return errors.New("repository command lifecycle differs from trusted membership")
+	}
+	return nil
 }
 
 func (r *CommandPartitionReader) resolveEntryPartition(ctx context.Context, operation string, entry CommandIndexEntry) (TrustedCityPartition, CommandRoutingHeader, error) {

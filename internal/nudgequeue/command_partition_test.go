@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 
@@ -94,6 +95,15 @@ func TestCommandPartitionReaderPreservesCompactedCoverageAcrossCities(t *testing
 	if _, err := repo.RepairLineage(t.Context()); err != nil {
 		t.Fatalf("RepairLineage after terminal write: %v", err)
 	}
+	if err := resolver.RecordCommandPartitionTerminal(t.Context(), CommandPartitionTerminal{
+		Store:              state.Store,
+		RepositoryRevision: state.Revision,
+		CommandID:          terminal.ID,
+		Sequence:           terminal.Order.Sequence,
+		Partition:          cityA,
+	}); err != nil {
+		t.Fatalf("RecordCommandPartitionTerminal: %v", err)
+	}
 	for {
 		_, caughtUp, err := repo.PublishCheckpoint(t.Context(), 1)
 		if err != nil {
@@ -141,6 +151,15 @@ func TestCommandPartitionReaderSameTrustedCityReopenIsStable(t *testing.T) {
 	reopenedPartition := trustedCityPartitionForTest("authority/city-a")
 	reopenedResolver := newTestTrustedCityPartitionResolver()
 	reopenedResolver.authorize(command.TrustedIngress, reopenedPartition)
+	if err := reopenedResolver.RecordCommandPartitionAdmission(t.Context(), CommandPartitionAdmission{
+		Store:              command.Store,
+		RepositoryRevision: command.Order.Revision,
+		CommandID:          command.ID,
+		Sequence:           command.Order.Sequence,
+		Partition:          reopenedPartition,
+	}); err != nil {
+		t.Fatalf("reopened RecordCommandPartitionAdmission: %v", err)
+	}
 	reopenedReader, err := NewCommandPartitionReader(repo, reopenedPartition, reopenedResolver)
 	if err != nil {
 		t.Fatalf("reopened NewCommandPartitionReader: %v", err)
@@ -399,6 +418,7 @@ type testTrustedCityPartitionResolver struct {
 	authorized       map[string]testTrustedCityPartitionAuthorization
 	defaultPartition TrustedCityPartition
 	calls            int
+	coverage         *testCommandPartitionCoverageLedger
 }
 
 type testTrustedCityPartitionAuthorization struct {
@@ -407,7 +427,10 @@ type testTrustedCityPartitionAuthorization struct {
 }
 
 func newTestTrustedCityPartitionResolver() *testTrustedCityPartitionResolver {
-	return &testTrustedCityPartitionResolver{authorized: make(map[string]testTrustedCityPartitionAuthorization)}
+	return &testTrustedCityPartitionResolver{
+		authorized: make(map[string]testTrustedCityPartitionAuthorization),
+		coverage:   newTestCommandPartitionCoverageLedger(),
+	}
 }
 
 func (r *testTrustedCityPartitionResolver) ResolveCommandPartition(ctx context.Context, reference TrustedIngressReference) (TrustedCityPartition, error) {
@@ -445,6 +468,22 @@ func (r *testTrustedCityPartitionResolver) callCount() int {
 	return r.calls
 }
 
+func (r *testTrustedCityPartitionResolver) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {
+	return r.coverage.RecordCommandPartitionAdmission(ctx, admission)
+}
+
+func (r *testTrustedCityPartitionResolver) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
+	return r.coverage.RecordCommandPartitionTerminal(ctx, terminal)
+}
+
+func (r *testTrustedCityPartitionResolver) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
+	return r.coverage.ResolveCommandPartitionCoverage(ctx, request)
+}
+
+func (r *testTrustedCityPartitionResolver) ResolveCommandPartitionMembership(ctx context.Context, request CommandPartitionMembershipRequest) (CommandPartitionMembership, error) {
+	return r.coverage.ResolveCommandPartitionMembership(ctx, request)
+}
+
 func trustedCityPartitionForTest(identity string) TrustedCityPartition {
 	return TrustedCityPartition{identity: sha256.Sum256([]byte(identity))}
 }
@@ -460,6 +499,15 @@ func createPartitionedCommandForTest(t *testing.T, repo *CommandRepository, bind
 	entry, created, err := repo.create(t.Context(), requestID, command, partition)
 	if err != nil || !created || entry.Command == nil {
 		t.Fatalf("Create(%s) = %#v, created=%t err=%v", requestID, entry, created, err)
+	}
+	if err := resolver.RecordCommandPartitionAdmission(t.Context(), CommandPartitionAdmission{
+		Store:              entry.Command.Store,
+		RepositoryRevision: entry.Command.Order.Revision,
+		CommandID:          entry.Command.ID,
+		Sequence:           entry.Command.Order.Sequence,
+		Partition:          partition,
+	}); err != nil {
+		t.Fatalf("RecordCommandPartitionAdmission(%s): %v", requestID, err)
 	}
 	return *entry.Command
 }
@@ -487,4 +535,156 @@ func assertPartitionSnapshot(t *testing.T, snapshot CommandIndexSnapshot, wantID
 	}
 }
 
-var _ TrustedCityPartitionResolver = (*testTrustedCityPartitionResolver)(nil)
+type testCommandPartitionCoverageLedger struct {
+	mu                     sync.Mutex
+	records                map[string]testCommandPartitionCoverageRecord
+	syntheticAdmittedCount uint64
+}
+
+type testCommandPartitionCoverageRecord struct {
+	store             CommandStoreBinding
+	admissionRevision uint64
+	terminalRevision  uint64
+	commandID         string
+	sequence          uint64
+	partition         TrustedCityPartition
+}
+
+func newTestCommandPartitionCoverageLedger() *testCommandPartitionCoverageLedger {
+	return &testCommandPartitionCoverageLedger{records: make(map[string]testCommandPartitionCoverageRecord)}
+}
+
+func (l *testCommandPartitionCoverageLedger) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if validateCommandRepositoryBinding(admission.Store) != nil || admission.RepositoryRevision == 0 ||
+		validateCommandIdentity("coverage command id", admission.CommandID) != nil || admission.Sequence == 0 ||
+		!admission.Partition.valid() {
+		return errors.New("invalid test partition admission")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	proposed := testCommandPartitionCoverageRecord{
+		store: admission.Store, admissionRevision: admission.RepositoryRevision,
+		commandID: admission.CommandID, sequence: admission.Sequence, partition: admission.Partition,
+	}
+	if existing, found := l.records[admission.CommandID]; found {
+		if existing.store != proposed.store || existing.admissionRevision != proposed.admissionRevision ||
+			existing.commandID != proposed.commandID || existing.sequence != proposed.sequence || existing.partition != proposed.partition {
+			return errors.New("conflicting test partition admission")
+		}
+		return nil
+	}
+	for _, existing := range l.records {
+		if existing.store == admission.Store && existing.sequence == admission.Sequence {
+			return errors.New("duplicate test partition sequence")
+		}
+	}
+	l.records[admission.CommandID] = proposed
+	return nil
+}
+
+func (l *testCommandPartitionCoverageLedger) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	record, found := l.records[terminal.CommandID]
+	if !found || record.store != terminal.Store || record.sequence != terminal.Sequence ||
+		record.partition != terminal.Partition || terminal.RepositoryRevision <= record.admissionRevision {
+		return errors.New("invalid test partition terminal")
+	}
+	if record.terminalRevision != 0 && record.terminalRevision != terminal.RepositoryRevision {
+		return errors.New("conflicting test partition terminal")
+	}
+	record.terminalRevision = terminal.RepositoryRevision
+	l.records[terminal.CommandID] = record
+	return nil
+}
+
+func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
+	if err := ctx.Err(); err != nil {
+		return CommandPartitionCoverage{}, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var (
+		sequenceHighWater uint64
+		terminalRanges    []CommandIndexSequenceRange
+		terminalCount     uint64
+		admittedCount     uint64
+		active            []CommandPartitionCoverageEntry
+	)
+	for _, record := range l.records {
+		if record.store != request.Store || record.admissionRevision > request.RepositoryRevision {
+			continue
+		}
+		admittedCount++
+		sequenceHighWater = max(sequenceHighWater, record.sequence)
+		terminal := record.terminalRevision != 0 && record.terminalRevision <= request.RepositoryRevision
+		if terminal {
+			var added bool
+			terminalRanges, added = addCommandRepositoryCheckpointSequence(terminalRanges, record.sequence)
+			if added {
+				terminalCount++
+			}
+			continue
+		}
+		if record.partition == request.Partition {
+			active = append(active, CommandPartitionCoverageEntry{CommandID: record.commandID, Sequence: record.sequence})
+		}
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].Sequence < active[j].Sequence })
+	if l.syntheticAdmittedCount != 0 {
+		admittedCount = l.syntheticAdmittedCount
+	}
+	if sequenceHighWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater || terminalCount != request.TerminalCount ||
+		!reflect.DeepEqual(terminalRanges, request.TerminalRanges) {
+		return CommandPartitionCoverage{}, errors.New("test authority coverage does not match repository snapshot")
+	}
+	return CommandPartitionCoverage{
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
+		SequenceHighWater: request.SequenceHighWater, AdmittedCount: admittedCount,
+		TerminalRanges: append([]CommandIndexSequenceRange(nil), request.TerminalRanges...),
+		TerminalCount:  request.TerminalCount, Partition: request.Partition,
+		ActiveEntries: active,
+	}, nil
+}
+
+func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionMembership(ctx context.Context, request CommandPartitionMembershipRequest) (CommandPartitionMembership, error) {
+	if err := ctx.Err(); err != nil {
+		return CommandPartitionMembership{}, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	result := CommandPartitionMembership{
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
+		CommandID: request.CommandID, Partition: request.Partition,
+	}
+	record, found := l.records[request.CommandID]
+	if !found || record.store != request.Store || record.admissionRevision > request.RepositoryRevision || record.partition != request.Partition {
+		return result, nil
+	}
+	result.Found = true
+	result.Sequence = record.sequence
+	result.Active = record.terminalRevision == 0 || record.terminalRevision > request.RepositoryRevision
+	return result, nil
+}
+
+func (l *testCommandPartitionCoverageLedger) rewriteAdmissionForTest(commandID string, revision, sequence uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	record := l.records[commandID]
+	record.admissionRevision = revision
+	record.sequence = sequence
+	l.records[commandID] = record
+	l.syntheticAdmittedCount = sequence
+}
+
+var (
+	_ TrustedCityPartitionResolver              = (*testTrustedCityPartitionResolver)(nil)
+	_ TrustedCommandPartitionCoverageResolver   = (*testTrustedCityPartitionResolver)(nil)
+	_ TrustedCommandPartitionMembershipRecorder = (*testTrustedCityPartitionResolver)(nil)
+)

@@ -65,8 +65,15 @@ func TestOpenProductionNudgeCommandSourceWrapsKnownTransientProvisionFailure(t *
 func TestOpenProductionNudgeCommandSourceCatchesUpTerminalCheckpointBeforeSnapshot(t *testing.T) {
 	fixture := newProductionNudgeCommandFixture(t)
 	claimed := fixture.claimDirect(t, "claim-before-reopen", "attempt-before-reopen")
-	if _, err := fixture.repository.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claimed, fixture.now.Add(3*time.Second))); err != nil {
+	completed, err := fixture.repository.CompleteProviderAttempt(t.Context(), deliveredNudgeCompletion(claimed, fixture.now.Add(3*time.Second)))
+	if err != nil {
 		t.Fatalf("CompleteProviderAttempt: %v", err)
+	}
+	if err := fixture.authority.RecordCommandPartitionTerminal(t.Context(), nudgequeue.CommandPartitionTerminal{
+		Store: completed.Command.Store, RepositoryRevision: completed.Command.Order.Revision,
+		CommandID: completed.Command.ID, Sequence: completed.Command.Order.Sequence, Partition: fixture.partition,
+	}); err != nil {
+		t.Fatalf("RecordCommandPartitionTerminal: %v", err)
 	}
 	if _, err := fixture.repository.Snapshot(t.Context(), 1); !errors.Is(err, nudgequeue.ErrCommandRepositoryCheckpointRequired) {
 		t.Fatalf("Snapshot before reopen error = %v, want checkpoint-required", err)
@@ -116,6 +123,31 @@ func TestProductionNudgeCommandSourceInjectsBoundPartitionAndMaintainsCheckpoint
 	}
 	if _, err := source.Snapshot(t.Context(), 1); err != nil {
 		t.Fatalf("Snapshot after bounded checkpoint maintenance: %v", err)
+	}
+}
+
+func TestProductionNudgeCommandSourceClaimTerminalMaintainsCheckpoint(t *testing.T) {
+	fixture := newProductionNudgeCommandFixture(t)
+	opened, err := openVerifiedProductionNudgeCommandSource(t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source := opened.(*productionNudgeCommandSource)
+	claimedAt := fixture.now.Add(2 * time.Hour)
+	result, err := source.ClaimAuthorized(t.Context(), nudgeEffectClaimRequest{
+		commandID: fixture.command.ID, claimID: "claim-expired-through-source",
+		ownerID: "owner-expired-through-source", attemptID: "attempt-expired-through-source",
+		boundLaunchIdentity: "production-launch", claimedAt: claimedAt, leaseUntil: claimedAt.Add(time.Minute),
+	}, fixture.authority)
+	if err != nil || result.Disposition != nudgequeue.CommandClaimDenied || result.Command.Terminal == nil {
+		t.Fatalf("ClaimAuthorized expired = %#v, err=%v", result, err)
+	}
+	snapshot, err := source.Snapshot(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("Snapshot after claim-time terminal: %v", err)
+	}
+	if len(snapshot.Entries) != 0 || snapshot.Coverage == nil || snapshot.Coverage.TerminalCount != 1 {
+		t.Fatalf("snapshot after claim-time terminal = %#v, want one compacted terminal", snapshot)
 	}
 }
 
@@ -169,7 +201,11 @@ func newProductionNudgeCommandFixture(t *testing.T) productionNudgeCommandFixtur
 	if _, err := repository.Provision(t.Context()); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	authority := &productionNudgeTestAuthority{references: make(map[string]nudgequeue.NudgeAuthorization)}
+	authority := &productionNudgeTestAuthority{
+		references: make(map[string]nudgequeue.NudgeAuthorization),
+		admissions: make(map[string]nudgequeue.CommandPartitionAdmission),
+		terminals:  make(map[string]nudgequeue.CommandPartitionTerminal),
+	}
 	ingress, err := nudgequeue.NewTrustedNudgeIngress(repository, authority)
 	if err != nil {
 		t.Fatalf("NewTrustedNudgeIngress: %v", err)
@@ -224,6 +260,8 @@ type productionNudgeTestAuthority struct {
 	mu         sync.Mutex
 	references map[string]nudgequeue.NudgeAuthorization
 	partition  nudgequeue.TrustedCityPartition
+	admissions map[string]nudgequeue.CommandPartitionAdmission
+	terminals  map[string]nudgequeue.CommandPartitionTerminal
 }
 
 func (a *productionNudgeTestAuthority) AuthorizeNudgeIngress(_ context.Context, request nudgequeue.NudgeIngressAuthorizationRequest) (nudgequeue.NudgeAuthorization, error) {
@@ -247,6 +285,98 @@ func (a *productionNudgeTestAuthority) ResolveTrustedNudgeIngress(_ context.Cont
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.references[reference.ReferenceID], nil
+}
+
+func (a *productionNudgeTestAuthority) RecordCommandPartitionAdmission(_ context.Context, admission nudgequeue.CommandPartitionAdmission) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.admissions[admission.CommandID]; found && existing != admission {
+		return errors.New("conflicting production-test partition admission")
+	}
+	a.admissions[admission.CommandID] = admission
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) RecordCommandPartitionTerminal(_ context.Context, terminal nudgequeue.CommandPartitionTerminal) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	admission, found := a.admissions[terminal.CommandID]
+	if !found || admission.Store != terminal.Store || admission.Sequence != terminal.Sequence || admission.Partition != terminal.Partition {
+		return errors.New("terminal has no matching production-test partition admission")
+	}
+	if existing, found := a.terminals[terminal.CommandID]; found && existing != terminal {
+		return errors.New("conflicting production-test partition terminal")
+	}
+	a.terminals[terminal.CommandID] = terminal
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) ResolveCommandPartitionCoverage(_ context.Context, request nudgequeue.CommandPartitionCoverageRequest) (nudgequeue.CommandPartitionCoverage, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var (
+		highWater         uint64
+		admittedCount     uint64
+		terminalSequences []uint64
+		active            []nudgequeue.CommandPartitionCoverageEntry
+	)
+	for id, admission := range a.admissions {
+		if admission.Store != request.Store || admission.RepositoryRevision > request.RepositoryRevision {
+			continue
+		}
+		admittedCount++
+		highWater = max(highWater, admission.Sequence)
+		terminal, closed := a.terminals[id]
+		if closed && terminal.RepositoryRevision <= request.RepositoryRevision {
+			terminalSequences = append(terminalSequences, admission.Sequence)
+			continue
+		}
+		if admission.Partition == request.Partition {
+			active = append(active, nudgequeue.CommandPartitionCoverageEntry{CommandID: id, Sequence: admission.Sequence})
+		}
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].Sequence < active[j].Sequence })
+	sort.Slice(terminalSequences, func(i, j int) bool { return terminalSequences[i] < terminalSequences[j] })
+	ranges := productionNudgeTerminalRanges(terminalSequences)
+	if highWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater || uint64(len(terminalSequences)) != request.TerminalCount || !reflect.DeepEqual(ranges, request.TerminalRanges) {
+		return nudgequeue.CommandPartitionCoverage{}, errors.New("production-test authority coverage differs from repository snapshot")
+	}
+	return nudgequeue.CommandPartitionCoverage{
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater, AdmittedCount: admittedCount,
+		TerminalRanges: append([]nudgequeue.CommandIndexSequenceRange(nil), request.TerminalRanges...),
+		TerminalCount:  request.TerminalCount, Partition: request.Partition, ActiveEntries: active,
+	}, nil
+}
+
+func (a *productionNudgeTestAuthority) ResolveCommandPartitionMembership(_ context.Context, request nudgequeue.CommandPartitionMembershipRequest) (nudgequeue.CommandPartitionMembership, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := nudgequeue.CommandPartitionMembership{
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
+		CommandID: request.CommandID, Partition: request.Partition,
+	}
+	admission, found := a.admissions[request.CommandID]
+	if !found || admission.Store != request.Store || admission.RepositoryRevision > request.RepositoryRevision || admission.Partition != request.Partition {
+		return result, nil
+	}
+	result.Found = true
+	result.Sequence = admission.Sequence
+	terminal, closed := a.terminals[request.CommandID]
+	result.Active = !closed || terminal.RepositoryRevision > request.RepositoryRevision
+	return result, nil
+}
+
+func productionNudgeTerminalRanges(sequences []uint64) []nudgequeue.CommandIndexSequenceRange {
+	var ranges []nudgequeue.CommandIndexSequenceRange
+	for _, sequence := range sequences {
+		last := len(ranges) - 1
+		if last >= 0 && ranges[last].LastSequence+1 == sequence {
+			ranges[last].LastSequence = sequence
+			continue
+		}
+		ranges = append(ranges, nudgequeue.CommandIndexSequenceRange{FirstSequence: sequence, LastSequence: sequence})
+	}
+	return ranges
 }
 
 func (a *productionNudgeTestAuthority) AuthorizeNudgeClaim(_ context.Context, request nudgequeue.NudgeClaimAuthorizationRequest) (nudgequeue.NudgeClaimAuthorization, error) {

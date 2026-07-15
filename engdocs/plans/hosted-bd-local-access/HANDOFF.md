@@ -53,19 +53,39 @@ WebPKI TLS → EIA auth → gateway routing all work.
 
 ---
 
-## ▶ IMMEDIATE NEXT ACTION — S2 (design → impl → red-team → ship)
+## ▶ IMMEDIATE NEXT ACTION — S2 IMPLEMENTATION (design + red-team DONE)
 
-S1 is done. S2 per the SPEC's Rollout item 2: `bd attach` + user-level
-trusted-gateway allowlist + per-dial BeforeConnect connector (port from
-`1f0ebe068`) + TOFU'd `credential_helper` persistence + diagnostic
-contract/doctor (fixes the doctor TLS-threading bug found in this session) +
-env-tunable timeouts — plus the lockstep gasworks CLI change (`--gateway`
-destination-aware mint refusal, jittered refresh, backoff, serve-last-good).
-Design doc: `S2-DESIGN.md` in this dir (grounded by a 4-reader workflow over
-bd main, the credcmd connector branch, the gasworks CLI, and the #4823 branch).
-Verified provisioner-path fact for S2: `provisionerLoop → resumeProvisioning →
-driveProvision → runProvision → provision.ProvisionProject` (the `a.provision`
-seam is nil in prod).
+**S2 design is complete and red-teamed** — `S2-DESIGN.md` v2 in this dir
+(bead `mc-b3clt.6`). A 3-lens Fable red-team broke v1 (all three lenses hit the
+same CRITICAL: the env-credential carve-out reopened the SPEC exfil vector);
+v2 fixed it at the root (unconditional destination gate at the mint boundary +
+terminal hosted resolution). **Next is implementation** (Opus impl, Fable
+red-team before each commit):
+
+- **WP-A (bd, OSS, no deps):** `creds.Source` interface + `ArgvSource` +
+  `ResolveForDial`/`Invalidate`, per-dial `openSQLDB` connector (port from
+  `1f0ebe068` incl. the mandatory transaction.go:147 conversion), gated
+  one-shot 1045-invalidate, sentinel-DSN token redaction, env-tunable timeouts.
+- **WP-B (gasworks, PUBLIC repo, no deps):** `--gateway`/`--project` flags
+  (+ hoistPositional), UNCONDITIONAL destination gate before the cache read,
+  `trust-gateway` (locked store), mint resilience (per-attempt STS timeout +
+  budget + jitter + serve-last-good floor), `expires_in` envelope fix.
+- Then **C1** (trust stores + `hosted.GuardDestination` + terminal
+  `hosted.Resolve` + second-user detection; dep A+B, NOT #4823) → **C2**
+  (`bd attach` + factored #4823 adoption helpers; dep C1+#4823-merge) → **D**
+  (doctor exhaustive sweep = fixes `mc-b3clt.4`; dep #4823+C).
+
+Ship order **A ∥ B → C1 → C2 → D**. Grounding dumps (session-local):
+`/data/tmp/s2-grounding/{bd-main,credcmd,gasworks,pr4823}.md`. Gasworks
+origin/main ground worktree: `/tmp/gasworks-main-ground` (canonical checkout
+`/data/projects/gasworks-go-build` was 7 commits stale). Verified
+provisioner-path fact: `provisionerLoop → resumeProvisioning → driveProvision →
+runProvision → provision.ProvisionProject`.
+
+**Open owner flags from the red-team (in S2-DESIGN §9):** gasworks CLI has NO
+machine leg (`GASWORKS_API_KEY` unbuilt) so `BD_TRUST_WORKSPACE=1` ships
+degraded; gasworks repo is PUBLIC (hosted defaults in OSS); bd release vehicle
+undecided.
 
 **Golden-thread test recipe (S1-proven; reuse project `prj_848513b16e7b5c43`):**
 ```bash

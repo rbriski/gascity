@@ -89,8 +89,16 @@ type CommandIndexSnapshot struct {
 	Store             CommandStoreBinding
 	Entries           []CommandIndexEntry
 	Tombstones        []CommandIndexTombstone
+	PartitionGaps     []CommandIndexPartitionGap
 	Revision          uint64
 	SequenceHighWater uint64
+}
+
+// CommandIndexPartitionGap certifies that one sequence is represented by a
+// command outside this reader's trusted city partition. It deliberately
+// carries no foreign command identity, target, content, or authorization data.
+type CommandIndexPartitionGap struct {
+	Sequence uint64
 }
 
 // CommandIndexTombstone is the durable deletion evidence retained by an audit
@@ -175,8 +183,18 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		tombstones:     make(map[string]CommandIndexTombstone, len(snapshot.Tombstones)),
 		replays:        make(map[uint64][sha256.Size]byte, min(len(snapshot.Entries)+len(snapshot.Tombstones), MaxCommandIndexReplayHistory)),
 	}
-	sequenceOwner := make(map[uint64]string, len(snapshot.Entries)+len(snapshot.Tombstones))
+	sequenceOwner := make(map[uint64]string, len(snapshot.Entries)+len(snapshot.Tombstones)+len(snapshot.PartitionGaps))
 	var maxSequence uint64
+	for _, gap := range snapshot.PartitionGaps {
+		if gap.Sequence == 0 {
+			return commandIndexProjection{}, errors.New("building nudge command index: trusted partition gap sequence must be positive")
+		}
+		if owner, exists := sequenceOwner[gap.Sequence]; exists {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and trusted partition gap", gap.Sequence, owner)
+		}
+		sequenceOwner[gap.Sequence] = "trusted partition gap"
+		maxSequence = max(maxSequence, gap.Sequence)
+	}
 	for _, tombstone := range snapshot.Tombstones {
 		if err := validateCommandIndexTombstone(tombstone, snapshot.Store, snapshot.Revision); err != nil {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)

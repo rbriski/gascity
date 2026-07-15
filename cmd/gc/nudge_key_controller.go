@@ -156,6 +156,10 @@ type nudgeKeyController struct {
 	pending   map[reconcilekey.Session]nudgeReconcileBatch
 	deferred  map[reconcilekey.Session]nudgeDeferredAdmission
 
+	backlogOldest      nudgeKeyBacklogHeap
+	backlogEntries     map[reconcilekey.Session]*nudgeKeyBacklogEntry
+	backlogUnavailable int
+
 	// Deterministic barriers for the Get/takeBatch race contract. Production
 	// leaves both nil; tests install them before Run starts.
 	afterGet          func(reconcilekey.Session)
@@ -182,18 +186,19 @@ func newNudgeKeyController(workers int, reconcile nudgeReconcileFunc, stderr io.
 	limiter := workqueue.NewTypedItemExponentialFailureRateLimiter[reconcilekey.Session](options.retryBaseDelay, options.retryMaxDelay)
 	queue := workqueue.NewTypedRateLimitingQueue[reconcilekey.Session](limiter)
 	controller := &nudgeKeyController{
-		queue:     queue,
-		limiter:   limiter,
-		workers:   workers,
-		reconcile: reconcile,
-		stderr:    stderr,
-		now:       time.Now,
-		yield:     options.continuationDelay,
-		ready:     make(chan struct{}),
-		failureCh: make(chan error, 1),
-		accepting: true,
-		pending:   make(map[reconcilekey.Session]nudgeReconcileBatch),
-		deferred:  make(map[reconcilekey.Session]nudgeDeferredAdmission),
+		queue:          queue,
+		limiter:        limiter,
+		workers:        workers,
+		reconcile:      reconcile,
+		stderr:         stderr,
+		now:            time.Now,
+		yield:          options.continuationDelay,
+		ready:          make(chan struct{}),
+		failureCh:      make(chan error, 1),
+		accepting:      true,
+		pending:        make(map[reconcilekey.Session]nudgeReconcileBatch),
+		deferred:       make(map[reconcilekey.Session]nudgeDeferredAdmission),
+		backlogEntries: make(map[reconcilekey.Session]*nudgeKeyBacklogEntry),
 	}
 	controller.addAfter = queue.AddAfter
 	return controller, nil
@@ -233,15 +238,10 @@ func (c *nudgeKeyController) backlogSnapshot() nudgeKeyBacklogSnapshot {
 	if depth == 0 {
 		return nudgeKeyBacklogSnapshot{AgeState: nudgeKeyBacklogAgeEmpty}
 	}
-	var oldest time.Time
-	for _, batch := range c.pending {
-		if batch.FirstEnqueuedAt.IsZero() {
-			return nudgeKeyBacklogSnapshot{Depth: int64(depth), AgeState: nudgeKeyBacklogAgeUnavailable}
-		}
-		if oldest.IsZero() || batch.FirstEnqueuedAt.Before(oldest) {
-			oldest = batch.FirstEnqueuedAt
-		}
+	if c.backlogUnavailable > 0 || len(c.backlogOldest) != depth {
+		return nudgeKeyBacklogSnapshot{Depth: int64(depth), AgeState: nudgeKeyBacklogAgeUnavailable}
 	}
+	oldest := c.backlogOldest[0].admitted
 	now := time.Now()
 	if c.now != nil {
 		now = c.now()
@@ -277,7 +277,7 @@ func (c *nudgeKeyController) Enqueue(key reconcilekey.Session, cause nudgeReconc
 		batch.FirstEnqueuedAt = c.now()
 	}
 	batch.Causes |= cause
-	c.pending[key] = batch
+	c.setPendingLocked(key, batch)
 	if _, delayed := c.deferred[key]; delayed {
 		// The source evidence remains dirty, but an irrelevant duplicate must
 		// not bypass the callback-owned continuation/retry eligibility edge.
@@ -339,7 +339,7 @@ func (c *nudgeKeyController) Run(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	if runErr == nil {
-		clear(c.pending)
+		c.clearPendingLocked()
 	}
 	c.stopped = true
 	c.mu.Unlock()
@@ -458,7 +458,7 @@ func (c *nudgeKeyController) takeBatch(key reconcilekey.Session) (nudgeReconcile
 	if !ok || (batch.Causes == 0 && !batch.WorkqueueReplay) {
 		return nudgeReconcileBatch{}, false, true
 	}
-	delete(c.pending, key)
+	c.deletePendingLocked(key)
 	return batch, true, true
 }
 
@@ -476,7 +476,7 @@ func (c *nudgeKeyController) restoreBatchLocked(key reconcilekey.Session, failed
 	}
 	pending.Causes |= failed.Causes
 	pending.WorkqueueReplay = pending.WorkqueueReplay || failed.WorkqueueReplay
-	c.pending[key] = pending
+	c.setPendingLocked(key, pending)
 }
 
 func (c *nudgeKeyController) deferBatch(key reconcilekey.Session, batch nudgeReconcileBatch, disposition nudgeReconcileDisposition, delay time.Duration) {
@@ -486,7 +486,7 @@ func (c *nudgeKeyController) deferBatch(key reconcilekey.Session, batch nudgeRec
 	pending := c.pending[key]
 	if pending.FirstEnqueuedAt.IsZero() {
 		pending.FirstEnqueuedAt = now
-		c.pending[key] = pending
+		c.setPendingLocked(key, pending)
 	}
 	c.deferred[key] = nudgeDeferredAdmission{
 		disposition: disposition,

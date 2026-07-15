@@ -68,6 +68,11 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 			switch typed := node.(type) {
 			case *ast.AssignStmt:
 				for _, lhs := range typed.Lhs {
+					indexed, indexedOK := lhs.(*ast.IndexExpr)
+					if indexedOK && selectorPath(indexed.X) == "c.pending" &&
+						(name != "nudge_key_backlog_index.go" || ownerAt(typed.Pos()) != "setPendingLocked") {
+						t.Errorf("%s bypasses the keyed backlog index with a pending-map assignment at %s", name, fset.Position(lhs.Pos()))
+					}
 					selector, ok := lhs.(*ast.SelectorExpr)
 					if ok && selector.Sel.Name == "reconcile" {
 						t.Errorf("%s assigns a production .reconcile callback at %s; the read-only callback is immutable after certified construction", name, fset.Position(selector.Pos()))
@@ -107,6 +112,16 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 					}
 				}
 			case *ast.CallExpr:
+				called := selectorPath(typed.Fun)
+				if (called == "delete" || called == "clear") && len(typed.Args) > 0 && selectorPath(typed.Args[0]) == "c.pending" {
+					wantOwner := "deletePendingLocked"
+					if called == "clear" {
+						wantOwner = "clearPendingLocked"
+					}
+					if name != "nudge_key_backlog_index.go" || ownerAt(typed.Pos()) != wantOwner {
+						t.Errorf("%s bypasses the keyed backlog index with %s at %s", name, called, fset.Position(typed.Pos()))
+					}
+				}
 				if constructor, ok := typed.Fun.(*ast.Ident); ok &&
 					constructor.Name == "newNudgeKeyController" &&
 					name == "city_runtime.go" && ownerAt(typed.Pos()) == "installNudgeKeyShadow" {
@@ -606,6 +621,7 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 		"workers.Add": true, "workers.Done": true, "workers.Wait": true,
 		"c.runWorker": true, "c.closeAdmission": true, "c.takeBatch": true, "c.invoke": true,
 		"c.restoreBatch": true, "c.restoreBatchLocked": true, "c.deferBatch": true, "c.reportFailure": true, "c.reconcile": true,
+		"c.setPendingLocked": true, "c.deletePendingLocked": true, "c.clearPendingLocked": true,
 		"c.afterGet": true, "c.onEmptyReplay": true, "c.onDeferred": true, "c.onForget": true, "c.addAfter": true,
 		"c.limiter.When": true, "c.logTransient": true,
 		"failed.FirstEnqueuedAt.IsZero": true, "failed.FirstEnqueuedAt.Before": true,
@@ -614,6 +630,54 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 		"oldest.IsZero": true, "time.Now": true, "now.Sub": true,
 	}
 	assertASTCallsOnly(t, fset, file, "nudge keyed core", allowedCalls)
+}
+
+func TestNudgeKeyBacklogSnapshotUsesIndexedStateWithoutPendingScan(t *testing.T) {
+	fset, file := parseGCTestSource(t, "nudge_key_controller.go")
+	snapshot := findGCFunction(t, file, "backlogSnapshot")
+	ast.Inspect(snapshot.Body, func(node ast.Node) bool {
+		if loop, ok := node.(*ast.RangeStmt); ok {
+			t.Errorf("backlog snapshot performs an O(backlog) range at %s; metric collection must use scheduler-maintained indexed state", fset.Position(loop.Pos()))
+		}
+		return true
+	})
+	indexFSet, indexFile := parseGCTestSource(t, "nudge_key_backlog_index.go")
+	wantImports := map[string]bool{
+		"container/heap": true,
+		"time":           true,
+		"github.com/gastownhall/gascity/internal/reconcilekey": true,
+	}
+	for _, imported := range indexFile.Imports {
+		path := strings.Trim(imported.Path.Value, "\"")
+		if !wantImports[path] {
+			t.Errorf("nudge backlog index imports unapproved capability %q at %s", path, indexFSet.Position(imported.Pos()))
+		}
+		delete(wantImports, path)
+	}
+	for missing := range wantImports {
+		t.Errorf("nudge backlog index allowlist is stale: expected import %q is absent", missing)
+	}
+	ast.Inspect(indexFile, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.CallExpr:
+			path := selectorPath(typed.Fun)
+			parts := strings.Split(path, ".")
+			last := parts[len(parts)-1]
+			if map[string]bool{
+				"Create": true, "Update": true, "Close": true, "SetMetadata": true,
+				"AtomicReadWrite": true, "Nudge": true, "Start": true, "Stop": true,
+			}[last] {
+				t.Errorf("nudge backlog index calls effect capability %q at %s", path, indexFSet.Position(typed.Pos()))
+			}
+		case *ast.GoStmt:
+			t.Errorf("nudge backlog index starts a goroutine at %s", indexFSet.Position(typed.Pos()))
+		case *ast.SendStmt:
+			t.Errorf("nudge backlog index sends on a channel at %s", indexFSet.Position(typed.Pos()))
+		case *ast.RangeStmt:
+			t.Errorf("nudge backlog index performs an O(backlog) range at %s", indexFSet.Position(typed.Pos()))
+		}
+		return true
+	})
 }
 
 func TestNudgeExactIngressCallGraphRemainsReadOnly(t *testing.T) {

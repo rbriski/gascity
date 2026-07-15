@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -115,10 +116,143 @@ func TestNudgeKeyBacklogSnapshotClassifiesEmptyReplayAndClockRegression(t *testi
 	}
 
 	controller.mu.Lock()
-	controller.pending[key] = nudgeReconcileBatch{Causes: nudgeCauseAudit, FirstEnqueuedAt: now.Add(time.Millisecond)}
+	controller.setPendingLocked(key, nudgeReconcileBatch{Causes: nudgeCauseAudit, FirstEnqueuedAt: now.Add(time.Millisecond)})
 	controller.mu.Unlock()
 	if got := controller.backlogSnapshot(); got.Depth != 1 || got.OldestAge != 0 || got.AgeState != nudgeKeyBacklogAgeClockRegressed {
 		t.Fatalf("regressed backlog snapshot = %+v, want depth 1 clock-regressed", got)
+	}
+}
+
+func TestNudgeKeyBacklogIndexTracksArbitraryRemovalRestoreAndUnavailableReplay(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	now := base
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	first := mustNudgeReconcileKey(t, "scope", "first")
+	second := mustNudgeReconcileKey(t, "scope", "second")
+	third := mustNudgeReconcileKey(t, "scope", "third")
+	for i, key := range []reconcilekey.Session{first, second, third} {
+		now = base.Add(time.Duration(i) * time.Millisecond)
+		if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+			t.Fatalf("Enqueue(%s): %v", key, err)
+		}
+	}
+
+	firstBatch, taken, ready := controller.takeBatch(first)
+	if !taken || !ready {
+		t.Fatalf("take first = taken %v ready %v, want true/true", taken, ready)
+	}
+	now = base.Add(10 * time.Millisecond)
+	if got := controller.backlogSnapshot(); got.Depth != 2 || got.OldestAge != 9*time.Millisecond || got.AgeState != nudgeKeyBacklogAgeObserved {
+		t.Fatalf("snapshot after oldest removal = %+v, want second key aged 9ms", got)
+	}
+
+	controller.restoreBatch(first, firstBatch)
+	if got := controller.backlogSnapshot(); got.Depth != 3 || got.OldestAge != 10*time.Millisecond || got.AgeState != nudgeKeyBacklogAgeObserved {
+		t.Fatalf("snapshot after oldest restore = %+v, want restored first key aged 10ms", got)
+	}
+	if _, taken, ready := controller.takeBatch(first); !taken || !ready {
+		t.Fatalf("retake first = taken %v ready %v, want true/true", taken, ready)
+	}
+
+	replay := mustNudgeReconcileKey(t, "scope", "unavailable-replay")
+	controller.restoreBatch(replay, nudgeReconcileBatch{WorkqueueReplay: true})
+	if got := controller.backlogSnapshot(); got.Depth != 3 || got.OldestAge != 0 || got.AgeState != nudgeKeyBacklogAgeUnavailable {
+		t.Fatalf("snapshot with unavailable replay = %+v, want unavailable depth 3", got)
+	}
+	if _, taken, ready := controller.takeBatch(replay); !taken || !ready {
+		t.Fatalf("take replay = taken %v ready %v, want true/true", taken, ready)
+	}
+	if got := controller.backlogSnapshot(); got.Depth != 2 || got.OldestAge != 9*time.Millisecond || got.AgeState != nudgeKeyBacklogAgeObserved {
+		t.Fatalf("snapshot after unavailable replay removal = %+v, want second key aged 9ms", got)
+	}
+}
+
+func TestNudgeKeyBacklogIndexMatchesReferenceAcrossMutationSequence(t *testing.T) {
+	base := time.Date(2026, 7, 15, 11, 0, 0, 0, time.UTC)
+	now := base
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	keys := make([]reconcilekey.Session, 64)
+	for i := range keys {
+		keys[i] = mustNudgeReconcileKey(t, "scope", fmt.Sprintf("session-%03d", i))
+		now = base.Add(time.Duration(i) * time.Millisecond)
+		if err := controller.Enqueue(keys[i], nudgeCauseCommandCommit); err != nil {
+			t.Fatalf("Enqueue(%d): %v", i, err)
+		}
+		if i%3 == 0 {
+			now = now.Add(time.Millisecond)
+			if err := controller.Enqueue(keys[i], nudgeCauseProviderResult); err != nil {
+				t.Fatalf("duplicate Enqueue(%d): %v", i, err)
+			}
+		}
+		assertNudgeKeyBacklogIndexMatchesReference(t, controller, now)
+	}
+
+	taken := make(map[int]nudgeReconcileBatch)
+	for i := 0; i < len(keys); i += 2 {
+		batch, ok, ready := controller.takeBatch(keys[i])
+		if !ok || !ready {
+			t.Fatalf("takeBatch(%d) = %v/%v, want true/true", i, ok, ready)
+		}
+		taken[i] = batch
+		now = now.Add(time.Millisecond)
+		assertNudgeKeyBacklogIndexMatchesReference(t, controller, now)
+	}
+	for i := 0; i < len(keys); i += 4 {
+		controller.restoreBatch(keys[i], taken[i])
+		now = now.Add(time.Millisecond)
+		assertNudgeKeyBacklogIndexMatchesReference(t, controller, now)
+	}
+
+	replay := mustNudgeReconcileKey(t, "scope", "replay-without-admission-time")
+	controller.restoreBatch(replay, nudgeReconcileBatch{WorkqueueReplay: true})
+	assertNudgeKeyBacklogIndexMatchesReference(t, controller, now)
+	if _, ok, ready := controller.takeBatch(replay); !ok || !ready {
+		t.Fatalf("takeBatch(replay) = %v/%v, want true/true", ok, ready)
+	}
+	assertNudgeKeyBacklogIndexMatchesReference(t, controller, now)
+}
+
+func assertNudgeKeyBacklogIndexMatchesReference(t *testing.T, controller *nudgeKeyController, now time.Time) {
+	t.Helper()
+	controller.mu.Lock()
+	depth := len(controller.pending)
+	want := nudgeKeyBacklogSnapshot{Depth: int64(depth), AgeState: nudgeKeyBacklogAgeEmpty}
+	var oldest time.Time
+	for _, batch := range controller.pending {
+		if batch.FirstEnqueuedAt.IsZero() {
+			want.OldestAge = 0
+			want.AgeState = nudgeKeyBacklogAgeUnavailable
+			break
+		}
+		if oldest.IsZero() || batch.FirstEnqueuedAt.Before(oldest) {
+			oldest = batch.FirstEnqueuedAt
+		}
+	}
+	if depth > 0 && want.AgeState != nudgeKeyBacklogAgeUnavailable {
+		age := now.Sub(oldest)
+		if age < 0 {
+			want.AgeState = nudgeKeyBacklogAgeClockRegressed
+		} else {
+			want.OldestAge = age
+			want.AgeState = nudgeKeyBacklogAgeObserved
+		}
+	}
+	controller.mu.Unlock()
+
+	if got := controller.backlogSnapshot(); got != want {
+		t.Fatalf("indexed backlog snapshot = %+v, reference = %+v", got, want)
 	}
 }
 

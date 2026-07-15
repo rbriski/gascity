@@ -846,11 +846,17 @@ func (tracer *channelTracer) traceChannelStores(allocation *ssa.Alloc, bindings 
 
 func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
+	dynamicTargets := callableTargetResult{}
+	if tracer.analysis.config.closedWorld && call.Call.StaticCallee() == nil {
+		dynamicTargets = newCallableTargetTracer(tracer.analysis).trace(call.Call.Value)
+	}
 	authoritativeMatch := false
 	for _, boundary := range tracer.boundaries {
 		if tracer.analysis.callProducesChannel(call, resultIndex, boundary) {
 			provenance.matches[boundary.definition.ID] = true
-			authoritativeMatch = authoritativeMatch || callDirectlyProducesChannel(call, resultIndex, boundary)
+			authoritativeMatch = authoritativeMatch ||
+				callDirectlyProducesChannel(call, resultIndex, boundary) ||
+				closedDynamicTargetsProduceChannel(dynamicTargets, resultIndex, boundary)
 		}
 	}
 	if authoritativeMatch {
@@ -863,7 +869,7 @@ func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, b
 	}
 
 	callees := tracer.analysis.closedWorldCallees(call.Parent(), call)
-	if call.Call.StaticCallee() == nil {
+	if call.Call.StaticCallee() == nil && !dynamicTargets.closed {
 		provenance.openWorld = true
 	}
 	if len(callees) == 0 {
@@ -904,6 +910,20 @@ func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, b
 		provenance.openWorld = true
 	}
 	return provenance
+}
+
+func closedDynamicTargetsProduceChannel(targets callableTargetResult, resultIndex int, boundary resolvedBoundary) bool {
+	if !targets.closed || len(targets.targets) == 0 || boundary.definition.Output.zero() ||
+		boundary.function == nil || boundary.definition.Output.Index != resultIndex+1 {
+		return false
+	}
+	for target := range targets.targets {
+		object, ok := target.Object().(*types.Func)
+		if !ok || object.Origin() != boundary.function.Origin() {
+			return false
+		}
+	}
+	return true
 }
 
 func callDirectlyProducesChannel(call *ssa.Call, resultIndex int, boundary resolvedBoundary) bool {

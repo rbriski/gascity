@@ -531,7 +531,21 @@ func stageCodexAuth(gcHome string, env *helpers.Env) (string, error) {
 		if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(stagedAuth), 0o600); err != nil {
 			return "", err
 		}
+		env.Without("OPENAI_API_KEY")
 		return stagedSecretSource("codex", authFromFile), nil
+	}
+	if sourceCodexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); sourceCodexHome != "" {
+		sourceAuth := filepath.Join(sourceCodexHome, "auth.json")
+		destinationAuth := filepath.Join(codexDir, "auth.json")
+		if filepath.Clean(sourceAuth) != filepath.Clean(destinationAuth) {
+			if err := copyFileIfExists(sourceAuth, destinationAuth, 0o600); err != nil {
+				return "", fmt.Errorf("codex auth unavailable: %w", err)
+			}
+		}
+		if fileExists(destinationAuth) {
+			env.Without("OPENAI_API_KEY")
+			return "env:CODEX_HOME", nil
+		}
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
 		env.With("OPENAI_API_KEY", apiKey)

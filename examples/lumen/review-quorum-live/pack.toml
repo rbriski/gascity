@@ -1,0 +1,13 @@
+[pack]
+name = "review-quorum-live"
+schema = 2
+
+# These packs are bundled and primed by gc, so the pinned imports resolve
+# offline while preserving the normal default bd+Dolt lifecycle.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"

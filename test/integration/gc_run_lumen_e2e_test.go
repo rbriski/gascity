@@ -21,25 +21,45 @@ import (
 )
 
 const (
-	gcRunReviewQuorumInput      = `{"convoy_id":"demo","lane_one_id":"architecture","lane_two_id":"risk"}`
-	gcRunReviewerCohort         = "reviewers"
-	gcRunSynthesisCohort        = "synthesis"
-	gcRunReviewerReleaseFile    = ".gc/lumen-e2e-release-reviewers"
-	gcRunSynthesisReleaseFile   = ".gc/lumen-e2e-release-synthesis"
-	gcRunAgentClaimTimeout      = 5 * time.Minute
-	gcRunSessionSpawnTimeout    = 7 * time.Minute
-	gcRunAgentReleaseTimeout    = 90 * time.Second
-	gcRunSessionObserveTimeout  = 30 * time.Second
-	gcRunSessionCommandTimeout  = 10 * time.Second
-	gcRunCommandShutdownTimeout = 10 * time.Second
-	gcRunCommandPostKillTimeout = 5 * time.Second
+	gcRunReviewQuorumInput       = `{"document_path":"/tmp/lumen-review-design.md","repository_path":"/tmp/lumen-review-repository","artifact_dir":"/tmp/lumen-review-artifacts","objective":"Make the design implementation-ready","lane_one_id":"implementation-realism","lane_two_id":"test-operability"}`
+	gcRunReviewerCohort          = "reviewers"
+	gcRunSynthesisCohort         = "synthesis"
+	gcRunVerificationCohort      = "verification"
+	gcRunReviewerReleaseFile     = ".gc/lumen-e2e-release-reviewers"
+	gcRunSynthesisReleaseFile    = ".gc/lumen-e2e-release-synthesis"
+	gcRunVerificationReleaseFile = ".gc/lumen-e2e-release-verification"
+	gcRunAgentClaimTimeout       = 5 * time.Minute
+	gcRunSessionSpawnTimeout     = 7 * time.Minute
+	gcRunAgentReleaseTimeout     = 90 * time.Second
+	gcRunSessionObserveTimeout   = 30 * time.Second
+	gcRunSessionReturnTimeout    = 3 * time.Minute
+	gcRunSessionCommandTimeout   = 10 * time.Second
+	gcRunCommandShutdownTimeout  = 10 * time.Second
+	gcRunCommandPostKillTimeout  = 5 * time.Second
 )
+
+func TestGCRunDemoReturnGateRequiresNoLifecycleOrProcessActivity(t *testing.T) {
+	t.Parallel()
+
+	active := map[string]sessionListRow{"laneOneAgent": {ID: "session-one"}}
+	if gcRunDemoSessionsReturned(active, nil) {
+		t.Fatal("return gate passed while a demo lifecycle row was active")
+	}
+	if gcRunDemoSessionsReturned(nil, []int{1234}) {
+		t.Fatal("return gate passed while a demo subprocess was active")
+	}
+	if !gcRunDemoSessionsReturned(nil, nil) {
+		t.Fatal("return gate rejected an empty lifecycle and process snapshot")
+	}
+}
 
 // TestGCRunLumenReviewQuorumE2E is the public-front-door proof for a
 // City-backed Lumen run. The real gc binary resolves the City, enqueues the
 // sibling IR, blocks for the durable terminal outcome, and fans the two bound
 // reviewer routes to simultaneously observable subprocess sessions before the
-// default-route synthesis step starts.
+// default-route synthesis step and explicitly routed verification step start in
+// dependency order. The subprocesses prove orchestration plumbing only; live
+// inference acceptance is covered separately.
 func TestGCRunLumenReviewQuorumE2E(t *testing.T) {
 	cityDir, env := setupGCRunLumenCity(t)
 
@@ -180,6 +200,59 @@ func TestGCRunLumenReviewQuorumE2E(t *testing.T) {
 	t.Logf("PROOF claimed synthesis route %s is concurrently observable as %s", lumenDoRoute, synthesis.SessionName)
 	releaseGCRunAgents(t, cityDir, gcRunSynthesisReleaseFile)
 
+	// Verification is a separate final Agent over the revised document. Observe
+	// its claimed session before release so a terminal pass cannot be mistaken
+	// for proof that the phase ran.
+	if runErr, exited, err := waitForGCRunClaimsWhileActive(runDone, cityDir, gcRunVerificationCohort, 1, gcRunSessionSpawnTimeout); err != nil {
+		if exited {
+			runFinished = true
+			t.Fatalf("%v: %v\nstdout:\n%s\nstderr:\n%s", err, runErr, stdout.String(), stderr.String())
+		}
+		runErr, joined := stopRun()
+		if !joined {
+			t.Fatalf("%v; gc run did not exit after cancellation", err)
+		}
+		t.Fatalf("%v; gc run after cancellation: %v\nstdout:\n%s\nstderr:\n%s", err, runErr, stdout.String(), stderr.String())
+	}
+	var verificationSnapshot map[string]sessionListRow
+	deadline = time.Now().Add(gcRunSessionObserveTimeout)
+	lastListErr = nil
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-runDone:
+			runFinished = true
+			t.Fatalf("gc run exited before the claimed verification session was observable: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		default:
+		}
+
+		rows, err := listAllGCRunSessions(cityDir)
+		if err != nil {
+			lastListErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		verificationSnapshot = currentGCRunSessions(rows, "verifierAgent")
+		if len(verificationSnapshot) == 1 {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if len(verificationSnapshot) != 1 {
+		runErr, joined := stopRun()
+		if !joined {
+			t.Fatalf("gc session list --json never contained claimed verification route within %s (last error: %v); gc run did not exit after cancellation", gcRunSessionObserveTimeout, lastListErr)
+		}
+		t.Fatalf("gc session list --json never contained claimed verification route within %s (last error: %v); gc run after cancellation: %v\nstdout:\n%s\nstderr:\n%s", gcRunSessionObserveTimeout, lastListErr, runErr, stdout.String(), stderr.String())
+	}
+	verification := verificationSnapshot["verifierAgent"]
+	if strings.TrimSpace(verification.ID) == "" || strings.TrimSpace(verification.SessionName) == "" ||
+		verification.ID == one.ID || verification.ID == two.ID || verification.ID == synthesis.ID ||
+		verification.SessionName == one.SessionName || verification.SessionName == two.SessionName || verification.SessionName == synthesis.SessionName {
+		t.Fatalf("verification session is not distinct from prior phases: verification=%+v synthesis=%+v laneOne=%+v laneTwo=%+v", verification, synthesis, one, two)
+	}
+	t.Logf("PROOF claimed verification route is concurrently observable as %s", verification.SessionName)
+	releaseGCRunAgents(t, cityDir, gcRunVerificationReleaseFile)
+
 	if err := <-runDone; err != nil {
 		runFinished = true
 		if ctx.Err() != nil {
@@ -200,13 +273,13 @@ func TestGCRunLumenReviewQuorumE2E(t *testing.T) {
 	}
 	defer func() { _ = gs.Close() }()
 	events := lumenStreamEvents(t, gs, streamID)
-	assertGCRunSynthesisAfterReviewers(t, events)
+	assertGCRunReviewPhaseOrdering(t, events)
 	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
 	if closed.Outcome != engine.OutcomePass {
 		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
 	}
 
-	waitForGCRunDemoSessionsReturned(t, cityDir, lumenKillNonce(filepath.Base(cityDir)), 30*time.Second)
+	waitForGCRunDemoSessionsReturned(t, cityDir, lumenKillNonce(filepath.Base(cityDir)), gcRunSessionReturnTimeout)
 	t.Logf("PROOF gc run exited 0 after synthesis and all demo sessions returned (stream %s)", streamID)
 }
 
@@ -219,7 +292,7 @@ func setupGCRunLumenCity(t *testing.T) (string, []string) {
 	nonceEnv := "GC_LUMEN_E2E_NONCE=" + lumenKillNonce(cityName)
 	barrierCommand := func(cohort, releaseFile string, barrier int) string {
 		return fmt.Sprintf(
-			"%s GC_LUMEN_E2E_CLAIM_TIMEOUT_SECONDS=%d GC_LUMEN_E2E_RELEASE_TIMEOUT_SECONDS=%d GC_LUMEN_E2E_COHORT=%s GC_LUMEN_E2E_RELEASE_FILE=%s GC_LUMEN_E2E_BARRIER=%d bash %s",
+			"%s GC_LUMEN_E2E_CLAIM_TIMEOUT_SECONDS=%d GC_LUMEN_E2E_RELEASE_TIMEOUT_SECONDS=%d GC_LUMEN_E2E_COHORT=%s GC_LUMEN_E2E_RELEASE_FILE=%s GC_LUMEN_E2E_BARRIER=%d bash %s && gc runtime drain-ack",
 			nonceEnv,
 			int(gcRunAgentClaimTimeout/time.Second),
 			int(gcRunAgentReleaseTimeout/time.Second),
@@ -231,6 +304,7 @@ func setupGCRunLumenCity(t *testing.T) (string, []string) {
 	}
 	reviewerCommand := barrierCommand(gcRunReviewerCohort, gcRunReviewerReleaseFile, 2)
 	synthesisCommand := barrierCommand(gcRunSynthesisCohort, gcRunSynthesisReleaseFile, 1)
+	verificationCommand := barrierCommand(gcRunVerificationCohort, gcRunVerificationReleaseFile, 1)
 	agentBlock := func(name, command string) string {
 		return fmt.Sprintf("\n[[agent]]\nname = %q\nmax_active_sessions = 1\nstart_command = %q\n", name, command)
 	}
@@ -248,7 +322,8 @@ patrol_interval = "1m"
 `, cityName) +
 		agentBlock("laneOneAgent", reviewerCommand) +
 		agentBlock("laneTwoAgent", reviewerCommand) +
-		agentBlock(lumenDoRoute, synthesisCommand)
+		agentBlock(lumenDoRoute, synthesisCommand) +
+		agentBlock("verifierAgent", verificationCommand)
 
 	configPath := filepath.Join(t.TempDir(), "gc-run-lumen.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
@@ -283,6 +358,27 @@ func waitForGCRunClaims(cityDir, cohort string, count int, timeout time.Duration
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("%d %s claim markers did not appear within %s", count, cohort, timeout)
+}
+
+func waitForGCRunClaimsWhileActive(runDone <-chan error, cityDir, cohort string, count int, timeout time.Duration) (runErr error, exited bool, err error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case runErr := <-runDone:
+			return runErr, true, fmt.Errorf("gc run exited before %d %s claim markers appeared", count, cohort)
+		default:
+		}
+
+		markers, globErr := filepath.Glob(filepath.Join(cityDir, ".gc", fmt.Sprintf("lumen-e2e-claimed-%s-*", cohort)))
+		if globErr != nil {
+			return nil, false, fmt.Errorf("glob %s claim markers: %w", cohort, globErr)
+		}
+		if len(markers) >= count {
+			return nil, false, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, false, fmt.Errorf("%d %s claim markers did not appear within %s", count, cohort, timeout)
 }
 
 func releaseGCRunAgents(t *testing.T, cityDir, releaseFile string) {
@@ -434,36 +530,81 @@ func parseGCRunStreamID(t *testing.T, output string) string {
 	return ""
 }
 
-func assertGCRunSynthesisAfterReviewers(t *testing.T, events []graphstore.StoredEvent) {
+func assertGCRunReviewPhaseOrdering(t *testing.T, events []graphstore.StoredEvent) {
 	t.Helper()
-	reviewerSettled := map[string]uint64{}
-	var synthesisAdmitted uint64
+	expected := map[string]bool{
+		"reviewLaneOne:0": true,
+		"reviewLaneTwo:0": true,
+		"synthesize:0":    true,
+		"verify:0":        true,
+	}
+	admitted := make(map[string]uint64, len(expected))
+	settled := make(map[string]uint64, len(expected))
+	var runClosed uint64
 	for _, event := range events {
 		switch event.Type {
 		case engine.EventOutcomeSettled:
-			var settled lumenOutcomeSettled
-			if err := json.Unmarshal(event.Payload, &settled); err != nil {
+			var outcome lumenOutcomeSettled
+			if err := json.Unmarshal(event.Payload, &outcome); err != nil {
 				t.Fatalf("decoding outcome.settled: %v", err)
 			}
-			if settled.Activation == "reviewLaneOne:0" || settled.Activation == "reviewLaneTwo:0" {
-				reviewerSettled[settled.Activation] = event.Seq
+			if !expected[outcome.Activation] {
+				continue
 			}
+			if settled[outcome.Activation] != 0 {
+				t.Fatalf("duplicate settlement for %s", outcome.Activation)
+			}
+			if outcome.Outcome != string(engine.OutcomePass) {
+				t.Fatalf("%s settled %q, want pass", outcome.Activation, outcome.Outcome)
+			}
+			settled[outcome.Activation] = event.Seq
 		case engine.EventOwnedAdmitted:
-			admitted := decodeOwnedAdmitted(t, event.Payload)
-			if admitted.Activation == "synthesize:0" {
-				synthesisAdmitted = event.Seq
+			owned := decodeOwnedAdmitted(t, event.Payload)
+			if !expected[owned.Activation] {
+				continue
 			}
+			if admitted[owned.Activation] != 0 {
+				t.Fatalf("duplicate admission for %s", owned.Activation)
+			}
+			if owned.Kind != engine.OwnedKindWorkBead {
+				t.Fatalf("%s admitted kind %q, want %q", owned.Activation, owned.Kind, engine.OwnedKindWorkBead)
+			}
+			admitted[owned.Activation] = event.Seq
+		case engine.EventRunClosed:
+			if runClosed != 0 {
+				t.Fatal("journal contains duplicate lumen.run.closed events")
+			}
+			closed := decodeRunClosed(t, event.Payload)
+			if closed.Outcome != engine.OutcomePass {
+				t.Fatalf("run closed %q, want pass", closed.Outcome)
+			}
+			runClosed = event.Seq
 		}
 	}
-	if len(reviewerSettled) != 2 || synthesisAdmitted == 0 {
-		t.Fatalf("missing ordering facts: reviewer settlements=%v synthesis admission=%d; sequence=%v", reviewerSettled, synthesisAdmitted, lumenStreamTypes(events))
-	}
-	for reviewer, settledSeq := range reviewerSettled {
-		if synthesisAdmitted <= settledSeq {
-			t.Fatalf("synthesis admitted at seq %d before %s settled at seq %d", synthesisAdmitted, reviewer, settledSeq)
+	for activation := range expected {
+		if admitted[activation] == 0 || settled[activation] == 0 {
+			t.Fatalf("missing admission or settlement for %s; sequence=%v", activation, lumenStreamTypes(events))
+		}
+		if admitted[activation] >= settled[activation] {
+			t.Fatalf("%s admitted at seq %d but settled at seq %d", activation, admitted[activation], settled[activation])
 		}
 	}
-	t.Logf("PROOF synthesis admission seq=%d follows reviewer settlements=%v", synthesisAdmitted, reviewerSettled)
+	for _, reviewer := range []string{"reviewLaneOne:0", "reviewLaneTwo:0"} {
+		if admitted["synthesize:0"] <= settled[reviewer] {
+			t.Fatalf("synthesis admitted at seq %d before %s settled at seq %d", admitted["synthesize:0"], reviewer, settled[reviewer])
+		}
+	}
+	if admitted["verify:0"] <= settled["synthesize:0"] {
+		t.Fatalf("verification admitted at seq %d before synthesis settled at seq %d", admitted["verify:0"], settled["synthesize:0"])
+	}
+	if runClosed <= settled["verify:0"] {
+		t.Fatalf("run closed at seq %d before verification settled at seq %d", runClosed, settled["verify:0"])
+	}
+	if len(events) == 0 || events[len(events)-1].Seq != runClosed {
+		t.Fatalf("run.closed seq %d is not the final stream event", runClosed)
+	}
+	t.Logf("PROOF reviewers settled at %d/%d; synthesis admitted/settled at %d/%d; verification admitted/settled at %d/%d; run closed at %d",
+		settled["reviewLaneOne:0"], settled["reviewLaneTwo:0"], admitted["synthesize:0"], settled["synthesize:0"], admitted["verify:0"], settled["verify:0"], runClosed)
 }
 
 func waitForGCRunDemoSessionsReturned(t *testing.T, cityDir, nonce string, timeout time.Duration) {
@@ -482,9 +623,9 @@ func waitForGCRunDemoSessionsReturned(t *testing.T, cityDir, nonce string, timeo
 			continue
 		}
 		lastErr = nil
-		lastPresent = currentGCRunWorkActiveSessions(rows, "laneOneAgent", "laneTwoAgent", lumenDoRoute)
+		lastPresent = currentGCRunWorkActiveSessions(rows, "laneOneAgent", "laneTwoAgent", lumenDoRoute, "verifierAgent")
 		lastPIDs = pgrepNonce(t, nonce)
-		if len(lastPIDs) == 0 {
+		if gcRunDemoSessionsReturned(lastPresent, lastPIDs) {
 			if absentSince.IsZero() {
 				absentSince = time.Now()
 			} else if time.Since(absentSince) >= 500*time.Millisecond {
@@ -496,4 +637,8 @@ func waitForGCRunDemoSessionsReturned(t *testing.T, cityDir, nonce string, timeo
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("demo subprocesses did not return after gc run exited: pids=%v lifecycle=%v (last list error: %v)", lastPIDs, lastPresent, lastErr)
+}
+
+func gcRunDemoSessionsReturned(active map[string]sessionListRow, pids []int) bool {
+	return len(active) == 0 && len(pids) == 0
 }

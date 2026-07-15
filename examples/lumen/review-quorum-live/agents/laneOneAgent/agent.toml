@@ -1,0 +1,6 @@
+scope = "city"
+provider = "claude"
+prompt_template = "prompts/lumen-worker.md"
+wake_mode = "fresh"
+max_active_sessions = 1
+option_defaults = { permission_mode = "unrestricted", model = "sonnet", effort = "high" }

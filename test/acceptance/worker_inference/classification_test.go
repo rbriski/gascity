@@ -529,6 +529,21 @@ func TestStageCodexAuthFromFile(t *testing.T) {
 	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
 }
 
+func TestStageCodexAuthPrefersExistingCodexHomeOverAmbientAPIKey(t *testing.T) {
+	hostCodexHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(hostCodexHome, "auth.json"), []byte(`{"tokens":{"access_token":"oauth-token"}}`), 0o600))
+	t.Setenv("CODEX_HOME", hostCodexHome)
+	t.Setenv("OPENAI_API_KEY", "ambient-api-key")
+
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	source, err := stageCodexAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:CODEX_HOME", source)
+	require.Empty(t, env.Get("OPENAI_API_KEY"), "OAuth staging must remove the ambient API key override")
+	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
+}
+
 func TestStageOpenCodeGeminiAuthFromEnv(t *testing.T) {
 	gcHome := t.TempDir()
 	env := helpers.NewEnv("", gcHome, t.TempDir())

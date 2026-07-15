@@ -5941,6 +5941,10 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 }
 
 func listTmuxSessionsOnCitySocket(cityDir string) ([]string, error) {
+	return listTmuxSessionsOnCitySocketWithEnv(cityDir, nil)
+}
+
+func listTmuxSessionsOnCitySocketWithEnv(cityDir string, commandEnv []string) ([]string, error) {
 	socketName, err := tmuxSocketNameForCity(cityDir)
 	if err != nil {
 		return nil, err
@@ -5950,6 +5954,9 @@ func listTmuxSessionsOnCitySocket(cityDir string) ([]string, error) {
 		return nil, fmt.Errorf("tmux not found: %w", err)
 	}
 	cmd := exec.Command(tmuxPath, "-L", socketName, "list-sessions", "-F", "#{session_name}")
+	if commandEnv != nil {
+		cmd.Env = commandEnv
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		var exitErr *exec.ExitError

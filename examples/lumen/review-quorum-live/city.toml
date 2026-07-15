@@ -1,0 +1,39 @@
+[workspace]
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
+[session]
+provider = "tmux"
+startup_timeout = "3m"
+
+[daemon]
+patrol_interval = "30s"
+shutdown_timeout = "10s"
+
+# Keep the live demo focused on its four routed Agents. The orchestrator's
+# event-driven enqueue/close wakeups still drive every Lumen phase; the patrol
+# interval remains the correctness fallback.
+[orders]
+skip = [
+  "beads-health",
+  "cross-rig-deps",
+  "dolt-health",
+  "dolt-remotes-patrol",
+  "gate-sweep",
+  "jsonl-export",
+  "mol-dog-backup",
+  "mol-dog-compactor",
+  "mol-dog-doctor",
+  "mol-dog-phantom-db",
+  "mol-dog-stale-db",
+  "orphan-sweep",
+  "prune-branches",
+  "reaper",
+  "spawn-storm-detect",
+  "wisp-compact",
+]

@@ -18,6 +18,13 @@ import (
 // already URL-redacted by git.Clone before it reaches this wrapper.
 var ErrCloneFailed = errors.New("git clone failed")
 
+// StoreInitializer initializes one rig bead store. The narrow operation keeps
+// provisioning independent of the CLI and controller implementations while
+// giving each production caller an explicit, statically typed adapter.
+type StoreInitializer interface {
+	InitRigStore(cityPath, dir, prefix string) (deferred bool, err error)
+}
+
 // Deps carries everything the provisioning core needs. It follows the
 // internal/sling.SlingDeps discipline: a small set of required infra fields plus
 // nil-optional injected funcs, so both the CLI (cmd/gc) and the API-side
@@ -39,11 +46,10 @@ type Deps struct {
 	// Cfg is the city config the caller loaded for edit.
 	Cfg *config.City
 
-	// initStore initializes the rig's bead store (cmd/gc initDirIfReady). It
+	// storeInitializer initializes the rig's bead store. It
 	// returns deferred=true when live init is punted to the controller/startup.
-	// Required and configured through WithInitStore rather than exposed as a
-	// mutable function field.
-	initStore func(cityPath, dir, prefix string) (deferred bool, err error)
+	// Required and configured through WithStoreInitializer.
+	storeInitializer StoreInitializer
 	// InitAndHook is the deferred-fallback deeper store init (cmd/gc
 	// initAndHookDir); its error is intentionally swallowed (reported as
 	// "deferred to controller"). Required — it is reached whenever InitStore
@@ -99,11 +105,9 @@ type Deps struct {
 	OnStep func(step ProvisionStep)
 }
 
-// WithInitStore returns d with the required bead-store initializer installed.
-// Keeping the callback behind this private field makes dependency
-// assembly explicit while preserving the CLI and controller injection seam.
-func (d Deps) WithInitStore(initStore func(cityPath, dir, prefix string) (deferred bool, err error)) Deps {
-	d.initStore = initStore
+// WithStoreInitializer returns d with the required bead-store initializer.
+func (d Deps) WithStoreInitializer(initializer StoreInitializer) Deps {
+	d.storeInitializer = initializer
 	return d
 }
 
@@ -201,7 +205,7 @@ func validateDeps(d Deps) error {
 	if d.ComposePacks == nil {
 		return depErr("ComposePacks")
 	}
-	if d.initStore == nil {
+	if d.storeInitializer == nil {
 		return depErr("InitStore")
 	}
 	if d.InitAndHook == nil {

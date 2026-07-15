@@ -2242,7 +2242,7 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 			return nil
 		},
 	}
-	return deps.WithInitStore(controllerStateInitRigDirIfReady)
+	return deps.WithStoreInitializer(controllerRigStoreInitializer{})
 }
 
 // rigPostProvisionLocal runs the rig-local infrastructure the CLI installs after a

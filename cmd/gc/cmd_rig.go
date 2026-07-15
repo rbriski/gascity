@@ -358,7 +358,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			}
 		},
 	}
-	deps = deps.WithInitStore(initDirIfReady)
+	deps = deps.WithStoreInitializer(cliRigStoreInitializer{})
 
 	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
 		Name:           name,
